@@ -291,8 +291,9 @@ class _RenderMixin:
         # Determine if a POSITIONAL encoding channel is quantitative
         # (explicit `:Q` / type="quantitative"). Every writer of a chart's
         # own `_encoding` (encode()'s shorthand parse, a composite-mark
-        # desugar's remap, RepeatChart's placeholder resolution, LayerChart's
-        # color promotion) constructs or copies a ChannelBase, never a raw
+        # desugar's remap, RepeatChart's placeholder resolution, a merge
+        # moving an operand's binding onto its layers) constructs or copies a
+        # ChannelBase, never a raw
         # string, so this reads the channel's declared type directly --
         # never a substring match against the field name, which would
         # misclassify a field literally named with a ":Q" substring

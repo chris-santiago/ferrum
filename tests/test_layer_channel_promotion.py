@@ -1,24 +1,20 @@
-"""A later layer's auxiliary channel binding promotes to the chart level like ``color``.
+"""A layer's own auxiliary channel binding draws that layer and no other (spec §4.6 V1, V10).
 
 Rust resolves each auxiliary (non-positional) scale -- color, size, shape,
 opacity, fill_opacity, stroke_opacity, stroke_dash -- from whichever layer
 draws the channel: layer 0 if it draws the channel, else the first layer
-that does. That layer's own binding always gets its scale, whether or not
-the binding also reaches the chart level, and in either layer order.
-Promotion is for every OTHER layer: an unbound layer inherits an auxiliary
-binding only through the chart-level encoding, so without promotion a
-drawing layer's own binding still tapers or colors that layer, but a sibling
-that does not draw the channel stays at the mark default instead of varying
-with it. ``Chart + Chart`` promotes the first layer-level binding of each
-auxiliary channel to chart level so every sibling inherits it the same way
-a leading chart's own binding is inherited: without that, ``sized_line +
-point`` (the line leading) sizes both the line and the dots, while ``point
-+ sized_line`` tapers the line but leaves the dots at the default radius --
-only the unbound sibling's rendering depends on layer order.
+that does, with a domain over every layer that draws it. A binding written
+on one ``+`` operand (or one ``fm.LayerChart`` member) is that operand's
+own: it varies that layer's marks, and the other layer stays at the mark
+default, in either layer order and on every route (spec §4.6 V1). ``sized_line +
+point`` and ``point + sized_line`` draw the same marks per layer, because
+neither binding reaches the other layer. Each test names the alternative
+it rejects: *promotion* (the binding is copied to the chart level, so the
+unbound partner inherits it).
 
-The channel population is Rust's auxiliary-scale channel list, read through
-:func:`ferrum.encoding._auxiliary_scale_channels`, so a new auxiliary channel joins this matrix
-without a hand edit.
+The channel population is Rust's auxiliary-scale channel list,
+``ferrum._core.auxiliary_scale_channels()``, so a new auxiliary channel
+joins this matrix without a hand edit.
 """
 
 from __future__ import annotations
@@ -31,8 +27,8 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-import ferrum.chart as chart_module
-from ferrum.encoding import _auxiliary_scale_channels, _channel_class_map
+from ferrum._core import auxiliary_scale_channels
+from ferrum.encoding import _channel_class_map
 
 _DF = pl.DataFrame(
     {
@@ -45,7 +41,7 @@ _DF = pl.DataFrame(
     }
 )
 
-_CHANNELS = _auxiliary_scale_channels()
+_CHANNELS = tuple(auxiliary_scale_channels())
 
 
 def _fields(channel: str) -> tuple[str, str]:
@@ -177,62 +173,39 @@ def _compose(route: str, channel: str, order: str, bound_mark: str = "point"):
 
 
 # ---------------------------------------------------------------------------
-# Population pin: the derived channel set is Rust's auxiliary-scale set
+# V1: a layer's own binding varies its own marks only, on every route
 # ---------------------------------------------------------------------------
 
 
-def test_derived_channels_are_exactly_rusts_auxiliary_scales() -> None:
-    """The promotion set is Rust's auxiliary-scale set, read from Rust in its order.
-
-    Promotion exists to make an unbound sibling layer inherit a channel's
-    scale, so it only needs to cover the channels Rust actually builds a
-    scale for: a channel missing from the set would leave an unbound
-    sibling's rendering layer-order dependent, and an extra one would
-    promote a channel no scale reads. Rust pins the list to its
-    ``AuxiliaryScales`` slots; this pins that Python asks Rust.
-    """
-    from ferrum._core import auxiliary_scale_channels
-
-    assert _CHANNELS == tuple(auxiliary_scale_channels())
-
-
-# ---------------------------------------------------------------------------
-# The matrix: channel x route x kind x order
-# ---------------------------------------------------------------------------
+def _partner_and_bound(batches: list, order: str) -> tuple:
+    """Split two per-layer value lists into (bound layer's, unbound partner's)."""
+    bound, partner = batches if order == "bound_first" else batches[::-1]
+    return bound, partner
 
 
 @pytest.mark.parametrize("order", _ORDERS)
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("route", sorted(_ROUTES))
 @pytest.mark.parametrize("channel", _CHANNELS)
-def test_a_layer_bound_channel_varies_the_rendered_marks(
+def test_a_layer_bound_channel_varies_only_its_own_marks(
     channel: str, route: str, kind: str, order: str
 ) -> None:
-    """Every layer's marks vary by the bound field, whichever position the binder holds.
+    """V1: the binding layer's marks vary by the field; the partner stays at one value.
 
-    The unbound partner inherits the promoted channel, exactly as an unbound
-    layer inherits a promoted ``color``. The one exception is static
-    ``fm.layer``: it renders through the composite overlay tree, where each
-    layer is its own leaf with its own encoding, so only the binding leaf
-    varies (``color`` behaves the same there).
+    Rejects promotion: the unbound partner inheriting the binding would
+    vary too.
     """
     chart = _compose(route, channel, order)
     if kind == "interactive":
         batches = _scene_batches(chart.interactive().scene_json, channel)
         assert len(batches) == 2, batches
-        for i, values in enumerate(batches):
-            assert len(set(values)) > 1, f"layer {i} drew one {channel} value: {values}"
-        return
-    _, points = _svg_values(chart.to_svg(), channel)
-    assert len(points) == 8, points
-    layers = [points[:4], points[4:]]
-    if route == "fm_layer":
-        bound, partner = layers if order == "bound_first" else layers[::-1]
-        assert len(set(bound)) > 1 and len(set(partner)) == 1, layers
     else:
-        assert all(len(set(values)) > 1 for values in layers), (
-            f"a layer drew one {channel} value: {layers}"
-        )
+        _, points = _svg_values(chart.to_svg(), channel)
+        assert len(points) == 8, points
+        batches = [points[:4], points[4:]]
+    bound, partner = _partner_and_bound(batches, order)
+    assert len(set(bound)) > 1, f"the binding layer drew one {channel} value: {batches}"
+    assert len(set(partner)) == 1, f"the unbound layer varied with {channel}: {batches}"
 
 
 @pytest.mark.parametrize("kind", _KINDS)
@@ -241,7 +214,7 @@ def test_a_layer_bound_channel_varies_the_rendered_marks(
 def test_layer_order_does_not_change_the_rendered_values(
     channel: str, route: str, kind: str
 ) -> None:
-    """``bound + point`` and ``point + bound`` render the same per-layer values up to layer order."""
+    """V1: ``bound + point`` and ``point + bound`` render the same per-layer values up to layer order."""
     first = _compose(route, channel, "bound_first")
     later = _compose(route, channel, "bound_later")
     if kind == "interactive":
@@ -254,6 +227,19 @@ def test_layer_order_does_not_change_the_rendered_values(
         )
 
 
+@pytest.mark.parametrize("route", sorted(_ROUTES))
+@pytest.mark.parametrize("channel", _CHANNELS)
+def test_the_chart_level_encoding_never_carries_an_operands_binding(
+    channel: str, route: str
+) -> None:
+    """V1 wire seam: the merged chart-level encoding holds no binding only one member wrote."""
+    for order in _ORDERS:
+        chart = _compose(route, channel, order)
+        merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
+        wire = json.loads(merged.to_spec().to_json())
+        assert channel not in wire["encoding"], wire["encoding"]
+
+
 # ---------------------------------------------------------------------------
 # Line consumers: a tapered line and a dashed line in either position
 # ---------------------------------------------------------------------------
@@ -264,7 +250,7 @@ _LINE_CHANNELS = [c for c in _CHANNELS if c in ("size", "stroke_dash")]
 @pytest.mark.parametrize("route", sorted(_ROUTES))
 @pytest.mark.parametrize("channel", _LINE_CHANNELS)
 def test_a_later_bound_line_renders_like_a_leading_one(channel: str, route: str) -> None:
-    """``point + bound_line`` equals ``bound_line + point`` up to layer order, and varies."""
+    """V1: ``point + bound_line`` equals ``bound_line + point`` up to layer order, and the line varies."""
     first = _scene_batches(
         _compose(route, channel, "bound_first", "line").interactive().scene_json, channel
     )
@@ -272,45 +258,74 @@ def test_a_later_bound_line_renders_like_a_leading_one(channel: str, route: str)
         _compose(route, channel, "bound_later", "line").interactive().scene_json, channel
     )
     assert sorted(first, key=repr) == sorted(later, key=repr)
-    assert all(len(set(values)) > 1 for values in later), later
+    bound, partner = later[1], later[0]
+    assert len(set(bound)) > 1, later
+    assert len(set(partner)) == 1, later
 
 
 @pytest.mark.parametrize("route", sorted(_ROUTES))
-def test_point_plus_sized_line_tapers_the_line_and_sizes_the_dots(route: str) -> None:
-    """The line's widths are the dot diameters at the same values; the dots carry those radii."""
+def test_point_plus_sized_line_tapers_the_line_and_leaves_the_dots_at_the_default(
+    route: str,
+) -> None:
+    """V1: the line tapers as it does alone; the dots keep the default radius.
+
+    Rejects promotion: the dots would carry the line's size scale.
+    """
     scene = json.loads(_compose(route, "size", "bound_later", "line").interactive().scene_json)
     batches = {b["kind"]: b for p in scene["panels"] for b in p["marks"]}
     (line_node,) = batches["line"]["nodes"]
-    radii = [n["r"] for n in batches["point"]["nodes"]]
-    widths = line_node["widths"]
-    assert widths == pytest.approx([2 * r for r in radii])
-    assert widths == sorted(widths) and widths[0] < widths[-1]
-    # The default size range is 4..36 px^2 over v in 1..4.
-    assert radii[0] == pytest.approx(math.sqrt(4 / math.pi))
-    assert radii[-1] == pytest.approx(math.sqrt(36 / math.pi))
+    alone = json.loads(_bound("size", "line").interactive().scene_json)
+    (alone_node,) = [n for p in alone["panels"] for b in p["marks"] for n in b["nodes"]]
+    assert line_node["widths"] == pytest.approx(alone_node["widths"])
+    assert line_node["widths"] == sorted(line_node["widths"])
+    assert line_node["widths"][0] < line_node["widths"][-1]
+    default = json.loads(_point().interactive().scene_json)
+    default_radii = {n["r"] for p in default["panels"] for b in p["marks"] for n in b["nodes"]}
+    assert {n["r"] for n in batches["point"]["nodes"]} == default_radii
+    # The default size range is 4..36 px^2 over v in 1..4, read as a diameter.
+    assert line_node["widths"][0] == pytest.approx(2 * math.sqrt(4 / math.pi))
+    assert line_node["widths"][-1] == pytest.approx(2 * math.sqrt(36 / math.pi))
 
 
 # ---------------------------------------------------------------------------
-# Conflicts: mirror color's rule per channel
+# Two binders: each keeps its own field; the first decides the scale (spec §4.6 V10)
 # ---------------------------------------------------------------------------
+
+# The channels Rust draws a legend for today; the opacity family's legends
+# arrive with their own task.
+_LEGEND_CHANNELS = [c for c in _CHANNELS if c in ("color", "size", "shape", "stroke_dash")]
+
+
+def _legend_titles(svg: str) -> list[str]:
+    root = ET.fromstring(svg)
+    return [
+        "".join(e.itertext())
+        for e in root.iter()
+        if e.tag.rsplit("}", 1)[-1] == "text"
+        and e.attrib.get("font-weight") == "600"
+        and e.attrib.get("text-anchor") == "start"
+        and "transform" not in e.attrib
+    ]
 
 
 @pytest.mark.parametrize("channel", _CHANNELS)
-def test_two_layers_binding_different_fields_promote_the_first_in_layer_order(channel: str) -> None:
-    """The first layer-level binding wins the chart level; the later field is not promoted."""
+def test_two_layers_binding_different_fields_each_keep_their_own(channel: str) -> None:
+    """V1: each layer draws its own field; no layer's field reaches the chart level."""
     f1, f2 = _fields(channel)
     for first, second in ((f1, f2), (f2, f1)):
         merged = _point() + _bound(channel, field=first) + _bound(channel, field=second)
-        assert merged._encoding[channel].field == first
+        assert channel not in merged._encoding
+        assert channel not in merged._layers[0].encoding
         assert [l.encoding[channel].field for l in merged._layers[1:]] == [first, second]
 
 
-@pytest.mark.parametrize("channel", _CHANNELS)
-def test_a_leading_chart_level_binding_is_never_overwritten(channel: str) -> None:
-    """A chart-level binding on the left-hand chart keeps the chart level."""
+@pytest.mark.parametrize("channel", _LEGEND_CHANNELS)
+def test_the_first_layer_drawing_a_channel_titles_its_legend(channel: str) -> None:
+    """V10: one legend per channel, titled by the first layer that draws it."""
     f1, f2 = _fields(channel)
-    merged = _bound(channel, field=f1) + _bound(channel, field=f2)
-    assert merged._encoding[channel].field == f1
+    for first, second in ((f1, f2), (f2, f1)):
+        svg = (_point() + _bound(channel, field=first) + _bound(channel, field=second)).to_svg()
+        assert _legend_titles(svg) == [first]
 
 
 # A constant per channel that ``mark_point`` accepts as a kwarg; the coverage
@@ -325,19 +340,19 @@ _CONSTANT_KWARG = {
 
 
 @pytest.mark.parametrize("channel", sorted(_CONSTANT_KWARG))
-def test_a_layer_zero_constant_does_not_block_promotion(channel: str) -> None:
-    """A mark-kwarg constant on layer 0 is mark style, not an encoding, so the later field promotes.
+def test_a_layer_zero_constant_keeps_its_constant_beside_a_later_field(channel: str) -> None:
+    """V1: a mark-kwarg constant is that layer's style; the later field draws only its own layer.
 
-    Rendered, each layer resolves its constant against the inherited field
-    the same way whichever chart leads.
+    Rendered, the two orders draw the same per-layer values.
     """
     constant = fm.Chart(_DF).mark_point(**{channel: _CONSTANT_KWARG[channel]}).encode(x="x", y="y")
     later = constant + _bound(channel)
     first = _bound(channel) + constant
-    assert later._encoding[channel].field == _fields(channel)[0]
+    assert channel not in later._encoding
     a = _scene_batches(later.interactive().scene_json, channel)
     b = _scene_batches(first.interactive().scene_json, channel)
     assert sorted(a, key=repr) == sorted(b, key=repr)
+    assert len(set(a[0])) == 1, a
 
 
 @pytest.mark.parametrize("channel", [c for c in _CHANNELS if c not in _CONSTANT_KWARG])
@@ -347,46 +362,19 @@ def test_a_channel_without_a_constant_cell_has_no_mark_kwarg(channel: str) -> No
 
 
 # ---------------------------------------------------------------------------
-# Scale resolution: the drawing layer keeps its own scale without promotion
-# ---------------------------------------------------------------------------
-
-
-def _without_promotion(monkeypatch) -> None:
-    monkeypatch.setattr(chart_module, "_promote_layer_channels", lambda new, authored: None)
-
-
-@pytest.mark.parametrize("channel", _CHANNELS)
-def test_a_later_binding_without_promotion_still_gets_its_own_scale(
-    channel: str, monkeypatch
-) -> None:
-    """V1: a later layer's own binding gets its scale whether or not promotion ran.
-
-    Promotion only copies the binding onto the merged chart's own encoding;
-    the auxiliary scale's existence, kind and domain come from the layers
-    that draw the channel, so the drawing layer (index 1, ``bound_later``)
-    renders the full range of its own binding either way. The unbound
-    partner layer (index 0) is the one that would have inherited the
-    channel through promotion, so without it that layer stays at one value
-    (``never crosses siblings``), while the drawing layer keeps varying.
-    """
-    on = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
-    _without_promotion(monkeypatch)
-    off = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
-    assert off[1] == on[1], (off, on)
-    assert len(set(off[1])) > 1, off
-    assert len(set(off[0])) == 1, off
-
-
-# ---------------------------------------------------------------------------
 # Controls
 # ---------------------------------------------------------------------------
 
+# `point + line` with no auxiliary binding, as the tree before the one-parent
+# model rendered it: SVG bytes and the interactive scene JSON.
+_UNBOUND_SVG_DIGEST = "a7c51bb8e0acfdf660de97f8cffd0132d67b455d91c75fdc90ee80032687c49a"
+_UNBOUND_SCENE_DIGEST = "2212bfb4a1fc00406a2d8b655892ed120c58a107568dfbcebcc0786964eccb4f"
 
-def test_an_unbound_layered_chart_is_byte_identical_with_and_without_promotion(monkeypatch) -> None:
-    def render():
-        chart = _point() + fm.Chart(_DF).mark_line().encode(x="x", y="y")
-        return chart.to_svg(), chart.interactive().scene_json
 
-    on = render()
-    _without_promotion(monkeypatch)
-    assert render() == on
+def test_an_unbound_layered_chart_renders_its_pinned_bytes() -> None:
+    import hashlib
+
+    chart = _point() + fm.Chart(_DF).mark_line().encode(x="x", y="y")
+    assert hashlib.sha256(chart.to_svg().encode()).hexdigest() == _UNBOUND_SVG_DIGEST
+    scene = chart.interactive().scene_json
+    assert hashlib.sha256(scene.encode()).hexdigest() == _UNBOUND_SCENE_DIGEST

@@ -128,21 +128,6 @@ def _channel_class_map() -> dict:
     }
 
 
-@functools.cache
-def _auxiliary_scale_channels() -> tuple[str, ...]:
-    """Return the channels Rust builds a chart-wide auxiliary (non-positional) scale for.
-
-    Read from Rust's ``ferrum._core.auxiliary_scale_channels()``, the list
-    the scale resolver's ``AuxiliaryScales`` is pinned to, so ``color``
-    comes first. Rust builds each of these scales from the chart-level
-    encoding only, which is why ``Chart + Chart`` promotes a layer-level
-    binding of each (``composition._promote_layer_channels``).
-    """
-    from ferrum._core import auxiliary_scale_channels
-
-    return tuple(auxiliary_scale_channels())
-
-
 def _channel_class_for(name: str):
     """Return the channel-class for a given parameter name."""
     return _channel_class_map().get(name)

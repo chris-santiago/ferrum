@@ -35,8 +35,9 @@ from ferrum._shorthand import parse_shorthand
 from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._encode_lowering import _infer_agg_groupby, _lower_bin_encoding
+from ferrum._encode_lowering import _bin_groupby, _chart_agg_groupby, _lower_bin_encoding
 from ferrum._layer import layer_mark
+from ferrum._layer_transforms import _POSITIONAL
 from ferrum._override_apply import OverridePayload
 from ferrum._override_consume import (
     merge_encoding_scale as _merge_encoding_scale,
@@ -261,7 +262,25 @@ def _scale_type_accepts_zero(scale_type: Any) -> bool:
 _AUTO_TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
 
 
-def _auto_tooltip_fields(enc: dict) -> list[dict]:
+def _field_titles(enc: dict, restored: dict[str, str]) -> dict[str, str]:
+    """The original name each merge-renamed field of a wire *enc* is shown under.
+
+    *restored* maps each column a merge renamed for this layer to the name
+    the caller wrote (``_Layer.column_renames``, read backwards), so a
+    renamed column shows its original name on an entry with no title of its
+    own, even when bound only through a channel that takes no title. A
+    column the merge did not rename keeps its name, whatever it looks like,
+    and a title the caller wrote titles its own channel alone, never another
+    channel's entry for the same column.
+    """
+    return {
+        ch_dict["field"]: restored[ch_dict["field"]]
+        for ch_dict in enc.values()
+        if isinstance(ch_dict, dict) and ch_dict.get("field") in restored
+    }
+
+
+def _auto_tooltip_fields(enc: dict, titles: dict[str, str] | None = None) -> list[dict]:
     """Derive auto-tooltip ``{"field": ...}`` entries from one encoding dict.
 
     Shared by :meth:`SpecBuildMixin._inject_auto_tooltips`'s chart-level and
@@ -273,6 +292,9 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
     ----------
     enc : dict
         A parsed-JSON encoding dict (channel name -> ``{"field": ..., ...}``).
+    titles : dict, optional
+        A title per field, for a field whose channel carries none: a
+        merge-renamed column's original name (:func:`_field_titles`).
 
     Returns
     -------
@@ -281,7 +303,7 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
         deduplicated by field name. When the channel's serialized dict
         carries an explicit ``title`` -- either user-set, or stamped by
         ``Chart.__add__``'s collision-rename to preserve the original
-        column name (see ``chart._rename_encoding_fields``, GH #71) -- the
+        column name (see ``_layer_transforms._rename_encoding_fields``, GH #71) -- the
         entry also carries a ``"title"`` display key, mirroring the shape
         the explicit multi-field ``Tooltip(*fields)`` path already emits in
         :meth:`SpecBuildMixin._build_encoding_specs`. ``field`` always stays
@@ -299,12 +321,37 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
         field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
         if field and isinstance(field, str) and field not in seen:
             entry: dict = {"field": field}
-            title = ch_dict.get("title")
+            title = ch_dict.get("title") or (titles or {}).get(field)
             if title:
                 entry["title"] = title
             auto_fields.append(entry)
             seen.add(field)
     return auto_fields
+
+
+def _inherited_wire_channels(layer, encoding_dict: dict) -> list[str]:
+    """The wire channels of *layer*'s serialized *encoding_dict* the layer inherited.
+
+    Each of ``layer.inherited_channels`` is named by the channel it draws as
+    (``fill`` and ``stroke`` draw as ``color``), kept only when the layer's
+    wire encoding carries it: ``detail`` serializes as mark style, a channel
+    a sibling spelling of the layer's own shadows never reaches the wire as
+    inherited, and a positional channel's provenance is
+    ``inherited_positional``'s.
+    """
+    from ferrum.encoding._aliases import resolved_channel
+
+    out: list[str] = []
+    for channel in layer.inherited_channels:
+        wire = resolved_channel(channel)
+        # An alias source whose target the layer binds itself draws nothing.
+        shadowed = (
+            wire != channel and wire in layer.encoding and wire not in layer.inherited_channels
+        )
+        positional = wire in ("x", "y", "x2", "y2")
+        if wire in encoding_dict and wire not in out and not shadowed and not positional:
+            out.append(wire)
+    return out
 
 
 def _warn_channel_dropped(ch_name: str) -> None:
@@ -878,6 +925,16 @@ class SpecBuildMixin:
             # none was copied, so every other spec is unchanged on the wire.
             if layer.inherited_positional:
                 layer_dict["inherited_positional"] = list(layer.inherited_positional)
+            # Non-positional channels the layer carries from a parent, as the
+            # wire channels they draw as; absent when it carries none, so
+            # every other spec is unchanged on the wire.
+            inherited_channels = _inherited_wire_channels(layer, encoding_dict)
+            if inherited_channels:
+                layer_dict["inherited_channels"] = inherited_channels
+            # Absent unless the layer reads its chart's data through a named
+            # output, so every other spec is unchanged on the wire.
+            if layer.reads_chart_data:
+                layer_dict["reads_chart_data"] = True
             out.append(layer_dict)
         return out
 
@@ -902,7 +959,8 @@ class SpecBuildMixin:
         Any Aggregate shorthand like ``encode(y="mean(val):Q")`` defers groupby
         assignment until all sibling encoding fields are visible.  This method
         infers groupby from non-aggregate encoding fields (mirrors Altair behaviour)
-        and replaces each sentinel with a concrete ``Aggregate`` transform.
+        and replaces the sentinels with one concrete ``Aggregate`` transform
+        holding every op.
 
         Parameters
         ----------
@@ -916,8 +974,8 @@ class SpecBuildMixin:
         Returns
         -------
         list
-            A new list with all ``_PendingAggregate`` sentinels replaced by
-            concrete ``Aggregate`` instances.  If no sentinels are present,
+            A new list with the ``_PendingAggregate`` sentinels replaced by one
+            concrete ``Aggregate``.  If no sentinels are present,
             the input list is returned unchanged.
         """
         if not any(isinstance(t, _PendingAggregate) for t in effective_transforms):
@@ -925,26 +983,26 @@ class SpecBuildMixin:
 
         from ferrum import Aggregate, AggregateOp
 
-        # Collect fields from channels that carry no aggregate (shared with the
-        # per-layer path via ``_infer_agg_groupby``).
-        non_agg_fields = _infer_agg_groupby(resolved._encoding)
-        # Include facet fields (row/col grouping dimensions).
-        if resolved._facet is not None:
-            for _ff in (resolved._facet.col, resolved._facet.row, resolved._facet.field):
-                if _ff and _ff not in non_agg_fields:
-                    non_agg_fields.append(_ff)
-        # Replace sentinels with concrete Aggregate objects.
+        # Fields of channels that carry no aggregate, plus facet fields (each
+        # layer's own statistic reads the same rule).
+        non_agg_fields = _chart_agg_groupby(resolved._encoding, resolved._facet)
+        # One Aggregate holds every op, as a layer's per-layer step does: the
+        # chart is one layer, and a second sequential Aggregate would read the
+        # first one's output, where its source column is gone. Ops are
+        # deduplicated by output column; the step sits where the first
+        # sentinel was.
+        ops: dict[str, AggregateOp] = {}
+        for t in effective_transforms:
+            if isinstance(t, _PendingAggregate) and t.output_col not in ops:
+                ops[t.output_col] = AggregateOp(t.field, t.agg, t.output_col)
+        aggregate = Aggregate(list(ops.values()), groupby=non_agg_fields)
         resolved_transforms: list = []
         for t in effective_transforms:
-            if isinstance(t, _PendingAggregate):
-                resolved_transforms.append(
-                    Aggregate(
-                        [AggregateOp(t.field, t.agg, t.output_col)],
-                        groupby=non_agg_fields,
-                    )
-                )
-            else:
+            if not isinstance(t, _PendingAggregate):
                 resolved_transforms.append(t)
+            elif aggregate is not None:
+                resolved_transforms.append(aggregate)
+                aggregate = None
         return resolved_transforms
 
     def _resolve_pending_bins(self, effective_transforms: list, enc: dict) -> _ResolvedBins:
@@ -989,6 +1047,7 @@ class SpecBuildMixin:
             enc,
             pending_bins,
             [t for t in effective_transforms if isinstance(t, _PendingAggregate)],
+            tuple(_bin_groupby(enc, self._facet)),
         )
         # name=None: single-chart bins are always unnamed, so the Bin advances
         # the pipeline's chain instead of fanning out. `filter_transforms`
@@ -1153,6 +1212,25 @@ class SpecBuildMixin:
             tf_list.append({"field": f})
         kw["tooltip_fields"] = json.dumps(tf_list)
 
+    def _layer_column_restores(self, n_layers: int) -> list[dict[str, str]]:
+        """Per wire layer, each column a merge renamed for it mapped back to the caller's name.
+
+        Read from the resolved chart's layers, which serialize one wire
+        layer each in order (``to_spec``), off their ``column_renames``:
+        the rename record ``Chart.__add__`` writes, never the column's name.
+        """
+        if not n_layers:
+            return []
+        layers = self._with_polars_data()._resolve_pending()._layers or []
+        if len(layers) != n_layers:
+            raise ValueError(
+                f"auto tooltips: the chart resolves to {len(layers)} layers but its spec "
+                f"serializes {n_layers}; each wire layer must come from one chart layer"
+            )
+        return [
+            {renamed: original for original, renamed in layer.column_renames} for layer in layers
+        ]
+
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
 
@@ -1176,72 +1254,35 @@ class SpecBuildMixin:
         its own field). An explicit chart-level ``tooltip``/``tooltip_fields``
         wins over the chart-level auto-injection (skipping it entirely).
 
-        Whether it ALSO short-circuits the per-layer loop below depends on
-        the *provenance* of the chart-level value, not merely on whether a
-        layer happens to carry its own explicit tooltip (GH #78 fixed a
-        false positive in the earlier structural proxy -- see below):
+        A chart-level ``tooltip`` is the parent's: written on the chart a
+        layer is attached to, or on a composition itself, never copied up
+        from a layer (a ``+`` operand's own tooltip stays on its layers). It
+        therefore reaches every layer that binds none, through Rust's
+        chart-level fallback (``Encoding::inherit_from``), and short-circuits
+        the per-layer loop below. Two cases still run the loop:
 
-        - ``Chart.__add__`` promotes the *primary* layer's own explicit
-          ``tooltip=`` onto the merged chart-level encoding (``new =
-          lhs._clone()``), and ``_expand_layers`` gives that same layer's
-          own ``encoding`` dict the identical key -- so the primary layer's
-          own encoding ALSO carries the explicit tooltip. ``Chart.__add__``
-          records this as ``self._tooltip_promoted = True``. In that case
-          the chart-level value is just a view of the primary layer's, and
-          other layers must still get their own auto-injected fields --
-          otherwise Rust's chart-level tooltip fallback leaks the primary
-          layer's fields onto every other layer's marks.
-        - A ``tooltip=`` set directly on an already-merged chart (e.g.
-          ``merged.encode(tooltip=...)``) only touches the chart-level
-          ``_encoding`` -- no layer's own encoding carries it, and
-          ``Chart.encode()`` resets ``_tooltip_promoted`` to ``False`` when
-          it sees a ``tooltip=`` channel. That is a genuine chart-wide
-          override, so it short-circuits every layer's auto-injection (a
-          per-layer auto injection would otherwise beat the explicit
-          tooltip in Rust's ``inherit_from`` merge). This case holds even
-          when SOME layer independently carries its own explicit tooltip
-          (e.g. from an earlier promotion) -- the earlier structural proxy
-          (``any_layer_explicit``) treated that as evidence of promotion
-          and incorrectly ran the per-layer loop for the *other*,
-          tooltip-less layers, injecting spurious per-layer fields that beat
-          the genuine chart-wide override in Rust's ``inherit_from`` merge.
-          Those layers must instead fall back to the chart-level value, same
-          as the all-implicit case.
         - ``_inject_selection_tooltips`` (called earlier in ``to_spec_dict``,
           before this method sees the wire) merges a field-based selection's
           ``fields`` into chart-level ``tooltip_fields`` whenever the chart
-          carries an active field-based selection (GH #58) -- including when
-          the chart-level tooltip is ALSO promoted (it rewrites the
-          promoted single ``tooltip`` into a merged ``tooltip_fields`` list
-          if the selection names a field the promoted tooltip didn't
-          already cover). Neither case is a genuine chart-wide override --
-          selection injection exists purely to make cross-layer selection
-          matching work -- so the per-layer loop must still run whenever a
-          field-based selection is active, and each layer's own auto fields
-          are unioned with the selection's fields (selection fields appended
-          after each layer's own, deduplicated by field name, mirroring the
-          existing-first-then-selection-appended order
-          ``_inject_selection_tooltips`` itself uses for the unlayered
+          carries an active field-based selection (GH #58). That is not a
+          chart-wide declaration -- selection injection exists purely to
+          make cross-layer selection matching work -- so each layer still
+          gets its own auto fields, unioned with the selection's fields
+          (selection fields appended after each layer's own, deduplicated by
+          field name, mirroring the existing-first-then-selection-appended
+          order ``_inject_selection_tooltips`` itself uses for the unlayered
           case). The selection's field set is re-derived directly from
-          ``self._selections`` (not read off the wire) so the union applies
-          uniformly regardless of whether the chart-level tooltip's OTHER
-          provenance is promoted, selection-only, or absent.
+          ``self._selections`` (not read off the wire).
+        - No chart-level tooltip at all.
 
-        The short-circuit discriminator is therefore provenance, not
-        structure: a chart-level explicit tooltip short-circuits the loop
-        only when it is neither promoted (``self._tooltip_promoted``) nor
-        selection-injected (chart-level ``tooltip``/``tooltip_fields``
-        present in the wire but absent from ``self._encoding`` -- the only
-        way that combination arises is ``_inject_selection_tooltips`` having
-        added it with no other source, since ``tooltip_fields`` is never
-        itself a settable channel and a promoted or directly-encoded
-        tooltip always leaves ``self._encoding`` carrying ``tooltip``). A
-        layer that itself carries an explicit ``tooltip``/``tooltip_fields``
-        is always left untouched by the loop (its own explicit value always
-        wins for that layer). Unlayered and single-layer charts emit the
-        exact same wire as before this fix (no ``kw["layers"]`` key, or a
-        layers list whose entries already carry no distinct-from-chart-level
-        fields to add).
+        A selection-injected chart-level tooltip is one present in the wire
+        but absent from ``self._encoding``: ``tooltip_fields`` is never
+        itself a settable channel, and a written tooltip always leaves
+        ``self._encoding`` carrying ``tooltip``. A layer that itself carries
+        an explicit ``tooltip``/``tooltip_fields`` is always left untouched
+        by the loop (its own explicit value always wins for that layer).
+        An unlayered chart has no ``kw["layers"]`` key, so only the
+        chart-level fields apply.
 
         Parameters
         ----------
@@ -1265,40 +1306,55 @@ class SpecBuildMixin:
         layers = kw.get("layers") or []
         # GH #58: a selection-injected chart-level tooltip_fields entry never
         # appears in self._encoding (only _inject_selection_tooltips's mutation
-        # of the wire kw put it there); a promoted or directly-.encode()'d
-        # tooltip always does. That distinguishes "the chart-level tooltip
-        # exists SOLELY because of a selection" (short-circuit must not fire)
-        # from the promoted/genuine cases, without threading extra state
-        # through to_spec_dict.
+        # of the wire kw put it there); a written tooltip always does. That
+        # distinguishes "the chart-level tooltip exists SOLELY because of a
+        # selection" (short-circuit must not fire) from a written one,
+        # without threading extra state through to_spec_dict.
         selection_injected = chart_level_explicit and "tooltip" not in self._encoding
-        if chart_level_explicit and not self._tooltip_promoted and not selection_injected:
-            # Genuine chart-wide override (set directly via
-            # .encode(tooltip=...), not promoted from a layer and not
-            # injected by a field-based selection) -- it wins for every
-            # layer via Rust's chart-level tooltip_fields fallback
+        if chart_level_explicit and not selection_injected:
+            # The parent's written tooltip -- it reaches every layer that
+            # binds none via Rust's chart-level tooltip_fields fallback
             # (Encoding::inherit_from).
             return kw
 
         # GH #58: the selection's own field set, re-derived directly from
         # self._selections (mirroring _inject_selection_tooltips's own
-        # field-collection) rather than gated on `selection_injected`. A
-        # PROMOTED chart-level tooltip can coexist with a field-based
-        # selection -- _inject_selection_tooltips still merges the
-        # selection's fields into the chart-level tooltip_fields in that
-        # case (self._encoding keeps carrying the promoted "tooltip" key, so
-        # `selection_injected` is False there) -- and every tooltip-less
-        # layer must still pick up those selection fields, not just its own
-        # auto fields.
+        # field-collection): every tooltip-less layer picks up those
+        # selection fields beside its own auto fields.
         selection_field_names = _selection_field_names(self._selections)
         selection_fields = (
             [{"field": f} for f in sorted(selection_field_names)] if selection_field_names else None
         )
 
-        for layer in layers:
+        for layer, restored in zip(layers, self._layer_column_restores(len(layers)), strict=True):
             layer_enc = layer.get("encoding") or {}
             if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
                 continue
-            layer_auto_fields = _auto_tooltip_fields(layer_enc)
+            # A layer lists its own fields: its wire encoding less what it
+            # carries from a parent (``inherited_channels`` and
+            # ``inherited_positional``, the wire twin of
+            # ``_layer_transforms._own_channels``). A layer that binds no
+            # field of its own lists the fields of everything it draws, its
+            # wire encoding over the chart-level one (without x/y/x2/y2 for
+            # a layer reading a named output, as Rust's
+            # ``inherit_non_positional``), which is the list it would
+            # otherwise take from the chart level, naming the columns its
+            # own rows carry. Either way the layer draws the tooltip it
+            # draws alone.
+            titles = _field_titles(layer_enc, restored)
+            carried = set(layer.get("inherited_channels") or ()) | set(
+                layer.get("inherited_positional") or ()
+            )
+            own = {channel: value for channel, value in layer_enc.items() if channel not in carried}
+            layer_auto_fields = _auto_tooltip_fields(own, titles=titles)
+            if not layer_auto_fields:
+                parent = {
+                    channel: value
+                    for channel, value in enc.items()
+                    if channel != "tooltip_fields"
+                    and ("data_source" not in layer or channel not in _POSITIONAL)
+                }
+                layer_auto_fields = _auto_tooltip_fields({**parent, **layer_enc}, titles=titles)
             if selection_fields:
                 seen_fields = {f.get("field") for f in layer_auto_fields}
                 layer_auto_fields = layer_auto_fields + [

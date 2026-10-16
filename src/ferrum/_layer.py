@@ -99,6 +99,17 @@ class _Layer:
     #: own chart. Serialized onto the wire layer dict only when non-empty
     #: (``Layer::inherited_positional`` in Rust ``spec/layer.rs``).
     inherited_positional: tuple[str, ...] = ()
+    #: The non-positional channels this layer's ``encoding`` carries because
+    #: it inherited them from a parent, not because the layer declared them:
+    #: a ``+`` operand's own encoding moved onto the layers it contributes,
+    #: or a parent binding a statistic lowered or a merge's renamed columns
+    #: renamed. Rust treats a listed channel as inherited, not owned, exactly
+    #: as it treats ``inherited_positional``, so a text layer draws no
+    #: inherited color and a line's own width wins over an inherited size.
+    #: Spelled as this layer's ``encoding`` keys; ``_build_layers_list``
+    #: serializes the wire channels they draw as (``Layer::inherited_channels``
+    #: in Rust ``spec/layer.rs``), only when non-empty.
+    inherited_channels: tuple[str, ...] = ()
     #: Where this layer, though it reads a named output, takes each
     #: positional channel it does not bind, as a layer reading the chart's
     #: own rows takes the chart's: ``None`` (it takes none), ``"encoding"``
@@ -111,13 +122,14 @@ class _Layer:
     #: fills the channels still unbound (listing every copied channel in
     #: ``inherited_positional``). Never serialized.
     positional_source: Optional[str] = None
-    #: The ``(column, renamed column)`` pairs a chart-level positional field
-    #: is renamed by before it reaches this layer: the right operand of
+    #: The ``(column, renamed column)`` pairs a field this layer inherits is
+    #: renamed by before it reaches this layer: the right operand of
     #: ``chart + chart`` over different data with overlapping columns reads
-    #: the combined rows, where its own columns carry the merge's suffix, so a
-    #: chart field ``"a"`` names that operand's ``"a__rhs_0001"``. Empty for
-    #: every other layer. Never serialized.
-    positional_renames: tuple[tuple[str, str], ...] = ()
+    #: the combined rows, where its own columns carry the merge's suffix, so
+    #: an inherited field ``"a"`` (a positional fallback, or a binding the
+    #: caller wrote on the composition) names that operand's own
+    #: ``"a__rhs_0001"``. Empty for every other layer. Never serialized.
+    column_renames: tuple[tuple[str, str], ...] = ()
     #: Whether this layer reads its operand's share of the chart's rows
     #: through a branch, so each unnamed step of the chart's chain must run
     #: over that share before the layer reads it. ``chart + chart`` over
@@ -126,6 +138,22 @@ class _Layer:
     #: ``.transform(...)`` adds to the composed chart still reaches them. See
     #: :func:`ferrum.chart._settle_chart_rows`. Never serialized.
     rows_from_chart: bool = False
+    #: Whether this layer reads its chart's data: the chart's rows after the
+    #: caller's own ``.transform(...)`` steps, never a composite mark's
+    #: statistics. ``Chart.layer`` and ``chart + SecondaryY(...)`` set it on
+    #: the layers they attach. The role is resolved against the record of
+    #: the chart that owns the layer when the spec is built, or, for a right
+    #: ``+`` operand's layers, against that operand's record at the merge
+    #: (:func:`ferrum._layer_transforms._settle_chart_data`), and is cleared
+    #: there. Never serialized.
+    chart_data: bool = False
+    #: Wire flag: this layer reads its chart's data through a named output
+    #: (``Layer::reads_chart_data`` in Rust ``spec/layer.rs``), so Rust's
+    #: unknown-column refusal names the remedy for a layer attached to a
+    #: chart rather than the plain message a ``+`` operand's layer gets. Set
+    #: only when the role is resolved to a named output; serialized only
+    #: when True.
+    reads_chart_data: bool = False
     #: The ``ConditionalSpec`` objects this layer declared, held by identity.
     #: A conditional is owned by a layer when it was declared on that layer's
     #: own ``Layer(encoding=...)``, or on the chart the layer came from when

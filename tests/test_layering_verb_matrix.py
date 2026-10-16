@@ -3,15 +3,13 @@
 The verbs are ``chart + chart``, ``fm.layer``, independent-y ``LayerChart``,
 ``Chart.layer()`` on a marked host, on a markless host, and called once per
 layer, and the ``hconcat`` composite. The features are a line's conditional
-``size`` scope, auxiliary-channel promotion, the composite ``size=``
+``size`` scope, auxiliary-channel isolation, the composite ``size=``
 refusal, and the tapered width, including the refusal that names the
 public entry. Each verb places two members, given as plain descriptions,
 in both orders.
 
-Field and conditional ``size`` follow two different reach rules, and the
-cells pin both. A field ``size`` is promoted to the merged chart, so under
-``chart + chart`` it reaches the other operand's line as well. A
-conditional ``size`` stays with the chart it was declared on: an operand of
+Field and conditional ``size`` follow one reach rule (spec §4.6 V1): a
+binding stays with the chart or layer it was declared on. An operand of
 ``chart + chart`` (and so every ``fm.layer``/``LayerChart`` member) keeps
 it on its own layers, a host of ``Chart.layer()`` shares it with every
 layer it is given, and a ``Layer``'s own encoding keeps it on that layer.
@@ -29,7 +27,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from ferrum.encoding import _auxiliary_scale_channels
+from ferrum._core import auxiliary_scale_channels
 
 _DF = pl.DataFrame(
     {
@@ -226,7 +224,7 @@ def test_a_conditional_is_not_a_constructor_field_of_the_public_spec() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auxiliary-channel promotion.
+# Auxiliary-channel isolation.
 # ---------------------------------------------------------------------------
 
 
@@ -245,29 +243,52 @@ def _channel_class(channel: str) -> type:
     return getattr(fm, "".join(part.title() for part in channel.split("_")))
 
 
-_PROMOTION_VERBS: dict[str, Callable[[fm.Chart, _Member], fm.Chart]] = {
+_ISOLATION_VERBS: dict[str, Callable[[fm.Chart, _Member], fm.Chart]] = {
     "plus": lambda host, m: host + m.chart(),
     "chart_layer": lambda host, m: host.layer(m.layer()),
 }
 
 
-@pytest.mark.parametrize("verb", sorted(_PROMOTION_VERBS))
-@pytest.mark.parametrize("channel", sorted(_auxiliary_scale_channels()))
-def test_a_later_layers_auxiliary_binding_renders_as_if_declared_chart_level(
+def _line_elements(svg: str, tags: str = "polyline") -> list[str]:
+    """The plot area's *tags* elements (a regex alternation), styles only.
+
+    Geometry is left out: a legend another layer draws narrows the plot area.
+    An untapered line is one ``<polyline>``; a tapered one is a ``<path>``.
+    """
+    marks = "".join(re.findall(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', svg, re.S))
+    return [
+        re.sub(r' (?:points|d)="[^"]*"', "", element)
+        for element in re.findall(rf"<(?:{tags}) [^>]*/>", marks)
+    ]
+
+
+@pytest.mark.parametrize("verb", sorted(_ISOLATION_VERBS))
+@pytest.mark.parametrize("channel", sorted(auxiliary_scale_channels()))
+def test_a_later_layers_auxiliary_binding_leaves_the_line_as_drawn_alone(
     channel: str, verb: str
 ) -> None:
+    """V1: a later layer's own binding draws that layer only; the line draws as beside a plain point.
+
+    A binding written on the host or chart reaches every layer instead.
+    Rejects promotion: the later binding would restyle the line as the
+    chart-level declaration does.
+    """
     binding = {channel: _channel_class(channel)("v")}
     member = _Member("point", binding)
-    combine = _PROMOTION_VERBS[verb]
-    promoted = combine(_PLAIN_LINE.chart(), member).to_svg()
+    combine = _ISOLATION_VERBS[verb]
+    own = combine(_PLAIN_LINE.chart(), member).to_svg()
     chart_level = combine(_PLAIN_LINE.chart().encode(**binding), member).to_svg()
     unbound = combine(_PLAIN_LINE.chart(), _Member("point")).to_svg()
-    assert promoted == chart_level
-    assert promoted != unbound
+    assert own != unbound
+    assert _line_elements(own) == _line_elements(unbound)
+    if channel in ("size", "stroke_dash"):
+        # A line draws these channels, so the chart-level declaration restyles it.
+        assert _line_elements(chart_level, "polyline|path") != _line_elements(
+            unbound, "polyline|path"
+        )
 
 
-# Two binders arriving in ONE merge onto a host that binds nothing, so the
-# promotion has to choose between them.
+# Two binders arriving in ONE merge onto a host that binds nothing.
 _TWO_BINDER_VERBS: dict[str, Callable[[_Member, _Member], fm.Chart]] = {
     "plus": lambda a, b: _PLAIN_LINE.chart() + (a.chart() + b.chart()),
     "chart_layer": lambda a, b: _PLAIN_LINE.chart().layer(a.layer(), b.layer()),
@@ -279,9 +300,16 @@ _TWO_BINDER_VERBS: dict[str, Callable[[_Member, _Member], fm.Chart]] = {
 def test_the_first_layer_binding_a_channel_decides_its_scale(
     verb: str, fields: tuple[str, str]
 ) -> None:
+    """V10: each binder keeps its own field on its layer, and the first one titles the legend."""
     first, second = (_Member("point", {"size": fm.Size(f)}) for f in fields)
-    wire = json.loads(_TWO_BINDER_VERBS[verb](first, second).to_spec().to_json())
-    assert wire["encoding"]["size"]["field"] == fields[0]
+    chart = _TWO_BINDER_VERBS[verb](first, second)
+    wire = json.loads(chart.to_spec().to_json())
+    assert "size" not in wire["encoding"]
+    assert [layer["encoding"].get("size", {}).get("field") for layer in wire["layers"]] == [
+        None,
+        *fields,
+    ]
+    assert _legend_titles(chart.to_svg()) == [fields[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -293,25 +321,22 @@ _DENSITY_REFUSAL = "mark_density(size=...) has no effect on mark_area; received 
 
 @dataclass(frozen=True)
 class _Composite:
-    """A composite mark: how to build it, and the x column its own output publishes."""
+    """A composite mark over ``_DF``, whose ``x`` column it reads: how to build it."""
 
     build: Callable[..., fm.Chart]
-    output_x: str
 
 
-_DENSITY = _Composite(lambda **kw: fm.Chart(_DF).mark_density(**kw).encode(x="x"), "value")
+_DENSITY = _Composite(lambda **kw: fm.Chart(_DF).mark_density(**kw).encode(x="x"))
 # With a CI band the fit is a ribbon plus a line, a layered composite.
-_SMOOTH = _Composite(
-    lambda **kw: fm.Chart(_DF).mark_smooth(ci=0.95, **kw).encode(x="x", y="y"), "x"
-)
+_SMOOTH = _Composite(lambda **kw: fm.Chart(_DF).mark_smooth(ci=0.95, **kw).encode(x="x", y="y"))
 
 _COMPOSITE_ROUTES: dict[str, Callable[[_Composite, dict], Any]] = {
     "flat": lambda c, kw: c.build(**kw),
     "plus": lambda c, kw: _Member("point").chart() + c.build(**kw),
     "fm_layer": lambda c, kw: fm.layer(_Member("point").chart(), c.build(**kw)),
-    # The attached rule reads the composite's own output.
+    # The attached rule reads the chart's data, the composite's source rows.
     "chart_layer_host": lambda c, kw: c.build(**kw).layer(
-        fm.Layer(mark="rule", encoding={"x": fm.X(c.output_x)})
+        fm.Layer(mark="rule", encoding={"x": fm.X("x")})
     ),
     "hconcat": lambda c, kw: fm.hconcat(_Member("point").chart(), c.build(**kw)),
 }
@@ -365,7 +390,7 @@ _SMOOTH_CONFLICT = (
 
 
 # Without a CI band the fit is one unlayered line, a flat composite.
-_FLAT_SMOOTH = _Composite(lambda **kw: fm.Chart(_DF).mark_smooth(**kw).encode(x="x", y="y"), "x")
+_FLAT_SMOOTH = _Composite(lambda **kw: fm.Chart(_DF).mark_smooth(**kw).encode(x="x", y="y"))
 _SMOOTHS = {"layered": _SMOOTH, "flat": _FLAT_SMOOTH}
 
 
@@ -589,7 +614,7 @@ def test_attaching_a_layer_keeps_a_composites_color_on_its_own_layers(
     )
 
 
-def test_vacuity_control_a_user_authored_color_is_promoted_with_its_title() -> None:
+def test_vacuity_control_a_user_authored_color_draws_its_titled_legend() -> None:
     rule = _COLORED_COMPOSITES["mark_roc"].rule_chart()
     colored = fm.Chart(_ROC).mark_line().encode(x="fpr", y="tpr", color="class")
     svg = (rule + colored).to_svg()

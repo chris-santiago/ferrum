@@ -16,6 +16,7 @@ from ferrum._entry import voiced_as
 from ferrum._layer import owned_conditional_ids
 from ferrum._overrides import _FIGURE_CHROME_KEYS
 from ferrum._validate import validate_choice
+from ferrum._warn import user_stacklevel
 from ferrum.selection import ConditionalSpec
 from ferrum.title import Title
 
@@ -4359,39 +4360,34 @@ class ConcatChart(_CompositeBase):
 
 
 def _expand_layers(c) -> tuple[list, list]:
-    """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
+    """Return ``(layers, top_level_transforms)`` for a chart turned into layers.
 
+    The doors that turn a chart into layers (both operands of ``Chart +
+    Chart``, ``Chart.layer`` and ``chart + SecondaryY(...)``) read it here.
     Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
-    ``None``) -- splat their layers as-is and carry their top-level transforms
-    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list,
-    and the public entry a flat chart speaks as (``Chart._entry``) moves onto
-    that layer: the caller rebuilding a chart from these layers clears its
-    own ``_entry``, so the entry names this operand's layer and no other.
+    ``None``) -- their layers are returned as-is. Plain single-mark charts
+    wrap into a one-element ``_Layer`` list, and the public entry a flat chart
+    speaks as (``Chart._entry``) moves onto that layer: the caller rebuilding a
+    chart from these layers clears its own ``_entry``, so the entry names this
+    operand's layer and no other.
 
-    Transforms are returned as the chart holds them.  Routing the RHS
-    operand's chain to a named output its layers read (``data_source``) is
-    handled in ``Chart.__add__``.
-
-    Encoding-implicit ``_PendingAggregate`` sentinels (added to ``c._transforms``
-    by ``encode()`` for channels like ``Y("v", aggregate="mean")``) are excluded
-    from the returned top-level transforms.  In a layered chart each layer
-    aggregates its own data independently; ``Chart.to_spec`` rebuilds these
-    aggregates per-layer from each layer's encoding via
-    ``_resolve_layer_aggregates``.  Leaving them at the chart top level would
-    aggregate the merged batch once with the wrong (single-layer) groupby.
+    Encoding-implicit ``_PendingAggregate`` and ``_PendingBin`` sentinels
+    (added to ``c._transforms`` by ``encode()`` for channels like
+    ``Y("v", aggregate="mean")``) are left out of the returned top-level
+    transforms: an encoding statistic is per layer, so each layer computes
+    its own over the rows it reads, grouped by its own effective encoding
+    (``_resolve_layer_aggregates`` / ``_resolve_layer_bins`` at
+    ``Chart.to_spec``). Left at the top level, it would become a chart-level
+    step every layer's own statistic then ran over again.
     """
     from ferrum._layer import _Layer
     from ferrum.encoding.base import _PendingAggregate, _PendingBin
 
-    def _top_transforms(chart) -> list:
-        return [
-            t
-            for t in (chart._transforms or [])
-            if not isinstance(t, (_PendingAggregate, _PendingBin))
-        ]
-
+    transforms = [
+        t for t in (c._transforms or []) if not isinstance(t, (_PendingAggregate, _PendingBin))
+    ]
     if c._layers is not None:
-        return list(c._layers), _top_transforms(c)
+        return list(c._layers), transforms
     return [
         _Layer(
             mark=c._mark,
@@ -4400,7 +4396,7 @@ def _expand_layers(c) -> tuple[list, list]:
             position=c._position,
             entry=c._entry,
         )
-    ], _top_transforms(c)
+    ], transforms
 
 
 def _layer_mark_kwargs(c) -> dict | None:
@@ -4512,65 +4508,11 @@ def _warn_on_layer_conflicts(lhs, rhs) -> None:
     the facet ARE still the primary layer's alone.
     """
     if (rhs._theme is not None and rhs._theme != lhs._theme) or rhs._facet != lhs._facet:
-        import warnings
-
         warnings.warn(
             "Layered chart `+`: secondary layer's theme/facet is ignored; primary layer wins.",
             UserWarning,
-            stacklevel=3,
+            stacklevel=user_stacklevel(),
         )
-
-
-def _promote_layer_channels(new, authored: list[dict]) -> None:
-    """Promote each auxiliary channel's first user-authored binding to chart level when absent.
-
-    Rust builds every auxiliary (non-positional) scale -- color, size, shape,
-    the opacity family, stroke dash; the set is
-    :func:`ferrum.encoding._auxiliary_scale_channels` -- from
-    ``spec.encoding`` only. When the LHS of ``Chart + Chart`` does not bind a
-    channel, the merged chart inherits no chart-level binding for it from
-    the LHS clone, so no scale is built and a layer that binds the channel
-    draws as if it did not: ``point + sized_line`` drew an untapered line
-    while ``sized_line + point`` tapered it.
-
-    *authored* is the encodings the caller wrote that arrive in this merge,
-    in layer order: the right operand's chart-level encoding for
-    ``chart + chart`` (a flat chart's whole encoding, or a layered chart's
-    shared one, including what its own merges promoted), and each public
-    ``Layer``'s encoding for ``Chart.layer()``. For each channel the first
-    of them that carries a ``ChannelBase`` binding is promoted, so the
-    result does not depend on layer order. Once promoted, the channel is
-    chart-level: every layer that does not bind it inherits it, exactly as
-    a leading chart's own binding is inherited. A later binding of a
-    different field keeps that binding on its layer and is drawn through
-    the first binder's scale. A mark-kwarg constant (``mark_point(size=30)``)
-    is mark style, not an encoding, so it never blocks promotion.
-
-    A layer a composite mark or figure function emitted keeps its own
-    layer-level bindings local: its encoding is never in *authored*, so
-    ``importance_chart(compare=...) + rule`` does not recolor the
-    composite's error rules or title its legend after its ``model`` color.
-
-    A binding is read through
-    :func:`ferrum.encoding._aliases.resolve_channel_alias`, so a
-    ``fill``/``stroke``-only encoding promotes its color the same way
-    ``to_spec()``'s later alias pass would resolve it, without that pass's
-    warning side effect.
-
-    The promoted channel is a copy of the authored one, never an alias of it.
-    """
-    from ferrum.encoding import _auxiliary_scale_channels
-    from ferrum.encoding._aliases import resolve_channel_alias
-    from ferrum.encoding.base import ChannelBase
-
-    for channel in _auxiliary_scale_channels():
-        if new._encoding.get(channel) is not None:
-            continue
-        for encoding in authored:
-            bound = resolve_channel_alias(encoding, channel)
-            if isinstance(bound, ChannelBase):
-                new._encoding[channel] = copy.copy(bound)
-                break
 
 
 def _bind_operand_conditionals(layers: list, conditionals: list) -> list:

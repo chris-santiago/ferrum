@@ -716,8 +716,8 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         return fit.encode(x=req.x, y=req.y)
     # A scatter layer will be composed beside this fit, so the fit's
     # transform must be a NAMED fan-out its own layers read through
-    # `data_source=` -- never a chain-advancing transform, which
-    # `_merge_layers` would apply to the scatter layer too. That is
+    # `data_source=` -- never a chain-advancing transform, which would
+    # become the rows the scatter layer reads. That is
     # exactly what `mark_smooth`'s single-line shortcut produces for
     # `ci=None, show_metrics=False`, and it corrupted the scatter:
     # measured on the pre-fix tree, `lmplot(df, x=, y=, ci=None,
@@ -741,7 +741,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
     ).transforms
     # `kind` doubles as the transform's `name=` here exactly as it does for
     # the three dedicated methods below.
-    return _fit_chart_from_named_transform(
+    fit = _fit_chart_from_named_transform(
         req.data,
         smooth_transform,
         kind="smooth",
@@ -753,6 +753,12 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         y_title=req.y_field,
         metrics=req.metrics,
     )
+    if req.hue is not None:
+        # The fit groups by the hue, and composed beside the scatter it
+        # draws only its own bindings, so it binds the hue itself (the same
+        # channel the no-scatter branch above binds).
+        return fit.encode(color=nominal_color_channel(req.hue))
+    return fit
 
 
 def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
@@ -1234,10 +1240,9 @@ def lmplot(
     # two ways (a bare keyword via `**encode_kwargs`, merged into `enc`
     # above, or the separate `encode=` dict `_finalize_chart` applies later).
     # Resolving through `resolve_channel_alias` over the merged effective
-    # encoding -- the same alias table, already read for exactly this "what
-    # would color resolve to" question by `composition.py`'s layer-channel
-    # promotion -- covers a future alias automatically, with no enumeration
-    # here to fall behind.
+    # encoding -- the same alias table every "what would color resolve to"
+    # question reads -- covers a future alias automatically, with no
+    # enumeration here to fall behind.
     color_active = resolve_channel_alias({**enc, **(encode or {})}, "color") is not None
 
     # ---- Scatter layer (optional) --------------------------------------

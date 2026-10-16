@@ -2456,17 +2456,17 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R7 — promoted color channel is an independent copy, not an alias
+# R7 — a highlight layer's color stays on its own layer
 # ---------------------------------------------------------------------------
 
 
-def test_r7_promoted_color_channel_is_independent_copy() -> None:
-    """_promote_layer_channels must assign a copy, not an alias of the layer's channel.
+def test_r7_a_highlight_layers_color_stays_on_its_own_layer() -> None:
+    """V1: the highlight operand's color is its own; it never reaches the chart level.
 
-    When (base + highlight) promotes the highlight layer's color encoding to
-    chart level, the chart-level channel and the layer's channel must be
-    distinct objects (``is not``).  Aliasing means an in-place mutation of
-    one would silently corrupt the other.
+    ``base + highlight`` keeps the highlight layer's color encoding on that
+    layer and leaves the gray background lines uncolored, so no chart-level
+    copy exists that an in-place mutation could corrupt or that would
+    recolor the background.
     """
     import numpy as np
     from ferrum.encoding.base import ChannelBase
@@ -2498,29 +2498,12 @@ def test_r7_promoted_color_channel_is_independent_copy() -> None:
 
     merged = base + highlight
 
-    # Chart-level color must exist and be a ChannelBase (promotion happened).
-    chart_color = merged._encoding.get("color")
-    assert chart_color is not None, "chart-level color must be promoted from the highlight layer"
-    assert isinstance(chart_color, ChannelBase), (
-        f"promoted color must be a ChannelBase; got {type(chart_color).__name__}"
-    )
-
-    # Find the layer that carries the color encoding.
-    layer_color = None
-    for layer in merged._layers or []:
-        ch = layer.encoding.get("color")
-        if isinstance(ch, ChannelBase):
-            layer_color = ch
-            break
-    assert layer_color is not None, "highlight layer must still carry its color encoding"
-
-    # The two must be equal in value but NOT the same object.
-    assert chart_color == layer_color, (
-        "promoted chart-level color must equal the layer's color in value"
-    )
-    assert chart_color is not layer_color, (
-        "promoted chart-level color must be an independent copy, not the same object as the layer's color"
-    )
+    assert "color" not in merged._encoding
+    background, highlighted = merged._layers
+    assert "color" not in background.encoding
+    layer_color = highlighted.encoding.get("color")
+    assert isinstance(layer_color, ChannelBase)
+    assert layer_color.field.startswith("country")  # renamed where the frames overlap
 
 
 # ---------------------------------------------------------------------------

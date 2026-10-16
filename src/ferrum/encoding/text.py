@@ -7,7 +7,7 @@ kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 
 from __future__ import annotations
 
-from ferrum.encoding._honored import BARE, TEXT_FORMATTED, TEXT_FORMATTED_TITLED
+from ferrum.encoding._honored import AGGREGATE, BARE, TEXT_FORMATTED, TEXT_FORMATTED_TITLED
 from ferrum.encoding.base import ChannelBase
 
 
@@ -40,7 +40,7 @@ class Text(ChannelBase):
 
     _channel_name = "text"
 
-    _honored_kwargs = TEXT_FORMATTED
+    _honored_kwargs = TEXT_FORMATTED | AGGREGATE
 
 
 class Detail(ChannelBase):
@@ -93,7 +93,7 @@ class Tooltip(ChannelBase):
 
     _channel_name = "tooltip"
 
-    _honored_kwargs = BARE
+    _honored_kwargs = BARE | AGGREGATE
 
     def __init__(self, *fields, **kwargs):
         # Tooltip(*fields) is a special case: takes a list of fields, not just one
@@ -134,7 +134,7 @@ class TooltipField(ChannelBase):
 
     _channel_name = "tooltip_field"
 
-    _honored_kwargs = TEXT_FORMATTED_TITLED
+    _honored_kwargs = TEXT_FORMATTED_TITLED | AGGREGATE
 
 
 class Href(ChannelBase):

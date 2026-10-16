@@ -8400,6 +8400,71 @@ mod tests {
         );
     }
 
+    // ── `inherited_channels` ──────────────────────────────────────────────
+    //
+    // The rendered consequence of `from_chart_and_layer`'s `color_is_own`
+    // reading `Layer::inherited_channels` (the flag-level tests live in
+    // `render::prepare`'s test module): a layer whose parent's `color` was
+    // written onto its own encoding and listed draws exactly as when the
+    // color reached it through the chart-level encoding.
+
+    /// A text label whose listed `color` sits on its own encoding draws the
+    /// same label colors as one inheriting the color from the chart level
+    /// (the theme's font color, not the bars' hue). Unlisted, the same
+    /// encoding is the label's own color and splits by category.
+    #[test]
+    fn a_listed_color_on_a_text_layer_draws_as_an_inherited_one() {
+        use crate::spec::layer::InheritedChannel;
+        let (chart_inherited, batch) = bar_text_layered_spec(None, None, None, None, Some("cat"));
+        let oracle = text_node_colors(&build_scene_for(&chart_inherited, &batch));
+
+        let (mut listed, batch) = bar_text_layered_spec(None, None, Some("cat"), Some("cat"), None);
+        listed.layers.as_mut().unwrap()[1].inherited_channels = vec![InheritedChannel::Color];
+        let listed_colors = text_node_colors(&build_scene_for(&listed, &batch));
+        assert_eq!(listed_colors, oracle, "a listed color draws as a chart-inherited one");
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(listed_colors.iter().all(|c| *c == font_color), "got {listed_colors:?}");
+
+        let (unlisted, batch) = bar_text_layered_spec(None, None, Some("cat"), Some("cat"), None);
+        let unlisted_colors = text_node_colors(&build_scene_for(&unlisted, &batch));
+        assert_eq!(unlisted_colors.len(), 2);
+        assert_ne!(
+            unlisted_colors[0], unlisted_colors[1],
+            "an unlisted color is the label's own and splits by category; got {unlisted_colors:?}"
+        );
+    }
+
+    /// The literal-stroke reference line of
+    /// [`roc_reference_line_layered_spec`], with the chart-level `color`
+    /// moved onto both layers' own encodings and listed on the reference
+    /// line, keeps its literal grey paint as one polyline, as it does when it
+    /// inherits the color from the chart level. Unlisted, the color is the
+    /// line's own and fans it out into one polyline per class.
+    #[test]
+    fn a_listed_color_on_a_literal_stroke_line_keeps_its_own_paint() {
+        use crate::spec::layer::InheritedChannel;
+        let reference_strokes = |inherited: Vec<InheritedChannel>| {
+            let (mut spec, batch) = roc_reference_line_layered_spec(3);
+            let color = spec.encoding.color.take();
+            let layers = spec.layers.as_mut().unwrap();
+            layers[1].encoding.color = color;
+            layers[1].inherited_channels = inherited;
+            let scene = build_scene_for(&spec, &batch);
+            let line_batches: Vec<&ferrum_scene::MarkBatch> = scene.panels[0]
+                .marks
+                .iter()
+                .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
+                .collect();
+            assert_eq!(line_batches.len(), 2, "one line batch per layer");
+            polyline_strokes(line_batches[1])
+        };
+        let gray = ferrum_scene::Color { r: 0xAA, g: 0xAA, b: 0xAA, a: 255 };
+        assert_eq!(reference_strokes(vec![InheritedChannel::Color]), vec![gray]);
+
+        let unlisted = reference_strokes(vec![]);
+        assert_eq!(unlisted.len(), 3, "an unlisted color is the line's own: {unlisted:?}");
+    }
+
     // ── Batch-E task-3, cycle 3 (quality-review gate): tick's own-span-axis
     // normalization is a path-stable property, not a merged-encoding read ──
     //

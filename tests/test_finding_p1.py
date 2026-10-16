@@ -69,10 +69,8 @@ def _circle_fills(svg: str) -> list[str]:
     Used to assert on the ACTUALLY RENDERED per-category color, not the
     wire-level ``EncodingSpec`` dict -- a channel can round-trip correctly
     through ``_build_layers_list``'s serialization-time alias while still
-    never rendering distinct colors, if an earlier merge-time seam (e.g.
-    ``composition._promote_layer_channels``) reads the raw, un-aliased
-    encoding and never builds a chart-level color scale for it. See
-    ``TestLayeredFillStrokeAlias``.
+    never rendering distinct colors, if the color scale is never built for
+    the layer that draws it. See ``TestLayeredFillStrokeAlias``.
     """
     fills = []
     for circle in re.findall(r"<circle[^>]*>", svg):
@@ -486,16 +484,12 @@ class TestLayeredFillStrokeAlias:
     """A layer's own fill/stroke must render distinct per-category colors +
     a legend, identically to the equivalent color= control.
 
-    This is a render-level check, not a wire-dict check: whether a layer's
-    color is ever promoted to a chart-level color scale is decided at
-    MERGE time by ``composition._promote_layer_channels`` -- which runs
-    before ``_build_layers_list``'s serialization-time alias, reading each
-    layer's own un-aliased encoding through
-    ``encoding._aliases.resolve_channel_alias`` -- so a correct
+    This is a render-level check, not a wire-dict check: the color scale is
+    built from the layers that draw color (spec §4.4), so a correct
     ``layer_enc["color"]`` wire entry does not by itself prove the chart
-    renders in color: `fill=`/`stroke=` on an overlay layer must resolve to
-    a promoted color channel, with a legend, not a theme-default fill and
-    no legend, even though the wire dict looks correct either way.
+    renders in color: `fill=`/`stroke=` on an overlay layer must draw its
+    own color scale, with a legend, not a theme-default fill and no legend,
+    even though the wire dict looks correct either way.
     """
 
     def test_per_layer_fill_renders_distinct_colors_with_legend(self):

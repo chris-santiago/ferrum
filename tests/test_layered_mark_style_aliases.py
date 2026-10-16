@@ -4,21 +4,17 @@
 the mark-style bag rather than the wire encoding. On a flat chart that bag is the
 chart's own `mark_style`. A layered chart emits no chart-level `mark_style`
 (`#119`, spec §4.8: a layer's style is its own), but `detail` is an ENCODING, not
-style: user ruling Q3 settles that a combined chart's encoding is shared by every
-layer, and `color` is the model. So every line/area/polygon layer without a
-`detail` of its own inherits the chart-level one at serialization, by the same
-lazy mechanism `color` uses: whenever it was declared, and whatever layers are
-added afterwards.
+style, and `color` is the model: a layer inherits the bindings of its one parent
+and never a sibling's (spec §4.6 V1, G1). A binding written on a composition
+(`(a + b).encode(...)`) reaches every layer of it that binds none, whenever it
+was declared; a binding written on one `+` operand stays on that operand's
+layers, so a later operand does not inherit it (`(a + b).encode(detail="g") + c`
+does not split `c`).
 
 The matrix pins every shape against `color` as the control (same counts, static
 and interactive). The population is derived by running `apply_channel_aliases`
 over every encoding channel and keeping the keys it writes into the mark-style
 bag.
-
-One cell is a known divergence shared by `color`: an interactive `LayerChart`
-merges its members with `+`, so a layered member's chart-level encoding reaches
-the members after it (6 polylines), while the static overlay renders each member
-alone (5). It is pinned as a strict xfail for both channels.
 """
 
 from __future__ import annotations
@@ -97,6 +93,8 @@ SHAPES = {
         lambda k: fm.Chart(DF).mark_line(point=True).encode(**XY, **{k: "g"}),
         2,
     ),
+    # The member's composition-level binding stays with its own layers on
+    # every route, the interactive merge included (V1, P8).
     "layerchart_layered_member": (
         lambda k: fm.LayerChart((_line() + _line()).encode(**{k: "g"}), _line()),
         5,
@@ -105,11 +103,13 @@ SHAPES = {
         lambda k: fm.LayerChart(_line(**{k: "g"}), _line(**{k: "g"})),
         4,
     ),
+    # Parent rule: the binding written on `(a + b)` stays with that operand.
     "plus_declared_after_then_plus": (
         lambda k: (_line() + _line()).encode(**{k: "g"}) + _line(),
-        6,
+        5,
     ),
-    "declared_before_any_plus": (lambda k: _line(**{k: "g"}) + _line(), 4),
+    # G1/V1: the left operand's binding never reaches the right operand.
+    "declared_before_any_plus": (lambda k: _line(**{k: "g"}) + _line(), 3),
     # A layer's own value wins over the inherited chart-level one.
     "layer_own_differs_from_chart_level": (
         lambda k: _line(**{k: "g"}) + _line(**{k: "one"}),
@@ -124,22 +124,10 @@ SHAPES = {
 COUNTERS = {"static": _static_count, "interactive": _interactive_count}
 
 
-def _xfail_layerchart_interactive(request, shape: str, output: str) -> None:
-    if shape == "layerchart_layered_member" and output == "interactive":
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason="interactive LayerChart merges members with `+`, so a layered "
-                "member's chart-level encoding reaches later members (color and detail alike)",
-            )
-        )
-
-
 @pytest.mark.parametrize("output", sorted(COUNTERS))
 @pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_color_control_has_the_same_counts(request, shape, output):
-    """`color` is the model: a combined chart's encoding is shared by every layer."""
-    _xfail_layerchart_interactive(request, shape, output)
+def test_color_control_has_the_same_counts(shape, output):
+    """`color` is the model: a layer inherits its parent's binding, never a sibling's."""
     build, expected = SHAPES[shape]
     assert COUNTERS[output](build("color")) == expected
 
@@ -147,8 +135,7 @@ def test_color_control_has_the_same_counts(request, shape, output):
 @pytest.mark.parametrize("output", sorted(COUNTERS))
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("key", ALIAS_KEYS)
-def test_alias_channel_reaches_every_layer(request, key, shape, output):
-    _xfail_layerchart_interactive(request, shape, output)
+def test_alias_channel_reaches_the_layers_its_parent_owns(key, shape, output):
     build, expected = SHAPES[shape]
     assert COUNTERS[output](build(key)) == expected
 

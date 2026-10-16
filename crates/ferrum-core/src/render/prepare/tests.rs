@@ -3068,6 +3068,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
                 ..Default::default()
             },
             inherited_positional: vec![],
+            inherited_channels: vec![],
             transforms: vec![],
             mark_style: None,
             data_source: None,
@@ -6265,6 +6266,86 @@ fn the_same_filled_channel_without_the_list_reads_as_own() {
 // own test module, next to the fixture and helpers
 // (`line_endpoints`, `build_scene_for`) it reuses — see
 // `a_filled_and_listed_y_renders_the_same_vertical_rule_as_standalone_inheritance`.
+
+// ── `inherited_channels` ─────────────────────────────────────────────────
+//
+// `Layer::inherited_channels` names a non-positional channel Python wrote
+// onto a layer's own encoding from its parent. `from_chart_and_layer` reads
+// it so `color_is_own`, `size_is_own` and `stroke_width_is_own` mean
+// "declared by this layer", as `inherited_positional` does for x/y. The
+// rendered consequences (a text label and a literal-paint line not taking
+// the color) are pinned in `scene_build`'s test module.
+
+/// A layer whose own encoding carries `color`, `size` and `stroke_width`,
+/// listing `inherited` in `inherited_channels`, under a chart that binds none
+/// of them, so the layer's own encoding is the only place they sit.
+fn layer_carrying_channels(
+    mark: Mark,
+    inherited: Vec<crate::spec::layer::InheritedChannel>,
+) -> LayerPrepared {
+    let field = |f: &str| Some(EncodingSpec { field: f.into(), ..Default::default() });
+    let spec = ChartSpec { mark, ..Default::default() };
+    let layer = crate::spec::layer::Layer {
+        mark,
+        encoding: Encoding {
+            x: field("x"),
+            y: field("y"),
+            color: field("c"),
+            size: field("z"),
+            stroke_width: field("w"),
+            ..Default::default()
+        },
+        inherited_channels: inherited,
+        ..Default::default()
+    };
+    LayerPrepared::from_chart_and_layer(&spec, &layer)
+}
+
+#[test]
+fn a_channel_listed_as_inherited_is_not_own() {
+    use crate::spec::layer::InheritedChannel;
+    for (listed, expect_color, expect_size, expect_width) in [
+        (InheritedChannel::Color, false, true, true),
+        (InheritedChannel::Size, true, false, true),
+        (InheritedChannel::StrokeWidth, true, true, false),
+    ] {
+        let prepared = layer_carrying_channels(Mark::Point, vec![listed]);
+        assert_eq!(prepared.color_is_own, expect_color, "{listed:?} listed: color_is_own");
+        assert_eq!(prepared.size_is_own, expect_size, "{listed:?} listed: size_is_own");
+        assert_eq!(prepared.stroke_width_is_own, expect_width, "{listed:?} listed: stroke_width_is_own");
+        assert!(
+            prepared.encoding.color.is_some()
+                && prepared.encoding.size.is_some()
+                && prepared.encoding.stroke_width.is_some(),
+            "{listed:?} listed: the carried values themselves are untouched"
+        );
+    }
+}
+
+/// The mutation guard: the identical layer with nothing listed reads every
+/// carried channel as its own.
+#[test]
+fn the_same_carried_channels_without_the_list_read_as_own() {
+    let prepared = layer_carrying_channels(Mark::Point, vec![]);
+    assert!(prepared.color_is_own);
+    assert!(prepared.size_is_own);
+    assert!(prepared.stroke_width_is_own);
+}
+
+/// A line that owns `stroke_width` yields a listed `size` to it, exactly as it
+/// yields a chart-inherited one, so the size is neither drawn nor counted by
+/// the size legend. Unlisted, the line owns both widths and yields neither.
+#[test]
+fn a_line_yields_a_listed_size_to_its_own_stroke_width() {
+    use crate::render::prepare::YieldedWidths;
+    use crate::spec::layer::InheritedChannel;
+    let listed = layer_carrying_channels(Mark::Line, vec![InheritedChannel::Size]);
+    assert_eq!(listed.yielded_widths(), YieldedWidths { size: true, stroke_width: false });
+    assert_eq!(listed.drawn_size_field(), None, "a yielded size is not drawn");
+
+    let unlisted = layer_carrying_channels(Mark::Line, vec![]);
+    assert_eq!(unlisted.yielded_widths(), YieldedWidths::default());
+}
 
 /// The flat render's prepare pass resolves a layered axis against layer 0's
 /// rendering encoding, while a layer on the chart's data that binds nothing

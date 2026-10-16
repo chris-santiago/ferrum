@@ -1070,14 +1070,10 @@ def _resolve_encoding_value(
             # reads `enc.field` only, so the class does not change the
             # serialized output. It IS observable in the channel's own
             # honored-kwarg warning, though -- an aggregate-carrying shorthand
-            # warns `color(aggregate=...)` here and would warn
-            # `shape(aggregate=...)` under a different stand-in -- so the
-            # choice is pinned by
-            # `tests/test_condition_translation.py::test_channelless_shorthand_branch_warns_as_color`
-            # rather than left to a comment. (A previous version of this
-            # comment claimed the two were "indistinguishable by
-            # construction"; that was false, and it told the next reader not
-            # to test something testable.)
+            # builds warning-free here, since Color honors ``aggregate=``, and
+            # would warn `shape(aggregate=...)` under a Shape stand-in -- so
+            # the choice is pinned by
+            # `tests/test_condition_translation.py::test_channelless_shorthand_branch_builds_as_color`.
             from ferrum.encoding.appearance import Color
 
             branch_cls = Color

@@ -1708,11 +1708,8 @@ def _jointplot_build(
         # _desugar._prep_smooth_force_name/_resolve_pending_impl). This
         # auto-names the Smooth transform "smooth" and routes the fit layer
         # through data_source="smooth", keeping the scatter layer on the raw
-        # batch. A manual _merge_layers(scatter, fit) of two independently
-        # built charts hits _merge_layers' fallback branch instead, which
-        # leaves the Smooth transform unnamed -- it then silently becomes the
-        # shared "main" batch every data_source-less layer reads, so the
-        # scatter layer loses its raw x/y columns (GH #75: "unknown column").
+        # batch, so the scatter keeps its raw x/y columns (GH #75: "unknown
+        # column").
         smooth_kwargs: dict = {}
         if hue is not None:
             smooth_kwargs["groupby"] = _field_name(hue)

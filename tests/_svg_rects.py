@@ -80,6 +80,11 @@ def data_bar_rects(svg: str) -> list[dict[str, str]]:
 _MARK_GROUP_RE = re.compile(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', re.DOTALL)
 
 
+def mark_groups(svg: str) -> list[str]:
+    """Return each plot-area clip group's contents, one entry per panel, in document order."""
+    return _MARK_GROUP_RE.findall(svg)
+
+
 def mark_layer(svg: str) -> str:
     """Return the concatenation of every plot-area clip group's contents.
 
@@ -89,7 +94,7 @@ def mark_layer(svg: str) -> str:
     import. Returns `""` for a chart that drew no marks at all, which is
     itself a meaningful (and asserted-on) outcome for some callers.
     """
-    return "".join(_MARK_GROUP_RE.findall(svg))
+    return "".join(mark_groups(svg))
 
 
 def polylines(svg: str) -> list[tuple[str | None, list[tuple[float, float]]]]:

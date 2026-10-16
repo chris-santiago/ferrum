@@ -79,6 +79,7 @@ from typing import Any, Callable, ClassVar, Literal, NamedTuple, Optional
 import polars as pl
 
 from ferrum._validate import validate_choice
+from ferrum.encoding._aliases import resolve_channel_alias
 
 
 def _resolve_field(enc_value: Any) -> Optional[str]:
@@ -441,6 +442,25 @@ def _is_metric_label_layer(layer: Any) -> bool:
     return layer.mark == "text" and _resolve_field(layer.encoding.get("text")) == _LABEL_TEXT_COL
 
 
+def _curve_hue_field(base: "Chart") -> Optional[str]:
+    """The field *base*'s curves are colored by, one label per value of it, or ``None``.
+
+    The base chart's own ``color``; on a ``+`` composition, whose operands
+    keep their bindings on their own layers, the ``color`` of the first
+    layer that draws one (the binding the panel's color legend is titled
+    by). A composite mark's layer-level colors are its own and group no
+    label.
+    """
+    field = _resolve_field(base._encoding.get("color"))
+    if field is not None or base._composite_kind is not None:
+        return field
+    for layer in base._layers or []:
+        field = _resolve_field(resolve_channel_alias(layer.encoding, "color"))
+        if field is not None:
+            return field
+    return None
+
+
 def _without_metric_label_layer(base: "Chart") -> "Chart":
     """``base`` with any previously-applied metric-label overlay removed.
 
@@ -546,7 +566,7 @@ def _apply_metric_label(
     base = _without_metric_label_layer(base)
     x_col = x_col_override or _resolve_field(base._encoding.get("x"))
     y_col = y_col_override or _resolve_field(base._encoding.get("y"))
-    color_col = color_col_override or _resolve_field(base._encoding.get("color"))
+    color_col = color_col_override or _curve_hue_field(base)
     if x_col is None or y_col is None:
         raise ValueError(f"{type(label).__name__} requires x and y encodings on the base chart")
     tbl = to_arrow_table(base._data)

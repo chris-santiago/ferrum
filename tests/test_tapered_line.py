@@ -20,15 +20,14 @@ same per-row magnitude (point radius = half the line width). A constant
 `size=` kwarg draws the same formula as a constant width, with no per-vertex
 `widths`.
 
-Since a later layer's `size` promotes to the chart level
-(`tests/test_layer_channel_promotion.py`), a line layer that binds only
-its own `stroke_width` (field or constant) but sits beside a `size`-bound
-layer elsewhere draws at its own `stroke_width`, untapered -- its own
-binding outranks a `size` it only inherits, on `+` and `fm.layer(...)`, in
-either layer order, static and interactive alike. A line that binds
-neither itself and inherits both channels keeps the inherited
-`stroke_width` and draws untapered too. The refusal still fires,
-unaffected, when one line layer binds both channels itself.
+A layer's own binding never reaches a sibling (spec §4.6 V1,
+`tests/test_layer_channel_promotion.py`), so a line layer that binds only
+its own `stroke_width` (field or constant) beside a `size`-bound layer
+draws at its own `stroke_width`, untapered, on `+` and `fm.layer(...)`, in
+either layer order, static and interactive alike, while the other layer's
+`size` sizes only its own marks. A line that binds neither draws at the
+line's default width. The refusal still fires, unaffected, when one line
+layer binds both channels itself.
 """
 
 from __future__ import annotations
@@ -289,11 +288,11 @@ def test_an_unsized_line_has_no_widths_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A line layer's own `stroke_width` outranks a `size` it only inherits
-# through auxiliary-channel promotion. `point(size="v") + line(stroke_width=3)`
-# sizes the dots and draws the line at a flat, untapered 3px width, in
-# either layer order, on both `+` and `fm.layer(...)`, whether the line's
-# own `stroke_width` is a constant kwarg or its own field encoding.
+# A line layer's own `stroke_width` draws beside a sibling's `size`, which
+# never reaches it. `point(size="v") + line(stroke_width=3)` sizes the dots
+# and draws the line at a flat, untapered 3px width, in either layer order,
+# on both `+` and `fm.layer(...)`, whether the line's own `stroke_width` is
+# a constant kwarg or its own field encoding.
 # ---------------------------------------------------------------------------
 
 
@@ -330,7 +329,7 @@ _MUST_DRAW_CELLS: dict[str, tuple] = {
 
 
 @pytest.mark.parametrize("cell", sorted(_MUST_DRAW_CELLS))
-def test_own_stroke_width_outranks_an_inherited_size(cell: str) -> None:
+def test_own_stroke_width_draws_beside_a_siblings_size(cell: str) -> None:
     build, expected_width = _MUST_DRAW_CELLS[cell]
     chart = build()
 
@@ -338,24 +337,22 @@ def test_own_stroke_width_outranks_an_inherited_size(cell: str) -> None:
     assert _svg_polyline_stroke_widths(chart.to_svg()) == [expected_width]
 
     # Interactive: no per-vertex `widths`, and the fallback width is the
-    # line's own, not derived from the inherited size.
+    # line's own, not derived from the sibling's size.
     nodes = _line_nodes(chart)
     assert len(nodes) == 1
     assert "widths" not in nodes[0]
     assert nodes[0]["style"]["width"] == pytest.approx(float(expected_width))
 
-    # The dots are still sized by the inherited `size` -- promotion still
-    # reaches the point layer; only the line's own width wins on the line.
+    # The dots are sized by their own `size`.
     radii = _point_radii(chart)
     assert len(radii) == 4
     assert radii == sorted(radii) and radii[0] < radii[-1]
 
 
-def test_a_line_inheriting_both_channels_draws_untapered_at_the_inherited_stroke_width() -> None:
-    """Neither `size` nor `stroke_width` is bound on the third layer itself --
-    both are inherited -- so it keeps the inherited `stroke_width` and draws
-    untapered, the width it drew before `size` could taper a line, rather
-    than refusing or tapering."""
+def test_a_line_binding_neither_channel_draws_untapered_at_the_default_width() -> None:
+    """V1: neither `size` nor `stroke_width` reaches the third layer from its
+    siblings, so it draws untapered at the line's default width, as it does
+    alone; the first line keeps its own `stroke_width`."""
     first_line = fm.Chart(_DF).mark_line().encode(x="x", y="y", stroke_width="w")
     sized_point = fm.Chart(_DF).mark_point().encode(x="x", y="y", size="v")
     bare_line = fm.Chart(_DF).mark_line().encode(x="x", y="y")
@@ -365,20 +362,24 @@ def test_a_line_inheriting_both_channels_draws_untapered_at_the_inherited_stroke
     assert len(nodes) == 2
     for node in nodes:
         assert "widths" not in node
-        assert node["style"]["width"] == pytest.approx(1.0)  # 'w' is constant 1.0
+    # 'w' is constant 1.0 on the first line; the bare line keeps the default.
+    alone = _line_nodes(bare_line)[0]["style"]["width"]
+    assert [node["style"]["width"] for node in nodes] == pytest.approx([1.0, alone])
 
     radii = _point_radii(chart)
     assert len(radii) == 4
     assert radii == sorted(radii) and radii[0] < radii[-1]
 
-    assert _svg_polyline_stroke_widths(chart.to_svg()) == ["1", "1"]
+    assert _svg_polyline_stroke_widths(chart.to_svg()) == [
+        "1",
+        *_svg_polyline_stroke_widths(bare_line.to_svg()),
+    ]
 
 
-def test_the_conflict_refusal_is_unaffected_by_promotion() -> None:
-    """A line layer that binds both channels itself still refuses, even
-    though the chart also carries an active `size` binding that promotion
-    would otherwise reach -- precedence applies only to a channel the line
-    *inherits*, never to a channel it binds itself."""
+def test_the_conflict_refusal_is_unaffected_by_a_siblings_size() -> None:
+    """A line layer that binds both channels itself still refuses beside a
+    sibling's own `size` binding -- precedence applies only to a channel the
+    line *inherits*, never to a channel it binds itself."""
     conflicted = fm.Chart(_DF).mark_line(stroke_width=2).encode(x="x", y="y", size="v")
     text = f"layer 1: {_CONFLICT_CORE}"
 
@@ -396,12 +397,10 @@ def test_the_conflict_refusal_is_unaffected_by_promotion() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A line layer's own constant `size=` or `stroke_width=` kwarg outranks a
-# width field it only inherits -- `size` through promotion from another
-# layer's own binding, `stroke_width` through the leading chart's own
-# binding, since `stroke_width` itself is never promoted -- the
-# kwarg-bound layer draws its own constant width, untapered, in either
-# layer order, static and interactive alike.
+# A line layer's own constant `size=` or `stroke_width=` kwarg draws beside
+# a sibling's width field, which never reaches it: the kwarg-bound layer
+# draws its own constant width, untapered, in either layer order, static
+# and interactive alike.
 # ---------------------------------------------------------------------------
 
 _OWN_KWARG_DF = pl.DataFrame(
@@ -418,21 +417,21 @@ def _own_kwarg_sized_line() -> fm.Chart:
     return fm.Chart(_OWN_KWARG_DF).mark_line(size=5).encode(x="x", y="y")
 
 
-def _inherited_size_only_point() -> fm.Chart:
+def _sized_point_beside() -> fm.Chart:
     return fm.Chart(_OWN_KWARG_DF).mark_point().encode(x="x", y="y", size="v")
 
 
 @pytest.mark.parametrize(
     "chart_factory",
     [
-        lambda: _inherited_size_only_point() + _own_kwarg_sized_line(),
-        lambda: _own_kwarg_sized_line() + _inherited_size_only_point(),
+        lambda: _sized_point_beside() + _own_kwarg_sized_line(),
+        lambda: _own_kwarg_sized_line() + _sized_point_beside(),
     ],
     ids=["point_first", "line_first"],
 )
-def test_own_size_kwarg_outranks_an_inherited_size_field(chart_factory, recwarn) -> None:
-    """A line's own `size=` kwarg wins over a `size` field it only inherits
-    through promotion from a sibling point layer, in either layer order."""
+def test_own_size_kwarg_draws_beside_a_siblings_size_field(chart_factory, recwarn) -> None:
+    """A line's own `size=` kwarg draws its constant width beside a sibling
+    point layer's `size` field, in either layer order."""
     control_width = 2 * math.sqrt(5 / math.pi)
     chart = chart_factory()
 
@@ -445,8 +444,7 @@ def test_own_size_kwarg_outranks_an_inherited_size_field(chart_factory, recwarn)
     assert len(svg_widths) == 1
     assert float(svg_widths[0]) == pytest.approx(control_width, abs=5e-4)
 
-    # The dots are still sized by the inherited `size` -- only the line's own
-    # kwarg wins on the line itself.
+    # The dots are sized by their own `size`.
     radii = _point_radii(chart)
     assert len(radii) == 4
     assert radii == sorted(radii) and radii[0] < radii[-1]
@@ -456,14 +454,9 @@ def test_own_size_kwarg_outranks_an_inherited_size_field(chart_factory, recwarn)
 
 
 def test_own_stroke_width_field_then_own_constant_draw_each_their_own_width(recwarn) -> None:
-    """The field line (layer 0) binds `stroke_width='w'`,
-    which becomes the leading chart's own binding -- the chart-level
-    `stroke_width` every later layer inherits unless it binds its own. The
-    constant line (layer 1) does bind its own, `stroke_width=3`, which
-    outranks that inherited field, so it draws its own width instead of the
-    inherited one. Each line ends up drawing its own width, in layer
-    order, but only because the second line's own kwarg won the
-    precedence check -- not because there was nothing to inherit."""
+    """The field line (layer 0) binds `stroke_width='w'` and the constant
+    line (layer 1) its own `stroke_width=3`; each draws its own width, in
+    layer order (V1: neither binding reaches the other line)."""
     field_line = fm.Chart(_OWN_KWARG_DF).mark_line().encode(x="x", y="y", stroke_width="w")
     const_line = fm.Chart(_OWN_KWARG_DF).mark_line(stroke_width=3).encode(x="x", y="y")
 
@@ -478,10 +471,8 @@ def test_own_stroke_width_field_then_own_constant_draw_each_their_own_width(recw
 
 
 def test_own_constant_stroke_width_then_own_field_is_order_independent(recwarn) -> None:
-    """Order-independence pin, not a precedence pin: this cell (the
-    `stroke_width=` kwarg line first, the field line second) passes both
-    before and after the fix, because `stroke_width` never promotes -- there
-    is no inheritance for either layer's own binding to outrank."""
+    """Order-independence pin: the `stroke_width=` kwarg line first, the
+    field line second, draws each line's own width, as the other order does."""
     const_line = fm.Chart(_OWN_KWARG_DF).mark_line(stroke_width=3).encode(x="x", y="y")
     field_line = fm.Chart(_OWN_KWARG_DF).mark_line().encode(x="x", y="y", stroke_width="w")
 
@@ -1376,9 +1367,9 @@ def test_line_only_legend_differs_from_point_only() -> None:
 
 
 @pytest.mark.parametrize("route", ["plus", "layer", "interactive"])
-def test_a_rule_inheriting_the_size_field_keeps_the_line_swatches(route: str) -> None:
-    """A rule beside a sized line carries the promoted size binding but draws
-    no size, so the line is the legend's only consumer."""
+def test_a_rule_beside_a_sized_line_keeps_the_line_swatches(route: str) -> None:
+    """A rule beside a sized line binds no size (V1: the line's binding is its
+    own), so the line is the legend's only consumer."""
     rule = fm.Chart(_DF).mark_rule().encode(y="y")
     chart = _consumer("line") + rule if route != "layer" else fm.layer(_consumer("line"), rule)
     radii = [r for _, r in _scene_legend_swatches(_consumer("point"))]

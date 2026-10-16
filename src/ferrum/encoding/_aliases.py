@@ -70,11 +70,9 @@ def resolve_channel_alias(enc: dict, channel: str) -> object | None:
     and does not consult ``detail`` at all. Reads ``_ENCODING_ALIASES``
     directly (the same table :func:`apply_channel_aliases` drives) rather
     than calling that function, because callers that only need to know
-    "what would this encoding's *channel* be" -- ``composition._promote_layer_channels``
-    resolving a layer's chart-level scale promotion at ``Chart + Chart``
-    merge time, before ``Chart.to_spec()``'s later, warning-emitting alias
-    pass ever runs -- must never trigger the ``stroke_dropped_by_color``
-    warning as a side effect of asking the question.
+    "what would this encoding's *channel* be", before ``Chart.to_spec()``'s
+    later, warning-emitting alias pass ever runs, must never trigger the
+    ``stroke`` warning as a side effect of asking the question.
 
     Returns ``None`` when neither *channel* nor any alias source targeting
     it (``fill``/``stroke`` for ``color``) is present in *enc*.
@@ -85,6 +83,19 @@ def resolve_channel_alias(enc: dict, channel: str) -> object | None:
         if rule.target == channel and rule.source in enc:
             return enc[rule.source]
     return None
+
+
+def resolved_channel(name: str) -> str:
+    """Return the channel *name* draws as: an alias source's target, else *name* itself.
+
+    ``fill`` and ``stroke`` draw as ``color`` (``_ENCODING_ALIASES``), so a
+    layer's own ``fill`` and an inherited ``color`` bind one channel and the
+    layer's own binding wins.
+    """
+    for rule in _ENCODING_ALIASES:
+        if rule.source == name:
+            return rule.target
+    return name
 
 
 def apply_channel_aliases(enc: dict, mk: dict, mark: str | None = None) -> tuple[dict, dict]:
@@ -230,8 +241,9 @@ def _warn_detail_ignored(mark: str | None) -> None:
 def layered_chart_detail(detail_ch: object, layer_marks: list) -> list[object | None]:
     """Return, per layer, the chart-level ``detail`` that layer inherits, or ``None``.
 
-    A layered chart's chart-level encoding is shared by every layer at
-    serialization (``color`` is inherited the same way, by Rust). ``detail`` is
+    A layered chart's chart-level encoding is the parent of every layer, which
+    inherits each channel it does not bind (``color`` is inherited the same
+    way, by Rust). ``detail`` is
     mark style on the wire, not an encoding Rust inherits, so Python hands it
     to each layer: the returned list, aligned with *layer_marks*, holds the
     channel for every layer whose mark draws ``detail`` (Rust's style table)

@@ -8,6 +8,7 @@ kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 from __future__ import annotations
 
 from ferrum.encoding._honored import (
+    AGGREGATE,
     APPEARANCE_BASE,
     APPEARANCE_COLOR,
     APPEARANCE_FULL,
@@ -60,7 +61,7 @@ class Color(ChannelBase):
     # {"type","legend","scale","title","sort","scheme"} plus "condition",
     # added by ChannelBase.__init_subclass__ -- "color" is a real conditional
     # channel (ferrum.encoding._channel_policy._CONDITIONAL_CHANNELS).
-    _honored_kwargs = APPEARANCE_COLOR
+    _honored_kwargs = APPEARANCE_COLOR | AGGREGATE
 
 
 class Size(ChannelBase):
@@ -102,17 +103,17 @@ class Size(ChannelBase):
     positive on such a line, and a conditional size plus ``stroke_width``
     raises ``ValueError`` as any other size does.
 
-    A field ``size`` and a conditional ``size`` reach different layers under
-    ``chart + chart``, so read them as two rules. A field ``size`` builds the
-    chart's one size scale and reaches every layer that draws size, whichever
-    operand declared it: ``point.encode(size="v") + line`` tapers the line
-    too. A conditional ``size`` reaches only the layers of the chart it was
-    declared on: ``point.encode(size=cond) + line`` restyles the points and
-    leaves the line alone, and a point beside a line that declared one is not
-    resized by it. A conditional declared on a layered chart as a whole, on a
-    composite such as ``mark_line(point=True)``, or on the host of
-    ``Chart.layer()`` reaches every layer of that chart, lines included; one
-    declared on a ``Layer``'s own encoding reaches that layer only.
+    A field ``size`` and a conditional ``size`` follow one rule under
+    ``chart + chart``: each reaches only the layers of the chart it was
+    declared on. ``point.encode(size="v") + line`` sizes the points and
+    leaves the line untapered, and a point beside a line that declared one
+    is not resized by it; the panel still draws one size scale and legend
+    over every layer that draws size. To size both, declare it on the
+    composition: ``(point + line).encode(size="v")``. A size declared on a
+    layered chart as a whole, on a composite such as
+    ``mark_line(point=True)``, or on the host of ``Chart.layer()`` reaches
+    every layer of that chart that binds none, lines included; one declared
+    on a ``Layer``'s own encoding reaches that layer only.
 
     When ``size`` and ``color`` are both mapped to the same field, ferrum merges
     them into a single combined legend block.
@@ -130,7 +131,7 @@ class Size(ChannelBase):
 
     # {"type","legend","scale","title"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- "size" is a real conditional channel.
-    _honored_kwargs = APPEARANCE_FULL
+    _honored_kwargs = APPEARANCE_FULL | AGGREGATE
 
 
 class Shape(ChannelBase):
@@ -275,7 +276,7 @@ class Opacity(ChannelBase):
     _channel_name = "opacity"
 
     # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_FULL
+    _honored_kwargs = APPEARANCE_FULL | AGGREGATE
     _legend_surface = "none"
 
 
@@ -327,7 +328,7 @@ class Fill(ChannelBase):
     # ChannelBase.__init_subclass__ -- "fill" aliases to "color" and gains
     # the bit. Stroke shares this same role set and does NOT gain it -- see
     # APPEARANCE_SCHEME's docstring.
-    _honored_kwargs = APPEARANCE_SCHEME
+    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE
 
 
 class Stroke(ChannelBase):
@@ -384,7 +385,7 @@ class Stroke(ChannelBase):
     # (_channel_policy._CONDITIONAL_REFUSALS["stroke"]) and encode() refuses
     # it. Fill shares this same role set and DOES gain the bit -- the
     # derivation, not a second role set, is what keeps the two channels apart.
-    _honored_kwargs = APPEARANCE_SCHEME
+    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE
 
 
 class FillOpacity(ChannelBase):
@@ -422,7 +423,7 @@ class FillOpacity(ChannelBase):
     _channel_name = "fill_opacity"
 
     # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_FULL
+    _honored_kwargs = APPEARANCE_FULL | AGGREGATE
     _legend_surface = "none"
 
 
@@ -461,7 +462,7 @@ class StrokeOpacity(ChannelBase):
     _channel_name = "stroke_opacity"
 
     # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_FULL
+    _honored_kwargs = APPEARANCE_FULL | AGGREGATE
     _legend_surface = "none"
 
 
@@ -497,7 +498,7 @@ class StrokeWidth(ChannelBase):
     _channel_name = "stroke_width"
 
     # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_BASE
+    _honored_kwargs = APPEARANCE_BASE | AGGREGATE
     _legend_surface = "none"
 
 
@@ -618,5 +619,5 @@ class Angle(ChannelBase):
     _channel_name = "angle"
 
     # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_BASE
+    _honored_kwargs = APPEARANCE_BASE | AGGREGATE
     _legend_surface = "none"

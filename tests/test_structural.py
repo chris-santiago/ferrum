@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import json
 import re
 import warnings
 
@@ -1213,8 +1214,12 @@ class TestStructuralSerialization:
         assert secondary_layer.independent_y is True
         assert secondary_layer.mark == "line"
         assert secondary_layer.encoding["y"].field == "revenue"
-        # x is inherited from the base chart's own x encoding.
-        assert secondary_layer.encoding["x"].field == "x"
+        # x is the base chart's written x, taken when the spec is built and
+        # listed as inherited on the wire.
+        assert "x" not in secondary_layer.encoding
+        wire_layer = json.loads(chart.to_spec().to_json())["layers"][-1]
+        assert wire_layer["encoding"]["x"]["field"] == "x"
+        assert wire_layer["inherited_positional"] == ["x"]
         # Optional fields omitted when None.
         assert secondary_layer.mark_kwargs is None
 
@@ -1479,8 +1484,12 @@ class TestSecondaryYDesugar:
         assert secondary_layer.independent_y is True
         assert secondary_layer.mark == "bar"
         assert secondary_layer.encoding["y"].field == "revenue"
-        # x is inherited from the base chart, not re-specified per SecondaryY.
-        assert secondary_layer.encoding["x"].field == "x"
+        # x is inherited from the base chart when the spec is built, not
+        # re-specified per SecondaryY.
+        assert "x" not in secondary_layer.encoding
+        wire_layer = json.loads(chart.to_spec().to_json())["layers"][-1]
+        assert wire_layer["encoding"]["x"]["field"] == "x"
+        assert wire_layer["inherited_positional"] == ["x"]
 
         svg = chart.to_svg()
         assert svg.startswith("<svg")

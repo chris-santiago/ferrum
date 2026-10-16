@@ -832,56 +832,22 @@ def _merge_layers(
     scatter_name: str | None = None,
     fit_name: str | None = None,
 ) -> "Chart":
-    """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
+    """Compose a scatter Chart and a fit Chart with ``+`` and name their layers.
 
-    Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
-    with transforms accumulated from both inputs.
+    The composition is ``scatter_chart + fit_chart``, so a figure draws its
+    layers by the same rule a user's ``+`` does: each chart's bindings stay
+    on its own layers, and a fit that should share the scatter's hue binds
+    it itself. Layer 0 (the scatter) takes *scatter_name* and the fit's first
+    layer *fit_name* when it has none, the names a figure's ``mark=`` and
+    ``layer_kwargs=`` doors address.
 
-    Originally defined in ``plots/regression.py``; relocated here because
-    it is domain-agnostic and is imported by both ``regression.py`` and
-    ``matrix.py``.
+    Imported by both ``regression.py`` and ``matrix.py``.
     """
-    from ferrum._layer import _Layer
-
-    s_resolved = scatter_chart._resolve_pending()
-    f_resolved = fit_chart._resolve_pending()
-
-    new = s_resolved._clone()
-    new._pending_stat_mark = None
-
-    shared_transforms: list = []
-    seen_ids: set = set()
-    for t in list(s_resolved._transforms) + list(f_resolved._transforms):
-        key = id(t)
-        if key in seen_ids:
-            continue
-        seen_ids.add(key)
-        shared_transforms.append(t)
-
-    scatter_layer = _Layer(
-        name=scatter_name,
-        mark=s_resolved._mark,
-        encoding=dict(s_resolved._encoding),
-        mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
-        position=s_resolved._position,
-    )
-
-    if f_resolved._layers is not None:
-        fit_layers = list(f_resolved._layers)
-        if fit_name and fit_layers and fit_layers[0].name is None:
-            fit_layers[0] = replace(fit_layers[0], name=fit_name)
-    else:
-        fit_layers = [
-            _Layer(
-                name=fit_name,
-                mark=f_resolved._mark,
-                encoding=dict(f_resolved._encoding),
-                mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
-                position=f_resolved._position,
-            )
-        ]
-
-    new._mark = None
-    new._layers = [scatter_layer] + fit_layers
-    new._transforms = shared_transforms
-    return new
+    composed = scatter_chart + fit_chart
+    layers = list(composed._layers)
+    if scatter_name is not None:
+        layers[0] = replace(layers[0], name=scatter_name)
+    if fit_name and len(layers) > 1 and layers[1].name is None:
+        layers[1] = replace(layers[1], name=fit_name)
+    composed._layers = layers
+    return composed

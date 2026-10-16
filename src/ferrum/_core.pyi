@@ -1020,10 +1020,9 @@ def theme_color_keys() -> list[str]: ...
 # list instead of hand-mirroring it as a Python literal.
 def aux_legend_channels() -> list[str]: ...
 
-# The channels Rust builds a chart-wide auxiliary (non-positional) scale for,
-# in its ``AuxiliaryScales`` order, each read from the chart-level encoding
-# only. ``ferrum.encoding._auxiliary_scale_channels`` reads it so a layer
-# merge promotes exactly the bindings Rust scales.
+# The channels Rust builds a panel's auxiliary (non-positional) scale for, in
+# its ``AuxiliaryScales`` order, each filled from the first layer that draws
+# the channel and resolved over every layer that draws it.
 def auxiliary_scale_channels() -> list[str]: ...
 
 # Every ``MarkKwargsSpec`` wire key (the ``mark_style`` dict's keys), in

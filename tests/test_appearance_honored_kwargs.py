@@ -68,6 +68,16 @@ StrokeWidth, Angle) honors neither: ``title=`` and a legend dict/``Legend(...)``
 are construction-time ``ValueError``s, and ``legend=None``/``False`` is
 accepted silently and puts nothing on the wire. ``scale`` stays honored on the
 opacity family: it IS wired. No legend-owning channel's set changes.
+
+**Seventh deliberate contract change (2026-10-15):** every channel whose mark
+draws the aggregated value honors ``aggregate``: Color, Fill, Stroke, Size,
+Opacity, FillOpacity, StrokeOpacity, StrokeWidth and Angle here (Text,
+Tooltip and TooltipField in ``ferrum.encoding.text``). Any channel's
+``aggregate=`` already lowered into an ``Aggregate`` step (one per flat chart,
+one per layer) that re-points the channel at its output column, so the warn
+guard was telling users the kwarg was ignored on a call that drew the
+aggregated value. Shape and StrokeDash keep warning: an aggregated category
+draws nothing a shape or dash palette means.
 """
 
 from __future__ import annotations
@@ -93,8 +103,10 @@ from ferrum.encoding.appearance import (
 # When a channel's membership intentionally changes, update this table and
 # add a dated comment explaining why.
 _EXPECTED: dict[type, frozenset[str]] = {
-    Color: frozenset({"type", "scale", "title", "legend", "condition", "sort", "scheme"}),
-    Size: frozenset({"type", "scale", "title", "legend", "condition"}),
+    Color: frozenset(
+        {"type", "scale", "title", "legend", "condition", "sort", "scheme", "aggregate"}
+    ),
+    Size: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     # Shape LOST "condition" 2026-09-11 (batch-H close re-review), the same
     # shape of change as Stroke's below and for the same class of reason: the
     # wire has a `shape` channel name but no EncodingValue::Shape, so a shape
@@ -109,8 +121,8 @@ _EXPECTED: dict[type, frozenset[str]] = {
     Shape: frozenset({"type", "scale", "title", "legend", "sort"}),
     # Opacity LOST "title" and "legend" 2026-09-23 (#123, sixth change
     # above): it draws no legend.
-    Opacity: frozenset({"type", "scale", "condition"}),
-    Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme"}),
+    Opacity: frozenset({"type", "scale", "condition", "aggregate"}),
+    Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme", "aggregate"}),
     # Stroke LOST "condition" 2026-09-11 (batch-H close re-review): a stroke
     # conditional would repaint the fill (ferrum-wasm's apply_value_common
     # writes EncodingValue::Color to fill_color; FillStrokeView has no
@@ -118,20 +130,22 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # advertise it. Fill keeps it -- Color *is* the fill. As of cycle 3
     # (2026-09-11), Fill and Stroke both declare the SAME role set
     # (APPEARANCE_SCHEME) -- see Shape's comment above for the pattern.
-    Stroke: frozenset({"type", "scale", "title", "legend", "scheme"}),
+    Stroke: frozenset({"type", "scale", "title", "legend", "scheme", "aggregate"}),
     # FillOpacity/StrokeOpacity/StrokeWidth/Angle gained "condition"
     # 2026-09-11 (batch-H close remediation) — all four are conditional
     # channels on the wire; StrokeWidth/Angle still carry no "scale"/"title".
     # All four LOST "legend" (and FillOpacity/StrokeOpacity "title")
     # 2026-09-23 (#123, sixth change above), the same reason as Opacity's.
-    FillOpacity: frozenset({"type", "scale", "condition"}),
+    FillOpacity: frozenset({"type", "scale", "condition", "aggregate"}),
     # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3).
-    StrokeOpacity: frozenset({"type", "scale", "condition"}),
-    StrokeWidth: frozenset({"type", "condition"}),
+    StrokeOpacity: frozenset({"type", "scale", "condition", "aggregate"}),
+    StrokeWidth: frozenset({"type", "condition", "aggregate"}),
+    # Every channel above but Shape and StrokeDash gained "aggregate" 2026-10-15
+    # (seventh change above).
     # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review
     # addendum) — moved to APPEARANCE_SORT, mirroring Shape.
     StrokeDash: frozenset({"type", "scale", "title", "legend", "condition", "sort"}),
-    Angle: frozenset({"type", "condition"}),
+    Angle: frozenset({"type", "condition", "aggregate"}),
 }
 
 

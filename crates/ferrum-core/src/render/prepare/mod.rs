@@ -109,6 +109,11 @@ pub struct LayerPrepared {
     /// not `true`, when it doesn't, matching `encoding.color` being `None`
     /// there too (the exemption is a no-op on an already-absent channel
     /// either way).
+    ///
+    /// A `color` listed in
+    /// [`Layer::inherited_channels`](crate::spec::layer::Layer::inherited_channels)
+    /// is inherited even though it sits on the layer's own encoding: Python
+    /// wrote the parent's binding there and recorded that it did.
     pub color_is_own: bool,
     /// Whether THIS layer's own (pre-merge) encoding declared an `x` / `y`
     /// channel, as opposed to `encoding.x` / `encoding.y` (above) having been
@@ -138,8 +143,11 @@ pub struct LayerPrepared {
     /// bindings outrank inherited ones: `scene_build` drops an inherited
     /// `size` or `stroke_width` from a line layer's `DrawCtx` encoding
     /// whenever the layer has another width source, so only a layer that
-    /// binds both itself meets the width-conflict refusal.
+    /// binds both itself meets the width-conflict refusal. A channel listed in
+    /// [`Layer::inherited_channels`](crate::spec::layer::Layer::inherited_channels)
+    /// is inherited, as for [`color_is_own`].
     ///
+    /// [`color_is_own`]: LayerPrepared::color_is_own
     /// [`x_is_own`]: LayerPrepared::x_is_own
     pub size_is_own: bool,
     /// Whether THIS layer declared its own `stroke_width` channel — see
@@ -200,7 +208,14 @@ impl LayerPrepared {
         // `inherit_non_positional` then does to `encoding.color` (spec §4.4,
         // 2026-08-28 T4 amendment, cycle-4 finding — see `color_is_own`'s doc
         // comment on [`LayerPrepared`]).
-        let color_is_own = layer.encoding.color.is_some();
+        //
+        // `inherited_channels` is the non-positional counterpart of
+        // `inherited_positional` below: a channel Python wrote onto the
+        // layer's own encoding from its parent is present there but was never
+        // declared by this layer, so it draws as an inherited one.
+        let inherits = |channel| layer.inherited_channels.contains(&channel);
+        let color_is_own =
+            layer.encoding.color.is_some() && !inherits(crate::spec::layer::InheritedChannel::Color);
         // Same capture-before-merge for the positional channels (batch-A Task
         // 13 spec c3) — see `x_is_own`'s doc comment on [`LayerPrepared`].
         // `inherited_positional` excludes a channel Python filled onto the
@@ -216,8 +231,10 @@ impl LayerPrepared {
             && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::X);
         let y_is_own = layer.encoding.y.is_some()
             && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::Y);
-        let size_is_own = layer.encoding.size.is_some();
-        let stroke_width_is_own = layer.encoding.stroke_width.is_some();
+        let size_is_own =
+            layer.encoding.size.is_some() && !inherits(crate::spec::layer::InheritedChannel::Size);
+        let stroke_width_is_own = layer.encoding.stroke_width.is_some()
+            && !inherits(crate::spec::layer::InheritedChannel::StrokeWidth);
         let mut encoding = layer.encoding.clone();
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the

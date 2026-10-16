@@ -137,6 +137,15 @@ SCALE = frozenset({"scale"})
 SORT = frozenset({"sort"})
 SCHEME = frozenset({"scheme"})
 
+#: The ``aggregate=`` kwarg on a channel whose mark draws the aggregated
+#: value (a label's text, a color, a size, an opacity, ...). Consumed through
+#: ``to_implicit_transforms``, never serialized: the chart's (or each layer's)
+#: aggregate step computes the value and the channel is re-pointed at its
+#: output column. Composed onto those channels' own sets in their modules, so
+#: channels where an aggregate draws nothing (Detail, Shape, the facet and
+#: secondary positional channels, ...) keep warning that it is ignored.
+AGGREGATE = frozenset({"aggregate"})
+
 #: Adds an explicit scale override. (Size, which draws a legend and so also
 #: honors ``legend``/``title``; Opacity, FillOpacity, StrokeOpacity, which do
 #: not.)

@@ -17,6 +17,32 @@ pub enum PositionalChannel {
     Y2,
 }
 
+/// A non-positional encoding channel name: one wire key of [`Encoding`]
+/// other than the positional `x`, `y`, `x2` and `y2` — the domain
+/// [`Layer::inherited_channels`] ranges over. Deserializes from exactly those
+/// wire keys (`"color"`, `"stroke_width"`, ...); any other value is a
+/// deserialize error, as [`PositionalChannel`] refuses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InheritedChannel {
+    Color,
+    Size,
+    Shape,
+    Opacity,
+    Text,
+    Tooltip,
+    TooltipFields,
+    Href,
+    Description,
+    Key,
+    Url,
+    StrokeWidth,
+    StrokeOpacity,
+    StrokeDash,
+    Angle,
+    FillOpacity,
+}
+
 /// A single layer within a multi-layer ChartSpec. Inherits chart-level
 /// encoding for any field set to None at the layer level.
 ///
@@ -49,6 +75,25 @@ pub struct Layer {
     /// wire then and round-trips byte-identically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited_positional: Vec<PositionalChannel>,
+    /// Non-positional channel names this layer's `encoding` carries a value
+    /// for that it inherited from its parent rather than declared: Python
+    /// writes a parent's binding onto the layer's own encoding when the
+    /// binding is scoped to that layer (a `+` operand's encoding reaches only
+    /// the operand's layers) or must name a renamed or statistic-lowered
+    /// column, and lists the channel here. The non-positional counterpart of
+    /// [`Self::inherited_positional`], read the same way and only by
+    /// [`LayerPrepared::from_chart_and_layer`](crate::render::prepare::LayerPrepared)
+    /// to decide `color_is_own`, `size_is_own` and `stroke_width_is_own`: a
+    /// listed channel draws as an inherited one does (a text label or a
+    /// literal-paint mark does not take an inherited color, and a line
+    /// yields an inherited width to one of its own), so a layer draws the
+    /// same whether its parent's binding reached it through the chart-level
+    /// encoding or through its own. Every other consumer (scales, domains,
+    /// legends, titles) reads `encoding` itself. Empty (the default) when the
+    /// layer inherited nothing onto its own encoding, which omits the field
+    /// from the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_channels: Vec<InheritedChannel>,
     /// A layer does not run its own transforms: it reads the chart's pipeline
     /// output, or a named chart-level output via `data_source`. This field is
     /// read only to refuse a non-empty list at render
@@ -131,6 +176,7 @@ impl Default for Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
             inherited_positional: Vec::new(),
+            inherited_channels: Vec::new(),
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
@@ -467,5 +513,103 @@ mod tests {
             serde_json::from_value(serde_json::json!({"mark": "point"})).unwrap();
         let json = serde_json::to_value(&plain).unwrap();
         assert!(json.get("reads_chart_data").is_none(), "false is omitted: {json}");
+    }
+
+    /// `inherited_channels` round-trips under the wire keys `Encoding` itself
+    /// uses, and is omitted when empty so a layer that inherited nothing onto
+    /// its own encoding serializes exactly as before the field existed.
+    #[test]
+    fn inherited_channels_round_trips_and_is_omitted_when_empty() {
+        let listed = Layer {
+            inherited_channels: vec![InheritedChannel::Color, InheritedChannel::StrokeWidth],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&listed).unwrap();
+        assert!(
+            json.contains(r#""inherited_channels":["color","stroke_width"]"#),
+            "expected the Encoding wire keys: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Layer>(&json).unwrap(), listed);
+
+        let plain = serde_json::to_value(Layer::default()).unwrap();
+        assert!(plain.get("inherited_channels").is_none(), "empty is omitted: {plain}");
+    }
+
+    /// A positional or misspelt name is a deserialize error, not a silently
+    /// ignored entry: the positional channels have their own list.
+    #[test]
+    fn inherited_channels_refuses_a_name_that_is_not_a_non_positional_channel() {
+        for name in ["x", "strokewidth"] {
+            let err = serde_json::from_value::<Layer>(serde_json::json!({
+                "mark": "point",
+                "inherited_channels": [name],
+            }))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("unknown variant `{name}`")),
+                "expected an unknown-variant error naming {name:?}: {err}"
+            );
+        }
+    }
+
+    /// The channel names are exactly `Encoding`'s non-positional wire keys.
+    /// The encoding literal lists every field without a `..Default` spread, so
+    /// a new `Encoding` channel stops this test compiling until it is given a
+    /// variant here and in `InheritedChannel`.
+    #[test]
+    fn inherited_channels_name_every_non_positional_encoding_key() {
+        let spec = || Some(EncodingSpec { field: "a".into(), ..Default::default() });
+        let every_channel = Encoding {
+            x: spec(),
+            y: spec(),
+            color: spec(),
+            size: spec(),
+            shape: spec(),
+            opacity: spec(),
+            x2: spec(),
+            y2: spec(),
+            text: spec(),
+            tooltip: spec(),
+            tooltip_fields: spec().map(|s| vec![s]),
+            href: spec(),
+            description: spec(),
+            key: spec(),
+            url: spec(),
+            stroke_width: spec(),
+            stroke_opacity: spec(),
+            stroke_dash: spec(),
+            angle: spec(),
+            fill_opacity: spec(),
+        };
+        let encoding_keys: std::collections::BTreeSet<String> = serde_json::to_value(&every_channel)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| !["x", "y", "x2", "y2"].contains(&k.as_str()))
+            .cloned()
+            .collect();
+        let channel_names: std::collections::BTreeSet<String> = [
+            InheritedChannel::Color,
+            InheritedChannel::Size,
+            InheritedChannel::Shape,
+            InheritedChannel::Opacity,
+            InheritedChannel::Text,
+            InheritedChannel::Tooltip,
+            InheritedChannel::TooltipFields,
+            InheritedChannel::Href,
+            InheritedChannel::Description,
+            InheritedChannel::Key,
+            InheritedChannel::Url,
+            InheritedChannel::StrokeWidth,
+            InheritedChannel::StrokeOpacity,
+            InheritedChannel::StrokeDash,
+            InheritedChannel::Angle,
+            InheritedChannel::FillOpacity,
+        ]
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap().as_str().unwrap().to_owned())
+        .collect();
+        assert_eq!(channel_names, encoding_keys);
     }
 }

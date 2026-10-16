@@ -570,19 +570,30 @@ def test_conditional_channels_mirror_rust_encoding_values():
             conditional_wire_channel(name)
 
 
-def test_channelless_shorthand_branch_warns_as_color():
+def test_channelless_shorthand_branch_builds_as_color(monkeypatch):
     """`_resolve_encoding_value(<shorthand>)` with no channel builds its branch
-    object as `Color`, and that choice is observable in the channel's own
-    honored-kwarg warning.
+    object as `Color`, which honors ``aggregate=``, so the call is warning-free.
 
-    Pins the stand-in class the mutation gate flagged: a `Shape` (or any other)
-    substitution would warn `shape(aggregate=...)`. The serialized wire dict is
-    identical either way, so the warning is the only discriminator -- which is
-    exactly why this test exists rather than a comment claiming there is none.
+    Pins the stand-in class the mutation gate flagged: a `Shape` (or any other
+    channel that does not honor ``aggregate=``) would warn `shape(aggregate=...)`.
+    The serialized wire dict is identical either way, so the class is asserted
+    directly and through the absence of that warning.
     """
+    from ferrum.encoding import appearance
+
+    built: list = []
+    real_color = appearance.Color
+
+    def recording_color(*args, **kwargs):
+        built.append(real_color(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(appearance, "Color", recording_color)
     reset_warnings()
-    with pytest.warns(UserWarning, match=r"color\(aggregate"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
         _resolve_encoding_value("mean(x)")
+    assert [type(b) for b in built] == [real_color]
 
 
 # ── One conditional per wire channel ────────────────────────────────────────

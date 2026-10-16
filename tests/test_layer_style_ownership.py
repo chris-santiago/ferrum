@@ -1063,10 +1063,10 @@ def test_row2_clip_false_does_not_escape_sibling_points():
     )
 
 
-def test_row3_detail_is_a_shared_encoding_like_color():
-    """`detail` is an encoding, not layer style: the combined chart's encoding is
-    shared by every layer, exactly as `color` is (spec §4.8 row 3, amended
-    2026-09-24). Both layers split into three groups."""
+def test_row3_detail_is_an_encoding_like_color():
+    """`detail` is an encoding, not layer style, and stays with the operand that
+    wrote it exactly as `color` does (spec §4.6 G1, V1): the left line splits
+    into three groups and the right line, which binds neither, draws one."""
     df = pl.DataFrame(
         {
             "x": [1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
@@ -1081,8 +1081,8 @@ def test_row3_detail_is_a_shared_encoding_like_color():
         ).mark_line().encode(x="x", y="y")
         return len(re.findall(r"<polyline[^>]*/>", _svg(chart)))
 
-    assert count("detail") == 6
-    assert count("color") == 6
+    assert count("detail") == 4
+    assert count("color") == 4
 
 
 def _area_closing_axis(path_d: str) -> str:

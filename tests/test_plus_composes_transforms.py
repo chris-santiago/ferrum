@@ -8,7 +8,8 @@ left-hand chain, and a right-hand layer with no chain of its own reads a named
 identity of the source whenever the left-hand chain has unnamed steps. A
 per-layer aggregate or bin reads the layer's own named input. A layer built
 on the chart itself (``Chart.layer``, ``SecondaryY``) reads that chart's
-transformed rows instead.
+data instead: its rows after the chart's own ``.transform(...)`` steps, never
+a composite mark's statistics.
 
 The static ``fm.LayerChart`` overlay tree lowers every operand on its own
 pipeline, so its marks are the oracle: each composed chart below draws the
@@ -1005,32 +1006,26 @@ def test_a_public_layer_reads_the_charts_transformed_rows():
     assert census["lines"] == _N_POSITIVE
 
 
-_TAIL_REMEDY = (
-    "this layer reads the chart's transformed rows, not its source data; "
-    "draw 'value' from the source by composing a separate chart with `+` instead"
-)
+def test_a_public_layer_on_a_histogram_draws_a_rug_at_the_sample_values():
+    """A histogram's bins are its mark's statistics; an attached layer reads the chart's rows.
 
-
-def test_a_public_layer_naming_a_column_the_chain_drops_is_refused():
-    """A histogram's chain outputs bins, so a layer naming the sample column cannot draw."""
+    The rug draws as the same tick composed with ``+``, which reads its own
+    source rows.
+    """
     chart = H().layer(fm.Layer(mark="tick", encoding={"x": "value"}))
-    with pytest.raises(ValueError) as exc:
-        chart.to_svg()
-    assert str(exc.value) == (
-        "layer 1: encoding 'x' references unknown column 'value' "
-        f"(not present in that layer's data) — {_TAIL_REMEDY}"
-    )
+    oracle = H() + fm.Chart(DF).mark_tick().encode(x="value")
+    assert _census(chart.to_svg())["lines"] == _N
+    assert _plot_marks(chart.to_svg()) == _plot_marks(oracle.to_svg())
 
 
-def test_a_secondary_y_naming_a_column_the_chain_drops_is_refused():
-    with pytest.raises(ValueError) as exc:
-        (H() + fm.SecondaryY("value", mark="line")).to_svg()
-    assert str(exc.value) == (
-        "layer 1: encoding 'y' references unknown column 'value' "
-        "(not present in that layer's data) — this layer reads the chart's "
-        "transformed rows, not its source data; draw 'value' from the source "
-        'with fm.LayerChart(base, other, resolve={"y": "independent"}) instead'
+def test_a_secondary_y_naming_a_source_column_of_a_histogram_draws():
+    """``SecondaryY`` reads the histogram's rows, not its bins, so a sample column draws."""
+    chart = H() + fm.SecondaryY("value", mark="line")
+    oracle = fm.LayerChart(
+        H(), fm.Chart(DF).mark_line().encode(x="value", y="value"), resolve={"y": "independent"}
     )
+    assert _census(chart.to_svg()) == _census(oracle.to_svg())
+    assert _paths(chart.to_svg()) == _paths(oracle.to_svg())
 
 
 def test_an_unknown_column_on_a_chart_without_transforms_names_no_remedy():
@@ -1075,12 +1070,6 @@ def test_an_unknown_column_on_a_chart_without_transforms_names_no_remedy():
             "(not present in that layer's data)",
             id="own-x-miss-on-an-independent-y-layer",
         ),
-        pytest.param(
-            lambda: H().layer(fm.Layer(mark="tick", encoding={"x": "value"})).facet("g"),
-            "layer 1: encoding 'x' references unknown column 'value' "
-            f"(not present in that layer's data) — {_TAIL_REMEDY}",
-            id="faceted-chain-tail",
-        ),
     ],
 )
 def test_the_plus_remedy_is_named_only_for_a_source_column_the_chain_drops(build, message):
@@ -1088,6 +1077,12 @@ def test_the_plus_remedy_is_named_only_for_a_source_column_the_chain_drops(build
     with pytest.raises(ValueError) as exc:
         build().to_svg()
     assert str(exc.value) == message
+
+
+def test_a_faceted_histogram_rug_draws_each_panels_sample_values():
+    """Faceted, the attached rug reads each panel's partition of the chart's rows."""
+    chart = H().layer(fm.Layer(mark="tick", encoding={"x": "value"})).facet("g")
+    assert _census(chart.to_svg())["lines"] == _N
 
 
 def test_a_layer_naming_a_source_column_on_a_named_only_chain_draws():

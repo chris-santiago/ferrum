@@ -87,6 +87,12 @@ _NO_TITLE_MESSAGE = (
     "title= is not supported on this channel."
 )
 
+_NO_AGGREGATE_MESSAGE = (
+    "{channel}(aggregate={value!r}) is not supported: {channel} draws no aggregated "
+    "value. Compute the aggregate with .transform(fm.transform_aggregate(...)) and "
+    "bind its output column, or drop aggregate=."
+)
+
 _NO_LEGEND_MESSAGE = (
     "{channel}({kwarg}={value!r}) is not supported: {channel} draws no legend of "
     "its own, so there is nothing for {kwarg}= to customize."
@@ -548,6 +554,11 @@ class ChannelBase:
         template = self._refused_kwargs.get(kwarg)
         if template is None and kwarg == "title":
             template = _NO_TITLE_MESSAGE
+        # A channel whose mark draws no aggregated value would still lower
+        # its aggregate= into a step that rewrites the chart's rows, so it
+        # is refused rather than warned about.
+        if template is None and kwarg == "aggregate" and self._kwargs[kwarg] is not None:
+            template = _NO_AGGREGATE_MESSAGE
         if template is None:
             return None
         return template.format(
