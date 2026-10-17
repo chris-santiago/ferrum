@@ -39,7 +39,7 @@
 use crate::render::color::Color;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, DrawCtx};
 use ferrum_scene::numeric_index_dash;
-use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
+use crate::render::scale_resolve::{dtype_reads_categorical, ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
 use crate::render::RenderError;
 use crate::spec::coord::PolarThetaChannel;
 use crate::spec::encoding::Encoding;
@@ -113,12 +113,26 @@ pub(crate) fn color_column_loader(ctx: &DrawCtx) -> ColorColumnPair {
 /// It returns [`ColorColumns`] rather than the pair so that decision is carried
 /// as data: the consumer matches what was loaded instead of asking
 /// [`ColorScale::input`] a second time and trusting the two answers to agree.
+///
+/// A column a numeric scale cannot read (one that reads categorical,
+/// [`dtype_reads_categorical`]) loads nothing: on a layered chart it is a
+/// later layer's color that the scale its establishing layer's numeric
+/// column decided left out
+/// ([`RenderWarning::LayerScaleExcluded`](crate::render::RenderWarning::LayerScaleExcluded),
+/// already raised), so the layer draws its constant paint, on every mark
+/// alike. The establishing column itself is numeric by construction, since
+/// it decided the scale's kind.
 fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
     let field = color_field(ctx, ctx.spec);
     let input = ctx.scales.color.as_ref().map(ColorScale::input);
     Ok(match (input, field) {
         (Some(ColorInput::Category) | None, Some(f)) => {
             ColorColumns::Category(col_as_ordinal_category_str(ctx.batch, f)?)
+        }
+        (Some(ColorInput::Numeric), Some(f))
+            if ctx.batch.column_by_name(f).is_some_and(|col| dtype_reads_categorical(col.data_type())) =>
+        {
+            ColorColumns::None
         }
         (Some(ColorInput::Numeric), Some(f)) => ColorColumns::Numeric(col_as_f64(ctx.batch, f)?),
         _ => ColorColumns::None,

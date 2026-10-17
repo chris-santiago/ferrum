@@ -620,17 +620,20 @@ class TestPerRowAppearanceChannels:
 
         Two different reasons live in this list, with two different futures:
 
-        * `text` and `detail` are inert for a MARK-LEVEL reason that has
-          nothing to do with aggregation -- `mark_point`/`mark_bar` do not
-          read them, and `text=` is equally inert on `kind="strip"`. `detail`
-          already says so through `alias_detail_channel`'s warning. Nothing
-          for catplot to fix.
-        * `tooltip`, `href`, `description`, `url` and `key` are inert because
-          the summary batch does not carry the source column. These are the
-          ones with a real future: a tooltip reading "mean 3.2, CI [2.1, 4.3]"
-          is the natural affordance of an estimate mark, and `Summary`'s
-          output already holds the columns to build it. The filed follow-up is
-          to THREAD them onto the summary layers -- not to refuse them, which
+        * `text`, `url` and `detail` are inert for a MARK-LEVEL reason that
+          has nothing to do with aggregation -- `mark_point`/`mark_bar` do not
+          draw them (Rust's per-mark table, `ferrum._core.mark_drawn_channels`),
+          and `text=` is equally inert on `kind="strip"`. They pass silently;
+          `detail` already says so through `alias_detail_channel`'s warning.
+          Nothing for catplot to fix.
+        * `tooltip`, `href`, `description` and `key` are drawn by a point but
+          inert here because the summary batch does not carry the source
+          column, so the render drops each from the estimate with a warning
+          that names the channel and the statistic. These are the ones with a
+          real future: a tooltip reading "mean 3.2, CI [2.1, 4.3]" is the
+          natural affordance of an estimate mark, and `Summary`'s output
+          already holds the columns to build it. The filed follow-up is to
+          THREAD them onto the summary layers -- not to refuse them, which
           would foreclose the feature.
 
         A failure here means one of them stopped being inert, which is the

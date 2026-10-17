@@ -217,7 +217,7 @@ impl PaintSource {
     /// The provenance of one `fill=`/`stroke=` override string. Called beside
     /// the [`resolve_paint_color`] that resolves the same string's *value*, so
     /// value and provenance are written in one place and cannot drift.
-    fn from_override(value: &str) -> Self {
+    pub(in crate::render) fn from_override(value: &str) -> Self {
         if is_paint_clear_sentinel(value) { Self::UserClear } else { Self::UserColor }
     }
 
@@ -797,6 +797,27 @@ pub(crate) use super::arrow_cast::{
     col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str,
 };
 
+/// The tooltip entries a chart's field selections add to a layer's own
+/// (`listed`): one per field any point or interval selection names, in sorted
+/// order, skipping a field `listed` already carries. Read by
+/// [`MetadataColumns::from_ctx`], whose absent-column skip leaves out a field
+/// the layer's rows lack, as a datum without the field is never selected.
+fn selection_tooltip_specs(
+    selections: &[ferrum_scene::SelectionSpec],
+    listed: &[&crate::spec::encoding::EncodingSpec],
+) -> Vec<crate::spec::encoding::EncodingSpec> {
+    let fields: std::collections::BTreeSet<&str> = selections
+        .iter()
+        .flat_map(|selection| selection.fields().unwrap_or_default())
+        .map(String::as_str)
+        .filter(|field| !listed.iter().any(|e| e.field == *field))
+        .collect();
+    fields
+        .into_iter()
+        .map(|field| crate::spec::encoding::EncodingSpec { field: field.to_string(), ..Default::default() })
+        .collect()
+}
+
 /// Pre-read per-row SVG metadata columns (tooltip, href, description).
 /// Constructed once per draw call; individual mark renderers call
 /// `open_metadata`/`close_metadata` around each mark element.
@@ -831,7 +852,7 @@ impl MetadataColumns {
         use crate::render::format::{format_numeric, format_time, format_with_spec};
 
         // Collect tooltip columns: use tooltip_fields if present, fall back to single tooltip.
-        let tooltip_specs: Vec<&crate::spec::encoding::EncodingSpec> =
+        let mut tooltip_specs: Vec<&crate::spec::encoding::EncodingSpec> =
             if let Some(fields) = ctx.spec.encoding.tooltip_fields.as_ref() {
                 fields.iter().collect()
             } else if let Some(t) = ctx.spec.encoding.tooltip.as_ref() {
@@ -839,6 +860,12 @@ impl MetadataColumns {
             } else {
                 vec![]
             };
+        // A field selection matches a mark by reading its fields out of the
+        // mark's tooltip, so every such field joins the tooltip after the
+        // layer's own entries. They are match keys, not bindings: added here,
+        // after the column gate, and skipped below on rows that lack them.
+        let selection_specs = selection_tooltip_specs(&ctx.spec.selections, &tooltip_specs);
+        tooltip_specs.extend(selection_specs.iter());
 
         // Read a single tooltip column, applying format/format_type from the spec.
         let read_col_with_spec = |field: &str, fmt: Option<&str>, fmt_type: Option<&str>| -> Option<Vec<Option<String>>> {
@@ -2552,6 +2579,83 @@ mod tests {
             untitled_name, "x",
             "when no title is set, tooltip name must fall back to field, unchanged from prior behavior"
         );
+    }
+
+    /// A chart's field selections join every layer's tooltip after its own
+    /// entries: the sorted union of every point and interval selection's
+    /// fields, skipping a field the list already carries and one the
+    /// layer's rows lack. A written single `tooltip` gains them too. Rejects
+    /// leaving the match keys to a producer-written binding, and rejects
+    /// refusing or listing a field the rows lack.
+    #[test]
+    fn selection_fields_join_the_tooltip_after_the_layers_own_entries() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use ferrum_scene::{EventExpr, SelectionResolve, SelectionSpec};
+        use std::sync::Arc;
+
+        let fields = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect());
+        let selections = vec![
+            SelectionSpec::Point {
+                name: "pick".into(),
+                fields: fields(&["k", "z", "g"]),
+                encodings: None,
+                nearest: false,
+                toggle: EventExpr::ShiftKey,
+                on: EventExpr::Click,
+                clear: EventExpr::Click,
+                resolve: SelectionResolve::Global,
+            },
+            SelectionSpec::Interval {
+                name: "brush".into(),
+                fields: fields(&["b", "absent"]),
+                encodings: None,
+                translate: false,
+                zoom: false,
+                mark: None,
+                resolve: SelectionResolve::Global,
+            },
+        ];
+        let field = |name: &str| EncodingSpec { field: name.into(), ..Default::default() };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("k", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(StringArray::from(vec!["k0"])),
+            Arc::new(StringArray::from(vec!["a"])),
+            Arc::new(Float64Array::from(vec![3.0])),
+        ])
+        .unwrap();
+        let names = |encoding: Encoding| -> Vec<String> {
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding { x: Some(field("x")), y: Some(field("y")), ..encoding },
+                selections: selections.clone(),
+                ..Default::default()
+            };
+            let theme = ThemeInputs::default();
+            let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+            let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            MetadataColumns::from_ctx(&ctx).tooltip_cols.into_iter().map(|(name, _)| name).collect()
+        };
+        assert_eq!(
+            names(Encoding { tooltip_fields: Some(vec![field("y"), field("k")]), ..Default::default() }),
+            ["y", "k", "b", "g"]
+        );
+        assert_eq!(names(Encoding { tooltip: Some(field("x")), ..Default::default() }), ["x", "b", "g", "k"]);
+        assert_eq!(names(Encoding::default()), ["b", "g", "k"]);
     }
 
     // --- RSUP-04: parse_text_baseline + to_scene_text_style corrected SVG output ---

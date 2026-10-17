@@ -89,6 +89,56 @@ pub enum InheritedChannel {
     FillOpacity,
 }
 
+impl InheritedChannel {
+    /// Every non-positional channel, in [`Encoding`]'s declaration order.
+    pub(crate) const ALL: [InheritedChannel; 16] = [
+        InheritedChannel::Color,
+        InheritedChannel::Size,
+        InheritedChannel::Shape,
+        InheritedChannel::Opacity,
+        InheritedChannel::Text,
+        InheritedChannel::Tooltip,
+        InheritedChannel::TooltipFields,
+        InheritedChannel::Href,
+        InheritedChannel::Description,
+        InheritedChannel::Key,
+        InheritedChannel::Url,
+        InheritedChannel::StrokeWidth,
+        InheritedChannel::StrokeOpacity,
+        InheritedChannel::StrokeDash,
+        InheritedChannel::Angle,
+        InheritedChannel::FillOpacity,
+    ];
+
+    /// The wire name, the key [`Encoding`] serializes the channel under.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            InheritedChannel::Color => "color",
+            InheritedChannel::Size => "size",
+            InheritedChannel::Shape => "shape",
+            InheritedChannel::Opacity => "opacity",
+            InheritedChannel::Text => "text",
+            InheritedChannel::Tooltip => "tooltip",
+            InheritedChannel::TooltipFields => "tooltip_fields",
+            InheritedChannel::Href => "href",
+            InheritedChannel::Description => "description",
+            InheritedChannel::Key => "key",
+            InheritedChannel::Url => "url",
+            InheritedChannel::StrokeWidth => "stroke_width",
+            InheritedChannel::StrokeOpacity => "stroke_opacity",
+            InheritedChannel::StrokeDash => "stroke_dash",
+            InheritedChannel::Angle => "angle",
+            InheritedChannel::FillOpacity => "fill_opacity",
+        }
+    }
+
+    /// The channel a wire name names, or `None` for a positional or unknown
+    /// name.
+    pub(crate) fn from_wire(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == name)
+    }
+}
+
 /// A single layer within a multi-layer ChartSpec. Inherits chart-level
 /// encoding for any field set to None at the layer level.
 ///
@@ -164,7 +214,7 @@ pub struct Layer {
     /// chart's data already, so the flag is only ever set beside a
     /// `data_source`.
     ///
-    /// Read only to pick the remedy of a missing positional column
+    /// Read only to pick the remedy of a missing column
     /// ([`RenderError::LayerUnknownColumn`](crate::render::RenderError::LayerUnknownColumn)):
     /// without it a layer reading its chart's data through a named output
     /// could not be told apart from a `+` operand's branch reader, whose
@@ -705,6 +755,14 @@ mod tests {
         .map(|c| serde_json::to_value(c).unwrap().as_str().unwrap().to_owned())
         .collect();
         assert_eq!(channel_names, encoding_keys);
+        let listed: std::collections::BTreeSet<String> =
+            InheritedChannel::ALL.iter().map(|c| c.as_str().to_owned()).collect();
+        assert_eq!(listed, encoding_keys, "ALL names every channel by its wire name");
+        for channel in InheritedChannel::ALL {
+            assert_eq!(serde_json::to_value(channel).unwrap().as_str(), Some(channel.as_str()));
+            assert_eq!(InheritedChannel::from_wire(channel.as_str()), Some(channel));
+        }
+        assert_eq!(InheritedChannel::from_wire("x"), None);
     }
 
     fn bound(field: &str) -> Option<crate::spec::encoding::EncodingSpec> {

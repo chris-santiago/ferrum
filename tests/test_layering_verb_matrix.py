@@ -395,12 +395,20 @@ _SMOOTHS = {"layered": _SMOOTH, "flat": _FLAT_SMOOTH}
 
 
 def _line_prefix(chart: fm.Chart) -> str:
-    """The ``layer {i}: `` prefix a refusal about *chart*'s one line carries, ``""`` when flat."""
-    layers = json.loads(chart.to_spec().to_json()).get("layers")
+    """The ``layer {i}: `` prefix a refusal about *chart*'s one line carries.
+
+    ``""`` when the chart is flat, and when a desugaring call built the line
+    (its entry, its own or else the chart's, is not ``mark_line``): that
+    call's sub-layer index is internal, and the entry already names the call
+    the caller wrote. Only a line the caller placed is located by its index.
+    """
+    wire = json.loads(chart.to_spec().to_json())
+    layers = wire.get("layers")
     if layers is None:
         return ""
     (index,) = [i for i, ly in enumerate(layers) if ly["mark"] == "line"]
-    return f"layer {index}: "
+    entry = layers[index].get("entry") or wire.get("entry") or "mark_line"
+    return f"layer {index}: " if entry == "mark_line" else ""
 
 
 def _refusal_prefix(chart: Any, output: str) -> str:
@@ -471,10 +479,10 @@ def test_a_figure_functions_width_conflict_names_the_figure_function(
     )
     layers = json.loads(chart.to_spec().to_json())["layers"]
     assert {ly.get("entry") for ly in layers} == {entry}
-    (index,) = [i for i, ly in enumerate(layers) if ly["mark"] == "line"]
     with pytest.raises(ValueError) as exc:
         getattr(chart, output)()
-    assert str(exc.value) == f"layer {index}: {_SMOOTH_CONFLICT.replace('mark_smooth', entry)}"
+    # The figure function's internal layer index is not named; its entry is.
+    assert str(exc.value) == _SMOOTH_CONFLICT.replace("mark_smooth", entry)
 
 
 _WIDTH_CONFLICT = {"size": 40, "stroke_width": 3}

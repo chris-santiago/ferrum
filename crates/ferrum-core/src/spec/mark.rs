@@ -115,6 +115,40 @@ impl Mark {
         }
     }
 
+    /// Whether this mark draws the non-positional `channel` when it is bound to
+    /// a field, read from what each mark's builder takes from that column:
+    /// the one table every question about which marks draw a non-positional
+    /// channel reads. `size`, `stroke_width` and the opacity family answer
+    /// from their own tables ([`Self::draws_size_channel`],
+    /// [`Self::draws_stroke_width_channel`], [`Self::draws_opacity_channel`]).
+    /// Of the rest: `color` is drawn by every mark that paints from a color
+    /// scale (not an image, a label or a geoshape); `text` by the text, label
+    /// and heatmap rect builders; `shape` by a point; `angle` by a point, a
+    /// bar and a text; `stroke_dash` by the marks reading a dash column
+    /// (point, bar, rect, line, ribbon, rule); `url` by an image; and the
+    /// tooltip family, `href`, `description` and `key` by every mark. Every
+    /// other mark carries a binding of the channel without drawing it.
+    pub(crate) fn draws_channel(self, channel: crate::spec::layer::InheritedChannel) -> bool {
+        use crate::render::scale_resolve::OpacityChannel;
+        use crate::spec::layer::InheritedChannel as C;
+        match channel {
+            C::Size => self.draws_size_channel(),
+            C::StrokeWidth => self.draws_stroke_width_channel(),
+            C::Opacity => self.draws_opacity_channel(OpacityChannel::Opacity),
+            C::FillOpacity => self.draws_opacity_channel(OpacityChannel::Fill),
+            C::StrokeOpacity => self.draws_opacity_channel(OpacityChannel::Stroke),
+            C::Color => !matches!(self, Mark::Image | Mark::Label | Mark::Geoshape),
+            C::Text => matches!(self, Mark::Text | Mark::Label | Mark::Rect),
+            C::Shape => self == Mark::Point,
+            C::Angle => matches!(self, Mark::Point | Mark::Bar | Mark::Text),
+            C::StrokeDash => {
+                matches!(self, Mark::Point | Mark::Bar | Mark::Rect | Mark::Line | Mark::Ribbon | Mark::Rule)
+            }
+            C::Url => self == Mark::Image,
+            C::Tooltip | C::TooltipFields | C::Href | C::Description | C::Key => true,
+        }
+    }
+
     /// Whether this mark draws the span channels `x2`/`y2`, read from what
     /// each mark's builder takes: a bar's, rect's, area's and ribbon's other
     /// edge, a rule's and segment's other end. Every other mark carries an
@@ -523,6 +557,18 @@ pub(crate) fn mark_inherited_positional(
     Ok(taken.into_iter().map(PositionalChannel::as_str).collect())
 }
 
+/// `ferrum._core.mark_drawn_channels(mark)`: the non-positional channels
+/// (`Encoding` wire names, in declaration order) a layer of `mark` draws when
+/// they are bound to a field ([`Mark::draws_channel`]). Python's per-layer
+/// auto tooltip lists only these rather than keeping a table of its own.
+/// Refuses an unknown mark. Registered in `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn mark_drawn_channels(mark: &str) -> pyo3::PyResult<Vec<&'static str>> {
+    use crate::spec::layer::InheritedChannel;
+    let mark = parse_mark_arg(mark)?;
+    Ok(InheritedChannel::ALL.into_iter().filter(|c| mark.draws_channel(*c)).map(InheritedChannel::as_str).collect())
+}
+
 impl fmt::Display for Mark {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -605,6 +651,50 @@ mod tests {
         assert_eq!(not_drawing, ["geoshape"]);
         assert_eq!(Mark::Geoshape.inherited_positional(&[], &[X, Y]), Vec::<PositionalChannel>::new());
         assert_eq!(Mark::Arc.inherited_positional(&[], &[X, Y]), vec![X, Y]);
+    }
+
+    /// The marks drawing each non-positional channel outside the size,
+    /// stroke-width and opacity tables, as each builder reads it, and those
+    /// three answering from their own tables.
+    #[test]
+    fn each_non_positional_channel_is_drawn_by_the_marks_whose_builders_read_it() {
+        use crate::render::scale_resolve::OpacityChannel;
+        use crate::spec::layer::InheritedChannel as C;
+        let drawing = |channel: C| -> Vec<&str> {
+            all_marks().filter(|m| m.draws_channel(channel)).map(|m| m.as_str()).collect()
+        };
+        let every: Vec<&str> = all_marks().map(|m| m.as_str()).collect();
+        assert_eq!(
+            drawing(C::Color),
+            ["point", "line", "bar", "area", "rule", "text", "tick", "rect", "polygon", "ribbon", "segment", "arc"]
+        );
+        assert_eq!(drawing(C::Text), ["text", "rect", "label"]);
+        assert_eq!(drawing(C::Shape), ["point"]);
+        assert_eq!(drawing(C::Angle), ["point", "bar", "text"]);
+        assert_eq!(drawing(C::StrokeDash), ["point", "line", "bar", "rule", "rect", "ribbon"]);
+        assert_eq!(drawing(C::Url), ["image"]);
+        for channel in [C::Tooltip, C::TooltipFields, C::Href, C::Description, C::Key] {
+            assert_eq!(drawing(channel), every, "{channel:?}");
+        }
+        for mark in all_marks() {
+            assert_eq!(mark.draws_channel(C::Size), mark.draws_size_channel());
+            assert_eq!(mark.draws_channel(C::StrokeWidth), mark.draws_stroke_width_channel());
+            assert_eq!(mark.draws_channel(C::Opacity), mark.draws_opacity_channel(OpacityChannel::Opacity));
+            assert_eq!(mark.draws_channel(C::FillOpacity), mark.draws_opacity_channel(OpacityChannel::Fill));
+            assert_eq!(mark.draws_channel(C::StrokeOpacity), mark.draws_opacity_channel(OpacityChannel::Stroke));
+        }
+    }
+
+    /// The published table lists a mark's drawn channels by wire name, in
+    /// declaration order, and refuses an unknown mark.
+    #[test]
+    fn mark_drawn_channels_publishes_the_table() {
+        assert_eq!(
+            mark_drawn_channels("image").unwrap(),
+            ["tooltip", "tooltip_fields", "href", "description", "key", "url"]
+        );
+        assert!(mark_drawn_channels("point").unwrap().contains(&"shape"));
+        assert!(mark_drawn_channels("nope").is_err());
     }
 
     /// A rule or tick declaring exactly one of `x`/`y` with no span is a

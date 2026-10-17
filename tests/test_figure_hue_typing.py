@@ -102,6 +102,15 @@ def _contour_twin(dtype: pl.DataType) -> pl.DataFrame:
     ).with_columns(pl.col("grp").cast(dtype))
 
 
+# boxen's outlier points draw the letter-value statistic's outlier rows,
+# which do not carry the hue column, so the hue is dropped from them with a
+# warning (an independent fact of boxen, not of hue typing).
+_CATPLOT_BOXEN_OUTLIER_WARNING = (
+    "catplot: color 'grp' was dropped: the statistic this point mark draws "
+    "does not carry 'grp', so it draws without color"
+)
+
+
 def _assert_dtype_parity(build, *, frame=_twin, expected_warnings=()) -> str:
     """Render *build* over the Int64 and Utf8 twins and require agreement.
 
@@ -163,15 +172,14 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
     # catplot's own entry, not mark_violin's: catplot fixes inner="box"
     # itself and exposes no inner= of its own for a mark_violin-voiced
     # message to point at.
-    expected_warnings = (
-        [
+    expected_warnings = {
+        "violin": [
             "catplot: inner marks are drawn at each "
             "category's center and are not dodged per hue group; use "
             'Chart.mark_violin(inner="none") to drop the inner mark'
-        ]
-        if kind == "violin"
-        else []
-    )
+        ],
+        "boxen": [_CATPLOT_BOXEN_OUTLIER_WARNING],
+    }.get(kind, [])
     _assert_dtype_parity(build, expected_warnings=expected_warnings)
 
 
@@ -335,7 +343,11 @@ def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs
     0 / 0.25 / 0.5 / 0.75 / 1 for a column holding exactly two distinct
     values is a truth claim about the mapping that no mark expresses.
     """
-    svg = _assert_dtype_parity(lambda df: getattr(fm, figure)(df, hue="grp", **kwargs))
+    expected_warnings = [_CATPLOT_BOXEN_OUTLIER_WARNING] if kwargs.get("kind") == "boxen" else []
+    svg = _assert_dtype_parity(
+        lambda df: getattr(fm, figure)(df, hue="grp", **kwargs),
+        expected_warnings=expected_warnings,
+    )
     assert len(legend_labels(svg)) == 2, (
         f"expected a two-entry swatch legend, got {legend_labels(svg)}"
     )

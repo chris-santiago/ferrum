@@ -2031,14 +2031,16 @@ mod tests {
         }
 
         // Naming is a property of where the refusal arose, not of its kind: an
-        // unparseable color on a layer reads as that layer's entry too.
+        // unparseable color on a layer reads as that layer's entry too. A
+        // layer a desugaring call built is named by that call alone, its
+        // internal index omitted.
         let mut bad_fill = test_layer(Mark::Point, xy.clone(), Some(MarkKwargsSpec { fill: Some("notacolor".into()), ..Default::default() }));
         bad_fill.entry = Some("relplot".into());
         let spec = added(vec![test_layer(Mark::Point, xy.clone(), None), bad_fill]);
         let err = render_static(&spec).err().expect("an unparseable fill must refuse");
-        assert!(matches!(err, RenderError::InLayer { layer: Some(1), .. }), "{err:?}");
+        assert!(matches!(err, RenderError::InLayer { layer: None, .. }), "{err:?}");
         assert!(matches!(err.root(), RenderError::InvalidColor(_)), "{err:?}");
-        assert!(err.to_string().starts_with("layer 1: relplot: "), "{err}");
+        assert!(err.to_string().starts_with("relplot: "), "{err}");
 
         // The size field is chart-level (the one size scale), inherited by
         // both layers; the line is layer 1.
@@ -2299,8 +2301,9 @@ mod tests {
 
     /// A layer that records the public entry which produced it (a composite
     /// such as `mark_smooth` desugaring into a fit line) names that entry,
-    /// not `mark_line`, in every per-layer line refusal; a layer that records
-    /// none keeps `mark_line`, and an unlayered chart is unchanged.
+    /// not `mark_line`, in every per-layer line refusal, without its internal
+    /// layer index; a layer that records none keeps `mark_line` and the index
+    /// that locates it, and an unlayered chart is unchanged.
     #[test]
     fn a_line_refusal_names_the_public_entry_its_layer_records() {
         let xy = line_spec().encoding;
@@ -2310,22 +2313,22 @@ mod tests {
             added(vec![test_layer(Mark::Point, xy.clone(), None), line])
         };
         let conflict = MarkKwargsSpec { size: Some(40.0), stroke_width: Some(3.0), ..Default::default() };
-        let conflict_text = |entry: &str| {
+        let conflict_text = |voice: &str| {
             format!(
-                "layer 1: {entry}: size and stroke_width both set the line's width (size=40, stroke_width=3); bind \
+                "{voice}: size and stroke_width both set the line's width (size=40, stroke_width=3); bind \
                  only one. size= sets a dot-diameter width that can taper along the line; stroke_width= sets a \
                  width in pixels."
             )
         };
         let bad_size = MarkKwargsSpec { size: Some(-4.0), ..Default::default() };
-        let size_text = |entry: &str| format!("layer 1: {entry}(size=...) must be a positive number; received -4");
-        let branch_text = |entry: &str| {
+        let size_text = |voice: &str| format!("{voice}(size=...) must be a positive number; received -4");
+        let branch_text = |voice: &str| {
             format!(
-                "layer 1: {entry}: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
+                "{voice}: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
                  positive line width. Every width along a line must be positive; give every branch a size above 0."
             )
         };
-        for (entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "mark_line")] {
+        for (entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "layer 1: mark_line")] {
             let refusal = |spec: &ChartSpec| render_static(spec).err().map(|e| e.to_string());
             assert_eq!(refusal(&layered(entry, conflict.clone())), Some(conflict_text(named)), "{entry:?}");
             assert_eq!(refusal(&layered(entry, bad_size.clone())), Some(size_text(named)), "{entry:?}");
@@ -2339,7 +2342,8 @@ mod tests {
     /// such as `mark_smooth` lowering to one unlayered line) names that entry
     /// in every line refusal, without a layer prefix; a chart that records
     /// none keeps `mark_line`. On a layered chart the chart's entry names
-    /// every layer that records none, and a layer's own entry outranks it.
+    /// every layer that records none, and a layer's own entry outranks it;
+    /// either names a layer the call built, so no index precedes it.
     #[test]
     fn a_line_refusal_names_the_public_entry_its_chart_records() {
         let conflict = MarkKwargsSpec { size: Some(40.0), stroke_width: Some(3.0), ..Default::default() };
@@ -2379,7 +2383,7 @@ mod tests {
             ChartSpec { entry: Some("lmplot".into()), ..added(vec![test_layer(Mark::Point, xy.clone(), None), line]) }
         };
         for (layer_entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "lmplot")] {
-            let want = format!("layer 1: {}", conflict_text(named));
+            let want = conflict_text(named);
             assert_eq!(refusal(&layered(layer_entry)), Some(want), "{layer_entry:?}");
         }
     }

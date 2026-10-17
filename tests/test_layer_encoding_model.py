@@ -2656,31 +2656,401 @@ def test_a_right_operands_own_facet_is_still_warned_and_ignored():
     [
         (lambda: P(x="w") + P(df2), {"circle": 6}, {}),
         (lambda: P(color="w") + P(df2), {"circle": 14}, {"w": ("1", "2.25", "3.5", "4.75", "6")}),
-        (lambda: P(df2) + P(color="w"), {"circle": 14}, {"w": ("1", "2.25", "3.5", "4.75", "6")}),
-        (
-            lambda: P() + P(df2, color="k"),
-            {"circle": 14},
-            {"k": tuple(f"k{i}" for i in range(8))},
-        ),
         (
             lambda: fm.LayerChart(P(color="w"), P(df2))._build_merged(),
             {"circle": 14},
             {"w": ("1", "2.25", "3.5", "4.75", "6")},
         ),
     ],
-    ids=["layer0-x-other-frame", "color-left", "color-right", "color-other-frame", "LCm-color"],
+    ids=["layer0-x-other-frame", "color-left", "LCm-color"],
 )
 def test_today_a_binding_to_a_column_only_the_other_frame_has_still_draws(build, marks, legends):
-    """Today: a layer bound to a column only the other operand's frame holds is not refused.
+    """Today: layer 0 bound to a column only the other operand's frame holds is not refused.
 
     Layer 0's ``x="w"`` draws none of the left's points (6 circles are df2's),
-    and a color on ``w`` or ``k`` draws a legend read from the other frame's
-    rows. The model refuses all of them; the engine reads the field outside
-    the layer's own batch today.
+    and its color on ``w`` draws a legend read from the other frame's rows.
+    The model refuses them; layer 0 is exempt from the column gate today and
+    the engine reads the field outside its own batch. A later layer's
+    binding is refused (cell A7 below).
     """
     svg = _quiet(lambda: build().to_svg())
     assert tag_counts(svg) == marks
     assert legend_set(svg) == legends
+
+
+# ---------------------------------------------------------------------------
+# A7: the column gate covers every channel a layer's mark draws
+# ---------------------------------------------------------------------------
+#
+# A layer reading rows the user supplied (a ``+`` operand's frame, a
+# ``Layer(data=)`` frame) that names a column those rows lack is refused on
+# every channel its mark draws, own, inherited or conditional, in the gate's
+# one message. A binding on a channel the mark never draws is never judged.
+
+
+def _absent(channel: str, field: str) -> str:
+    return (
+        f"layer 1: encoding '{channel}' references unknown column '{field}' "
+        "(not present in that layer's data)"
+    )
+
+
+_PICK_C = fm.selection_point(fields=["c"], name="pick")
+
+
+def _over_df2(host: fm.Chart) -> fm.Chart:
+    """*host* with a line over ``df2``, which lacks ``c`` and ``k``."""
+    return host.layer(fm.Layer(data=df2, mark="line"))
+
+
+_A7_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
+    "color-right": (lambda: P(df2) + P(color="w"), _absent("color", "w")),
+    "color-other-frame": (lambda: P() + P(df2, color="k"), _absent("color", "k")),
+    "host-color-over-a-data-layer": (lambda: _over_df2(P(color="c")), _absent("color", "c")),
+    "host-field-conditional-over-a-data-layer": (
+        lambda: _over_df2(
+            P(color=_PICK_C.when(fm.Color("c")).otherwise(fm.value("#cccccc"))).add_selection(
+                _PICK_C
+            )
+        ),
+        _absent("color", "c"),
+    ),
+    **{
+        f"own-{channel}": (
+            (lambda channel=channel: P() + P(df2, **{channel: "k"})),
+            _absent(channel, "k"),
+        )
+        for channel in ("tooltip", "shape", "stroke_dash", "key", "href", "description")
+    },
+    "own-text": (lambda: P() + mk("text", df2, x="v", y="y", text="k"), _absent("text", "k")),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_A7_REFUSALS))
+def test_A7_a_drawn_binding_its_layers_rows_lack_is_refused(case, kind):
+    """A7: a later layer's drawn binding to a column its own rows lack names the layer and channel.
+
+    The color cells reject reading the other frame's column (``P(df2) +
+    P(color="w")`` drew 14 circles under a ``w`` legend); the host cells
+    reject drawing the line uncolored under the host's legend; a host
+    conditional is refused on its own channel, not on the selection's
+    tooltip, because the selection field never reaches a layer whose rows
+    lack it.
+    """
+    build, message = _A7_REFUSALS[case]
+    with pytest.raises(ValueError) as refused:
+        chart = build()
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == message
+
+
+# The SVG each rendering cell drew before the gate covered every channel:
+# the gate refuses none of them.
+_A7_RENDER_DIGESTS = {
+    "selection-only": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
+    "value-conditional": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
+    "selection-plus": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
+    "undrawn-host-shape": "bbc7316b39bcbcb990493cf76ec22e5c99c53ec7f41c8decf05df5b6faeec9e8",
+}
+
+_A7_RENDERS: dict[str, Callable[[], Any]] = {
+    "selection-only": lambda: _over_df2(P().add_selection(_PICK_C)),
+    "value-conditional": lambda: _over_df2(
+        P(color=_PICK_C.when(fm.value("#d62728")).otherwise(fm.value("#cccccc"))).add_selection(
+            _PICK_C
+        )
+    ),
+    "selection-plus": lambda: P().add_selection(_PICK_C) + line(df2),
+    "undrawn-host-shape": lambda: _over_df2(P(shape="c")),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_A7_RENDERS))
+def test_A7_a_layer_whose_rows_lack_only_an_unread_field_renders(case):
+    """A7: a selection field, or an undrawn binding, its rows lack never refuses a layer.
+
+    A field selection's ``c`` joins the host's tooltip but not the df2
+    line's, whose rows lack it, and a line never reads the host's shape. Each
+    renders static and interactive, the SVG unchanged, and the line's
+    interactive tooltip lists only its own drawn fields. Rejects carrying
+    the selection field (or the undrawn shape's column) into the line's
+    tooltip, which the gate refuses.
+    """
+    import hashlib
+
+    svg = _A7_RENDERS[case]().to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _A7_RENDER_DIGESTS[case]
+    host, data_line = interactive_tooltip_fields(_A7_RENDERS[case]())
+    assert data_line == {"v", "y"}
+    assert "c" in host or case == "undrawn-host-shape"
+
+
+def test_A7_a_selection_field_is_never_written_into_a_tooltip_binding():
+    """The spec names no selection field in any tooltip; the scene lists ``c`` on the host only.
+
+    A field selection's fields are match keys the render's tooltip reader
+    appends where the rows hold them, so the column gate never judges them.
+    """
+    chart = _A7_RENDERS["selection-plus"]()
+    wire = _wire(chart)
+    assert "tooltip_fields" not in wire["encoding"]
+    assert all("tooltip_fields" not in layer["encoding"] for layer in wire["layers"])
+    host, data_line = interactive_tooltip_fields(chart)
+    assert "c" in host and "c" not in data_line
+
+
+def test_A7_a_selection_field_reaches_the_frame_of_a_chain_of_merges_that_carries_it():
+    """In ``(P + P(df2)) + P(df3-like)``, the selection's ``c`` stays off df2's layer only."""
+    with_c = df2.with_columns(c=pl.Series(["p", "q"] * 3))
+    chart = (P().add_selection(_PICK_C) + P(df2)) + P(with_c)
+    assert [names for names in interactive_tooltip_fields(chart)] == [
+        {"c", "v", "y"},
+        {"v", "y"},
+        {"c", "v", "y"},
+    ]
+    chart.to_svg()
+
+
+def test_A7_a_layer_keeps_the_selection_fields_its_rows_carry():
+    """A selection on ``c`` and ``g``: the df2 line, which holds only ``g``, lists ``g`` beside its own."""
+    both = fm.selection_point(fields=["c", "g"], name="both")
+    chart = _over_df2(P().add_selection(both))
+    assert interactive_tooltip_fields(chart) == [{"c", "g", "v", "y"}, {"g", "v", "y"}]
+
+
+@pytest.mark.parametrize(
+    ("build", "line_fields"),
+    [
+        (lambda: P().layer(layer("line", shape="c")), {"v", "y"}),
+        (lambda: P() + line(shape="c"), {"v", "y"}),
+        (lambda: P().layer(layer("line", shape="c", color="g")), {"g"}),
+    ],
+    ids=["L-own-shape", "+-own-shape", "L-own-shape-beside-own-color"],
+)
+def test_A7_a_layers_own_undrawn_binding_stays_out_of_its_auto_tooltip(build, line_fields):
+    """A line never draws ``shape``, so its own ``shape="c"`` is not listed in its interactive tooltip.
+
+    Rejects listing ``c`` (the line lists ``{c}`` alone, or ``c`` beside its
+    drawn fields): a field the mark never reads is not one it shows on hover.
+    """
+    assert interactive_tooltip_fields(_quiet(build))[1] == line_fields
+
+
+# ---------------------------------------------------------------------------
+# A field selection's fields are match keys, never bindings (GH #58)
+# ---------------------------------------------------------------------------
+#
+# Each family below draws statistic sub-layers or layers over rows that lack
+# the selection's ``c``. With the selection it renders in both kinds and
+# raises exactly the warnings it raises without one; ``c`` sits in the
+# scene tooltips of the batches whose rows carry it, and of no other.
+
+
+def _sel_cat() -> pl.DataFrame:
+    return _W_CAT.with_columns(c=pl.Series(["p", "q", "q", "p"] * 15))
+
+
+# Per family: the chart, and the mark kinds of the batches whose rows carry ``c``.
+_SELECTION_FAMILIES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
+    "boxen": (lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z"), []),
+    "boxplot": (lambda: fm.Chart(df).mark_boxplot().encode(x="g", y="z"), []),
+    "violin": (lambda: fm.Chart(df).mark_violin().encode(x="g", y="z"), []),
+    "mark_qq": (lambda: fm.Chart(df).mark_qq().encode(x="z"), []),
+    "mark_qq-color": (lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"), []),
+    "catplot-point": (lambda: fm.catplot(_sel_cat(), x="cat", y="val", kind="point"), []),
+    "catplot-boxen-hue": (
+        lambda: fm.catplot(_sel_cat(), x="cat", y="val", kind="boxen", hue="grp"),
+        [],
+    ),
+    "lmplot-color": (
+        lambda: fm.lmplot(_sel_cat(), x="x", y="y", encode={"color": "c"}),
+        ["point"],
+    ),
+    "L-mean-point": (
+        lambda: bar_mean().layer(layer("point", y=fm.Y("y", aggregate="mean"))),
+        [],
+    ),
+    "plus-mean-point": (lambda: bar_mean() + agg("point"), []),
+    "plus-filtered-operand": (
+        lambda: P() + line(df2).transform(fm.transform_filter("datum.v > 0")),
+        ["point"],
+    ),
+}
+
+
+def _render_recording(chart: Any, kind: str) -> tuple[Any, list[str]]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = chart.to_svg() if kind == "static" else _scene(chart)
+    return out, sorted({str(w.message) for w in caught})
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("family", sorted(_SELECTION_FAMILIES))
+def test_a_field_selection_never_refuses_or_warns_on_a_layer_lacking_its_field(family, kind):
+    """Rejects the selection's ``c`` reaching the column gate as a tooltip binding.
+
+    Written into a tooltip, ``c`` refused a statistic sub-layer interactively
+    (``layer 12: encoding 'tooltip' references unknown column 'c'``), warned
+    ``tooltip 'c' was dropped`` per sub-layer statically, and refused a
+    filtered operand's line in both kinds.
+    """
+    build, carrying = _SELECTION_FAMILIES[family]
+    selected, warned = _render_recording(build().add_selection(_PICK_C), kind)
+    _plain, warned_without = _render_recording(build(), kind)
+    assert warned == warned_without
+    if kind == "interactive":
+        batches = [
+            (batch["kind"], {f["name"] for t in batch.get("tooltips") or [] for f in t["fields"]})
+            for panel in selected["panels"]
+            for batch in panel["marks"]
+        ]
+        assert sorted(k for k, names in batches if "c" in names) == sorted(carrying)
+
+
+def test_an_unlayered_chart_lists_its_auto_fields_then_the_selection_field():
+    scene = _scene(P().add_selection(_PICK_C))
+    (batch,) = [b for panel in scene["panels"] for b in panel["marks"]]
+    assert [f["name"] for f in batch["tooltips"][0]["fields"]] == ["v", "y", "c"]
+
+
+def test_a_layers_own_explicit_tooltip_lists_its_entries_then_the_selection_field():
+    chart = P().add_selection(_PICK_C).layer(layer("line", tooltip=fm.Tooltip("v")))
+    _host, line_batch = [b for panel in _scene(chart)["panels"] for b in panel["marks"]]
+    assert [f["name"] for f in line_batch["tooltips"][0]["fields"]] == ["v", "c"]
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+def test_a_user_written_tooltip_its_rows_lack_still_refuses_under_a_selection(kind):
+    """The negative control: a tooltip the user wrote is a binding, and the gate refuses it."""
+    chart = (
+        P().add_selection(_PICK_C).layer(fm.Layer(data=df2, mark="line", encoding={"tooltip": "c"}))
+    )
+    with pytest.raises(ValueError) as refused:
+        chart.to_svg() if kind == "static" else _scene(chart)
+    assert str(refused.value) == _absent("tooltip", "c")
+
+
+def test_a_parent_fallback_auto_tooltip_is_listed_as_inherited():
+    """A layer binding no field lists its parent's drawn fields, marked inherited; an own list is not."""
+    chart = P(shape="c").layer(fm.Layer(data=df2, mark="line"))
+    spec, *_rest = chart._render_inputs(_auto_tooltips=True)
+    host, data_line = json.loads(spec.to_json())["layers"]
+    assert data_line["encoding"]["tooltip_fields"] == [{"field": "v"}, {"field": "y"}]
+    assert data_line["inherited_channels"] == ["tooltip_fields"]
+    assert host["encoding"]["tooltip_fields"] == [{"field": "v"}, {"field": "y"}, {"field": "c"}]
+    assert "inherited_channels" not in host
+
+
+_A7_C7_BUILDS: dict[str, Callable[[], Any]] = {
+    "+": lambda: bar_mean(color=mean(fm.Color)) + mk("tick", df2, color="g"),
+    "L": lambda: bar_mean(color=mean(fm.Color)).layer(
+        fm.Layer(data=df2, mark="tick", encoding={"color": "g"})
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_A7_C7_BUILDS))
+def test_A7_a_tick_left_out_of_a_numeric_color_scale_draws_with_one_warning(door, kind):
+    """A string-colored tick beside a mean-colored bar stays out of the scale, as a point does.
+
+    Rejects the tick's color reader refusing the column's dtype
+    (``column 'g' has unsupported dtype: Utf8``).
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = _A7_C7_BUILDS[door]()
+        chart.to_svg() if kind == "static" else chart.interactive().scene_json
+    excluded = [str(w.message) for w in caught if "stays out of that scale" in str(w.message)]
+    assert excluded == [
+        "layer 1: its color scale differs from the one layer 0 establishes the color scale "
+        "with, so it stays out of that scale; its marks draw through that scale and may fall "
+        "outside its legend"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# A7, user ruling W (2026-10-17): a statistic sub-layer drops an inherited
+# channel its statistic does not carry, with a warning
+# ---------------------------------------------------------------------------
+
+_W_RNG = np.random.default_rng(0)
+_W_CAT = pl.DataFrame(
+    {
+        "cat": ["a", "b", "c"] * 20,
+        "grp": ["X"] * 30 + ["Y"] * 30,
+        "val": _W_RNG.normal(0, 1, 60),
+        "x": _W_RNG.normal(0, 1, 60),
+        "y": _W_RNG.normal(0, 1, 60),
+    }
+)
+
+
+def _dropped(entry: str, mark: str, channel: str, field: str) -> str:
+    """The warning, voiced by the call that built the layer (its internal index is not named)."""
+    return (
+        f"{entry}: {channel} '{field}' was dropped: the statistic this {mark} "
+        f"mark draws does not carry '{field}', so it draws without {channel}"
+    )
+
+
+_W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
+    "mark_boxen-color": (
+        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
+        [_dropped("mark_boxen", "point", "color", "c")],
+        "03f2fae70d706aafac90797b57e800c7d5cf026ab1b7bf16a9d81de2fa5b76c0",
+    ),
+    "catplot-boxen-hue": (
+        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
+        [_dropped("catplot", "point", "color", "grp")],
+        "f102bc411159b027438aee275985b550c5ae47eb7797d8d85e8ad045db17a1d1",
+    ),
+    "mark_qq-color": (
+        lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
+        [_dropped("mark_qq", "rule", "color", "c")],
+        "cb1a6d003edd2bedc566a85d310eb266430b00e0143ea0d5681cede1af393827",
+    ),
+    "lmplot-encode-color": (
+        lambda: fm.lmplot(_W_CAT, x="x", y="y", encode={"color": "cat"}),
+        [
+            _dropped("lmplot", "ribbon", "color", "cat"),
+            _dropped("lmplot", "line", "color", "cat"),
+        ],
+        "e77ac1f870b76a33fc8230b63c43fb4d7c69444b4b2197636496a7abd6faa46e",
+    ),
+    "catplot-point-tooltip": (
+        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="point", tooltip="grp"),
+        [_dropped("catplot", "point", "tooltip", "grp")],
+        "d6002ccc9dd6882e00677cb808ef3fe957791e384381c9fab34961d2698a2dd6",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_W_CASES))
+def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(case):
+    """Ruling W: the statistic sub-layer warns and draws the SVG it drew before the gate.
+
+    Rejects refusing a call whose column is in the user's data (the
+    statistic's output, not the user, dropped it), and rejects dropping it
+    silently.
+    """
+    import hashlib
+
+    build, expected, digest = _W_CASES[case]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = build().to_svg()
+    assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == expected
+    assert hashlib.sha256(svg.encode()).hexdigest() == digest
+
+
+def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack():
+    """The control: a ``Layer(data=)`` line reads the user's rows, so the host's color refuses."""
+    with pytest.raises(ValueError) as refused:
+        _over_df2(P(color="c")).to_svg()
+    assert str(refused.value) == _absent("color", "c")
 
 
 def test_today_a_secondary_y_on_a_left_chain_names_the_statistic_remedy():

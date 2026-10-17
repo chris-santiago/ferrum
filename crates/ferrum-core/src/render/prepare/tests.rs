@@ -8218,3 +8218,539 @@ fn a_grid_facet_warns_per_field_for_its_null_rows() {
     let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
     assert_eq!(float_col(out, "v").iter().filter(|v| **v == 6.0).count(), 2);
 }
+
+// ── The column gate covers every channel ─────────────────────────────────────
+//
+// A layer beyond the first that names a column its own rows lack, on any
+// channel, is refused with the positional gate's classified message
+// (`validate_layer_columns`). Each test renders the whole chart, since which
+// batch a layer is judged against is chosen by the scene build.
+
+/// The gate fixture's rows: `x`, `y`, `z` (Float64) and `g`, `k` (Utf8).
+fn column_gate_batch() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("k", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![2.0, 1.0, 4.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            Arc::new(StringArray::from(vec!["k0", "k1", "k2", "k3"])),
+        ],
+    )
+    .expect("schema and columns agree")
+}
+
+/// A two-layer chart over [`column_gate_batch`]: `layers` as written,
+/// `transforms` before them. The chart-level encoding is layer 0's `x` and
+/// `y`, so every other binding is the layer's own.
+fn column_gate_spec(transforms: serde_json::Value, layers: serde_json::Value) -> ChartSpec {
+    let layer0 = &layers[0]["encoding"];
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": layers[0]["mark"],
+        "encoding": {"x": layer0["x"], "y": layer0["y"]},
+        "transforms": transforms,
+        "layers": layers,
+    }))
+    .expect("the layered spec deserializes")
+}
+
+/// A named statistic: the per-`g` mean of `z` as `mean_z`, published as
+/// `stats`. A layer reading the chart's rows does not see it.
+fn named_mean_z() -> serde_json::Value {
+    serde_json::json!([{"type": "aggregate", "ops": [{"field": "z", "fn": "mean", "as": "mean_z"}], "groupby": ["g"], "name": "stats"}])
+}
+
+/// An unnamed statistic the chart's rows advance through: per `g`, the sum
+/// of `x` as `total`. `z` and `k` are source columns it drops.
+fn chain_dropping_z_and_k() -> serde_json::Value {
+    serde_json::json!([{"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"]}])
+}
+
+/// The scene the whole pipeline builds for `spec` over `batch`, or its refusal,
+/// with the warnings raised either way.
+fn gate_render(spec: &ChartSpec, batch: &RecordBatch) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
+    pyo3::Python::initialize();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let theme = crate::layout::ThemeInputs::default();
+    let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = match crate::render::prepare_and_layout(
+        spec,
+        batch,
+        &theme,
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &chart_config,
+        None,
+    ) {
+        Ok(out) => out,
+        Err(e) => return (Err(e), Vec::new()),
+    };
+    let scene = crate::render::scene_build::build_scene(
+        spec,
+        &prep,
+        &layout,
+        &applied.effective_theme,
+        &crate::render::config::RenderConfig::default(),
+        &mut warnings,
+        &chart_config,
+        None,
+    );
+    (scene, warnings)
+}
+
+/// The refusal `spec` raises, which must be the gate's.
+fn gate_refusal(spec: &ChartSpec) -> RenderError {
+    match gate_render(spec, &column_gate_batch()).0 {
+        Err(e @ RenderError::LayerUnknownColumn { .. }) => e,
+        other => panic!("expected the column gate's refusal, got {:?}", other.map(|_| "a rendered scene")),
+    }
+}
+
+/// The gate's message for a column on layer 1, as its formatter writes it.
+fn gate_message(channel: &'static str, name: &str, remedy: Option<crate::render::MissingColumnRemedy>, independent_y: bool) -> String {
+    RenderError::LayerUnknownColumn { layer: 1, channel, name: name.into(), coord_flipped: false, remedy, independent_y }
+        .to_string()
+}
+
+/// Every non-positional channel a layer binds itself, naming a column found
+/// nowhere, refuses with the plain message naming the channel as `encode`
+/// writes it (`tooltip` for a `tooltip_fields` entry), each on a mark that
+/// draws the channel. Layer 0 binds the channels that build a chart-wide
+/// scale to a real column, so only the gate can refuse layer 1. Rejects the
+/// positional-only gate, under which every one of these rendered with the
+/// channel silently dropped.
+#[test]
+fn every_channel_naming_an_absent_column_refuses_with_the_plain_message() {
+    // (wire channel, as `encode` names it, layer 0's field for it, layer 0's mark, layer 1's mark)
+    let cases: [(&str, &'static str, Option<&str>, &str, &str); 16] = [
+        ("color", "color", Some("g"), "point", "point"),
+        ("size", "size", Some("z"), "point", "point"),
+        ("shape", "shape", Some("g"), "point", "point"),
+        ("opacity", "opacity", Some("z"), "point", "point"),
+        ("fill_opacity", "fill_opacity", Some("z"), "point", "point"),
+        ("stroke_opacity", "stroke_opacity", Some("z"), "point", "point"),
+        ("stroke_dash", "stroke_dash", Some("g"), "line", "line"),
+        ("stroke_width", "stroke_width", Some("z"), "line", "line"),
+        ("angle", "angle", None, "point", "point"),
+        ("text", "text", None, "point", "text"),
+        ("tooltip", "tooltip", None, "point", "point"),
+        ("tooltip_fields", "tooltip", None, "point", "point"),
+        ("key", "key", None, "point", "point"),
+        ("href", "href", None, "point", "point"),
+        ("description", "description", None, "point", "point"),
+        ("url", "url", None, "point", "image"),
+    ];
+    for (wire, voiced, layer0_field, layer0_mark, layer1_mark) in cases {
+        let binding = |field: &str| {
+            let one = serde_json::json!({"field": field});
+            if wire == "tooltip_fields" { serde_json::json!([{"field": "x"}, one]) } else { one }
+        };
+        let mut layer0 = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+        if let Some(field) = layer0_field {
+            layer0[wire] = binding(field);
+        }
+        let mut layer1 = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+        layer1[wire] = binding("nope");
+        let spec = column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([{"mark": layer0_mark, "encoding": layer0}, {"mark": layer1_mark, "encoding": layer1}]),
+        );
+        let err = gate_refusal(&spec);
+        assert!(
+            matches!(err, RenderError::LayerUnknownColumn { layer: 1, channel, ref name, remedy: None, .. } if channel == voiced && name == "nope"),
+            "{wire}: {err:?}"
+        );
+        assert_eq!(err.to_string(), gate_message(voiced, "nope", None, false), "{wire}");
+    }
+}
+
+/// A binding on a channel the layer's mark does not draw names no column it
+/// reads, so the gate does not judge it, own or inherited: a line's own
+/// `text` and `url`, and a chart-level `angle` every layer inherits that a
+/// line never draws. The control: the same own `text` on a text mark
+/// refuses.
+#[test]
+fn a_binding_on_a_channel_the_mark_does_not_draw_is_not_judged() {
+    let spec = |layer1_mark: &str| {
+        let mut spec = column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": layer1_mark, "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "nope"}, "url": {"field": "nope_url"}}},
+            ]),
+        );
+        spec.encoding.angle = Some(EncodingSpec { field: "nope_angle".into(), ..Default::default() });
+        spec
+    };
+    let (scene, _) = gate_render(&spec("line"), &column_gate_batch());
+    let scene = scene.expect("a line draws no text, url or angle");
+    assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "both layers draw");
+    assert_eq!(gate_refusal(&spec("text")).to_string(), gate_message("text", "nope", None, false));
+}
+
+/// The gate answers before any scale reads a column: a later layer that
+/// establishes a chart-wide scale (no earlier layer draws the channel) from
+/// a column its rows lack refuses in the gate's words, not as the scale
+/// builder's unlocated column. Spec §4.5's example, `color`, then `size` and
+/// `opacity`.
+#[test]
+fn a_later_layer_establishing_a_scale_from_an_absent_column_refuses_in_the_gates_words() {
+    for (wire, mark) in [("color", "line"), ("size", "point"), ("opacity", "point")] {
+        let mut layer1 = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+        layer1[wire] = serde_json::json!({"field": "nope"});
+        let spec = column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": mark, "encoding": layer1},
+            ]),
+        );
+        assert_eq!(gate_refusal(&spec).to_string(), gate_message(wire, "nope", None, false), "{wire}");
+    }
+}
+
+/// A statistic sub-layer (reading a named output no `Branch` publishes) that
+/// inherits a drawn chart-level binding whose column its statistic dropped,
+/// though the source holds it, draws without that channel and warns once,
+/// in the layer's voice. A chart-wide conditional's field branch it inherits
+/// is dropped the same way. Rejects refusing the inherited read, and rejects
+/// dropping it silently.
+#[test]
+fn a_statistic_sub_layer_drops_an_inherited_read_its_statistic_does_not_carry_with_a_warning() {
+    let mut spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}},
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    spec.conditionals = vec![serde_json::from_value(serde_json::json!({
+        "selection_name": "pick", "channel": "size",
+        "if_selected": {"kind": "field", "name": "z"},
+        "if_not": {"kind": "size", "value": 10.0},
+    }))
+    .expect("a conditional")];
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    let scene = scene.expect("the statistic layer draws without the dropped channels");
+    assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "both layers draw");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        [
+            "layer 1: mark_point: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color",
+            "layer 1: mark_point: size 'z' was dropped: the statistic this point mark draws does not carry 'z', so it draws without size",
+        ]
+    );
+}
+
+/// What still refuses beside a statistic sub-layer's dropped read: the same
+/// column bound by the statistic layer itself (its own binding), the same
+/// inherited binding on a layer over the user's rows (a `Branch` output),
+/// and an inherited column found nowhere, even in the source.
+#[test]
+fn own_bindings_raw_row_layers_and_unknown_columns_still_refuse_beside_a_statistic_layer() {
+    let own = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}, "color": {"field": "k"}}},
+        ]),
+    );
+    assert_eq!(gate_refusal(&own).to_string(), gate_message("color", "k", None, false));
+
+    let mut branch = column_gate_spec(
+        serde_json::json!([{"type": "branch", "name": "rows", "transforms": chain_dropping_z_and_k()}]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "data_source": "rows", "encoding": {"x": {"field": "total"}, "y": {"field": "total"}}},
+        ]),
+    );
+    branch.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    assert_eq!(gate_refusal(&branch).to_string(), gate_message("color", "k", None, false));
+
+    let mut nowhere = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}},
+        ]),
+    );
+    nowhere.encoding.tooltip = Some(EncodingSpec { field: "nope".into(), ..Default::default() });
+    assert_eq!(gate_refusal(&nowhere).to_string(), gate_message("tooltip", "nope", None, false));
+}
+
+/// A layer's `detail` grouping column is checked as its channels are.
+#[test]
+fn a_detail_naming_an_absent_column_refuses() {
+    let spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"detail": "nope"}},
+        ]),
+    );
+    assert_eq!(gate_refusal(&spec).to_string(), gate_message("detail", "nope", None, false));
+}
+
+/// A field branch of a conditional layer 1 declared is checked against
+/// layer 1's rows and named by the conditional's channel. The control: the
+/// same conditional declared only by layer 0, over rows that hold its
+/// field, renders.
+#[test]
+fn a_conditional_field_branch_naming_an_absent_column_refuses() {
+    let conditional = |field: &str, layers: serde_json::Value| {
+        serde_json::json!({
+            "selection_name": "pick", "channel": "size",
+            "if_selected": {"kind": "field", "name": field},
+            "if_not": {"kind": "size", "value": 10.0},
+            "layers": layers,
+        })
+    };
+    let layers = serde_json::json!([
+        {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+        {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+    ]);
+    let mut spec = column_gate_spec(serde_json::json!([]), layers.clone());
+    spec.conditionals = vec![serde_json::from_value(conditional("nope", serde_json::json!([1]))).expect("a conditional")];
+    assert_eq!(gate_refusal(&spec).to_string(), gate_message("size", "nope", None, false));
+
+    let mut declared_by_layer_0 = column_gate_spec(serde_json::json!([]), layers);
+    declared_by_layer_0.conditionals = vec![serde_json::from_value(conditional("nope", serde_json::json!([0]))).expect("a conditional")];
+    assert!(
+        !matches!(gate_render(&declared_by_layer_0, &column_gate_batch()).0, Err(RenderError::LayerUnknownColumn { .. })),
+        "a conditional layer 1 did not declare is not layer 1's"
+    );
+}
+
+/// A column the layer's own statistic produces is in the layer's own rows:
+/// a layer reading `stats` draws `mean_z` on color and passes.
+#[test]
+fn a_column_the_layers_own_statistic_produces_passes() {
+    let spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "z"}}},
+            {"mark": "point", "data_source": "stats",
+             "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}, "color": {"field": "mean_z"}, "tooltip": {"field": "g"}}},
+        ]),
+    );
+    let scene = gate_render(&spec, &column_gate_batch()).0.expect("every column layer 1 names is in its own rows");
+    assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "both layers draw");
+}
+
+/// Layer 0 keeps its exemption: a column it names that its rows lack is not
+/// the gate's to refuse.
+#[test]
+fn layer_zero_stays_exempt_from_the_column_gate() {
+    let spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "tooltip": {"field": "nope"}}},
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+        ]),
+    );
+    let (scene, _) = gate_render(&spec, &column_gate_batch());
+    assert!(!matches!(scene, Err(RenderError::LayerUnknownColumn { .. })), "{scene:?}");
+}
+
+/// A layer reading a named output of its own (a `data_source` the wire does
+/// not mark as the chart's rows) keeps the plain message, even for a column
+/// the chart's source holds: no chart-data remedy describes its rows.
+#[test]
+fn a_data_source_layer_not_reading_the_charts_rows_keeps_the_plain_message() {
+    let spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {"mark": "point", "data_source": "stats",
+             "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}, "tooltip": {"field": "k"}}},
+        ]),
+    );
+    assert_eq!(gate_refusal(&spec).to_string(), gate_message("tooltip", "k", None, false));
+}
+
+/// A non-positional column the chart's chain dropped names the source
+/// remedy, spelled for the layer's axis: `+` on the shared y axis,
+/// `fm.LayerChart(..., resolve={"y": "independent"})` on its own (the y-slot
+/// route, which runs the same gate before resolving).
+#[test]
+fn a_source_column_the_chain_dropped_names_the_source_remedy_on_either_axis() {
+    use crate::render::MissingColumnRemedy::Source;
+    for independent_y in [false, true] {
+        let spec = column_gate_spec(
+            chain_dropping_z_and_k(),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "total"}, "y": {"field": "total"}, "color": {"field": "g"}}},
+                {"mark": "point", "independent_y": independent_y,
+                 "encoding": {"x": {"field": "total"}, "y": {"field": "total"}, "color": {"field": "z"}, "key": {"field": "k"}}},
+            ]),
+        );
+        let message = gate_refusal(&spec).to_string();
+        assert_eq!(message, gate_message("color", "z", Some(Source), independent_y));
+        let remedy_door = if independent_y { "fm.LayerChart(" } else { "with `+`" };
+        assert!(message.contains(remedy_door), "{message}");
+    }
+}
+
+/// A non-positional column only another batch the pipeline produced holds
+/// names the statistic remedy, spelled for the layer's axis.
+#[test]
+fn a_statistic_column_names_the_statistic_remedy_on_either_axis() {
+    use crate::render::MissingColumnRemedy::Statistic;
+    for independent_y in [false, true] {
+        let spec = column_gate_spec(
+            named_mean_z(),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": "point", "independent_y": independent_y,
+                 "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "tooltip_fields": [{"field": "mean_z"}]}},
+            ]),
+        );
+        let message = gate_refusal(&spec).to_string();
+        assert_eq!(message, gate_message("tooltip", "mean_z", Some(Statistic), independent_y));
+        let remedy_door = if independent_y { "fm.LayerChart(" } else { "composed with `+`" };
+        assert!(message.contains(remedy_door), "{message}");
+    }
+}
+
+/// A later layer whose color reads categorical under the numeric color scale
+/// layer 0 establishes is left out of that scale with one warning and draws
+/// its constant paint, on a tick (a stroke-only mark reading per-row color
+/// through the fallible reader) as on a point. Rejects refusing the tick's
+/// `g` as an unsupported numeric dtype.
+#[test]
+fn a_color_left_out_of_a_numeric_scale_draws_unscaled_on_every_mark() {
+    for mark in ["tick", "point", "rule"] {
+        let mut layer1 = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}});
+        if mark == "rule" {
+            layer1["x2"] = serde_json::json!({"field": "z"});
+        }
+        let spec = column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "z"}}},
+                {"mark": mark, "encoding": layer1},
+            ]),
+        );
+        let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+        let scene = scene.unwrap_or_else(|e| panic!("{mark}: the left-out layer draws: {e}"));
+        assert_eq!(scale_exclusions(&warnings), excluded(1, 0, "color"), "{mark}");
+        assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "{mark}: both layers draw");
+    }
+}
+
+/// A layer reads the user's rows when its `data_source` is a `Branch`
+/// output, at any nesting (a nested branch's tail is published scoped under
+/// its enclosing branch), and a statistic's output when it names any other
+/// published key: a named step's output, scoped or not.
+#[test]
+fn a_layer_reads_a_statistic_unless_a_branch_publishes_its_data_source() {
+    let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
+        {"type": "branch", "name": "outer", "transforms": [
+            {"type": "branch", "name": "inner", "transforms": [{"type": "filter", "predicate": "true"}]},
+            {"type": "aggregate", "ops": [{"field": "z", "fn": "mean", "as": "mean_z"}], "groupby": ["g"], "name": "stats"},
+        ]},
+    ]))
+    .expect("the transforms deserialize");
+    let reading = |data_source: Option<&str>| {
+        let layer = crate::spec::layer::Layer { data_source: data_source.map(str::to_string), ..Default::default() };
+        reads_statistic_output(&LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer), &transforms)
+    };
+    assert!(!reading(None));
+    assert!(!reading(Some("outer")));
+    assert!(!reading(Some("outer_inner")));
+    assert!(reading(Some("outer_stats")));
+}
+
+/// A dropped column warns once per layer, naming the first channel that
+/// dropped it: an inherited `tooltip_fields` entry mirroring an inherited
+/// `color` on the same column is cleared with it and raises no second
+/// warning.
+#[test]
+fn a_column_a_statistic_layer_drops_on_two_channels_warns_once_naming_the_first() {
+    let mut spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}},
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    spec.encoding.tooltip_fields = Some(vec![EncodingSpec { field: "k".into(), ..Default::default() }]);
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    scene.expect("the statistic layer draws without k");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        ["layer 1: mark_point: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color"]
+    );
+}
+
+/// A layer-voiced message names a layer by its index only when the caller
+/// placed it: a layer whose entry is its own mark's primitive, or that
+/// records none. A desugaring call's sub-layer, and an unlayered chart's one
+/// layer, carry no index.
+#[test]
+fn public_layer_names_only_a_layer_the_caller_placed() {
+    let spec = |entry: Option<&str>| {
+        let mut layered = column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            ]),
+        );
+        layered.layers.as_mut().expect("layered")[1].entry = entry.map(str::to_string);
+        layered
+    };
+    assert_eq!(public_layer(&spec(Some("mark_point")), 1, Mark::Point), Some(1));
+    assert_eq!(public_layer(&spec(None), 1, Mark::Point), Some(1));
+    assert_eq!(public_layer(&spec(Some("mark_boxen")), 1, Mark::Point), None);
+    assert_eq!(public_layer(&ChartSpec { mark: Mark::Point, ..Default::default() }, 0, Mark::Point), None);
+}
+
+/// Two sibling sub-layers one desugaring call built, of the same mark, that
+/// drop the same inherited column raise identical text (neither names an
+/// index), which is reported once. Rejects one warning per sub-layer.
+#[test]
+fn sibling_sub_layers_of_one_call_dropping_one_column_warn_once() {
+    let sub_layer = serde_json::json!(
+        {"mark": "point", "data_source": "stats", "entry": "mark_boxen",
+         "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}}
+    );
+    let mut spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            sub_layer.clone(),
+            sub_layer,
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    scene.expect("both sub-layers draw without k");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        ["mark_boxen: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color"]
+    );
+}

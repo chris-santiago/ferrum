@@ -442,34 +442,19 @@ def _remap_polar_channels(coord, enc: dict) -> dict:
     return enc
 
 
-def _selection_field_names(selections: list) -> set[str]:
-    """Collect the union of field names tracked by field-based selections.
+def _layer_drawn_encoding(layer: dict, encoding: dict) -> dict:
+    """The channels of *encoding* the wire *layer*'s mark draws: positional ones and its table's.
 
-    Shared by :meth:`SpecBuildMixin._inject_selection_tooltips` and
-    :meth:`SpecBuildMixin._inject_auto_tooltips`, both of which need "every
-    field named in an active selection's ``fields`` list" to keep
-    cross-panel linked-selection matching fields rather than only data
-    index. Callers apply their own ordering (``_inject_selection_tooltips``
-    merges with existing fields then sorts; ``_inject_auto_tooltips`` sorts
-    directly) -- this helper only collects the unordered set.
-
-    Parameters
-    ----------
-    selections : list
-        Resolved selection objects (e.g. ``self._selections`` or
-        ``resolved._selections``); entries may be ``None``.
-
-    Returns
-    -------
-    set of str
-        Field names from every selection whose ``params`` dict carries a
-        non-empty ``"fields"`` list.
+    Read from Rust's one per-mark table (``ferrum._core.mark_drawn_channels``).
     """
-    field_names: set[str] = set()
-    for s in selections:
-        if s is not None and hasattr(s, "params") and s.params.get("fields"):
-            field_names.update(s.params["fields"])
-    return field_names
+    from ferrum._core import mark_drawn_channels
+
+    drawn = set(mark_drawn_channels(layer["mark"]))
+    return {
+        channel: value
+        for channel, value in encoding.items()
+        if channel in _POSITIONAL or channel in drawn
+    }
 
 
 class SpecBuildMixin:
@@ -1154,49 +1139,6 @@ class SpecBuildMixin:
                     f"Use a finite bound instead of Inf or NaN."
                 )
 
-    @staticmethod
-    def _inject_selection_tooltips(kw: dict, selections: list) -> None:
-        """Merge selection-tracked fields into the spec-assembly tooltip keys.
-
-        Called during ``to_spec()`` to ensure that every field named in an
-        active selection's ``fields`` list is also present in the chart's
-        tooltip, so cross-panel linked-selection can match marks by field
-        value rather than only by data index.
-
-        Operates on the ``kw`` dict being assembled before ``ChartSpec`` is
-        constructed (``tooltip`` values are still Python channel objects;
-        ``tooltip_fields`` is a JSON string when present).  Mutates *kw* in
-        place; returns nothing.
-
-        Parameters
-        ----------
-        kw : dict
-            The spec-assembly keyword dict (in-progress ``ChartSpec`` kwargs).
-        selections : list
-            The resolved selections list (``resolved._selections``).
-        """
-        sel_fields = _selection_field_names(selections)
-        if not sel_fields:
-            return
-        existing: set[str] = set()
-        if "tooltip_fields" in kw:
-            for entry in json.loads(kw["tooltip_fields"]):
-                existing.add(entry.get("field", ""))
-        elif "tooltip" in kw:
-            existing.add(getattr(kw["tooltip"], "field", ""))
-        missing = sel_fields - existing
-        if not missing:
-            return
-        tf_list: list[dict] = []
-        if "tooltip_fields" in kw:
-            tf_list = json.loads(kw["tooltip_fields"])
-        elif "tooltip" in kw:
-            tf_list = [{"field": getattr(kw["tooltip"], "field", "")}]
-            del kw["tooltip"]
-        for f in sorted(missing):
-            tf_list.append({"field": f})
-        kw["tooltip_fields"] = json.dumps(tf_list)
-
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
 
@@ -1225,30 +1167,27 @@ class SpecBuildMixin:
         from a layer (a ``+`` operand's own tooltip stays on its layers). It
         therefore reaches every layer that binds none, through Rust's
         chart-level fallback (``Encoding::inherit_from``), and short-circuits
-        the per-layer loop below. Two cases still run the loop:
+        the per-layer loop below.
 
-        - ``_inject_selection_tooltips`` (called earlier in ``to_spec_dict``,
-          before this method sees the wire) merges a field-based selection's
-          ``fields`` into chart-level ``tooltip_fields`` whenever the chart
-          carries an active field-based selection (GH #58). That is not a
-          chart-wide declaration -- selection injection exists purely to
-          make cross-layer selection matching work -- so each layer still
-          gets its own auto fields, unioned with the selection's fields
-          (selection fields appended after each layer's own, deduplicated by
-          field name, mirroring the existing-first-then-selection-appended
-          order ``_inject_selection_tooltips`` itself uses for the unlayered
-          case). The selection's field set is re-derived directly from
-          ``self._selections`` (not read off the wire).
-        - No chart-level tooltip at all.
+        Each layer the loop fills lists either its own bindings' fields,
+        which stay its own, or, when its own drawn encoding names no field,
+        the fields of everything it draws over the chart-level encoding
+        (without x/y/x2/y2 for a layer reading a named output, as Rust's
+        ``inherit_non_positional``). That second list mirrors the parent's
+        bindings, so it is listed in the layer's ``inherited_channels`` as
+        ``tooltip_fields``, and the column gate judges it as the inherited
+        read it stands for. It may be empty: an empty list still binds the
+        tooltip, so the chart-level auto list never reaches a layer that
+        draws none of its fields. A layer's auto fields name only the
+        channels its mark draws (:func:`_layer_drawn_encoding`).
 
-        A selection-injected chart-level tooltip is one present in the wire
-        but absent from ``self._encoding``: ``tooltip_fields`` is never
-        itself a settable channel, and a written tooltip always leaves
-        ``self._encoding`` carrying ``tooltip``. A layer that itself carries
-        an explicit ``tooltip``/``tooltip_fields`` is always left untouched
-        by the loop (its own explicit value always wins for that layer).
-        An unlayered chart has no ``kw["layers"]`` key, so only the
-        chart-level fields apply.
+        A field selection's ``fields`` (GH #58) are match keys, not
+        bindings, and are never written here: Rust's one tooltip reader
+        appends them after each layer's own entries, skipping a field the
+        layer's rows lack, for both output kinds. A layer that itself
+        carries an explicit ``tooltip``/``tooltip_fields`` is left untouched
+        by the loop. An unlayered chart has no ``kw["layers"]`` key, so only
+        the chart-level fields apply.
 
         Parameters
         ----------
@@ -1263,68 +1202,39 @@ class SpecBuildMixin:
             level and, for layered charts, on each layer's own encoding.
         """
         enc = kw.get("encoding") or {}
-        chart_level_explicit = "tooltip" in enc or "tooltip_fields" in enc
-        if not chart_level_explicit:
-            auto_fields = _auto_tooltip_fields(enc)
-            if auto_fields:
-                kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
-
-        layers = kw.get("layers") or []
-        # GH #58: a selection-injected chart-level tooltip_fields entry never
-        # appears in self._encoding (only _inject_selection_tooltips's mutation
-        # of the wire kw put it there); a written tooltip always does. That
-        # distinguishes "the chart-level tooltip exists SOLELY because of a
-        # selection" (short-circuit must not fire) from a written one,
-        # without threading extra state through to_spec_dict.
-        selection_injected = chart_level_explicit and "tooltip" not in self._encoding
-        if chart_level_explicit and not selection_injected:
+        if "tooltip" in enc or "tooltip_fields" in enc:
             # The parent's written tooltip -- it reaches every layer that
             # binds none via Rust's chart-level tooltip_fields fallback
             # (Encoding::inherit_from).
             return kw
+        auto_fields = _auto_tooltip_fields(enc)
+        if auto_fields:
+            kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
 
-        # GH #58: the selection's own field set, re-derived directly from
-        # self._selections (mirroring _inject_selection_tooltips's own
-        # field-collection): every tooltip-less layer picks up those
-        # selection fields beside its own auto fields.
-        selection_field_names = _selection_field_names(self._selections)
-        selection_fields = (
-            [{"field": f} for f in sorted(selection_field_names)] if selection_field_names else None
-        )
-
-        for layer in layers:
-            layer_enc = layer.get("encoding") or {}
+        for layer in kw.get("layers") or []:
+            layer_enc = layer.setdefault("encoding", {})
             if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
                 continue
             # A layer lists its own fields: its wire encoding less what it
             # carries from a parent (``inherited_channels`` and
             # ``inherited_positional``, the wire twin of
-            # ``_layer_transforms._own_channels``). A layer that binds no
-            # field of its own lists the fields of everything it draws, its
-            # wire encoding over the chart-level one (without x/y/x2/y2 for
-            # a layer reading a named output, as Rust's
-            # ``inherit_non_positional``), which is the list it would
-            # otherwise take from the chart level, naming the columns its
-            # own rows carry. Either way the layer draws the tooltip it
-            # draws alone.
+            # ``_layer_transforms._own_channels``).
             carried = set(layer.get("inherited_channels") or ()) | set(
                 layer.get("inherited_positional") or ()
             )
             own = {channel: value for channel, value in layer_enc.items() if channel not in carried}
-            layer_auto_fields = _auto_tooltip_fields(own)
-            if not layer_auto_fields:
-                parent = {
-                    channel: value
-                    for channel, value in enc.items()
-                    if channel != "tooltip_fields"
-                    and ("data_source" not in layer or channel not in _POSITIONAL)
-                }
-                layer_auto_fields = _auto_tooltip_fields({**parent, **layer_enc})
-            if selection_fields:
-                seen_fields = {f.get("field") for f in layer_auto_fields}
-                layer_auto_fields = layer_auto_fields + [
-                    dict(f) for f in selection_fields if f.get("field") not in seen_fields
-                ]
-            if layer_auto_fields:
-                layer.setdefault("encoding", {})["tooltip_fields"] = layer_auto_fields
+            own_fields = _auto_tooltip_fields(_layer_drawn_encoding(layer, own))
+            if own_fields:
+                layer_enc["tooltip_fields"] = own_fields
+                continue
+            parent = {
+                channel: value
+                for channel, value in enc.items()
+                if channel != "tooltip_fields"
+                and ("data_source" not in layer or channel not in _POSITIONAL)
+            }
+            layer_enc["tooltip_fields"] = _auto_tooltip_fields(
+                _layer_drawn_encoding(layer, {**parent, **layer_enc})
+            )
+            layer["inherited_channels"] = [*layer.get("inherited_channels", ()), "tooltip_fields"]
         return kw

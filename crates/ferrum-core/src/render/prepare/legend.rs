@@ -1848,6 +1848,7 @@ mod tests {
             color_is_own: color_field.is_some(),
             size_is_own: false,
             stroke_width_is_own: false,
+            dropped_reads: Vec::new(),
         }
     }
 

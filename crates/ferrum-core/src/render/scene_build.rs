@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::PreparedInputs;
+use super::prepare::{layer_entry, public_layer, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -1095,7 +1095,6 @@ fn resolve_panel_scales(
         for &layer_idx in prep.y_slot_plan.secondary_layers() {
             let y_scale = resolve_layer_y_scale(
                 ctx,
-                layer_idx,
                 &prep.layers[layer_idx],
                 &layer_batches[layer_idx],
                 panel,
@@ -1129,7 +1128,6 @@ fn resolve_panel_scales(
 /// layer 0's. A genuine y-field error still propagates as `Err`.
 fn resolve_layer_y_scale(
     ctx: &PanelResolveCtx,
-    layer_idx: usize,
     layer: &super::prepare::LayerPrepared,
     layer_batch: &RecordBatch,
     panel: &crate::layout::PanelLayout,
@@ -1158,8 +1156,6 @@ fn resolve_layer_y_scale(
         transform_outputs: &prep.transform_outputs,
         theme,
         leaf_scales,
-        layer_idx,
-        source_schema: prep.source_schema.as_ref(),
     };
     let (mut y, layer_warnings) = scale_resolve::resolve_layer_y_slot_scale(
         &layer_ctx,
@@ -1585,111 +1581,11 @@ fn route_panel_axes_and_grid(
     }
 }
 
-/// The ownership facts [`layer_geometry_encoding`] needs to decide its two
-/// normalizations, bundled rather than read off `LayerPrepared` and
-/// `mark_style` directly inside that function: `has_own_literal_paint` is
-/// derived from `mark_style` (a `DrawCtx`-local value this function does not
-/// otherwise need), so the caller computes it once and hands over the
-/// finished facts.
-struct LayerGeometryFlags {
-    /// Whether this layer declared its own `color` channel — see
-    /// [`LayerPrepared::color_is_own`].
-    color_is_own: bool,
-    /// Whether this layer's OWN `stroke=`/`fill=` mark kwarg names a real
-    /// color (not a clear like `stroke="none"`) — see the own-color doc
-    /// below for why a clear does not count.
-    has_own_literal_paint: bool,
-    /// The inherited width bindings this layer yields — see
-    /// [`LayerPrepared::yielded_widths`].
-    yielded_widths: crate::render::prepare::YieldedWidths,
-}
-
-/// The DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
-/// needs before a mark builder sees its encoding: the own-color exemption
-/// and the own-width precedence for line. None ever touches
-/// `layer.encoding` itself — both apply to a clone, so scale domains, axis
-/// chrome, position grouping, and the legend keep reading the merged
-/// encoding unchanged, while the geometry sees only the shape THIS layer
-/// actually declared.
-///
-/// **Own-color exemption** (spec §4.4): a layer whose `color` channel came
-/// purely from chart-level inheritance (`!flags.color_is_own`) must not have
-/// it reach the mark builder's per-row color read when doing so would
-/// override that layer's own declared paint — only the layer's OWN declared
-/// `color=` may drive per-row/per-group color variation. Applies
-/// unconditionally to `Mark::Text` (the `heatmap(annot=True)` colored-cells +
-/// colorless-labels shape, where an un-colored label must NEVER borrow the
-/// cells' hue), and to any OTHER mark only when that layer ALSO carries its
-/// own literal `stroke=`/`fill=` override that names a real
-/// color (`flags.has_own_literal_paint` — a *cleared* paint like
-/// `fill="none"`/`stroke="transparent"` does NOT count, because
-/// `desugar_ribbon`/`desugar_errorband` always pass `stroke="none"`, and
-/// reading that as "own paint" would strip the color channel those layers
-/// group their bands by) — a chart-level `color` set
-/// for one layer's legend (e.g. a diagnostic chart's per-class curve)
-/// silently repainted a sibling layer's own literal stroke override with the
-/// categorical palette's first color whenever that sibling declared no color
-/// of its own (`fm.roc_chart`'s grey dashed chance-diagonal `reference` line
-/// flipping to the first class's blue, fanning out into one duplicate
-/// polyline per class). The literal-override gate is deliberately narrower
-/// than "any non-owning mark": a layer with NO literal paint override that
-/// relies on a genuinely shared chart-level `color` to vary ITS OWN
-/// per-row/per-group fill — e.g. `catplot(kind="box", hue=x)`'s IQR
-/// `rect`/tick-cap/outlier-`point` layers, none of which declare their own
-/// `color=` because the desugar treats the shared x-axis category as the hue
-/// and lets every layer inherit it — must keep inheriting; an unconditional
-/// strip (mirroring the Text rule) would flatten every box to the first
-/// category's color instead of one color per box.
-///
-/// For a GROUPING mark (line/area/ribbon — `marks/line.rs`'s
-/// `build_color_detail_groups`), the cleared channel is not just a paint
-/// input: it is also the per-group split key, so clearing it collapses
-/// whatever per-color groups that layer's OWN batch would otherwise fan out
-/// into back down to a single merged node/polyline over every row — the
-/// desired effect for a literal-stroke layer that is conceptually ONE curve
-/// (the `roc_chart` chance-diagonal is collinear, so the merge is invisible),
-/// but a real topology change in general.
-///
-/// **Own-width precedence for line.** The inherited width bindings a line
-/// yields to a width it owns ([`LayerPrepared::yielded_widths`]) are dropped
-/// here. The scale keeps reading the merged `size`, so the other layers keep
-/// it, and the size legend asks the same precedence which layers draw it.
-fn layer_geometry_encoding(
-    merged: crate::spec::encoding::Encoding,
-    mark: crate::spec::mark::Mark,
-    flags: LayerGeometryFlags,
-) -> crate::spec::encoding::Encoding {
-    let mut encoding = merged;
-    if !flags.color_is_own
-        && (mark == crate::spec::mark::Mark::Text || flags.has_own_literal_paint)
-    {
-        encoding.color = None;
-    }
-    if flags.yielded_widths.size {
-        encoding.size = None;
-    }
-    if flags.yielded_widths.stroke_width {
-        encoding.stroke_width = None;
-    }
-    encoding
-}
-
-/// The public entry layer `li` of `spec` names in its refusals: the layer's
-/// own, else the chart's, else the mark's.
-fn layer_entry(spec: &ChartSpec, li: usize, mark: crate::spec::mark::Mark) -> String {
-    spec.layers
-        .as_ref()
-        .and_then(|layers| layers.get(li))
-        .and_then(|l| l.entry.clone())
-        .or_else(|| spec.entry.clone())
-        .unwrap_or_else(|| format!("mark_{}", mark.as_str()))
-}
-
 /// Wrap `e` in layer `li`'s voice ([`RenderError::in_layer_context`]): its
-/// index on a layered chart (an unlayered chart's one layer is the chart
-/// itself) and its public [`layer_entry`].
-fn in_layer_voice(e: RenderError, spec: &ChartSpec, li: usize, entry: &str) -> RenderError {
-    e.in_layer_context(spec.layers.is_some().then_some(li), entry)
+/// index when the caller placed it ([`public_layer`]; an unlayered chart's
+/// one layer is the chart itself) and its public [`layer_entry`].
+fn in_layer_voice(e: RenderError, spec: &ChartSpec, li: usize, mark: crate::spec::mark::Mark, entry: &str) -> RenderError {
+    e.in_layer_context(public_layer(spec, li, mark), entry)
 }
 
 /// Every layer's resolved mark style, indexed like `prep.layers`, each
@@ -1705,7 +1601,7 @@ fn resolve_layer_styles(
         .enumerate()
         .map(|(li, layer)| {
             draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)
-                .map_err(|e| in_layer_voice(e, spec, li, &layer_entry(spec, li, layer.mark)))
+                .map_err(|e| in_layer_voice(e, spec, li, layer.mark, &layer_entry(spec, li, layer.mark)))
         })
         .collect()
 }
@@ -1753,25 +1649,25 @@ fn build_panel_mark_batches(
         // This layer's OWN resolved batch — the base data, or the named
         // `data_source` output it reads — captured before the
         // position-adjustment shadowing below, because that is the batch the
-        // positional gate (`validate_layer_positional_columns`, called with
-        // the DrawCtx-local encoding further down) means by "this layer's own
-        // data". Position adjustment never adds a column an encoding could
-        // name, so checking the pre-adjust batch and the post-adjust one give
-        // the same answer today; binding the pre-adjust one keeps the gate's
-        // contract independent of that fact.
+        // coord-exchange gate further down means by "this layer's own data".
+        // Position adjustment never adds a column an encoding could name, so
+        // checking the pre-adjust batch and the post-adjust one give the same
+        // answer today; binding the pre-adjust one keeps the gate's contract
+        // independent of that fact.
         let own_batch: &RecordBatch = layer_batch;
 
         // Every refusal raised building this layer is wrapped in
         // `RenderError::InLayer`: its index on a layered chart (an unlayered
         // chart's one layer is the chart itself), and the public entry that
         // produced it, the layer's own, else the chart's, else the mark's.
-        // The two positional gates below stay outside it: theirs are the
-        // shared-panel refusals, raised in the same words by scale resolution
-        // and by the composite route's (`fm.layer`), neither of which runs
-        // inside a layer's draw, so each names its layer as `layer {i}: `
-        // and `+` and `fm.layer` refuse alike.
+        // The coord-exchange gate below stays outside it, as the column gate
+        // in `prepare` does: theirs are the shared-panel refusals, raised in
+        // the same words by scale resolution and by the composite route's
+        // (`fm.layer`), neither of which runs inside a layer's draw, so each
+        // names its layer as `layer {i}: ` and `+` and `fm.layer` refuse
+        // alike.
         let entry = layer_entry(spec, li, layer.mark);
-        let name_layer = |e: RenderError| in_layer_voice(e, spec, li, &entry);
+        let name_layer = |e: RenderError| in_layer_voice(e, spec, li, layer.mark, &entry);
 
         // This layer's coordinate system (`#172`(1)), already resolved against
         // the chart's by `prepare`, and whether it exchanges the positional
@@ -1842,16 +1738,8 @@ fn build_panel_mark_batches(
         .map_err(name_layer)?;
         let layer_batch: &RecordBatch = &adjusted_owned;
 
-        // Synthetic ChartSpec for this layer. The `encoding` here is a
-        // DrawCtx-LOCAL copy — everything else in this loop (position
-        // grouping just above, key extraction below, and the legend's own
-        // separate resolution in `resolve_legend_color_scale`) reads
-        // `layer.encoding` directly and is never touched by what follows.
-        //
-        // Read before the own-color exemption below because that
-        // exemption's non-Text branch needs to know whether THIS layer
-        // carries its own literal stroke/fill override. Resolved, and any
-        // malformed field refused, once per chart ([`resolve_layer_styles`]).
+        // The layer's resolved style: resolved, and any malformed field
+        // refused, once per chart ([`resolve_layer_styles`]).
         let mut mark_style = layer_styles[li].clone();
         // Set the fallback dot area: unchanged for an unfed layer, or the
         // swarm's own dot (drawn at declared `point_size`) for a swarm-fed
@@ -1860,18 +1748,14 @@ fn build_panel_mark_batches(
             mark_style.point.point_size = crate::render::marks::point::fallback_dot(layer, swarm.map(|p| p.spec), theme).area();
         }
 
-        let has_own_literal_paint = mark_style.paint.stroke_source
-            == crate::render::draw::PaintSource::UserColor
-            || mark_style.paint.fill_source == crate::render::draw::PaintSource::UserColor;
-        let layer_spec_encoding = layer_geometry_encoding(
-            layer.encoding.clone(),
-            layer.mark,
-            LayerGeometryFlags {
-                color_is_own: layer.color_is_own,
-                has_own_literal_paint,
-                yielded_widths: layer.yielded_widths(),
-            },
-        );
+        // Synthetic ChartSpec for this layer. The `encoding` here is a
+        // DrawCtx-LOCAL copy, the bindings this layer's mark draws
+        // ([`LayerPrepared::drawn_encoding`](super::prepare::LayerPrepared::drawn_encoding)):
+        // everything else in this loop (position grouping just above, key
+        // extraction below, and the legend's own separate resolution in
+        // `resolve_legend_color_scale`) reads `layer.encoding` directly and is
+        // never touched by what follows.
+        let layer_spec_encoding = layer.drawn_encoding();
         // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
         // Stamped onto the synthetic spec so every mark builder that asks
         // `ctx.spec.coord` — `arc::polar_geom`, `bar::build_polar`,
@@ -1902,7 +1786,7 @@ fn build_panel_mark_batches(
         if let Some(overrides) = layer.mark_style.as_ref() {
             for (field, needs) in draw::inert_style_fields(overrides, &ctx).map_err(name_layer)? {
                 let inert = RenderWarning::MarkStyleInert {
-                    layer: spec.layers.is_some().then_some(li),
+                    layer: public_layer(spec, li, layer.mark),
                     entry: entry.clone(),
                     mark: layer.mark,
                     field: field.to_string(),
@@ -1914,36 +1798,16 @@ fn build_panel_mark_batches(
             }
         }
 
-        // Both refusal gates below read the encoding the mark builder will
+        // The mark-shape gate below reads the encoding the mark builder will
         // actually see — the DrawCtx-local copy — so a refusal gate and the
         // geometry can never disagree about a layer's shape. The positional channels
         // are the layer's completed ones (`Layer::completed_encoding`), so
-        // nothing here touches them.
+        // nothing here touches them. Every column that encoding names was
+        // checked against this layer's own rows once, in `prepare`, before
+        // any scale read one (`prepare::validate_layer_columns`).
         //
-        // The positional gate (layers ≥ 1, F-L10-01 rider) is checked against
-        // `own_batch` — this layer's own resolved batch, captured above before
-        // the position-adjustment shadowing. It sits here, on this side of the
-        // normalization, for exactly the reason `validate_mark_encoding` does:
-        // on the other side it refused a `mark_rule`/`mark_tick` layer over an
-        // inherited channel the normalization then cleared and no builder ever
-        // read — a working chart turned into a hard error.
-        //
-        // The gate searches every batch the pipeline saw to name where a
-        // missing column does exist, which picks the remedy it names.
-        super::prepare::validate_layer_positional_columns(
-            li,
-            layer,
-            &layer_spec.encoding,
-            own_batch,
-            layer_flipped,
-            &super::prepare::PipelineBatches {
-                source: prep.source_schema.as_ref(),
-                outputs: &prep.transform_outputs,
-                transforms: &spec.transforms,
-            },
-        )?;
         // `#172`(1)'s second refusal reason (wave-5 close remediation). Asked
-        // here, after the presence gate above and before the mark-shape gate
+        // here, after the presence gate in `prepare` and before the mark-shape gate
         // below, because the three answer one escalating question about this
         // layer: is the column there, can the axis it lands on draw it, does the
         // mark have the channels it needs. Needs `scales`, which is why it cannot
@@ -3647,11 +3511,11 @@ fn validate_mark_encoding(
     }
 }
 
-// `validate_layer_positional_columns` lives in `render::prepare`:
-// `scale_resolve::resolve_layer_y_slot_scale` (the `SecondaryY(...)`/
-// independent-y route) needs the same gate, and `prepare` is the one module
-// both `scene_build` and `scale_resolve` already call. See it there for the
-// full doc.
+// `validate_layer_columns` lives in `render::prepare`, which runs it once
+// per layer before any scale resolves, so every route (this per-panel build,
+// and `scale_resolve::resolve_layer_y_slot_scale`'s `SecondaryY(...)`/
+// independent-y route) reads columns it has already judged. See it there for
+// the full doc.
 
 /// Refuse a layer whose own coord puts its positional channels in the opposite
 /// space from the panel's axes when an axis there cannot draw the column that
@@ -3743,6 +3607,7 @@ fn validate_layer_coord_exchange_is_servable(
 mod tests {
     use super::*;
     use crate::layout::Rect;
+    use crate::render::prepare::{layer_geometry_encoding, LayerGeometryFlags};
     use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
     fn default_fill_stroke() -> ferrum_scene::FillStroke {
@@ -4173,6 +4038,7 @@ mod tests {
             size_is_own: false,
             stroke_width_is_own: false,
             coord: None,
+            dropped_reads: Vec::new(),
         }
     }
 
@@ -8880,7 +8746,7 @@ mod tests {
     // ── F-L10-01 rider: the layer positional gate ────────────────────────────
     //
     // These exercise the FULL `prepare → layout → build_scene` pipeline rather
-    // than `validate_layer_positional_columns` alone, because the whole point
+    // than `validate_layer_columns` alone, because the whole point
     // of the finding is WHICH batch a layer ≥ 1 is checked against, and that
     // batch is chosen by `build_scene`'s layer-batch resolution (base data vs.
     // named `data_source` output) — a unit test that hands the function a batch
@@ -10002,11 +9868,9 @@ mod tests {
 
     /// The `+ SecondaryY(...)` shape: an `independent_y` layer with no
     /// `data_source` of its own, naming `value`, over the same unnamed
-    /// `Aggregate` chain. This resolves through
-    /// `prepare::build_secondary_y_axis_inputs` →
-    /// `scale_resolve::resolve_layer_y_slot_scale`, not through
-    /// `validate_layer_positional_columns` directly — a different route into
-    /// the SAME `LayerUnknownColumn` variant and the same classification: a
+    /// `Aggregate` chain. It resolves its own y scale slot, and the one
+    /// column gate in `prepare` refuses it before that resolution, with the
+    /// SAME `LayerUnknownColumn` variant and the same classification: a
     /// `Chart.layer(...)` layer and a `SecondaryY(...)` layer get the same
     /// source remedy for the same mistake, spelled for the independent-y
     /// door with `fm.LayerChart(...)` rather than `+`.
@@ -10085,16 +9949,16 @@ mod tests {
         assert!(msg.contains("chart's transformed rows") && msg.contains("fm.LayerChart("), "{msg}");
     }
 
-    /// The positional gate is positional-only (`validate_layer_positional_columns`'s
-    /// documented scope): an independent-y layer missing a NON-positional
-    /// column (its own `color`) is not caught
-    /// by it, so the plain `UnknownColumn` `resolve_scales_with_leaf_context`
-    /// itself raises passes through untouched — never rewritten into a
-    /// `LayerUnknownColumn` naming channel `"y"`, which is what the deleted
-    /// `rephrase_unknown_column_for_chain_tail_layer` did to EVERY error this
-    /// resolution could raise, positional or not.
+    /// An independent-y layer whose own `color` names a column found nowhere,
+    /// on a chart where no other layer draws color, would establish the
+    /// chart's color scale; the column gate answers first, before any scale
+    /// resolves, so the refusal is the gate's plain message on the real
+    /// channel — never the scale builder's unlocated column, and never
+    /// rewritten into a `LayerUnknownColumn` naming channel `"y"`, which is
+    /// what the deleted `rephrase_unknown_column_for_chain_tail_layer` did to
+    /// EVERY error this resolution could raise, positional or not.
     #[test]
-    fn independent_y_layer_missing_a_non_positional_column_keeps_the_plain_message() {
+    fn independent_y_layer_missing_a_non_positional_column_refuses_in_the_gates_words() {
         pyo3::Python::initialize();
         use crate::spec::encoding::Encoding;
 
@@ -10111,15 +9975,20 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("the independent-y layer's own color names a column nowhere in scope");
         match err {
-            RenderError::UnknownColumn { ref name } => assert_eq!(name, "nope_color"),
-            ref other => panic!("expected the plain UnknownColumn, got {other:?}"),
+            RenderError::LayerUnknownColumn { layer: 1, channel: "color", ref name, remedy: None, .. } => {
+                assert_eq!(name, "nope_color")
+            }
+            ref other => panic!("expected the gate's refusal on color, got {other:?}"),
         }
         let msg = err.to_string();
-        assert_eq!(msg, "unknown column 'nope_color' referenced by an encoding");
+        assert_eq!(
+            msg,
+            "layer 1: encoding 'color' references unknown column 'nope_color' (not present in that layer's data)"
+        );
     }
 
-    /// The y-slot route's positional gate judges the layer's completed
-    /// encoding, exactly as the per-panel route's does.
+    /// The column gate judges an independent-y layer's completed encoding as
+    /// it judges every other layer's.
     /// Layer 1 (`independent_y`) declares only its own `y`; its `x` is
     /// INHERITED from the chart-level encoding, which names a column
     /// ("value") absent from layer 1's own tail (a `Filter` publishes it
@@ -14092,27 +13961,35 @@ mod tests {
     }
 
     /// On a layered chart the warning names the layer and its entry, and a
-    /// sibling's input never enables another layer's field.
+    /// sibling's input never enables another layer's field. A layer the
+    /// caller placed is named by its index; one a desugaring call built is
+    /// named by the call alone, its internal index omitted.
     #[test]
     fn an_inert_style_field_on_a_layer_names_that_layer() {
-        let spec = spec_from(serde_json::json!({
-            "data": {"kind": "named", "name": "default"},
-            "mark": "bar",
-            "encoding": {"x": {"field": "g"}, "y": {"field": "y"}},
-            "layers": [
-                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke": "#123456"}},
-                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke_width": 3.0}, "entry": "catplot"},
-            ],
-        }));
-        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &xy_span_batch());
-        scene.unwrap();
-        assert_eq!(
-            inert_warnings(&warnings),
-            vec![
-                "layer 1: catplot: stroke_width has no effect on this bar mark without a stroke color (stroke=) or a \
-                 numeric stroke_width encoding (which stroke='none' turns off); it was ignored"
-            ]
-        );
+        let spec = |entry: Option<&str>| {
+            let mut layer1 = serde_json::json!(
+                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke_width": 3.0}}
+            );
+            if let Some(entry) = entry {
+                layer1["entry"] = serde_json::json!(entry);
+            }
+            spec_from(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "bar",
+                "encoding": {"x": {"field": "g"}, "y": {"field": "y"}},
+                "layers": [
+                    {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke": "#123456"}},
+                    layer1,
+                ],
+            }))
+        };
+        let inert = "stroke_width has no effect on this bar mark without a stroke color (stroke=) or a numeric \
+                     stroke_width encoding (which stroke='none' turns off); it was ignored";
+        for (entry, voice) in [(Some("catplot"), "catplot"), (None, "layer 1: mark_bar")] {
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec(entry), &xy_span_batch());
+            scene.unwrap();
+            assert_eq!(inert_warnings(&warnings), vec![format!("{voice}: {inert}")], "{entry:?}");
+        }
     }
 
     /// A stroke field's inert warning names every input that turns that

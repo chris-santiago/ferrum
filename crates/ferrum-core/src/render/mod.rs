@@ -112,8 +112,8 @@ pub(crate) enum LayerCoordUnplaceableReason {
     ///
     /// Not answerable from the coord alone — it needs the resolved scales and the
     /// layer's own columns — so it is asked in `build_scene`'s per-layer loop, at
-    /// the same site as the sibling positional-column gate
-    /// (`validate_layer_positional_columns`).
+    /// the same site as the sibling column gate
+    /// (`validate_layer_columns`).
     ///
     /// This is the class the wave-5 close review found still silent: a member
     /// whose `CoordFlip` puts its categorical column on the panel's quantitative
@@ -148,7 +148,7 @@ pub(crate) struct LayerAxisColumnDetail {
 
 /// The remedy [`RenderError::LayerUnknownColumn`] names, by where the
 /// missing column exists for a layer that reads its chart's data
-/// (`prepare::validate_layer_positional_columns` classifies it).
+/// (`prepare::validate_layer_columns` classifies it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MissingColumnRemedy {
     /// The column is in the chart's source batch, dropped by the chain the
@@ -587,22 +587,24 @@ pub enum RenderError {
         /// 128-byte threshold.
         detail: Box<LayerAxisColumnDetail>,
     },
-    /// A layer beyond the first bound a positional channel (`x`/`y`/`x2`/`y2`)
-    /// to a column that is absent from **that layer's own resolved batch** —
-    /// the base data, or the named `data_source` output the layer reads from
-    /// (F-L10-01 rider, spec §4).
+    /// A layer beyond the first bound a channel to a column that is absent
+    /// from **that layer's own resolved batch** — the base data, or the named
+    /// `data_source` output the layer reads from (F-L10-01 rider, spec §4):
+    /// a positional channel, any other binding its mark draws, its `detail`,
+    /// or a field branch of a conditional it declared.
     ///
     /// A layer ≥ 1's encoding reaches scale resolution only where layer 0
     /// leaves the channel unbound (`scene_build::resolve_panel_scales` merges
     /// layer 0 onto the chart encoding, and `scale_resolve::positional_binding`
     /// falls back to the first layer that binds an otherwise-unbound `x`/`y`;
     /// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`), so
-    /// a layer ≥ 1 naming a missing positional column that layer 0 also binds
-    /// used to reach the mark builders, where the `.ok()`-swallowing readers
-    /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into
-    /// an empty mark batch: the layer simply vanished from the render, with no
-    /// error and no warning. That is how a broken regression-fit layer shipped
-    /// undetected.
+    /// a layer ≥ 1 naming a missing column that layer 0 also binds used to
+    /// reach the mark builders, whose readers skip a column that is not there
+    /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs` for positions,
+    /// the per-row color, tooltip, href, description and key readers for the
+    /// rest): the layer vanished from the render, or drew without the
+    /// channel, with no error and no warning. That is how a broken
+    /// regression-fit layer shipped undetected.
     ///
     /// Shape follows the composite `CompositeRenderError::LeafRender { index,
     /// source }` precedent (`composite_render.rs`) — the offending index is
@@ -610,15 +612,18 @@ pub enum RenderError {
     /// Standalone single-mark charts are untouched: layer 0 keeps raising the
     /// plain [`RenderError::UnknownColumn`] from scale resolution.
     ///
-    /// Scope is deliberately positional-only (#106 ownership): a non-owning
-    /// layer that INHERITED a `color` channel naming a column its own batch
-    /// does not carry keeps rendering exactly as before, and a zero-row layer
+    /// The gate judges the bindings the layer's mark draws: an inherited
+    /// binding the mark does not draw (an inherited `color` on a text layer
+    /// or on a layer painting its own literal `stroke=`/`fill=`; an inherited
+    /// width a line yields to its own) is never refused, and a zero-row layer
     /// keeps being skipped (an empty batch is not an unknown column).
+    /// `channel` names the channel as `encode(...)` writes it (`tooltip` for
+    /// every `tooltip_fields` entry).
     ///
     /// `channel` is the RESOLVED (post-`CoordFlip`) token the gate acted on;
     /// `coord_flipped` (R3) is the `Display`-time un-flip back to the token
     /// the user wrote, patched at the one construction site
-    /// (`prepare::validate_layer_positional_columns`) from
+    /// (`prepare::validate_layer_columns`) from
     /// `PreparedInputs::coord_flipped`.
     ///
     /// `remedy` is where the missing column does exist, for a layer that
@@ -633,8 +638,8 @@ pub enum RenderError {
     /// `independent_y` is the layer's own flag and picks how the remedy is
     /// spelled: `+` for a layer on the shared y axis,
     /// `fm.LayerChart(..., resolve={"y": "independent"})` for a layer with its
-    /// own y axis (the `SecondaryY(...)` door). Set at the one positional
-    /// gate (`prepare::validate_layer_positional_columns`), shared by
+    /// own y axis (the `SecondaryY(...)` door). Set at the one column gate
+    /// (`prepare::validate_layer_columns`), shared by
     /// `Chart.layer(...)`'s own gate and the `SecondaryY(...)` y-slot
     /// resolution (`scale_resolve::resolve_layer_y_slot_scale`, which runs
     /// the same gate before resolving), so both routes report the real
@@ -796,8 +801,10 @@ pub enum RenderError {
         source: Box<NonPositiveLineWidth>,
     },
     /// A refusal raised while building one layer's marks, with the layer it
-    /// came from: `layer` is its index on a layered chart (`None` on an
-    /// unlayered one, whose one layer is the chart), and `entry` the public
+    /// came from: `layer` is its index on a layered chart when the caller
+    /// placed the layer (`None` on an unlayered one, whose one layer is the
+    /// chart, and on a layer a desugaring call built, whose entry names the
+    /// call: `prepare::public_layer`), and `entry` the public
     /// call that produced it ([`crate::spec::layer::Layer::entry`], else
     /// [`crate::spec::chart::ChartSpec::entry`], else `mark_{mark}`). Applied
     /// to every refusal of the per-layer draw loop's style and build steps, so
@@ -1067,7 +1074,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::MarkRequiresCoord { .. }
         | RenderError::AuxiliaryScaleUnsupported { .. }
         // Carries a `coord_flipped` field, patched at its own single
-        // construction site (`scene_build::validate_layer_positional_columns`,
+        // construction site (`prepare::validate_layer_columns`,
         // which has `PreparedInputs::coord_flipped` in hand) — same discipline
         // as `EncodingTypeMismatch` and friends above, so this boundary must
         // leave it alone rather than overwrite it.
@@ -1627,7 +1634,8 @@ impl RenderError {
     }
 
     /// Wrap a refusal raised while building one layer in [`Self::InLayer`],
-    /// naming its `layer` index (on a layered chart) and its public `entry`.
+    /// naming its `layer` index (on a layered chart, for a layer the caller
+    /// placed: `prepare::public_layer`) and its public `entry`.
     /// A refusal already wrapped keeps its context.
     pub(crate) fn in_layer_context(self, layer: Option<usize>, entry: &str) -> Self {
         match self {
@@ -2127,13 +2135,31 @@ pub enum RenderWarning {
     /// resolve (`draw::inert_style_fields`), per panel, deduplicated so a
     /// facet chart raises it once rather than once per panel. Voiced as the
     /// layer's refusals are ([`RenderError::InLayer`]): `layer` is its index
-    /// on a layered chart, `entry` the public call that built it.
+    /// on a layered chart when the caller placed the layer
+    /// (`prepare::public_layer`), `entry` the public call that built it.
     MarkStyleInert {
         layer: Option<usize>,
         entry: String,
         mark: crate::spec::mark::Mark,
         field: String,
         needs: crate::spec::mark::StyleNeed,
+    },
+    /// A statistic sub-layer inherited a binding on a channel its mark draws,
+    /// but the statistic's output does not carry the bound column (the
+    /// chart's source does), so the layer draws without that channel: WARN
+    /// DEGRADED. Decided once per layer per dropped column by the column
+    /// gate (`prepare::validate_layer_columns`), before any scale resolves,
+    /// naming the first channel that dropped it. Voiced as
+    /// [`Self::MarkStyleInert`] is: `layer` is its index when the caller
+    /// placed the layer (`prepare::public_layer`), `entry` the public call
+    /// that built it, `mark` its mark; `channel` is named as `encode(...)`
+    /// names it and `field` is the dropped column.
+    StatisticDroppedChannel {
+        layer: Option<usize>,
+        entry: String,
+        mark: crate::spec::mark::Mark,
+        channel: String,
+        field: String,
     },
 }
 
@@ -2363,6 +2389,16 @@ impl std::fmt::Display for RenderWarning {
                     f,
                     "{entry}: {field} has no effect on this {mark} mark without {}; it was ignored",
                     needs.describe(*mark)
+                )
+            }
+            RenderWarning::StatisticDroppedChannel { layer, entry, mark, channel, field } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                write!(
+                    f,
+                    "{entry}: {channel} '{field}' was dropped: the statistic this {mark} mark draws \
+                     does not carry '{field}', so it draws without {channel}"
                 )
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {

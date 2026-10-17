@@ -23,7 +23,7 @@ mod tests;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use arrow::datatypes::{DataType as ArrowDataType, Schema};
+use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::ThemeInputs;
@@ -1977,14 +1977,6 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
     pub(in crate::render) transform_outputs: &'a HashMap<String, RecordBatch>,
     pub(in crate::render) theme: &'a ThemeInputs,
     pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
-    /// This layer's index, for a [`RenderError::LayerUnknownColumn`] refusal.
-    pub(in crate::render) layer_idx: usize,
-    /// The chart's SOURCE schema, taken before any transform ran —
-    /// [`PreparedInputs::source_schema`](
-    /// crate::render::prepare::PreparedInputs::source_schema). Forwarded to
-    /// [`crate::render::prepare::validate_layer_positional_columns`] with
-    /// `transform_outputs`, to name where a missing column does exist.
-    pub(in crate::render) source_schema: &'a Schema,
 }
 
 /// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52 / #72).
@@ -2004,16 +1996,10 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
 /// piece the prepare path previously lacked (#72), which made static right-axis
 /// ticks diverge from mark placement once layer params reached the wire.
 ///
-/// Before resolving, runs the SAME positional gate `Chart.layer(...)` itself
-/// is judged by
-/// ([`crate::render::prepare::validate_layer_positional_columns`]), over the
-/// merged encoding and this layer's own batch, with this layer's own coord
-/// flip, so a missing `x`, `y`, `x2` or `y2` is reported on its real channel
-/// through the one `LayerUnknownColumn` constructor, rather than every `UnknownColumn` this
-/// resolution could raise being rewritten and mislabeled `"y"`. A
-/// non-positional miss (e.g. a bad `color` field) is not caught by that gate
-/// and passes through as the plain [`RenderError::UnknownColumn`] this
-/// function always raised, unchanged.
+/// Every column the layer draws was checked against its own rows once, in
+/// `prepare`, before any scale read one
+/// ([`crate::render::prepare::validate_layer_columns`]), so a missing column
+/// on any channel is refused there on its real channel, with its remedy.
 ///
 /// Returns the resolved `y` [`ScaleKind`] plus any warnings the resolution
 /// produced (the caller propagates them). No-op param substitution keeps
@@ -2025,35 +2011,7 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
-    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales, layer_idx, source_schema } = ctx;
-
-    // The positional gate reads `layer.encoding` — `LayerPrepared`'s own,
-    // already prepare-time-merged encoding — NOT the `merged_encoding`
-    // freshly re-derived below for scale resolution. The two differ for a
-    // layer with its own `data_source`: `from_chart_and_layer` built
-    // `layer.encoding` via `inherit_non_positional` (positional channels
-    // belong to the layer's own data, so x2/y2 are never inherited there),
-    // while `merged_encoding`'s `overlay_from` falls back to `spec.encoding`
-    // for any channel `layer.encoding` left unset — reintroducing a
-    // chart-level x2/y2 the layer's own batch never had whenever
-    // `layer.encoding` (correctly) didn't carry one.
-    //
-    // `layer.encoding` is the layer's completed encoding, which keeps only
-    // the inherited positional channels its mark draws, the same encoding
-    // `scene_build`'s per-panel route gates and draws.
-    let layer_flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
-    crate::render::prepare::validate_layer_positional_columns(
-        layer_idx,
-        layer,
-        &layer.encoding,
-        layer_batch,
-        layer_flipped,
-        &crate::render::prepare::PipelineBatches {
-            source: source_schema,
-            outputs: transform_outputs,
-            transforms: &spec.transforms,
-        },
-    )?;
+    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
 
     let mut merged_encoding = spec.encoding.clone();
     merged_encoding.overlay_from(&layer.encoding);

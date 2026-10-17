@@ -225,19 +225,27 @@ def test_add_then_encode_tooltip_is_the_compositions_own():
 
 
 # ---------------------------------------------------------------------------
-# GH #58: selection-injected chart-level tooltip must union per layer, not
-# replace every layer's own fields with one shared set.
+# GH #58: a field selection's fields join each layer's own tooltip, never
+# replacing it. The render's tooltip reader appends them, so they are read
+# off the interactive scene, not the spec.
 # ---------------------------------------------------------------------------
+
+
+def _scene_tooltip_names(chart: fm.Chart) -> list[list[str]]:
+    """Per mark batch of *chart*'s interactive scene, the field names its first tooltip lists."""
+    scene = json.loads(chart.interactive().scene_json)
+    return [
+        [field["name"] for field in batch["tooltips"][0]["fields"]]
+        for panel in scene["panels"]
+        for batch in panel["marks"]
+    ]
 
 
 def test_selection_linked_tooltip_unions_per_layer_fields():
     """GH #58: a field-based ``selection_point``'s ``fields`` must union
     into EACH layer's own auto tooltip fields, not replace them with one
-    shared chart-level field set. Before the fix, ``_inject_selection_tooltips``
-    setting chart-level ``tooltip_fields`` made ``chart_level_explicit`` true
-    with no layer carrying its own explicit tooltip, so the short-circuit
-    fired and both layers fell back to the single selection-derived field
-    (losing their own auto fields entirely)."""
+    shared field set: each layer keeps its own auto fields, and the
+    selection's field follows them where the layer does not list it."""
     from ferrum.selection import selection_point
 
     df = _df()
@@ -246,29 +254,24 @@ def test_selection_linked_tooltip_unions_per_layer_fields():
     sel = selection_point(fields=["revenue"], name="sel")
     merged = (a + b).add_selection(sel)
 
-    kw = _tooltip_wire(merged)
-
-    layers = kw["layers"]
-    assert len(layers) == 2
-    # layer 0 (bar) already encodes "revenue" via its own auto fields.
+    # The spec carries each layer's own auto fields only.
+    layers = _tooltip_wire(merged)["layers"]
     assert layers[0]["encoding"]["tooltip_fields"] == [{"field": "x"}, {"field": "revenue"}]
-    # layer 1 (point) does not encode "revenue" -- the selection field must
-    # be unioned in alongside its own x/margin auto fields, not replace them.
-    assert layers[1]["encoding"]["tooltip_fields"] == [
-        {"field": "x"},
-        {"field": "margin"},
-        {"field": "revenue"},
-    ]
+    assert layers[1]["encoding"]["tooltip_fields"] == [{"field": "x"}, {"field": "margin"}]
+    # layer 0 (bar) already lists "revenue"; layer 1 (point) gains it after
+    # its own x/margin, which it keeps.
+    assert _scene_tooltip_names(merged) == [["x", "revenue"], ["x", "margin", "revenue"]]
 
 
 def test_selection_union_applies_beside_an_operands_own_tooltip():
-    """GH #58: a field-based selection unions its fields into every
-    tooltip-less layer when a left operand carries its own tooltip. V1: that
-    tooltip stays on its own layer (it never becomes the chart level), so
-    the chart-level ``tooltip_fields`` holds only the selection's field."""
+    """GH #58: a field-based selection unions its fields into every layer's
+    tooltip when a left operand carries its own tooltip. V1: that tooltip
+    stays on its own layer (it never becomes the chart level), and the
+    selection's field follows each layer's own entries."""
     from ferrum.selection import selection_point
 
-    df = _df()
+    # The frame carries the selection's field, so it can join each layer's tooltip.
+    df = _df().with_columns(z=pl.Series(["p", "q", "p"]))
     a = fm.Chart(df).mark_bar().encode(x="x", y="revenue", tooltip="revenue")
     b = fm.Chart(df).mark_point().encode(x="x", y="margin")
     sel = selection_point(fields=["z"], name="sel")
@@ -277,17 +280,13 @@ def test_selection_union_applies_beside_an_operands_own_tooltip():
     kw = _tooltip_wire(merged)
 
     assert "tooltip" not in kw["encoding"]
-    assert kw["encoding"]["tooltip_fields"] == [{"field": "z"}]
     layers = kw["layers"]
     # layer 0 keeps its own explicit tooltip, untouched (invariant).
     assert layers[0]["encoding"]["tooltip"] == {"field": "revenue"}
     assert "tooltip_fields" not in layers[0]["encoding"]
-    # layer 1 gets its own auto fields UNIONED with the selection field.
-    assert layers[1]["encoding"]["tooltip_fields"] == [
-        {"field": "x"},
-        {"field": "margin"},
-        {"field": "z"},
-    ]
+    assert layers[1]["encoding"]["tooltip_fields"] == [{"field": "x"}, {"field": "margin"}]
+    # Each layer's own entries, then the selection field.
+    assert _scene_tooltip_names(merged) == [["revenue", "z"], ["x", "margin", "z"]]
 
 
 # ---------------------------------------------------------------------------

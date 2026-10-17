@@ -4174,7 +4174,6 @@ class Chart(
         # --- Conditional / selection injection ---
         if resolved._selections:
             kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
-            self._inject_selection_tooltips(kw, resolved._selections)
         if resolved._conditionals:
             conditionals = resolved._conditionals
             scopes = (

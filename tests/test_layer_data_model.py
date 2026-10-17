@@ -760,7 +760,9 @@ _JSON_DIGESTS = {
     "same-frame-composition-transform": "eed6f78eaaa652224a7d6d5d7fda0c114c6037ffce250bcdfac5386d5d4d0a29",
     "flat-mean-bar": "5cf1f31799b8c2a33b12ff4275debacd3ea82caf3e4eb0585e21dabae93ac825",
     "mean-bar+mean-point": "82bf37a8596924292c93f84787a1bda02898fcd60c8fbb367d3ceb1a0be3ed62",
-    "plus-each-own-conditional": "0e5505b715a3cb56c0ccd3cf0a215f0d9db8bd6b79c128741130a256a53aea8c",
+    # The spec carries no selection fields in its tooltip: the render's
+    # tooltip reader adds them where the rows hold them.
+    "plus-each-own-conditional": "a4b9ae1343bb3349235333d08145cf7de6b2f44cdf46fd6704defbfe9a5f5497",
     "ungrouped-binned-count": "ee159220f7be8224dc4745e3986334e13822c1c87bec82b22f118d30329d9941",
     # The y-only rule takes no binned x: an aggregate, not a second bin.
     "ungrouped-binned-count-layer-rule": "5f0c778b676eb7ea9ddd79f97fdc8dc0add5cebc4818b96dcebb5b462f68b29d",
@@ -1232,8 +1234,13 @@ def _host() -> fm.Chart:
     return fm.Chart(df).mark_point().encode(x="v", y="y", color=cond).add_selection(_PICK)
 
 
+# df2 with the host's conditional field `g`, so the conditional reaches a
+# layer whose rows carry it (a frame lacking it is refused by the column gate).
+_DF2_G = df2.with_columns(g=pl.Series(["a", "b"] * 4))
+
+
 def _data_layer() -> fm.Layer:
-    return fm.Layer(data=df2, mark="line", encoding={"x": "v", "y": "w"})
+    return fm.Layer(data=_DF2_G, mark="line", encoding={"x": "v", "y": "w"})
 
 
 def _text_layer() -> fm.Layer:

@@ -1284,11 +1284,10 @@ impl Encoding {
             stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity);
     }
 
-    /// Every populated channel as `(wire name, &EncodingSpec)`, in
-    /// declaration order. `tooltip_fields` (the one list-valued channel) is
-    /// expanded to `tooltip_fields[i]` per entry rather than a single
-    /// `(name, EncodingSpec)` pair, since its `EncodingSpec`s are indexed,
-    /// not singular.
+    /// Every populated binding as `(wire name, &EncodingSpec)`, in
+    /// declaration order, each `tooltip_fields` entry (the one list-valued
+    /// channel) as its own `("tooltip_fields", entry)` pair after the
+    /// singular channels.
     ///
     /// Destructures `Encoding` exhaustively (no `..`), so a field added to
     /// the struct is a compile error here until this function names it, and
@@ -1298,10 +1297,10 @@ impl Encoding {
     /// lint-enforced, not a second hand-typed list kept in sync by
     /// convention.
     ///
-    /// Used by the render-time sort-object gate
-    /// ([`crate::render::RenderError::SortSpecMalformed`]) to walk every
-    /// channel a hand-built spec could carry a malformed `sort` on.
-    pub(crate) fn channels(&self) -> Vec<(String, &EncodingSpec)> {
+    /// Read by [`Self::channels`] and by the render-time column gate
+    /// (`render::prepare::validate_layer_columns`), which checks every
+    /// column a layer's encoding names.
+    pub(crate) fn bindings(&self) -> Vec<(&'static str, &EncodingSpec)> {
         let Encoding {
             x,
             y,
@@ -1327,7 +1326,7 @@ impl Encoding {
         let mut out = Vec::new();
         macro_rules! push {
             ($($name:literal => $ch:expr),* $(,)?) => {
-                $( if let Some(e) = $ch { out.push(($name.to_string(), e)); } )*
+                $( if let Some(e) = $ch { out.push(($name, e)); } )*
             };
         }
         push!(
@@ -1338,12 +1337,76 @@ impl Encoding {
             "stroke_opacity" => stroke_opacity, "stroke_dash" => stroke_dash,
             "angle" => angle, "fill_opacity" => fill_opacity,
         );
-        if let Some(fields) = tooltip_fields {
-            for (i, e) in fields.iter().enumerate() {
-                out.push((format!("tooltip_fields[{i}]"), e));
-            }
-        }
+        out.extend(tooltip_fields.iter().flatten().map(|e| ("tooltip_fields", e)));
         out
+    }
+
+    /// Clear every binding `keep` rejects, given its wire name as
+    /// [`Self::bindings`] names it: a singular channel becomes unbound, a
+    /// rejected `tooltip_fields` entry leaves the list (an emptied list stays
+    /// bound, so the layer still takes no single `tooltip` in its place).
+    pub(crate) fn retain_bindings(&mut self, mut keep: impl FnMut(&'static str, &EncodingSpec) -> bool) {
+        let Encoding {
+            x,
+            y,
+            color,
+            size,
+            shape,
+            opacity,
+            x2,
+            y2,
+            text,
+            tooltip,
+            tooltip_fields,
+            href,
+            description,
+            key,
+            url,
+            stroke_width,
+            stroke_opacity,
+            stroke_dash,
+            angle,
+            fill_opacity,
+        } = self;
+        macro_rules! retain {
+            ($($name:literal => $ch:expr),* $(,)?) => {
+                $( if $ch.as_ref().is_some_and(|e| !keep($name, e)) { *$ch = None; } )*
+            };
+        }
+        retain!(
+            "x" => x, "y" => y, "color" => color, "size" => size, "shape" => shape,
+            "opacity" => opacity, "x2" => x2, "y2" => y2, "text" => text,
+            "tooltip" => tooltip, "href" => href, "description" => description,
+            "key" => key, "url" => url, "stroke_width" => stroke_width,
+            "stroke_opacity" => stroke_opacity, "stroke_dash" => stroke_dash,
+            "angle" => angle, "fill_opacity" => fill_opacity,
+        );
+        if let Some(fields) = tooltip_fields {
+            fields.retain(|e| keep("tooltip_fields", e));
+        }
+    }
+
+    /// Every populated channel as `(wire name, &EncodingSpec)`, in
+    /// declaration order ([`Self::bindings`]), each `tooltip_fields` entry
+    /// named by its index (`tooltip_fields[i]`), since its `EncodingSpec`s
+    /// are indexed, not singular.
+    ///
+    /// Used by the render-time sort-object gate
+    /// ([`crate::render::RenderError::SortSpecMalformed`]) to walk every
+    /// channel a hand-built spec could carry a malformed `sort` on.
+    pub(crate) fn channels(&self) -> Vec<(String, &EncodingSpec)> {
+        let mut entry = 0;
+        self.bindings()
+            .into_iter()
+            .map(|(name, e)| {
+                if name != "tooltip_fields" {
+                    return (name.to_string(), e);
+                }
+                let indexed = format!("{name}[{entry}]");
+                entry += 1;
+                (indexed, e)
+            })
+            .collect()
     }
 
     /// Swap the positional channels between the x and y roles (`CoordFlip`).

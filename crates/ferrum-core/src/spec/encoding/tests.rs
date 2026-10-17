@@ -1341,3 +1341,22 @@ fn channels_enumerates_every_populated_field_with_the_right_spec() {
         assert_eq!(enc.field, expected, "channel {name} carries the wrong EncodingSpec");
     }
 }
+
+/// `retain_bindings` clears each rejected singular binding and drops each
+/// rejected `tooltip_fields` entry, keeping an emptied list bound.
+#[test]
+fn retain_bindings_clears_rejected_bindings_and_tooltip_entries() {
+    let spec = |field: &str| Some(EncodingSpec { field: field.into(), ..Default::default() });
+    let mut e = Encoding {
+        x: spec("x"),
+        color: spec("c"),
+        shape: spec("s"),
+        tooltip_fields: Some(vec![EncodingSpec { field: "a".into(), ..Default::default() }]),
+        ..Default::default()
+    };
+    e.retain_bindings(|wire, binding| wire != "shape" && binding.field != "a");
+    assert_eq!(e.x, spec("x"));
+    assert_eq!(e.color, spec("c"));
+    assert_eq!(e.shape, None);
+    assert_eq!(e.tooltip_fields, Some(vec![]));
+}

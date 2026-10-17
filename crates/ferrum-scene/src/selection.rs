@@ -40,6 +40,14 @@ impl SelectionSpec {
             SelectionSpec::Point { name, .. } | SelectionSpec::Interval { name, .. } => name,
         }
     }
+
+    /// The data fields this selection matches marks by, when it names any:
+    /// the runtime reads each from a mark's tooltip.
+    pub fn fields(&self) -> Option<&[String]> {
+        match self {
+            SelectionSpec::Point { fields, .. } | SelectionSpec::Interval { fields, .. } => fields.as_deref(),
+        }
+    }
 }
 
 /// A selection as the scene carries it: the declared [`SelectionSpec`] and
@@ -104,6 +112,26 @@ pub enum ChannelName {
     StrokeDash,
     FillOpacity,
     Angle,
+}
+
+impl ChannelName {
+    /// The channel's name as Python's `encode(...)` writes it, the same
+    /// string its wire form serializes to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelName::X => "x",
+            ChannelName::Y => "y",
+            ChannelName::Color => "color",
+            ChannelName::Size => "size",
+            ChannelName::Shape => "shape",
+            ChannelName::Opacity => "opacity",
+            ChannelName::StrokeWidth => "stroke_width",
+            ChannelName::StrokeOpacity => "stroke_opacity",
+            ChannelName::StrokeDash => "stroke_dash",
+            ChannelName::FillOpacity => "fill_opacity",
+            ChannelName::Angle => "angle",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -451,6 +479,16 @@ mod tests {
             EncodingValue::Field { name: "g".into() }.channel(),
             ChannelName::Color
         );
+    }
+
+    /// `as_str` names every channel as its wire form serializes it.
+    #[test]
+    fn channel_name_as_str_matches_its_wire_name() {
+        use ChannelName::*;
+        for channel in [X, Y, Color, Size, Shape, Opacity, StrokeWidth, StrokeOpacity, StrokeDash, FillOpacity, Angle] {
+            let wire = serde_json::to_value(channel).unwrap();
+            assert_eq!(wire.as_str(), Some(channel.as_str()), "{channel:?}");
+        }
     }
 
     /// Byte-stability gate: a param-free config must omit `param_bindings`.

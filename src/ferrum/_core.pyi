@@ -1061,6 +1061,12 @@ def marks_drawing_constant_size() -> list[str]: ...
 # no span takes no other. An unknown mark or channel raises ``ValueError``.
 def mark_inherited_positional(mark: str, own: list[str], offered: list[str]) -> list[str]: ...
 
+# The non-positional wire channels primitive ``mark`` draws when bound to a
+# field, in ``Encoding`` declaration order: from Rust's one per-mark table
+# (``Mark::draws_channel``). A binding on any other channel is never read by
+# the mark's builder. An unknown mark raises ``ValueError``.
+def mark_drawn_channels(mark: str) -> list[str]: ...
+
 # Run the render-time constant-size rule early: raise ``ValueError`` with the
 # render refusal's exact text, voiced as ``entry``, when ``mark`` never draws a
 # constant size or ``size`` is not a finite number above zero. ``mark`` must be
