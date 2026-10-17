@@ -531,10 +531,17 @@ class TestAppearanceScaleWireGate:
         svg = chart.to_svg()
         assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
 
-    def test_stroke_opacity_title_is_refused(self, opacity_df: pl.DataFrame):
-        """StrokeOpacity(title=...) refuses (#123): no legend exists to label."""
-        with pytest.raises(ValueError, match=r"StrokeOpacity\(title='Opacity'\) is not honored"):
-            fr.StrokeOpacity("sw", title="Opacity")
+    def test_stroke_opacity_title_titles_its_legend(self, opacity_df: pl.DataFrame):
+        """StrokeOpacity(title=...) reaches the wire and titles the opacity legend it draws."""
+        channel = fr.StrokeOpacity("sw", title="Opacity")
+        assert channel.to_encoding_spec_dict()["title"] == "Opacity"
+        svg = (
+            fr.Chart(opacity_df)
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_opacity=channel)
+            .to_svg()
+        )
+        assert ">Opacity</text>" in svg
 
     def test_stroke_dash_scale_serializes(self, opacity_df: pl.DataFrame):
         """StrokeDash(scale=OrdinalScale(domain=...)) reaches the wire AND reassigns

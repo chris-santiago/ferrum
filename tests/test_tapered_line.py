@@ -293,7 +293,14 @@ def test_an_unsized_line_has_no_widths_key() -> None:
 # and draws the line at a flat, untapered 3px width, in either layer order,
 # on both `+` and `fm.layer(...)`, whether the line's own `stroke_width` is
 # a constant kwarg or its own field encoding.
+#
+# A field-bound `stroke_width` maps through the stroke-width scale, never
+# draws its raw values as pixels: a constant column (`w` here) has a
+# degenerate domain and draws at the midpoint of the default 1-4 px band,
+# 2.5 px.
 # ---------------------------------------------------------------------------
+
+_CONSTANT_FIELD_WIDTH = 2.5
 
 
 def _sized_point() -> fm.Chart:
@@ -315,8 +322,8 @@ def _svg_polyline_stroke_widths(svg: str) -> list[str]:
 _MUST_DRAW_CELLS: dict[str, tuple] = {
     "plus_point_first_constant": (lambda: _sized_point() + _own_stroke_width_line(3), "3"),
     "plus_line_first_constant": (lambda: _own_stroke_width_line(3) + _sized_point(), "3"),
-    "plus_point_first_field": (lambda: _sized_point() + _own_stroke_width_line_field(), "1"),
-    "plus_line_first_field": (lambda: _own_stroke_width_line_field() + _sized_point(), "1"),
+    "plus_point_first_field": (lambda: _sized_point() + _own_stroke_width_line_field(), "2.5"),
+    "plus_line_first_field": (lambda: _own_stroke_width_line_field() + _sized_point(), "2.5"),
     "fm_layer_point_first": (
         lambda: fm.layer(_sized_point(), _own_stroke_width_line(3)),
         "3",
@@ -362,16 +369,19 @@ def test_a_line_binding_neither_channel_draws_untapered_at_the_default_width() -
     assert len(nodes) == 2
     for node in nodes:
         assert "widths" not in node
-    # 'w' is constant 1.0 on the first line; the bare line keeps the default.
+    # 'w' is constant on the first line, so it draws the scale's midpoint;
+    # the bare line keeps the default.
     alone = _line_nodes(bare_line)[0]["style"]["width"]
-    assert [node["style"]["width"] for node in nodes] == pytest.approx([1.0, alone])
+    assert [node["style"]["width"] for node in nodes] == pytest.approx(
+        [_CONSTANT_FIELD_WIDTH, alone]
+    )
 
     radii = _point_radii(chart)
     assert len(radii) == 4
     assert radii == sorted(radii) and radii[0] < radii[-1]
 
     assert _svg_polyline_stroke_widths(chart.to_svg()) == [
-        "1",
+        "2.5",
         *_svg_polyline_stroke_widths(bare_line.to_svg()),
     ]
 
@@ -456,14 +466,15 @@ def test_own_size_kwarg_draws_beside_a_siblings_size_field(chart_factory, recwar
 def test_own_stroke_width_field_then_own_constant_draw_each_their_own_width(recwarn) -> None:
     """The field line (layer 0) binds `stroke_width='w'` and the constant
     line (layer 1) its own `stroke_width=3`; each draws its own width, in
-    layer order (V1: neither binding reaches the other line)."""
+    layer order (V1: neither binding reaches the other line). The constant
+    field column draws the stroke-width scale's midpoint."""
     field_line = fm.Chart(_OWN_KWARG_DF).mark_line().encode(x="x", y="y", stroke_width="w")
     const_line = fm.Chart(_OWN_KWARG_DF).mark_line(stroke_width=3).encode(x="x", y="y")
 
     chart = field_line + const_line
-    assert _svg_polyline_stroke_widths(chart.to_svg()) == ["2", "3"]
+    assert _svg_polyline_stroke_widths(chart.to_svg()) == ["2.5", "3"]
     nodes = _line_nodes(chart)
-    assert [n["style"]["width"] for n in nodes] == [2.0, 3.0]
+    assert [n["style"]["width"] for n in nodes] == [_CONSTANT_FIELD_WIDTH, 3.0]
     assert all("widths" not in n for n in nodes)
 
     user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
@@ -477,9 +488,9 @@ def test_own_constant_stroke_width_then_own_field_is_order_independent(recwarn) 
     field_line = fm.Chart(_OWN_KWARG_DF).mark_line().encode(x="x", y="y", stroke_width="w")
 
     chart = const_line + field_line
-    assert _svg_polyline_stroke_widths(chart.to_svg()) == ["3", "2"]
+    assert _svg_polyline_stroke_widths(chart.to_svg()) == ["3", "2.5"]
     nodes = _line_nodes(chart)
-    assert [n["style"]["width"] for n in nodes] == [3.0, 2.0]
+    assert [n["style"]["width"] for n in nodes] == [3.0, _CONSTANT_FIELD_WIDTH]
     assert all("widths" not in n for n in nodes)
 
     user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]

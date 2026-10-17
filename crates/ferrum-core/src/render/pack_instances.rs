@@ -275,7 +275,10 @@ pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_color(&mut buf, style.fill.as_ref(), style.fill_opacity);
             push_color(&mut buf, style.stroke.as_ref(), 1.0);
             push_f32(&mut buf, style.stroke_width as f32);
-            push_f32(&mut buf, style.opacity as f32);
+            // Instance opacity is the WASM runtime's multiplier (conditional
+            // dimming, transition fades); the scene's opacity is already in
+            // the paint alphas, as `ferrum-wasm`'s scene loader reads it.
+            push_f32(&mut buf, 1.0);
             push_f32(&mut buf, style.stroke_opacity as f32);
             push_f32(&mut buf, stroke_dash_index(style.stroke_dash.as_deref()) as f32);
             push_f32(&mut buf, style.angle as f32);
@@ -315,7 +318,10 @@ pub fn pack_rect_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_color(&mut buf, style.fill.as_ref(), style.fill_opacity);
             push_color(&mut buf, style.stroke.as_ref(), 1.0);
             push_f32(&mut buf, style.stroke_width as f32);
-            push_f32(&mut buf, style.opacity as f32);
+            // Instance opacity is the WASM runtime's multiplier (conditional
+            // dimming, transition fades); the scene's opacity is already in
+            // the paint alphas, as `ferrum-wasm`'s scene loader reads it.
+            push_f32(&mut buf, 1.0);
             push_f32(&mut buf, style.stroke_opacity as f32);
             push_f32(&mut buf, stroke_dash_index(style.stroke_dash.as_deref()) as f32);
             push_f32(&mut buf, style.angle as f32);
@@ -338,7 +344,7 @@ fn push_f32(buf: &mut Vec<u8>, v: f32) {
 ///
 /// For fill colors, `alpha_factor` is `fill_opacity`.
 /// For stroke colors, `alpha_factor` is `1.0` (raw color; the shader
-/// applies `stroke_opacity` and `opacity` independently).
+/// applies `stroke_opacity`).
 #[inline]
 fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
     match color {
@@ -468,8 +474,8 @@ mod tests {
         );
         // stroke_width
         assert!((floats[11] - 2.0).abs() < 1e-6, "stroke_width");
-        // opacity
-        assert!((floats[12] - 0.5).abs() < 1e-6, "opacity");
+        // instance opacity: 1.0, the scene's opacity is already in the paint alpha
+        assert!((floats[12] - 1.0).abs() < 1e-6, "instance opacity");
         // stroke_opacity
         assert!((floats[13] - 0.75).abs() < 1e-6, "stroke_opacity");
         // stroke_dash (dashed → 1.0)

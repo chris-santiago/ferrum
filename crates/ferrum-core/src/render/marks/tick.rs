@@ -951,15 +951,19 @@ mod tests {
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
         }).collect();
-        assert_eq!(opacities, vec![0.2, 0.5, 0.9],
-            "each tick must carry its own row's opacity (per-row OpacityResolver sample)");
+        // `op` spans 0.2..0.9, mapped onto the 0.1..1.0 opacity band.
+        let mapped: Vec<f64> = [0.2, 0.5, 0.9].iter().map(|v| 0.1 + 0.9 * (v - 0.2) / 0.7).collect();
+        assert_eq!(opacities.len(), 3);
+        for (got, want) in opacities.iter().zip(&mapped) {
+            assert!((got - want).abs() < 1e-12, "each tick must carry its own row's mapped opacity: {opacities:?} vs {mapped:?}");
+        }
     }
 
-    /// C7 family-consistency guard: tick now clamps out-of-range opacity to
-    /// `[0, 1]` and falls non-finite values back to the default, matching every
-    /// other mark via the shared `OpacityResolver`. (Before C7 tick passed these
-    /// raw, which could emit SVG with an invalid `opacity` attribute.) No real
-    /// chart feeds out-of-range opacity, so goldens are unaffected.
+    /// Family-consistency guard: tick maps opacity through the opacity scale
+    /// like every other mark (via the shared `OpacityResolver`), so a value
+    /// past 1 lands on the band's top, the in-range low end on its bottom, and a
+    /// non-finite value falls back to the default rather than reaching SVG as
+    /// an invalid `opacity` attribute.
     #[test]
     fn tick_opacity_is_clamped_and_finite_checked() {
         use crate::spec::encoding::DataType as SDT;
@@ -976,8 +980,8 @@ mod tests {
             Field::new("x",  DataType::Float64, false),
             Field::new("op", DataType::Float64, false),
         ]));
-        // Row 0: > 1 → clamps to 1.0. Row 1: NaN → falls back to default opacity.
-        // Row 2: in-range → passes through.
+        // `op`'s finite extent is 0.3..1.5 onto the 0.1..1.0 band. Row 0: 1.5
+        // → 1.0. Row 1: NaN → falls back to default opacity. Row 2: 0.3 → 0.1.
         let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
             Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
             Arc::new(Float64Array::from(vec![1.5_f64, f64::NAN, 0.3])),
@@ -993,8 +997,9 @@ mod tests {
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
         }).collect();
-        assert_eq!(opacities, vec![1.0, default_opacity, 0.3],
-            "tick opacity must clamp >1 to 1.0, fall NaN to default, pass in-range through");
+        assert_eq!(opacities.len(), 3);
+        assert!((opacities[0] - 1.0).abs() < 1e-12 && opacities[1] == default_opacity && (opacities[2] - 0.1).abs() < 1e-12,
+            "tick opacity must map 1.5 to 1.0, fall NaN to default, map 0.3 to 0.1: {opacities:?}");
     }
 
     // ── Dodge band-narrowing (Task 3c remediation) ───────────────────────────
@@ -1155,6 +1160,7 @@ mod tests {
             fill_opacity: None,
             stroke_opacity: None,
             stroke_dash: None,
+            stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
@@ -1213,6 +1219,7 @@ mod tests {
             fill_opacity: None,
             stroke_opacity: None,
             stroke_dash: None,
+            stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
@@ -1822,8 +1829,10 @@ mod tests {
         let stroke_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.stroke_opacity) } else { None }
         }).collect();
-        assert_eq!(stroke_opacities, vec![0.2, 0.5, 0.9],
+        let opacity_res = OpacityResolver::load(&ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
+        let resolved: Vec<f64> = (0..3).map(|i| opacity_res.at_row(i).0).collect();
+        assert_eq!(stroke_opacities, resolved,
             "with no stroke_opacity encoding, StrokeStyle.stroke_opacity must equal the \
-             resolved opacity value unchanged (the pre-cycle-3 behavior, bit-for-bit)");
+             resolved opacity value unchanged (bit-for-bit)");
     }
 }

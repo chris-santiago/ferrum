@@ -485,6 +485,7 @@ mod tests {
             fill_opacity: None,
             stroke_opacity: None,
             stroke_dash: None,
+            stroke_width: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),

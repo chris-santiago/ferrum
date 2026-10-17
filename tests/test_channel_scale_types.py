@@ -4,6 +4,8 @@ Catches cases where a channel silently falls back to defaults when
 an unexpected scale type is provided (e.g. ordinal size, ordinal opacity).
 """
 
+import re
+
 import polars as pl
 import pytest
 
@@ -196,13 +198,17 @@ class TestOpacityOrdinal:
                 .encode(x="x:Q", y="y:Q", opacity=fm.Opacity("cat", type_="N"))
             )
 
-    def test_opacity_bin_ordinal_scale_warns_with_hyphenated_wire_tag(self, df):
-        """A non-linear opacity scale (``BinOrdinalScale``) warns and falls back
-        to the default linear resolution. The warning's scale-kind name is the
-        ``ScaleSpec`` wire tag (``"bin-ordinal"``, hyphenated), matching every
-        other tag-producing site in the crate, not a hand-spelled variant name.
+    def test_opacity_bin_ordinal_scale_refuses_with_hyphenated_wire_tag(self, df):
+        """A non-linear opacity scale (``BinOrdinalScale``) refuses. The refusal
+        names the scale by its ``ScaleSpec`` wire tag (``"bin-ordinal"``,
+        hyphenated), matching every other tag-producing site in the crate, not a
+        hand-spelled variant name.
         """
-        with pytest.warns(UserWarning) as record:
+        text = (
+            "opacity scale: type 'bin-ordinal' is not supported; "
+            "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+        )
+        with pytest.raises(ValueError, match=re.escape(text)):
             _render(
                 fm.Chart(df)
                 .mark_point()
@@ -212,12 +218,6 @@ class TestOpacityOrdinal:
                     opacity=fm.Opacity("op", scale=fm.BinOrdinalScale(bins=[0.0, 0.5, 1.0])),
                 )
             )
-        messages = {str(w.message) for w in record.list}
-        assert (
-            "opacity: bin-ordinal scale is not supported on opacity-family channels; "
-            "the curve, domain, and range were ignored in favor of the default linear "
-            "resolution"
-        ) in messages
 
 
 # ---------------------------------------------------------------------------

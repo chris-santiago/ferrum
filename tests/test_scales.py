@@ -393,3 +393,18 @@ def test_raw_dict_degenerate_range_still_renders(scale_type: str) -> None:
         scale_type, domain=_positional_domain_for(scale_type), range=[5.0, 5.0]
     )
     assert "<svg" in svg
+
+
+def test_a_y_domain_param_draws_the_axis_and_points_its_value_gives():
+    """A y ``domain`` given by a parameter draws exactly what the literal domain draws.
+
+    The axis ticks and the points both read the parameter's ``[0, 100000]``,
+    so the chart renders byte-for-byte as ``domain=[0, 100000]`` does. Rejects
+    an axis laid out from the data extent while the points map through the
+    parameter's domain.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 50000.0, 90000.0]})
+    param = fm.param("yd", value=[0, 100000])
+    by_param = fm.Chart(df).mark_point().encode(x="x", y=fm.Y("y", scale={"domain": param}))
+    literal = fm.Chart(df).mark_point().encode(x="x", y=fm.Y("y", scale={"domain": [0, 100000]}))
+    assert by_param.to_svg() == literal.to_svg()

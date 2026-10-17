@@ -300,9 +300,9 @@ def test_vacuity_control_mark_glyph_kinds_reads_the_default_palette_assignment()
 #   family (`build_opacity_channel_scale`) never call `infer_spec_type` or
 #   read `.type_` at all (grep of `auxiliary.rs`: the only `infer_spec_type`
 #   call in the file is StrokeDash's, above) -- each always resolves its
-#   scale the same way regardless of the declared type. StrokeWidth/Angle
-#   have no scale-building function at all (documented per-row constants,
-#   `spec/encoding.rs:746`). For these seven, `type=` is architecturally
+#   scale the same way regardless of the declared type; StrokeWidth's
+#   linear scale (`build_stroke_width_scale`) never reads it either, and
+#   Angle has no scale at all (a per-row constant). For these seven, `type=` is architecturally
 #   inert at render time; the wire-normalization check is the only
 #   discriminating assertion that exists for them, not a shortcut around a
 #   render check the brief demands but this cell happens not to need.
@@ -396,14 +396,15 @@ def test_type_reaches_the_wire_normalized_for_type_blind_channels(channel_cls: t
 
 # ---------------------------------------------------------------------------
 # `legend=None` / `legend=False` -- silent on "none"-surface channels,
-# disables the rendered legend everywhere else (all 11 appearance channels
-# have `_legend_surface` "own", never "cascade" -- see
-# `test_channel_population_is_the_documented_eleven`).
+# disables the rendered legend everywhere else (every appearance channel but
+# Angle has `_legend_surface` "own", and none has "cascade").
+#
+# The opacity family and StrokeWidth draw a legend of their own once a field
+# is bound to them, so they sit with the legend owners: `legend=None`
+# suppresses it, `title=` and a legend dict label it.
 # ---------------------------------------------------------------------------
 
-_NO_LEGEND_CHANNELS = frozenset(
-    {"opacity", "fill_opacity", "stroke_opacity", "stroke_width", "angle"}
-)
+_NO_LEGEND_CHANNELS = frozenset({"angle"})
 _AUX_LEGEND_CHANNELS = frozenset(aux_legend_channels())
 _OWN_NON_AUX_LEGEND_CHANNELS = frozenset({"color", "fill", "stroke"})
 
@@ -455,7 +456,7 @@ def test_legend_dict_or_object_works_for_own_non_aux_channels(
     ids=["dict", "Legend"],
 )
 def test_legend_orient_refused_for_aux_channels(channel_cls: type, legend_value_factory) -> None:
-    """Size/Shape/StrokeDash: a legend value with orient != 'none' is refused (#123, Q10)."""
+    """Every aux-legend channel: a legend value with orient != 'none' is refused (#123, Q10)."""
     name = channel_cls.__name__
     with pytest.raises(ValueError, match=rf"{name}\(legend=\.\.\.\): orient='bottom'"):
         channel_cls(_field_for(channel_cls._channel_name), legend=legend_value_factory())
@@ -474,7 +475,7 @@ def test_legend_orient_refused_for_aux_channels(channel_cls: type, legend_value_
 def test_legend_orient_none_still_disables_aux_legend(
     channel_cls: type, legend_value_factory
 ) -> None:
-    """Size/Shape/StrokeDash: orient='none' still disables the aux legend (works)."""
+    """Every aux-legend channel: orient='none' still disables its legend (works)."""
     field = _field_for(channel_cls._channel_name)
     with_legend = _render(channel_cls)
     without_legend = _render(channel_cls, legend=legend_value_factory())
@@ -495,7 +496,7 @@ def test_legend_orient_none_still_disables_aux_legend(
 def test_legend_dict_or_object_orient_free_works_for_aux_channels(
     channel_cls: type, legend_value_factory
 ) -> None:
-    """Size/Shape/StrokeDash: an orient-free legend dict/``Legend(...)`` still
+    """Every aux-legend channel: an orient-free legend dict/``Legend(...)`` still
     configures the legend (works) -- spec §4.9's cell for the aux channels
     with a benign (non-orient) legend value, previously untested (cycle-1
     spec-review finding: only the orient-refusal and orient='none' paths
@@ -518,7 +519,7 @@ def test_legend_dict_or_object_orient_free_works_for_aux_channels(
 def test_legend_dict_or_object_refused_for_no_legend_channels(
     channel_cls: type, legend_value_factory
 ) -> None:
-    """Opacity/FillOpacity/StrokeOpacity/StrokeWidth/Angle: any legend value refuses."""
+    """Angle: any legend value refuses."""
     name = channel_cls.__name__
     with pytest.raises(ValueError, match=rf"{name}\(legend=.*\) is not supported"):
         channel_cls(_field_for(channel_cls._channel_name), legend=legend_value_factory())
@@ -528,9 +529,7 @@ def test_legend_dict_or_object_refused_for_no_legend_channels(
 # `title=` -- works on a legend owner, refused on every no-legend channel
 # ---------------------------------------------------------------------------
 
-_TITLE_REFUSED_CHANNELS = frozenset(
-    {"opacity", "fill_opacity", "stroke_opacity", "stroke_width", "angle"}
-)
+_TITLE_REFUSED_CHANNELS = frozenset({"angle"})
 _TITLE_WORKS_CHANNELS = frozenset(_BY_NAME) - _TITLE_REFUSED_CHANNELS
 
 
@@ -630,8 +629,8 @@ def test_scheme_na_warns_unchanged(channel_cls: type) -> None:
 
 
 # ---------------------------------------------------------------------------
-# `scale=` -- the widest cell: works (Color/Fill/Stroke/Size/Opacity family),
-# n/a (StrokeWidth/Angle), and the two bold #123 cells (Shape, StrokeDash).
+# `scale=` -- the widest cell: works (Color/Fill/Stroke/Size/Opacity family/
+# StrokeWidth), n/a (Angle), and the two bold #123 cells (Shape, StrokeDash).
 # ---------------------------------------------------------------------------
 
 
@@ -678,23 +677,116 @@ def test_scale_works_for_opacity_family(channel_cls: type) -> None:
     incorrect, render (quality-review finding). `opacity` bakes its value
     into the mark's `rgba(...)` fill alpha, which rounds during hex/rgba
     conversion, so it is compared with a loose tolerance; `fill_opacity`/
-    `stroke_opacity` write the raw attribute and match exactly.
+    `stroke_opacity` write the raw attribute and match exactly. The legend
+    is suppressed so only the marks' alphas are read: its swatches carry
+    alphas of their own.
     """
     extract = _OPACITY_ATTR_BY_CHANNEL[channel_cls._channel_name]
     out_values = extract(
-        _render(channel_cls, scale=fm.LinearScale(domain=[0.0, 20.0], range=[0.0, 1.0]))
+        _render(
+            channel_cls,
+            scale=fm.LinearScale(domain=[0.0, 20.0], range=[0.0, 1.0]),
+            legend=None,
+        )
     )
     expected = [n / 20.0 for n in _DF["n"].to_list()]
     assert out_values == pytest.approx(expected, rel=0.05)
 
 
-@pytest.mark.parametrize("channel_cls", [fm.StrokeWidth, fm.Angle], ids=lambda c: c.__name__)
-def test_scale_na_for_stroke_width_and_angle(channel_cls: type) -> None:
+def test_scale_works_for_stroke_width() -> None:
+    """An explicit `scale=` maps each row's value onto its pixel width.
+
+    `_DF`'s "n" column is `[1, ..., 6]`; against
+    `LinearScale(domain=[0, 12], range=[0, 6])` each point's outline is
+    exactly `n / 2` pixels wide. The legend is suppressed so only the marks'
+    widths are read.
+    """
+    svg = _render(
+        fm.StrokeWidth, scale=fm.LinearScale(domain=[0.0, 12.0], range=[0.0, 6.0]), legend=None
+    )
+    widths = [
+        float(w)
+        for w in re.findall(
+            rf'<circle[^>]*stroke="{re.escape(_MARK_COLOR)}"[^>]*stroke-width="([0-9.]+)"', svg
+        )
+    ]
+    assert widths == pytest.approx([n / 2.0 for n in _DF["n"].to_list()])
+
+
+def test_a_scale_whose_domain_equals_its_range_draws_literal_pixel_widths() -> None:
+    """A column of pixel widths draws as those widths through an identity scale, with no legend."""
+    svg = _render(
+        fm.StrokeWidth, scale=fm.LinearScale(domain=[1.0, 6.0], range=[1.0, 6.0]), legend=None
+    )
+    widths = re.findall(r'<circle[^>]*stroke-width="([0-9.]+)"', svg)
+    assert [float(w) for w in widths] == _DF["n"].to_list()
+    assert not _legend_title_present(svg, "n")
+
+
+# The five channels whose scale is the numeric auxiliary linear scale.
+_NUMERIC_AUX_CLASSES = (fm.Size, fm.Opacity, fm.FillOpacity, fm.StrokeOpacity, fm.StrokeWidth)
+
+_GATE_REMEDY = "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+
+# Each malformed scale, in the class spelling where one exists and the dict
+# spelling, with the reason the gate gives for it.
+_MALFORMED_AUX_SCALES: dict[str, tuple[Any, str]] = {
+    "log": (fm.LogScale(), f"type 'log' is not supported; {_GATE_REMEDY}"),
+    "log-dict": ({"type": "log"}, f"type 'log' is not supported; {_GATE_REMEDY}"),
+    "sqrt": (fm.SqrtScale(), f"type 'sqrt' is not supported; {_GATE_REMEDY}"),
+    "pow": (fm.PowScale(), f"type 'pow' is not supported; {_GATE_REMEDY}"),
+    "symlog": (fm.SymlogScale(), f"type 'symlog' is not supported; {_GATE_REMEDY}"),
+    "padding": (
+        fm.LinearScale(padding=0.1),
+        f"padding is not supported (it insets an axis); {_GATE_REMEDY}",
+    ),
+    "padding-dict": (
+        {"type": "linear", "padding": 0.1},
+        f"padding is not supported (it insets an axis); {_GATE_REMEDY}",
+    ),
+    "scheme-dict": (
+        {"type": "linear", "scheme": "blues"},
+        f"scheme is not supported (it names a color scheme); {_GATE_REMEDY}",
+    ),
+    "domain-3": ({"domain": [1.0, 2.0, 3.0]}, "domain must have length 2; got 3"),
+    "range-1": ({"range": [1.0]}, "range must have length 2; got 1"),
+}
+
+
+@pytest.mark.parametrize("scale_id", sorted(_MALFORMED_AUX_SCALES))
+@pytest.mark.parametrize("channel_cls", _NUMERIC_AUX_CLASSES, ids=lambda c: c.__name__)
+def test_a_numeric_aux_channel_refuses_a_scale_it_cannot_draw(
+    channel_cls: type, scale_id: str
+) -> None:
+    """Size, the opacity family and StrokeWidth refuse one set of scales at construction.
+
+    The text names the channel and the reason. Rejects a scale dropped or
+    drawn linearly without a word, and three outcomes (refuse, warn,
+    silent) for one mistake across the five.
+    """
+    scale, reason = _MALFORMED_AUX_SCALES[scale_id]
+    with pytest.raises(ValueError) as exc:
+        channel_cls("n", scale=scale)
+    assert str(exc.value) == f"{channel_cls._channel_name} scale: {reason}"
+
+
+@pytest.mark.parametrize("channel_cls", _NUMERIC_AUX_CLASSES, ids=lambda c: c.__name__)
+def test_a_numeric_aux_channel_accepts_every_linear_field_it_draws(channel_cls: type) -> None:
+    """Domain, range, reverse, nice, zero and clamp construct without a word."""
     reset_warnings()
-    field = _field_for(channel_cls._channel_name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        channel_cls(
+            "n", scale=fm.LinearScale(domain=[0.0, 10.0], range=[0.2, 0.8], reverse=True, nice=True)
+        )
+        channel_cls("n", scale={"domain": [1.0, 5.0], "zero": True, "clamp": True})
+
+
+def test_scale_na_for_angle() -> None:
+    reset_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        channel_cls(field, scale=fm.LinearScale())
+        fm.Angle("n", scale=fm.LinearScale())
     assert len(caught) == 1
     assert issubclass(caught[0].category, UserWarning)
 

@@ -51,10 +51,10 @@ class TestFillOpacity:
         chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
         svg = chart.to_svg()
         assert "fill-opacity" in svg, "Expected fill-opacity attribute in SVG output"
-        # Extract fill-opacity values; at least one should be ~0.3
+        # The constant 0.3 column maps to the middle of the opacity band.
         values = re.findall(r'fill-opacity="([^"]+)"', svg)
-        assert any(abs(float(v) - 0.3) < 0.05 for v in values), (
-            f"Expected fill-opacity near 0.3; got values: {values}"
+        assert any(abs(float(v) - 0.55) < 0.05 for v in values), (
+            f"Expected fill-opacity near 0.55; got values: {values}"
         )
 
     def test_fill_opacity_on_large_batch(self, large_scatter_df):
@@ -79,9 +79,10 @@ class TestStrokeOpacity:
         )
         svg = chart.to_svg()
         assert "stroke-opacity" in svg, "Expected stroke-opacity attribute in SVG output"
+        # The constant 0.7 column maps to the middle of the opacity band.
         values = re.findall(r'stroke-opacity="([^"]+)"', svg)
-        assert any(abs(float(v) - 0.7) < 0.05 for v in values), (
-            f"Expected stroke-opacity near 0.7; got values: {values}"
+        assert any(abs(float(v) - 0.55) < 0.05 for v in values), (
+            f"Expected stroke-opacity near 0.55; got values: {values}"
         )
 
     def test_stroke_opacity_on_bars(self):
@@ -136,21 +137,20 @@ class TestOpacityNoDoubleApply:
         fill_opacities = re.findall(r'fill-opacity="([^"]+)"', svg)
         stroke_opacities = re.findall(r'stroke-opacity="([^"]+)"', svg)
 
-        # fill_opacity values should be near 0.3
-        assert any(abs(float(v) - 0.3) < 0.05 for v in fill_opacities), (
-            f"Expected fill-opacity ~0.3; got {fill_opacities}"
+        # Each constant column maps to the middle of the opacity band,
+        # each through its own channel's attribute.
+        assert any(abs(float(v) - 0.55) < 0.05 for v in fill_opacities), (
+            f"Expected fill-opacity ~0.55; got {fill_opacities}"
         )
-
-        # stroke_opacity values should be near 0.7
-        assert any(abs(float(v) - 0.7) < 0.15 for v in stroke_opacities), (
-            f"Expected stroke-opacity ~0.7; got {stroke_opacities}"
+        assert any(abs(float(v) - 0.55) < 0.05 for v in stroke_opacities), (
+            f"Expected stroke-opacity ~0.55; got {stroke_opacities}"
         )
 
 
 class TestRangeOnlyOpacityScaleOverConstantColumn:
     """`#108`: an explicit range-only `LinearScale` over a constant
     `fill_opacity`/`stroke_opacity` column is honored (the clamped range
-    midpoint), not the column's own literal value.
+    midpoint), and with no range the default band's midpoint applies.
     """
 
     def test_fill_opacity_range_only_scale_resolves_to_midpoint(self, scatter_df):
@@ -220,25 +220,26 @@ class TestRangeOnlyOpacityScaleOverConstantColumn:
         assert svg.count('fill-opacity="0.5"') == 12
         assert 'fill-opacity="0.3"' not in svg
 
-    def test_no_scale_keeps_the_literal_alpha(self, scatter_df):
-        """Control: with no `scale=` at all, a constant column still keeps
-        its own literal value."""
+    def test_no_scale_draws_the_band_midpoint(self, scatter_df):
+        """Control: with no `scale=` at all, a constant column maps to the
+        middle of the default opacity band, as size and Vega-Lite map a
+        degenerate domain."""
         chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
         svg = chart.to_svg()
-        assert 'fill-opacity="0.3"' in svg
-        assert 'fill-opacity="0.5"' not in svg
+        assert svg.count('fill-opacity="0.55"') == 20
+        assert 'fill-opacity="0.3"' not in svg
 
-    def test_range_less_linear_scale_keeps_the_literal_alpha(self, scatter_df):
-        """Control: an explicit `LinearScale()` with neither domain nor range
-        is the same as no scale for this purpose — still the literal value."""
+    def test_range_less_linear_scale_draws_the_band_midpoint(self, scatter_df):
+        """Control: an explicit `LinearScale()` with neither domain nor
+        range is the same as no scale — the default band's midpoint."""
         chart = (
             fm.Chart(scatter_df)
             .mark_point()
             .encode(x="x", y="y", fill_opacity=fm.FillOpacity("fo", scale=fm.LinearScale()))
         )
         svg = chart.to_svg()
-        assert 'fill-opacity="0.3"' in svg
-        assert 'fill-opacity="0.5"' not in svg
+        assert svg.count('fill-opacity="0.55"') == 20
+        assert 'fill-opacity="0.3"' not in svg
 
     def test_explicit_domain_case_is_unaffected(self, scatter_df):
         """Control: an explicit domain over a constant column already

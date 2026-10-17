@@ -64,7 +64,8 @@ pub(crate) struct LeafResolveInput<'a> {
 /// explicit composite resolve names (`resolve.color`/`resolve.size`, or a
 /// `legend` override of either) on the overlay or an enclosing composite,
 /// which keep the meaning that resolve gives them. No resolve can name
-/// `shape`, the opacity family or `stroke_dash`, so those are always grouped.
+/// `shape`, the opacity family, `stroke_dash` or `stroke_width`, so those are
+/// always grouped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MemberChannels {
     pub(crate) color: bool,
@@ -123,6 +124,7 @@ impl MemberChannels {
         scales.fill_opacity = None;
         scales.stroke_opacity = None;
         scales.stroke_dash = None;
+        scales.stroke_width = None;
     }
 }
 

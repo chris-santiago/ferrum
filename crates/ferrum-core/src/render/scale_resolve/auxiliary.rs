@@ -14,48 +14,114 @@ use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
 use super::domain::{admitted_aux_reads, aux_category_union, aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, AuxRead, SortContext};
-use super::{column_min_max_f64, distinct_values_in_order, infer_spec_type, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, SHAPE_PALETTE};
+use super::{column_min_max_f64, distinct_values_in_order, infer_spec_type, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
 
-/// The explicit `domain`/`range` a user's `scale=` puts on a *numeric auxiliary*
-/// channel (size, opacity family).
+/// The channels whose scale maps a quantitative field linearly onto a
+/// bounded output interval: the one gate [`numeric_aux_scale`] answers for.
+pub(crate) const NUMERIC_AUX_CHANNELS: [&str; 5] = ["size", "opacity", "fill_opacity", "stroke_opacity", "stroke_width"];
+
+/// What a numeric auxiliary channel (size, the opacity family, stroke width)
+/// takes from its `scale=`, once [`numeric_aux_scale`] has admitted it.
 ///
-/// Only [`ScaleSpec::Linear`] contributes: these channels map a quantitative
-/// field linearly onto a bounded output band, so a `Log`/`Pow`/… spec would
-/// describe a curve this resolution does not apply, and honoring only its
-/// endpoints would misreport the mapping. Every other spec (and a domain/range
-/// that is not a two-element `[lo, hi]`) leaves the corresponding slot `None`,
-/// which is the pre-batch-A behavior byte-for-byte.
+/// These scales always clamp: a value outside an explicit domain draws at the
+/// nearer end of the range, so `clamp=` has no other setting to honor.
 #[derive(Debug, Clone, Copy, Default)]
-struct LinearOverrides {
+pub(in crate::render) struct NumericAuxOverrides {
+    /// An explicit `[lo, hi]` domain, which replaces the data extent.
     domain: Option<(f64, f64)>,
+    /// An explicit `[lo, hi]` range, which replaces the channel's theme band.
     range: Option<(f64, f64)>,
+    /// `reverse=`: the range endpoints swap, after the drawable-interval clamp.
+    reverse: bool,
+    /// `nice=`: the domain is niced, on top of the channel's own default.
+    nice: bool,
+    /// `zero=`: the domain widens to include zero.
+    zero: bool,
 }
 
-/// Read the `[lo, hi]` overrides off an encoding's `scale=`.
-fn linear_overrides(scale: &Option<ScaleSpec>) -> LinearOverrides {
-    let Some(ScaleSpec::Linear { common, .. }) = scale else {
-        return LinearOverrides::default();
+/// The one gate a numeric auxiliary channel's `scale=` passes. These scales
+/// map linearly onto a bounded interval, so a scale of another type, a
+/// `padding` (an axis inset) or a `scheme` (a color scheme) is something this
+/// resolution would ignore or misread, and refuses with
+/// [`RenderError::AuxiliaryScaleUnsupported`]; a domain or range that is not
+/// `[lo, hi]` refuses with the positional sentence
+/// ([`super::positional::validate_explicit_continuous_shape`]). Every other
+/// `linear` field is honored ([`NumericAuxOverrides`]). `channel` is the
+/// channel's wire name. No `scale=` admits the channel's defaults.
+///
+/// Published to Python as `ferrum._core.validate_numeric_aux_scale`, so a
+/// channel class refuses at construction with the text the wire refuses with
+/// at render.
+pub(in crate::render) fn numeric_aux_scale(
+    channel: &'static str,
+    scale: &Option<ScaleSpec>,
+) -> Result<NumericAuxOverrides, RenderError> {
+    let Some(spec) = scale else {
+        return Ok(NumericAuxOverrides::default());
     };
-    LinearOverrides { domain: endpoints(&common.domain), range: endpoints(&common.range) }
+    let unsupported = |reason: String| RenderError::AuxiliaryScaleUnsupported { channel: channel.to_string(), reason };
+    let ScaleSpec::Linear { common, nice, zero, system_injected: _ } = spec else {
+        return Err(unsupported(format!("type '{}' is not supported", spec.tag())));
+    };
+    if common.padding.is_some() {
+        return Err(unsupported("padding is not supported (it insets an axis)".to_string()));
+    }
+    if common.scheme.is_some() {
+        return Err(unsupported("scheme is not supported (it names a color scheme)".to_string()));
+    }
+    super::positional::validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
+    let pair = |values: &Option<Vec<f64>>| values.as_ref().map(|v| (v[0], v[1]));
+    Ok(NumericAuxOverrides {
+        domain: pair(&common.domain),
+        range: pair(&common.range),
+        reverse: common.reverse,
+        nice: *nice,
+        zero: *zero,
+    })
 }
 
-/// A two-element `[lo, hi]` list as a pair; any other length is not an extent.
-fn endpoints(values: &Option<Vec<f64>>) -> Option<(f64, f64)> {
-    match values {
-        Some(v) if v.len() == 2 => Some((v[0], v[1])),
-        _ => None,
+/// The output values a numeric auxiliary channel can draw: an alpha for the
+/// opacity family, a non-negative area or width for size and stroke width.
+#[derive(Debug, Clone, Copy)]
+enum DrawableInterval {
+    /// `[0, 1]`.
+    Alpha,
+    /// `[0, inf)`.
+    NonNegative,
+}
+
+impl DrawableInterval {
+    /// `range` with each endpoint clamped into the interval, so marks and
+    /// legend read one bounded value and the mapping stays monotone.
+    fn clamp(self, (lo, hi): (f64, f64)) -> (f64, f64) {
+        match self {
+            DrawableInterval::Alpha => (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0)),
+            DrawableInterval::NonNegative => (lo.max(0.0), hi.max(0.0)),
+        }
     }
 }
 
-/// A short kind name for a `ScaleSpec` variant, used to name the dropped scale
-/// type in [`crate::render::RenderWarning::UnsupportedOpacityScale`] when an
-/// opacity-family channel's `scale=` is not `Linear`. Always the `ScaleSpec`
-/// wire `"type"` tag spelling ([`ScaleSpec::tag()`]), the same spelling
-/// every other tag-producing site in the crate uses — pinned by
-/// `non_linear_bin_ordinal_opacity_scale_warns_with_the_wire_tag_spelling`
-/// in `render/scale_resolve/tests.rs`.
-fn scale_spec_kind_name(spec: &ScaleSpec) -> &'static str {
-    spec.tag()
+/// The linear scale of a numeric auxiliary channel: `extent` (the data's, or
+/// a composite's shared one) unless the scale states a domain, widened to
+/// zero when asked, onto `band` unless the scale states a range, that range
+/// clamped into `interval` and then reversed when asked. A data-derived
+/// domain is niced when `nice_data_domain` (the channel's default) or the
+/// scale's `nice` says so; an explicit one only when the scale says so.
+fn numeric_aux_linear(
+    extent: (f64, f64),
+    overrides: NumericAuxOverrides,
+    band: (f64, f64),
+    interval: DrawableInterval,
+    nice_data_domain: bool,
+) -> ScaleKind {
+    let (mut lo_d, mut hi_d) = overrides.domain.unwrap_or(extent);
+    if overrides.zero {
+        (lo_d, hi_d) = super::positional::extend_extent_to_zero(lo_d, hi_d);
+    }
+    let (lo, hi) = interval.clamp(overrides.range.unwrap_or(band));
+    let (lo, hi) = if overrides.reverse { (hi, lo) } else { (lo, hi) };
+    let nice = overrides.nice || (nice_data_domain && overrides.domain.is_none());
+    ScaleKind::Linear(LinearScale::new_internal(vec![lo_d, hi_d], vec![lo, hi], true, nice))
 }
 
 /// Shared prelude for a *sorted categorical domain*: resolve the (possibly
@@ -156,10 +222,22 @@ fn numeric_aux_extent(
     Ok(if facet_shared { union_panel_with_global_extent(panel, field, transform_outputs) } else { panel })
 }
 
+/// Whether a [`numeric_aux_extent`] holds any value. A column whose every
+/// row is null (or NaN) reads as an inverted, unbounded extent; a channel
+/// bound to it has nothing to map, so it builds no scale and every mark
+/// draws at the channel's default.
+fn extent_has_values((lo, hi): (f64, f64)) -> bool {
+    lo.is_finite() && hi.is_finite() && lo <= hi
+}
+
 /// Build a SizeScale if `encoding.size` is present.
 ///
-/// Honors a user-supplied `scale.range` (Phase 10f); when absent, falls back
-/// to `[theme.sizes.point_size_min, theme.sizes.point_size_max]`.
+/// A linear map from the data extent (niced) onto
+/// `[theme.sizes.point_size_min, theme.sizes.point_size_max]`, through the
+/// [`numeric_aux_scale`] gate: an explicit `scale=` domain replaces the extent,
+/// an explicit range replaces the band (clamped to a non-negative area), and
+/// `reverse`/`nice`/`zero` are honored. The scale clamps, so a value outside
+/// an explicit domain draws at the nearer end of the range.
 ///
 /// `facet_shared`: when `true` (chart is faceted with no independent option for
 /// size), unions `batch`'s extent with the global `FINAL_OUTPUT_KEY` batch so
@@ -191,6 +269,7 @@ pub fn build_size_scale(
     let Some(size_enc) = &encoding.size else {
         return Ok((None, Vec::new()));
     };
+    let overrides = numeric_aux_scale("size", &size_enc.scale)?;
     let mut warnings = Vec::new();
     let (min, max) = numeric_aux_extent(
         &size_enc.field,
@@ -208,19 +287,8 @@ pub fn build_size_scale(
         Some(SharedDomain::Numeric { lo, hi }) => (*lo, *hi),
         _ => (min, max),
     };
-    // Phase 10f: an explicit `scale.range` overrides the theme size band. The
-    // explicit *domain* is deliberately NOT read here — size-scale behavior is a
-    // batch-A non-goal (spec §3), so this stays the pre-batch-A resolution.
-    let (lo, hi) = linear_overrides(&size_enc.scale)
-        .range
-        .unwrap_or((theme.sizes.point_size_min, theme.sizes.point_size_max));
-    let inner = ScaleKind::Linear(LinearScale::new_internal(
-        vec![min, max],
-        vec![lo, hi],
-        false,
-        true,
-    ));
-    let _ = (lo, hi); // bounds now read from inner.pixel_range() via accessors
+    let band = (theme.sizes.point_size_min, theme.sizes.point_size_max);
+    let inner = numeric_aux_linear((min, max), overrides, band, DrawableInterval::NonNegative, true);
     Ok((Some(SizeScale { inner }), warnings))
 }
 
@@ -343,7 +411,7 @@ pub enum OpacityChannel {
 
 impl OpacityChannel {
     /// This channel's slot on an encoding.
-    pub(super) fn slot(self, encoding: &Encoding) -> &Option<EncodingSpec> {
+    pub(in crate::render) fn slot(self, encoding: &Encoding) -> &Option<EncodingSpec> {
         match self {
             OpacityChannel::Opacity => &encoding.opacity,
             OpacityChannel::Fill => &encoding.fill_opacity,
@@ -351,34 +419,8 @@ impl OpacityChannel {
         }
     }
 
-    /// Whether a *constant* column on this channel is a literal alpha the user
-    /// asked for, rather than data to spread across the theme band.
-    ///
-    /// `fill_opacity`/`stroke_opacity` say yes: their column values ARE alphas
-    /// in the channel's own units, so `fill_opacity="fo"` over a column of
-    /// `0.3`s means "every mark at 0.3" — mapping that degenerate extent onto
-    /// the band would silently repaint it at the band midpoint
-    /// ([`LinearScale`]'s documented degenerate-domain rule, GH #104). Those
-    /// charts must render byte-identically to pre-batch-A (spec §7), so no
-    /// scale resolves and each row keeps its value.
-    ///
-    /// `opacity` says no: mapping a constant column to the band midpoint is its
-    /// established pre-batch-A behavior, which batch A does not touch.
-    ///
-    /// This predicate alone does not decide the literal-alpha path: an
-    /// explicit `scale=` domain or range over the constant column is a real
-    /// scale the caller asked for, so `is_literal_alpha` in
-    /// [`build_opacity_channel_scale`] also requires both to be absent
-    /// (spec §6.10).
-    fn constant_column_is_a_literal_alpha(self) -> bool {
-        match self {
-            OpacityChannel::Opacity => false,
-            OpacityChannel::Fill | OpacityChannel::Stroke => true,
-        }
-    }
-
     /// The channel's wire name, carried in `UnsupportedDtype`'s `context`.
-    pub(super) fn context(self) -> &'static str {
+    pub(in crate::render) fn context(self) -> &'static str {
         match self {
             OpacityChannel::Opacity => "opacity",
             OpacityChannel::Fill => "fill_opacity",
@@ -393,7 +435,9 @@ impl OpacityChannel {
 /// explicit `[lo, hi]` domain, which wins outright (mirroring the positional
 /// explicit-scale bypass). Range: the theme opacity band
 /// `[sizes.opacity_min, sizes.opacity_max]`, unless `scale=` carries an explicit
-/// `[lo, hi]` range (spec §4.3).
+/// `[lo, hi]` range (spec §4.3), clamped to a legal alpha. The `scale=` passes
+/// the [`numeric_aux_scale`] gate, so `reverse`/`nice`/`zero` are honored and a
+/// non-linear scale refuses.
 ///
 /// `layer_reads`: a layered spec's reads of this channel ([`AuxRead`]), whose
 /// union over every layer's own column is the data extent
@@ -405,21 +449,13 @@ impl OpacityChannel {
 /// domain as the global legend. Non-faceted callers pass `false`; the
 /// per-panel-only path is byte-identical.
 ///
+/// A column with no value (every row null) builds no scale: each mark draws
+/// at the channel's default and no legend reads it. A constant column follows
+/// the degenerate-domain rule the size and stroke-width scales follow (and
+/// Vega-Lite's linear scales): every row maps to the middle of the range, on
+/// all three channels alike.
+///
 /// Returns the scale (if built) and a vec of warnings.
-///
-/// *(Amended 2026-09-01, spec §4.3, T6 quality review — ruling 2):* a
-/// `scale=` whose spec is present but not `Linear` (`Log`/`Pow`/`Sqrt`/…)
-/// pushes a [`crate::render::RenderWarning::UnsupportedOpacityScale`] naming
-/// the channel, the dropped scale kind, and which fallback the channel
-/// actually took — never silent, and full non-linear opacity-curve support
-/// stays a logged campaign follow-up.
-///
-/// *(Amended 2026-09-24, spec §4.2):* the fallback named in that warning is
-/// decided at the SAME point the constant-column early return below decides
-/// it, so a constant `fill_opacity`/`stroke_opacity` column is reported as
-/// [`OpacityScaleFallback::LiteralAlpha`](crate::render::OpacityScaleFallback::LiteralAlpha)
-/// rather than always claiming the default (data-extent-or-domain-override →
-/// theme-band-or-range-override) linear resolution.
 #[allow(clippy::too_many_arguments)]
 pub fn build_opacity_channel_scale(
     channel: OpacityChannel,
@@ -433,6 +469,7 @@ pub fn build_opacity_channel_scale(
     let Some(op_enc) = channel.slot(encoding) else {
         return Ok((None, Vec::new()));
     };
+    let overrides = numeric_aux_scale(channel.context(), &op_enc.scale)?;
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
     let (min, max) = numeric_aux_extent(
         &op_enc.field,
@@ -443,52 +480,16 @@ pub fn build_opacity_channel_scale(
         layer_reads,
         &mut warnings,
     )?;
-    let overrides = linear_overrides(&op_enc.scale);
-    // A constant column has no spread to lay across a band; for the two
-    // channels whose values are literal alphas that means no scale at all, so
-    // each row keeps its own value. An explicit `scale=` domain or range is a
-    // real scale even over a constant column, so either takes precedence over
-    // this (spec §6.10): a range-only `Linear` scale over a degenerate extent
-    // still builds the ordinary clamped, un-niced linear scale and resolves
-    // through the existing degenerate-domain midpoint rule (GH #104).
-    let is_literal_alpha = overrides.domain.is_none()
-        && overrides.range.is_none()
-        && min == max
-        && channel.constant_column_is_a_literal_alpha();
-    if let Some(spec) = &op_enc.scale {
-        if !matches!(spec, ScaleSpec::Linear { .. }) {
-            let fallback = if is_literal_alpha {
-                crate::render::OpacityScaleFallback::LiteralAlpha
-            } else {
-                crate::render::OpacityScaleFallback::Linear
-            };
-            warnings.push(crate::render::RenderWarning::UnsupportedOpacityScale {
-                channel: channel.context().to_string(),
-                scale_kind: scale_spec_kind_name(spec).to_string(),
-                fallback,
-            });
-        }
-    }
-    if is_literal_alpha {
+    if !extent_has_values((min, max)) {
         return Ok((None, warnings));
     }
-    let (min, max) = overrides.domain.unwrap_or((min, max));
-    let (lo, hi) = overrides
-        .range
-        .unwrap_or((theme.sizes.opacity_min, theme.sizes.opacity_max));
-    // Ruling 3: an explicit `scale=` range is honored as an alpha, so its
-    // endpoints must themselves be a legal alpha range — an unclamped
+    // An explicit `scale=` range is honored as an alpha, so its endpoints are
+    // clamped to a legal alpha range before the scale is built: an unclamped
     // `range=[0, 5]` would let the GPU-packed instance buffer carry alpha 5.0
-    // (svg.rs only omits the attribute at >= 1.0, so SVG and WASM would
-    // silently disagree). Clamping here, before the scale is built, keeps
-    // both backends reading the same already-bounded value.
-    let (lo, hi) = (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0));
-    let inner = ScaleKind::Linear(LinearScale::new_internal(
-        vec![min, max],
-        vec![lo, hi],
-        true,
-        false,
-    ));
+    // while svg.rs omits the attribute at >= 1.0, and the two backends would
+    // disagree.
+    let band = (theme.sizes.opacity_min, theme.sizes.opacity_max);
+    let inner = numeric_aux_linear((min, max), overrides, band, DrawableInterval::Alpha, false);
     Ok((Some(OpacityScale { inner }), warnings))
 }
 
@@ -583,3 +584,51 @@ pub fn build_stroke_dash_scale(
     Ok((Some(StrokeDashScale { domain: distinct, patterns }), warnings))
 }
 
+/// Build the [`StrokeWidthScale`] if `encoding.stroke_width` is bound.
+///
+/// A linear map from the data extent onto the theme width band
+/// `[sizes.line_stroke_width_min, sizes.line_stroke_width_max]`, as
+/// [`build_size_scale`] maps onto `[sizes.point_size_min,
+/// sizes.point_size_max]`: through the [`numeric_aux_scale`] gate, an explicit
+/// `scale=` range overrides the band (clamped to a non-negative width), an
+/// explicit domain overrides the extent, and `reverse`/`nice`/`zero` are
+/// honored. The scale clamps, so a value outside an explicit domain draws at
+/// the nearer end of the range. A data-derived domain is niced as the size
+/// scale's is; an explicit one is kept as written unless `nice` says so. A constant column maps
+/// every row to the middle of the range (the degenerate-domain rule the size
+/// scale follows), and a column with no value builds no scale, so every mark
+/// draws at its default width.
+///
+/// `facet_shared` and `layer_reads` read the extent exactly as they do for
+/// the size scale ([`numeric_aux_extent`]): a later layer whose column reads
+/// as categories stays out with one `LayerScaleExcluded` in the warnings, and
+/// a string column on the establishing layer refuses as an unsupported dtype.
+pub fn build_stroke_width_scale(
+    encoding: &Encoding,
+    batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    facet_shared: bool,
+    theme: &ThemeInputs,
+    layer_reads: &[AuxRead<'_>],
+) -> Result<(Option<StrokeWidthScale>, Vec<crate::render::RenderWarning>), RenderError> {
+    let Some(width_enc) = &encoding.stroke_width else {
+        return Ok((None, Vec::new()));
+    };
+    let overrides = numeric_aux_scale("stroke_width", &width_enc.scale)?;
+    let mut warnings = Vec::new();
+    let extent = numeric_aux_extent(
+        &width_enc.field,
+        "stroke_width",
+        batch,
+        transform_outputs,
+        facet_shared,
+        layer_reads,
+        &mut warnings,
+    )?;
+    if !extent_has_values(extent) {
+        return Ok((None, warnings));
+    }
+    let band = (theme.sizes.line_stroke_width_min, theme.sizes.line_stroke_width_max);
+    let inner = numeric_aux_linear(extent, overrides, band, DrawableInterval::NonNegative, true);
+    Ok((Some(StrokeWidthScale { inner }), warnings))
+}

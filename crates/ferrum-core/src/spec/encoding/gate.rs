@@ -556,7 +556,7 @@ fn deserialize_scale_value_with_prefix(
     ))
 }
 
-pub(super) fn deserialize_scale_value(
+pub(crate) fn deserialize_scale_value(
     py: Python,
     scale: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<ScaleSpec>> {

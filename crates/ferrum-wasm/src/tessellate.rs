@@ -50,7 +50,7 @@ pub fn tessellate_line(
     // `tessellate_path`'s `if let Some(stroke)` branch and the SVG walker's
     // omitted `stroke` attribute (`#110`).
     let Some(c) = &style.color else { return };
-    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
+    let color = color_to_f32(c, style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(x1 as f32, y1 as f32));
     builder.line_to(point(x2 as f32, y2 as f32));
@@ -74,7 +74,7 @@ pub fn tessellate_path(
     let path = pathcmds_to_lyon(commands, closed);
 
     if let Some(fill) = &style.fill {
-        let fill_alpha = style.opacity * style.fill_opacity;
+        let fill_alpha = style.fill_opacity;
         let color = color_to_f32(fill, fill_alpha);
         let mut tess = FillTessellator::new();
         let _ = tess.tessellate_path(
@@ -90,7 +90,7 @@ pub fn tessellate_path(
     }
 
     if let Some(stroke) = &style.stroke {
-        let stroke_alpha = style.opacity * style.stroke_opacity;
+        let stroke_alpha = style.stroke_opacity;
         let color = color_to_f32(stroke, stroke_alpha);
         let mut opts = StrokeOptions::default().with_line_width(style.stroke_width as f32);
         apply_cap_join(&mut opts, batch_cap, batch_join);
@@ -107,7 +107,7 @@ pub fn tessellate_polyline(
         return;
     }
     let Some(c) = &style.color else { return };
-    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
+    let color = color_to_f32(c, style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(points[0].0 as f32, points[0].1 as f32));
     for p in &points[1..] {
@@ -134,7 +134,7 @@ pub fn tessellate_tapered_polyline(
 ) -> Result<(), TaperError> {
     let pieces = dash_tapered(points, widths, style.dash.as_deref().unwrap_or(&[]))?;
     let Some(c) = &style.color else { return Ok(()) };
-    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
+    let color = color_to_f32(c, style.stroke_opacity);
     let mut opts = StrokeOptions::default();
     apply_cap_join(&mut opts, style.stroke_cap, style.stroke_join);
     stroke_tapered(&pieces, &opts, color, buffers);
@@ -156,7 +156,7 @@ pub fn tessellate_tapered_path(
 ) -> Result<(), TaperError> {
     let pieces = dash_tapered_path(commands, closure, widths, style.stroke_dash.as_deref().unwrap_or(&[]))?;
     let Some(stroke) = &style.stroke else { return Ok(()) };
-    let color = color_to_f32(stroke, style.opacity * style.stroke_opacity);
+    let color = color_to_f32(stroke, style.stroke_opacity);
     let mut opts = StrokeOptions::default();
     apply_cap_join(&mut opts, batch_cap, batch_join);
     stroke_tapered(&pieces, &opts, color, buffers);
@@ -327,7 +327,7 @@ pub fn tessellate_polygon(
     let path = builder.build();
 
     if let Some(fill) = &style.fill {
-        let fill_alpha = style.opacity * style.fill_opacity;
+        let fill_alpha = style.fill_opacity;
         let color = color_to_f32(fill, fill_alpha);
         let mut tess = FillTessellator::new();
         let _ = tess.tessellate_path(
@@ -343,7 +343,7 @@ pub fn tessellate_polygon(
     }
 
     if let Some(stroke) = &style.stroke {
-        let stroke_alpha = style.opacity * style.stroke_opacity;
+        let stroke_alpha = style.stroke_opacity;
         let color = color_to_f32(stroke, stroke_alpha);
         // Use Bevel joins so every stroke vertex carries a unit normal (|normal| ≈ 1).
         // This is required for the screen-space-width shader to stay correct under
@@ -449,6 +449,12 @@ fn pathcmds_to_lyon(cmds: &[PathCmd], closed: bool) -> LyonPath {
     builder.build()
 }
 
+/// A paint color at `opacity` times its own alpha. Every caller passes the
+/// paint's `fill_opacity` or `stroke_opacity` and never the style's
+/// `opacity`: a scene carries that opacity in the paint alpha already, and
+/// the SVG walker paints the alpha times `fill-opacity`/`stroke-opacity`
+/// alone, so multiplying it in again would draw the mark fainter here than
+/// in the static SVG.
 fn color_to_f32(c: &Color, opacity: f64) -> [f32; 4] {
     crate::scene_load::color_to_linear(c, opacity)
 }
@@ -700,10 +706,12 @@ mod tests {
         assert!(!ctrl.vertices.is_empty(), "a painted polyline must tessellate geometry");
     }
 
-    /// When both opacity=0.8 and stroke_opacity=0.5 are set, the effective
-    /// alpha must be opacity * stroke_opacity = 0.4.
+    /// With opacity=0.8 and stroke_opacity=0.5 the stroke paints at its own
+    /// alpha times stroke_opacity, 0.5, as the SVG walker paints it: the
+    /// style's opacity is already in the paint alpha and is not applied
+    /// again.
     #[test]
-    fn w10_line_tessellation_multiplies_opacity_and_stroke_opacity() {
+    fn w10_line_tessellation_applies_stroke_opacity_and_not_opacity_again() {
         let style = make_stroke_style(0.8, 0.5);
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
@@ -711,8 +719,8 @@ mod tests {
         assert!(!buffers.vertices.is_empty());
         for v in &buffers.vertices {
             assert!(
-                (v.color[3] - 0.4).abs() < 0.05,
-                "alpha must be opacity*stroke_opacity = 0.4, got {}",
+                (v.color[3] - 0.5).abs() < 0.05,
+                "alpha must be the paint alpha times stroke_opacity = 0.5, got {}",
                 v.color[3]
             );
         }
@@ -779,7 +787,7 @@ mod tests {
         }
     }
 
-    /// tessellate_path stroke must apply opacity * stroke_opacity.
+    /// tessellate_path stroke applies stroke_opacity.
     #[test]
     fn b2_path_stroke_applies_stroke_opacity() {
         use ferrum_scene::PathCmd;
@@ -811,13 +819,14 @@ mod tests {
             // Expected alpha = opacity(1.0) * stroke_opacity(0.6) = 0.6
             assert!(
                 (v.color[3] - 0.6).abs() < 0.05,
-                "path stroke alpha must be opacity*stroke_opacity (0.6), got {}",
+                "path stroke alpha must be the paint alpha times stroke_opacity (0.6), got {}",
                 v.color[3]
             );
         }
     }
 
-    /// tessellate_path fill must apply opacity * fill_opacity.
+    /// tessellate_path fill applies fill_opacity, and not the style's opacity
+    /// the paint alpha already carries.
     #[test]
     fn b2_path_fill_applies_fill_opacity() {
         use ferrum_scene::PathCmd;
@@ -839,16 +848,16 @@ mod tests {
             "path fill must produce vertices"
         );
         for v in &buffers.vertices {
-            // Expected alpha = opacity(0.8) * fill_opacity(0.5) = 0.4
+            // Expected alpha = paint alpha (1.0) * fill_opacity(0.5) = 0.5
             assert!(
-                (v.color[3] - 0.4).abs() < 0.05,
-                "path fill alpha must be opacity*fill_opacity (0.4), got {}",
+                (v.color[3] - 0.5).abs() < 0.05,
+                "path fill alpha must be the paint alpha times fill_opacity (0.5), got {}",
                 v.color[3]
             );
         }
     }
 
-    /// tessellate_polygon stroke must apply opacity * stroke_opacity.
+    /// tessellate_polygon stroke applies stroke_opacity.
     #[test]
     fn b2_polygon_stroke_applies_stroke_opacity() {
         let style = make_fill_stroke_style(1.0, 0.6, 1.0);
@@ -865,13 +874,14 @@ mod tests {
         for v in &buffers.vertices {
             assert!(
                 (v.color[3] - 0.6).abs() < 0.05,
-                "polygon stroke alpha must be opacity*stroke_opacity (0.6), got {}",
+                "polygon stroke alpha must be the paint alpha times stroke_opacity (0.6), got {}",
                 v.color[3]
             );
         }
     }
 
-    /// tessellate_polygon fill must apply opacity * fill_opacity.
+    /// tessellate_polygon fill applies fill_opacity, and not the style's
+    /// opacity the paint alpha already carries.
     #[test]
     fn b2_polygon_fill_applies_fill_opacity() {
         let style = make_fill_stroke_style(0.8, 1.0, 0.5);
@@ -887,8 +897,8 @@ mod tests {
         );
         for v in &buffers.vertices {
             assert!(
-                (v.color[3] - 0.4).abs() < 0.05,
-                "polygon fill alpha must be opacity*fill_opacity (0.4), got {}",
+                (v.color[3] - 0.5).abs() < 0.05,
+                "polygon fill alpha must be the paint alpha times fill_opacity (0.5), got {}",
                 v.color[3]
             );
         }

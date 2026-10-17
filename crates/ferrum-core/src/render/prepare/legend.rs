@@ -8,8 +8,8 @@
 //! straight into `PreparedInputs`.
 
 use crate::layout::{
-    AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendOrient, ShapeLegendEntry,
-    SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
+    AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendOrient, OpacityLegendEntry,
+    ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry, StrokeWidthLegendEntry, SymbolKind,
 };
 use crate::layout::axis::resolve_axis_title;
 use crate::render::chart_config::LegendStyleSpec;
@@ -36,6 +36,10 @@ pub(crate) struct LegendBindings<'a> {
     size: Option<&'a EncodingSpec>,
     shape: Option<&'a EncodingSpec>,
     stroke_dash: Option<&'a EncodingSpec>,
+    opacity: Option<&'a EncodingSpec>,
+    fill_opacity: Option<&'a EncodingSpec>,
+    stroke_opacity: Option<&'a EncodingSpec>,
+    stroke_width: Option<&'a EncodingSpec>,
     x: Option<&'a EncodingSpec>,
     y: Option<&'a EncodingSpec>,
     conditionals: &'a [ChartConditional],
@@ -50,6 +54,10 @@ impl<'a> LegendBindings<'a> {
             size: rendering.size.as_ref(),
             shape: rendering.shape.as_ref(),
             stroke_dash: rendering.stroke_dash.as_ref(),
+            opacity: rendering.opacity.as_ref(),
+            fill_opacity: rendering.fill_opacity.as_ref(),
+            stroke_opacity: rendering.stroke_opacity.as_ref(),
+            stroke_width: rendering.stroke_width.as_ref(),
             x: spec.encoding.x.as_ref(),
             y: spec.encoding.y.as_ref(),
             conditionals: &spec.conditionals,
@@ -499,6 +507,7 @@ pub(crate) fn build_color_legend(
             layers,
             leaf_scales.is_some_and(|c| c.size_scale_has_non_line_sibling),
         ),
+        DrawnAuxChannels::of(layers),
     );
     fold_identity_into_color_entries(&mut legend_entries, &folded, warnings);
 
@@ -725,23 +734,28 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
 /// [`aux_legend_channel_pairs`] (the Rust-side per-spec builder/validator,
 /// directly below) and the Python-visible [`aux_legend_channels`] pyfunction
 /// read (#123), so Python reads the set instead of mirroring it.
-const AUX_LEGEND_CHANNEL_NAMES: [&str; 3] = ["size", "shape", "stroke_dash"];
+const AUX_LEGEND_CHANNEL_NAMES: [&str; 7] =
+    ["size", "shape", "stroke_dash", "opacity", "fill_opacity", "stroke_opacity", "stroke_width"];
 
 /// The aux legend channels paired with their binding, in block order:
 /// the one list [`build_aux_legends`] destructures and
 /// [`refuse_format_temporality_mismatch_legend_fields`] walks. The guarantee
-/// runs one way: a fourth entry here fails to compile at the destructure until
+/// runs one way: a new entry here fails to compile at the destructure until
 /// the builder handles it, but an aux block the builder reads straight from
 /// the [`LegendBindings`] (bypassing this list) would compile without meeting the
 /// `#147` rule, so a new aux legend channel belongs in this list. Channel
 /// names come from [`AUX_LEGEND_CHANNEL_NAMES`], the same array the
 /// Python-visible [`aux_legend_channels`] pyfunction reads, so the two
 /// cannot drift apart on names or order.
-fn aux_legend_channel_pairs<'a>(bindings: &LegendBindings<'a>) -> [(&'static str, Option<&'a EncodingSpec>); 3] {
+fn aux_legend_channel_pairs<'a>(bindings: &LegendBindings<'a>) -> [(&'static str, Option<&'a EncodingSpec>); 7] {
     [
         (AUX_LEGEND_CHANNEL_NAMES[0], bindings.size),
         (AUX_LEGEND_CHANNEL_NAMES[1], bindings.shape),
         (AUX_LEGEND_CHANNEL_NAMES[2], bindings.stroke_dash),
+        (AUX_LEGEND_CHANNEL_NAMES[3], bindings.opacity),
+        (AUX_LEGEND_CHANNEL_NAMES[4], bindings.fill_opacity),
+        (AUX_LEGEND_CHANNEL_NAMES[5], bindings.stroke_opacity),
+        (AUX_LEGEND_CHANNEL_NAMES[6], bindings.stroke_width),
     ]
 }
 
@@ -768,7 +782,7 @@ fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) ->
         .is_some_and(|l| LegendStyleSpec::suppressed_by(&[l]))
 }
 
-/// Aux (size/shape/dash) legend title, three-state per spec §6 (#90):
+/// Aux legend title, three-state per spec §6 (#90):
 /// `legend.title` > channel `title` > field name, each rung resolved through
 /// [`resolve_axis_title`] (present+blank → suppress with no further
 /// fallback, present+non-blank → verbatim, absent → fall through). Mirrors
@@ -778,6 +792,18 @@ fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String>
     let channel_fallback = resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone()));
     let legend_title = enc.legend.as_ref().and_then(|l| l.title.as_deref());
     resolve_axis_title(legend_title, channel_fallback)
+}
+
+/// The label a numeric aux legend (size, the opacity family, stroke width)
+/// gives one of its values: the channel's own `Legend(format=,
+/// format_type=)`, with an undeclared `%` pattern read as a date when the
+/// channel's field is temporal.
+fn aux_value_labeler<'e>(enc: &'e EncodingSpec, transformed: &RecordBatch) -> impl Fn(f64) -> String + 'e {
+    let legend = enc.legend.as_deref();
+    let format_spec = legend.and_then(|l| l.format.as_deref());
+    let format_type = legend.and_then(|l| l.format_type.as_deref());
+    let temporality = super::field_temporality(enc, transformed).unwrap_or(Temporality::NonTemporal);
+    move |v| crate::render::format::format_value_with_spec(v, format_spec, format_type, temporality)
 }
 
 /// The title a channel STATED, as opposed to the one it falls back to.
@@ -1014,7 +1040,8 @@ fn same_field_numeric_size_color_merge(bindings: &LegendBindings<'_>, scales: &R
     same_field_as_color && color_is_numeric
 }
 
-/// Build the size/shape/stroke-dash auxiliary legend blocks.
+/// Build the auxiliary legend blocks: size, shape, stroke-dash, then one per
+/// bound opacity-family channel, then stroke-width.
 ///
 /// Size: graduated symbols at ~5 nice round values spanning the size domain
 /// (`nice_ticks`), each scaled to the size scale's pixel radius and labeled
@@ -1050,14 +1077,27 @@ fn same_field_numeric_size_color_merge(bindings: &LegendBindings<'_>, scales: &R
 ///
 /// `size_symbol` is the swatch the size block draws ([`size_legend_symbol`]),
 /// `None` when no layer draws size and so no size block is emitted.
+///
+/// Opacity family (`opacity`, `fill_opacity`, `stroke_opacity`): one block
+/// per bound channel some layer draws, as Vega-Lite draws an opacity legend:
+/// a circle swatch at each nice value of the scale's domain, drawn at the
+/// alpha that value maps to (a `stroke_opacity` swatch fades its stroke). A
+/// constant column's scale has a one-value domain, so its block has one entry.
+///
+/// Stroke width: line swatches (the stroke-dash block's sample shape) drawn
+/// at the width each nice domain value maps to, as ggplot2 draws a linewidth
+/// legend.
+///
+/// `drawn` says which of these channels some layer's mark draws
+/// ([`DrawnAuxChannels`]); a binding no mark draws gets no block.
 fn build_aux_legends(
     bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
     scales: &ResolvedScales,
     state: ColorLegendState,
     size_symbol: Option<SymbolKind>,
+    drawn: DrawnAuxChannels,
 ) -> AuxLegends {
-    use crate::render::format::format_value_with_spec;
     use crate::scale::ticks::nice_ticks;
 
     use super::super::scale_resolve::{ColorInput, ColorScale};
@@ -1078,7 +1118,8 @@ fn build_aux_legends(
 
     let mut out = Vec::new();
     let mut folded = FoldedChannels::default();
-    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channel_pairs(bindings);
+    let [(_, size_enc), (_, shape_enc), (_, dash_enc), (_, opacity_enc), (_, fill_opacity_enc), (_, stroke_opacity_enc), (_, width_enc)] =
+        aux_legend_channel_pairs(bindings);
 
     // ── Size legend ──────────────────────────────────────────────────────
     if let (Some(size_scale), Some(size_enc), Some(size_symbol)) = (&scales.size, size_enc, size_symbol) {
@@ -1097,12 +1138,7 @@ fn build_aux_legends(
         // than changed here.
         let suppressed = disabled || (same_field_as_color && !color_is_numeric);
         if !suppressed {
-            let format_spec = size_enc.legend.as_ref().and_then(|l| l.format.as_deref());
-            // D8 (legend half of format_type threading, Task 4): mirrors the
-            // color legend's colorbar handling just above.
-            let format_type = size_enc.legend.as_ref().and_then(|l| l.format_type.as_deref());
-            let size_temporality = super::field_temporality(size_enc, transformed)
-                .unwrap_or(Temporality::NonTemporal);
+            let label = aux_value_labeler(size_enc, transformed);
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
                 let values = nice_ticks(lo, hi, 5);
                 let entries: Vec<SizeLegendEntry> = values
@@ -1131,7 +1167,7 @@ fn build_aux_legends(
                             None
                         };
                         Some(SizeLegendEntry {
-                            label: format_value_with_spec(v, format_spec, format_type, size_temporality),
+                            label: label(v),
                             radius,
                             color_hex,
                         })
@@ -1223,7 +1259,74 @@ fn build_aux_legends(
         }
     }
 
+    // ── Opacity-family legends ───────────────────────────────────────────
+    use crate::layout::OpacityPaint;
+    let opacity_channels = [
+        (opacity_enc, &scales.opacity, drawn.opacity, OpacityPaint::Fill),
+        (fill_opacity_enc, &scales.fill_opacity, drawn.fill_opacity, OpacityPaint::Fill),
+        (stroke_opacity_enc, &scales.stroke_opacity, drawn.stroke_opacity, OpacityPaint::Stroke),
+    ];
+    for (enc, scale, channel_drawn, paint) in opacity_channels {
+        let (Some(enc), Some(scale), true) = (enc, scale, channel_drawn) else { continue };
+        if legend_channel_disabled(Some(enc)) {
+            continue;
+        }
+        let Some((lo, hi)) = scale.inner.data_domain() else { continue };
+        let label = aux_value_labeler(enc, transformed);
+        let entries: Vec<OpacityLegendEntry> = nice_ticks(lo, hi, 5)
+            .into_iter()
+            .filter_map(|v| Some(OpacityLegendEntry { label: label(v), opacity: scale.inner.to_pixel_f64(v)? }))
+            .collect();
+        if !entries.is_empty() {
+            out.push(AuxLegendInput::Opacity { title: aux_legend_title(enc), entries, paint });
+        }
+    }
+
+    // ── Stroke-width legend ──────────────────────────────────────────────
+    let width_block = match (&scales.stroke_width, width_enc) {
+        (Some(scale), Some(enc)) if drawn.stroke_width && !legend_channel_disabled(Some(enc)) => {
+            scale.inner.data_domain().map(|domain| (scale, enc, domain))
+        }
+        _ => None,
+    };
+    if let Some((scale, enc, (lo, hi))) = width_block {
+        let label = aux_value_labeler(enc, transformed);
+        let entries: Vec<StrokeWidthLegendEntry> = nice_ticks(lo, hi, 5)
+            .into_iter()
+            .filter_map(|v| Some(StrokeWidthLegendEntry { label: label(v), width: scale.width(v)? }))
+            .collect();
+        if !entries.is_empty() {
+            out.push(AuxLegendInput::StrokeWidth { title: aux_legend_title(enc), entries });
+        }
+    }
+
     AuxLegends { blocks: out, folded }
+}
+
+/// Which of the continuous auxiliary channels without a symbol of their own
+/// some layer's mark draws: the gate on their legend blocks, so a legend
+/// never states a mapping no mark paints. Each mirrors the size legend's
+/// [`super::LayerPrepared::drawn_size_field`] question.
+#[derive(Debug, Clone, Copy, Default)]
+struct DrawnAuxChannels {
+    opacity: bool,
+    fill_opacity: bool,
+    stroke_opacity: bool,
+    stroke_width: bool,
+}
+
+impl DrawnAuxChannels {
+    /// The answer over `layers` (every member's, for an overlay group).
+    fn of(layers: &[super::LayerPrepared]) -> Self {
+        use crate::render::scale_resolve::OpacityChannel;
+        let opacity = |channel| layers.iter().any(|l| l.drawn_opacity_field(channel).is_some());
+        Self {
+            opacity: opacity(OpacityChannel::Opacity),
+            fill_opacity: opacity(OpacityChannel::Fill),
+            stroke_opacity: opacity(OpacityChannel::Stroke),
+            stroke_width: layers.iter().any(|l| l.drawn_stroke_width_field().is_some()),
+        }
+    }
 }
 
 /// What becomes of a categorical aux channel's block — the one gate the shape
@@ -1565,6 +1668,7 @@ mod tests {
             fill_opacity: None,
             stroke_opacity: None,
             stroke_dash: None,
+            stroke_width: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -2965,7 +3069,10 @@ mod tests {
         let pair_names: Vec<String> =
             aux_legend_channel_pairs(&bindings(&spec)).iter().map(|(name, _)| name.to_string()).collect();
         assert_eq!(aux_legend_channels(), pair_names);
-        assert_eq!(aux_legend_channels(), vec!["size", "shape", "stroke_dash"]);
+        assert_eq!(
+            aux_legend_channels(),
+            vec!["size", "shape", "stroke_dash", "opacity", "fill_opacity", "stroke_opacity", "stroke_width"]
+        );
     }
 
     // ── Continuous colorbar stops drawn from the marks' color mapping ──────

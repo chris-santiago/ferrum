@@ -266,15 +266,30 @@ pub fn build_legend(
             // 4), line half-length=6 are the defaults at scale 1.0.
             match entry.symbol_kind {
                 SymbolKind::Circle => {
+                    // An opacity-legend entry draws its swatch at the alpha
+                    // its value maps to, carried as a mark carries it: baked
+                    // into the paint it fades, and on the style. A
+                    // `stroke_opacity` swatch is an unfilled ring whose stroke
+                    // takes the alpha. Every other circle swatch is opaque.
+                    use crate::layout::{OpacityPaint, SwatchOpacity};
+                    use crate::render::color::with_opacity;
+                    let (fill, stroke, stroke_w, opacity) = match entry.symbol_opacity {
+                        None => (ClearablePaint::Paint(color), swatch_stroke, swatch_stroke_w, 1.0),
+                        Some(SwatchOpacity { paint: OpacityPaint::Fill, alpha }) => {
+                            (ClearablePaint::Paint(with_opacity(color, alpha)), swatch_stroke, swatch_stroke_w, alpha)
+                        }
+                        Some(SwatchOpacity { paint: OpacityPaint::Stroke, alpha }) => (
+                            ClearablePaint::Absent,
+                            ClearablePaint::Paint(with_opacity(color, alpha)),
+                            symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width),
+                            alpha,
+                        ),
+                    };
                     nodes.push(SceneNode::Circle {
                         cx: sx,
                         cy: sy,
                         r: swatch_r,
-                        style: to_scene_fill_stroke(
-                            ClearablePaint::Paint(color),
-                            swatch_stroke,
-                            PaintChannels::new(swatch_stroke_w, 1.0, None),
-                        ),
+                        style: to_scene_fill_stroke(fill, stroke, PaintChannels::new(stroke_w, opacity, None)),
                     });
                 }
                 SymbolKind::Square => {
@@ -302,9 +317,9 @@ pub fn build_legend(
                     // to `Line`, which is what makes the dash visible at all (a
                     // `Circle` carrying a dash draws byte-identically to one
                     // without). Every other `Line`-kind entry carries `None` and
-                    // draws solid, byte-identical to pre-T12. A size entry's own
-                    // `symbol_line_width` (the dot diameter its lines draw)
-                    // outranks both widths.
+                    // draws solid, byte-identical to pre-T12. An entry's own
+                    // `symbol_line_width` (a size entry's dot diameter, a
+                    // stroke-width entry's mapped width) outranks both widths.
                     let line_w = entry
                         .symbol_line_width
                         .or(symbol_stroke_w)
@@ -489,6 +504,7 @@ mod tests {
                     color_hex: None,
                     dash_pattern: None,
                     symbol_line_width: None,
+                    symbol_opacity: None,
                 },
                 LegendEntryLayout {
                     label: "b".into(),
@@ -502,6 +518,7 @@ mod tests {
                     color_hex: None,
                     dash_pattern: None,
                     symbol_line_width: None,
+                    symbol_opacity: None,
                 },
             ],
             title: None,
@@ -536,6 +553,7 @@ mod tests {
             color_hex: None,
             dash_pattern: None,
             symbol_line_width: None,
+            symbol_opacity: None,
         };
         let legend = LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
@@ -640,6 +658,7 @@ mod tests {
                 color_hex: None,
                 dash_pattern: None,
                 symbol_line_width: None,
+                symbol_opacity: None,
             }],
             title: None,
             colorbar: None,
@@ -688,6 +707,7 @@ mod tests {
             color_hex: Some("#1f77b4".into()),
             dash_pattern: None,
             symbol_line_width: None,
+            symbol_opacity: None,
         };
         LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },

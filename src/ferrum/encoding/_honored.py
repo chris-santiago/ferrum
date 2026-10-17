@@ -54,8 +54,8 @@ the channel's ``_legend_surface`` (``ChannelBase.__init_subclass__`` via
 ``base._derive_honored``). A role set declares ``title`` only where it labels
 something other than a legend (X/Y's axis title, a facet strip, a tooltip
 field). The appearance roles compose from orthogonal atoms (``SCALE``,
-``SORT``, ``SCHEME``), so Size (``own`` surface) and Opacity (``none``) can
-share ``APPEARANCE_FULL`` and differ only in whether they draw a legend.
+``SORT``, ``SCHEME``), so Size (``own`` surface) and Angle (``none``)
+differ in ``scale`` while each one's legend bits follow its surface.
 
 The appearance-channel membership is pinned by
 ``tests/test_appearance_honored_kwargs.py``, which documents each intentional
@@ -128,8 +128,8 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 # express theirs) is never spelled out as a role-set member here.
 # ---------------------------------------------------------------------------
 
-#: Minimum appearance contract: the data type. (StrokeWidth, Angle, per-row
-#: constants with no scale resolution; see ``spec/encoding.rs:746``.)
+#: Minimum appearance contract: the data type. (Angle, a per-row constant
+#: with no scale resolution.)
 APPEARANCE_BASE = frozenset({"type"})
 
 #: Orthogonal capability atoms that compose onto ``APPEARANCE_BASE``.
@@ -146,9 +146,9 @@ SCHEME = frozenset({"scheme"})
 #: secondary positional channels, ...) keep warning that it is ignored.
 AGGREGATE = frozenset({"aggregate"})
 
-#: Adds an explicit scale override. (Size, which draws a legend and so also
-#: honors ``legend``/``title``; Opacity, FillOpacity, StrokeOpacity, which do
-#: not.)
+#: Adds an explicit scale override. (Size, Opacity, FillOpacity,
+#: StrokeOpacity and StrokeWidth, which also draw a legend and so honor
+#: ``legend``/``title`` through their ``own`` surface.)
 APPEARANCE_FULL = APPEARANCE_BASE | SCALE
 
 #: Adds an explicit domain-order sort. (StrokeDash and Shape both use this

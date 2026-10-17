@@ -816,7 +816,7 @@ fn band_point_pixel_range(range: Option<&[f64]>, pr: (f64, f64)) -> (Vec<f64>, b
 /// `build_from_scale_spec` ONLY — see the comment on the sibling
 /// "continuous-degrading" arm (`Sequential`/`Diverging`/`Quantize`/
 /// `BinOrdinal`/`Quantile`/`Threshold`) for why that family is out of scope.
-fn validate_explicit_continuous_shape(
+pub(super) fn validate_explicit_continuous_shape(
     channel: &str,
     domain: &Option<Vec<f64>>,
     range: &Option<Vec<f64>>,
@@ -844,8 +844,11 @@ fn validate_explicit_continuous_shape(
     Ok(())
 }
 
-/// Widen a resolved `[lo, hi]` extent so it includes zero — the zero-anchor's
-/// arithmetic, in one place instead of per-caller.
+/// Widen a resolved domain pair so it includes zero — the zero-anchor's
+/// arithmetic, in one place instead of per-caller. The pair keeps its order:
+/// an ascending `[5, 20]` widens to `[0, 20]`, a descending `[20, 5]` to
+/// `[20, 0]` and `[-5, -20]` to `[0, -20]`, so a reversed domain stays
+/// reversed.
 ///
 /// Spelled as the two guarded comparisons rather than `lo.min(0.0)` /
 /// `hi.max(0.0)` deliberately: `f64::min`/`max` return the non-NaN operand, so
@@ -871,8 +874,14 @@ fn validate_explicit_continuous_shape(
 /// what happened before this existed: the third site carried a comment claiming
 /// to mirror the first "exactly (same two guarded assignments)", by which time
 /// the first had become a call to this function.
-pub(in crate::render) fn extend_extent_to_zero(lo: f64, hi: f64) -> (f64, f64) {
-    (if lo > 0.0 { 0.0 } else { lo }, if hi < 0.0 { 0.0 } else { hi })
+pub(in crate::render) fn extend_extent_to_zero(first: f64, second: f64) -> (f64, f64) {
+    let widen = |lo: f64, hi: f64| (if lo > 0.0 { 0.0 } else { lo }, if hi < 0.0 { 0.0 } else { hi });
+    if first > second {
+        let (lo, hi) = widen(second, first);
+        (hi, lo)
+    } else {
+        widen(first, second)
+    }
 }
 
 /// The three domain-resolution knobs [`resolve_continuous_domain_and_range`]
@@ -902,9 +911,9 @@ struct DomainAdjust {
 /// below), so omitting a decision is a missing-argument compile error, not a
 /// runtime gap.
 ///
-/// `adjust.zero` is applied BEFORE the swap: `apply_domain_reverse`'s doc
-/// explains why reversing first corrupts `zero`'s ascending-pair assumption
-/// on any domain, not only a hand-written descending one. Every variant but
+/// `adjust.zero` is applied BEFORE the swap, and keeps the pair's order
+/// ([`extend_extent_to_zero`]), so a descending domain stays descending.
+/// Every variant but
 /// Linear passes `zero: false`, a guaranteed no-op (the `d.len() == 2` guard
 /// below).
 fn resolve_continuous_domain_and_range(
@@ -970,22 +979,12 @@ fn column_extent(batch: &RecordBatch, field: &str) -> Result<(f64, f64), RenderE
 /// continuous variant arm in `build_from_scale_spec`, after that call, with
 /// nothing enforcing the restatement) — as the LAST step, after that
 /// function's own `zero`-extension block (Linear's `zero` field; every other
-/// variant passes `zero: false`). This ordering is load-bearing, and the
-/// reason is NOT that it matches a hand-written descending domain — it does
-/// not: `domain=[100, 0]` with `zero=true` collapses to `[0.0, 0.0]` today
-/// (pre-existing, independent of `reverse`), because the `zero` block treats
-/// `d[0]` as the minimum (`if d[0] > 0.0 { d[0] = 0.0; }`, `if d[1] < 0.0 {
-/// d[1] = 0.0; }`), an assumption only an ASCENDING pair satisfies. The real
-/// reason to reverse LAST is that reversing FIRST would hand that same
-/// ascending-pair assumption a descending pair instead, silently corrupting
-/// the result — NOT necessarily to `[0.0, 0.0]` (the exact wrong value
-/// depends on the domain: an auto-inferred `[20, 80]` reversed-then-zeroed
-/// comes out `[0.0, 20.0]`, not `[0.0, 0.0]`, and not the correct `[80.0,
-/// 0.0]` either) — see
+/// variant passes `zero: false`). [`extend_extent_to_zero`] keeps a pair's
+/// order, so a hand-written descending `domain=[100, 0]` with `zero=true`
+/// stays `[100, 0]`, and `zero` then `reverse` gives the descending, widened
+/// pair: an auto-inferred `[20, 80]` comes out `[80.0, 0.0]` — pinned by
 /// `linear_zero_true_reverse_true_yields_non_degenerate_descending_domain`
-/// below, which pins the CORRECT ordering by failing (on the concrete
-/// `[0.0, 20.0]` wrong value above) if the swap is hoisted above the `zero`
-/// block.
+/// below.
 ///
 /// Range orientation, the structural y-inversion predicate
 /// (`axis_pixel_range`), and tick label/fraction pairing are untouched —
@@ -3097,6 +3096,11 @@ mod tests {
         assert_eq!(super::extend_extent_to_zero(5.0, 30.0), (0.0, 30.0));
         assert_eq!(super::extend_extent_to_zero(-30.0, -5.0), (-30.0, 0.0));
         assert_eq!(super::extend_extent_to_zero(-4.0, 9.0), (-4.0, 9.0));
+        // A descending pair keeps its order.
+        assert_eq!(super::extend_extent_to_zero(20.0, 0.0), (20.0, 0.0));
+        assert_eq!(super::extend_extent_to_zero(20.0, 5.0), (20.0, 0.0));
+        assert_eq!(super::extend_extent_to_zero(-5.0, -20.0), (0.0, -20.0));
+        assert_eq!(super::extend_extent_to_zero(9.0, -4.0), (9.0, -4.0));
         let (lo, hi) = super::extend_extent_to_zero(f64::NAN, f64::NAN);
         assert!(lo.is_nan() && hi.is_nan(), "got ({lo}, {hi})");
     }

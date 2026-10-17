@@ -13,16 +13,15 @@
 //! - `bar` alone falls `fill_opacity` back to the `opacity` column when the
 //!   `fill_opacity` column is absent ([`OpacityFallback::BarLike`]); every other
 //!   mark uses [`OpacityFallback::Standard`].
-//! - The `opacity` channel's scale transform stays at the call sites:
-//!   `arc`/`point`/`rect`/`polygon` map it through [`resolve_scaled_opacity`]
-//!   themselves, and the resolver returns that channel raw-resolved
-//!   (finite-checked, clamped, defaulted).
+//! - `arc`/`point`/`rect`/`polygon` map the `opacity` channel through
+//!   [`resolve_scaled_opacity`] themselves.
 //!
-//! Batch A (spec §4.3) adds the one exception: `fill_opacity`/`stroke_opacity`
-//! now resolve scales of their own ([`crate::render::scale_resolve::ResolvedScales`]),
-//! and the resolver applies them — see [`resolve_scaled_or_raw`] — so every
-//! adopting mark honors `FillOpacity(scale=…)`/`StrokeOpacity(scale=…)` without
-//! five copies of the mapping. A channel with no resolved scale keeps the raw
+//! All three channels resolve scales of their own
+//! ([`crate::render::scale_resolve::ResolvedScales`]), and the resolver applies
+//! each one — see [`resolve_scaled_or_raw`] — so every mark draws the alpha its
+//! value maps to, the alpha the channel's legend shows, and honors
+//! `Opacity(scale=…)`/`FillOpacity(scale=…)`/`StrokeOpacity(scale=…)` without a
+//! copy of the mapping per mark. A channel with no resolved scale keeps the raw
 //! path exactly.
 //!
 //! Sampling mode matches each mark's current behavior: `point`/`bar`/`rect` are
@@ -91,6 +90,9 @@ pub(crate) struct OpacityResolver {
     fill_opacity: Option<Vec<Option<f64>>>,
     /// The `stroke_opacity` encoding column (`col_as_f64`), if present.
     stroke_opacity: Option<Vec<Option<f64>>>,
+    /// The resolved `opacity` scale (`ctx.scales.opacity`), if the channel
+    /// resolved one. See [`resolve_scaled_or_raw`].
+    opacity_scale: Option<OpacityScale>,
     /// The resolved `fill_opacity` scale (`ctx.scales.fill_opacity`), if the
     /// channel resolved one. See [`resolve_scaled_or_raw`].
     fill_scale: Option<OpacityScale>,
@@ -131,7 +133,7 @@ fn resolve(col: &Option<Vec<Option<f64>>>, idx: usize, default: f64) -> f64 {
 /// channel and for a bound one whose scale did not resolve, so charts without
 /// these channels are byte-identical.
 #[inline]
-fn resolve_scaled_or_raw(
+pub(crate) fn resolve_scaled_or_raw(
     col: &Option<Vec<Option<f64>>>,
     scale: &Option<OpacityScale>,
     idx: usize,
@@ -168,6 +170,7 @@ impl OpacityResolver {
                 .stroke_opacity
                 .as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            opacity_scale: ctx.scales.opacity.clone(),
             fill_scale: ctx.scales.fill_opacity.clone(),
             stroke_scale: ctx.scales.stroke_opacity.clone(),
             fallback,
@@ -182,11 +185,11 @@ impl OpacityResolver {
     /// difference between per-row and per-group-first marks.
     fn sample(&self, idx: usize) -> (f64, f64, f64) {
         let (def_op, def_fill, def_stroke) = self.defaults;
-        let opacity = resolve(&self.opacity, idx, def_op);
+        let opacity = resolve_scaled_or_raw(&self.opacity, &self.opacity_scale, idx, def_op);
         // bar's quirk: when the fill_opacity column is absent at this index, fall
-        // back to the opacity column (clamped/finite-checked) before the default.
+        // back to the opacity channel (through its scale) before the default.
         let fill_default = match self.fallback {
-            OpacityFallback::BarLike => resolve(&self.opacity, idx, def_fill),
+            OpacityFallback::BarLike => resolve_scaled_or_raw(&self.opacity, &self.opacity_scale, idx, def_fill),
             OpacityFallback::Standard => def_fill,
         };
         let fill_opacity = resolve_scaled_or_raw(&self.fill_opacity, &self.fill_scale, idx, fill_default);
@@ -223,6 +226,7 @@ mod tests {
             opacity,
             fill_opacity,
             stroke_opacity,
+            opacity_scale: None,
             fill_scale: None,
             stroke_scale: None,
             fallback,

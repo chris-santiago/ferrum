@@ -1286,6 +1286,7 @@ mod tests {
             fill_opacity: None,
             stroke_opacity: None,
             stroke_dash: None,
+            stroke_width: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -1821,10 +1822,14 @@ mod tests {
                 let svg_widths = svg_polyline_widths(&svg);
                 let control_widths = svg_polyline_widths(&render_static(&added(order(&control_sibling))).unwrap());
                 if sibling_is_line {
-                    // The sibling keeps its own `stroke_width` field.
-                    assert_eq!(line_of(&scene, si).0, 2.0, "line_first={line_first}");
+                    // The sibling keeps its own `stroke_width` field: its
+                    // constant `w` column maps to the middle of the
+                    // stroke-width range.
+                    let sizes = ThemeInputs::default().sizes;
+                    let mapped = (sizes.line_stroke_width_min + sizes.line_stroke_width_max) / 2.0;
+                    assert_eq!(line_of(&scene, si).0, mapped, "line_first={line_first}");
                     assert_eq!(svg_widths[li], control_widths[li], "line_first={line_first}");
-                    assert_eq!(svg_widths[si], 2.0, "line_first={line_first}");
+                    assert_eq!(svg_widths[si], mapped, "line_first={line_first}");
                 } else {
                     // The sibling's dots stay sized by `v` (ascending 1..4).
                     let radii: Vec<f64> = scene.panels[0].marks[si].nodes.iter()

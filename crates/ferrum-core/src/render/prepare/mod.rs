@@ -400,6 +400,32 @@ impl LayerPrepared {
         let size = self.encoding.size.as_ref()?;
         (self.mark.draws_size_channel() && !self.yielded_widths().size).then_some(size.field.as_str())
     }
+
+    /// The field this layer draws on the opacity-family `channel`: `None`
+    /// when it binds no field there or its mark does not draw the channel
+    /// ([`crate::spec::mark::Mark::draws_opacity_channel`]); a segment draws
+    /// `fill_opacity` only on the arrowheads `arrow=True` adds.
+    pub(in crate::render) fn drawn_opacity_field(
+        &self,
+        channel: crate::render::scale_resolve::OpacityChannel,
+    ) -> Option<&str> {
+        use crate::render::scale_resolve::OpacityChannel;
+        let binding = channel.slot(&self.encoding).as_ref()?;
+        let arrowless_segment_fill = self.mark == crate::spec::mark::Mark::Segment
+            && channel == OpacityChannel::Fill
+            && !self.mark_style.as_ref().and_then(|m| m.arrow).unwrap_or(false);
+        (self.mark.draws_opacity_channel(channel) && !arrowless_segment_fill).then_some(binding.field.as_str())
+    }
+
+    /// The `stroke_width` field this layer draws, after width precedence:
+    /// `None` when its mark draws no encoded stroke width, when it binds no
+    /// stroke-width field, or when it is a line that yields an inherited
+    /// `stroke_width` to a width of its own ([`Self::yielded_widths`]).
+    pub(in crate::render) fn drawn_stroke_width_field(&self) -> Option<&str> {
+        let width = self.encoding.stroke_width.as_ref()?;
+        (self.mark.draws_stroke_width_channel() && !self.yielded_widths().stroke_width)
+            .then_some(width.field.as_str())
+    }
 }
 
 /// Which inherited width bindings a layer yields ([`LayerPrepared::yielded_widths`]).
@@ -1021,11 +1047,10 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 ///   member is NOT produced by the color resolver like the two above — the
 ///   shared property is "restated per panel, not re-measured per panel", which
 ///   is what this predicate has always actually meant.
-/// - `UnsupportedOpacityScale`, `ShapePaletteOverflowed`,
-///   `StrokeDashPaletteOverflowed` — every `RenderWarning`
-///   `scale_resolve::auxiliary` pushes (`#120`(7) + N2). These three are
-///   whole-chart facts even though they look data-dependent (a
-///   distinct-category count, a dropped scale kind): `build_auxiliary_scales`
+/// - `ShapePaletteOverflowed`, `StrokeDashPaletteOverflowed` — every
+///   `RenderWarning` `scale_resolve::auxiliary` pushes (`#120`(7) + N2). These
+///   are whole-chart facts even though they look data-dependent (a
+///   distinct-category count): `build_auxiliary_scales`
 ///   resolves every one of these channels with `facet_aux_shared(spec)` —
 ///   `spec.facet.is_some()` — which reads the SAME batch on every resolution
 ///   regardless of which pass or which panel asks (a non-faceted chart's one
@@ -1082,7 +1107,6 @@ pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarni
         RenderWarning::UnknownColorScheme { .. }
             | RenderWarning::GradientTooFewStops { .. }
             | RenderWarning::SortSpecIgnored { .. }
-            | RenderWarning::UnsupportedOpacityScale { .. }
             | RenderWarning::ShapePaletteOverflowed { .. }
             | RenderWarning::StrokeDashPaletteOverflowed { .. }
             | RenderWarning::ColorPaletteOverflowed { .. }
@@ -1107,9 +1131,9 @@ fn excluded_from_a_non_positional_scale(w: &RenderWarning) -> bool {
 /// provisional pass and the panel loop; this one polices repetition WITHIN
 /// the panel loop itself, once it has already run once per panel.
 ///
-/// `UnsupportedOpacityScale`/`ShapePaletteOverflowed`/`StrokeDashPaletteOverflowed`
-/// qualify for the reason given in this module's other predicate's doc:
-/// `build_auxiliary_scales` resolves all three with `facet_aux_shared(spec)`,
+/// `ShapePaletteOverflowed`/`StrokeDashPaletteOverflowed` qualify for the
+/// reason given in this module's other predicate's doc:
+/// `build_auxiliary_scales` resolves both with `facet_aux_shared(spec)`,
 /// which reads the SAME shared global batch for every panel of a faceted
 /// chart, so `resolve_panel_scales` re-derives an identical answer at each
 /// one — beyond the first panel, every later copy is a pure restatement.
@@ -1127,9 +1151,7 @@ fn excluded_from_a_non_positional_scale(w: &RenderWarning) -> bool {
 pub(crate) fn panel_pass_warning_restated_by_every_panel(w: &RenderWarning) -> bool {
     matches!(
         w,
-        RenderWarning::UnsupportedOpacityScale { .. }
-            | RenderWarning::ShapePaletteOverflowed { .. }
-            | RenderWarning::StrokeDashPaletteOverflowed { .. }
+        RenderWarning::ShapePaletteOverflowed { .. } | RenderWarning::StrokeDashPaletteOverflowed { .. }
     ) || excluded_from_a_non_positional_scale(w)
 }
 
@@ -1265,10 +1287,13 @@ pub fn prepare_render_inputs(
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
     let rendering_encoding = &establishing_encoding(&layers)?;
-    let rendering_spec = ChartSpec {
+    let mut rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
     };
+    // The legends read these scales, so a `domainParam` is substituted here as
+    // the panel pass substitutes it for the marks.
+    crate::render::scale_resolve::resolve_param_domains(&mut rendering_spec);
 
     // This call resolves over a metadata-only `(0.0, 1.0)` placeholder pixel
     // range (needed only for the DOMAIN, to feed `compute_layout`'s

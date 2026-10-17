@@ -223,15 +223,12 @@ fn size_scale_defaults_to_theme_point_size_range() {
     assert_eq!(scale.max_px(), 36.0);
 }
 
-/// The load-bearing fact behind `build_scene`'s once-per-chart swarm packing
-/// bound (`position::chart_swarms`, read against `prep.provisional_scales`,
-/// which `resolve_param_domains` never touches): the size scale's domain is
-/// the data extent, never the spec's `domain`, so a size `domainParam`
-/// substitution cannot change it. If the size scale ever starts honoring an
-/// explicit domain, this fails, and the packing bound must then read the
-/// param-resolved size scale the panels draw with.
+/// A size `domainParam` reaches the size scale the marks draw with and the
+/// provisional scale `build_scene`'s once-per-chart swarm packing bound
+/// (`position::chart_swarms`) and the size legend read: both map the param's
+/// `[0, 2]`, not the data extent.
 #[test]
-fn size_scale_is_unchanged_by_domain_param_substitution() {
+fn a_size_domain_param_reaches_the_drawn_and_the_provisional_size_scale() {
     use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
     use ferrum_scene::{ParamKind, ParameterSpec};
     let mut spec = make_spec_with_size();
@@ -258,24 +255,24 @@ fn size_scale_is_unchanged_by_domain_param_substitution() {
     }];
     let mut substituted = spec.clone();
     resolve_param_domains(&mut substituted);
-    let substituted_domain = match substituted.encoding.size.as_ref().unwrap().scale.as_ref().unwrap() {
-        ScaleSpec::Linear { common, .. } => common.domain.clone(),
-        other => panic!("expected a linear size scale, got {other:?}"),
-    };
-    assert_eq!(substituted_domain, Some(vec![0.0, 2.0]), "the param must reach the spec's size domain");
-
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let size_scale = |s: &ChartSpec| {
-        build_size_scale(&s.encoding, &batch, &outputs, false, &theme, None, &[]).unwrap().0.unwrap()
-    };
-    let (raw, resolved) = (size_scale(&spec), size_scale(&substituted));
-    for v in [1.0, 5.0, 10.0] {
-        let px = resolved.inner.to_pixel_f64(v);
-        assert!(px.is_some(), "every data value maps through the size scale, got None for {v}");
-        assert_eq!(raw.inner.to_pixel_f64(v), px, "size domainParam changed the area of {v}");
-    }
+    let drawn = build_size_scale(&substituted.encoding, &batch, &outputs, false, &theme, None, &[]).unwrap().0.unwrap();
+    assert_eq!(drawn.inner.data_domain(), Some((0.0, 2.0)), "the marks draw over the param's domain");
+
+    pyo3::Python::initialize();
+    let prep = crate::render::prepare::prepare_render_inputs(
+        &spec,
+        &batch,
+        &theme,
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("the spec prepares");
+    let provisional = prep.provisional_scales.size.expect("a provisional size scale");
+    assert_eq!(provisional.inner.data_domain(), Some((0.0, 2.0)), "the swarm bound and the legend read the param's domain");
 }
 
 #[test]
@@ -6031,17 +6028,14 @@ fn opacity_family_honors_an_explicit_wire_scale() {
     }
 }
 
-/// Byte-identity guard (§7): a CONSTANT `fill_opacity`/`stroke_opacity` column
-/// — `encode(fill_opacity="fo")` over a column of `0.3`s, the shape
-/// `tests/test_opacity_semantics.py` pins — resolves NO scale, so every row
-/// keeps its literal alpha. Mapping that degenerate extent onto the band would
-/// silently repaint 0.3 as the band midpoint 0.55 (`LinearScale`'s
-/// degenerate-domain rule, GH #104).
-///
-/// `opacity` is deliberately excluded: a constant column mapping to the band
-/// midpoint is its pre-batch-A behavior, and batch A does not change it.
+/// A constant column on any opacity-family channel follows the
+/// degenerate-domain rule the size and stroke-width scales follow (and
+/// Vega-Lite's linear scales): its one value maps to the middle of the band,
+/// 0.55 on the default 0.1..1.0 band, on `opacity`, `fill_opacity` and
+/// `stroke_opacity` alike. Rejects a channel that keeps the raw value as a
+/// literal alpha (0.3) where its siblings map it.
 #[test]
-fn a_constant_opacity_column_keeps_its_literal_alpha() {
+fn a_constant_opacity_family_column_maps_to_the_middle_of_the_band() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("x", ArrowDataType::Float64, false),
         Field::new("y", ArrowDataType::Float64, false),
@@ -6063,12 +6057,16 @@ fn a_constant_opacity_column_keeps_its_literal_alpha() {
     }));
     let (scales, warns) = resolve_appearance(&spec, &batch);
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
-    assert!(scales.fill_opacity.is_none(), "constant fill_opacity → raw pass-through");
-    assert!(scales.stroke_opacity.is_none(), "constant stroke_opacity → raw pass-through");
-    assert!(
-        scales.opacity.is_some(),
-        "the opacity channel keeps its pre-batch-A resolution over a constant column"
-    );
+    for (channel, scale) in [
+        ("opacity", &scales.opacity),
+        ("fill_opacity", &scales.fill_opacity),
+        ("stroke_opacity", &scales.stroke_opacity),
+    ] {
+        let scale = scale.as_ref().unwrap_or_else(|| panic!("constant {channel} resolves a scale"));
+        assert_eq!(scale.inner.data_domain(), Some((0.3, 0.3)), "{channel}");
+        let midpoint = scale.inner.to_pixel_f64(0.3).unwrap();
+        assert!((midpoint - 0.55).abs() < 1e-12, "{channel} maps a constant column to the band midpoint: {midpoint}");
+    }
 
     // An explicit `scale=` domain is a real domain even over a constant column,
     // so it still resolves — the guard is about an ABSENT domain, not about
@@ -6089,9 +6087,7 @@ fn a_constant_opacity_column_keeps_its_literal_alpha() {
 /// over a degenerate extent resolves the ordinary clamped, un-niced linear
 /// scale and collapses to the range's midpoint through the existing
 /// degenerate-domain rule (GH #104) — 0.5 for `[0.2, 0.8]`, and still 0.5 for
-/// `[-1, 2]` once its endpoints clamp into `[0, 1]` first. `Fill` and `Stroke`
-/// both take this path; `Opacity` is excluded from the carve-out entirely (it
-/// always resolves) and is not re-asserted here.
+/// `[-1, 2]` once its endpoints clamp into `[0, 1]` first.
 #[test]
 fn a_range_only_linear_scale_resolves_over_a_constant_opacity_column() {
     let batch = appearance_batch_constant_v(0.3);
@@ -6390,73 +6386,8 @@ fn svg_and_packed_alpha_agree_because_the_range_clamps_into_unit_interval() {
     );
 }
 
-/// Ruling 2: an opacity-family `scale=` whose spec is not `Linear` (Log here)
-/// emits `RenderWarning::UnsupportedOpacityScale` naming the channel and the
-/// dropped scale kind, then falls back to the default linear (data extent →
-/// theme band) resolution — never silent. Discriminating: under the pre-fix
-/// behavior this rendered byte-identically to no `scale=` at all with zero
-/// warnings; the fix must both warn AND keep resolving (not error, not drop
-/// the channel).
-#[test]
-fn non_linear_opacity_scale_warns_and_falls_back_to_linear_default() {
-    let batch = appearance_batch();
-    let spec = appearance_spec(serde_json::json!({
-        "fill_opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
-        },
-    }));
-    let (scales, warns) = resolve_appearance(&spec, &batch);
-    assert!(
-        warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
-            channel: "fill_opacity".into(),
-            scale_kind: "log".into(),
-            fallback: crate::render::OpacityScaleFallback::Linear,
-        }),
-        "a non-Linear scale must warn, naming the channel and dropped kind; got {warns:?}"
-    );
-    let scale = scales.fill_opacity.expect("the channel still resolves — degraded, not dropped");
-    // Falls back to the §4.3 default: data extent [0.2, 0.9] onto the theme
-    // band [0.1, 1.0] — NOT the log spec's own domain/range [1,100]/[0.2,0.9].
-    assert_eq!(
-        (scale.min_opacity(), scale.max_opacity()),
-        (0.1, 1.0),
-        "the log spec's range must be dropped in favor of the theme band default"
-    );
-    let at_min = scale.inner.to_pixel_f64(0.2).unwrap();
-    assert!(
-        (at_min - 0.1).abs() < 1e-9,
-        "must resolve via the linear default-extent path, not the log domain; got {at_min}"
-    );
-}
-
-/// Same warning, a `BinOrdinal` scale: `scale_kind` must be the `ScaleSpec`
-/// wire tag spelling (`"bin-ordinal"`, hyphen), the same spelling every
-/// other tag-producing site in the crate uses, since `scale_spec_kind_name`
-/// delegates to `ScaleSpec::tag()`.
-#[test]
-fn non_linear_bin_ordinal_opacity_scale_warns_with_the_wire_tag_spelling() {
-    let batch = appearance_batch();
-    let spec = appearance_spec(serde_json::json!({
-        "opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "bin-ordinal", "bins": [0.0, 50.0, 100.0]},
-        },
-    }));
-    let (_scales, warns) = resolve_appearance(&spec, &batch);
-    assert!(
-        warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
-            channel: "opacity".into(),
-            scale_kind: "bin-ordinal".into(),
-            fallback: crate::render::OpacityScaleFallback::Linear,
-        }),
-        "expected the hyphenated wire tag spelling; got {warns:?}"
-    );
-}
-
-/// `appearance_batch`'s "v" column with every row equal, so `fill_opacity`
-/// takes the literal-alpha path (`OpacityChannel::constant_column_is_a_literal_alpha`)
-/// instead of the linear one.
+/// `appearance_batch`'s "v" column with every row equal: a degenerate
+/// domain.
 fn appearance_batch_constant_v(value: f64) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("x", ArrowDataType::Float64, false),
@@ -6509,29 +6440,6 @@ fn n2_with_facet(mut spec: ChartSpec, field: &str) -> ChartSpec {
     spec
 }
 
-/// x/y/`v` (quantitative, varying) plus a 3-value `grp` facet column — the
-/// faceted counterpart of `appearance_batch`, 3 rows per panel.
-fn n2_faceted_opacity_batch() -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("x", ArrowDataType::Float64, false),
-        Field::new("y", ArrowDataType::Float64, false),
-        Field::new("grp", ArrowDataType::Utf8, false),
-        Field::new("v", ArrowDataType::Float64, false),
-    ]));
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
-            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0])),
-            Arc::new(StringArray::from(vec![
-                "p1", "p1", "p1", "p2", "p2", "p2", "p3", "p3", "p3",
-            ])),
-            Arc::new(Float64Array::from(vec![0.2, 0.4, 0.6, 0.3, 0.5, 0.7, 0.25, 0.55, 0.9])),
-        ],
-    )
-    .unwrap()
-}
-
 /// x/y/`cat` (one row per entry of `categories`, repeated identically in
 /// each of 3 panels) plus a 3-value `grp` facet column — shared by the
 /// faceted shape and color palette-overflow tests, which differ only in how
@@ -6569,46 +6477,8 @@ fn n2_faceted_categorical_batch(categories: &[&str]) -> RecordBatch {
     .unwrap()
 }
 
-/// The exact `Display` text for `UnsupportedOpacityScale`'s `Linear` arm at
-/// `channel="fill_opacity"`, `scale_kind="log"` — every test below that
-/// triggers this arm asserts against this verbatim, not a substring.
-const LINEAR_OPACITY_TEXT: &str = "fill_opacity: log scale is not supported on opacity-family \
-     channels; the curve, domain, and range were ignored in favor of the default linear \
-     resolution";
-
-/// The exact `Display` text for the `LiteralAlpha` arm, same channel/kind.
-const LITERAL_ALPHA_OPACITY_TEXT: &str = "fill_opacity: log scale is not supported on \
-     opacity-family channels; the column is constant, so its values were used as literal \
-     alphas instead of a scale";
-
-/// `UnsupportedOpacityScale` is a whole-chart fact: `facet_aux_shared` reads
-/// the same batch — the single panel's own, or, when faceted, the shared
-/// global one — on every resolution auxiliary.rs's warning-producing pass
-/// runs, so it must be recorded exactly once per render.
-#[test]
-fn opacity_warning_is_recorded_once_per_render_not_once_per_resolution_pass() {
-    let spec = appearance_spec(serde_json::json!({
-        "fill_opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
-        },
-    }));
-    let out = render_appearance(&spec, &appearance_batch());
-    let matches: Vec<_> = out
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
-        .collect();
-    assert_eq!(
-        matches.len(), 1,
-        "UnsupportedOpacityScale must be recorded exactly once per render, got {}: {:?}",
-        matches.len(), out.warnings
-    );
-    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
-}
-
-/// Same rule as the opacity test above, for `ShapePaletteOverflowed`: also
-/// pushed from `auxiliary.rs`, also a whole-chart fact.
+/// `ShapePaletteOverflowed` is recorded once per render: it is
+/// pushed from `auxiliary.rs` and is a whole-chart fact.
 #[test]
 fn shape_palette_overflow_warning_is_recorded_once_per_render_not_once_per_resolution_pass() {
     let mut spec = make_spec_with_color();
@@ -6640,111 +6510,7 @@ fn shape_palette_overflow_warning_is_recorded_once_per_render_not_once_per_resol
     );
 }
 
-/// A constant `fill_opacity` column under a non-`Linear` `scale=` takes the
-/// literal-alpha path (`build_opacity_channel_scale`'s early return), so the
-/// warning must say so — not claim the linear fallback it never took — and
-/// the rendered `fill-opacity` must be the raw per-row value (`0.3`),
-/// unscaled, on every row.
-#[test]
-fn opacity_scale_over_a_constant_column_warns_literal_alpha_and_renders_the_raw_value() {
-    let spec = appearance_spec(serde_json::json!({
-        "fill_opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
-        },
-    }));
-    let batch = appearance_batch_constant_v(0.3);
-    let out = render_appearance(&spec, &batch);
-    let matches: Vec<_> = out
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
-        .collect();
-    assert_eq!(
-        matches.len(), 1,
-        "expected exactly one warning, got {}: {:?}", matches.len(), out.warnings
-    );
-    assert_eq!(
-        matches[0],
-        &crate::render::RenderWarning::UnsupportedOpacityScale {
-            channel: "fill_opacity".into(),
-            scale_kind: "log".into(),
-            fallback: crate::render::OpacityScaleFallback::LiteralAlpha,
-        },
-    );
-    assert_eq!(matches[0].to_string(), LITERAL_ALPHA_OPACITY_TEXT);
-    let row_count = batch.num_rows();
-    let occurrences = out.bytes.matches(r#"fill-opacity="0.3""#).count();
-    assert_eq!(
-        occurrences, row_count,
-        "every one of the {row_count} rows must carry the raw literal alpha, not just one; \
-         got {occurrences} occurrences"
-    );
-}
-
-/// Same shape as the constant-column test, over a VARYING column: the
-/// linear-fallback text applies, and it is still recorded once.
-#[test]
-fn opacity_scale_over_a_varying_column_still_warns_linear_once() {
-    let spec = appearance_spec(serde_json::json!({
-        "fill_opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
-        },
-    }));
-    let out = render_appearance(&spec, &appearance_batch());
-    let matches: Vec<_> = out
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
-        .collect();
-    assert_eq!(
-        matches.len(), 1,
-        "expected exactly one warning, got {}: {:?}", matches.len(), out.warnings
-    );
-    assert_eq!(
-        matches[0],
-        &crate::render::RenderWarning::UnsupportedOpacityScale {
-            channel: "fill_opacity".into(),
-            scale_kind: "log".into(),
-            fallback: crate::render::OpacityScaleFallback::Linear,
-        },
-    );
-    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
-}
-
-/// `#120`(7) + N2, faceted extension: `resolve_panel_scales` runs once per
-/// panel and, for this whole-chart fact, re-derives an identical answer each
-/// time (`facet_aux_shared` reads the same shared global batch for every
-/// panel of a faceted chart), so a 3-panel facet must still record
-/// `UnsupportedOpacityScale` exactly once, not once per panel.
-#[test]
-fn opacity_warning_is_recorded_once_per_render_across_a_faceted_panel_loop() {
-    let out = render_appearance(&n2_faceted_opacity_spec(), &n2_faceted_opacity_batch());
-    let matches: Vec<_> = out
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
-        .collect();
-    assert_eq!(
-        matches.len(), 1,
-        "UnsupportedOpacityScale must be recorded exactly once per render across a 3-panel \
-         facet, got {}: {:?}", matches.len(), out.warnings
-    );
-    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
-}
-
-fn n2_faceted_opacity_spec() -> ChartSpec {
-    let spec = appearance_spec(serde_json::json!({
-        "fill_opacity": {
-            "field": "v", "type": "quantitative",
-            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
-        },
-    }));
-    n2_with_facet(spec, "grp")
-}
-
-/// Same rule as the opacity facet test above, for `ShapePaletteOverflowed`.
+/// `ShapePaletteOverflowed` is recorded once per render across a faceted panel loop.
 #[test]
 fn shape_palette_overflow_warning_is_recorded_once_per_render_across_a_faceted_panel_loop() {
     let categories: Vec<String> = (1..=9).map(|i| format!("c{i}")).collect();
@@ -7584,7 +7350,7 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
         let encoding: crate::spec::encoding::Encoding =
             serde_json::from_value(serde_json::json!({ name: { "field": field } })).unwrap();
         let spec = ChartSpec { encoding, ..Default::default() };
-        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash } =
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width } =
             build_auxiliary_scales(&spec, &spec.encoding, &batch, &HashMap::new(), &ThemeInputs::default(), None, &mut Vec::new())
                 .unwrap();
         let built = [
@@ -7595,6 +7361,7 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
             fill_opacity.is_some(),
             stroke_opacity.is_some(),
             stroke_dash.is_some(),
+            stroke_width.is_some(),
         ];
         let expected: Vec<bool> = (0..built.len()).map(|j| j == i).collect();
         assert_eq!(built.to_vec(), expected, "{name}");
@@ -8270,4 +8037,107 @@ fn layer_scale_excluded_says_scale_for_a_non_positional_channel() {
         "layer 1: its x scale differs from the one layer 0 establishes the x axis with, so it \
          stays out of that axis; its marks are placed on that axis and may fall outside it"
     );
+}
+
+/// `ferrum._core.validate_numeric_aux_scale` runs the render-time gate on a
+/// raw dict with no data: it admits a linear scale, refuses a non-linear one
+/// with the text a render refuses with, refuses a key the scale-dict gate
+/// refuses, and refuses a channel that is not a numeric auxiliary one.
+#[test]
+fn the_published_gate_answers_as_the_render_does() {
+    use pyo3::types::{PyDict, PyDictMethods};
+    pyo3::Python::initialize();
+    pyo3::Python::attach(|py| {
+        let dict = |pairs: &[(&str, pyo3::Py<pyo3::PyAny>)]| {
+            let d = PyDict::new(py);
+            for (k, v) in pairs {
+                d.set_item(*k, v).unwrap();
+            }
+            d
+        };
+        use pyo3::IntoPyObjectExt;
+        let s = |v: &str| v.into_py_any(py).unwrap();
+        let linear = dict(&[("type", s("linear")), ("domain", vec![0.0, 1.0].into_py_any(py).unwrap())]);
+        for channel in NUMERIC_AUX_CHANNELS {
+            validate_numeric_aux_scale(py, channel, &linear).unwrap();
+            let log = dict(&[("type", s("log"))]);
+            let err = validate_numeric_aux_scale(py, channel, &log).unwrap_err();
+            assert_eq!(
+                err.value(py).to_string(),
+                format!("{channel} scale: type 'log' is not supported; pass fm.LinearScale(domain=[...], range=[...]) or drop scale=")
+            );
+        }
+        let typo = dict(&[("type", s("linear")), ("clammp", true.into_py_any(py).unwrap())]);
+        assert!(validate_numeric_aux_scale(py, "size", &typo).unwrap_err().value(py).to_string().contains("clammp"));
+        assert!(validate_numeric_aux_scale(py, "color", &linear).is_err(), "color is not a numeric auxiliary channel");
+    });
+}
+
+/// `zero=true` widens a descending domain to zero and keeps it descending, on
+/// every numeric auxiliary channel and on the x/y axes: `[20, 0]` stays
+/// `[20, 0]`, `[20, 5]` becomes `[20, 0]`, `[-5, -20]` becomes `[0, -20]`,
+/// and a `domainParam` substituting `[20, 5]` becomes `[20, 0]`. Rejects
+/// widening as if the pair were ascending, which collapses `[20, 0]` to
+/// `[0, 0]` and turns `[20, 5]` into an ascending `[0, 5]`.
+#[test]
+fn zero_widens_a_descending_domain_and_keeps_it_descending() {
+    use ferrum_scene::{ParamKind, ParameterSpec};
+    let cases: [(serde_json::Value, (f64, f64)); 4] = [
+        (serde_json::json!({"type": "linear", "domain": [20.0, 0.0], "zero": true}), (20.0, 0.0)),
+        (serde_json::json!({"type": "linear", "domain": [20.0, 5.0], "zero": true}), (20.0, 0.0)),
+        (serde_json::json!({"type": "linear", "domain": [-5.0, -20.0], "zero": true}), (0.0, -20.0)),
+        (serde_json::json!({"type": "linear", "domainParam": "d", "zero": true}), (20.0, 0.0)),
+    ];
+    let params = vec![ParameterSpec {
+        name: "d".into(),
+        kind: ParamKind::Variable,
+        value: Some(serde_json::json!([20, 5])),
+        bind: None,
+        select: None,
+    }];
+    let batch = appearance_batch();
+    for (scale, expected) in &cases {
+        for channel in NUMERIC_AUX_CHANNELS.iter().copied().chain(["x", "y"]) {
+            let scale_spec: crate::spec::encoding::ScaleSpec = serde_json::from_value(scale.clone()).unwrap();
+            let mut spec = match channel {
+                "x" | "y" => {
+                    let mut spec = appearance_spec(serde_json::json!({}));
+                    let binding = if channel == "x" { &mut spec.encoding.x } else { &mut spec.encoding.y };
+                    binding.as_mut().unwrap().scale = Some(scale_spec);
+                    spec
+                }
+                _ => appearance_spec(serde_json::json!({ channel: {"field": "v", "scale": scale} })),
+            };
+            spec.params = params.clone();
+            resolve_param_domains(&mut spec);
+            let (scales, _) = resolve_appearance(&spec, &batch);
+            let domain = match channel {
+                "x" => scales.x.data_domain(),
+                "y" => scales.y.data_domain(),
+                "size" => scales.size.map(|s| s.inner.data_domain().unwrap()),
+                "opacity" => scales.opacity.map(|s| s.inner.data_domain().unwrap()),
+                "fill_opacity" => scales.fill_opacity.map(|s| s.inner.data_domain().unwrap()),
+                "stroke_opacity" => scales.stroke_opacity.map(|s| s.inner.data_domain().unwrap()),
+                "stroke_width" => scales.stroke_width.map(|s| s.inner.data_domain().unwrap()),
+                other => panic!("{other}"),
+            };
+            assert_eq!(domain, Some(*expected), "{channel} {scale}");
+        }
+    }
+}
+
+/// An x axis with `domain=[20, 0], zero=true` draws its points, at the
+/// positions a plain `[20, 0]` gives them, instead of collapsing the axis.
+#[test]
+fn a_descending_zero_x_domain_draws_its_points() {
+    let batch = appearance_batch();
+    let render = |scale: serde_json::Value| {
+        let mut spec = appearance_spec(serde_json::json!({}));
+        spec.encoding.x.as_mut().unwrap().scale = Some(serde_json::from_value(scale).unwrap());
+        render_appearance(&spec, &batch).bytes
+    };
+    let zeroed = render(serde_json::json!({"type": "linear", "domain": [20.0, 0.0], "zero": true}));
+    let plain = render(serde_json::json!({"type": "linear", "domain": [20.0, 0.0]}));
+    assert_eq!(zeroed.matches("<circle").count(), 3, "three points");
+    assert_eq!(zeroed, plain);
 }

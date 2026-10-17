@@ -2000,13 +2000,24 @@ _MIXED_CASES: dict[str, tuple[Callable[[], Any], str]] = {
         "color",
     ),
     "size": (lambda: _mixed_point(size="z") + _mixed_point(size="g"), "size"),
-    "opacity": (lambda: _mixed_point(opacity="z") + _mixed_point(opacity="g"), "opacity"),
+    # The opacity family draws a legend the commit before the layer data model
+    # did not; with it suppressed, the marks render those same bytes.
+    "opacity": (
+        lambda: _mixed_point(opacity=fm.Opacity("z", legend=None)) + _mixed_point(opacity="g"),
+        "opacity",
+    ),
     "fill_opacity": (
-        lambda: _mixed_point(fill_opacity="z") + _mixed_point(fill_opacity="g"),
+        lambda: (
+            _mixed_point(fill_opacity=fm.FillOpacity("z", legend=None))
+            + _mixed_point(fill_opacity="g")
+        ),
         "fill_opacity",
     ),
     "stroke_opacity": (
-        lambda: _mixed_point(stroke_opacity="z") + _mixed_point(stroke_opacity="g"),
+        lambda: (
+            _mixed_point(stroke_opacity=fm.StrokeOpacity("z", legend=None))
+            + _mixed_point(stroke_opacity="g")
+        ),
         "stroke_opacity",
     ),
 }
@@ -2048,6 +2059,18 @@ def test_a_layer_of_another_field_type_stays_out_of_the_layered_scale(case):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         assert "<html" in build().interactive().to_html().lower()
+
+
+@pytest.mark.parametrize("channel", ["opacity", "fill_opacity", "stroke_opacity"])
+def test_an_excluded_opacity_layer_leaves_one_legend_over_the_establishing_values(channel):
+    """The string layer stays out of the scale and its legend; layer 0's ``z`` titles the one legend."""
+    svg, messages = _scale_warnings(
+        lambda: _mixed_point(**{channel: "z"}) + _mixed_point(**{channel: "g"})
+    )
+    assert messages == [_excluded(channel)]
+    texts = _texts(svg)
+    assert texts.count("z") == 1 and "g" not in texts
+    assert texts[-7:] == ["1", "1.5", "2", "2.5", "3", "3.5", "4"]
 
 
 def test_a_nominal_color_legend_lists_only_the_establishing_categories():

@@ -398,6 +398,16 @@ pub enum RenderError {
         surface: ScaleDomainSurface,
         coord_flipped: bool,
     },
+    /// A numeric auxiliary channel (size, the opacity family, stroke width)
+    /// carried a `scale=` its linear resolution cannot draw: a scale type
+    /// other than `linear` (named by its wire tag), or a `padding`/`scheme`
+    /// that has no meaning off an axis or a color scale
+    /// (`scale_resolve::auxiliary::numeric_aux_scale`). `channel` is the
+    /// channel's wire name, never positional, so nothing un-flips.
+    AuxiliaryScaleUnsupported {
+        channel: String,
+        reason: String,
+    },
     /// A band scale's `padding`/`paddingInner`/`paddingOuter` outside d3's
     /// bounds. The `BandScale` constructor refuses the same values at the
     /// call; this is the refusal for a scale dict (or an override type
@@ -1055,6 +1065,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::UnknownBlend { .. }
         | RenderError::MarkStyleNotDrawn { .. }
         | RenderError::MarkRequiresCoord { .. }
+        | RenderError::AuxiliaryScaleUnsupported { .. }
         // Carries a `coord_flipped` field, patched at its own single
         // construction site (`scene_build::validate_layer_positional_columns`,
         // which has `PreparedInputs::coord_flipped` in hand) — same discipline
@@ -1255,6 +1266,10 @@ impl std::fmt::Display for RenderError {
                     )
                 }
             }
+            Self::AuxiliaryScaleUnsupported { channel, reason } => write!(
+                f,
+                "{channel} scale: {reason}; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+            ),
             Self::InvalidScaleDomainConfig { channel, reason, surface, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 match surface {
@@ -1654,32 +1669,6 @@ impl RenderError {
     }
 }
 
-/// Which resolution an opacity-family channel fell back to when its `scale=`
-/// carried a non-`Linear` spec (see [`RenderWarning::UnsupportedOpacityScale`]).
-/// Decided at the same early return that picks between the two behaviors in
-/// `scale_resolve::auxiliary::build_opacity_channel_scale`, so the warning
-/// names the fallback the channel actually took rather than always claiming
-/// the linear one. Two variants, `Copy`, matched exhaustively in `Display`.
-///
-/// Not the same concept as `marks::opacity::OpacityFallback` (that one picks
-/// the *default* an absent value falls back to; this one names which *scale
-/// resolution* a present-but-unsupported `scale=` fell back to).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpacityScaleFallback {
-    /// Data extent (or the `scale=` domain) onto the theme opacity band (or
-    /// the `scale=` range) — the channel's ordinary default resolution.
-    Linear,
-    /// `fill_opacity`/`stroke_opacity` over a constant column with no
-    /// explicit `scale=` domain or range: no scale is built, and each row
-    /// keeps its own value as a literal alpha. An explicit domain or range
-    /// over the same constant column is a real scale instead (spec §6.10),
-    /// so this fallback is only reported when the channel's `scale=` is
-    /// non-`Linear` (which never populates domain/range overrides) and the
-    /// column is otherwise a literal alpha.
-    LiteralAlpha,
-}
-
 /// Whether a [`RenderWarning::LayerScaleExcluded`] `channel` names a
 /// positional channel, whose shared scale is an axis, rather than a
 /// non-positional one, whose shared scale is drawn by a legend.
@@ -1882,22 +1871,6 @@ pub enum RenderWarning {
         marks: Vec<String>,
         scale_kind: String,
         suppressed: bool,
-    },
-    /// An opacity-family channel (`opacity`/`fill_opacity`/`stroke_opacity`)
-    /// carried an explicit `scale=` whose spec is not `Linear` (spec §4.3,
-    /// amended 2026-09-01). The curve, domain, and range are NOT honored;
-    /// `fallback` names which resolution the channel actually took instead
-    /// (spec §4.2, amended 2026-09-24: the message no longer always claims
-    /// the linear fallback when a constant `fill_opacity`/`stroke_opacity`
-    /// column took the literal-alpha path). `channel` is the channel name
-    /// (`"opacity"` / `"fill_opacity"` / `"stroke_opacity"`); `scale_kind` is
-    /// the dropped spec's kind (`"log"`, `"pow"`, `"sqrt"`, …). Full
-    /// non-linear opacity-curve support is a logged campaign follow-up, not
-    /// this batch.
-    UnsupportedOpacityScale {
-        channel: String,
-        scale_kind: String,
-        fallback: OpacityScaleFallback,
     },
     /// A chart-level config section named a surface the chart does not have:
     /// `axis_y2` (D2/F-L07-06, spec §4.1) on a chart with no `independent_y`
@@ -2284,20 +2257,6 @@ impl std::fmt::Display for RenderWarning {
                     )
                 }
             }
-            RenderWarning::UnsupportedOpacityScale { channel, scale_kind, fallback } => match fallback {
-                OpacityScaleFallback::Linear => write!(
-                    f,
-                    "{channel}: {scale_kind} scale is not supported on opacity-family channels; \
-                     the curve, domain, and range were ignored in favor of the default linear \
-                     resolution"
-                ),
-                OpacityScaleFallback::LiteralAlpha => write!(
-                    f,
-                    "{channel}: {scale_kind} scale is not supported on opacity-family channels; \
-                     the column is constant, so its values were used as literal alphas instead \
-                     of a scale"
-                ),
-            },
             RenderWarning::ConfigSurfaceNotPresent { section } => write!(
                 f,
                 "chart config names '{}' but the chart has no matching surface; \
@@ -2515,16 +2474,6 @@ mod tests {
                 marks: vec!["line".into()],
                 scale_kind: "discretizing".into(),
                 suppressed: false,
-            },
-            RenderWarning::UnsupportedOpacityScale {
-                channel: "fill_opacity".into(),
-                scale_kind: "log".into(),
-                fallback: OpacityScaleFallback::Linear,
-            },
-            RenderWarning::UnsupportedOpacityScale {
-                channel: "fill_opacity".into(),
-                scale_kind: "log".into(),
-                fallback: OpacityScaleFallback::LiteralAlpha,
             },
             RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 },
             RenderWarning::LegendValuesUnknown { values: vec!["zzz".into()] },

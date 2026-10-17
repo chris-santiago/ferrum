@@ -117,6 +117,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // (`spec/encoding/mod.rs::AUXILIARY_SCALE_CHANNELS`), published so
     // a layer merge promotes exactly the bindings Rust scales.
     m.add_function(wrap_pyfunction!(render::scale_resolve::auxiliary_scale_channels, m)?)?;
+    // The numeric auxiliary channels' `scale=` gate
+    // (`render/scale_resolve/auxiliary.rs::numeric_aux_scale`), published so
+    // a channel class refuses at construction with the render-time text.
+    m.add_function(wrap_pyfunction!(render::scale_resolve::validate_numeric_aux_scale, m)?)?;
     // #176: the `interpolate=` vocabulary
     // (`render/marks/curve.rs::Interpolate::ALL`), published so `marks/base.py`
     // gates it at declaration instead of the renderer refusing it.

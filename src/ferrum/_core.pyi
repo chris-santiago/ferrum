@@ -1174,6 +1174,13 @@ def scale_temporal_type_tags() -> list[str]: ...
 # effect of its exception.
 def validate_scale_dict(scale: dict) -> None: ...
 
+# The numeric auxiliary scale gate (size, opacity, fill_opacity,
+# stroke_opacity, stroke_width) run on a scale dict with no data, so a channel
+# class refuses at construction with the text a wire spec refuses with at
+# render: a non-linear type, ``padding``, ``scheme``, or a domain or range
+# whose length is not 2. Returns None when the channel admits the scale.
+def validate_numeric_aux_scale(channel: str, scale: dict) -> None: ...
+
 # #157: the data-free value bounds the scale classes enforce at
 # construction, through the same Rust predicates and so the same clause text:
 # band padding (d3's bounds) and ``align`` in [0, 1]; point ``padding`` finite

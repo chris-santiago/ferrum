@@ -3113,18 +3113,11 @@ fn provisional_scale_warning_superseded_by_panel_pass_excludes_the_facet_variant
 
 /// `#120`(7) + N2: every `RenderWarning` `scale_resolve::auxiliary`
 /// pushes is a provisional-pass duplicate too, alongside the color-scheme
-/// and sort members above — see the predicate's doc for why these three,
+/// and sort members above — see the predicate's doc for why these two,
 /// plus `ColorPaletteOverflowed`, are whole-chart facts at the
 /// provisional/panel-real boundary despite looking data-dependent.
 #[test]
 fn provisional_scale_warning_superseded_by_panel_pass_includes_every_auxiliary_warning() {
-    assert!(provisional_scale_warning_superseded_by_panel_pass(
-        &RenderWarning::UnsupportedOpacityScale {
-            channel: "fill_opacity".into(),
-            scale_kind: "log".into(),
-            fallback: crate::render::OpacityScaleFallback::Linear,
-        }
-    ));
     assert!(provisional_scale_warning_superseded_by_panel_pass(
         &RenderWarning::ShapePaletteOverflowed { categories: 9 }
     ));
@@ -3137,18 +3130,11 @@ fn provisional_scale_warning_superseded_by_panel_pass_includes_every_auxiliary_w
 }
 
 /// `#120`(7) + N2, faceted extension: the panel-loop predicate includes
-/// exactly the three auxiliary variants, and — the asymmetry the whole
+/// exactly the two auxiliary variants, and — the asymmetry the whole
 /// mechanism exists to preserve — excludes `ColorPaletteOverflowed`,
 /// whose own per-panel copies must survive.
 #[test]
 fn panel_pass_warning_restated_by_every_panel_excludes_color() {
-    assert!(panel_pass_warning_restated_by_every_panel(
-        &RenderWarning::UnsupportedOpacityScale {
-            channel: "fill_opacity".into(),
-            scale_kind: "log".into(),
-            fallback: crate::render::OpacityScaleFallback::Linear,
-        }
-    ));
     assert!(panel_pass_warning_restated_by_every_panel(
         &RenderWarning::ShapePaletteOverflowed { categories: 9 }
     ));
@@ -3166,11 +3152,7 @@ fn panel_pass_warning_restated_by_every_panel_excludes_color() {
 /// warning's relative order untouched.
 #[test]
 fn collapse_panel_restated_duplicates_keeps_first_copy_and_every_color_copy() {
-    let opacity = RenderWarning::UnsupportedOpacityScale {
-        channel: "fill_opacity".into(),
-        scale_kind: "log".into(),
-        fallback: crate::render::OpacityScaleFallback::Linear,
-    };
+    let opacity = RenderWarning::ShapePaletteOverflowed { categories: 9 };
     let color = RenderWarning::ColorPaletteOverflowed { categories: 12 };
     let sort = RenderWarning::SortSpecIgnored { reason: "x".into() };
     let input = vec![
@@ -6585,13 +6567,21 @@ fn drawn_channel_prepared(spec: &ChartSpec) -> PreparedInputs {
 /// The full `prepare → layout → build_scene` render of `spec` over
 /// [`drawn_channel_batch`], with every warning the render reports.
 fn drawn_channel_scene(spec: &ChartSpec) -> (ferrum_scene::SceneGraph, Vec<RenderWarning>) {
+    scene_over(spec, &drawn_channel_batch(), &crate::layout::ThemeInputs::default())
+}
+
+/// [`drawn_channel_scene`] over `batch` under `theme`.
+fn scene_over(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    theme: &crate::layout::ThemeInputs,
+) -> (ferrum_scene::SceneGraph, Vec<RenderWarning>) {
     pyo3::Python::initialize();
-    let theme = crate::layout::ThemeInputs::default();
     let chart_config = crate::render::chart_config::ChartConfig::default();
     let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
         spec,
-        &drawn_channel_batch(),
-        &theme,
+        batch,
+        theme,
         crate::layout::Viewport { width: 600.0, height: 400.0 },
         &chart_config,
         None,
@@ -6637,6 +6627,7 @@ fn aux_scale_debug(scales: &ResolvedScales, channel: &str) -> String {
         "stroke_opacity" => format!("{:?}", scales.stroke_opacity),
         "shape" => format!("{:?}", scales.shape),
         "stroke_dash" => format!("{:?}", scales.stroke_dash),
+        "stroke_width" => format!("{:?}", scales.stroke_width),
         other => panic!("{other} resolves no auxiliary scale"),
     }
 }
@@ -6673,6 +6664,7 @@ fn drawn_channel_cases() -> Vec<(&'static str, &'static str, serde_json::Value)>
         ("point", "stroke_opacity", field("v")),
         ("point", "shape", field("g")),
         ("line", "stroke_dash", field("g")),
+        ("line", "stroke_width", field("w")),
     ]
 }
 
@@ -6955,9 +6947,11 @@ fn a_legend_title_comes_from_the_establishing_layers_binding() {
         .aux_legends
         .iter()
         .map(|block| match block {
-            AuxLegendInput::Size { title, .. } | AuxLegendInput::Shape { title, .. } | AuxLegendInput::StrokeDash { title, .. } => {
-                title.clone()
-            }
+            AuxLegendInput::Size { title, .. }
+            | AuxLegendInput::Shape { title, .. }
+            | AuxLegendInput::StrokeDash { title, .. }
+            | AuxLegendInput::Opacity { title, .. }
+            | AuxLegendInput::StrokeWidth { title, .. } => title.clone(),
         })
         .collect();
     assert_eq!(titles, vec![Some("v".to_string())]);
@@ -7021,4 +7015,984 @@ fn the_establishing_layers_own_batch_decides_the_kind_over_a_same_named_chart_co
         drawn_channel_prepared(&spec).provisional_scales.stroke_dash.is_none(),
         "agg's numeric g reads as palette indices"
     );
+}
+
+// ── Opacity-family and stroke-width legends, and the stroke-width scale ──────
+
+/// Every node of `nodes`, groups flattened, in drawing order.
+fn flat_nodes(nodes: &[ferrum_scene::SceneNode]) -> Vec<&ferrum_scene::SceneNode> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            ferrum_scene::SceneNode::Group { children, .. } => out.extend(flat_nodes(children)),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The alpha every circle swatch in the scene's legend paints, in order: a
+/// filled swatch's fill alpha (checked against the style's opacity, which
+/// carries the same value), an unfilled swatch's stroke alpha, each to the
+/// nearest 8-bit alpha step the SVG paints.
+fn legend_circle_opacities(scene: &ferrum_scene::SceneGraph) -> Vec<f64> {
+    flat_nodes(&scene.legend)
+        .into_iter()
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Circle { style, .. } => Some(match (&style.fill, &style.stroke) {
+                (Some(fill), _) => {
+                    let fill_alpha = f64::from(fill.a) / 255.0;
+                    assert!((fill_alpha - style.opacity).abs() <= 0.5 / 255.0, "fill alpha {fill_alpha} vs opacity {}", style.opacity);
+                    style.opacity
+                }
+                (None, Some(stroke)) => f64::from(stroke.a) / 255.0,
+                (None, None) => panic!("a swatch paints nothing: {style:?}"),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The stroke width of every line swatch in the scene's legend, in order.
+fn legend_line_widths(scene: &ferrum_scene::SceneGraph) -> Vec<f64> {
+    flat_nodes(&scene.legend)
+        .into_iter()
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some(style.width),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of the scene's legend, in order.
+fn legend_text(scene: &ferrum_scene::SceneGraph) -> Vec<String> {
+    flat_nodes(&scene.legend)
+        .into_iter()
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Text { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The stroke width each point of the first panel's first mark batch draws.
+fn point_stroke_widths(scene: &ferrum_scene::SceneGraph) -> Vec<f64> {
+    scene.panels[0].marks[0]
+        .nodes
+        .iter()
+        .map(|n| match n {
+            ferrum_scene::SceneNode::Circle { style, .. } => style.stroke_width,
+            other => panic!("a point draws a circle: {other:?}"),
+        })
+        .collect()
+}
+
+/// The width of every polyline of the first panel, in mark-batch order.
+fn polyline_widths(scene: &ferrum_scene::SceneGraph) -> Vec<f64> {
+    scene.panels[0]
+        .marks
+        .iter()
+        .flat_map(|batch| batch.nodes.iter())
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Polyline { style, .. } => Some(style.width),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `values` mapped linearly from `domain` onto `range`: the oracle every
+/// opacity and stroke-width expectation below is computed from.
+fn linear_map(values: &[f64], domain: (f64, f64), range: (f64, f64)) -> Vec<f64> {
+    values.iter().map(|v| range.0 + (v - domain.0) / (domain.1 - domain.0) * (range.1 - range.0)).collect()
+}
+
+fn assert_close(actual: &[f64], expected: &[f64], context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}: {actual:?} vs {expected:?}");
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-9, "{context}: {actual:?} vs {expected:?}");
+    }
+}
+
+/// [`assert_close`] for alphas a painted color carries, as one of 256 steps.
+fn assert_painted_close(actual: &[f64], expected: &[f64], context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}: {actual:?} vs {expected:?}");
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() <= 0.5 / 255.0 + 1e-12, "{context}: {actual:?} vs {expected:?}");
+    }
+}
+
+/// The nice values of `w`'s 20..50 extent a stroke-width legend lists.
+const NICE_W: [&str; 7] = ["20", "25", "30", "35", "40", "45", "50"];
+
+/// The widths [`NICE_W`] map to on the default 1..4 px band.
+fn nice_w_widths() -> Vec<f64> {
+    linear_map(&[20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0], (20.0, 50.0), (1.0, 4.0))
+}
+
+/// The only aux legend block of a prepared chart.
+fn only_aux_block(prep: &PreparedInputs) -> &AuxLegendInput {
+    match prep.aux_legends.as_slice() {
+        [block] => block,
+        other => panic!("expected one aux legend block, got {other:?}"),
+    }
+}
+
+/// Each opacity-family channel bound to a quantitative field draws one
+/// legend from its scale, as Vega-Lite's opacity legend does: a circle at
+/// each nice value of the domain (`v` spans 1..10, so 2, 4, 6, 8, 10), each
+/// drawn at the alpha that value maps to on the theme band `[0.1, 1.0]`,
+/// titled by its field. With all three bound there are three legends, one
+/// per channel. Rejects a legend that does not exist (the channels drew none
+/// before) and one whose swatches are opaque.
+#[test]
+fn opacity_family_channels_each_draw_one_legend_of_alphas_at_nice_values() {
+    let nice = [2.0, 4.0, 6.0, 8.0, 10.0];
+    let alphas = linear_map(&nice, (1.0, 10.0), (0.1, 1.0));
+    for channel in ["opacity", "fill_opacity", "stroke_opacity"] {
+        let spec = drawn_channel_alone("point", bound(channel, &serde_json::json!({"field": "v"})));
+        match only_aux_block(&drawn_channel_prepared(&spec)) {
+            AuxLegendInput::Opacity { title, entries, paint } => {
+                assert_eq!(title.as_deref(), Some("v"), "{channel}");
+                let faded = if channel == "stroke_opacity" { crate::layout::OpacityPaint::Stroke } else { crate::layout::OpacityPaint::Fill };
+                assert_eq!(*paint, faded, "{channel}");
+                let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+                assert_eq!(labels, ["2", "4", "6", "8", "10"], "{channel}");
+                assert_close(&entries.iter().map(|e| e.opacity).collect::<Vec<_>>(), &alphas, channel);
+            }
+            other => panic!("{channel}: expected an opacity legend, got {other:?}"),
+        }
+        let (scene, _) = drawn_channel_scene(&spec);
+        assert_painted_close(&legend_circle_opacities(&scene), &alphas, channel);
+        assert_eq!(legend_text(&scene), ["v", "2", "4", "6", "8", "10"], "{channel}");
+    }
+    let all = drawn_channel_alone(
+        "point",
+        serde_json::json!({"opacity": {"field": "v"}, "fill_opacity": {"field": "w"}, "stroke_opacity": {"field": "v", "title": "S"}}),
+    );
+    let titles: Vec<Option<String>> = drawn_channel_prepared(&all)
+        .aux_legends
+        .iter()
+        .map(|block| match block {
+            AuxLegendInput::Opacity { title, .. } => title.clone(),
+            other => panic!("only opacity legends: {other:?}"),
+        })
+        .collect();
+    assert_eq!(titles, [Some("v".to_string()), Some("w".to_string()), Some("S".to_string())]);
+}
+
+/// An opacity channel's explicit `scale=` domain and range set its legend's
+/// entries and alphas: domain `[0, 20]` onto `[0.2, 0.8]` lists 0, 5, 10,
+/// 15, 20 at `0.2 + 0.6 * value / 20`, and marks outside that domain clamp
+/// onto the range's ends.
+#[test]
+fn an_opacity_legend_reads_an_explicit_domain_and_range() {
+    let binding = serde_json::json!({
+        "field": "w",
+        "scale": {"type": "linear", "domain": [0.0, 20.0], "range": [0.2, 0.8]},
+    });
+    for channel in ["opacity", "fill_opacity", "stroke_opacity"] {
+        let spec = drawn_channel_alone("point", bound(channel, &binding));
+        match only_aux_block(&drawn_channel_prepared(&spec)) {
+            AuxLegendInput::Opacity { entries, .. } => {
+                let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+                assert_eq!(labels, ["0", "5", "10", "15", "20"], "{channel}");
+                let expected = linear_map(&[0.0, 5.0, 10.0, 15.0, 20.0], (0.0, 20.0), (0.2, 0.8));
+                assert_close(&entries.iter().map(|e| e.opacity).collect::<Vec<_>>(), &expected, channel);
+            }
+            other => panic!("{channel}: expected an opacity legend, got {other:?}"),
+        }
+    }
+}
+
+/// `stroke_width` bound to a field maps through a linear scale from the
+/// data extent (`w` spans 20..50) onto the theme's 1..4 px band: points draw
+/// 1, 2, 3 and 4 px, and a line draws its first row's mapped 1 px. Rejects
+/// drawing the raw values as pixel widths (20..50 px).
+#[test]
+fn a_stroke_width_field_draws_mapped_widths_never_raw_values() {
+    let w = bound("stroke_width", &serde_json::json!({"field": "w"}));
+    let (scene, _) = drawn_channel_scene(&drawn_channel_alone("point", w.clone()));
+    assert_close(&point_stroke_widths(&scene), &linear_map(&[20.0, 30.0, 40.0, 50.0], (20.0, 50.0), (1.0, 4.0)), "point");
+    let (scene, _) = drawn_channel_scene(&drawn_channel_alone("line", w));
+    assert_close(&polyline_widths(&scene), &[1.0], "line");
+}
+
+/// An explicit `scale=` range overrides the theme band, an explicit domain
+/// overrides the data extent, and a value outside an explicit domain draws
+/// at the nearer end of the range.
+#[test]
+fn a_stroke_width_scale_honors_an_explicit_domain_and_range_and_clamps() {
+    let w = [20.0, 30.0, 40.0, 50.0];
+    let widths = |scale: serde_json::Value| {
+        let spec = drawn_channel_alone("point", bound("stroke_width", &serde_json::json!({"field": "w", "scale": scale})));
+        point_stroke_widths(&drawn_channel_scene(&spec).0)
+    };
+    assert_close(&widths(serde_json::json!({"type": "linear", "range": [2.0, 8.0]})), &linear_map(&w, (20.0, 50.0), (2.0, 8.0)), "range");
+    assert_close(&widths(serde_json::json!({"type": "linear", "domain": [0.0, 100.0]})), &linear_map(&w, (0.0, 100.0), (1.0, 4.0)), "domain");
+    assert_close(
+        &widths(serde_json::json!({"type": "linear", "domain": [25.0, 45.0], "range": [2.0, 6.0]})),
+        &[2.0, 3.0, 5.0, 6.0],
+        "values outside the domain clamp",
+    );
+}
+
+/// The stroke-width scale's default range is the theme's
+/// `[line_stroke_width_min, line_stroke_width_max]`, 1 to 4 px by default,
+/// read the way the size scale reads its point-size band: a theme with
+/// another band draws another range.
+#[test]
+fn the_stroke_width_range_is_the_themes_line_stroke_width_band() {
+    let defaults = crate::layout::ThemeInputs::default().sizes;
+    assert_eq!((defaults.line_stroke_width_min, defaults.line_stroke_width_max), (1.0, 4.0));
+    let mut theme = crate::layout::ThemeInputs::default();
+    theme.sizes.line_stroke_width_min = 0.5;
+    theme.sizes.line_stroke_width_max = 6.5;
+    let spec = drawn_channel_alone("point", bound("stroke_width", &serde_json::json!({"field": "w"})));
+    let (scene, _) = scene_over(&spec, &drawn_channel_batch(), &theme);
+    assert_close(&point_stroke_widths(&scene), &[0.5, 2.5, 4.5, 6.5], "theme band");
+}
+
+/// A `stroke_width` field draws a legend of line samples at the widths its
+/// nice domain values map to, as ggplot2's linewidth legend does: 20, 25,
+/// …, 50 at 1, 1.5, …, 4 px, titled by the binding's title, else its field.
+#[test]
+fn a_stroke_width_field_draws_a_legend_of_line_samples_at_mapped_widths() {
+    for (binding, title) in [
+        (serde_json::json!({"field": "w"}), "w"),
+        (serde_json::json!({"field": "w", "title": "Width"}), "Width"),
+    ] {
+        let spec = drawn_channel_alone("line", bound("stroke_width", &binding));
+        match only_aux_block(&drawn_channel_prepared(&spec)) {
+            AuxLegendInput::StrokeWidth { title: t, entries } => {
+                assert_eq!(t.as_deref(), Some(title));
+                let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+                assert_eq!(labels, NICE_W);
+                assert_close(&entries.iter().map(|e| e.width).collect::<Vec<_>>(), &nice_w_widths(), title);
+            }
+            other => panic!("expected a stroke-width legend, got {other:?}"),
+        }
+        let (scene, _) = drawn_channel_scene(&spec);
+        assert_close(&legend_line_widths(&scene), &nice_w_widths(), title);
+        let mut text = vec![title];
+        text.extend(NICE_W);
+        assert_eq!(legend_text(&scene), text);
+    }
+}
+
+/// `legend=None` on the wire suppresses each new legend exactly as it
+/// suppresses the size legend, and the scale still applies to the marks.
+#[test]
+fn a_disabled_legend_suppresses_each_new_legend_and_keeps_the_mapping() {
+    let disabled = |field: &str| serde_json::json!({"field": field, "legend": {"disabled": true}});
+    for channel in ["opacity", "fill_opacity", "stroke_opacity", "stroke_width", "size"] {
+        let spec = drawn_channel_alone("point", bound(channel, &disabled("w")));
+        let prep = drawn_channel_prepared(&spec);
+        assert!(prep.aux_legends.is_empty(), "{channel}: {:?}", prep.aux_legends);
+        assert_ne!(aux_scale_debug(&prep.provisional_scales, channel), "None", "{channel} still scales");
+    }
+    let spec = drawn_channel_alone("point", bound("stroke_width", &disabled("w")));
+    assert_close(&point_stroke_widths(&drawn_channel_scene(&spec).0), &[1.0, 2.0, 3.0, 4.0], "mapped widths");
+}
+
+/// On a layered chart the stroke-width domain is the union over every layer
+/// that draws it, each reading its own column: `v` (1..10) and `w`
+/// (20..50) give one scale over 1..50, niced to 0..50, and one legend.
+#[test]
+fn a_layered_stroke_width_spans_every_drawing_layer() {
+    let spec = drawn_channel_spec(
+        serde_json::json!({}),
+        &[("line", bound("stroke_width", &serde_json::json!({"field": "v"}))), ("line", bound("stroke_width", &serde_json::json!({"field": "w"})))],
+    );
+    let prep = drawn_channel_prepared(&spec);
+    let scale = prep.provisional_scales.stroke_width.as_ref().expect("a stroke-width scale");
+    assert_eq!(scale.inner.data_domain(), Some((0.0, 50.0)));
+    match only_aux_block(&prep) {
+        AuxLegendInput::StrokeWidth { title, entries } => {
+            assert_eq!(title.as_deref(), Some("v"));
+            let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+            assert_eq!(labels, ["0", "10", "20", "30", "40", "50"]);
+        }
+        other => panic!("expected one stroke-width legend, got {other:?}"),
+    }
+    // Each line draws its first row through the one scale: v=1 and w=20.
+    let (scene, _) = drawn_channel_scene(&spec);
+    assert_close(&polyline_widths(&scene), &linear_map(&[1.0, 20.0], (0.0, 50.0), (1.0, 4.0)), "union");
+}
+
+/// A batch of `x`/`y` over `n` rows plus one numeric column `c` of `values`.
+fn one_column_batch(values: Vec<Option<f64>>) -> RecordBatch {
+    let n = values.len();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| (i * i) as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// A one-row chart and a constant column each draw a one-entry legend on
+/// every new channel, and every channel follows the size scale's
+/// degenerate-domain rule: `stroke_width` draws the middle of its range
+/// (2.5 px) and each opacity-family channel the middle of its band (0.55).
+#[test]
+fn a_degenerate_domain_draws_a_one_entry_legend_on_every_new_channel() {
+    let theme = crate::layout::ThemeInputs::default();
+    for batch in [one_column_batch(vec![Some(0.3)]), one_column_batch(vec![Some(0.3), Some(0.3), Some(0.3)])] {
+        for (channel, expected) in [("opacity", 0.55), ("fill_opacity", 0.55), ("stroke_opacity", 0.55), ("stroke_width", 2.5)] {
+            let spec = drawn_channel_alone("point", bound(channel, &serde_json::json!({"field": "c"})));
+            let (scene, _) = scene_over(&spec, &batch, &theme);
+            let swatches = if channel == "stroke_width" { legend_line_widths(&scene) } else { legend_circle_opacities(&scene) };
+            assert_painted_close(&swatches, &[expected], channel);
+            assert_eq!(legend_text(&scene), ["c", "0.3"], "{channel}");
+            if channel == "stroke_width" {
+                assert!(point_stroke_widths(&scene).iter().all(|w| (w - 2.5).abs() < 1e-9), "{channel}");
+            }
+            let faded = match channel {
+                "opacity" => Some(Faded::Mark),
+                "fill_opacity" => Some(Faded::Fill),
+                _ => None,
+            };
+            if let Some(faded) = faded {
+                for (node, _) in drawn_rows(&scene) {
+                    let painted = painted_alpha(node, faded);
+                    assert!((painted - expected).abs() <= 0.5 / 255.0 + 1e-12, "{channel}: the mark draws {painted}");
+                }
+            }
+        }
+    }
+}
+
+/// A null value draws its mark at the channel's default, stays out of the
+/// domain and adds no legend entry: with row 1 null, the other rows map over
+/// 20..50 exactly as without it, and row 1 draws what an all-null column
+/// draws for every row. An all-null column draws every mark at the default,
+/// builds no scale and draws no legend.
+#[test]
+fn a_null_value_draws_at_the_default_and_adds_no_legend_entry() {
+    let theme = crate::layout::ThemeInputs::default();
+    let all_null = one_column_batch(vec![None, None, None, None]);
+    let partial = one_column_batch(vec![Some(20.0), None, Some(40.0), Some(50.0)]);
+    for channel in ["stroke_width", "opacity", "fill_opacity", "stroke_opacity"] {
+        let spec = drawn_channel_alone("point", bound(channel, &serde_json::json!({"field": "c"})));
+        pyo3::Python::initialize();
+        let prep = |batch: &RecordBatch| {
+            prepare_render_inputs(&spec, batch, &theme, crate::layout::Viewport { width: 600.0, height: 400.0 }, &crate::render::chart_config::ChartConfig::default(), None)
+                .expect("the spec prepares")
+        };
+        let none = prep(&all_null);
+        assert_eq!(aux_scale_debug(&none.provisional_scales, channel), "None", "{channel}: an all-null column builds no scale");
+        assert!(none.aux_legends.is_empty(), "{channel}: {:?}", none.aux_legends);
+        let some = prep(&partial);
+        let labels: Vec<String> = match only_aux_block(&some) {
+            AuxLegendInput::StrokeWidth { entries, .. } => entries.iter().map(|e| e.label.clone()).collect(),
+            AuxLegendInput::Opacity { entries, .. } => entries.iter().map(|e| e.label.clone()).collect(),
+            other => panic!("{channel}: {other:?}"),
+        };
+        assert_eq!(labels, NICE_W, "{channel}");
+    }
+    let spec = drawn_channel_alone("point", bound("stroke_width", &serde_json::json!({"field": "c"})));
+    let default_width = point_stroke_widths(&scene_over(&spec, &all_null, &theme).0);
+    let widths = point_stroke_widths(&scene_over(&spec, &partial, &theme).0);
+    assert_close(&[widths[0], widths[2], widths[3]], &linear_map(&[20.0, 40.0, 50.0], (20.0, 50.0), (1.0, 4.0)), "valued rows");
+    assert_eq!(widths[1], default_width[1], "the null row draws the default width");
+}
+
+/// A stroke-width binding no layer draws gets no legend: an area carries
+/// the binding without drawing it, and a line yields an inherited
+/// `stroke_width` to a `size` of its own.
+#[test]
+fn a_stroke_width_no_layer_draws_gets_no_legend() {
+    let w = serde_json::json!({"field": "w"});
+    let area = drawn_channel_alone("area", bound("stroke_width", &w));
+    assert!(drawn_channel_prepared(&area).aux_legends.is_empty());
+    let yielded = drawn_channel_spec(bound("stroke_width", &w), &[("line", bound("size", &serde_json::json!({"field": "v"})))]);
+    let prep = drawn_channel_prepared(&yielded);
+    assert!(
+        !prep.aux_legends.iter().any(|b| matches!(b, AuxLegendInput::StrokeWidth { .. })),
+        "{:?}",
+        prep.aux_legends
+    );
+}
+
+/// The new legends reach the interactive scene the WASM runtime paints,
+/// drawn from the existing circle and line legend nodes.
+#[test]
+fn the_new_legends_reach_the_interactive_scene() {
+    pyo3::Python::initialize();
+    let spec = drawn_channel_alone(
+        "point",
+        serde_json::json!({"opacity": {"field": "v"}, "stroke_width": {"field": "w"}}),
+    );
+    let (json, _, _) = crate::render::render_scene_json(
+        &spec,
+        &drawn_channel_batch(),
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::config::RenderConfig::default(),
+        &crate::render::chart_config::ChartConfig::default(),
+    )
+    .expect("the interactive scene renders");
+    let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).expect("the scene parses");
+    assert_painted_close(&legend_circle_opacities(&scene), &linear_map(&[2.0, 4.0, 6.0, 8.0, 10.0], (1.0, 10.0), (0.1, 1.0)), "opacity");
+    assert_close(&legend_line_widths(&scene), &nice_w_widths(), "stroke_width");
+}
+
+/// A constant (`stroke_width=` kwarg) width draws exactly that width with no
+/// stroke-width scale or legend, and a chart binding none of the four
+/// channels builds none of their scales or legends.
+#[test]
+fn constant_widths_and_unbound_channels_build_no_new_scale_or_legend() {
+    let mut constant = drawn_channel_alone("point", serde_json::json!({}));
+    constant.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() });
+    let prep = drawn_channel_prepared(&constant);
+    assert!(prep.provisional_scales.stroke_width.is_none());
+    assert!(prep.aux_legends.is_empty());
+    assert!(point_stroke_widths(&drawn_channel_scene(&constant).0).iter().all(|w| *w == 3.0));
+    let prep = drawn_channel_prepared(&drawn_channel_alone("point", serde_json::json!({})));
+    for channel in ["opacity", "fill_opacity", "stroke_opacity", "stroke_width"] {
+        assert_eq!(aux_scale_debug(&prep.provisional_scales, channel), "None", "{channel}");
+    }
+    assert!(prep.aux_legends.is_empty());
+}
+
+/// Which paint of a node an opacity-family channel fades.
+#[derive(Clone, Copy, Debug)]
+enum Faded {
+    /// The fill where the node has one, else its stroke (`opacity`).
+    Mark,
+    /// The fill (`fill_opacity`).
+    Fill,
+    /// The stroke (`stroke_opacity`).
+    Stroke,
+}
+
+/// The alpha a node paints the faded paint with, as the SVG walker paints it:
+/// a fill's alpha times `fill_opacity`, a stroke's alpha times
+/// `stroke_opacity`, a text's color alpha times its opacity.
+fn painted_alpha(node: &ferrum_scene::SceneNode, faded: Faded) -> f64 {
+    use ferrum_scene::SceneNode as N;
+    let alpha = |c: &ferrum_scene::Color| f64::from(c.a) / 255.0;
+    match node {
+        N::Circle { style, .. } | N::Rect { style, .. } | N::Path { style, .. } | N::Polygon { style, .. } => {
+            let fill = || style.fill.as_ref().map(|c| alpha(c) * style.fill_opacity);
+            let stroke = || style.stroke.as_ref().map(|c| alpha(c) * style.stroke_opacity);
+            match faded {
+                Faded::Mark => fill().or_else(stroke),
+                Faded::Fill => fill(),
+                Faded::Stroke => stroke(),
+            }
+            .unwrap_or_else(|| panic!("{faded:?}: the node paints no such paint: {node:?}"))
+        }
+        N::Line { style, .. } | N::Polyline { style, .. } => {
+            alpha(style.color.as_ref().expect("a painted stroke")) * style.stroke_opacity
+        }
+        N::Text { style, .. } => alpha(style.color.as_ref().expect("a painted text")) * style.opacity,
+        other => panic!("no painted alpha for {other:?}"),
+    }
+}
+
+/// Every mark node of `scene`'s first panel paired with the row it draws.
+fn drawn_rows(scene: &ferrum_scene::SceneGraph) -> Vec<(&ferrum_scene::SceneNode, usize)> {
+    scene.panels[0]
+        .marks
+        .iter()
+        .flat_map(|batch| {
+            let rows = batch.data_indices.as_ref().expect("mark nodes carry their rows");
+            batch.nodes.iter().zip(rows.iter().copied())
+        })
+        .collect()
+}
+
+
+// ── The numeric auxiliary channels' scale= gate ──────────────────────────────
+
+/// A point chart of `c` (1.3, 2, 3, 9.7) on `channel` under `scale`, with a
+/// stroke so the stroke channels show, and `params` declared.
+fn numeric_aux_chart(channel: &str, scale: Option<serde_json::Value>, params: serde_json::Value) -> ChartSpec {
+    let mut binding = serde_json::json!({"field": "c"});
+    if let Some(scale) = scale {
+        binding["scale"] = scale;
+    }
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound(channel, &binding)),
+        "params": params,
+    }))
+    .expect("the spec deserializes");
+    spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec { stroke: Some("black".into()), ..Default::default() });
+    spec
+}
+
+fn numeric_aux_batch() -> RecordBatch {
+    one_column_batch(vec![Some(1.3), Some(2.0), Some(3.0), Some(9.7)])
+}
+
+/// The marks and the legend a render draws, as JSON, or the refusal text.
+fn marks_and_legend(spec: &ChartSpec) -> Result<(serde_json::Value, serde_json::Value), String> {
+    pyo3::Python::initialize();
+    let theme = crate::layout::ThemeInputs::default();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let batch = numeric_aux_batch();
+    let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+        spec,
+        &batch,
+        &theme,
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &chart_config,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let scene = crate::render::scene_build::build_scene(
+        spec,
+        &prep,
+        &layout,
+        &applied.effective_theme,
+        &crate::render::config::RenderConfig::default(),
+        &mut warnings,
+        &chart_config,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let marks: Vec<&ferrum_scene::SceneNode> = scene.panels[0].marks.iter().flat_map(|b| b.nodes.iter()).collect();
+    Ok((serde_json::to_value(marks).unwrap(), serde_json::to_value(&scene.legend).unwrap()))
+}
+
+/// What a `linear` scale key does on a numeric auxiliary channel.
+#[derive(Debug, PartialEq)]
+enum KeyOutcome {
+    /// Refused with this text.
+    Refused(String),
+    /// Changes the marks and the legend together.
+    Drawn,
+    /// Changes nothing: the scale already behaves this way.
+    Inert,
+}
+
+/// Every key a `linear` scale accepts, on each numeric auxiliary channel, is
+/// either refused or changes the marks and the legend together; the two
+/// exceptions are documented no-ops (`clamp`: these scales always clamp;
+/// `systemInjected`: a positional-only flag) and `nice` on size and stroke
+/// width, whose data-derived domain is already niced. A key added to the
+/// variant fails this test until it is classified here. A bare `linear`
+/// scale draws exactly what no `scale=` draws.
+#[test]
+fn every_linear_scale_key_is_refused_or_drawn_on_every_numeric_aux_channel() {
+    let keys = crate::spec::encoding::scale_accepted_keys("linear").expect("linear has keys");
+    let param = serde_json::json!([{"name": "p", "kind": "variable", "value": [0, 20]}]);
+    for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
+        let range = if channel.contains("opacity") { serde_json::json!([0.2, 0.6]) } else { serde_json::json!([2.0, 30.0]) };
+        let baseline = marks_and_legend(&numeric_aux_chart(channel, Some(serde_json::json!({"type": "linear"})), param.clone()))
+            .expect("a bare linear scale renders");
+        assert_eq!(baseline, marks_and_legend(&numeric_aux_chart(channel, None, param.clone())).unwrap(), "{channel}");
+        let refused = |reason: &str| {
+            KeyOutcome::Refused(format!(
+                "{channel} scale: {reason}; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+            ))
+        };
+        for key in &keys {
+            let (value, expected) = match key.as_str() {
+                "domain" => (serde_json::json!([0.0, 20.0]), KeyOutcome::Drawn),
+                "range" => (range.clone(), KeyOutcome::Drawn),
+                "reverse" | "zero" => (serde_json::json!(true), KeyOutcome::Drawn),
+                "nice" if channel.contains("opacity") => (serde_json::json!(true), KeyOutcome::Drawn),
+                "nice" => (serde_json::json!(true), KeyOutcome::Inert),
+                "domainParam" => (serde_json::json!("p"), KeyOutcome::Drawn),
+                "clamp" | "systemInjected" => (serde_json::json!(true), KeyOutcome::Inert),
+                "padding" => (serde_json::json!(0.1), refused("padding is not supported (it insets an axis)")),
+                "scheme" => (serde_json::json!("blues"), refused("scheme is not supported (it names a color scheme)")),
+                other => panic!("{other}: a linear scale key this test does not classify"),
+            };
+            let mut scale = serde_json::json!({"type": "linear"});
+            scale[key.as_str()] = value;
+            let outcome = match marks_and_legend(&numeric_aux_chart(channel, Some(scale), param.clone())) {
+                Err(text) => KeyOutcome::Refused(text),
+                Ok((marks, legend)) if marks != baseline.0 && legend != baseline.1 => KeyOutcome::Drawn,
+                Ok((marks, legend)) if marks == baseline.0 && legend == baseline.1 => KeyOutcome::Inert,
+                Ok((marks, _)) => panic!("{channel} {key}: the marks {} but the legend does not agree", if marks == baseline.0 { "hold" } else { "change" }),
+            };
+            assert_eq!(outcome, expected, "{channel} {key}");
+        }
+    }
+}
+
+/// Every scale type other than `linear` refuses on every numeric auxiliary
+/// channel, naming the type by its wire tag, as does a domain or range that
+/// is not `[lo, hi]` (with the positional sentence).
+#[test]
+fn a_non_linear_or_malformed_scale_refuses_on_every_numeric_aux_channel() {
+    for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
+        for tag in crate::spec::encoding::ScaleSpec::TAGS.into_iter().filter(|t| *t != "linear") {
+            let text = marks_and_legend(&numeric_aux_chart(channel, Some(serde_json::json!({"type": tag})), serde_json::json!([])))
+                .expect_err("a non-linear scale refuses");
+            assert_eq!(
+                text,
+                format!("{channel} scale: type '{tag}' is not supported; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="),
+            );
+        }
+        for (key, len) in [("domain", 3), ("range", 1)] {
+            let values: Vec<f64> = (0..len).map(f64::from).collect();
+            let text = marks_and_legend(&numeric_aux_chart(channel, Some(serde_json::json!({"type": "linear", key: values})), serde_json::json!([])))
+                .expect_err("a malformed extent refuses");
+            assert_eq!(text, format!("{channel} scale: {key} must have length 2; got {len}"));
+        }
+    }
+}
+
+/// Size reads an explicit domain, and a value outside it draws at the nearer
+/// end of the range: domain `[2, 3]` onto `[10, 40]` draws 10, 10, 40, 40.
+#[test]
+fn a_size_domain_is_honored_and_clamps() {
+    let spec = numeric_aux_chart("size", Some(serde_json::json!({"type": "linear", "domain": [2.0, 3.0], "range": [10.0, 40.0]})), serde_json::json!([]));
+    let scene = scene_over(&spec, &numeric_aux_batch(), &crate::layout::ThemeInputs::default()).0;
+    let areas: Vec<f64> = scene.panels[0].marks[0]
+        .nodes
+        .iter()
+        .map(|n| match n {
+            ferrum_scene::SceneNode::Circle { r, .. } => std::f64::consts::PI * r * r,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_close(&areas, &[10.0, 10.0, 40.0, 40.0], "size areas");
+}
+
+/// A range crossing the channel's drawable interval is clamped into it before
+/// the scale is built, so the mapping stays monotone and the legend lists every
+/// entry: stroke width `[-2, 4]` over `w` (20..50) draws 0, 4/3, 8/3, 4, and
+/// size `[-10, 100]` draws areas from 0.
+#[test]
+fn a_range_outside_the_drawable_interval_clamps_into_it() {
+    let w = bound("stroke_width", &serde_json::json!({"field": "w", "scale": {"type": "linear", "range": [-2.0, 4.0]}}));
+    let spec = drawn_channel_alone("point", w);
+    let (scene, _) = drawn_channel_scene(&spec);
+    assert_close(&point_stroke_widths(&scene), &linear_map(&[20.0, 30.0, 40.0, 50.0], (20.0, 50.0), (0.0, 4.0)), "widths");
+    assert_eq!(legend_line_widths(&scene).len(), NICE_W.len(), "every entry is listed");
+
+    let size = bound("size", &serde_json::json!({"field": "v", "scale": {"type": "linear", "range": [-10.0, 100.0]}}));
+    match drawn_channel_prepared(&drawn_channel_alone("point", size)).provisional_scales.size {
+        Some(scale) => assert_eq!(scale.inner.pixel_range(), (0.0, 100.0)),
+        None => panic!("a size scale"),
+    }
+}
+
+/// A `domainParam` on a layer's own encoding, and on fill_opacity and
+/// stroke_width, is substituted: the marks and the legend map the param's
+/// `[0, 20]`.
+#[test]
+fn a_domain_param_is_substituted_on_every_numeric_aux_channel_and_on_a_layer() {
+    let param = serde_json::json!([{"name": "p", "kind": "variable", "value": [0, 20]}]);
+    let with_param = |channel: &str| numeric_aux_chart(channel, Some(serde_json::json!({"type": "linear", "domainParam": "p"})), param.clone());
+    let with_domain = |channel: &str| numeric_aux_chart(channel, Some(serde_json::json!({"type": "linear", "domain": [0.0, 20.0]})), param.clone());
+    for channel in ["fill_opacity", "stroke_opacity", "stroke_width"] {
+        assert_eq!(marks_and_legend(&with_param(channel)).unwrap(), marks_and_legend(&with_domain(channel)).unwrap(), "{channel}");
+    }
+    let layered = |scale: serde_json::Value| {
+        let own = bound("opacity", &serde_json::json!({"field": "c", "scale": scale}));
+        let mut spec = drawn_channel_spec(serde_json::json!({}), &[("point", serde_json::json!({})), ("point", own)]);
+        spec.params = serde_json::from_value(param.clone()).unwrap();
+        spec
+    };
+    let batch = numeric_aux_batch();
+    let theme = crate::layout::ThemeInputs::default();
+    let opacities = |spec: &ChartSpec| legend_circle_opacities(&scene_over(spec, &batch, &theme).0);
+    assert_eq!(
+        opacities(&layered(serde_json::json!({"type": "linear", "domainParam": "p"}))),
+        opacities(&layered(serde_json::json!({"type": "linear", "domain": [0.0, 20.0]}))),
+    );
+}
+
+/// A label's leader line paints at half the mark's opacity, carried in its
+/// stroke color (the value the SVG walker and the interactive renderer both
+/// paint): at `opacity=0.4` the leader paints 0.2.
+#[test]
+fn a_label_leader_paints_at_half_the_mark_opacity() {
+    let mut spec = drawn_channel_alone("label", serde_json::json!({"text": {"field": "g"}}));
+    spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+        leader_line: Some(true),
+        opacity: Some(0.4),
+        ..Default::default()
+    });
+    let (scene, _) = drawn_channel_scene(&spec);
+    let leaders: Vec<f64> = scene.panels[0]
+        .marks
+        .iter()
+        .flat_map(|b| b.nodes.iter())
+        .filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. }))
+        .map(|n| painted_alpha(n, Faded::Stroke))
+        .collect();
+    assert_eq!(leaders.len(), 4, "one leader per label");
+    assert_painted_close(&leaders, &[0.2; 4], "leader");
+}
+
+/// A minimal 1x1 PNG as a base64 data URL, for the url-tile image mark.
+fn tiny_png_url() -> String {
+    let png_bytes: Vec<u8> = vec![
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144,
+        119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 248, 207, 192, 0, 0, 0, 2, 0, 1, 227, 33, 188, 51, 0,
+        0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    use base64::Engine;
+    format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png_bytes))
+}
+
+/// [`drawn_channel_batch`] for the marks that read it; for an image, url
+/// tiles at four points; for a geoshape, four point geometries. Each carries
+/// `v` (1, 2, 3, 10) for the opacity channels.
+fn opacity_table_batch(mark: Mark) -> RecordBatch {
+    let v = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 10.0]));
+    match mark {
+        Mark::Image => {
+            let url = tiny_png_url();
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("x", DataType::Float64, false),
+                    Field::new("y", DataType::Float64, false),
+                    Field::new("url", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                    Arc::new(Float64Array::from(vec![1.0, 3.0, 2.0, 4.0])),
+                    Arc::new(StringArray::from(vec![url.as_str(); 4])),
+                    v,
+                ],
+            )
+            .unwrap()
+        }
+        Mark::Geoshape => {
+            let points: Vec<String> =
+                (0..4).map(|i| format!(r#"{{"type":"Point","coordinates":[{},{}]}}"#, -90.0 + i as f64, 40.0 + i as f64)).collect();
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("__geometry__", DataType::Utf8, true),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(points.iter().map(String::as_str).collect::<Vec<_>>())), v],
+            )
+            .unwrap()
+        }
+        _ => drawn_channel_batch(),
+    }
+}
+
+/// A minimal chart of `mark` over [`opacity_table_batch`] binding `extra`,
+/// with a black stroke where the mark takes one (so a stroke channel has a
+/// paint to fade) and `arrow=True` when asked.
+fn opacity_table_chart(mark: Mark, extra: serde_json::Value, arrow: bool) -> ChartSpec {
+    let f = |field: &str| serde_json::json!({"field": field});
+    let mut encoding = match mark {
+        Mark::Point | Mark::Line | Mark::Area | Mark::Polygon => serde_json::json!({"x": f("x"), "y": f("y")}),
+        Mark::Bar => serde_json::json!({"x": f("g"), "y": f("y")}),
+        Mark::Tick => serde_json::json!({"x": f("x"), "y": f("g")}),
+        Mark::Ribbon => serde_json::json!({"x": f("x"), "y": f("y"), "y2": f("w")}),
+        Mark::Rule | Mark::Rect | Mark::Segment => serde_json::json!({"x": f("x"), "y": f("y"), "x2": f("w"), "y2": f("w")}),
+        Mark::Text | Mark::Label => serde_json::json!({"x": f("x"), "y": f("y"), "text": f("g")}),
+        Mark::Arc => serde_json::json!({"x": f("x")}),
+        Mark::Image => serde_json::json!({"x": f("x"), "y": f("y"), "url": f("url")}),
+        Mark::Geoshape => serde_json::json!({}),
+    };
+    for (channel, binding) in extra.as_object().expect("an object") {
+        encoding[channel] = binding.clone();
+    }
+    let mut spec = serde_json::json!({"mark": mark, "encoding": encoding});
+    match mark {
+        Mark::Arc => spec["coord"] = serde_json::json!({"kind": "polar"}),
+        Mark::Geoshape => spec["coord"] = serde_json::json!({"kind": "geo", "projection": "equirectangular"}),
+        _ => {}
+    }
+    let mut spec: ChartSpec = serde_json::from_value(spec).expect("the spec deserializes");
+    let stroked = mark.style_field("stroke").is_some();
+    spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+        stroke: stroked.then(|| "black".to_string()),
+        arrow: arrow.then_some(true),
+        ..Default::default()
+    });
+    spec
+}
+
+/// The (mark, channel, arrow) triples whose mark draws the channel
+/// ([`crate::spec::mark::Mark::draws_opacity_channel`], a segment's
+/// `fill_opacity` with `arrow=True` only), and every other triple.
+fn opacity_table_cases() -> Vec<(Mark, crate::render::scale_resolve::OpacityChannel, bool, bool)> {
+    use crate::render::scale_resolve::OpacityChannel;
+    let mut cases = Vec::new();
+    for mark in crate::spec::mark::all_marks() {
+        for arrow in if mark == Mark::Segment { vec![false, true] } else { vec![false] } {
+            for channel in [OpacityChannel::Opacity, OpacityChannel::Fill, OpacityChannel::Stroke] {
+                let drawn = mark.draws_opacity_channel(channel)
+                    && !(mark == Mark::Segment && channel == OpacityChannel::Fill && !arrow);
+                cases.push((mark, channel, arrow, drawn));
+            }
+        }
+    }
+    cases
+}
+
+/// Every mark draws an opacity-family channel exactly where its drawing
+/// table says: binding the channel to `v` changes the marks it paints and
+/// draws the channel's legend, or changes neither. Every mark is covered,
+/// image and geoshape included. Rejects a legend over a channel no mark
+/// paints (a line's `fill_opacity`) and a table entry for a channel the
+/// builder ignores.
+#[test]
+fn every_mark_draws_an_opacity_channel_exactly_where_its_table_says() {
+    let theme = crate::layout::ThemeInputs::default();
+    let marks_of = |scene: &ferrum_scene::SceneGraph| {
+        serde_json::to_value(scene.panels[0].marks.iter().flat_map(|b| b.nodes.iter()).collect::<Vec<_>>()).unwrap()
+    };
+    for (mark, channel, arrow, drawn) in opacity_table_cases() {
+        let batch = opacity_table_batch(mark);
+        let unbound = marks_of(&scene_over(&opacity_table_chart(mark, serde_json::json!({}), arrow), &batch, &theme).0);
+        let name = channel.context();
+        let spec = opacity_table_chart(mark, bound(name, &serde_json::json!({"field": "v"})), arrow);
+        let painted = marks_of(&scene_over(&spec, &batch, &theme).0) != unbound;
+        pyo3::Python::initialize();
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect("the spec prepares");
+        let legend = prep.aux_legends.iter().any(|b| matches!(b, AuxLegendInput::Opacity { .. }));
+        assert_eq!((painted, legend), (drawn, drawn), "{mark:?} {name} arrow={arrow}: (painted, legend)");
+    }
+}
+
+/// Every (mark, channel) pair the drawing table says is drawn paints, at
+/// each row, the alpha the channel's legend shows for that row's value: `v`
+/// (1, 2, 3, 10) maps onto the 0.1..1.0 band, so `opacity` draws 0.1, 0.2,
+/// 0.3 and 1.0 in place of the mark's own opacity, and the rows at 2 and 10
+/// draw exactly the legend's "2" and "10" swatches. `fill_opacity` and
+/// `stroke_opacity` fade the paint the mark draws without the channel (an
+/// area's 0.35 fill) by that same alpha; a node without that paint (a
+/// segment's shaft under `fill_opacity`) is not one the channel fades.
+/// Rejects a mark that draws the raw clamped value (1.0 for every row).
+#[test]
+fn every_mark_draws_the_alpha_its_opacity_legend_shows() {
+    use crate::render::scale_resolve::OpacityChannel;
+    let theme = crate::layout::ThemeInputs::default();
+    let v = [1.0, 2.0, 3.0, 10.0];
+    let has_paint = |node: &ferrum_scene::SceneNode, faded: Faded| match (node, faded) {
+        (ferrum_scene::SceneNode::Circle { style, .. }
+        | ferrum_scene::SceneNode::Rect { style, .. }
+        | ferrum_scene::SceneNode::Path { style, .. }
+        | ferrum_scene::SceneNode::Polygon { style, .. }, Faded::Fill) => style.fill.is_some(),
+        (ferrum_scene::SceneNode::Circle { style, .. }
+        | ferrum_scene::SceneNode::Rect { style, .. }
+        | ferrum_scene::SceneNode::Path { style, .. }
+        | ferrum_scene::SceneNode::Polygon { style, .. }, Faded::Stroke) => style.stroke.is_some(),
+        (ferrum_scene::SceneNode::Text { .. } | ferrum_scene::SceneNode::Line { .. } | ferrum_scene::SceneNode::Polyline { .. }, Faded::Fill) => false,
+        (ferrum_scene::SceneNode::Text { .. }, Faded::Stroke) => false,
+        _ => true,
+    };
+    let mut wrong: Vec<String> = Vec::new();
+    for (mark, channel, arrow, drawn) in opacity_table_cases() {
+        if !drawn {
+            continue;
+        }
+        let faded = match channel {
+            OpacityChannel::Opacity => Faded::Mark,
+            OpacityChannel::Fill => Faded::Fill,
+            OpacityChannel::Stroke => Faded::Stroke,
+        };
+        let name = channel.context();
+        let context = format!("{mark:?} {name} arrow={arrow}");
+        let batch = opacity_table_batch(mark);
+        let unfaded = scene_over(&opacity_table_chart(mark, serde_json::json!({}), arrow), &batch, &theme).0;
+        let base_of = |row: usize| -> f64 {
+            match faded {
+                Faded::Mark => 1.0,
+                _ => drawn_rows(&unfaded)
+                    .into_iter()
+                    .find(|(n, r)| *r == row && has_paint(n, faded))
+                    .map(|(n, _)| painted_alpha(n, faded))
+                    .expect("the unfaded mark paints the row"),
+            }
+        };
+        let spec = opacity_table_chart(mark, bound(name, &serde_json::json!({"field": "v"})), arrow);
+        let legend: Vec<(String, f64)> = match prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect("the spec prepares")
+        .aux_legends
+        .as_slice()
+        {
+            [AuxLegendInput::Opacity { entries, .. }] => entries.iter().map(|e| (e.label.clone(), e.opacity)).collect(),
+            other => panic!("{context}: expected one opacity legend, got {other:?}"),
+        };
+        let swatch = |label: &str| legend.iter().find(|(l, _)| l == label).map(|(_, a)| *a).expect("a legend swatch");
+        let scene = scene_over(&spec, &batch, &theme).0;
+        let checked: Vec<(&ferrum_scene::SceneNode, usize)> =
+            drawn_rows(&scene).into_iter().filter(|(n, _)| has_paint(n, faded)).collect();
+        if checked.is_empty() {
+            wrong.push(format!("{context}: no node paints the faded paint"));
+        }
+        for (node, row) in checked {
+            let base = base_of(row);
+            let painted = painted_alpha(node, faded) / base;
+            let expected = linear_map(&[v[row]], (1.0, 10.0), (0.1, 1.0))[0];
+            // A painted color carries its alpha as one of 256 steps, scaled
+            // here by the base the alpha was divided by.
+            let tolerance = 0.5 / 255.0 / base + 1e-12;
+            if (painted - expected).abs() > tolerance {
+                wrong.push(format!("{context} row {row}: drew {painted}, the scale maps {expected}"));
+            }
+            if row == 1 || row == 3 {
+                let legend_alpha = swatch(if row == 1 { "2" } else { "10" });
+                if (painted - legend_alpha).abs() > tolerance {
+                    wrong.push(format!("{context} row {row}: drew {painted}, the legend shows {legend_alpha}"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "marks drawing another alpha than their legend:\n{}", wrong.join("\n"));
+}
+
+/// On a layered chart the opacity legend follows the layers that draw the
+/// channel: bound only on a line's `fill_opacity` (which no line paints) it
+/// draws none; bound on that line and on a point, one.
+#[test]
+fn a_layered_opacity_legend_follows_the_layers_that_draw_it() {
+    let fo = bound("fill_opacity", &serde_json::json!({"field": "v"}));
+    let only_line = drawn_channel_spec(serde_json::json!({}), &[("point", serde_json::json!({})), ("line", fo.clone())]);
+    assert!(drawn_channel_prepared(&only_line).aux_legends.is_empty());
+    let both = drawn_channel_spec(serde_json::json!({}), &[("point", fo.clone()), ("line", fo)]);
+    let blocks = drawn_channel_prepared(&both).aux_legends;
+    assert_eq!(blocks.iter().filter(|b| matches!(b, AuxLegendInput::Opacity { .. })).count(), 1, "{blocks:?}");
+}
+
+/// A `stroke_opacity` legend swatch is an unfilled ring whose stroke carries
+/// the mapped alpha, as Vega-Lite applies `strokeOpacity` to the symbol
+/// stroke; an `opacity` or `fill_opacity` swatch fades its fill.
+#[test]
+fn a_stroke_opacity_swatch_fades_its_stroke_not_its_fill() {
+    for (channel, stroked) in [("opacity", false), ("fill_opacity", false), ("stroke_opacity", true)] {
+        let (scene, _) = drawn_channel_scene(&drawn_channel_alone("point", bound(channel, &serde_json::json!({"field": "v"}))));
+        let swatches: Vec<&ferrum_scene::FillStroke> = flat_nodes(&scene.legend)
+            .into_iter()
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Circle { style, .. } => Some(style),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(swatches.len(), 5, "{channel}");
+        for style in swatches {
+            assert_eq!(style.fill.is_none(), stroked, "{channel}: {style:?}");
+            assert_eq!(style.stroke.is_some(), stroked, "{channel}: {style:?}");
+        }
+    }
 }

@@ -45,8 +45,9 @@ use super::RenderError;
 
 pub use self::auxiliary::{
     build_opacity_channel_scale, build_shape_scale, build_size_scale, build_stroke_dash_scale,
-    OpacityChannel,
+    build_stroke_width_scale, OpacityChannel,
 };
+pub(crate) use self::auxiliary::NUMERIC_AUX_CHANNELS;
 pub use self::color::build_color_scale;
 
 // Domain-union helpers re-exported for the composite resolve pass
@@ -1111,6 +1112,26 @@ impl OpacityScale {
     pub fn max_opacity(&self) -> f64 { self.inner.pixel_range().1 }
 }
 
+/// A linear stroke-width scale: maps a quantitative field to a line width in
+/// pixels, from the data extent (or the `scale=` domain) onto
+/// `[sizes.line_stroke_width_min, sizes.line_stroke_width_max]` (or the
+/// `scale=` range). Clamped, so a value outside an explicit domain draws at
+/// the nearer end of the range. Built by
+/// [`build_stroke_width_scale`](crate::render::scale_resolve::build_stroke_width_scale);
+/// every mark reads it through `draw::stroke_width_column`.
+#[derive(Debug, Clone)]
+pub struct StrokeWidthScale {
+    /// The underlying linear scale. Its range is the `[min, max]` width band.
+    pub inner: ScaleKind,
+}
+
+impl StrokeWidthScale {
+    /// The width (px) `value` draws at, `None` for a non-finite value.
+    pub fn width(&self, value: f64) -> Option<f64> {
+        self.inner.to_pixel_f64(value)
+    }
+}
+
 /// Per-layer independent y-scale slots (secondary-y-axis, GH #52).
 ///
 /// `slots[0]` is always the primary y-scale — identical to
@@ -1317,6 +1338,10 @@ pub struct ResolvedScales {
     pub fill_opacity: Option<OpacityScale>,
     pub stroke_opacity: Option<OpacityScale>,
     pub stroke_dash: Option<StrokeDashScale>,
+    /// `Some` when `stroke_width` is bound to a field with at least one value
+    /// (see [`StrokeWidthScale`]); marks draw the mapped width, never the raw
+    /// column value.
+    pub stroke_width: Option<StrokeWidthScale>,
     // Phase 8b: paired-channel field names. The x2/y2 axis is shared with x/y
     // (their domain is unioned in `build_axis_scale`); this field surfaces the
     // bound field name so downstream code (mark drawers, legends) can read it
@@ -1338,10 +1363,10 @@ impl ResolvedScales {
     ///
     /// The three resolution paths (single-axis x-only, single-axis y-only, and
     /// the full x+y path) differ only in how they obtain `x`/`y`; funneling the
-    /// copy of seven auxiliary slots through here keeps a new appearance channel
+    /// copy of the auxiliary slots through here keeps a new appearance channel
     /// from having to be threaded into three literals.
     fn from_axes_and_auxiliary(x: ScaleKind, y: ScaleKind, aux: AuxiliaryScales) -> Self {
-        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash } = aux;
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width } = aux;
         ResolvedScales {
             x,
             y,
@@ -1352,6 +1377,7 @@ impl ResolvedScales {
             fill_opacity,
             stroke_opacity,
             stroke_dash,
+            stroke_width,
             x2: None,
             y2: None,
             y_slots: YScaleSlots::default(),
@@ -1536,7 +1562,7 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 
 /// The non-positional scales a chart spec resolves, in the order
 /// [`build_auxiliary_scales`] builds them. A named bundle rather than a tuple:
-/// the appearance family (spec §4.3) took it to seven members, past the point
+/// the appearance family (spec §4.3) took it to eight members, well past the point
 /// where positional `let (a, b, c, …)` destructuring at the three call sites
 /// reads as anything.
 #[derive(Debug, Clone, Default)]
@@ -1548,12 +1574,14 @@ pub(in crate::render) struct AuxiliaryScales {
     fill_opacity: Option<OpacityScale>,
     stroke_opacity: Option<OpacityScale>,
     stroke_dash: Option<StrokeDashScale>,
+    stroke_width: Option<StrokeWidthScale>,
 }
 
 /// Build the auxiliary (non-positional) scales for a chart spec.
 ///
 /// Warning push order is: color, size, shape, then the opacity family in
-/// `opacity`/`fill_opacity`/`stroke_opacity` order, then `stroke_dash`.
+/// `opacity`/`fill_opacity`/`stroke_opacity` order, then `stroke_dash`, then
+/// `stroke_width`.
 ///
 /// `leaf_scales` is the composite seam, `None` for every standalone (flat or
 /// faceted) render. A leaf of an overlay group that resolves its auxiliary
@@ -1732,7 +1760,10 @@ fn resolve_auxiliary_scales<'r>(
     let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &reads(&|e| e.stroke_dash.as_ref()))
         .map_err(refused("stroke_dash"))?;
     warnings.extend(dash_warns);
-    Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
+    let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &reads(&|e| e.stroke_width.as_ref()))
+        .map_err(refused("stroke_width"))?;
+    warnings.extend(width_warns);
+    Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width })
 }
 
 /// The chart's color scale alone: the `color` [`resolve_scales_with_leaf_context`]
@@ -1758,6 +1789,31 @@ pub(in crate::render) fn resolve_color_scale(
     }
     let mut warnings = Vec::new();
     Ok(build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, None, &mut warnings)?.color)
+}
+
+/// `ferrum._core.validate_numeric_aux_scale(channel, scale)`: the
+/// [`auxiliary::numeric_aux_scale`] gate run on a raw scale dict with no data,
+/// so a channel class refuses at construction with the text a wire spec
+/// refuses with at render. `channel` is one of [`NUMERIC_AUX_CHANNELS`]; `scale` passes the scale-dict gate
+/// first (`ferrum._core.validate_scale_dict`'s check). Returns `None` when the
+/// channel admits the scale; raises `ValueError` otherwise. Registered in
+/// `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn validate_numeric_aux_scale(
+    py: pyo3::Python<'_>,
+    channel: &str,
+    scale: &pyo3::Bound<'_, pyo3::types::PyDict>,
+) -> pyo3::PyResult<()> {
+    use pyo3::exceptions::PyValueError;
+    let Some(channel) = NUMERIC_AUX_CHANNELS.iter().copied().find(|c| *c == channel) else {
+        return Err(PyValueError::new_err(format!(
+            "{channel:?} is not a numeric auxiliary channel; expected one of {NUMERIC_AUX_CHANNELS:?}"
+        )));
+    };
+    let spec = crate::spec::encoding::deserialize_scale_value(py, Some(scale.as_any()))?;
+    auxiliary::numeric_aux_scale(channel, &spec)
+        .map(|_| ())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// `ferrum._core.auxiliary_scale_channels()`: the names of
@@ -1870,23 +1926,30 @@ pub(in crate::render) fn resolve_param_domains(spec: &mut ChartSpec) {
     if store.is_empty() {
         return;
     }
-    let enc = &mut spec.encoding;
-    for channel in [
-        enc.x.as_mut(),
-        enc.y.as_mut(),
-        enc.color.as_mut(),
-        enc.size.as_mut(),
-        enc.opacity.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let Some(scale) = channel.scale.as_mut() else { continue };
-        let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
-        if let Some(domain) = store.numeric_domain(&name) {
-            scale.set_domain(domain);
+    // The chart's encoding and each layer's own: a param domain written on a
+    // `+` operand or a `Layer` is substituted as one written on the chart is.
+    let layer_encodings = spec.layers.iter_mut().flatten().map(|layer| &mut layer.encoding);
+    for enc in std::iter::once(&mut spec.encoding).chain(layer_encodings) {
+        for channel in [
+            enc.x.as_mut(),
+            enc.y.as_mut(),
+            enc.color.as_mut(),
+            enc.size.as_mut(),
+            enc.opacity.as_mut(),
+            enc.fill_opacity.as_mut(),
+            enc.stroke_opacity.as_mut(),
+            enc.stroke_width.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(scale) = channel.scale.as_mut() else { continue };
+            let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
+            if let Some(domain) = store.numeric_domain(&name) {
+                scale.set_domain(domain);
+            }
+            // else: leave domain = None → auto-infer (empty-selection semantics).
         }
-        // else: leave domain = None → auto-infer (empty-selection semantics).
     }
 }
 
@@ -2444,6 +2507,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 y: dummy_unit_scale(y_pixel_range, false),
                 color: None, size: None, shape: None, opacity: None,
                 fill_opacity: None, stroke_opacity: None, stroke_dash: None,
+                stroke_width: None,
                 x2: None, y2: None, y_slots: YScaleSlots::default(),
             },
             warnings,

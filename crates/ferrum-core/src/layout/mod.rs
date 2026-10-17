@@ -34,7 +34,8 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     AuxLegendInput, ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
     LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides, LegendStyleOpts,
-    LegendSuppression, ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
+    LegendSuppression, OpacityLegendEntry, OpacityPaint, ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry,
+    StrokeWidthLegendEntry, SwatchOpacity, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -401,6 +402,14 @@ pub struct ThemeRenderSizes {
     pub point_size_max: f64,
     pub opacity_min: f64,
     pub opacity_max: f64,
+    /// Narrowest width (px) a `stroke_width` bound to a field maps its
+    /// smallest value to: the low end of the stroke-width scale's default
+    /// range, as `point_size_min` is the size scale's. A built-in default
+    /// with no theme key; a `scale=` range on the channel overrides it.
+    pub line_stroke_width_min: f64,
+    /// Widest width (px) a `stroke_width` bound to a field maps its largest
+    /// value to; see [`Self::line_stroke_width_min`].
+    pub line_stroke_width_max: f64,
 }
 
 impl Default for ThemeRenderSizes {
@@ -424,6 +433,9 @@ impl Default for ThemeRenderSizes {
             point_size_max: 36.0,
             opacity_min: 0.1,
             opacity_max: 1.0,
+            // Vega-Lite's default strokeWidth range, 1 to 4 px.
+            line_stroke_width_min: 1.0,
+            line_stroke_width_max: 4.0,
         }
     }
 }

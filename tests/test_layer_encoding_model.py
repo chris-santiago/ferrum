@@ -845,9 +845,9 @@ def test_V10_a_size_on_both_layers_draws_one_legend_over_the_union(build):
     assert float(entries[0]) <= df["z"].min() and float(entries[-1]) >= 0.8 * df["z"].max()
 
 
-def test_V10_an_opacity_on_both_layers_draws_at_most_one_legend():
+def test_V10_an_opacity_on_both_layers_draws_one_legend():
     titles = list(legend_set(_quiet(lambda: P(opacity="z") + P(df2, opacity="z")).to_svg()))
-    assert len(titles) <= 1 and set(titles) <= {"z"}
+    assert titles == ["z"]
 
 
 def test_V10_a_type_conflict_excludes_the_later_layer_with_a_warning():
@@ -857,6 +857,522 @@ def test_V10_a_type_conflict_excludes_the_later_layer_with_a_warning():
     messages = [str(w.message) for w in caught]
     assert any("stays out of that scale" in m for m in messages), messages
     assert list(legend_set(svg)) == ["z"]
+
+
+# ---------------------------------------------------------------------------
+# V1, V10: the opacity family and stroke_width draw one legend on every door
+# ---------------------------------------------------------------------------
+#
+# A field bound to opacity, fill_opacity, stroke_opacity or stroke_width
+# draws one legend per channel, titled, suppressed and scaled from Python as
+# a size legend is. Every mark that draws a bound opacity draws it through
+# the channel's scale, so its painted alpha is the one its legend shows.
+
+_LEGEND_CHANNEL_CLASSES: dict[str, type] = {
+    "opacity": fm.Opacity,
+    "fill_opacity": fm.FillOpacity,
+    "stroke_opacity": fm.StrokeOpacity,
+    "stroke_width": fm.StrokeWidth,
+}
+
+# The explicit scale each channel is given: domain 0..50 onto this range.
+_EXPLICIT_RANGE: dict[str, tuple[float, float]] = {
+    "opacity": (0.2, 0.8),
+    "fill_opacity": (0.2, 0.8),
+    "stroke_opacity": (0.2, 0.8),
+    "stroke_width": (0.5, 3.0),
+}
+
+
+def interactive_legend(
+    chart: Any, channel: str | None = None
+) -> dict[str, tuple[tuple[str, float], ...]]:
+    """Each interactive legend's title and its (label, swatch) entries.
+
+    A swatch is a line's width or a circle's opacity (its radius on a size
+    legend): the value the scale maps that entry's label to.
+    """
+    legends: dict[str, list[tuple[str, float]]] = {}
+    title: str | None = None
+    swatch: float | None = None
+    for node in _scene(chart)["legend"]:
+        style = node.get("style") or {}
+        if node["type"] == "text":
+            if style.get("font_weight") == {"custom": "600"}:
+                title = node["content"]
+                legends[title] = []
+            elif title is not None and swatch is not None:
+                legends[title].append((node["content"], swatch))
+                swatch = None
+        elif node["type"] == "line":
+            swatch = style["width"]
+        elif node["type"] == "circle":
+            swatch = node["r"] if channel == "size" else style["opacity"]
+    return {t: tuple(entries) for t, entries in legends.items()}
+
+
+def _legend_title_count(svg: str, title: str) -> int:
+    return sum(
+        1
+        for e in _chrome_texts(svg)
+        if "".join(e.itertext()).strip() == title
+        and e.get("font-weight") == "600"
+        and e.get("font-size") != "13"
+    )
+
+
+def _bound_value(channel: str, spelling: str) -> Any:
+    cls = _LEGEND_CHANNEL_CLASSES[channel]
+    if spelling == "string":
+        return "z"
+    if spelling == "titled":
+        return cls("z", title="Mapped")
+    lo, hi = _EXPLICIT_RANGE[channel]
+    return cls("z", scale=fm.LinearScale(domain=[0.0, 50.0], range=[lo, hi]))
+
+
+def _legend_doors(channel: str, spelling: str) -> dict[str, Callable[[], Any]]:
+    """The doors a channel's binding is written on, with a point partner where one composes."""
+    return _binding_doors(lambda: {channel: _bound_value(channel, spelling)})
+
+
+def _binding_doors(bound: Callable[[], dict[str, Any]]) -> dict[str, Callable[[], Any]]:
+    """Every door one binding is written on; the binding is built inside each door."""
+
+    def binder() -> fm.Chart:
+        return P(**bound())
+
+    def partner() -> fm.Chart:
+        return P(y="r")
+
+    return {
+        "F": binder,
+        "L-own": lambda: P().layer(layer("point", y="r", **bound())),
+        "L-inherited": lambda: binder().layer(layer("point", y="r")),
+        "+": lambda: binder() + partner(),
+        "+rev": lambda: partner() + binder(),
+        "+e": lambda: (P() + partner()).encode(**bound()),
+        "SY": lambda: binder() + SY("r"),
+        "LCs": lambda: fm.LayerChart(binder(), partner()),
+        "LCm": lambda: fm.LayerChart(binder(), partner())._build_merged(),
+        "LCi": lambda: fm.LayerChart(binder(), partner(), resolve={"y": "independent"}),
+        "Fc": lambda: binder().facet("c"),
+        "Fc+": lambda: (binder() + partner()).facet("c"),
+    }
+
+
+_LEGEND_DOOR_CASES = {
+    f"{channel}/{spelling}/{door}": (channel, spelling, door)
+    for channel in _LEGEND_CHANNEL_CLASSES
+    for spelling in ("string", "titled", "scaled")
+    for door in _legend_doors(channel, spelling)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LEGEND_DOOR_CASES))
+def test_V10_an_opacity_or_width_binding_draws_one_legend_alike_on_every_door(case):
+    """V1/V10: every door draws the flat chart's one legend, static and interactive.
+
+    The interactive legend's entries carry the swatch each label maps to,
+    so a door that drew another scale (or another title) would differ.
+    Rejects the legend-less channel: no legend, or ``title=``/``scale=``
+    refused or dropped before the wire.
+    """
+    channel, spelling, door = _LEGEND_DOOR_CASES[case]
+    reference = _quiet(lambda: interactive_legend(_legend_doors(channel, spelling)["F"]()))
+    ((title, entries),) = reference.items()
+    assert title == ("Mapped" if spelling == "titled" else "z")
+    assert len(entries) >= 2
+
+    chart = _quiet(_legend_doors(channel, spelling)[door])
+    svg = _quiet(chart.to_svg)
+    assert legend_set(svg) == {title: tuple(label for label, _ in entries)}
+    assert _legend_title_count(svg, title) == 1
+    assert _quiet(lambda: interactive_legend(chart)) == reference
+
+
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_V10_an_explicit_domain_and_range_reach_the_wire_and_set_the_legend(channel):
+    """The legend lists the explicit domain's values, each drawn at its linear map onto the range.
+
+    Rejects a scale dropped before the wire (the data extent 10..45 and the
+    default range would set the entries).
+    """
+    lo, hi = _EXPLICIT_RANGE[channel]
+    chart = P(**{channel: _bound_value(channel, "scaled")})
+    scale = _wire(chart)["encoding"][channel]["scale"]
+    assert scale["domain"] == [0.0, 50.0] and scale["range"] == [lo, hi]
+    ((title, entries),) = interactive_legend(chart).items()
+    assert title == "z"
+    labels = [float(label) for label, _ in entries]
+    assert labels[0] == 0.0 and labels[-1] == 50.0
+    assert [swatch for _, swatch in entries] == pytest.approx(
+        [lo + (hi - lo) * v / 50.0 for v in labels]
+    )
+
+
+def _mark_values(chart: Any, channel: str) -> list:
+    """Each interactive mark's drawn value for *channel*: a radius for size, else its style value.
+
+    A style with no alpha of its own is opaque.
+    """
+    if channel == "size":
+        return [
+            node["r"]
+            for panel in _scene(chart)["panels"]
+            for batch in panel["marks"]
+            for node in batch["nodes"]
+        ]
+    default = None if channel == "stroke_width" else 1.0
+    return [
+        (node.get("style") or {}).get(channel, default)
+        for panel in _scene(chart)["panels"]
+        for batch in panel["marks"]
+        for node in batch["nodes"]
+    ]
+
+
+@pytest.mark.parametrize("door", ["F", "+", "LCs", "LCm", "Fc"])
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_legend_none_suppresses_the_legend_and_keeps_the_mapped_values(channel, door):
+    """``legend=None`` draws no legend; every mark keeps the value the scale maps it to.
+
+    Rejects ``legend=None`` dropped before the wire (the legend still
+    draws) and a suppression that also drops the scale (the marks would
+    draw one default value).
+    """
+    cls = _LEGEND_CHANNEL_CLASSES[channel]
+
+    def build(value: Any) -> Callable[[], Any]:
+        def binder() -> fm.Chart:
+            return P(**{channel: value})
+
+        return {
+            "F": binder,
+            "+": lambda: binder() + P(y="r"),
+            "LCs": lambda: fm.LayerChart(binder(), P(y="r")),
+            "LCm": lambda: fm.LayerChart(binder(), P(y="r"))._build_merged(),
+            "Fc": lambda: binder().facet("c"),
+        }[door]
+
+    shown = _quiet(build(cls("z")))
+    hidden = _quiet(build(cls("z", legend=None)))
+    assert list(legend_set(_quiet(shown.to_svg))) == ["z"]
+    hidden_svg = _quiet(hidden.to_svg)
+    assert legend_set(hidden_svg) == {}
+    assert _quiet(lambda: interactive_legend(hidden)) == {}
+    assert census(hidden_svg) == census(_quiet(shown.to_svg))
+    values = _quiet(lambda: _mark_values(hidden, channel))
+    assert values == _quiet(lambda: _mark_values(shown, channel))
+    assert len(set(v for v in values if v is not None)) > 1
+
+
+def _union_layers(channel: str) -> tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]:
+    # A stroke width reads off lines; the opacity family reads off points.
+    first = line if channel == "stroke_width" else P
+    return (lambda: first(**{channel: "r"}), lambda: first(df2, **{channel: "w"}))
+
+
+@pytest.mark.parametrize("order", ["r-first", "w-first"])
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_V10_two_layers_draw_one_legend_spanning_both_extents(channel, order):
+    """``line(stroke_width="r") + line(df2, stroke_width="w")``: one legend over r and w together.
+
+    ``r`` spans 1..4.5 and ``w`` 1..6. Rejects a first-layer domain: the
+    legend would end at 4.5 (or start at w's own nice extent).
+    """
+    a, b = _union_layers(channel)
+    chart = _quiet(lambda: a() + b() if order == "r-first" else b() + a())
+    title = "r" if order == "r-first" else "w"
+    legends = legend_set(_quiet(chart.to_svg))
+    assert list(legends) == [title]
+    values = [float(v) for v in legends[title]]
+    assert values[0] <= 1.0 and values[-1] >= 6.0
+    assert legends[title] != legend_set(_quiet(a().to_svg))["r"]
+    ((_, entries),) = _quiet(lambda: interactive_legend(chart)).items()
+    swatches = [s for _, s in entries]
+    assert swatches == sorted(swatches) and swatches[0] < swatches[-1]
+
+
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_V10_a_string_layer_is_excluded_and_one_legend_stays(channel):
+    """``point(opacity="z") + point(opacity="g")`` warns the exclusion and draws layer 0's one legend."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = (P(**{channel: "z"}) + P(**{channel: "g"})).to_svg()
+    excluded = [str(w.message) for w in caught if "stays out of that scale" in str(w.message)]
+    assert excluded == [
+        f"layer 1: its {channel} scale differs from the one layer 0 establishes the {channel} "
+        "scale with, so it stays out of that scale; its marks draw through that scale and may "
+        "fall outside its legend"
+    ]
+    assert list(legend_set(svg)) == ["z"]
+    assert legend_set(svg) == legend_set(P(**{channel: "z"}).to_svg())
+
+
+_ONE_ROW = pl.DataFrame({"v": [1.0], "y": [2.0], "z": [3.0]})
+_CONSTANT = pl.DataFrame({"v": [1.0, 2.0, 3.0], "y": [2.0, 3.0, 4.0], "z": [0.3, 0.3, 0.3]})
+
+
+@pytest.mark.parametrize("frame", ["one-row", "constant"])
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_a_degenerate_domain_draws_a_one_entry_legend_at_the_marks_value(channel, frame):
+    """A one-row chart or a constant column draws one legend entry at the value its marks draw.
+
+    A stroke width draws the midpoint of its 1-4 px band.
+    """
+    data = _ONE_ROW if frame == "one-row" else _CONSTANT
+    chart = mk("point", data, x="v", y="y", **{channel: "z"})
+    ((title, entries),) = _quiet(lambda: interactive_legend(chart)).items()
+    assert title == "z"
+    ((label, swatch),) = entries
+    assert float(label) == data["z"][0]
+    drawn = set(_quiet(lambda: _mark_values(chart, channel)))
+    assert drawn == {swatch}
+    if channel == "stroke_width":
+        assert swatch == 2.5
+
+
+_WITH_NULL = pl.DataFrame(
+    {"v": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 3.0, 4.0, 1.0], "r": [1.0, None, 3.0, 4.0]}
+)
+
+
+@pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
+def test_a_null_value_draws_the_default_and_adds_no_legend_entry(channel):
+    """The null row draws what an unbound mark draws; the legend is the null-free chart's.
+
+    Rejects a null read as 0 (the row would draw the range's low end, and
+    the legend would start at 0).
+    """
+    filled = channel not in ("stroke_opacity", "stroke_width")
+
+    def chart(data: pl.DataFrame, **encoding: Any) -> fm.Chart:
+        return fm.Chart(data).mark_point(filled=filled).encode(x="v", y="y", **encoding)
+
+    bound = chart(_WITH_NULL, **{channel: "r"})
+    unbound_values = _mark_values(chart(_WITH_NULL), channel)
+    values = _mark_values(bound, channel)
+    assert values[1] == unbound_values[1]
+    assert len({values[0], values[2], values[3]}) == 3
+    without_null = chart(_WITH_NULL.drop_nulls(), **{channel: "r"})
+    assert list(legend_set(bound.to_svg())) == ["r"]
+    assert legend_set(bound.to_svg()) == legend_set(without_null.to_svg())
+    assert interactive_legend(bound) == interactive_legend(without_null)
+
+
+def _painted_alpha(node: dict) -> float:
+    """The alpha a line or bar node paints: its style opacity, paint alpha and fill opacity."""
+    style = node["style"]
+    paint = style.get("fill") or style.get("color")
+    return style["opacity"] * (paint["a"] / 255) * style.get("fill_opacity", 1.0)
+
+
+@pytest.mark.parametrize("mark", ["line", "bar"])
+def test_a_line_or_bar_paints_the_alpha_its_opacity_legend_shows(mark):
+    """A bound opacity on a line or a bar draws through the scale its legend states.
+
+    Each bar draws its row's alpha, and the line draws its first row's; each
+    equals the legend swatch at that row's ``z``. Rejects the raw clamped
+    column value (``z`` is 10..45, so every raw alpha would be 1).
+    """
+    chart = line(opacity="z") if mark == "line" else mk("bar", x="k", y="y", opacity="z")
+    ((_, entries),) = interactive_legend(chart).items()
+    swatch = {float(label): alpha for label, alpha in entries}
+    nodes = [n for p in _scene(chart)["panels"] for b in p["marks"] for n in b["nodes"]]
+    rows = df["z"].to_list()[: len(nodes)]
+    assert len(nodes) == (1 if mark == "line" else len(df))
+    for node, z in zip(nodes, rows, strict=True):
+        assert _painted_alpha(node) == pytest.approx(swatch[z], abs=0.005)
+    assert min(swatch.values()) < 0.5
+
+
+# ---------------------------------------------------------------------------
+# The numeric auxiliary scale: what scale= each of the five channels honors
+# ---------------------------------------------------------------------------
+#
+# Size, the opacity family and StrokeWidth share one linear scale, checked by
+# one Rust gate at construction and at render. Each linear-scale key is
+# either refused, honored (the marks and the legend change together and
+# agree), or inert, and the table below names every key the linear scale
+# accepts, so a key added later fails the coverage cell until it is placed.
+
+_NUMERIC_AUX_CLASSES: dict[str, type] = {"size": fm.Size, **_LEGEND_CHANNEL_CLASSES}
+
+# A range each channel can draw, away from its default band.
+_ALT_RANGE: dict[str, list[float]] = {
+    "size": [20.0, 400.0],
+    "opacity": [0.2, 0.6],
+    "fill_opacity": [0.2, 0.6],
+    "stroke_opacity": [0.2, 0.6],
+    "stroke_width": [0.5, 6.0],
+}
+
+# Key -> (disposition, the scale dict that sets it, the dict it is compared with).
+_LINEAR_KEY_CASES: dict[str, tuple[str, Callable[[str], dict], Callable[[str], dict] | None]] = {
+    "domain": ("honored", lambda ch: {"domain": [0.0, 100.0]}, lambda ch: {}),
+    "range": ("honored", lambda ch: {"range": _ALT_RANGE[ch]}, lambda ch: {}),
+    "reverse": ("honored", lambda ch: {"reverse": True}, lambda ch: {}),
+    "nice": (
+        "honored",
+        lambda ch: {"domain": [3.3, 47.7], "nice": True},
+        lambda ch: {"domain": [3.3, 47.7]},
+    ),
+    "zero": ("honored", lambda ch: {"zero": True}, lambda ch: {}),
+    "domainParam": ("honored", lambda ch: {"domain": fm.param("d", value=[0.0, 100.0])}, None),
+    "clamp": (
+        "inert",
+        lambda ch: {"domain": [15.0, 35.0], "clamp": False},
+        lambda ch: {"domain": [15.0, 35.0], "clamp": True},
+    ),
+    "padding": ("refused", lambda ch: {"padding": 0.1}, None),
+    "scheme": ("refused", lambda ch: {"scheme": "blues"}, None),
+    # The positional resolver's flag for a scale it injects itself; the
+    # Python door never writes it.
+    "systemInjected": ("internal", lambda ch: {}, None),
+}
+
+
+def test_the_key_table_places_every_key_the_linear_scale_accepts():
+    from ferrum._core import scale_accepted_keys
+
+    assert set(_LINEAR_KEY_CASES) == set(scale_accepted_keys("linear"))
+
+
+def _scaled_point(channel: str, scale: dict) -> fm.Chart:
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    chart = P(**{channel: cls("z", scale=scale) if scale else cls("z")})
+    domain = scale.get("domain")
+    if isinstance(domain, fm.Parameter):
+        chart = chart.add_params(domain)
+    return chart
+
+
+def _marks_and_legend(chart: Any, channel: str) -> tuple[list, tuple]:
+    """The marks' drawn values, and the legend's entries, after checking they agree.
+
+    Every legend entry whose label is some row's ``z`` has the swatch that
+    row's mark draws.
+    """
+    values = _quiet(lambda: _mark_values(chart, channel))
+    ((_, entries),) = _quiet(lambda: interactive_legend(chart, channel)).items()
+    by_z: dict[float, set] = {}
+    for z, value in zip(df["z"].to_list(), values, strict=True):
+        by_z.setdefault(z, set()).add(round(value, 6))
+    for label, swatch in entries:
+        if float(label) in by_z:
+            assert by_z[float(label)] == {round(swatch, 6)}, (label, swatch, by_z)
+    return values, entries
+
+
+_LINEAR_KEY_MATRIX = {
+    f"{channel}/{key}": (channel, key)
+    for channel in _NUMERIC_AUX_CLASSES
+    for key in _LINEAR_KEY_CASES
+    if _LINEAR_KEY_CASES[key][0] != "internal"
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LINEAR_KEY_MATRIX))
+def test_each_linear_scale_key_is_refused_or_drawn_by_marks_and_legend_together(case):
+    """A refused key raises at construction; an honored key moves the marks and the legend
+    together; ``clamp`` is inert, since these scales always clamp.
+
+    Rejects a key dropped without a word (the honored case would draw the
+    comparison's marks), and marks and legend that disagree.
+    """
+    channel, key = _LINEAR_KEY_MATRIX[case]
+    disposition, scale, compared = _LINEAR_KEY_CASES[key]
+    if disposition == "refused":
+        with pytest.raises(ValueError, match=rf"^{channel} scale: {key} is not supported"):
+            _scaled_point(channel, scale(channel))
+        return
+    chart = _scaled_point(channel, scale(channel))
+    got = _marks_and_legend(chart, channel)
+    if compared is None:
+        # domainParam: the parameter's value draws as the literal domain does.
+        assert got == _marks_and_legend(_scaled_point(channel, {"domain": [0.0, 100.0]}), channel)
+        compared = lambda ch: {}  # noqa: E731
+    base = _marks_and_legend(_scaled_point(channel, compared(channel)), channel)
+    if disposition == "inert":
+        assert got == base
+    else:
+        assert got[0] != base[0] and got[1] != base[1]
+
+
+def test_size_reverse_swaps_the_areas_and_the_legend_with_them():
+    """Reversed, the largest ``z`` draws the smallest dot and the legend says so."""
+    values, entries = _marks_and_legend(_scaled_point("size", {"reverse": True}), "size")
+    zs = df["z"].to_list()
+    assert values[zs.index(max(zs))] < values[zs.index(min(zs))]
+    swatches = [s for _, s in entries]
+    assert swatches == sorted(swatches, reverse=True)
+
+
+_MALFORMED_DOOR_SCALES: dict[str, tuple[dict, str]] = {
+    "log": ({"type": "log"}, "type 'log' is not supported"),
+    "padding": ({"padding": 0.1}, "padding is not supported"),
+    "scheme": ({"scheme": "blues"}, "scheme is not supported"),
+    "domain-3": ({"domain": [1.0, 2.0, 3.0]}, "domain must have length 2; got 3"),
+    "range-1": ({"range": [1.0]}, "range must have length 2; got 1"),
+}
+
+# The ``zero`` row on a descending domain: the widened pair keeps its order.
+# Case -> (the scale that sets ``zero``, the literal domain it draws as).
+_ZERO_DESCENDING_CASES: dict[str, tuple[Callable[[], dict], list[float]]] = {
+    "descending": (lambda: {"domain": [100.0, 5.0], "zero": True}, [100.0, 0.0]),
+    "descending-negative": (lambda: {"domain": [-5.0, -20.0], "zero": True}, [0.0, -20.0]),
+    "descending-param": (
+        lambda: {"domain": fm.param("d", value=[100.0, 5.0]), "zero": True},
+        [100.0, 0.0],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ZERO_DESCENDING_CASES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_zero_on_a_descending_domain_keeps_it_descending(channel, case):
+    """``zero=True`` on a descending domain widens it to zero and keeps it descending.
+
+    The marks and the legend draw exactly what the widened descending literal
+    domain draws. Rejects widening the pair as if it ascended, which flattens
+    ``[100, 5]`` into the reversal-free ``[0, 5]``.
+    """
+    scale, literal = _ZERO_DESCENDING_CASES[case]
+    got = _marks_and_legend(_scaled_point(channel, scale()), channel)
+    assert got == _marks_and_legend(_scaled_point(channel, {"domain": literal}), channel)
+
+
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_channel_class_refuses_a_scale_it_cannot_draw_at_construction(channel):
+    """Constructing the channel with a scale it cannot draw raises the gate's text.
+
+    The refusal comes at construction, before any door builds a chart; the
+    wire's render-time refusal is the next test.
+    """
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    for scale, reason in _MALFORMED_DOOR_SCALES.values():
+        with pytest.raises(ValueError, match=rf"^{channel} scale: {re.escape(reason)}"):
+            cls("z", scale=scale)
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("scale_id", sorted(_MALFORMED_DOOR_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_wire_spec_is_refused_at_render_with_the_construction_text(channel, scale_id, kind):
+    """A spec that reaches the wire without a channel class refuses at render, word for word."""
+    from ferrum._core import render_interactive, render_svg
+
+    scale, _reason = _MALFORMED_DOOR_SCALES[scale_id]
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    with pytest.raises(ValueError) as built:
+        cls("z", scale=scale)
+    wire = _wire(P(**{channel: "z"}))
+    wire["encoding"][channel]["scale"] = {"type": "linear", **scale}
+    renderer = render_svg if kind == "static" else render_interactive
+    with pytest.raises(ValueError) as rendered:
+        renderer(fm.ChartSpec.from_json(json.dumps(wire)), df.to_arrow(), viewport=(400.0, 300.0))
+    assert str(rendered.value).endswith(str(built.value))
 
 
 _V11: dict[str, Case] = {
@@ -1489,7 +2005,9 @@ def test_a_metric_label_on_a_composition_labels_each_curve_hue(label):
 _CONTROLS: dict[str, Callable[[], Any]] = {
     "F/point-color": lambda: P(color="c"),
     "F/bar-mean-color": lambda: bar_mean(color="c"),
-    "F/point-size-opacity": lambda: P(size="z", opacity="r"),
+    # The opacity legend is suppressed: the marks draw the bytes they drew
+    # before the opacity family drew a legend.
+    "F/point-size-opacity": lambda: P(size="z", opacity=fm.Opacity("r", legend=None)),
     "L/host-color-line": lambda: P(color="c").layer(layer("line")),
     "L/host-bar-mean-label": lambda: bar_mean().layer(
         layer("text", text=fm.Text("y", aggregate="mean"))

@@ -176,7 +176,7 @@ def _derive_honored(
 
 
 def _aux_legend_channels() -> frozenset[str]:
-    """Return the channel names whose legend is an auxiliary block (Size, Shape, StrokeDash).
+    """Return the channel names whose legend is an auxiliary block (every own legend but color's).
 
     Read from Rust's ``ferrum._core.aux_legend_channels()`` -- the one list
     ``build_aux_legends`` (``render/prepare/legend.rs``) walks -- rather than
@@ -195,10 +195,10 @@ def _aux_legend_channels() -> frozenset[str]:
 
 _AUX_LEGEND_ORIENT_MESSAGE = (
     "{channel}(legend=...): orient={orient!r} is not supported on an "
-    "auxiliary legend -- Size, Shape and StrokeDash legends always share "
-    "the chart's legend block. Place it with Color(legend=Legend(orient=...)) "
-    'or configure_legend(orient=...). orient="none" still disables this '
-    "channel's own legend block."
+    "auxiliary legend -- size, shape, stroke-dash, opacity and stroke-width "
+    "legends always share the chart's legend block. Place it with "
+    'Color(legend=Legend(orient=...)) or configure_legend(orient=...). orient="none" '
+    "still disables this channel's own legend block."
 )
 
 
@@ -461,11 +461,16 @@ class ChannelBase:
     # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
     # leave it False and the normalization is skipped.
     _stack_kwarg: ClassVar[bool] = False
+    # Channels whose scale is the numeric auxiliary linear scale (Size, the
+    # opacity family, StrokeWidth) set this True so the base ``_validate``
+    # asks Rust's numeric auxiliary scale gate about an explicit ``scale=``.
+    _numeric_aux_scale: ClassVar[bool] = False
     # This channel's legend surface, the one fact every legend and
     # legend-title rule derives from (`_derive_honored`, `_validate_legend_value`,
     # `_refusal_message`):
     #
-    # - "own" (Color, Fill, Stroke, Size, Shape, StrokeDash): the channel
+    # - "own" (Color, Fill, Stroke, Size, Shape, StrokeDash, Opacity,
+    #   FillOpacity, StrokeOpacity, StrokeWidth): the channel
     #   renders a legend block of its own; `legend` and `title` are honored.
     #   A bare ``legend=None``/``False`` suppresses that block; a
     #   ``Legend(...)``/dict configures it (`_emit_legend`).
@@ -582,6 +587,12 @@ class ChannelBase:
             from ferrum.color import _validate_scheme
 
             _validate_scheme(scheme, where=f"{self.__class__.__name__}(scheme=...)")
+        if self._numeric_aux_scale and self._kwargs.get("scale") is not None:
+            # The render's own gate, so construction and render refuse one
+            # scale with one text.
+            from ferrum._core import validate_numeric_aux_scale
+
+            validate_numeric_aux_scale(self._channel_name, _scale_to_dict(self._kwargs["scale"]))
         if self._stack_kwarg:
             stack = self._kwargs.get("stack")
             if stack is not None:
@@ -609,7 +620,7 @@ class ChannelBase:
         - ``_legend_surface == "none"``: any other value is refused -- there
           is no legend for a dict/``Legend(...)`` to configure.
         - An auxiliary-legend channel (`_aux_legend_channels`: Size, Shape,
-          StrokeDash) whose legend value carries an explicit ``orient=``
+          StrokeDash, the opacity family, StrokeWidth) whose legend value carries an explicit ``orient=``
           other than ``"none"`` is refused: an aux legend has no independent
           screen position, so it always shares the chart's legend block.
           ``orient="none"`` still disables the aux block itself.

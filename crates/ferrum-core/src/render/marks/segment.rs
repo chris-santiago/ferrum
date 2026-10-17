@@ -167,8 +167,11 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                 Some(points) => acc.push_many(
                     [
                         line_node,
+                        // The head fades by the row's opacity as the shaft
+                        // does: the shaft carries it in `stroke_opacity`, the
+                        // head in `fill_opacity`, the paint both walkers read.
                         arrowhead_path_with_opacity(
-                            points, line_paint, line_opacity, line_stroke_opacity, row_fill_opacity,
+                            points, line_paint, line_opacity, line_stroke_opacity, row_fill_opacity * line_opacity,
                         ),
                     ],
                     i,
@@ -590,8 +593,9 @@ mod tests {
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
         }).collect();
-        assert_eq!(opacities, vec![0.25, 0.75],
-            "each segment must carry its own row's opacity (per-row OpacityResolver sample)");
+        // `op` spans 0.25..0.75, mapped onto the 0.1..1.0 opacity band.
+        assert_eq!(opacities, vec![0.1, 1.0],
+            "each segment must carry its own row's mapped opacity (per-row OpacityResolver sample)");
     }
 
     // ── Per-row stroke_opacity (batch-E close remediation) ───────────────────
@@ -692,11 +696,11 @@ mod tests {
     fn segment_no_stroke_opacity_encoding_is_byte_identical() {
         let spec = segment_spec_with("opacity", "op");
         let batch = opacity_channel_batch("op", vec![0.2, 0.5, 0.9]);
-        let (rendered, _) = segment_stroke_opacities(&spec, &batch);
+        let (rendered, resolver) = segment_stroke_opacities(&spec, &batch);
 
         assert_eq!(
             rendered,
-            vec![0.2, 0.5, 0.9],
+            (0..3).map(|i| resolver.at_row(i).0).collect::<Vec<_>>(),
             "with no stroke_opacity encoding, StrokeStyle.stroke_opacity must equal the \
              resolved opacity value unchanged (the pre-fix behavior, bit-for-bit)"
         );
@@ -987,7 +991,8 @@ mod tests {
     /// `fill_opacity` to `1.0`, passes it. Here all three opacity-family
     /// channels are bound to distinct columns, so each slot must land in its
     /// own field: `opacity` verbatim, `stroke_opacity` as the shaft's
-    /// post-multiply product, `fill_opacity` as the head's own fill.
+    /// post-multiply product, and `fill_opacity` as the head's own fill times
+    /// the row's opacity, the paint that fades the head as the shaft fades.
     #[test]
     fn segment_arrowhead_places_each_opacity_family_slot_in_its_own_field() {
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -1027,7 +1032,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![5.0_f64, 30.0, 45.0])),
             Arc::new(Float64Array::from(vec![0.2_f64, 0.5, 0.8])),
             Arc::new(Float64Array::from(vec![0.3_f64, 0.6, 0.9])),
-            Arc::new(Float64Array::from(vec![0.1_f64, 0.4, 0.7])),
+            Arc::new(Float64Array::from(vec![0.1_f64, 0.2, 0.7])),
         ]).unwrap();
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1068,9 +1073,9 @@ mod tests {
              post-multiply value, not the raw channel and not the opacity slot"
         );
         assert_eq!(
-            head.fill_opacity, row_fill_opacity,
+            head.fill_opacity, row_fill_opacity * row_opacity,
             "the head is segment's only FILLED node; it must carry the row's resolved \
-             fill_opacity, not a hardcoded 1.0"
+             fill_opacity faded by its opacity, not a hardcoded 1.0"
         );
     }
 }

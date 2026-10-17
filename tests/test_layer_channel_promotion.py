@@ -1,7 +1,7 @@
 """A layer's own auxiliary channel binding draws that layer and no other (spec §4.6 V1, V10).
 
 Rust resolves each auxiliary (non-positional) scale -- color, size, shape,
-opacity, fill_opacity, stroke_opacity, stroke_dash -- from whichever layer
+opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width -- from whichever layer
 draws the channel: layer 0 if it draws the channel, else the first layer
 that does, with a domain over every layer that draws it. A binding written
 on one ``+`` operand (or one ``fm.LayerChart`` member) is that operand's
@@ -105,6 +105,7 @@ _SVG_ATTR = {
     "fill_opacity": "fill-opacity",
     "stroke_opacity": "stroke-opacity",
     "stroke_dash": "stroke-dasharray",
+    "stroke_width": "stroke-width",
 }
 
 
@@ -291,10 +292,6 @@ def test_point_plus_sized_line_tapers_the_line_and_leaves_the_dots_at_the_defaul
 # Two binders: each keeps its own field; the first decides the scale (spec §4.6 V10)
 # ---------------------------------------------------------------------------
 
-# The channels Rust draws a legend for today; the opacity family's legends
-# arrive with their own task.
-_LEGEND_CHANNELS = [c for c in _CHANNELS if c in ("color", "size", "shape", "stroke_dash")]
-
 
 def _legend_titles(svg: str) -> list[str]:
     root = ET.fromstring(svg)
@@ -319,7 +316,7 @@ def test_two_layers_binding_different_fields_each_keep_their_own(channel: str) -
         assert [l.encoding[channel].field for l in merged._layers[1:]] == [first, second]
 
 
-@pytest.mark.parametrize("channel", _LEGEND_CHANNELS)
+@pytest.mark.parametrize("channel", _CHANNELS)
 def test_the_first_layer_drawing_a_channel_titles_its_legend(channel: str) -> None:
     """V10: one legend per channel, titled by the first layer that draws it."""
     f1, f2 = _fields(channel)
@@ -336,6 +333,7 @@ _CONSTANT_KWARG = {
     "shape": "square",
     "opacity": 0.5,
     "stroke_dash": "dashed",
+    "stroke_width": 2.0,
 }
 
 

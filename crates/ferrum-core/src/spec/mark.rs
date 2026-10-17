@@ -80,6 +80,39 @@ impl Mark {
         self.size_drawing() != SizeDrawing::Never
     }
 
+    /// Whether this mark draws an encoded `stroke_width` channel: a per-row
+    /// stroke width mapped through the stroke-width scale
+    /// (`render::draw::stroke_width_column`'s readers). Every other mark
+    /// carries an inherited `stroke_width` binding without drawing it.
+    pub(crate) fn draws_stroke_width_channel(self) -> bool {
+        match self {
+            Mark::Point | Mark::Line | Mark::Bar | Mark::Rule | Mark::Tick | Mark::Rect | Mark::Segment => true,
+            Mark::Area | Mark::Text | Mark::Polygon | Mark::Image | Mark::Ribbon | Mark::Arc | Mark::Label
+            | Mark::Geoshape => false,
+        }
+    }
+
+    /// Whether this mark draws the opacity-family `channel` bound to a field,
+    /// read from what each mark's builder takes from that column: `opacity`
+    /// fades every mark that reads it (bar through its fill), `fill_opacity`
+    /// the marks that paint a fill with it, `stroke_opacity` the marks that
+    /// paint a stroke with it. A segment's `fill_opacity` fills its
+    /// arrowheads, so it draws only with `arrow=True`
+    /// (`render::prepare::LayerPrepared::drawn_opacity_field`). Every other
+    /// mark carries an inherited binding of the channel without drawing it.
+    pub(crate) fn draws_opacity_channel(self, channel: crate::render::scale_resolve::OpacityChannel) -> bool {
+        use crate::render::scale_resolve::OpacityChannel::{Fill, Opacity, Stroke};
+        match self {
+            Mark::Point => true,
+            Mark::Bar => true,
+            Mark::Rect | Mark::Area => matches!(channel, Opacity | Fill),
+            Mark::Line | Mark::Rule | Mark::Tick => matches!(channel, Opacity | Stroke),
+            Mark::Segment => true,
+            Mark::Text | Mark::Arc | Mark::Polygon => channel == Opacity,
+            Mark::Image | Mark::Ribbon | Mark::Label | Mark::Geoshape => false,
+        }
+    }
+
     /// Whether this mark draws a constant `size=`.
     pub(crate) fn draws_constant_size(self) -> bool {
         self.size_drawing() == SizeDrawing::ConstantOrEncoded

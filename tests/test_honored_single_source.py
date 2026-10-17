@@ -196,13 +196,14 @@ _ROLE_CONTRACT = [
             "legend",
         },
     ),
-    # FillOpacity and Angle have `_legend_surface == "none"` (#123): they
-    # honor no `legend`, so their `legend` key never reaches the wire.
+    # FillOpacity draws a legend of its own, serialized as Size's is.
     (
         fm.FillOpacity,
         fm.FillOpacity._honored_kwargs,
-        {"field", "type_", "scale"},
+        {"field", "type_", "scale", "title", "legend"},
     ),
+    # Angle has `_legend_surface == "none"` (#123): it honors no `legend`,
+    # so its `legend` key never reaches the wire.
     (fm.Angle, APPEARANCE_BASE, {"field", "type_"}),
     (fm.Text, TEXT_FORMATTED, {"field", "type_", "format", "format_type"}),
     (

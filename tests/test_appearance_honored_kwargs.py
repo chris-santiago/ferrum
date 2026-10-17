@@ -78,6 +78,13 @@ one per layer) that re-points the channel at its output column, so the warn
 guard was telling users the kwarg was ignored on a call that drew the
 aggregated value. Shape and StrokeDash keep warning: an aggregated category
 draws nothing a shape or dash palette means.
+
+**Eighth deliberate contract change (2026-10-16):** a field bound to
+Opacity, FillOpacity, StrokeOpacity or StrokeWidth draws a legend, and a
+field bound to StrokeWidth maps through a linear scale onto pixel widths.
+All four have the ``own`` legend surface, so they honor ``legend`` and
+``title`` (derived), and StrokeWidth honors ``scale`` (``APPEARANCE_FULL``).
+Angle is the one appearance channel left with no legend.
 """
 
 from __future__ import annotations
@@ -120,8 +127,8 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # only the derivation's answer for "shape" flips).
     Shape: frozenset({"type", "scale", "title", "legend", "sort"}),
     # Opacity LOST "title" and "legend" 2026-09-23 (#123, sixth change
-    # above): it draws no legend.
-    Opacity: frozenset({"type", "scale", "condition", "aggregate"}),
+    # above) and regained both 2026-10-16 (eighth change): it draws a legend.
+    Opacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme", "aggregate"}),
     # Stroke LOST "condition" 2026-09-11 (batch-H close re-review): a stroke
     # conditional would repaint the fill (ferrum-wasm's apply_value_common
@@ -136,10 +143,12 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # channels on the wire; StrokeWidth/Angle still carry no "scale"/"title".
     # All four LOST "legend" (and FillOpacity/StrokeOpacity "title")
     # 2026-09-23 (#123, sixth change above), the same reason as Opacity's.
-    FillOpacity: frozenset({"type", "scale", "condition", "aggregate"}),
+    # FillOpacity, StrokeOpacity and StrokeWidth regained "legend"/"title",
+    # and StrokeWidth gained "scale", 2026-10-16 (eighth change above).
+    FillOpacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3).
-    StrokeOpacity: frozenset({"type", "scale", "condition", "aggregate"}),
-    StrokeWidth: frozenset({"type", "condition", "aggregate"}),
+    StrokeOpacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
+    StrokeWidth: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     # Every channel above but Shape and StrokeDash gained "aggregate" 2026-10-15
     # (seventh change above).
     # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review

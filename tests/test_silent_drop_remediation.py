@@ -1155,7 +1155,12 @@ class TestFillOpacitySVG:
         )
 
     def test_fill_opacity_1_does_not_emit_attribute(self):
-        """fill_opacity=1.0 (default) → no fill-opacity attribute emitted."""
+        """A fill_opacity that maps to 1.0 (the default) → no fill-opacity attribute emitted.
+
+        The identity scale maps the column's 1.0 to 1.0; without it a constant
+        column maps to the middle of the opacity band like every opacity-family
+        channel.
+        """
         df = pl.DataFrame(
             {
                 "x": [1.0, 2.0, 3.0],
@@ -1163,7 +1168,13 @@ class TestFillOpacitySVG:
                 "fo": [1.0, 1.0, 1.0],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
+        identity = fm.LinearScale(domain=[0.0, 1.0], range=[0.0, 1.0])
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity=fm.FillOpacity("fo", scale=identity))
+            .to_svg()
+        )
         assert "fill-opacity" not in svg, (
             "fill-opacity=1.0 should not emit attribute; got:\n" + svg[:2000]
         )

@@ -1,15 +1,14 @@
 """Every ``RenderWarning`` auxiliary-scale resolution pushes is recorded
-exactly once per ``to_svg()`` call, and ``UnsupportedOpacityScale`` names the
-fallback the channel actually took rather than always claiming the linear
-one.
+exactly once per ``to_svg()`` call, and a non-linear opacity-family scale
+refuses rather than warning.
 
 The population under test is derived from a grep of every ``warnings.push``
 site in the two source files ``build_auxiliary_scales`` calls into, rather
 than hand-listed: ``grep -oE
 'warnings\\.push\\(crate::render::RenderWarning::[A-Za-z]+'
 crates/ferrum-core/src/render/scale_resolve/{auxiliary,color}.rs``, variant
-names deduplicated. At this tree that grep returns six variants:
-``ShapePaletteOverflowed``, ``UnsupportedOpacityScale``,
+names deduplicated. At this tree that grep returns five variants:
+``ShapePaletteOverflowed``,
 ``StrokeDashPaletteOverflowed`` (``auxiliary.rs``), and
 ``UnknownColorScheme``, ``GradientTooFewStops``, ``ColorPaletteOverflowed``
 (``color.rs``). ``test_population_is_covered`` fails if a future push site
@@ -18,8 +17,8 @@ exclusion (see ``_UNREACHABLE_VIA_PUBLIC_API`` below).
 
 Two independent facts are pinned:
 
-- **Once per render.** ``ShapePaletteOverflowed``, ``StrokeDashPaletteOverflowed``
-  and ``UnsupportedOpacityScale`` are whole-chart facts — every panel of a
+- **Once per render.** ``ShapePaletteOverflowed`` and ``StrokeDashPaletteOverflowed``
+  are whole-chart facts — every panel of a
   faceted chart re-derives byte-identical text — so they are recorded exactly
   once per ``to_svg()``, faceted or not. ``ColorPaletteOverflowed`` is
   different by ruling: an independently-resolved color scale can legitimately
@@ -30,10 +29,9 @@ Two independent facts are pinned:
   unfaceted chart; on a faceted chart it still records once per panel rather
   than collapsing like its siblings above — a known gap (F36) this file does
   not assert on (see the note on ``_FACETED_CASES`` below).
-- **The opacity warning's true fallback.** A constant ``fill_opacity``/
-  ``stroke_opacity`` column under a non-``Linear`` ``scale=`` states that its
-  values were used as literal alphas, not that it fell back to a linear
-  resolution it never took.
+- **A non-linear opacity scale refuses.** A ``fill_opacity`` column under a
+  non-``Linear`` ``scale=`` refuses with the numeric auxiliary scale gate's
+  text instead of warning and falling back.
 """
 
 import re
@@ -125,16 +123,6 @@ def _stroke_dash_df(n_cat: int, *, groups: tuple[str, ...] | None = None) -> pl.
     return pl.DataFrame(rows, schema=["x", "y", "series", "g"], orient="row")
 
 
-def _opacity_varying_df(*, groups: tuple[str, ...] | None = None) -> pl.DataFrame:
-    def _one_group():
-        return [(i, i * 2.0 + 1.0, 0.1 + 0.03 * i) for i in range(_OPACITY_ROWS)]
-
-    if groups is None:
-        return pl.DataFrame(_one_group(), schema=["x", "y", "fo"], orient="row")
-    rows = [(x, y, fo, g) for g in groups for x, y, fo in _one_group()]
-    return pl.DataFrame(rows, schema=["x", "y", "fo", "g"], orient="row")
-
-
 def _opacity_scale_channel(field: str):
     return fm.FillOpacity(field, scale=fm.LogScale())
 
@@ -160,24 +148,6 @@ def _stroke_dash_overflow_facet_chart():
         fm.Chart(df)
         .mark_line()
         .encode(x="x:Q", y="y:Q", stroke_dash="series:N", facet=fm.Facet("g"))
-    )
-
-
-def _opacity_varying_column_chart():
-    df = _opacity_varying_df()
-    return (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", fill_opacity=_opacity_scale_channel("fo"))
-    )
-
-
-def _opacity_varying_column_facet_chart():
-    df = _opacity_varying_df(groups=_GROUPS)
-    return (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", fill_opacity=_opacity_scale_channel("fo"), facet=fm.Facet("g"))
     )
 
 
@@ -221,13 +191,9 @@ def _unknown_color_scheme_chart():
     )
 
 
-_LINEAR_TEXT = (
-    "fill_opacity: log scale is not supported on opacity-family channels; "
-    "the curve, domain, and range were ignored in favor of the default linear resolution"
-)
-_LITERAL_ALPHA_TEXT = (
-    "fill_opacity: log scale is not supported on opacity-family channels; "
-    "the column is constant, so its values were used as literal alphas instead of a scale"
+_REFUSAL_TEXT = (
+    "fill_opacity scale: type 'log' is not supported; "
+    "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
 )
 _SHAPE_TEXT = "shape palette has fewer entries than the 9 categories; shapes were recycled"
 _DASH_TEXT = "stroke dash palette has fewer entries than the 5 categories; dashes were recycled"
@@ -243,13 +209,12 @@ _UNKNOWN_SCHEME_TEXT = (
 _UNFACETED_CASES: dict[str, tuple] = {
     "ShapePaletteOverflowed": (_shape_overflow_chart, _SHAPE_TEXT),
     "StrokeDashPaletteOverflowed": (_stroke_dash_overflow_chart, _DASH_TEXT),
-    "UnsupportedOpacityScale": (_opacity_varying_column_chart, _LINEAR_TEXT),
     "ColorPaletteOverflowed": (_color_overflow_chart, _COLOR_TEXT),
     "UnknownColorScheme": (_unknown_color_scheme_chart, _UNKNOWN_SCHEME_TEXT),
 }
 
 # Faceted (3-panel, shared resolution) cell per producer whose count this
-# file pins: the three whole-chart facts collapse to exactly one warning
+# file pins: the two whole-chart facts collapse to exactly one warning
 # across the panel loop; ColorPaletteOverflowed keeps one copy per panel,
 # since an independently-resolved color scale can legitimately overflow
 # differently per panel, so its expected count is _N_PANELS, not 1.
@@ -259,7 +224,6 @@ _UNFACETED_CASES: dict[str, tuple] = {
 _FACETED_CASES: dict[str, tuple] = {
     "ShapePaletteOverflowed": (_shape_overflow_facet_chart, _SHAPE_TEXT, 1),
     "StrokeDashPaletteOverflowed": (_stroke_dash_overflow_facet_chart, _DASH_TEXT, 1),
-    "UnsupportedOpacityScale": (_opacity_varying_column_facet_chart, _LINEAR_TEXT, 1),
     "ColorPaletteOverflowed": (_color_overflow_facet_chart, _COLOR_TEXT, _N_PANELS),
 }
 
@@ -305,15 +269,8 @@ def test_no_auxiliary_warning_is_vacuity_control():
     assert _record_warnings(chart) == []
 
 
-def test_opacity_constant_column_uses_literal_alpha_fallback():
-    """A constant ``fill_opacity`` column under a non-linear ``scale=`` states
-    the fallback the channel actually took (each value used as a literal
-    alpha), not the linear resolution it never took, and renders that literal
-    value on every row.
-    """
-    svg, messages = _render_and_record(_opacity_constant_column_chart())
-    assert messages == [_LITERAL_ALPHA_TEXT]
-    literal_alpha_count = svg.count('fill-opacity="0.3"')
-    assert literal_alpha_count == _OPACITY_ROWS, (
-        f"expected all {_OPACITY_ROWS} rows to carry the literal alpha; got {literal_alpha_count}"
-    )
+def test_a_non_linear_opacity_scale_refuses():
+    """A ``fill_opacity`` column under a non-linear ``scale=`` refuses with the
+    gate's text, whether the channel class or the render refuses it."""
+    with pytest.raises(ValueError, match=re.escape(_REFUSAL_TEXT)):
+        _opacity_constant_column_chart().to_svg()

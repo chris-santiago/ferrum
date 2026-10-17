@@ -68,6 +68,10 @@ pub struct CircleInstance {
     pub fill_color: [f32; 4],
     pub stroke_color: [f32; 4],
     pub stroke_width: f32,
+    /// Runtime alpha multiplier on the whole instance: a conditional
+    /// encoding's opacity and a transition's enter/exit fade. `1.0` as loaded
+    /// from a scene, whose `FillStroke::opacity` is already in the fill and
+    /// stroke alphas (the SVG walker paints those alphas and never the field).
     pub opacity: f32,
     /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
     pub stroke_opacity: f32,
@@ -92,6 +96,10 @@ pub struct RectInstance {
     pub fill_color: [f32; 4],
     pub stroke_color: [f32; 4],
     pub stroke_width: f32,
+    /// Runtime alpha multiplier on the whole instance: a conditional
+    /// encoding's opacity and a transition's enter/exit fade. `1.0` as loaded
+    /// from a scene, whose `FillStroke::opacity` is already in the fill and
+    /// stroke alphas (the SVG walker paints those alphas and never the field).
     pub opacity: f32,
     /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
     pub stroke_opacity: f32,
@@ -1777,7 +1785,8 @@ fn collect_nodes(
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
-                    opacity: style.opacity as f32,
+                    // The scene's opacity is already in the paint alphas.
+                    opacity: 1.0,
                     stroke_opacity: style.stroke_opacity as f32,
                     stroke_dash: stroke_dash_index(style.stroke_dash.as_deref()) as f32,
                     angle: style.angle as f32,
@@ -1798,7 +1807,8 @@ fn collect_nodes(
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
-                    opacity: style.opacity as f32,
+                    // The scene's opacity is already in the paint alphas.
+                    opacity: 1.0,
                     stroke_opacity: style.stroke_opacity as f32,
                     stroke_dash: stroke_dash_index(style.stroke_dash.as_deref()) as f32,
                     angle: style.angle as f32,
@@ -6010,7 +6020,9 @@ mod tests {
         assert!((ci.center[0] - 80.0).abs() < 1e-3, "circle cx");
         assert!((ci.center[1] - 80.0).abs() < 1e-3, "circle cy");
         assert!((ci.radius - 12.0).abs() < 1e-3, "circle radius");
-        assert!((ci.opacity - 0.9).abs() < 1e-3, "circle opacity");
+        // The scene's opacity is in the paint alpha; the instance multiplier
+        // starts at 1.
+        assert!((ci.opacity - 1.0).abs() < 1e-3, "circle instance opacity");
         assert!(
             (ci.stroke_opacity - 0.7).abs() < 1e-3,
             "circle stroke_opacity"

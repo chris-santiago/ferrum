@@ -1472,14 +1472,21 @@ fn stroke_width_bound(ctx: &DrawCtx<'_>) -> bool {
     })
 }
 
-/// The bound `stroke_width` column, read per row, when it is numeric. On a
-/// filled mark its presence is the gate of [`resolve_effective_stroke`]'s
-/// rescue; [`style_need_met`] reads the same fact for a stroke need.
+/// The bound `stroke_width` column, when it is numeric: each row's width in
+/// pixels, mapped through the chart's stroke-width scale
+/// ([`StrokeWidthScale`](crate::render::scale_resolve::StrokeWidthScale)),
+/// never the raw column value. A null or non-finite row, or a column with no
+/// value at all (which builds no scale), is `None` and draws at the mark's
+/// default width. On a filled mark the column's presence is the gate of
+/// [`resolve_effective_stroke`]'s rescue; [`style_need_met`] reads the same
+/// fact for a stroke need.
 pub(crate) fn stroke_width_column(ctx: &DrawCtx<'_>) -> Option<Vec<Option<f64>>> {
     if !stroke_width_bound(ctx) {
         return None;
     }
-    ctx.spec.encoding.stroke_width.as_ref().and_then(|e| col_as_f64(ctx.batch, &e.field).ok())
+    let values = ctx.spec.encoding.stroke_width.as_ref().and_then(|e| col_as_f64(ctx.batch, &e.field).ok())?;
+    let scale = ctx.scales.stroke_width.as_ref();
+    Some(values.into_iter().map(|v| v.and_then(|v| scale.and_then(|s| s.width(v)))).collect())
 }
 
 /// Resolve the effective per-row stroke color for a *filled* mark

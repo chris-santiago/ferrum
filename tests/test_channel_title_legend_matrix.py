@@ -100,9 +100,9 @@ def test_vacuity_control_a_legend_owner_emits_its_legend_and_title():
 
 def test_title_refusal_text_names_channel_and_value():
     with pytest.raises(ValueError) as exc:
-        _construct(fm.StrokeWidth, {"title": "T"})
+        _construct(fm.Angle, {"title": "T"})
     assert str(exc.value) == (
-        "StrokeWidth(title='T') is not honored: StrokeWidth draws no legend, and "
+        "Angle(title='T') is not honored: Angle draws no legend, and "
         "title= is not supported on this channel."
     )
 
@@ -110,7 +110,18 @@ def test_title_refusal_text_names_channel_and_value():
 def test_legend_surfaces_agree_with_the_published_aux_legend_list():
     own = {c._channel_name for c in CHANNELS if c._legend_surface == "own"}
     assert set(aux_legend_channels()) <= own
-    assert own == {"color", "fill", "stroke", "size", "shape", "stroke_dash"}
+    assert own == {
+        "color",
+        "fill",
+        "stroke",
+        "size",
+        "shape",
+        "stroke_dash",
+        "opacity",
+        "fill_opacity",
+        "stroke_opacity",
+        "stroke_width",
+    }
 
 
 @pytest.mark.parametrize("cls", CHANNELS, ids=lambda c: c.__name__)

@@ -21,7 +21,7 @@ pub use gate::{
     scale_accepted_keys, scale_padding_keys, scale_temporal_type_tags, scale_type_tags,
     sort_accepted_vocabulary, translate_scale_switch, validate_scale_dict, validate_scale_values,
 };
-use gate::deserialize_scale_value;
+pub(crate) use gate::deserialize_scale_value;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -138,14 +138,14 @@ pub struct ContinuousScaleCommon {
     /// 5: domain-swap over range-swap since descending domains are already
     /// tolerated, tested, and normalized everywhere downstream).
     ///
-    /// **Positional resolution only.** `ContinuousScaleCommon` is also read
-    /// by non-positional channels that only pull `domain`/`range` from it
-    /// and never consult this field: color (`build_color_scale`, which
-    /// honors `reverse` solely on the separate `ScaleSpec::Sequential`
-    /// variant — `ScaleSpec::Diverging` has no `reverse` field at all,
-    /// documented at `scale_spec_is_reversed`'s doc in
-    /// `scale_resolve::color`) and size/opacity (`linear_overrides` in
-    /// `scale_resolve::auxiliary`). A raw-dict color- or size-channel scale
+    /// **Positional and numeric-auxiliary resolution.** The numeric
+    /// auxiliary channels (size, the opacity family, stroke width) honor it
+    /// too, by swapping their range endpoints (`numeric_aux_scale` in
+    /// `scale_resolve::auxiliary`). Color never consults this field
+    /// (`build_color_scale`, which honors `reverse` solely on the separate
+    /// `ScaleSpec::Sequential` variant — `ScaleSpec::Diverging` has no
+    /// `reverse` field at all, documented at `scale_spec_is_reversed`'s doc in
+    /// `scale_resolve::color`). A raw-dict color-channel scale
     /// like `{"type": "linear", "reverse": true}` deserializes this field
     /// (the batch-C task 4 scale-key gate accepts `reverse` on `Linear`/
     /// `Log`/etc. unconditionally — it is keyed off scale *type*, not
@@ -1039,9 +1039,8 @@ pub struct Encoding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<EncodingSpec>,
     // ── Stroke/angle channels (silent-drop remediation) ───────────────
-    // These are data-driven per-row constants, not scale-transformed channels.
-    // Values flow directly from the batch column into mark style / FillStroke.
-    // stroke_width: per-row stroke line width in pixels.
+    // stroke_width: per-row stroke line width, mapped through the chart's
+    // stroke-width scale to pixels (`scale_resolve::StrokeWidthScale`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stroke_width: Option<EncodingSpec>,
     // stroke_opacity: per-row stroke opacity in [0, 1].
@@ -1088,7 +1087,7 @@ impl AuxiliaryScaleChannel {
 /// on each of these channels is the establishing layer's (layer 0 when it
 /// draws the channel, else the first layer that does); on a layered spec each
 /// domain spans every drawing layer's own column.
-pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 7] = [
+pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 8] = [
     AuxiliaryScaleChannel { name: "color", slot: |e| &e.color, slot_mut: |e| &mut e.color },
     AuxiliaryScaleChannel { name: "size", slot: |e| &e.size, slot_mut: |e| &mut e.size },
     AuxiliaryScaleChannel { name: "shape", slot: |e| &e.shape, slot_mut: |e| &mut e.shape },
@@ -1096,6 +1095,7 @@ pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 7] = [
     AuxiliaryScaleChannel { name: "fill_opacity", slot: |e| &e.fill_opacity, slot_mut: |e| &mut e.fill_opacity },
     AuxiliaryScaleChannel { name: "stroke_opacity", slot: |e| &e.stroke_opacity, slot_mut: |e| &mut e.stroke_opacity },
     AuxiliaryScaleChannel { name: "stroke_dash", slot: |e| &e.stroke_dash, slot_mut: |e| &mut e.stroke_dash },
+    AuxiliaryScaleChannel { name: "stroke_width", slot: |e| &e.stroke_width, slot_mut: |e| &mut e.stroke_width },
 ];
 
 /// Merge a single `parent` `EncodingSpec` into a `child` slot.

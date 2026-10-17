@@ -81,9 +81,14 @@ class Size(ChannelBase):
         Column name to map to size.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : Scale, optional
+    scale : LinearScale or dict, optional
         Explicit scale override. Its ``range`` is in area units (square
-        pixels) for every mark, a line included.
+        pixels) for every mark, a line included; an endpoint below 0 draws
+        as 0. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
+        ``zero`` are honored, and values outside the domain clamp to the
+        nearer end of the range. Any other scale type, ``padding``,
+        ``scheme``, or a domain or range whose length is not 2 raises
+        ``ValueError`` at construction.
     title : str, optional
         Legend title override.
 
@@ -128,6 +133,7 @@ class Size(ChannelBase):
 
     _channel_name = "size"
     _legend_surface = "own"
+    _numeric_aux_scale = True
 
     # {"type","legend","scale","title"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- "size" is a real conditional channel.
@@ -253,8 +259,16 @@ class Opacity(ChannelBase):
         Column name to map to opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : Scale, optional
-        Explicit scale override.
+    scale : LinearScale or dict, optional
+        Explicit scale override: ``domain`` sets the data extent and
+        ``range`` the alphas it maps onto, each endpoint clamped to
+        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
+        ``zero`` are honored, and values outside the domain clamp to the
+        nearer end of the range. Any other scale type, ``padding``,
+        ``scheme``, or a domain or range whose length is not 2 raises
+        ``ValueError`` at construction.
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
 
     Notes
     -----
@@ -263,9 +277,13 @@ class Opacity(ChannelBase):
     to switch opacity based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``Opacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
-    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
-    ``ValueError`` at construction, since there is nothing for them to label.
+    ``legend`` is honored: a field bound to opacity draws a legend of
+    swatches at round values of the domain, each drawn at the alpha the
+    scale maps it to. ``legend=None`` or ``legend=False`` suppresses it and
+    keeps the mapped alphas; ``legend=Legend(title=..., format=...)``
+    customizes it. The legend is an auxiliary block that shares the chart's
+    legend position, so a ``legend=`` value whose ``orient=`` is anything
+    other than ``"none"`` is refused.
 
     Examples
     --------
@@ -274,10 +292,12 @@ class Opacity(ChannelBase):
     """
 
     _channel_name = "opacity"
+    _legend_surface = "own"
+    _numeric_aux_scale = True
 
-    # Plus "condition", derived from the conditional vocabulary.
+    # {"type","legend","scale","title"} plus "condition", derived from the
+    # conditional vocabulary.
     _honored_kwargs = APPEARANCE_FULL | AGGREGATE
-    _legend_surface = "none"
 
 
 # Deferred to Phase 9:
@@ -400,8 +420,16 @@ class FillOpacity(ChannelBase):
         Column name to map to fill opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : Scale, optional
-        Explicit scale override.
+    scale : LinearScale or dict, optional
+        Explicit scale override: ``domain`` sets the data extent and
+        ``range`` the alphas it maps onto, each endpoint clamped to
+        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
+        ``zero`` are honored, and values outside the domain clamp to the
+        nearer end of the range. Any other scale type, ``padding``,
+        ``scheme``, or a domain or range whose length is not 2 raises
+        ``ValueError`` at construction.
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
 
     Notes
     -----
@@ -410,9 +438,13 @@ class FillOpacity(ChannelBase):
     to switch fill opacity based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``FillOpacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
-    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
-    ``ValueError`` at construction, since there is nothing for them to label.
+    ``legend`` is honored: a field bound to fill opacity draws a legend of
+    swatches at round values of the domain, each drawn at the alpha the
+    scale maps it to. ``legend=None`` or ``legend=False`` suppresses it and
+    keeps the mapped alphas; ``legend=Legend(title=..., format=...)``
+    customizes it. The legend is an auxiliary block that shares the chart's
+    legend position, so a ``legend=`` value whose ``orient=`` is anything
+    other than ``"none"`` is refused.
 
     Examples
     --------
@@ -421,10 +453,12 @@ class FillOpacity(ChannelBase):
     """
 
     _channel_name = "fill_opacity"
+    _legend_surface = "own"
+    _numeric_aux_scale = True
 
-    # Plus "condition", derived from the conditional vocabulary.
+    # {"type","legend","scale","title"} plus "condition", derived from the
+    # conditional vocabulary.
     _honored_kwargs = APPEARANCE_FULL | AGGREGATE
-    _legend_surface = "none"
 
 
 class StrokeOpacity(ChannelBase):
@@ -439,8 +473,16 @@ class StrokeOpacity(ChannelBase):
         Column name to map to stroke opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : Scale, optional
-        Explicit scale override.
+    scale : LinearScale or dict, optional
+        Explicit scale override: ``domain`` sets the data extent and
+        ``range`` the alphas it maps onto, each endpoint clamped to
+        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
+        ``zero`` are honored, and values outside the domain clamp to the
+        nearer end of the range. Any other scale type, ``padding``,
+        ``scheme``, or a domain or range whose length is not 2 raises
+        ``ValueError`` at construction.
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
 
     Notes
     -----
@@ -449,9 +491,13 @@ class StrokeOpacity(ChannelBase):
     to switch stroke opacity based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``StrokeOpacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
-    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
-    ``ValueError`` at construction, since there is nothing for them to label.
+    ``legend`` is honored: a field bound to stroke opacity draws a legend of
+    swatches at round values of the domain, each drawn at the alpha the
+    scale maps it to. ``legend=None`` or ``legend=False`` suppresses it and
+    keeps the mapped alphas; ``legend=Legend(title=..., format=...)``
+    customizes it. The legend is an auxiliary block that shares the chart's
+    legend position, so a ``legend=`` value whose ``orient=`` is anything
+    other than ``"none"`` is refused.
 
     Examples
     --------
@@ -460,16 +506,23 @@ class StrokeOpacity(ChannelBase):
     """
 
     _channel_name = "stroke_opacity"
+    _legend_surface = "own"
+    _numeric_aux_scale = True
 
-    # Plus "condition", derived from the conditional vocabulary.
+    # {"type","legend","scale","title"} plus "condition", derived from the
+    # conditional vocabulary.
     _honored_kwargs = APPEARANCE_FULL | AGGREGATE
-    _legend_surface = "none"
 
 
 class StrokeWidth(ChannelBase):
     """Stroke-width channel — maps a field to stroke width in pixels.
 
-    Larger values produce thicker mark outlines.
+    A linear scale maps the field's extent onto a 1 to 4 pixel band, so
+    larger values draw thicker strokes; values outside an explicit domain
+    draw at the nearer end of the range, and a null value draws the mark's
+    default width. To draw a column of literal pixel widths, pass a scale
+    whose domain equals its range, e.g.
+    ``StrokeWidth("w", scale=fm.LinearScale(domain=[1, 6], range=[1, 6]))``.
 
     Parameters
     ----------
@@ -477,6 +530,16 @@ class StrokeWidth(ChannelBase):
         Column name to map to stroke width.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scale : LinearScale or dict, optional
+        Explicit scale override: ``domain`` sets the data extent and
+        ``range`` the pixel widths it maps onto; an endpoint below 0 draws
+        as 0. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
+        ``zero`` are honored, and values outside the domain clamp to the
+        nearer end of the range. Any other scale type, ``padding``,
+        ``scheme``, or a domain or range whose length is not 2 raises
+        ``ValueError`` at construction.
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
 
     Notes
     -----
@@ -485,9 +548,13 @@ class StrokeWidth(ChannelBase):
     to switch stroke width based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``StrokeWidth`` draws no legend of its own. ``legend=None``/``legend=False`` are
-    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
-    ``ValueError`` at construction, since there is nothing for them to label.
+    ``legend`` is honored: a field bound to stroke width draws a legend of
+    line swatches at round values of the domain, each drawn at the width
+    the scale maps it to. ``legend=None`` or ``legend=False`` suppresses it
+    and keeps the mapped widths; ``legend=Legend(title=..., format=...)``
+    customizes it. The legend is an auxiliary block that shares the chart's
+    legend position, so a ``legend=`` value whose ``orient=`` is anything
+    other than ``"none"`` is refused.
 
     Examples
     --------
@@ -496,10 +563,12 @@ class StrokeWidth(ChannelBase):
     """
 
     _channel_name = "stroke_width"
+    _legend_surface = "own"
+    _numeric_aux_scale = True
 
-    # Plus "condition", derived from the conditional vocabulary.
-    _honored_kwargs = APPEARANCE_BASE | AGGREGATE
-    _legend_surface = "none"
+    # {"type","legend","scale","title"} plus "condition", derived from the
+    # conditional vocabulary.
+    _honored_kwargs = APPEARANCE_FULL | AGGREGATE
 
 
 class StrokeDash(ChannelBase):

@@ -286,12 +286,36 @@ pub struct LegendEntryLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dash_pattern: Option<Vec<f64>>,
     /// Stroke width (px) of this entry's `SymbolKind::Line` swatch. Set on a
-    /// size-legend entry whose consumers are all lines: the swatch draws the
-    /// entry's dot diameter, the width the lines draw at that value, and
-    /// outranks the legend-level `symbol_stroke_width`. `None` on every other
-    /// entry, which keeps the legend-level width (omitted from JSON).
+    /// size-legend entry whose consumers are all lines (the swatch draws the
+    /// entry's dot diameter, the width the lines draw at that value) and on a
+    /// stroke-width legend entry (the width its value maps to); it outranks
+    /// the legend-level `symbol_stroke_width`. `None` on every other entry,
+    /// which keeps the legend-level width (omitted from JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol_line_width: Option<f64>,
+    /// Opacity of this entry's swatch. Set on an opacity-legend entry: the
+    /// alpha its value maps to and the paint it fades. `None` on every other
+    /// entry, which draws opaque (omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_opacity: Option<SwatchOpacity>,
+}
+
+/// Which paint of an opacity-legend swatch an alpha fades: the fill for
+/// `opacity` and `fill_opacity`, the stroke of an unfilled swatch for
+/// `stroke_opacity`, as Vega-Lite applies `strokeOpacity` to the symbol
+/// stroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpacityPaint {
+    Fill,
+    Stroke,
+}
+
+/// An opacity-legend swatch's alpha and the paint it fades.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SwatchOpacity {
+    pub paint: OpacityPaint,
+    pub alpha: f64,
 }
 
 use super::text_metrics::TextMetrics;
@@ -698,6 +722,7 @@ fn place_color_entry(
         color_hex: None,
         dash_pattern: entry.dash_pattern.clone(),
         symbol_line_width: None,
+        symbol_opacity: None,
     }
 }
 
@@ -1349,9 +1374,30 @@ pub struct StrokeDashLegendEntry {
     pub dash: Vec<f64>,
 }
 
-/// Input for one auxiliary legend block (size, shape, or stroke-dash) stacked
-/// below the color legend. Built in `prepare.rs`; consumed by
-/// [`layout_aux_legends`].
+/// An opacity-legend value (`opacity`, `fill_opacity` or `stroke_opacity`):
+/// the data value's formatted label and the alpha its opacity scale maps it
+/// to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpacityLegendEntry {
+    pub label: String,
+    pub opacity: f64,
+}
+
+/// A stroke-width-legend value: the data value's formatted label and the
+/// width (px) its stroke-width scale maps it to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeWidthLegendEntry {
+    pub label: String,
+    pub width: f64,
+}
+
+/// Input for one auxiliary legend block (size, shape, stroke-dash, an
+/// opacity-family channel, or stroke-width) stacked below the color legend.
+/// Built in `prepare.rs`; consumed by [`layout_aux_legends`].
+///
+/// An `Opacity` block draws one circle swatch per entry at the entry's alpha;
+/// a `StrokeWidth` block draws one line swatch (the stroke-dash block's
+/// sample shape) per entry at the entry's width.
 ///
 /// A `Size` block's `symbol` is the swatch its entries draw: `Circle` (a dot
 /// of the entry's radius) or `Line` (a line swatch whose stroke width is the
@@ -1362,6 +1408,8 @@ pub enum AuxLegendInput {
     Size { title: Option<String>, entries: Vec<SizeLegendEntry>, symbol: SymbolKind },
     Shape { title: Option<String>, entries: Vec<ShapeLegendEntry> },
     StrokeDash { title: Option<String>, entries: Vec<StrokeDashLegendEntry> },
+    Opacity { title: Option<String>, entries: Vec<OpacityLegendEntry>, paint: OpacityPaint },
+    StrokeWidth { title: Option<String>, entries: Vec<StrokeWidthLegendEntry> },
 }
 
 /// The optional title of an aux legend block, regardless of variant.
@@ -1369,8 +1417,16 @@ fn aux_title(input: &AuxLegendInput) -> Option<&str> {
     match input {
         AuxLegendInput::Size { title, .. }
         | AuxLegendInput::Shape { title, .. }
-        | AuxLegendInput::StrokeDash { title, .. } => title.as_deref(),
+        | AuxLegendInput::StrokeDash { title, .. }
+        | AuxLegendInput::Opacity { title, .. }
+        | AuxLegendInput::StrokeWidth { title, .. } => title.as_deref(),
     }
+}
+
+/// The `(width, height)` a stroke-width-legend line swatch occupies: the
+/// fixed symbol width, and its stroke width.
+fn stroke_width_swatch_extent(width: f64) -> (f64, f64) {
+    (SYMBOL_WIDTH, width)
 }
 
 /// The `(width, height)` a size-legend swatch occupies: a circle spans its
@@ -1407,6 +1463,14 @@ fn estimate_aux_block_size(
             entries.iter().map(|e| e.label.as_str()).collect(),
             SYMBOL_WIDTH,
         ),
+        AuxLegendInput::Opacity { entries, .. } => (
+            entries.iter().map(|e| e.label.as_str()).collect(),
+            SYMBOL_WIDTH,
+        ),
+        AuxLegendInput::StrokeWidth { entries, .. } => (
+            entries.iter().map(|e| e.label.as_str()).collect(),
+            SYMBOL_WIDTH,
+        ),
     };
     let max_label_w = labels
         .iter()
@@ -1419,7 +1483,11 @@ fn estimate_aux_block_size(
             .iter()
             .map(|e| size_swatch_extent(*symbol, e.radius).1)
             .fold(line_h, f64::max),
-        AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => line_h,
+        AuxLegendInput::StrokeWidth { entries, .. } => entries
+            .iter()
+            .map(|e| stroke_width_swatch_extent(e.width).1)
+            .fold(line_h, f64::max),
+        AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } | AuxLegendInput::Opacity { .. } => line_h,
     };
     let entry_w = max_symbol_w + SYMBOL_LABEL_GAP + max_label_w;
     let width = entry_w + 2.0 * LEGEND_OUTER_PAD;
@@ -1585,10 +1653,11 @@ pub fn layout_aux_legends(
     (blocks, new_inner)
 }
 
-/// Lay out a single aux block (size or shape) within `block_rect`: title at
-/// top, then one row per entry. Returns a `LegendLayout` whose `entries` carry
-/// `symbol_radius` (size) or `shape_name` (shape) so the renderer draws the
-/// graduated / shaped glyph.
+/// Lay out a single aux block within `block_rect`: title at top, then one row
+/// per entry. Returns a `LegendLayout` whose `entries` carry what the renderer
+/// draws each swatch with: `symbol_radius` (size), `shape_name` (shape),
+/// `dash_pattern` (stroke-dash), `symbol_opacity` (an opacity-family channel)
+/// or `symbol_line_width` (stroke-width, and a size block of lines).
 fn layout_aux_block(
     input: &AuxLegendInput,
     block_rect: Rect,
@@ -1619,7 +1688,10 @@ fn layout_aux_block(
             .iter()
             .map(|e| size_swatch_extent(*symbol, e.radius).0 / 2.0)
             .fold(SYMBOL_WIDTH / 2.0, f64::max),
-        AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => SYMBOL_WIDTH / 2.0,
+        AuxLegendInput::Shape { .. }
+        | AuxLegendInput::StrokeDash { .. }
+        | AuxLegendInput::Opacity { .. }
+        | AuxLegendInput::StrokeWidth { .. } => SYMBOL_WIDTH / 2.0,
     };
     let symbol_col_x = block_rect.x + LEGEND_OUTER_PAD + max_radius;
     let label_x = block_rect.x + LEGEND_OUTER_PAD + 2.0 * max_radius + SYMBOL_LABEL_GAP;
@@ -1645,6 +1717,7 @@ fn layout_aux_block(
                     color_hex: e.color_hex.clone(),
                     dash_pattern: None,
                     symbol_line_width: line_swatch.then_some(2.0 * e.radius),
+                    symbol_opacity: None,
                 });
                 row_top += row_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1664,6 +1737,7 @@ fn layout_aux_block(
                     color_hex: None,
                     dash_pattern: None,
                     symbol_line_width: None,
+                    symbol_opacity: None,
                 });
                 row_top += line_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1687,8 +1761,50 @@ fn layout_aux_block(
                     // dasharray.
                     dash_pattern: if e.dash.is_empty() { None } else { Some(e.dash.clone()) },
                     symbol_line_width: None,
+                    symbol_opacity: None,
                 });
                 row_top += line_h + LEGEND_ENTRY_ROW_PAD;
+            }
+        }
+        AuxLegendInput::Opacity { entries: oes, paint, .. } => {
+            for e in oes {
+                let cy = row_top + line_h / 2.0;
+                entries.push(LegendEntryLayout {
+                    label: e.label.clone(),
+                    label_anchor_x: label_x,
+                    label_anchor_y: cy + label_font_size * 0.35,
+                    symbol_anchor_x: symbol_col_x,
+                    symbol_anchor_y: cy,
+                    symbol_kind: SymbolKind::Circle,
+                    symbol_radius: None,
+                    shape_name: None,
+                    color_hex: None,
+                    dash_pattern: None,
+                    symbol_line_width: None,
+                    symbol_opacity: Some(SwatchOpacity { paint: *paint, alpha: e.opacity }),
+                });
+                row_top += line_h + LEGEND_ENTRY_ROW_PAD;
+            }
+        }
+        AuxLegendInput::StrokeWidth { entries: wes, .. } => {
+            for e in wes {
+                let row_h = stroke_width_swatch_extent(e.width).1.max(line_h);
+                let cy = row_top + row_h / 2.0;
+                entries.push(LegendEntryLayout {
+                    label: e.label.clone(),
+                    label_anchor_x: label_x,
+                    label_anchor_y: cy + label_font_size * 0.35,
+                    symbol_anchor_x: symbol_col_x,
+                    symbol_anchor_y: cy,
+                    symbol_kind: SymbolKind::Line,
+                    symbol_radius: None,
+                    shape_name: None,
+                    color_hex: None,
+                    dash_pattern: None,
+                    symbol_line_width: Some(e.width),
+                    symbol_opacity: None,
+                });
+                row_top += row_h + LEGEND_ENTRY_ROW_PAD;
             }
         }
     }
@@ -1727,6 +1843,7 @@ mod tests {
                 color_hex: None,
                 dash_pattern: None,
                 symbol_line_width: None,
+                symbol_opacity: None,
             }],
             title: None,
             colorbar: None,

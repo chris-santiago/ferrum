@@ -270,13 +270,14 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             raw_label
         };
 
-        // Resolve per-row opacity (fill-opacity on text).
-        let row_opacity = opacity_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(base_opacity);
+        // Resolve per-row opacity (fill-opacity on text), through the
+        // opacity scale when the channel resolved one.
+        let row_opacity = crate::render::marks::opacity::resolve_scaled_or_raw(
+            &opacity_values,
+            &ctx.scales.opacity,
+            i,
+            base_opacity,
+        );
 
         // Resolve per-row font-size from size encoding.
         let row_font_size = size_values

@@ -767,7 +767,10 @@ impl LeafLegendBundle {
     fn size_symbol(&self) -> Option<SymbolKind> {
         self.aux.iter().find_map(|a| match a {
             AuxLegendInput::Size { symbol, .. } => Some(*symbol),
-            AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => None,
+            AuxLegendInput::Shape { .. }
+            | AuxLegendInput::StrokeDash { .. }
+            | AuxLegendInput::Opacity { .. }
+            | AuxLegendInput::StrokeWidth { .. } => None,
         })
     }
 
@@ -808,6 +811,8 @@ fn aux_block_is_empty(a: &AuxLegendInput) -> bool {
         AuxLegendInput::Size { entries, .. } => entries.is_empty(),
         AuxLegendInput::Shape { entries, .. } => entries.is_empty(),
         AuxLegendInput::StrokeDash { entries, .. } => entries.is_empty(),
+        AuxLegendInput::Opacity { entries, .. } => entries.is_empty(),
+        AuxLegendInput::StrokeWidth { entries, .. } => entries.is_empty(),
     }
 }
 
@@ -9180,17 +9185,35 @@ mod tests {
         Shape,
         StrokeDash,
         Opacity,
+        FillOpacity,
+        StrokeOpacity,
+        StrokeWidth,
     }
 
     impl AuxChannel {
         /// The channels that draw a legend.
-        const ALL: [AuxChannel; 4] = [AuxChannel::Color, AuxChannel::Size, AuxChannel::Shape, AuxChannel::StrokeDash];
+        const ALL: [AuxChannel; 8] = [
+            AuxChannel::Color,
+            AuxChannel::Size,
+            AuxChannel::Shape,
+            AuxChannel::StrokeDash,
+            AuxChannel::Opacity,
+            AuxChannel::FillOpacity,
+            AuxChannel::StrokeOpacity,
+            AuxChannel::StrokeWidth,
+        ];
 
         fn mark(self) -> Mark {
             match self {
-                AuxChannel::StrokeDash => Mark::Line,
+                AuxChannel::StrokeDash | AuxChannel::StrokeWidth => Mark::Line,
                 _ => Mark::Point,
             }
+        }
+
+        /// Whether the channel's scale maps numbers only (a categorical
+        /// column cannot establish it).
+        fn numeric_only(self) -> bool {
+            !matches!(self, AuxChannel::Color | AuxChannel::Shape | AuxChannel::StrokeDash)
         }
 
         fn bound(self, field: &str) -> Encoding {
@@ -9204,6 +9227,9 @@ mod tests {
                 AuxChannel::Shape => Encoding { shape: spec, ..Default::default() },
                 AuxChannel::StrokeDash => Encoding { stroke_dash: spec, ..Default::default() },
                 AuxChannel::Opacity => Encoding { opacity: spec, ..Default::default() },
+                AuxChannel::FillOpacity => Encoding { fill_opacity: spec, ..Default::default() },
+                AuxChannel::StrokeOpacity => Encoding { stroke_opacity: spec, ..Default::default() },
+                AuxChannel::StrokeWidth => Encoding { stroke_width: spec, ..Default::default() },
             }
         }
 
@@ -9214,16 +9240,16 @@ mod tests {
                 AuxChannel::Shape => "shape",
                 AuxChannel::StrokeDash => "stroke_dash",
                 AuxChannel::Opacity => "opacity",
+                AuxChannel::FillOpacity => "fill_opacity",
+                AuxChannel::StrokeOpacity => "stroke_opacity",
+                AuxChannel::StrokeWidth => "stroke_width",
             }
         }
 
-        /// The field of the fixtures: categorical `g`, numeric `v` for size
-        /// and opacity.
+        /// The field of the fixtures: numeric `v` for a numeric-only channel,
+        /// else categorical `g`.
         fn field(self) -> &'static str {
-            match self {
-                AuxChannel::Size | AuxChannel::Opacity => "v",
-                _ => "g",
-            }
+            if self.numeric_only() { "v" } else { "g" }
         }
 
         fn member(self, binds: bool) -> ChartSpec {
@@ -9273,10 +9299,11 @@ mod tests {
     /// Two members binding the same field over different rows draw one
     /// legend listing every value either draws, as one chart over both
     /// members' rows lists them: `a, b` and `b, c` give `a, b, c` for color,
-    /// shape and stroke_dash, and size's legend spans both members' values.
-    /// The marks of every member draw through that one scale: opacity, which
-    /// draws no legend, maps each member's values onto the band its union
-    /// spans, as one chart over both members' rows maps them.
+    /// shape and stroke_dash, and the legend of size, the opacity family and
+    /// stroke_width spans both members' values. The points of every member
+    /// draw through that one scale, as one chart over both members' rows
+    /// draws them (a line joins the two members' rows differently, so only
+    /// point channels compare marks).
     #[test]
     fn an_overlay_legend_spans_every_members_values() {
         let first = aux_batch_of(&[1.0, 2.0, 3.0], &[1.0, 2.0, 4.0], &["a", "b", "a"]);
@@ -9287,39 +9314,37 @@ mod tests {
             let (overlay, _) = overlay_route(&[(member.clone(), first.clone()), (member.clone(), second.clone())]);
             let (one_chart, _) = overlay_route(&[(member, both.clone())]);
             assert_eq!(legend_texts(&overlay), legend_texts(&one_chart), "{channel:?}");
-            if !matches!(channel, AuxChannel::Size) {
+            if channel.numeric_only() {
+                // `v` spans 1..10 over both members, 1..4 over the first alone.
+                assert_eq!(legend_texts(&overlay).first().map(String::as_str), Some("v"), "{channel:?}");
+                assert!(legend_texts(&overlay).iter().any(|t| t == "10"), "{channel:?}: {:?}", legend_texts(&overlay));
+            } else {
                 assert_eq!(legend_texts(&overlay), ["g", "a", "b", "c"], "{channel:?}");
             }
+            if channel.mark() == Mark::Point {
+                assert_eq!(mark_nodes(&overlay), mark_nodes(&one_chart), "{channel:?}");
+            }
         }
-        let opacity = aux_member(Mark::Point, Encoding { opacity: binding("v"), ..Default::default() });
-        let (overlay, _) = overlay_route(&[(opacity.clone(), first), (opacity.clone(), second)]);
-        let (one_chart, _) = overlay_route(&[(opacity, both)]);
-        assert!(legend_texts(&overlay).is_empty(), "no opacity legend exists: {:?}", legend_texts(&overlay));
-        assert_eq!(mark_nodes(&overlay), mark_nodes(&one_chart));
     }
 
     /// A member whose column reads the other way than the channel's scale
     /// (categorical beside numeric) stays out of the one scale with one
     /// `LayerScaleExcluded` naming it, the first member drawing the channel
     /// decides the kind, and the overlay draws what its layers merged draw,
-    /// in both member orders, for color, size, opacity and stroke_dash. A
-    /// numeric-only channel (size, opacity) cannot be established on
-    /// categories: both routes refuse the first member's column with the
-    /// same error, naming that member.
+    /// in both member orders, for color, size, the opacity family,
+    /// stroke_dash and stroke_width (shape reads every column as categories,
+    /// so no column conflicts with it). A numeric-only channel (size, the
+    /// opacity family, stroke_width) cannot be established on categories:
+    /// both routes refuse the first member's column with the same error,
+    /// naming that member.
     #[test]
     fn an_overlay_member_whose_column_conflicts_is_excluded_as_a_merged_layer_is() {
         let batch = aux_batch();
-        let cases = [
-            (AuxChannel::Color, Mark::Point),
-            (AuxChannel::Size, Mark::Point),
-            (AuxChannel::Opacity, Mark::Point),
-            (AuxChannel::StrokeDash, Mark::Line),
-        ];
-        for (channel, mark) in cases {
+        for channel in AuxChannel::ALL.into_iter().filter(|c| !matches!(c, AuxChannel::Shape)) {
             for fields in [["g", "v"], ["v", "g"]] {
-                let members = fields.map(|f| aux_member(mark, channel.bound(f)));
+                let members = fields.map(|f| aux_member(channel.mark(), channel.bound(f)));
                 let pair = [(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())];
-                if matches!(channel, AuxChannel::Size | AuxChannel::Opacity) && fields[0] == "g" {
+                if channel.numeric_only() && fields[0] == "g" {
                     let refusal = |route: Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError>| match route {
                         Err(CompositeRenderError::LeafRender {
                             index,
@@ -9350,6 +9375,45 @@ mod tests {
                 assert_eq!(overlay.legend, merged.legend, "{channel:?} {fields:?}");
                 assert_eq!(mark_nodes(&overlay), mark_nodes(&merged), "{channel:?} {fields:?}");
             }
+        }
+    }
+
+    /// An overlay whose only binding of an opacity channel sits on a mark that
+    /// does not draw it (a line's `fill_opacity`) draws no legend for it,
+    /// exactly as its layers merged into one chart draw none, in either
+    /// member order.
+    #[test]
+    fn an_overlay_draws_no_legend_for_an_opacity_channel_no_member_draws() {
+        let batch = aux_batch();
+        let line = aux_member(Mark::Line, AuxChannel::FillOpacity.bound("v"));
+        let point = aux_member(Mark::Point, Encoding::default());
+        for members in [[line.clone(), point.clone()], [point, line]] {
+            let (overlay, _) = overlay_route(&[(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())]);
+            let (merged, _) = merged_route(&members, &batch);
+            assert!(legend_texts(&overlay).is_empty(), "{:?}", legend_texts(&overlay));
+            assert_eq!(overlay.legend, merged.legend);
+        }
+    }
+
+    /// A leaf of an overlay refuses a numeric auxiliary channel's `scale=`
+    /// with the gate's own text, whole, after the leaf prefix: the remedy
+    /// keeps its `[...]` placeholders, and the scale type is quoted.
+    #[test]
+    fn an_overlay_leaf_refuses_a_numeric_aux_scale_with_the_gates_text() {
+        let batch = aux_batch();
+        let scaled = |scale: serde_json::Value| {
+            let mut spec = AuxChannel::FillOpacity.bound("v");
+            spec.fill_opacity.as_mut().unwrap().scale = Some(serde_json::from_value(scale).unwrap());
+            aux_member(Mark::Point, spec)
+        };
+        let remedy = "pass fm.LinearScale(domain=[...], range=[...]) or drop scale=";
+        for (scale, reason) in [
+            (serde_json::json!({"type": "log"}), "type 'log' is not supported".to_string()),
+            (serde_json::json!({"type": "ordinal"}), "type 'ordinal' is not supported".to_string()),
+        ] {
+            let pair = [(scaled(scale), batch.clone()), (AuxChannel::FillOpacity.member(true), batch.clone())];
+            let err = try_overlay_route(&pair, shared_xy()).map(|_| ()).expect_err("the leaf refuses");
+            assert_eq!(err.to_string(), format!("failed to render composite leaf leaf #0: fill_opacity scale: {reason}; {remedy}"));
         }
     }
 
