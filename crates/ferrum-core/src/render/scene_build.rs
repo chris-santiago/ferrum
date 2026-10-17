@@ -1599,21 +1599,14 @@ struct LayerGeometryFlags {
     /// color (not a clear like `stroke="none"`) — see the own-color doc
     /// below for why a clear does not count.
     has_own_literal_paint: bool,
-    /// Whether this layer declared its own `x` channel — see
-    /// [`LayerPrepared::x_is_own`].
-    x_is_own: bool,
-    /// Whether this layer declared its own `y` channel — see
-    /// [`LayerPrepared::y_is_own`].
-    y_is_own: bool,
     /// The inherited width bindings this layer yields — see
     /// [`LayerPrepared::yielded_widths`].
     yielded_widths: crate::render::prepare::YieldedWidths,
 }
 
 /// The DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
-/// needs before a mark builder sees its encoding: the own-color exemption,
-/// the own-span-axis normalization for rule/tick, and the own-width
-/// precedence for line. None ever touches
+/// needs before a mark builder sees its encoding: the own-color exemption
+/// and the own-width precedence for line. None ever touches
 /// `layer.encoding` itself — both apply to a clone, so scale domains, axis
 /// chrome, position grouping, and the legend keep reading the merged
 /// encoding unchanged, while the geometry sees only the shape THIS layer
@@ -1657,36 +1650,6 @@ struct LayerGeometryFlags {
 /// (the `roc_chart` chance-diagonal is collinear, so the merge is invisible),
 /// but a real topology change in general.
 ///
-/// **Own-span-axis normalization for rule and tick** (spec §4.4). A
-/// reference-line layer, or a rug tick, declares the
-/// axis it belongs to by declaring exactly one positional channel — the
-/// diagnostic desugars all do this (`{"x": "_ref_zero"}` for a vertical zero
-/// line, `{"y": "_ref_zero"}` for a horizontal one; a bare
-/// `mark_tick().encode(x=...)` rug the same way). When the chart ALSO sets a
-/// chart-level `x`/`y`, `Encoding::inherit_from` fills in the opposite
-/// channel, and the mark's shape derivation would then see a two-channel
-/// pattern that is not the layer's own shape: `shap_chart(kind="beeswarm")`'s
-/// vertical zero line inherited the chart's ordinal `y="feature"` and
-/// rendered as one full-width HORIZONTAL span per row; a rug tick layered
-/// under a scatter (`fm.layer(scatter, mark_tick(band_size=...).encode(x=...))`)
-/// inherited the scatter's `y` and could no longer tell, from its own
-/// DrawCtx, that it was a bare rug rather than a composite tick layer that
-/// declares its own `y` — silently dropping `band_size` in the interactive
-/// merged-flat assembly while the static composite path (no cross-layer
-/// inheritance there) rendered it correctly, a static-vs-interactive
-/// divergence on the SAME spec.
-///
-/// Deliberately narrow: only when the layer declared exactly one of `x`/`y`
-/// and the merged encoding binds neither `x2` nor `y2`. A rule whose
-/// ranged/diagonal shape is assembled partly from inherited channels keeps
-/// assembling it, and a layer that declares both channels itself — including
-/// a composite tick layer such as a boxplot median/whisker-cap or errorbar
-/// cap, which sets its own `x` AND `y` explicitly in its desugar — keeps its
-/// own shape (and, for tick, `tick::build`'s fallthrough arm keeps reading
-/// that OWN `y` as present, so those composite ticks are unaffected and keep
-/// the fixed `tick_size*2.0` length regardless of the `band_size` they set on
-/// themselves).
-///
 /// **Own-width precedence for line.** The inherited width bindings a line
 /// yields to a width it owns ([`LayerPrepared::yielded_widths`]) are dropped
 /// here. The scale keeps reading the merged `size`, so the other layers keep
@@ -1702,12 +1665,6 @@ fn layer_geometry_encoding(
     {
         encoding.color = None;
     }
-    encoding = super::prepare::normalize_rule_tick_own_span(
-        encoding,
-        mark,
-        flags.x_is_own,
-        flags.y_is_own,
-    );
     if flags.yielded_widths.size {
         encoding.size = None;
     }
@@ -1912,8 +1869,6 @@ fn build_panel_mark_batches(
             LayerGeometryFlags {
                 color_is_own: layer.color_is_own,
                 has_own_literal_paint,
-                x_is_own: layer.x_is_own,
-                y_is_own: layer.y_is_own,
                 yielded_widths: layer.yielded_widths(),
             },
         );
@@ -1960,13 +1915,10 @@ fn build_panel_mark_batches(
         }
 
         // Both refusal gates below read the encoding the mark builder will
-        // actually see — the DrawCtx-local copy, not the pre-normalization
-        // merge — so a refusal gate and the geometry can never disagree about
-        // a layer's shape (batch-A Task 13 spec c3). Only rule's and tick's
-        // own-span-axis normalization above touches a positional channel (tick
-        // has no channel-combination refusal to trip either way — see
-        // `validate_mark_encoding`'s `_ => Ok(())` fallthrough), so every
-        // other mark's gate decision is unchanged.
+        // actually see — the DrawCtx-local copy — so a refusal gate and the
+        // geometry can never disagree about a layer's shape. The positional channels
+        // are the layer's completed ones (`Layer::completed_encoding`), so
+        // nothing here touches them.
         //
         // The positional gate (layers ≥ 1, F-L10-01 rider) is checked against
         // `own_batch` — this layer's own resolved batch, captured above before
@@ -1987,6 +1939,7 @@ fn build_panel_mark_batches(
             &super::prepare::PipelineBatches {
                 source: prep.source_schema.as_ref(),
                 outputs: &prep.transform_outputs,
+                transforms: &spec.transforms,
             },
         )?;
         // `#172`(1)'s second refusal reason (wave-5 close remediation). Asked
@@ -4217,8 +4170,6 @@ mod tests {
             independent_y,
             reads_chart_data: true,
             color_is_own: false,
-            x_is_own: false,
-            y_is_own: true,
             size_is_own: false,
             stroke_width_is_own: false,
             coord: None,
@@ -8205,9 +8156,9 @@ mod tests {
     /// test alone when reverted:
     /// - Relaxing `RuleShape::resolve`'s horizontal-span arm to accept a bound
     ///   `x` (the pre-fix `if let Some(yf)` gate) restores the hijack.
-    /// - Dropping the own-span-axis normalization in
-    ///   `build_panel_mark_batches` sends this shape to the `x`+`y` tie-break,
-    ///   which is also a horizontal span.
+    /// - Letting a one-axis rule take the inherited `y` at layer completion
+    ///   (`Mark::inherited_positional`) sends this shape to the `x`+`y`
+    ///   tie-break, which is also a horizontal span.
     #[test]
     fn rule_layer_own_x_span_is_not_hijacked_by_inherited_ordinal_y() {
         let (spec, batch) = beeswarm_shaped_zero_line_spec();
@@ -8304,11 +8255,9 @@ mod tests {
     // ── `inherited_positional` ────────────────────────────────────────────
     //
     // The end-to-end rendered-geometry consequence of
-    // `LayerPrepared::from_chart_and_layer`'s `x_is_own`/`y_is_own` reading
-    // `Layer::inherited_positional` (the flag-level unit tests live in
-    // `render::prepare`'s own test module, next to `from_chart_and_layer`).
+    // `Layer::completed_encoding` reading `Layer::inherited_positional`.
     // Reuses this file's own rule fixtures/helpers (`line_endpoints`,
-    // `build_scene_for`) since the two own-span rule tests directly above
+    // `build_scene_for`) since the two one-axis rule tests directly above
     // are the standalone-inheritance oracle this must match.
 
     /// A `Mark::Rule` layer routed to its own `data_source` (a named
@@ -8319,9 +8268,8 @@ mod tests {
     /// `inherited_positional`, the layer must draw the SAME vertical span
     /// `rule_layer_own_x_span_is_not_hijacked_by_inherited_ordinal_y` pins
     /// for genuine chart-level inheritance; unlisted, `y` reads as own too,
-    /// so the own-span normalization's `(true, true)` arm clears neither
-    /// channel and the rule draws a different (bounded, two-coordinate)
-    /// shape instead.
+    /// so the rule writes both channels, is not a one-axis rule, and draws a
+    /// different (bounded, two-coordinate) shape instead.
     fn filled_y_rule_spec(inherited_positional: Vec<crate::spec::layer::PositionalChannel>) -> (ChartSpec, RecordBatch) {
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
@@ -8473,8 +8421,8 @@ mod tests {
         assert_eq!(unlisted.len(), 3, "an unlisted color is the line's own: {unlisted:?}");
     }
 
-    // ── Batch-E task-3, cycle 3 (quality-review gate): tick's own-span-axis
-    // normalization is a path-stable property, not a merged-encoding read ──
+    // ── A one-axis tick's shape is a path-stable property, not a
+    // merged-encoding read ──
     //
     // Same mechanism as the rule tests above, extended to `Mark::Tick`
     // (`scene_build.rs`'s `build_panel_mark_batches`, 2026-09-06). A rug tick
@@ -8501,8 +8449,8 @@ mod tests {
     /// declares ONLY `x="a"` itself, with `band_size` set on its own
     /// `mark_style` (mirroring a real `mark_tick(band_size=...)` call). This
     /// is the shape `Encoding::inherit_from` fills `y` into for the tick
-    /// layer at merge time — exactly the ambiguity the own-span-axis
-    /// normalization must resolve.
+    /// layer at merge time — exactly the ambiguity layer completion's
+    /// one-axis rule (`Mark::inherited_positional`) resolves.
     fn layered_rug_tick_spec(band_size: f64) -> (ChartSpec, RecordBatch) {
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
@@ -8617,9 +8565,9 @@ mod tests {
             assert!(
                 (len - expected_len).abs() < 1e-6,
                 "a tick layer declaring only its own x must honor band_size (0.5 * panel.h = \
-                 {expected_len}) even though the merged encoding inherits a y from its sibling \
-                 layer; got length {len} (fixed tick_size*2.0 = {fixed_len} would mean the \
-                 own-span-axis normalization did not reach Mark::Tick)"
+                 {expected_len}) even though the chart binds a y for its sibling layer; got \
+                 length {len} (fixed tick_size*2.0 = {fixed_len} would mean the one-axis tick \
+                 took the inherited y)"
             );
         }
     }
@@ -8662,16 +8610,14 @@ mod tests {
         }
     }
 
-    // ── Task 13 spec c4 (spec §4.4, "Extended 2026-09-02"): the positional
-    // provenance flags are coordinate-space-consistent ───────────────────────
+    // ── A rule's one axis is judged in the space its channel occupies ───────
     //
-    // `prepare::build_layers` swaps `encoding.x`↔`y` (and `x2`↔`y2`) under
-    // `CoordFlip`; `LayerPrepared::flip_coords` swaps `x_is_own`/`y_is_own`
-    // WITH them, so a flag always describes the slot its channel now occupies
-    // and a coord-flipped rule span renders exactly as its unflipped
-    // counterpart does on the other axis. Pinned at BOTH `LayerPrepared`
-    // constructors — `from_chart_only` (flat) and `from_chart_and_layer`
-    // (layered) — because the flags are captured separately in each.
+    // Layer completion decides a one-axis rule in the authored space
+    // (`Layer::completed_encoding`), and `prepare::build_layers` then swaps
+    // `encoding.x`↔`y` (and `x2`↔`y2`) under `CoordFlip`, so a coord-flipped
+    // rule span renders exactly as its unflipped counterpart does on the
+    // other axis. Pinned at BOTH `LayerPrepared` constructors —
+    // `from_chart_only` (flat) and `from_chart_and_layer` (layered).
     //
     // Every `*_SPEC_JSON` below is the VERBATIM `chart.to_dict()` of the
     // public-API call named in its doc comment (captured 2026-09-02), parsed
@@ -8716,13 +8662,11 @@ mod tests {
     /// declares only `x` renders exactly what its unflipped `y=` counterpart
     /// renders — four full-width horizontal spans, at identical pixels.
     ///
-    /// RED (verified in place): drop `std::mem::swap(&mut self.x_is_own, &mut
-    /// self.y_is_own)` from `LayerPrepared::flip_coords` and the flags still
-    /// describe the PRE-flip slots — `(x_is_own, y_is_own) == (true, false)`
-    /// against a post-flip encoding holding `y`. The own-span-axis
-    /// normalization then clears the very channel the layer owns, handing
-    /// `RuleShape::resolve` an all-absent encoding, and the render REFUSES the
-    /// shape (`UnsupportedChannel`, whose own message advertises "x= alone").
+    /// A flip that moved the encoding but judged the rule's one axis in the
+    /// pre-flip space would clear the very channel the layer owns, handing
+    /// `RuleShape::resolve` an all-absent encoding, and the render would
+    /// REFUSE the shape (`UnsupportedChannel`, whose own message advertises
+    /// "x= alone").
     #[test]
     fn coord_flipped_rule_span_matches_its_unflipped_counterpart() {
         let batch = z_batch();
@@ -9271,6 +9215,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),
@@ -9381,6 +9326,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),
@@ -9526,6 +9472,7 @@ mod tests {
                 row_title: None,
                 sort: None,
                 row_sort: None,
+                repeat: Vec::new(),
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -9593,9 +9540,9 @@ mod tests {
     ///
     /// Layer 0 is a bar on the output-only columns (renders empty, layer 0 is
     /// exempt); layer 1 carries `layer1_mark` and declares only its own
-    /// `y="y0"`, inheriting the chart-level `x`. For `Mark::Rule`/`Mark::Tick`
-    /// the own-span normalization clears that inherited `x` before any builder
-    /// reads it; for every other mark the builder really does read it.
+    /// `y="y0"` under the chart-level `x`. A one-axis `Mark::Rule`/`Mark::Tick`
+    /// takes no inherited `x` at layer completion; every other mark takes it
+    /// and its builder really does read it.
     ///
     /// This is the reviewer's live repro, in Python terms:
     /// ```text
@@ -9619,7 +9566,7 @@ mod tests {
             ..Default::default()
         });
         // Layer 1 reads the BASE data and declares only `y` — the one-own-
-        // positional-channel shape the own-span normalization exists for.
+        // positional-channel shape of a one-axis rule or tick.
         layers[1].mark = layer1_mark;
         layers[1].data_source = None;
         layers[1].encoding.x = None;
@@ -9630,19 +9577,16 @@ mod tests {
         (spec, batch)
     }
 
-    /// Cycle-2 regression (quality review, Bug Risk #1). A `mark_rule` layer
-    /// that declares only `y` and inherits a chart-level `x` its own batch does
-    /// not carry must RENDER: `build_panel_mark_batches`' own-span-axis
-    /// normalization clears that inherited `x` before any builder reads it, and
-    /// the rule draws as a horizontal span. The gate's first home was ABOVE
-    /// that normalization, so it refused this working chart on a channel the
-    /// layer neither declares nor reads.
+    /// A `mark_rule` layer that declares only `y`, under a chart-level `x` its
+    /// own batch does not carry, must RENDER: layer completion does not give a
+    /// one-axis rule the opposite channel (`Mark::inherited_positional`), so
+    /// the gate never sees it and the rule draws as a horizontal span.
     #[test]
-    fn rule_layer_inheriting_absent_x_still_renders_after_own_span_normalization() {
+    fn rule_layer_under_an_absent_chart_x_renders_without_it() {
         pyo3::Python::initialize();
         let (spec, batch) = layer_gate_output_only_x_spec(Mark::Rule);
         let scene = try_build_scene_for(&spec, &batch)
-            .expect("the inherited x is cleared by own-span normalization; the rule must render");
+            .expect("a one-axis rule takes no inherited x; the rule must render");
         let counts = panel_mark_batch_node_counts(&scene);
         assert!(
             counts.last().is_some_and(|&n| n > 0),
@@ -9650,14 +9594,13 @@ mod tests {
         );
     }
 
-    /// The same for `mark_tick` — the second mark the own-span normalization
-    /// covers (batch-E task-3 extension).
+    /// The same for `mark_tick`, the other one-axis mark.
     #[test]
-    fn tick_layer_inheriting_absent_x_still_renders_after_own_span_normalization() {
+    fn tick_layer_under_an_absent_chart_x_renders_without_it() {
         pyo3::Python::initialize();
         let (spec, batch) = layer_gate_output_only_x_spec(Mark::Tick);
         let scene = try_build_scene_for(&spec, &batch)
-            .expect("the inherited x is cleared by own-span normalization; the tick must render");
+            .expect("a one-axis tick takes no inherited x; the tick must render");
         let counts = panel_mark_batch_node_counts(&scene);
         assert!(
             counts.last().is_some_and(|&n| n > 0),
@@ -9667,19 +9610,8 @@ mod tests {
 
     // ── `layer_geometry_encoding`, one unit test per rule ────────────────
 
-    fn geometry_flags(
-        color_is_own: bool,
-        has_own_literal_paint: bool,
-        x_is_own: bool,
-        y_is_own: bool,
-    ) -> LayerGeometryFlags {
-        LayerGeometryFlags {
-            color_is_own,
-            has_own_literal_paint,
-            x_is_own,
-            y_is_own,
-            yielded_widths: Default::default(),
-        }
+    fn geometry_flags(color_is_own: bool, has_own_literal_paint: bool) -> LayerGeometryFlags {
+        LayerGeometryFlags { color_is_own, has_own_literal_paint, yielded_widths: Default::default() }
     }
 
     fn xy_encoding() -> crate::spec::encoding::Encoding {
@@ -9696,7 +9628,7 @@ mod tests {
     /// the `heatmap(annot=True)` colorless-labels shape.
     #[test]
     fn own_color_exemption_clears_inherited_color_on_text() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(false, false, true, true));
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(false, false));
         assert!(out.color.is_none(), "an inherited color must not reach a Text layer's own read");
     }
 
@@ -9705,7 +9637,7 @@ mod tests {
     /// override — the `roc_chart` chance-diagonal shape.
     #[test]
     fn own_color_exemption_clears_inherited_color_on_a_literal_stroke_layer() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(false, true, true, true));
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(false, true));
         assert!(out.color.is_none(), "a literal-stroke layer must not read an inherited color");
     }
 
@@ -9715,7 +9647,7 @@ mod tests {
     /// color.
     #[test]
     fn own_color_exemption_leaves_an_own_declared_color_alone() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(true, true, true, true));
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(true, true));
         assert!(out.color.is_some(), "a layer's OWN color must never be stripped");
     }
 
@@ -9724,60 +9656,13 @@ mod tests {
     /// shape, which relies on the inherited color to group its own rows.
     #[test]
     fn own_color_exemption_leaves_inherited_color_alone_with_no_literal_paint() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Rect, geometry_flags(false, false, true, true));
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Rect, geometry_flags(false, false));
         assert!(out.color.is_some(), "no literal override means the inherited color still drives grouping");
-    }
-
-    /// Own-span rule 1: a `Rule` layer that declared only `x` of its own
-    /// loses the inherited `y` — a vertical zero-line shape.
-    #[test]
-    fn own_span_normalization_clears_inherited_y_when_only_x_is_own() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(true, false, true, false));
-        assert!(out.x.is_some(), "the layer's own x survives");
-        assert!(out.y.is_none(), "the inherited y must be cleared");
-    }
-
-    /// Own-span rule 2: the `Tick` mirror, declaring only `y` of its own —
-    /// the bare rug-tick shape.
-    #[test]
-    fn own_span_normalization_clears_inherited_x_when_only_y_is_own() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Tick, geometry_flags(true, false, false, true));
-        assert!(out.x.is_none(), "the inherited x must be cleared");
-        assert!(out.y.is_some(), "the layer's own y survives");
-    }
-
-    /// Own-span negative 1: a layer that declared BOTH `x` and `y` itself —
-    /// a composite tick's boxplot whisker-cap shape — keeps both.
-    #[test]
-    fn own_span_normalization_leaves_a_layer_that_owns_both_channels_alone() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Tick, geometry_flags(true, false, true, true));
-        assert!(out.x.is_some() && out.y.is_some(), "a layer owning both channels keeps both");
-    }
-
-    /// Own-span negative 2: a ranged rule (`x2` bound) is a two-endpoint
-    /// shape assembled partly from inherited channels — the normalization
-    /// must not touch it even though only `x` is own.
-    #[test]
-    fn own_span_normalization_leaves_a_ranged_rule_alone() {
-        let ranged = crate::spec::encoding::Encoding {
-            x2: Some(EncodingSpec { field: "x1".into(), ..Default::default() }),
-            ..xy_encoding()
-        };
-        let out = layer_geometry_encoding(ranged, Mark::Rule, geometry_flags(true, false, true, false));
-        assert!(out.x.is_some() && out.y.is_some(), "a ranged rule's inherited y must survive");
-    }
-
-    /// Own-span negative 3: a mark neither rule nor tick (e.g. `Point`) is
-    /// never touched by this normalization, even with only one own channel.
-    #[test]
-    fn own_span_normalization_leaves_a_non_rule_tick_mark_alone() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Point, geometry_flags(true, false, true, false));
-        assert!(out.x.is_some() && out.y.is_some(), "only Rule/Tick are subject to this normalization");
     }
 
     /// The other side of that boundary, and the guard against over-narrowing
     /// the cycle-2 fix to "own-declared channels only": the SAME inherited,
-    /// absent `x` on a mark nothing normalizes — `mark_point` genuinely reads
+    /// absent `x` on a mark that draws it — `mark_point` genuinely reads
     /// its `x` column — must still refuse. Also the only refusal test whose
     /// layer 1 has `data_source: None`, i.e. reads the base data.
     #[test]
@@ -10233,8 +10118,8 @@ mod tests {
         assert_eq!(msg, "unknown column 'nope_color' referenced by an encoding");
     }
 
-    /// The own-span normalization must run before the y-slot route's
-    /// positional gate, exactly as it runs before the per-panel route's.
+    /// The y-slot route's positional gate judges the layer's completed
+    /// encoding, exactly as the per-panel route's does.
     /// Layer 1 (`independent_y`) declares only its own `y`; its `x` is
     /// INHERITED from the chart-level encoding, which names a column
     /// ("value") absent from layer 1's own tail (a `Filter` publishes it
@@ -10242,10 +10127,10 @@ mod tests {
     /// from `__final__`) — so `locate_field` can still resolve an `x` scale
     /// for the chart from that named output, but layer 1's own batch never
     /// carries "value". Because layer 1 is a `Mark::Tick` declaring only
-    /// `y`, the own-span normalization clears the inherited `x` before the
-    /// gate ever checks it, so the chart renders; without the
-    /// normalization, the gate would refuse on "value" even though the
-    /// mark builder never reads it.
+    /// `y`, layer completion gives it no inherited `x`, so the gate never
+    /// checks it and the chart renders; a tick taking the inherited `x`
+    /// would be refused on "value" even though the mark builder never reads
+    /// it.
     #[test]
     fn independent_y_tick_with_inherited_x_found_only_in_a_named_output_renders() {
         pyo3::Python::initialize();
@@ -10310,7 +10195,7 @@ mod tests {
         .unwrap();
 
         let scene = try_build_scene_for(&spec, &batch)
-            .expect("the inherited x is cleared by the own-span normalization before the gate runs");
+            .expect("a one-axis tick takes no inherited x, so the gate never sees it");
         // Layer 1 (y_slot 1, its own independent-y slot) must draw one
         // y-rug tick per row of its own tail — 3, one per distinct "y_own"
         // value the Aggregate's groupby preserved. A build-only check would
@@ -10375,6 +10260,7 @@ mod tests {
                 row_title: None,
                 sort: None,
                 row_sort: None,
+                repeat: Vec::new(),
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -11763,6 +11649,7 @@ mod tests {
                 row_title: None,
                 sort: None,
                 row_sort: None,
+                repeat: Vec::new(),
                 mode: crate::layout::facet::FacetMode::Wrap { ncols },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),

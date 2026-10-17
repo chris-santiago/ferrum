@@ -1272,6 +1272,7 @@ fn spec_color_facet() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),
@@ -1431,6 +1432,7 @@ fn facet_sort_orders_row_and_col_dimensions_independently_in_grid_mode() {
         row_title: None,
         sort: Some(serde_json::json!({"field": "v", "op": "sum"})),
         row_sort: Some(serde_json::json!("descending")),
+        repeat: Vec::new(),
         mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
         spacing: None,
         resolve: crate::layout::facet::FacetResolve::default(),
@@ -1697,6 +1699,7 @@ fn raster_screen_resolution_facet_grid_divides_estimate() {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: crate::layout::FacetMode::Wrap { ncols: 1 },
         spacing: None,
         resolve: crate::layout::FacetResolve::default(),
@@ -1899,6 +1902,7 @@ fn smooth_facet_panel_rank_deficient_degrades_instead_of_refusing() {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: crate::layout::FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: crate::layout::FacetResolve::default(),
@@ -2205,6 +2209,7 @@ fn smooth_facet_groupby_int64_column_widens_instead_of_erroring() {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: crate::layout::FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: crate::layout::FacetResolve::default(),
@@ -2259,6 +2264,7 @@ fn smooth_facet_groupby_boolean_column_widens_instead_of_erroring() {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: crate::layout::FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: crate::layout::FacetResolve::default(),
@@ -3053,6 +3059,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             row_title: None,
             sort: Some(serde_json::json!({"field": "y", "op": "mean"})),
             row_sort: Some(serde_json::json!("descending")),
+            repeat: Vec::new(),
             mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),
@@ -6183,19 +6190,18 @@ fn a_layer_level_aux_binding_draws_its_legend_like_a_chart_level_one() {
 // chart-level encoding (so a layer that gets a `data_source` — and so loses
 // `inherit_non_positional`'s ordinary chart-level inheritance — still has
 // something to plot), while recording that the layer never declared that
-// channel itself. `LayerPrepared::from_chart_and_layer` reads it to keep
-// `x_is_own`/`y_is_own` describing "declared by this layer", not merely
-// "present on this layer's encoding" — the same distinction `color_is_own`
-// already draws between a chart-inherited and a layer-declared channel, now
-// extended to a channel Python filled rather than the chart merge inheriting.
+// channel itself. `Layer::completed_encoding` reads it so a filled channel
+// is an inherited one, kept only when the layer's mark draws it — the same
+// distinction `color_is_own` draws between a chart-inherited and a
+// layer-declared channel, extended to a channel Python filled.
 
 /// A `Mark::Rule` layer routed to its own `data_source` (so ordinary
 /// chart-level positional inheritance does NOT apply, per
 /// `from_chart_and_layer`'s `data_source.is_some()` branch): it declares its
 /// own `x`, and carries a `y` value Python filled from the RHS operand's
-/// chart-level encoding. Listed in `inherited_positional`, `y_is_own` must
-/// be `false` — exactly the standalone-inherited shape — even though
-/// `encoding.y` is `Some`.
+/// chart-level encoding. Listed in `inherited_positional`, `y` is inherited,
+/// and a rule declaring only `x` draws no inherited `y`: completion drops it,
+/// exactly the standalone-inherited shape.
 #[test]
 fn a_filled_positional_channel_listed_as_inherited_is_not_own() {
     let x = EncodingSpec { field: "a".into(), ..Default::default() };
@@ -6213,15 +6219,14 @@ fn a_filled_positional_channel_listed_as_inherited_is_not_own() {
         ..Default::default()
     };
     let prepared = LayerPrepared::from_chart_and_layer(&spec, &layer);
-    assert!(prepared.encoding.y.is_some(), "the filled value itself is untouched");
-    assert!(prepared.x_is_own, "x was declared by this layer");
-    assert!(!prepared.y_is_own, "y is listed in inherited_positional, so it is not own");
+    assert!(prepared.encoding.x.is_some(), "x was declared by this layer");
+    assert!(prepared.encoding.y.is_none(), "y is listed in inherited_positional, and a one-axis rule draws none");
 }
 
 /// The mutation guard: the identical layer WITHOUT the `inherited_positional`
-/// entry — same `data_source`, same filled `y` value — reads `y_is_own` as
-/// `true`, proving the field (not the data_source or the value) is what
-/// flips the flag.
+/// entry — same `data_source`, same filled `y` value — keeps `y` as its
+/// own, proving the field (not the data_source or the value) is what
+/// decides it.
 #[test]
 fn the_same_filled_channel_without_the_list_reads_as_own() {
     let x = EncodingSpec { field: "a".into(), ..Default::default() };
@@ -6239,8 +6244,8 @@ fn the_same_filled_channel_without_the_list_reads_as_own() {
         ..Default::default()
     };
     let prepared = LayerPrepared::from_chart_and_layer(&spec, &layer);
-    assert!(prepared.x_is_own);
-    assert!(prepared.y_is_own, "with no inherited_positional entry, a present y reads as own");
+    assert!(prepared.encoding.x.is_some());
+    assert!(prepared.encoding.y.is_some(), "with no inherited_positional entry, a present y is own");
 }
 
 // The end-to-end rendered-geometry consequence (a rule drawing the same
@@ -6331,8 +6336,8 @@ fn a_line_yields_a_listed_size_to_its_own_stroke_width() {
 
 /// The flat render's prepare pass resolves a layered axis against layer 0's
 /// rendering encoding, while a layer on the chart's data that binds nothing
-/// there draws the chart-level field: `(P(x="a") + tick(y only)).encode(x="c")`.
-/// The x axis must reach the tick's `c` (100..300). The rejected reading
+/// there draws the chart-level field: `(P(x="a") + P(y only)).encode(x="c")`.
+/// The x axis must reach the second layer's `c` (100..300). The rejected reading
 /// takes the inherited field from the rendering encoding (layer 0's `a`) and
 /// resolves 1..3.
 #[test]
@@ -6341,7 +6346,7 @@ fn a_layer_inheriting_a_re_encoded_chart_field_widens_the_axis() {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
     let spec: ChartSpec = serde_json::from_str(
-        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c"},"y":{"field":"b"}},"layers":[{"mark":"point","encoding":{"x":{"field":"a"},"y":{"field":"b"}}},{"mark":"tick","encoding":{"y":{"field":"b"}}}]}"#,
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c"},"y":{"field":"b"}},"layers":[{"mark":"point","encoding":{"x":{"field":"a"},"y":{"field":"b"}}},{"mark":"point","encoding":{"y":{"field":"b"}}}]}"#,
     )
     .expect("layered spec JSON must deserialize");
     let schema = Arc::new(Schema::new(vec![
@@ -7995,4 +8000,221 @@ fn a_stroke_opacity_swatch_fades_its_stroke_not_its_fill() {
             assert_eq!(style.stroke.is_some(), stroked, "{channel}: {style:?}");
         }
     }
+}
+
+/// A two-frame batch for the facet repeat rule: the left operand's rows carry
+/// `c` (`p`, `q`, `p`), the right operand's rows (marked `m`) come from a
+/// frame without `c`, so their `c` is null padding, and one more left row has
+/// a real null `c`.
+fn facet_repeat_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("c", DataType::Utf8, true),
+        Field::new("v", DataType::Float64, true),
+        Field::new("m", DataType::Boolean, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![Some("p"), Some("q"), Some("p"), None, None, None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 10.0, 20.0, 4.0])),
+            Arc::new(arrow::array::BooleanArray::from(vec![None, None, None, Some(true), Some(true), None])),
+        ],
+    )
+    .expect("schema and columns agree")
+}
+
+/// The right operand's spec shape: its rows picked out by marker, projected
+/// to its own frame's columns, then a step reading the facet field. `repeat`
+/// declares (or not) that its frame lacks `c`.
+fn facet_repeat_spec(repeat: &str) -> crate::spec::chart::ChartSpec {
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},
+        "transforms":[{{"type":"filter","predicate":"datum[\"m\"] == true"}},{{"type":"project","fields":["v"]}},{{"type":"calculate","as_field":"panel","expr":"datum.c"}}],
+        "facet":{{"field":"c","mode":{{"kind":"wrap","ncols":2}}{repeat}}}}}"#
+    );
+    serde_json::from_str(&json).expect("valid spec")
+}
+
+/// A frame lacking the facet field repeats in every panel, with the panel's
+/// value in the field, so a step after the projection still reads its panel
+/// (`panel`); the real null-`c` row of the frame that has `c` is dropped with
+/// one warning naming the field and the count. The rejected readings: no
+/// repeat (the marked rows land in no panel, the output is empty), and a
+/// projection that drops the facet field (`panel` reads null).
+#[test]
+fn rows_whose_frame_lacks_the_facet_field_repeat_in_every_panel() {
+    let spec = facet_repeat_spec(r#","repeat":[{"marker":"m","fields":["c"]}]"#);
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+        .expect("a declared repeat renders");
+    let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
+    assert_eq!(float_col(out, "v"), [10.0, 20.0, 10.0, 20.0]);
+    assert_eq!(str_col(out, "c"), ["p", "p", "q", "q"]);
+    assert_eq!(str_col(out, "panel"), ["p", "p", "q", "q"]);
+    assert_eq!(
+        warnings,
+        [crate::transform::context::TransformWarning::FacetNullRowsDropped { field: "c".into(), rows: 1 }]
+    );
+    assert_eq!(
+        warnings[0].to_string(),
+        "facet 'c': 1 row has a null 'c' and belongs to no panel, so it was dropped; fill or filter the nulls in 'c'"
+    );
+}
+
+/// Without a repeat entry every null-`c` row is a row of a frame that has
+/// `c`: all three are dropped, and the one warning counts them.
+#[test]
+fn null_facet_values_without_a_repeat_are_dropped_with_a_count() {
+    let spec = facet_repeat_spec("");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (_, warnings, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+        .expect("null facet values drop, they do not fail the chart");
+    assert_eq!(
+        warnings,
+        [crate::transform::context::TransformWarning::FacetNullRowsDropped { field: "c".into(), rows: 3 }]
+    );
+    assert!(warnings[0].to_string().starts_with("facet 'c': 3 rows have a null 'c'"), "{}", warnings[0]);
+}
+
+/// A repeat entry naming a field the facet does not split by, or a marker
+/// the batch lacks, is a malformed wire and is refused.
+#[test]
+fn a_malformed_facet_repeat_is_refused() {
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let not_a_facet = facet_repeat_spec(r#","repeat":[{"marker":"m","fields":["v"]}]"#);
+    let err = run_transforms_with_facet(&not_a_facet, &facet_repeat_batch(), viewport, &theme)
+        .expect_err("v is not a facet field");
+    assert!(err.to_string().contains("names 'v', which is not a facet field"), "{err}");
+    let no_marker = facet_repeat_spec(r#","repeat":[{"marker":"absent","fields":["c"]}]"#);
+    let err = run_transforms_with_facet(&no_marker, &facet_repeat_batch(), viewport, &theme)
+        .expect_err("the marker column is absent");
+    assert!(matches!(err, RenderError::UnknownColumn { ref name } if name == "absent"), "{err}");
+}
+
+/// Every row null in the facet field leaves no panel at all: a typed error
+/// naming the field, not a missing pipeline tail.
+#[test]
+fn a_facet_with_no_values_is_refused() {
+    let spec = facet_repeat_spec("");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("c", DataType::Utf8, true),
+        Field::new("v", DataType::Float64, true),
+        Field::new("m", DataType::Boolean, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![None::<&str>, None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(arrow::array::BooleanArray::from(vec![Some(true), Some(true)])),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme).expect_err("no panel exists");
+    assert_eq!(err.to_string(), "facet: no usable values found for field 'c'");
+}
+
+/// The rows a layer reading its chart's data starts from, for the remedy a
+/// missing column names: a branch reading a published `input` (a
+/// composition's left operand's own rows) starts from that input, never from
+/// the merged source, which also holds a sibling operand's `w`. So `w`, absent
+/// from the left's rows and from every produced batch, gets the plain message
+/// (`None`). The rejected reading consults the merged source and names the
+/// Source remedy. The control: a branch reading the original batch keeps the
+/// Source remedy for a source column its chain dropped.
+#[test]
+fn the_remedy_source_is_the_rows_the_layers_branch_starts_from() {
+    use crate::transform::branch::BranchSpec;
+    use crate::transform::core::TransformSpec;
+    use crate::transform::filter::FilterSpec;
+    let merged_source = Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+    ]);
+    let left_rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)])),
+        vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+    )
+    .expect("schema and columns agree");
+    let outputs = HashMap::from([("left_rows".to_string(), left_rows.clone()), ("layer_rows".to_string(), left_rows)]);
+    let branch = |input: Option<&str>| {
+        TransformSpec::Branch(BranchSpec {
+            name: "layer_rows".into(),
+            input: input.map(str::to_string),
+            transforms: vec![TransformSpec::Filter(FilterSpec { predicate: "true".into(), name: None, param: None })],
+        })
+    };
+    let layer = crate::spec::layer::Layer {
+        mark: Mark::Line,
+        encoding: Encoding { y: Some(EncodingSpec { field: "w".into(), ..Default::default() }), ..Default::default() },
+        data_source: Some("layer_rows".into()),
+        reads_chart_data: true,
+        ..Default::default()
+    };
+    let prepared = LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer);
+    let reading_input = [branch(Some("left_rows"))];
+    let pipeline = PipelineBatches { source: &merged_source, outputs: &outputs, transforms: &reading_input };
+    assert_eq!(missing_column_remedy("w", &prepared, &pipeline), None);
+    let reading_source = [branch(None)];
+    let pipeline = PipelineBatches { source: &merged_source, outputs: &outputs, transforms: &reading_source };
+    assert_eq!(missing_column_remedy("w", &prepared, &pipeline), Some(crate::render::MissingColumnRemedy::Source));
+}
+
+/// A repeat marker that is not Boolean is a malformed wire, refused by name.
+#[test]
+fn a_non_boolean_facet_repeat_marker_is_refused() {
+    let spec = facet_repeat_spec(r#","repeat":[{"marker":"v","fields":["c"]}]"#);
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let err = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+        .expect_err("v is Float64, not a Boolean marker");
+    assert_eq!(err.to_string(), RenderError::ScaleResolutionFailed("facet repeat marker 'v' must be Boolean".into()).to_string());
+}
+
+/// A grid facet warns once per facet field, counting each field's own null
+/// rows: two rows null in `c`, two null in `r`, one null in both (counted in
+/// each). The marked row repeats along `r`, so its null `r` is not counted.
+#[test]
+fn a_grid_facet_warns_per_field_for_its_null_rows() {
+    let spec: crate::spec::chart::ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"v"},"y":{"field":"v"}},
+        "facet":{"field":"c","row":"r","mode":{"kind":"grid","nrows":2,"ncols":2},"repeat":[{"marker":"m","fields":["r"]}]}}"#,
+    )
+    .expect("valid spec");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("c", DataType::Utf8, true),
+        Field::new("r", DataType::Utf8, true),
+        Field::new("v", DataType::Float64, true),
+        Field::new("m", DataType::Boolean, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![Some("p"), Some("q"), None, Some("p"), None, Some("q")])),
+            Arc::new(StringArray::from(vec![Some("s"), Some("t"), Some("s"), None, None, None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(arrow::array::BooleanArray::from(vec![None, None, None, None, None, Some(true)])),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (outputs, warnings, _) =
+        run_transforms_with_facet(&spec, &batch, viewport, &theme).expect("null facet rows drop, they do not fail");
+    use crate::transform::context::TransformWarning::FacetNullRowsDropped;
+    assert_eq!(
+        warnings,
+        [
+            FacetNullRowsDropped { field: "c".into(), rows: 2 },
+            FacetNullRowsDropped { field: "r".into(), rows: 2 },
+        ]
+    );
+    // The repeated row (v = 6) joins both rows of its `q` column.
+    let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
+    assert_eq!(float_col(out, "v").iter().filter(|v| **v == 6.0).count(), 2);
 }

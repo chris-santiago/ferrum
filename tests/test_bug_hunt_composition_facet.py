@@ -1074,13 +1074,19 @@ def test_layer_carries_a_differing_coord_instead_of_warning():
 
 
 def test_layer_warns_on_facet_conflict():
-    """Layering charts with different facets should warn.
+    """Layering a right operand with its own, different facet warns that it is ignored.
 
-    Targets composition._warn_on_layer_conflicts.
+    Targets composition._warn_on_layer_conflicts. A right operand with no
+    facet of its own loses nothing (its rows join the left's facet), so it
+    does not warn.
     """
-    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"]})
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"], "h": ["p", "q"]})
     c1 = Chart(df).mark_point().encode(x="x", y="y").facet(col="g")
-    c2 = Chart(df).mark_line().encode(x="x", y="y")
+    unfaceted = Chart(df).mark_line().encode(x="x", y="y")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _ = c1 + unfaceted
+    c2 = unfaceted.facet(col="h")
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         _ = c1 + c2

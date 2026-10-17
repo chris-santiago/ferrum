@@ -922,6 +922,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         ("identity", Identity(IdentitySpec { name: None })),
         ("filter", Filter(FilterSpec { predicate: "x > 0".into(), name: None, param: None })),
         ("calculate", Calculate(CalculateSpec { as_field: "z".into(), expr: "x + y".into(), name: None })),
+        ("project", Project(crate::transform::project::ProjectSpec { fields: vec!["x".into()], name: None })),
         ("fold", Fold(FoldSpec { fields: vec![], as_: ("key".into(), "value".into()), name: None })),
         ("pivot", Pivot(PivotSpec {
             field: "k".into(), value: "v".into(), groupby: None, limit: None, op: "sum".into(),
@@ -1079,6 +1080,7 @@ fn params_match_spec_struct_serde_fields() {
         assert_params_match_serde_fields::<crate::transform::identity::IdentitySpec>("identity"),
         assert_params_match_serde_fields::<crate::transform::filter::FilterSpec>("filter"),
         assert_params_match_serde_fields::<crate::transform::calculate::CalculateSpec>("calculate"),
+        assert_params_match_serde_fields::<crate::transform::project::ProjectSpec>("project"),
         assert_params_match_serde_fields::<crate::transform::fold::FoldSpec>("fold"),
         assert_params_match_serde_fields::<crate::transform::pivot::PivotSpec>("pivot"),
         assert_params_match_serde_fields::<crate::transform::join_aggregate::JoinAggregateSpec>("join_aggregate"),

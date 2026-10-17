@@ -29,7 +29,7 @@ pub use self::axis::{
     LabelOverlap, PanelAxisInputs, TickLayout, TickProjection,
 };
 pub(crate) use self::axis::{AxisStyleOverrides, Claimed, LabelFormat};
-pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
+pub use self::facet::{FacetGroup, FacetMode, FacetRepeat, FacetResolve, FacetSpec, ResolveMode};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     AuxLegendInput, ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
@@ -8268,6 +8268,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -8364,6 +8365,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Grid { nrows: 1, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -8597,6 +8599,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -9107,6 +9110,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Grid { nrows, ncols },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -9380,6 +9384,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),

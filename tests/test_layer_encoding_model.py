@@ -1661,13 +1661,25 @@ def test_X1_a_layered_operands_layers_draw_that_operands_written_axis(order):
     ("build", "titles"),
     [
         (lambda: P() + fm.Chart(df2).mark_line(), ["y", "v"]),
-        (lambda: line(df2, x="w") + fm.Chart(df).mark_point(), ["y", "w"]),
         (lambda: bar_mean() + fm.Chart(df).mark_point(), ["mean_y", "g"]),
     ],
-    ids=["+d", "+d-rev-x", "+s-aggregate"],
+    ids=["+d", "+s-aggregate"],
 )
 def test_X1_layer_zeros_written_axis_titles_the_axes(build, titles):
     assert axis_titles(build().to_svg()) == titles
+
+
+def test_X1_a_drawn_fallback_column_the_layers_rows_lack_is_refused():
+    """X1 +d reversed: the points take layer 0's ``x="w"``, which df lacks, so the chart refuses.
+
+    A point draws x, so it takes the fallback and reads ``w`` by name in its
+    own rows. Rejects the padded column: the points drew nothing, silently.
+    """
+    with pytest.raises(ValueError) as refused:
+        (line(df2, x="w") + fm.Chart(df).mark_point()).to_svg()
+    assert str(refused.value).startswith(
+        "layer 1: encoding 'x' references unknown column 'w' (not present in that layer's data)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1852,878 @@ def test_P5_an_error_channel_on_encode_is_warned_and_omitted():
 
 
 # ---------------------------------------------------------------------------
+# A1: a different-frame operand reads only its own rows (spec §4.5, §5 A1)
+# ---------------------------------------------------------------------------
+#
+# A ``+`` operand or ``fm.Layer(data=...)`` over another frame reads its own
+# rows: the columns the merge renamed are restored inside that operand, so
+# no binding, groupby, legend, axis title or tooltip of any layer names an
+# internal ``__rhs_`` column, and no layer groups by a column null on its rows.
+
+
+def _null_group_warnings(build: Callable[[], Any]) -> list[str]:
+    """The null-groupby-key warnings a chart raises rendering static and interactive."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg()
+        chart.interactive().to_html()
+    return [str(w.message) for w in caught if "null in its groupby key" in str(w.message)]
+
+
+# df2 inside the host's panel ``p``: the facet field ``c`` names a column of
+# both frames, which the merge renames on the data layer's rows.
+_DF2_IN_P = df2.with_columns(c=pl.lit("p"))
+
+
+def _f3(faceted: bool, data: pl.DataFrame = df2) -> fm.Chart:
+    host = bar_mean().facet("c") if faceted else bar_mean()
+    return host.layer(fm.Layer(data=data, mark="point"))
+
+
+_F3: dict[str, Case] = {
+    "LD": Case(
+        lambda: _f3(faceted=False),
+        (bar_mean, lambda: agg("point", df2)),
+        marks={"rect": 2, "circle": 3},
+        chart_level=None,
+    ),
+    "LD-faceted": Case(
+        lambda: _f3(faceted=True, data=_DF2_IN_P),
+        marks={"rect": 4, "circle": 3},
+        chart_level=None,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_F3))
+def test_F3_a_data_layer_inheriting_an_aggregate_draws_its_own_rows_means(case):
+    """F3: the data layer averages its own rows by ``g``: 4 bars and 3 points faceted, nothing warned.
+
+    Rejects reading the combined rows: the faceted data layer grouped by
+    the renamed ``g`` copy, null on every row of the host's frame, and each
+    panel warned that every row had a null in its groupby key.
+    """
+    check_rendering(_F3[case])
+    assert _null_group_warnings(_F3[case].build) == []
+
+
+def test_F3_the_faceted_data_layer_draws_its_means_in_its_own_panel():
+    """F3 faceted: panel ``p`` draws the host's 2 bars and the data layer's 3 points; ``q`` the bars."""
+    panels = panel_census(_quiet(lambda: _f3(faceted=True, data=_DF2_IN_P).to_svg()))
+    kinds = [dict(Counter(signature[0] for signature in panel.elements())) for panel in panels]
+    assert kinds == [{"rect": 2, "circle": 3}, {"rect": 2}]
+
+
+def _kinds_per_panel(svg: str) -> list[dict[str, int]]:
+    """Per plot clip group, the count of each mark element kind."""
+    return [
+        dict(Counter(signature[0] for signature in panel.elements())) for panel in panel_census(svg)
+    ]
+
+
+def _interactive_kinds(chart: Any) -> Counter:
+    """The interactive scene's mark nodes per batch kind, over every panel."""
+    return Counter(kind for kind, _ in _quiet(lambda: interactive_census(chart)).elements())
+
+
+def _facet_warnings(build: Callable[[], Any]) -> list[str]:
+    """The facet warnings a chart raises rendering static and interactive output."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg()
+        chart.interactive().to_html()
+    return [str(w.message) for w in caught if str(w.message).startswith("facet ")]
+
+
+def test_F3_a_data_layer_whose_frame_lacks_the_facet_field_repeats_in_every_panel():
+    """F3 over the spec's df2, which has no ``c``: each panel draws 2 bars and 3 points, nothing warned.
+
+    The data layer's ``mean(y)`` by ``g`` runs on its own 6 rows in every
+    panel, as ggplot2 draws a layer whose data lacks the faceting variable
+    (ruling 2026-10-17). Rejects the silent drop: the 3 points were drawn in
+    no panel.
+    """
+    assert _null_group_warnings(lambda: _f3(faceted=True)) == []
+    assert _facet_warnings(lambda: _f3(faceted=True)) == []
+    svg = _quiet(lambda: _f3(faceted=True).to_svg())
+    assert _kinds_per_panel(svg) == [{"rect": 2, "circle": 3}, {"rect": 2, "circle": 3}]
+    assert _interactive_kinds(_quiet(lambda: _f3(faceted=True))) == Counter({"bar": 4, "point": 6})
+
+
+# Each faceted door over df and df2, which lacks ``c``: df2's rows repeat in
+# every panel, df's partition by ``c``.
+_FACET_REPEAT: dict[str, tuple[Callable[[], Any], list[dict[str, int]]]] = {
+    "+/facet-after": (lambda: (P() + P(df2)).facet("c"), [{"circle": 10}, {"circle": 10}]),
+    "+rev/facet-after": (lambda: (P(df2) + P()).facet("c"), [{"circle": 10}, {"circle": 10}]),
+    "+/facet-before": (lambda: P().facet("c") + P(df2), [{"circle": 10}, {"circle": 10}]),
+    "+/statistic": (
+        lambda: (bar_mean() + agg("point", df2)).facet("c"),
+        [{"rect": 2, "circle": 3}, {"rect": 2, "circle": 3}],
+    ),
+    "+rev/statistic": (
+        lambda: (agg("point", df2) + bar_mean()).facet("c"),
+        [{"circle": 3, "rect": 2}, {"circle": 3, "rect": 2}],
+    ),
+    # df2 has ``g`` but no ``c``: it partitions by column ``g`` and repeats down the rows.
+    "grid/lacks-only-the-row-field": (
+        lambda: (P() + P(df2)).facet(row="c", col="g"),
+        [{"circle": n} for n in (4, 4, 2, 4, 4, 2)],
+    ),
+    "LCs": (lambda: fm.LayerChart(P().facet("c"), P(df2)), [{"circle": 10}, {"circle": 10}]),
+    "LCm": (
+        lambda: fm.LayerChart(P().facet("c"), P(df2))._build_merged(),
+        [{"circle": 10}, {"circle": 10}],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FACET_REPEAT))
+def test_a_frame_lacking_the_facet_field_draws_its_rows_in_every_panel(case):
+    """A different-frame operand without the facet field repeats per panel on every door.
+
+    Static and interactive draw the same marks, and no row-drop warning
+    fires. Rejects the silent drop: df2's rows reached no panel, and the
+    static overlay drew them in a stray third plot area.
+    """
+    build, panels = _FACET_REPEAT[case]
+    assert _facet_warnings(build) == []
+    assert _kinds_per_panel(_quiet(lambda: build().to_svg())) == panels
+    expected = sum((Counter(panel) for panel in panels), Counter())
+    names = {"circle": "point", "rect": "bar"}
+    assert _interactive_kinds(_quiet(build)) == Counter(
+        {names[kind]: n for kind, n in expected.items()}
+    )
+
+
+def test_the_static_overlay_of_a_faceted_member_draws_what_its_merged_chart_draws():
+    """LCs = LCm = LCx: a LayerChart with a faceted member renders the merged chart's facet grid."""
+    members = lambda: (P().facet("c"), P(df2))  # noqa: E731
+    static = _quiet(lambda: fm.LayerChart(*members()).to_svg())
+    merged = _quiet(lambda: fm.LayerChart(*members())._build_merged())
+    assert static == _quiet(merged.to_svg)
+    assert _quiet(lambda: fm.LayerChart(*members()).interactive().scene_json) == _quiet(
+        lambda: merged.interactive().scene_json
+    )
+
+
+# A frame holding ``c`` with nulls: rows 7 and 8 of df, rows 2 and 4 of df2.
+_DF_NULL_C = df.with_columns(c=pl.Series(["p", "p", "q", "q", "p", "p", None, None], dtype=pl.Utf8))
+_DF2_NULL_C = df2.with_columns(c=pl.Series(["p", None, "q", None, "p", "q"], dtype=pl.Utf8))
+_TWO_NULL_ROWS = (
+    "facet 'c': 2 rows have a null 'c' and belong to no panel, so they were dropped; "
+    "fill or filter the nulls in 'c'"
+)
+
+# Each door: the chart, its per-panel marks, and the one warning it raises.
+_FACET_NULLS: dict[str, tuple[Callable[[], Any], list[dict[str, int]]]] = {
+    "F": (lambda: P(_DF_NULL_C).facet("c"), [{"circle": 4}, {"circle": 2}]),
+    "LD": (
+        lambda: bar_mean().facet("c").layer(fm.Layer(data=_DF2_NULL_C, mark="point")),
+        # The layer's mean(y) by g over each panel's rows: a, b in p; c twice in q.
+        [{"rect": 2, "circle": 2}, {"rect": 2, "circle": 1}],
+    ),
+    "+": (lambda: (P() + P(_DF2_NULL_C)).facet("c"), [{"circle": 6}, {"circle": 6}]),
+    "+rev": (lambda: (P(_DF2_NULL_C) + P()).facet("c"), [{"circle": 6}, {"circle": 6}]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FACET_NULLS))
+def test_a_null_facet_value_in_a_frame_with_the_field_is_dropped_with_a_warning(case):
+    """A row whose own frame has ``c`` but whose value is null is dropped, and the count is named.
+
+    Only rows of frames holding ``c`` count; a frame without ``c`` repeats.
+    Rejects the silent drop (no warning) and a count of the padded rows of
+    a frame lacking the field.
+    """
+    build, panels = _FACET_NULLS[case]
+    assert _kinds_per_panel(_quiet(lambda: build().to_svg())) == panels
+    assert set(_facet_warnings(build)) == {_TWO_NULL_ROWS}
+
+
+# Each pair: a data layer, and the ``+`` it lowers to, binding on the right
+# operand what the data layer inherits from its host.
+_M1_PAIRS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "bar-mean-point": (
+        lambda: _f3(faceted=False),
+        lambda: bar_mean() + fm.Chart(df2).mark_point(),
+    ),
+    "faceted-bar-mean-point": (
+        lambda: _f3(faceted=True, data=_DF2_IN_P),
+        lambda: bar_mean().facet("c") + fm.Chart(_DF2_IN_P).mark_point(),
+    ),
+    "point-line": (
+        lambda: P().layer(fm.Layer(data=df2, mark="line")),
+        lambda: P() + fm.Chart(df2).mark_line(),
+    ),
+    "colored-point-line": (
+        lambda: P(color="g").layer(fm.Layer(data=df2, mark="line")),
+        lambda: P(color="g") + line(df2, color="g"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_M1_PAIRS))
+def test_M1_a_data_layer_draws_what_the_plus_it_lowers_to_draws(case):
+    """M1 control: ``Layer(data=df2)`` over a different frame renders the bytes of its ``+``."""
+    layered, plus = _M1_PAIRS[case]
+    assert _quiet(lambda: layered().to_svg()) == _quiet(lambda: plus().to_svg())
+
+
+def _filtered(chart: fm.Chart) -> fm.Chart:
+    return chart.transform(fm.transform_filter("datum.y > 1"))
+
+
+# Operands over df and df2, which share v, y, z and g: each pair is composed
+# in both orders, with and without a user chain on either side.
+_OVERLAP_OPERANDS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "no-chain": (P, lambda: line(df2)),
+    "chain-left": (lambda: _filtered(P()), lambda: line(df2)),
+    "chain-right": (P, lambda: _filtered(line(df2))),
+    "chain-both": (lambda: _filtered(P()), lambda: _filtered(line(df2))),
+    "right-aggregates-by-g": (lambda: P(x="g"), lambda: agg("point", df2, color="g")),
+    "right-sized-by-z": (P, lambda: P(df2, size="z")),
+}
+
+
+def _overlap_cases() -> dict[str, Case]:
+    cases: dict[str, Case] = {}
+    for name, (a, b) in _OVERLAP_OPERANDS.items():
+        cases[f"{name}/+"] = Case(lambda a=a, b=b: a() + b(), (a, b))
+        cases[f"{name}/+rev"] = Case(lambda a=a, b=b: b() + a(), (b, a))
+    cases["faceted/+"] = Case(
+        lambda: (P() + line(df2)).facet("g"),
+        marks={"circle": 8, "polyline": 3},
+        chart_level=None,
+    )
+    cases["faceted/+rev"] = Case(
+        lambda: (line(df2) + P()).facet("g"),
+        marks={"circle": 8, "polyline": 3},
+        chart_level=None,
+    )
+    cases["faceted-right-aggregates/+"] = Case(
+        lambda: (P(x="g") + agg("point", df2)).facet("g"),
+        marks={"circle": 11},
+        chart_level=None,
+    )
+    cases["faceted-right-aggregates/+rev"] = Case(
+        lambda: (agg("point", df2) + P(x="g")).facet("g"),
+        marks={"circle": 11},
+        chart_level=None,
+    )
+    return cases
+
+
+_OVERLAP = _overlap_cases()
+
+
+def _wire_names(chart: Any) -> list[str]:
+    """Every field and title a chart's wire binds, and every groupby column its steps name."""
+    wire = _wire(chart)
+    names: list[str] = []
+
+    def bindings(encoding: dict) -> None:
+        for value in encoding.values():
+            for entry in value if isinstance(value, list) else [value]:
+                if isinstance(entry, dict):
+                    names.extend(str(entry[k]) for k in ("field", "title") if k in entry)
+
+    def groupbys(node: Any) -> None:
+        if isinstance(node, dict):
+            names.extend(node.get("groupby") or [])
+            for value in node.values():
+                groupbys(value)
+        elif isinstance(node, list):
+            for value in node:
+                groupbys(value)
+
+    bindings(wire["encoding"])
+    for layer_ in wire.get("layers") or []:
+        bindings(layer_["encoding"])
+    groupbys(wire["transforms"])
+    return names
+
+
+@pytest.mark.parametrize("case", sorted(_OVERLAP))
+def test_A1_an_operand_sharing_column_names_reads_only_its_own_rows(case):
+    """A1: each operand of ``P(df) + line(df2)`` draws its own rows alone, in both orders.
+
+    No layer binding, groupby, legend, axis title or tooltip names a
+    ``__rhs_`` column. Rejects reading the combined rows under renamed
+    fields: the right layer bound ``v__rhs_0001``, and a faceted or
+    aggregating right layer grouped by a column null on the left's rows.
+    """
+    built = _OVERLAP[case]
+    check_rendering(built)
+    chart = _quiet(built.build)
+    assert not [name for name in _wire_names(chart) if "__rhs_" in name]
+    assert not [n for names in interactive_tooltip_fields(chart) for n in names if "__rhs_" in n]
+
+
+# Channel -> a class binding z on it.
+_RENAMED_CHANNELS: dict[str, type] = {
+    "color": fm.Color,
+    "size": fm.Size,
+    "opacity": fm.Opacity,
+    "fill_opacity": fm.FillOpacity,
+    "stroke_opacity": fm.StrokeOpacity,
+}
+
+
+def _renamed_title_cases() -> dict[str, Case]:
+    cases: dict[str, Case] = {}
+    for channel in _RENAMED_CHANNELS:
+        bound = lambda channel=channel: P(df2, **{channel: "z"})  # noqa: E731
+        legends = legend_set(_quiet(lambda: bound().to_svg()))
+        cases[f"{channel}/+"] = Case(lambda bound=bound: P() + bound(), (P, bound), legends=legends)
+        cases[f"{channel}/+rev"] = Case(
+            lambda bound=bound: bound() + P(), (bound, P), legends=legends
+        )
+    return cases
+
+
+_RENAMED_TITLES = _renamed_title_cases()
+
+
+@pytest.mark.parametrize("case", sorted(_RENAMED_TITLES))
+def test_V4_a_right_binding_on_a_shared_column_name_is_titled_by_its_field(case):
+    """V4: ``P(df) + P(df2, size="z")`` draws one legend titled ``z``, with no title on the wire.
+
+    Rejects the rename title stamp: the right layer bound ``z__rhs_0001``
+    with a stamped ``title="z"`` where its channel takes a title, and an
+    opacity-family legend was titled ``z__rhs_0001`` where it takes none.
+    """
+    built = _RENAMED_TITLES[case]
+    check_rendering(built)
+    channel = case.split("/")[0]
+    layers = _wire(_quiet(built.build))["layers"]
+    (bound,) = [layer_["encoding"][channel] for layer_ in layers if channel in layer_["encoding"]]
+    assert bound == {"field": "z"}
+
+
+@pytest.mark.parametrize("order", ["+", "+rev"])
+def test_V4_an_explicit_tooltip_on_a_shared_column_name_shows_its_field(order):
+    """An explicit ``Tooltip("z")`` on a right operand over df2 shows ``z``, as alone.
+
+    Rejects reading the combined rows: the tooltip named ``z__rhs_0001``.
+    """
+    tipped = lambda: P(df2, tooltip=fm.Tooltip("z"))  # noqa: E731
+    chart = _quiet(lambda: P() + tipped() if order == "+" else tipped() + P())
+    (bound,) = [
+        layer_["encoding"]["tooltip"]
+        for layer_ in _wire(chart)["layers"]
+        if "tooltip" in layer_["encoding"]
+    ]
+    assert bound == {"field": "z"}
+    svg = _quiet(chart.to_svg)
+    assert "__rhs_" not in svg
+    assert "<title>z: 5</title>" in svg
+    names = interactive_tooltip_fields(chart)
+    assert (names[1] if order == "+" else names[0]) == interactive_tooltip_fields(tipped())[0]
+
+
+def _tipped_layer() -> fm.Layer:
+    return layer("point", y="r", tooltip=fm.Tooltip("z"))
+
+
+# Each door draws a point layer of its own with ``Tooltip("z")``, last.
+_OWN_TOOLTIP_DOORS: dict[str, Callable[[], fm.Chart]] = {
+    "+s": lambda: P() + P(y="r", tooltip=fm.Tooltip("z")),
+    "+d": lambda: P() + P(df2, tooltip=fm.Tooltip("z")),
+    "L": lambda: P().layer(_tipped_layer()),
+    "LD": lambda: P().layer(
+        fm.Layer(data=df2, mark="point", encoding={"tooltip": fm.Tooltip("z")})
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_OWN_TOOLTIP_DOORS))
+def test_a_layers_own_tooltip_shows_in_interactive_output_on_every_door(door):
+    """A layer's explicit ``Tooltip("z")`` lists ``z`` on hover, as the flat chart does.
+
+    Rejects completing the layer's tooltip pair from the chart-level auto
+    fields: the layer listed ``v`` and ``y``.
+    """
+    assert interactive_tooltip_fields(_quiet(_OWN_TOOLTIP_DOORS[door]))[-1] == {"z"}
+
+
+# df2 with no column name in common with df.
+_DF4 = df2.rename({c: f"{c}4" for c in df2.columns})
+
+# Charts the own-rows routing does not reach: same-frame ``+``, different
+# frames sharing no column name, and every LayerChart route.
+_OWN_ROWS_CONTROLS: dict[str, Callable[[], Any]] = {
+    "+/no-shared-name": lambda: P(color="g") + mk("line", _DF4, x="v4", y="y4", color="g4"),
+    "+/no-shared-name-rev": lambda: mk("line", _DF4, x="v4", y="y4", color="g4") + P(color="g"),
+    "+/same-frame-mean": lambda: bar_mean() + agg("point", color=mean(fm.Color)),
+    "LCs/shared-names": lambda: fm.LayerChart(P(color="g"), line(df2, color="g")),
+    "LCm/shared-names": lambda: fm.LayerChart(P(color="g"), line(df2, color="g"))._build_merged(),
+    "LCi/shared-names": lambda: fm.LayerChart(
+        P(color="g"), line(df2, y="w", color="g"), resolve={"y": "independent"}
+    ),
+    "LCm/shared-names-mean": lambda: fm.LayerChart(
+        bar_mean(), agg("point", df2, size=mean(fm.Size))
+    )._build_merged(),
+    "LCi/shared-names-mean": lambda: fm.LayerChart(
+        bar_mean(), agg("point", df2, y="mean(w)"), resolve={"y": "independent"}
+    ),
+}
+
+# The SVG bytes each spec §7 control renders; routing every different-frame
+# operand through its own rows leaves them unchanged.
+_OWN_ROWS_CONTROL_DIGESTS = {
+    "+/no-shared-name": "373d2a3b67c7526b251ffa8d91652fb0e29b9c27157c167a1a73bc54361e17a3",
+    "+/no-shared-name-rev": "d745f517551755552412f8683ea65d44c7afcffd13cdb1389817bbb3f077c3c5",
+    "+/same-frame-mean": "6195fa7a7201dcdd04850635d30432d855bb7c1cd2d7739cb52dd75b5e1d2520",
+    "LCs/shared-names": "6b9a1a465974887656e16ac3c9502a757283bb971f363f8e19ffc692dbd4f5e1",
+    "LCm/shared-names": "373d2a3b67c7526b251ffa8d91652fb0e29b9c27157c167a1a73bc54361e17a3",
+    "LCi/shared-names": "fa3123bd3b4b02c0b2fa291a97e19f14b43087bdcfa873d12823737243a3b720",
+    "LCm/shared-names-mean": "a348555fc978b946c57a01f30998b6f155b6179ff3ebbb192a4147f0b04eeea9",
+    "LCi/shared-names-mean": "99c14bd0f45b1077763c25691cc254a931461cb29519b11b4bcca778e9a8274a",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OWN_ROWS_CONTROLS))
+def test_an_own_rows_control_renders_its_pinned_bytes(case):
+    import hashlib
+
+    svg = _quiet(lambda: _OWN_ROWS_CONTROLS[case]().to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _OWN_ROWS_CONTROL_DIGESTS[case]
+
+
+# ---------------------------------------------------------------------------
+# X11: a SecondaryY on a composition reads the left operand's frame (spec §4.5)
+# ---------------------------------------------------------------------------
+
+_SECONDARY_W_REFUSAL = (
+    "SecondaryY: field 'w' is not a column of the base chart's data (SecondaryY draws "
+    "from the same table as the base chart); available columns: "
+    "['v', 'y', 'z', 'r', 'g', 'c', 'k']"
+)
+
+
+@pytest.mark.parametrize("left", [P, bar_mean], ids=["raw", "aggregating"])
+def test_X11_a_secondary_y_naming_a_right_only_column_is_refused_at_construction(left):
+    """X11: ``(P(df) + P(df2, y="w")) + SY("w")`` raises the ``SecondaryY`` column message.
+
+    Rejects reading the composition's combined frame, which holds the right
+    operand's ``w``: the secondary layer drew nothing, silently.
+    """
+    composition = _quiet(lambda: left() + P(df2, y="w"))
+    with pytest.raises(ValueError) as refused:
+        composition + SY("w")
+    assert str(refused.value) == _SECONDARY_W_REFUSAL
+
+
+_W_ABSENT = "layer 2: encoding 'y' references unknown column 'w' (not present in that layer's data)"
+
+
+def test_X11_a_secondary_y_on_a_left_chain_lacking_the_column_is_refused_at_render():
+    """X11, left with a chain: the secondary layer's rows are the left's, which have no ``w``.
+
+    Rejects keeping the other frame's padded ``w`` in the left's rows: the
+    secondary axis drew nothing, silently.
+    """
+    chart = (_filtered(P()) + P(df2, y="w")) + SY("w")
+    with pytest.raises(ValueError) as refused:
+        chart.to_svg()
+    assert str(refused.value).startswith(_W_ABSENT)
+
+
+def test_a_layer_attached_to_a_composition_reads_only_the_left_operands_columns():
+    """``(P(df) + P(df2)).layer(rule, y=mean(w))`` refuses: the composition's data is df's.
+
+    Rejects reading the combined frame: the rule averaged nothing, silently.
+    """
+    chart = (P() + P(df2)).layer(fm.Layer(mark="rule", encoding={"y": fm.Y("w", aggregate="mean")}))
+    with pytest.raises(ValueError) as refused:
+        chart.to_spec()
+    assert str(refused.value) == _W_ABSENT
+
+
+def _polyline_vertices(svg: str) -> list[int]:
+    """The vertex count of every polyline the chart draws."""
+    return [
+        len(e.get("points").split())
+        for group in _clip_groups(_svg_root(svg))
+        for e in group.iter()
+        if _tag(e) == "polyline"
+    ]
+
+
+_X11: dict[str, tuple[Case, list[int]]] = {
+    "left-column": (
+        Case(
+            lambda: (P() + P(df2)) + SY("r"), marks={"circle": 14, "polyline": 1}, chart_level=None
+        ),
+        [8],
+    ),
+    "left-transform-creates-it": (
+        Case(
+            lambda: (
+                (P().transform(fm.transform_calculate("w", "datum.r * 2")) + P(df2, y="w"))
+                + SY("w")
+            ),
+            marks={"circle": 14, "polyline": 1},
+            chart_level=None,
+        ),
+        [8],
+    ),
+    "left-is-the-w-frame": (
+        Case(
+            lambda: (P(df2) + P()) + SY("w"), marks={"circle": 14, "polyline": 1}, chart_level=None
+        ),
+        [6],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_X11))
+def test_X11_a_secondary_y_on_a_composition_draws_the_left_operands_rows(case):
+    """X11: the secondary line draws one vertex per row of the left operand's frame."""
+    built, vertices = _X11[case]
+    check_rendering(built)
+    assert _polyline_vertices(_quiet(lambda: built.build().to_svg())) == vertices
+
+
+# ---------------------------------------------------------------------------
+# Facet coalescing reads the merge's own copies, never a column's name
+# ---------------------------------------------------------------------------
+
+# A frame whose ``g`` has nulls beside a column named like a merge's copy of it.
+_COPY_SHAPED = pl.DataFrame(
+    {
+        "v": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+        "g": ["a", "b", None, None],
+        "g__rhs_0001": ["a", "a", "b", "b"],
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda frame: mk("point", frame, x="v", y="y").facet("g"),
+        lambda frame: (mk("point", frame, x="v", y="y") + line(df3, x="v3", y="y3")).facet("g"),
+    ],
+    ids=["flat", "composed"],
+)
+def test_a_facet_never_fills_its_field_from_a_column_named_like_a_copy(build):
+    """A row whose facet value is null stays out of every panel, whatever its other columns are named.
+
+    The chart draws the panels it draws without the copy-named column.
+    Rejects finding a merge's copies by the ``{field}__rhs_`` name: the two
+    null-``g`` points were placed in a panel by the caller's own column.
+    """
+    plain = _COPY_SHAPED.drop("g__rhs_0001")
+    expected = panel_census(_quiet(lambda: build(plain).to_svg()))
+    assert panel_census(_quiet(lambda: build(_COPY_SHAPED).to_svg())) == expected
+
+
+def test_a_facet_fills_its_field_from_every_copy_a_chain_of_merges_made():
+    """A facet on ``g`` over ``P(df) + (line(df2) + tick(df3))`` draws every operand's rows.
+
+    The right operand's own merge renamed df3's ``g``, and the outer merge
+    renamed it again; both copies fill the facet field.
+    """
+    chart = (P() + (line(df2) + mk("tick", df3, x="v3", y="y3"))).facet("g")
+    assert tag_counts(_quiet(chart.to_svg)) == {"circle": 8, "polyline": 3, "line": 6}
+
+
+# ---------------------------------------------------------------------------
+# V10 on the static overlay: one legend per channel, as the merged chart draws
+# ---------------------------------------------------------------------------
+
+# Channel -> (bound field, the left operand's mark, the right operand's mark).
+_OVERLAY_LEGEND_CHANNELS: dict[str, tuple[str, str, str]] = {
+    "color": ("g", "point", "line"),
+    "size": ("z", "point", "point"),
+    "shape": ("g", "point", "point"),
+    "opacity": ("z", "point", "point"),
+    "stroke_dash": ("g", "line", "line"),
+}
+
+
+@pytest.mark.parametrize("channel", sorted(_OVERLAY_LEGEND_CHANNELS))
+def test_V10_the_static_overlay_draws_one_legend_over_both_members(channel):
+    """V10 LCs: two members binding one channel over df and df2 draw one legend, the merged chart's.
+
+    Rejects a legend per member: the title would be drawn twice and each
+    legend would list one member's values.
+    """
+    field, left_mark, right_mark = _OVERLAY_LEGEND_CHANNELS[channel]
+
+    def members() -> tuple[fm.Chart, fm.Chart]:
+        return (
+            mk(left_mark, x="v", y="y", **{channel: field}),
+            mk(right_mark, df2, x="v", y="y", **{channel: field}),
+        )
+
+    static = _quiet(lambda: fm.LayerChart(*members()).to_svg())
+    merged = _quiet(lambda: fm.LayerChart(*members())._build_merged().to_svg())
+    assert legend_set(static) == legend_set(merged)
+    assert list(legend_set(static)) == [field]
+    assert _legend_title_count(static, field) == 1
+
+
+def interactive_legend_set(chart: Any) -> dict[str, tuple[str, ...]]:
+    """Each interactive legend's title and its entry labels, in order."""
+    legends: dict[str, list[str]] = {}
+    title: str | None = None
+    for node in _scene(chart)["legend"]:
+        if node["type"] != "text":
+            continue
+        if (node.get("style") or {}).get("font_weight") == {"custom": "600"}:
+            title = node["content"]
+            legends[title] = []
+        elif title is not None:
+            legends[title].append(node["content"])
+    return {t: tuple(entries) for t, entries in legends.items()}
+
+
+# ---------------------------------------------------------------------------
+# A layer takes an inherited positional channel only where its mark draws it
+# ---------------------------------------------------------------------------
+#
+# Ruling 2026-10-17: a layer takes an inherited x, y, x2 or y2 only on a
+# channel its mark draws (Rust's one per-mark table,
+# ``ferrum._core.mark_inherited_positional``), and a drawn channel whose
+# column the layer's rows lack is refused.
+
+
+def test_a_drawn_inherited_channel_its_rows_lack_is_refused_on_a_data_layer():
+    """A point data layer over df2 takes its host's ``x="r"``, which df2 lacks, and refuses.
+
+    Rejects reading the padded column: the layer's points drew nothing.
+    """
+    chart = mk("point", x="r", y="y").layer(fm.Layer(data=df2, mark="point"))
+    with pytest.raises(ValueError) as refused:
+        chart.to_svg()
+    assert str(refused.value) == (
+        "layer 1: encoding 'x' references unknown column 'r' (not present in that layer's data)"
+    )
+
+
+def test_a_one_axis_count_rule_counts_every_row_beside_a_layer_with_its_own_x():
+    """``P(x="z") + rule(y="count()")`` draws one rule at the total, 8, over the same frame.
+
+    The y-only rule draws no x, so its count groups by nothing. Rejects
+    the inherited x reaching the rule's grain: one rule per ``z`` value.
+    """
+    chart = P(x="z") + mk("rule", y="count()")
+    rule = _wire(chart)["layers"][-1]
+    assert "x" not in rule["encoding"]
+    assert [s.get("groupby") for s in _wire(chart)["transforms"] if s["type"] == "aggregate"] == [
+        []
+    ]
+    assert tag_counts(_quiet(chart.to_svg)) == {"circle": 8, "line": 1}
+
+
+@pytest.mark.parametrize(
+    ("mark", "own", "offered", "taken"),
+    [
+        ("line", ["x", "y"], ["x2", "y2"], set()),
+        ("segment", ["x", "y"], ["x2", "y2"], {"x2", "y2"}),
+        ("tick", ["x"], ["y"], set()),
+        ("rule", ["y"], ["x"], set()),
+        ("point", [], ["x", "y"], {"x", "y"}),
+    ],
+)
+def test_the_effective_encoding_takes_only_the_positional_channels_the_mark_draws(
+    mark, own, offered, taken
+):
+    """``_effective_encoding`` reads the Rust table: no Python copy of which mark draws what."""
+    from ferrum._layer import _Layer
+    from ferrum._layer_transforms import _effective_encoding
+
+    layer_ = _Layer(mark=mark, encoding={ch: ch for ch in own})
+    parent = {ch: f"{ch}_field" for ch in offered}
+    drawn = _effective_encoding(layer_, parent)
+    assert {ch for ch in offered if ch in drawn} == taken
+
+
+def _aggregate_groupbys(chart: Any) -> list[list[str]]:
+    """The groupby of every aggregate step in a chart's wire, branches included, in order."""
+    out: list[list[str]] = []
+
+    def walk(steps: list) -> None:
+        for step in steps:
+            if step.get("type") == "aggregate":
+                out.append(step.get("groupby") or [])
+            walk(step.get("transforms") or [])
+
+    walk(_wire(chart)["transforms"])
+    return out
+
+
+# Hosts writing a span channel a point does not draw.
+_SPAN_HOSTS: dict[str, Callable[[], fm.Chart]] = {
+    "bar-y2": lambda: mk("bar", x="g", y="y", y2="z"),
+    "rect-x2": lambda: mk("rect", x="v", x2="r", y="y"),
+}
+
+
+def _mean_v_layer(mark: str | None, data: pl.DataFrame | None) -> fm.Layer:
+    kwargs: dict[str, Any] = {} if mark is None else {"mark": mark}
+    if data is not None:
+        kwargs["data"] = data
+    return fm.Layer(encoding={"y": fm.Y("v", aggregate="mean")}, **kwargs)
+
+
+@pytest.mark.parametrize("data", [None, df2], ids=["chart-data", "data-source"])
+@pytest.mark.parametrize("host", sorted(_SPAN_HOSTS))
+def test_a_layer_with_no_mark_takes_what_a_point_takes(host, data):
+    """``Layer()`` draws a point, so it takes no inherited span: it equals ``Layer(mark="point")``.
+
+    Its mean groups by the host's x alone and it draws the same SVG.
+    Rejects taking every offered channel: the mean grouped by the span
+    field too (7 or 4 points instead of 2).
+    """
+    unmarked = _quiet(lambda: _SPAN_HOSTS[host]().layer(_mean_v_layer(None, data)))
+    point = _quiet(lambda: _SPAN_HOSTS[host]().layer(_mean_v_layer("point", data)))
+    assert _aggregate_groupbys(unmarked) == _aggregate_groupbys(point)
+    assert _quiet(unmarked.to_svg) == _quiet(point.to_svg)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: mk("bar", x="v", x2="r", y="y") + mk("tick", x="v"),
+        lambda: mk("bar", x="v", x2="r", y="y").layer(layer("tick", x="v")),
+    ],
+    ids=["+", "L"],
+)
+def test_a_tick_writing_x_beside_a_ranged_bar_takes_no_y_and_draws_a_rug(build):
+    """``bar(x, x2, y) + tick(x)``: the tick takes no inherited y, so it draws as a rug alone does.
+
+    A tick draws no span, so the bar's x2 does not make it a two-axis tick.
+    Rejects counting an offered span the tick never draws: the tick took
+    the bar's y.
+    """
+    chart = _quiet(build)
+    tick = _wire(chart)["layers"][-1]
+    assert set(tick["encoding"]) == {"x"}
+    tick_marks = Counter({k: n for k, n in census(_quiet(chart.to_svg)).items() if k[0] == "line"})
+    alone = Counter(
+        {
+            k: n
+            for k, n in census(_quiet(lambda: mk("tick", x="v").to_svg())).items()
+            if k[0] == "line"
+        }
+    )
+    assert tick_marks == alone
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: fm.LayerChart(P().facet("c"), P(df2)),
+        lambda: fm.LayerChart(P().facet("c"), P(df2))._build_merged(),
+        lambda: P().facet("c") + P(df2),
+        lambda: (P() + P(df2)).facet("c"),
+    ],
+    ids=["LCs", "LCm", "+", "+-facet-after"],
+)
+def test_a_right_operand_with_no_facet_joins_the_left_facet_without_a_warning(build):
+    """Nothing of a right operand without a facet is ignored, so nothing warns; its rows repeat."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg()
+        chart.interactive().to_html()
+    assert [str(w.message) for w in caught] == []
+
+
+def test_a_right_operands_own_facet_is_still_warned_and_ignored():
+    """F2: ``P + P(df2).facet("g")`` warns that the right operand's facet is ignored."""
+    with pytest.warns(UserWarning, match="secondary layer's theme/facet is ignored"):
+        (P() + P(df2).facet("g")).to_svg()
+
+
+# ---------------------------------------------------------------------------
+# Current behavior pinned for a later task (not the target)
+# ---------------------------------------------------------------------------
+#
+# These pin what the built engine draws today for three cases the model
+# wants refused or drawn differently. They state the present output plainly
+# so a change to it is seen; the target belongs to a later task.
+
+
+@pytest.mark.parametrize(
+    ("build", "marks", "legends"),
+    [
+        (lambda: P(x="w") + P(df2), {"circle": 6}, {}),
+        (lambda: P(color="w") + P(df2), {"circle": 14}, {"w": ("1", "2.25", "3.5", "4.75", "6")}),
+        (lambda: P(df2) + P(color="w"), {"circle": 14}, {"w": ("1", "2.25", "3.5", "4.75", "6")}),
+        (
+            lambda: P() + P(df2, color="k"),
+            {"circle": 14},
+            {"k": tuple(f"k{i}" for i in range(8))},
+        ),
+        (
+            lambda: fm.LayerChart(P(color="w"), P(df2))._build_merged(),
+            {"circle": 14},
+            {"w": ("1", "2.25", "3.5", "4.75", "6")},
+        ),
+    ],
+    ids=["layer0-x-other-frame", "color-left", "color-right", "color-other-frame", "LCm-color"],
+)
+def test_today_a_binding_to_a_column_only_the_other_frame_has_still_draws(build, marks, legends):
+    """Today: a layer bound to a column only the other operand's frame holds is not refused.
+
+    Layer 0's ``x="w"`` draws none of the left's points (6 circles are df2's),
+    and a color on ``w`` or ``k`` draws a legend read from the other frame's
+    rows. The model refuses all of them; the engine reads the field outside
+    the layer's own batch today.
+    """
+    svg = _quiet(lambda: build().to_svg())
+    assert tag_counts(svg) == marks
+    assert legend_set(svg) == legends
+
+
+def test_today_a_secondary_y_on_a_left_chain_names_the_statistic_remedy():
+    """Today: X11 with a left chain refuses with the statistic remedy, not the plain message.
+
+    The right operand's own rows hold ``w``, and the render gate's remedy
+    search finds it there.
+    """
+    with pytest.raises(ValueError) as refused:
+        ((_filtered(P()) + P(df2, y="w")) + SY("w")).to_svg()
+    assert str(refused.value) == (
+        "layer 2: encoding 'y' references unknown column 'w' (not present in that layer's data)"
+        " — 'w' is a statistic another layer's mark computes for itself; compute it in the "
+        "chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every layer reads "
+        "it, or draw it from its own chart with "
+        'fm.LayerChart(base, other, resolve={"y": "independent"})'
+    )
+
+
+def test_today_the_static_overlay_takes_its_x_axis_from_a_first_member_drawing_no_x():
+    """Today: ``LayerChart(rule(df2, y="w"), bar(df, x="g"))`` static draws a 0..1 numeric x axis.
+
+    The overlay's axis chrome comes from its first member, which draws no x;
+    ``+``, LCm and LCi draw the bars' a, b.
+    """
+    svg = _quiet(lambda: fm.LayerChart(mk("rule", df2, y="w"), mk("bar", x="g", y="y")).to_svg())
+    assert _x_tick_labels(svg) == [
+        "0",
+        "0.1",
+        "0.2",
+        "0.3",
+        "0.4",
+        "0.5",
+        "0.6",
+        "0.7",
+        "0.8",
+        "0.9",
+        "1",
+    ]
+    assert axis_titles(svg) == ["w"]
+
+
+# ---------------------------------------------------------------------------
 # The wire seam (spec §6.3), read off every matrix case
 # ---------------------------------------------------------------------------
 
@@ -1859,6 +2743,10 @@ _MATRIX: dict[str, Case] = {
     **{f"parent/{k}": v for k, v in _PARENT.items()},
     **{f"X1/{k}": v for k, v in _X1.items()},
     **{f"net/{k}": v for k, v in _NET.items()},
+    **{f"F3/{k}": v for k, v in _F3.items()},
+    **{f"A1/{k}": v for k, v in _OVERLAP.items()},
+    **{f"V4-titled/{k}": v for k, v in _RENAMED_TITLES.items()},
+    **{f"X11/{k}": v for k, (v, _vertices) in _X11.items()},
 }
 
 
@@ -1870,6 +2758,23 @@ def test_each_layers_completed_wire_encoding_draws_what_it_draws_alone(case):
     operand's own binding (or a promoted copy), completing a sibling with it.
     """
     check_wire_seam(_MATRIX[case])
+
+
+# Every matrix case reached through ``fm.LayerChart``: the prefix its four routes share.
+_LAYER_CHART_CASES = sorted(key[: -len("LCs")] for key in _MATRIX if key.endswith("/LCs"))
+
+
+@pytest.mark.parametrize("prefix", _LAYER_CHART_CASES)
+def test_the_static_overlay_draws_the_legends_every_layer_chart_route_draws(prefix):
+    """Route parity (spec §7): LCs draws LCm's and LCi's legend set, and LCx shows it interactively.
+
+    Rejects a static overlay that resolves each member's auxiliary scales
+    alone: a legend per member, or one listing only the first member's values.
+    """
+    static = legend_set(_quiet(lambda: _MATRIX[prefix + "LCs"].build().to_svg()))
+    for door in ("LCm", "LCi"):
+        assert legend_set(_quiet(lambda: _MATRIX[prefix + door].build().to_svg())) == static, door
+    assert _quiet(lambda: interactive_legend_set(_MATRIX[prefix + "LCx"].build())) == static
 
 
 # ---------------------------------------------------------------------------
@@ -2130,6 +3035,49 @@ def test_an_operand_draws_inside_a_composition_what_it_draws_alone(case):
     check_rendering(_OPERAND[case])
 
 
+def _x_tick_labels(svg: str) -> list[str]:
+    """The bottom x axis's tick labels: the lowest row of centered chrome-colored text."""
+    ticks = [
+        e
+        for e in _chrome_texts(svg)
+        if e.get("fill") == _CHROME_TEXT
+        and e.get("text-anchor") == "middle"
+        and "transform" not in e.attrib
+    ]
+    bottom = max(float(e.get("y")) for e in ticks)
+    return ["".join(e.itertext()).strip() for e in ticks if float(e.get("y")) == bottom]
+
+
+@pytest.mark.parametrize("name", sorted(_OPERANDS))
+def test_an_axis_layer_zero_does_not_draw_lists_only_what_its_drawers_draw(name):
+    """``rule(df2, y="w") + operand``: the x axis is the operand's alone, with no stray category.
+
+    The rule draws no x, so the operand's layers establish the x domain
+    from the rows they draw. Rejects reading the field from layer 0's
+    frame: df2's ``g`` added ``c`` (or the padding added ``null``).
+    """
+    operand = _OPERANDS[name]
+    alone = _x_tick_labels(_quiet(lambda: operand().to_svg()))
+    assert _x_tick_labels(_quiet(lambda: (_rule_d2() + operand()).to_svg())) == alone
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: mk("rule", df2, y="w") + mk("bar", x="g", y="y"),
+        lambda: _filtered(mk("rule", df2, y="w")) + mk("bar", x="g", y="y"),
+        lambda: fm.LayerChart(mk("rule", df2, y="w"), mk("bar", x="g", y="y"))._build_merged(),
+        lambda: fm.LayerChart(
+            mk("rule", df2, y="w"), mk("bar", x="g", y="y"), resolve={"y": "independent"}
+        ),
+    ],
+    ids=["+", "+-left-chain", "LCm", "LCi"],
+)
+def test_a_layer_zero_drawing_no_x_leaves_the_bars_categories_alone(build):
+    """``rule(df2, y="w") + bar(df, x="g")`` lists a, b: the categories the bars draw."""
+    assert _x_tick_labels(_quiet(lambda: build().to_svg())) == ["a", "b"]
+
+
 def _tooltip_batches(chart: Any) -> Counter:
     """The multiset of per-batch tooltip field-name sets of *chart*'s interactive scene."""
     return Counter(frozenset(names) for names in interactive_tooltip_fields(chart))
@@ -2166,7 +3114,7 @@ _DF_HEAD = df.head(6)
 _LD: dict[
     str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart], Callable[[], fm.Chart], Any]
 ] = {
-    "text-renamed-color": (
+    "text-color-by-name": (
         lambda: mk("bar", x="g", y="y", color="g").layer(
             fm.Layer(data=df2, mark="text", encoding={"text": "y"})
         ),
@@ -2174,7 +3122,7 @@ _LD: dict[
         lambda: mk("bar", df2, x="g", y="y", color="g"),
         layer("text", text="y"),
     ),
-    "titled-text-renamed-color": (
+    "titled-text-color-by-name": (
         lambda: mk(
             "bar", x="g", y=fm.Y("y", title="Yield"), color=fm.Color("g", title="Group")
         ).layer(fm.Layer(data=df2, mark="text", encoding={"text": "y"})),
@@ -2184,7 +3132,7 @@ _LD: dict[
         ),
         layer("text", text="y"),
     ),
-    "grey-line-renamed-color": (
+    "grey-line-color-by-name": (
         lambda: P(color="g").layer(
             fm.Layer(data=df2, mark="line", mark_kwargs={"stroke": "#999999"})
         ),
@@ -2193,7 +3141,7 @@ _LD: dict[
         fm.Layer(mark="line", mark_kwargs={"stroke": "#999999"}),
     ),
     # A slice of df keeps the size scale's union domain the host's own.
-    "own-width-renamed-size": (
+    "own-width-size-by-name": (
         lambda: P(size="z").layer(
             fm.Layer(data=_DF_HEAD, mark="line", encoding={"stroke_width": "r"})
         ),
@@ -2215,10 +3163,10 @@ _LD: dict[
 
 @pytest.mark.parametrize("case", sorted(_LD))
 def test_LD_a_data_layer_draws_its_inherited_bindings_as_inherited(case):
-    """LD: a renamed or lowered host binding draws on the data layer as on the L door.
+    """LD: a host binding read by name, or lowered, draws on the data layer as on the L door.
 
     The data layer's marks equal the same layer attached to the host over
-    its own frame. Rejects carrying the renamed or lowered binding as the
+    its own frame. Rejects carrying the inherited or lowered binding as the
     layer's own: the labels would take the palette, the grey line would
     split, the own-width line would refuse.
     """
@@ -2235,7 +3183,7 @@ def test_LD_a_data_layer_draws_its_inherited_bindings_as_inherited(case):
 def test_LD_a_data_layer_lists_the_tooltips_it_lists_on_the_L_door(case):
     """LD, interactive: the data layer's tooltip fields equal the same layer attached over its frame.
 
-    Rejects counting a carried renamed color or the x/y fill as the layer's
+    Rejects counting an inherited color or the x/y fill as the layer's
     own (the text would list ``g`` and ``y``), dropping a no-own layer's
     inherited fields (the grey line would list only ``v`` and ``y``), and
     showing a renamed column under its internal name or a sibling channel's
@@ -2336,7 +3284,8 @@ _PROVENANCE: dict[str, tuple[Callable[[], Any], list[list[str]]]] = {
         lambda: _composed_label() + _rule(),
         [["color"], ["color"], []],
     ),
-    "LD-renamed-color": (_LD["text-renamed-color"][0], [[], ["color"]]),
+    # The data layer reads its own rows, so the host color names its own `g` from the chart level.
+    "LD-color-by-name": (_LD["text-color-by-name"][0], [[], []]),
     "L-lowered-color": (_lowered_label, [[], ["color"]]),
     "own-color-beside-a-host-color": (
         lambda: P(color="c").layer(layer("line", color="g")) + _rule(),

@@ -889,6 +889,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),

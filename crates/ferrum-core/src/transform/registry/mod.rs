@@ -45,7 +45,8 @@
 //! `vec![]` for:
 //! - pass-through-only transforms (`Outliers`, `Filter`, `Reorder`,
 //!   `Identity`, `TopK`, `Sample`) — the output schema is whatever the input
-//!   schema was;
+//!   schema was — and `Project`, whose output is the caller's own list of
+//!   input columns;
 //! - pass-through-*plus*-additive transforms whose additive columns cannot be
 //!   declared as a stable name/dtype pair together with the transform's
 //!   arbitrary (unknown) pass-through columns — `DataWindow` (each
@@ -624,6 +625,12 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["as_field", "expr", "name"],
+            ..Default::default()
+        },
+        "project" => TransformRegistryEntry {
+            outputs: vec![],
+            secondary_outputs: vec![],
+            params: vec!["fields", "name"],
             ..Default::default()
         },
         "fold" => TransformRegistryEntry {

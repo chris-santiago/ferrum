@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
-from ferrum._core import mark_style_fields, marks_drawing_constant_size, style_table_marks
+from ferrum._core import (
+    mark_inherited_positional,
+    mark_style_fields,
+    marks_drawing_constant_size,
+    style_table_marks,
+)
 
 # The marks whose ``mark_*`` method sets a flat mark directly, with no
 # desugar into a layered composite. A narrower set than the marks with a
@@ -22,6 +27,26 @@ from ferrum._core import mark_style_fields, marks_drawing_constant_size, style_t
 # a leaf of the desugar pipeline, so chart.py, _desugar.py and the
 # statistical chart-method mixin read one set.
 _FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
+
+
+_POSITIONAL_WIRE = ("x", "y", "x2", "y2")
+
+
+def inherited_positional_taken(mark: Optional[str], own: Any, offered: Any) -> set[str]:
+    """The positional channels of *offered* a layer drawing *mark* takes from a parent.
+
+    *own* holds the channels the layer writes itself; only positional ones
+    are read. The answer is Rust's one per-mark table
+    (``ferrum._core.mark_inherited_positional``): a layer takes an inherited
+    x, y, x2 or y2 only where its mark draws it, so a line takes no span and
+    a one-axis rule or tick no opposite channel. A layer with no mark of its
+    own draws a point (:func:`layer_mark`), as on the wire.
+    """
+    offered_positional = [c for c in _POSITIONAL_WIRE if c in offered]
+    if not offered_positional:
+        return set()
+    own_positional = [c for c in _POSITIONAL_WIRE if c in own]
+    return set(mark_inherited_positional(layer_mark(mark), own_positional, offered_positional))
 
 
 @dataclass(frozen=True)
@@ -102,9 +127,9 @@ class _Layer:
     #: The non-positional channels this layer's ``encoding`` carries because
     #: it inherited them from a parent, not because the layer declared them:
     #: a ``+`` operand's own encoding moved onto the layers it contributes,
-    #: or a parent binding a statistic lowered or a merge's renamed columns
-    #: renamed. Rust treats a listed channel as inherited, not owned, exactly
-    #: as it treats ``inherited_positional``, so a text layer draws no
+    #: or a parent binding a statistic lowered. Rust treats a listed channel
+    #: as inherited, not owned, exactly as it treats
+    #: ``inherited_positional``, so a text layer draws no
     #: inherited color and a line's own width wins over an inherited size.
     #: Spelled as this layer's ``encoding`` keys; ``_build_layers_list``
     #: serializes the wire channels they draw as (``Layer::inherited_channels``
@@ -122,14 +147,6 @@ class _Layer:
     #: fills the channels still unbound (listing every copied channel in
     #: ``inherited_positional``). Never serialized.
     positional_source: Optional[str] = None
-    #: The ``(column, renamed column)`` pairs a field this layer inherits is
-    #: renamed by before it reaches this layer: the right operand of
-    #: ``chart + chart`` over different data with overlapping columns reads
-    #: the combined rows, where its own columns carry the merge's suffix, so
-    #: an inherited field ``"a"`` (a positional fallback, or a binding the
-    #: caller wrote on the composition) names that operand's own
-    #: ``"a__rhs_0001"``. Empty for every other layer. Never serialized.
-    column_renames: tuple[tuple[str, str], ...] = ()
     #: Whether this layer reads its operand's share of the chart's rows
     #: through a branch, so each unnamed step of the chart's chain must run
     #: over that share before the layer reads it. ``chart + chart`` over

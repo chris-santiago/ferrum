@@ -379,9 +379,13 @@ def test_a_secondary_y_used_as_a_left_operand_reads_its_own_rows():
 
 
 def test_a_rug_on_a_right_operand_reads_that_operands_rows():
-    """Rejects resolved binding: the rug draws ``df``'s ``v`` beside ``df2``'s points."""
+    """Rejects resolved binding: the tick draws ``df``'s ``v`` beside ``df2``'s points.
+
+    The tick writes no positional channel, so it takes its host's written
+    ``x="v"`` and layer 0's ``y="y"``, both drawn by a tick, read in ``df``.
+    """
     chart = P(df2) + H().layer(fm.Layer(mark="tick"))
-    oracle = P(df2) + (H() + fm.Chart(df).mark_tick().encode(x="v"))
+    oracle = P(df2) + (H() + fm.Chart(df).mark_tick().encode(x="v", y="y"))
     assert _census(mark_layer(chart.to_svg()))["line"] == df.height
     assert mark_layer(chart.to_svg()) == mark_layer(oracle.to_svg())
 
@@ -724,7 +728,8 @@ _SVG_DIGESTS = {
     "mean-bar+mean-point": "68bffa6e84c1df86d6fd8462a5544f741ae56441dcf51a55d999593b8e629386",
     "plus-each-own-conditional": "dc55ef9989488878bf3165eadef306b8c26af3d04bdda764e889ba40a502a331",
     "ungrouped-binned-count": "f9b2041050d7eae26d615b4580ad7e8ee6590d15ff33c726c8244776a3838368",
-    "ungrouped-binned-count-layer-rule": "4c7668fc506befc0a26842ba5d8191221ae678e3fd3c2e32e6c742ac52919562",
+    # The y-only rule draws no x, so it averages every row once: one rule, not one per bin.
+    "ungrouped-binned-count-layer-rule": "a5b26fffb1ce82174edbde5ba08eb6208f834ae39c4ffd74e96c5f3c31c1b855",
     "no-data-host-data-layer": "62dd601259a1fcb244f892679826d98b92b5871135c3963423854aafe4628a3e",
 }
 _SECONDARY_CONTROLS = {
@@ -750,13 +755,15 @@ _JSON_DIGESTS = {
     "same-frame-composition-layer-line": "aa855589e4516cbfcf31e1645c58af22b42db9e3ae2cd36606f63ed12979e570",
     "faceted-point+secondary": "aaf6cef5c01f57d17c064daedf33f5fa989f071b89ee5671b620efdf7b6e8853",
     "layer-chart-independent-bar": "11542e32c0be6517dcf5e3b8afc7dbc18ccf174bfa31101b40ee85bc9987e27e",
-    "composition-transform": "e75f45a37234812aeae072e54bef363378decc9f9e533f7e81323b76afebf02b",
+    # Each operand reads its own-rows branch, projected to its own frame's columns.
+    "composition-transform": "f6cb15c8c42c64750a73ed4d34dbc8c411d921e45f8328f0427772a793c17def",
     "same-frame-composition-transform": "eed6f78eaaa652224a7d6d5d7fda0c114c6037ffce250bcdfac5386d5d4d0a29",
     "flat-mean-bar": "5cf1f31799b8c2a33b12ff4275debacd3ea82caf3e4eb0585e21dabae93ac825",
     "mean-bar+mean-point": "82bf37a8596924292c93f84787a1bda02898fcd60c8fbb367d3ceb1a0be3ed62",
     "plus-each-own-conditional": "0e5505b715a3cb56c0ccd3cf0a215f0d9db8bd6b79c128741130a256a53aea8c",
     "ungrouped-binned-count": "ee159220f7be8224dc4745e3986334e13822c1c87bec82b22f118d30329d9941",
-    "ungrouped-binned-count-layer-rule": "a7ff60c755625b1545b4833c6e388dc82980c2bc5cf89f555e1e1e2fb6d110be",
+    # The y-only rule takes no binned x: an aggregate, not a second bin.
+    "ungrouped-binned-count-layer-rule": "5f0c778b676eb7ea9ddd79f97fdc8dc0add5cebc4818b96dcebb5b462f68b29d",
     "no-data-host-data-layer": "e9efaf8931203b579be8a46e221aa8fcbfcbf35c89319637170f3ae2dac2f232",
 }
 
@@ -1292,8 +1299,9 @@ _GROUPED = pl.DataFrame(
 
 
 def _faceted_plus() -> fm.Chart:
-    """A faceted chart ``+`` an unfaceted one, which warns that the right facet is ignored."""
-    with pytest.warns(UserWarning, match="theme/facet is ignored"):
+    """A faceted chart ``+`` an unfaceted one: the right operand has no facet to ignore, so nothing warns."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         return P().facet("g") + fm.Chart(_GROUPED).mark_line().encode(x="v", y="w")
 
 
@@ -1571,8 +1579,10 @@ def test_a_faceted_binned_count_groups_by_the_facet():
 def test_an_attached_layer_keeps_the_binned_bars_grouped():
     rule = fm.Layer(mark="rule", encoding={"y": fm.Y("v", aggregate="mean")})
     chart = _binned_count(color="g").layer(rule)
-    # The rule inherits the binned x and the color, so it bins per group too.
-    assert [step["groupby"] for step in _steps(chart, "bin")] == [["g"], ["g"]]
+    # The y-only rule draws no x, so it takes no binned x: only the bars bin,
+    # per group, and the rule averages v per group of the color it inherits.
+    assert [step["groupby"] for step in _steps(chart, "bin")] == [["g"]]
+    assert [step["groupby"] for step in _steps(chart, "aggregate")] == [["g"]]
     assert len(_bars_by_fill(chart.to_svg())) == _BINNED["g"].n_unique()
 
 

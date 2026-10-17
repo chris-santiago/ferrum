@@ -36,6 +36,7 @@ use crate::transform::violin::{self, ViolinSpec};
 // Phase 12 data transforms
 use crate::transform::filter::FilterSpec;
 use crate::transform::calculate::CalculateSpec;
+use crate::transform::project::ProjectSpec;
 use crate::transform::fold::FoldSpec;
 use crate::transform::pivot::PivotSpec;
 use crate::transform::join_aggregate::JoinAggregateSpec;
@@ -84,6 +85,7 @@ pub(crate) enum TransformSpec {
     // Phase 12 data transforms
     Filter(FilterSpec),
     Calculate(CalculateSpec),
+    Project(ProjectSpec),
     Fold(FoldSpec),
     Pivot(PivotSpec),
     JoinAggregate(JoinAggregateSpec),
@@ -105,7 +107,7 @@ pub(crate) enum TransformSpec {
     Branch(BranchSpec),
 }
 
-/// Single source of truth for the 42 leaf `TransformSpec` variants (every
+/// Single source of truth for the 43 leaf `TransformSpec` variants (every
 /// variant except the `Branch` combinator). Dispatchers
 /// across this module, `spec/chart.rs`, and `lib.rs` define a local `arm!`
 /// macro and invoke `for_each_transform!(arm)`; the macro expands the table
@@ -165,6 +167,7 @@ macro_rules! for_each_transform {
             Identity      => identity       : PyIdentity,
             Filter        => filter         : PyDataFilter,
             Calculate     => calculate      : PyDataCalculate,
+            Project       => project        : PyProject,
             Fold          => fold           : PyDataFold,
             Pivot         => pivot          : PyDataPivot,
             JoinAggregate => join_aggregate : PyJoinAggregate,
@@ -202,6 +205,8 @@ pub(crate) use for_each_transform;
 /// functions and have no typed pyclass (SEAM-02). They still round-trip through
 /// the `transforms_json` serde path; the getter renders them as plain dicts via
 /// the `_ =>` fallback arm, mirroring the `layers`/`coord`/`position` getters.
+/// `Project` is absent for the same reason: Python writes it as a dict when
+/// it scopes a composition operand's rows to its own frame's columns.
 ///
 /// A new entry ships a row in `tests/test_transform_repr_completeness.py`
 /// (#195): its `__repr__` renders every constructor argument with its value,
@@ -366,6 +371,7 @@ impl TransformSpec {
             DataStack => data_stack,
             DataWindow => data_window,
             JoinAggregate => join_aggregate,
+            Project => project,
         }
     }
 

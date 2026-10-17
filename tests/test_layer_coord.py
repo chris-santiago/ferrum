@@ -718,12 +718,20 @@ def test_a_spec_with_no_per_layer_coord_round_trips_byte_identically():
     assert reparsed.to_json() == PRE_CHANGE_LAYERED_PAYLOAD
 
 
-def test_the_current_build_still_emits_that_payload_for_the_same_charts():
-    """The captured bytes above are this build's bytes, not a stale snapshot."""
+def test_the_current_build_declares_no_layer_coord_and_round_trips_byte_identically():
+    """The same charts on this build: no layer carries a coord, and the wire round-trips.
+
+    The two members read different frames, so each layer reads its operand's
+    own rows through a named output the captured payload above predates.
+    """
+    from ferrum._core import ChartSpec
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         merged = fm.layer(_control_chart(), _secondary_line())._build_merged()
-    assert merged.to_spec().to_json() == PRE_CHANGE_LAYERED_PAYLOAD
+    payload = merged.to_spec().to_json()
+    assert all("coord" not in layer for layer in json.loads(payload)["layers"])
+    assert ChartSpec.from_json(payload).to_json() == payload
 
 
 def test_a_declared_layer_coord_rides_the_wire():

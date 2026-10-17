@@ -2038,27 +2038,21 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     // chart-level x2/y2 the layer's own batch never had whenever
     // `layer.encoding` (correctly) didn't carry one.
     //
-    // `layer.encoding` is normalized through
-    // [`crate::render::prepare::normalize_rule_tick_own_span`] before the
-    // gate sees it — the same normalization `scene_build`'s per-panel route
-    // applies before its own call to this gate — so a `Mark::Tick`/`Mark::Rule`
-    // layer that declares only `y` (or only `x`) is judged on the one
-    // channel it actually draws, not on an inherited opposite channel the
-    // mark builder never reads.
+    // `layer.encoding` is the layer's completed encoding, which keeps only
+    // the inherited positional channels its mark draws, the same encoding
+    // `scene_build`'s per-panel route gates and draws.
     let layer_flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
-    let gate_encoding = crate::render::prepare::normalize_rule_tick_own_span(
-        layer.encoding.clone(),
-        layer.mark,
-        layer.x_is_own,
-        layer.y_is_own,
-    );
     crate::render::prepare::validate_layer_positional_columns(
         layer_idx,
         layer,
-        &gate_encoding,
+        &layer.encoding,
         layer_batch,
         layer_flipped,
-        &crate::render::prepare::PipelineBatches { source: source_schema, outputs: transform_outputs },
+        &crate::render::prepare::PipelineBatches {
+            source: source_schema,
+            outputs: transform_outputs,
+            transforms: &spec.transforms,
+        },
     )?;
 
     let mut merged_encoding = spec.encoding.clone();
@@ -2311,18 +2305,18 @@ fn positional_binding<'a>(
         let coord_flipped = crate::spec::coord::flips_positional_channels(
             layer.effective_coord(spec.coord.as_ref()),
         );
-        let encoding = if coord_flipped {
-            let mut flipped = layer.encoding.clone();
-            flipped.flip_positional();
-            Cow::Owned(flipped)
-        } else {
-            Cow::Borrowed(&layer.encoding)
-        };
+        // The bindings the layer writes and its mark draws
+        // ([`Layer::drawn_own_encoding`](crate::spec::layer::Layer::drawn_own_encoding)), so a filled channel the mark never
+        // draws does not stand in for the axis.
+        let mut encoding = layer.drawn_own_encoding(&spec.encoding);
+        if coord_flipped {
+            encoding.flip_positional();
+        }
         let (primary, paired) = channel.select(&encoding);
         if primary.is_some() {
-            // Owned: `encoding` may be the flipped temporary, which does not
-            // outlive this iteration. One small clone on the fallback path only;
-            // the chart-encoding path above stays borrowed.
+            // Owned: `encoding` is this iteration's temporary. One small clone
+            // on the fallback path only; the chart-encoding path above stays
+            // borrowed.
             return (
                 primary.cloned().map(Cow::Owned),
                 paired.cloned().map(Cow::Owned),
@@ -2354,12 +2348,11 @@ fn positional_binding<'a>(
 /// exists to stop, arriving by a different road.
 ///
 /// **What counts as "available", and why not the fallback.** What the layer
-/// draws, built the way prepare builds it: the layer's own encoding (which
-/// carries any value Python filled into it, `inherited_positional`), plus,
-/// for a layer on the chart's data only, the authored `chart_encoding`, in
-/// the layer's coordinate space. A layer with a `data_source` inherits no
-/// chart positional channel, so a chart-level binding never makes one of its
-/// axes available. `spec.encoding` is not read: at the flat render's callers
+/// draws: its completed encoding ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding) over the
+/// authored `chart_encoding`), the one its mark builder draws, in the layer's
+/// coordinate space. A layer with a `data_source` inherits no chart
+/// positional channel, so a chart-level binding never makes one of its axes
+/// available, and a geoshape, which draws no position channel, needs none. `spec.encoding` is not read: at the flat render's callers
 /// it is layer 0's rendering encoding, whose positional channels may come
 /// from layer 0's own bindings, which no later layer inherits. Deliberately
 /// NOT `positional_binding`'s fallback either: that resolves a SCALE, not a
@@ -2413,14 +2406,14 @@ fn validate_drawing_layers_can_plot(
         // written to do without.
         let coord = layer.effective_coord(spec.coord.as_ref());
         let coord_flipped = crate::spec::coord::flips_positional_channels(coord);
-        // What the layer draws, as prepare builds it: its own bindings
-        // (Python's `inherited_positional` fills included), plus the authored
-        // chart encoding's when it reads the chart's data, moved into the
-        // resolved channels' space by the layer's own coord.
-        let mut drawn = layer.encoding.clone();
-        if layer.data_source.is_none() {
-            drawn.inherit_from(chart_encoding);
+        // A mark that draws no position channel (a geoshape) needs neither.
+        if !layer.mark.draws_position_channels() {
+            continue;
         }
+        // What the layer draws: its completed encoding
+        // ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding)), the one its mark builder draws,
+        // moved into the resolved channels' space by the layer's own coord.
+        let mut drawn = layer.completed_encoding(chart_encoding);
         if coord_flipped {
             drawn.flip_positional();
         }

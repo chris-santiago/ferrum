@@ -942,6 +942,61 @@ fn inherit_from_tooltip_fields_only_fills_when_child_is_none() {
     assert_eq!(child2.tooltip_fields.as_ref().unwrap()[0].field, "only_mine");
 }
 
+fn tooltip_list(fields: &[&str]) -> Option<Vec<EncodingSpec>> {
+    Some(fields.iter().map(|f| EncodingSpec { field: (*f).into(), ..Default::default() }).collect())
+}
+
+/// A layer's own single-field `tooltip` is its tooltip: the parent's list is
+/// the same channel spelled the other way, so it is not taken. The rejected
+/// reading treats the two spellings as two channels and hands the layer the
+/// parent's `["v", "y"]` beside its own `z`.
+#[test]
+fn a_layers_own_tooltip_keeps_the_parents_tooltip_fields_out() {
+    let parent = Encoding { tooltip_fields: tooltip_list(&["v", "y"]), ..Default::default() };
+    for inherit in [Encoding::inherit_from, Encoding::inherit_non_positional] {
+        let mut child = Encoding {
+            tooltip: Some(EncodingSpec { field: "z".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        inherit(&mut child, &parent);
+        assert_eq!(child.tooltip.as_ref().map(|t| t.field.as_str()), Some("z"));
+        assert_eq!(child.tooltip_fields, None);
+    }
+}
+
+/// A layer's own `tooltip_fields` list is its tooltip: the parent's
+/// single-field `tooltip` is not added beside it.
+#[test]
+fn a_layers_own_tooltip_fields_keep_the_parents_tooltip_out() {
+    let parent = Encoding {
+        tooltip: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    for inherit in [Encoding::inherit_from, Encoding::inherit_non_positional] {
+        let mut child = Encoding { tooltip_fields: tooltip_list(&["z"]), ..Default::default() };
+        inherit(&mut child, &parent);
+        assert_eq!(child.tooltip, None);
+        assert_eq!(child.tooltip_fields, tooltip_list(&["z"]));
+    }
+}
+
+/// A layer with no tooltip of its own takes the parent's whole tooltip, both
+/// spellings.
+#[test]
+fn a_layer_without_a_tooltip_takes_both_of_the_parents_spellings() {
+    let parent = Encoding {
+        tooltip: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+        tooltip_fields: tooltip_list(&["v", "y"]),
+        ..Default::default()
+    };
+    for inherit in [Encoding::inherit_from, Encoding::inherit_non_positional] {
+        let mut child = Encoding::default();
+        inherit(&mut child, &parent);
+        assert_eq!(child.tooltip, parent.tooltip);
+        assert_eq!(child.tooltip_fields, parent.tooltip_fields);
+    }
+}
+
 #[test]
 fn inherit_from_completely_empty_parent_is_noop() {
     let parent = Encoding::default();

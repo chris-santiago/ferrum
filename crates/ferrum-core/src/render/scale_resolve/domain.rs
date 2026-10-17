@@ -122,13 +122,16 @@ struct SeedRead<'a> {
 }
 
 /// The reads that seed a layered axis, in layer order, one per batch and
-/// field. The first is the bound field (layer 0's, the rendering encoding's)
-/// from layer 0's own batch, with the caller's `span` and `opposite`. Then,
-/// for each later layer on the chart's data that binds nothing on `channel`,
-/// the chart's data with the field that layer inherits: the chart-level
-/// encoding's binding in that layer's own coordinate space
-/// ([`chart_channel_slots`]), as `Encoding::inherit_from` gives it, with its
-/// own span and opposite fields where it binds them.
+/// field. The first is the bound field (the rendering encoding's) from the
+/// batch of the layer that establishes the axis ([`establishing_axis_layer`]):
+/// layer 0's own, with the caller's `span` and `opposite`, when layer 0 draws
+/// the channel, else the first later layer's that does, with that layer's
+/// own `span` and `opposite` where the caller asks for them. Then,
+/// for each later layer on the chart's data that binds nothing on `channel`
+/// but draws it, the chart's data with the field that layer inherits: the
+/// chart-level binding in that layer's own coordinate space, as its completed
+/// encoding carries it ([`drawn_channel_slots`]), with the span and opposite
+/// fields it draws.
 fn seed_reads<'a>(
     spec: &'a ChartSpec,
     layers: &'a [Layer],
@@ -136,8 +139,20 @@ fn seed_reads<'a>(
     bound: (&'a str, Option<&'a str>, Option<&'a str>),
 ) -> Vec<SeedRead<'a>> {
     let (field, span, opposite) = bound;
-    let Some(lead) = layers.first() else { return Vec::new() };
-    let mut reads = vec![SeedRead { source: LayerSource::of(lead), field, span, opposite, inheritor: None }];
+    let Some((index, establisher)) = establishing_axis_layer(spec, layers, channel) else { return Vec::new() };
+    let first = if index == 0 {
+        SeedRead { source: LayerSource::of(establisher), field, span, opposite, inheritor: None }
+    } else {
+        let drawn = drawn_channel_slots(spec, establisher, channel);
+        SeedRead {
+            source: LayerSource::of(establisher),
+            field,
+            span: span.and(drawn.span),
+            opposite: opposite.and(drawn.opposite),
+            inheritor: None,
+        }
+    };
+    let mut reads = vec![first];
     for (index, layer) in layers.iter().enumerate().skip(1) {
         if layer.data_source.is_some() || (channel == "y" && layer.independent_y) {
             continue;
@@ -146,20 +161,60 @@ fn seed_reads<'a>(
         if own.value.is_some() {
             continue;
         }
-        let inherited = chart_channel_slots(spec, layer, channel);
-        let Some(field) = inherited.value else { continue };
+        let drawn = drawn_channel_slots(spec, layer, channel);
+        let Some(field) = drawn.value else { continue };
         if reads.iter().any(|r| r.source == LayerSource::Chart && r.field == field) {
             continue;
         }
-        reads.push(SeedRead {
-            source: LayerSource::Chart,
-            field,
-            span: own.span.or(inherited.span),
-            opposite: own.opposite.or(inherited.opposite),
-            inheritor: Some(index),
-        });
+        reads.push(SeedRead { source: LayerSource::Chart, field, span: drawn.span, opposite: drawn.opposite, inheritor: Some(index) });
     }
     reads
+}
+
+/// The positional bindings `layer` draws on the shared `channel`: the
+/// channels of its completed encoding ([`Layer::completed_encoding`]), which
+/// fills a chart-data layer's unbound slots from the chart-level binding and
+/// keeps only the inherited ones its mark draws. A layer on its own output
+/// inherits no positional channel, and an `independent_y` layer draws its own
+/// y axis rather than this one, so it draws nothing on the shared y.
+fn drawn_channel_slots<'a>(spec: &'a ChartSpec, layer: &'a Layer, channel: &str) -> ChannelSlots<'a> {
+    use crate::spec::layer::PositionalChannel::{X, X2, Y, Y2};
+    let none = ChannelSlots { value: None, span: None, opposite: None };
+    if channel == "y" && layer.independent_y {
+        return none;
+    }
+    let (value, span, opposite) = match (channel, layer_flips(layer, spec.coord.as_ref())) {
+        ("x", false) | ("y", true) => (X, X2, Y),
+        ("y", false) | ("x", true) => (Y, Y2, X),
+        _ => return none,
+    };
+    let completed = layer.completed_encoding(&spec.encoding);
+    let field = |c: crate::spec::layer::PositionalChannel| -> Option<&'a str> {
+        if c.slot(&completed).is_none() {
+            return None;
+        }
+        c.slot(&layer.encoding).as_ref().or(c.slot(&spec.encoding).as_ref()).map(|e| e.field.as_str())
+    };
+    ChannelSlots { value: field(value), span: field(span), opposite: field(opposite) }
+}
+
+/// The layer, with its index, whose batch a layered axis's bound field is
+/// read from first: layer 0 when it draws `channel`
+/// ([`drawn_channel_slots`]), else the first later layer that does, the same
+/// establishing rule the auxiliary channels' domains follow ([`aux_reads`]).
+/// Layer 0 when no layer draws the channel, so a spec binding it nowhere
+/// keeps layer 0's read and its `UnknownColumn` precondition. `None` only for
+/// an empty layer list.
+fn establishing_axis_layer<'a>(
+    spec: &'a ChartSpec,
+    layers: &'a [Layer],
+    channel: &str,
+) -> Option<(usize, &'a Layer)> {
+    layers
+        .iter()
+        .enumerate()
+        .find(|(_, layer)| drawn_channel_slots(spec, layer, channel).value.is_some())
+        .or_else(|| layers.first().map(|lead| (0, lead)))
 }
 
 /// One read of a chart-level non-positional channel's domain (color, size,
@@ -392,20 +447,15 @@ fn layer_flips(layer: &Layer, chart_coord: Option<&crate::spec::coord::CoordKind
     crate::spec::coord::flips_positional_channels(layer.effective_coord(chart_coord))
 }
 
-/// The chart-level encoding's [`ChannelSlots`] for `channel` as `layer` draws
-/// them: in that layer's own coordinate space, which is the space its
-/// inherited channels land in.
-fn chart_channel_slots<'a>(spec: &'a ChartSpec, layer: &Layer, channel: &str) -> ChannelSlots<'a> {
-    channel_slots(&spec.encoding, layer_flips(layer, spec.coord.as_ref()), channel)
-}
-
 /// The column an axis's bound `field` is typed and ordered by: in a layered
-/// spec, layer 0's own batch, which draws it. When that batch lacks the field
-/// (a layer 0 that binds nothing on the axis), [`locate_field`] answers, so
-/// the axis can still be typed; the domain union itself reads only the
-/// batches that draw the field ([`numeric_domain_union_over`],
-/// [`positional_category_union`]).
+/// spec, the batch of the layer that establishes `channel`
+/// ([`establishing_axis_layer`]: layer 0 when it draws the channel, else the
+/// first layer that does), which draws it. When that batch lacks the field,
+/// [`locate_field`] answers, so the axis can still be typed; the domain union
+/// itself reads only the batches that draw the field
+/// ([`numeric_domain_union_over`], [`positional_category_union`]).
 pub(in crate::render) fn locate_seed_field<'a>(
+    channel: &str,
     field: &str,
     spec: &'a ChartSpec,
     primary_batch: &'a RecordBatch,
@@ -413,8 +463,8 @@ pub(in crate::render) fn locate_seed_field<'a>(
 ) -> Option<LocatedColumn<'a>> {
     spec.layers
         .as_deref()
-        .and_then(<[Layer]>::first)
-        .and_then(|lead| LayerSource::of(lead).locate(field, primary_batch, transform_outputs))
+        .and_then(|layers| establishing_axis_layer(spec, layers, channel))
+        .and_then(|(_, layer)| LayerSource::of(layer).locate(field, primary_batch, transform_outputs))
         .or_else(|| locate_field(field, primary_batch, transform_outputs))
 }
 
@@ -860,10 +910,11 @@ fn bar_wants_zero(
 ///     is data no layer draws: `mark_smooth(ci=)`'s raw `y` beside its
 ///     fitted `y`, a user's own `lower` beside `mark_errorbar`'s, the merged
 ///     frame beside each `+` operand's own rows.
-///   - On a layered spec the bound field and its paired endpoint are layer
-///     0's, read from layer 0's batch, plus the chart's data when another
-///     layer on it binds nothing on this channel and so draws the inherited
-///     field ([`seed_sources`]). A batch with no rows contributes nothing,
+///   - On a layered spec the bound field and its paired endpoint are read
+///     from the batch of the layer establishing the axis (layer 0 when it
+///     draws the channel, else the first layer that does), plus the chart's
+///     data when another layer on it binds nothing on this channel and so
+///     draws the inherited field ([`seed_reads`]). A batch with no rows contributes nothing,
 ///     and the reader never looks elsewhere for a field a layer's batch
 ///     lacks. Reaching past the primary batch is still the point of the
 ///     per-layer read: `calibration_chart`'s `ReferenceLine` diagonal, whose
@@ -1104,18 +1155,23 @@ fn first_caller_scale<'a>(
 /// A layer's own encoding for the post-flip `channel`, with the layer's coord
 /// flip applied: under a layer whose effective coord flips, its authored `y`
 /// occupies the x axis (see the coordinate-space note in
-/// [`numeric_domain_union_over`]).
+/// [`numeric_domain_union_over`]). Only a binding its completed encoding
+/// keeps ([`Layer::completed_encoding`]): a channel Python filled that the
+/// mark never draws is not the layer's.
 fn layer_channel_encoding<'a>(
     layer: &'a Layer,
-    chart_coord: Option<&'a crate::spec::coord::CoordKind>,
+    spec: &'a ChartSpec,
     channel: &str,
 ) -> Option<&'a crate::spec::encoding::EncodingSpec> {
-    let flipped = crate::spec::coord::flips_positional_channels(layer.effective_coord(chart_coord));
-    match (channel, flipped) {
-        ("x", false) | ("y", true) => layer.encoding.x.as_ref(),
-        ("y", false) | ("x", true) => layer.encoding.y.as_ref(),
-        _ => None,
-    }
+    use crate::spec::layer::PositionalChannel::{X, Y};
+    let flipped = crate::spec::coord::flips_positional_channels(layer.effective_coord(spec.coord.as_ref()));
+    let authored = match (channel, flipped) {
+        ("x", false) | ("y", true) => X,
+        ("y", false) | ("x", true) => Y,
+        _ => return None,
+    };
+    authored.slot(&layer.completed_encoding(&spec.encoding)).as_ref()?;
+    authored.slot(&layer.encoding).as_ref()
 }
 
 /// A warning for each member left out of the axis the first caller-written
@@ -1172,10 +1228,10 @@ fn layered_axis<'a>(
         .filter(move |(_, layer)| !(channel == "y" && layer.independent_y))
         .map(move |(index, layer)| AxisMember {
             index,
-            own_scale: layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()),
+            own_scale: layer_channel_encoding(layer, spec, channel).and_then(|e| e.scale.as_ref()),
         });
     AxisMembers::new(members, |idx| {
-        layer_channel_encoding(&layers[idx], spec.coord.as_ref(), channel)
+        layer_channel_encoding(&layers[idx], spec, channel)
             .is_some_and(|enc| {
                 let located = LayerSource::of(&layers[idx]).locate(&enc.field, primary_batch, transform_outputs);
                 column_reads_categorical(enc, located)
@@ -1242,7 +1298,7 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
         if idx == establishing || exchanges || (channel == "y" && layer.independent_y) {
             continue;
         }
-        let Some(enc) = layer_channel_encoding(layer, spec.coord.as_ref(), channel) else { continue };
+        let Some(enc) = layer_channel_encoding(layer, spec, channel) else { continue };
         if let Some(located) = LayerSource::of(layer).locate(&enc.field, primary_batch, transform_outputs) {
             crate::render::arrow_cast::require_placeable_on_continuous_axis(
                 idx,
@@ -1472,12 +1528,11 @@ pub(in crate::render) fn numeric_domain_union_over(
             if channel == "y" && layer.independent_y {
                 continue;
             }
-            let flipped = coord_flipped.then(|| {
-                let mut e = layer.encoding.clone();
-                e.flip_positional();
-                e
-            });
-            let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
+            let mut drawn = layer.drawn_own_encoding(&spec.encoding);
+            if coord_flipped {
+                drawn.flip_positional();
+            }
+            let encoding = &drawn;
             let (value_enc, paired_enc) = match channel {
                 "x" => (encoding.x.as_ref(), encoding.x2.as_ref()),
                 "y" => (encoding.y.as_ref(), encoding.y2.as_ref()),
@@ -1718,9 +1773,9 @@ fn distinct_positional_categories_shared(
 /// caller ([`apply_sort_to_domain`]), to the unioned ladder.
 ///
 /// **Each field from the batch that draws it** ([`LayerSource`]), the rule
-/// [`numeric_domain_union`] follows: the seed is the bound field (layer 0's),
-/// read from layer 0's batch and from the chart's data when another layer on
-/// it inherits the field ([`seed_sources`]); each layer's own field is read
+/// [`numeric_domain_union`] follows: the seed is the bound field, read from
+/// the batch of the layer establishing the axis and from the chart's data
+/// when another layer on it inherits the field ([`seed_reads`]); each layer's own field is read
 /// from its own `data_source` output, else the chart's data. Two `+`
 /// operands binding the same field name on their own rows therefore both
 /// contribute, and a merged frame's padding rows, which no layer draws, open
@@ -1789,7 +1844,7 @@ pub(in crate::render) fn positional_category_union(
 ) -> Result<Vec<String>, RenderError> {
     // The one precondition, layered or not: the locator the caller types this
     // axis with finds the bound field somewhere.
-    let seed_batch = locate_seed_field(field, spec, primary_batch, transform_outputs)
+    let seed_batch = locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?
         .batch;
     let Some(layers) = &spec.layers else {
@@ -1812,7 +1867,7 @@ pub(in crate::render) fn positional_category_union(
             }
         }
     };
-    // The seed: the bound field (layer 0's) from layer 0's batch, then each
+    // The seed: the bound field from the establishing layer's batch, then each
     // field a later layer inherits from the chart's data ([`seed_reads`]), in
     // that order. Only the chart's data takes in the facet-shared all-panels
     // batch; a named output is already the all-panels one. An inherited field
@@ -1865,12 +1920,11 @@ pub(in crate::render) fn positional_category_union(
         let coord_flipped = crate::spec::coord::flips_positional_channels(
             layer.effective_coord(spec.coord.as_ref()),
         );
-        let flipped = coord_flipped.then(|| {
-            let mut e = layer.encoding.clone();
-            e.flip_positional();
-            e
-        });
-        let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
+        let mut drawn = layer.drawn_own_encoding(&spec.encoding);
+        if coord_flipped {
+            drawn.flip_positional();
+        }
+        let encoding = &drawn;
         let (layer_enc, own_paired_enc) = match channel {
             "x" => (encoding.x.as_ref(), encoding.y.as_ref()),
             "y" => (encoding.y.as_ref(), encoding.x.as_ref()),
@@ -3740,6 +3794,73 @@ mod tests {
         assert_eq!(ladder, strings(&["a", "b", "c", "x", "y", "z"]));
     }
 
+    /// A different-frame `+` whose layer 0 (a rule on its own rows) draws no
+    /// x: the chart-level x names the field the right operand (a bar on its
+    /// own rows) draws, and layer 0's own rows carry a same-named column of
+    /// their own frame.
+    const NON_DRAWING_LEAD_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"w"}},"layers":[{"mark":"rule","encoding":{"y":{"field":"w"}},"data_source":"lhs"},{"mark":"bar","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"y"}},"data_source":"rhs"}]}"#;
+
+    fn non_drawing_lead_batches(lhs_g: arrow::array::ArrayRef) -> (RecordBatch, HashMap<String, RecordBatch>) {
+        let merged = columns_batch(vec![
+            ("g", opt_str_col(&[Some("a"), Some("b"), Some("c"), Some("a"), Some("b")])),
+            ("w", opt_f64_col(&[Some(1.0), Some(2.0), Some(3.0), None, None])),
+        ]);
+        let lhs = columns_batch(vec![("g", lhs_g), ("w", f64_col(&[1.0, 2.0, 3.0]))]);
+        let rhs = columns_batch(vec![
+            ("g", opt_str_col(&[Some("a"), Some("b")])),
+            ("y", f64_col(&[4.0, 5.0])),
+        ]);
+        let outputs = HashMap::from([
+            ("lhs".to_string(), lhs),
+            ("rhs".to_string(), rhs),
+            (FINAL_OUTPUT_KEY.to_string(), merged.clone()),
+        ]);
+        (merged, outputs)
+    }
+
+    /// The x ladder comes from the layer that draws x, the bar: `a, b`. The
+    /// rejected reading seeds from layer 0's batch, which draws no x, and
+    /// returns its frame's `["a", "b", "c"]`.
+    #[test]
+    fn an_axis_layer_zero_does_not_draw_is_seeded_from_the_first_layer_that_does() {
+        let spec = spec_from(NON_DRAWING_LEAD_SPEC_JSON);
+        let (merged, outputs) =
+            non_drawing_lead_batches(opt_str_col(&[Some("a"), Some("b"), Some("c")]));
+        let ladder = positional_category_union("x", "g", Some("y"), &merged, &outputs, &spec, false)
+            .expect("every category column is Utf8");
+        assert_eq!(ladder, strings(&["a", "b"]));
+    }
+
+    /// The axis is typed from the drawing layer's column too: layer 0's own
+    /// `g` is numeric, the bar's is text. The rejected reading types the
+    /// axis from layer 0's Float64 column.
+    #[test]
+    fn an_axis_layer_zero_does_not_draw_is_typed_from_the_first_layer_that_does() {
+        let spec = spec_from(NON_DRAWING_LEAD_SPEC_JSON);
+        let (merged, outputs) = non_drawing_lead_batches(f64_col(&[7.0, 8.0, 9.0]));
+        let located = locate_seed_field("x", "g", &spec, &merged, &outputs).expect("the bar draws g");
+        assert_eq!(located.col.data_type(), &arrow::datatypes::DataType::Utf8);
+    }
+
+    /// The numeric counterpart: layer 0's own `g` (7..9) is not drawn, so it
+    /// widens nothing, and the point layer's own rows are where the seed is
+    /// read. The rejected reading seeds from layer 0's rows and returns
+    /// `(1.0, 9.0)`.
+    #[test]
+    fn a_numeric_axis_layer_zero_does_not_draw_is_seeded_from_the_drawing_layer() {
+        const NUMERIC: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"x":{"field":"g"},"y":{"field":"w"}},"layers":[{"mark":"rule","encoding":{"y":{"field":"w"}},"data_source":"lhs"},{"mark":"point","encoding":{"x":{"field":"g"},"y":{"field":"w"}},"data_source":"rhs"}]}"#;
+        let spec = spec_from(NUMERIC);
+        let merged = columns_batch(vec![("g", f64_col(&[7.0, 9.0])), ("w", f64_col(&[1.0, 2.0]))]);
+        let outputs = HashMap::from([
+            ("lhs".to_string(), columns_batch(vec![("g", f64_col(&[7.0, 9.0])), ("w", f64_col(&[1.0, 2.0]))])),
+            ("rhs".to_string(), columns_batch(vec![("g", f64_col(&[1.0, 2.0])), ("w", f64_col(&[3.0, 4.0]))])),
+            (FINAL_OUTPUT_KEY.to_string(), merged.clone()),
+        ]);
+        let extent = numeric_domain_union("x", "g", None, &merged, &outputs, &spec, false)
+            .expect("every column is Float64");
+        assert_eq!(extent, (1.0, 2.0));
+    }
+
     /// A categorical scale the caller wrote takes its categories from the
     /// seed's own column, which is layer 0's batch, not the merged frame.
     /// The rejected reading returns the merged frame's `["a", "b", "c",
@@ -3821,12 +3942,13 @@ mod tests {
         assert_eq!(extent, (1.0, 6.0));
     }
 
-    /// `(P(df).encode(x="a", y="b") + tick(df).encode(y="b")).encode(x="c")`:
-    /// layer 0 binds its own `x="a"`, the tick binds no `x` and so draws the
-    /// chart-level `c` from the chart's data. The axis covers both. The
-    /// rejected reading takes the inheriting layer's field to be layer 0's
-    /// and returns `(1.0, 3.0)`, leaving the ticks at 100..300 off the panel.
-    const INHERITED_DIFFERENT_FIELD_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c"},"y":{"field":"b"}},"layers":[{"mark":"point","encoding":{"x":{"field":"a"},"y":{"field":"b"}}},{"mark":"tick","encoding":{"y":{"field":"b"}}}]}"#;
+    /// `(P(df).encode(x="a", y="b") + P(df).encode(y="b")).encode(x="c")`:
+    /// layer 0 binds its own `x="a"`, the second point layer binds no `x` and
+    /// so draws the chart-level `c` from the chart's data. The axis covers
+    /// both. The rejected reading takes the inheriting layer's field to be
+    /// layer 0's and returns `(1.0, 3.0)`, leaving the points at 100..300 off
+    /// the panel.
+    const INHERITED_DIFFERENT_FIELD_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c"},"y":{"field":"b"}},"layers":[{"mark":"point","encoding":{"x":{"field":"a"},"y":{"field":"b"}}},{"mark":"point","encoding":{"y":{"field":"b"}}}]}"#;
 
     #[test]
     fn an_inheriting_layer_contributes_the_chart_field_it_draws() {
@@ -3841,12 +3963,56 @@ mod tests {
         assert_eq!(extent, (1.0, 300.0));
     }
 
+    /// A one-axis tick writing only `y` takes no inherited `x`
+    /// (`Mark::inherited_positional`), so the chart-level `c` it never draws
+    /// widens nothing. The rejected reading, an inheritance that ignores the
+    /// mark, returns `(1.0, 300.0)`.
+    #[test]
+    fn a_one_axis_tick_does_not_widen_the_axis_with_a_field_it_never_draws() {
+        let spec = spec_from(&INHERITED_DIFFERENT_FIELD_SPEC_JSON.replace(
+            r#"{"mark":"point","encoding":{"y":{"field":"b"}}}"#,
+            r#"{"mark":"tick","encoding":{"y":{"field":"b"}}}"#,
+        ));
+        let batch = columns_batch(vec![
+            ("a", f64_col(&[1.0, 2.0, 3.0])),
+            ("b", f64_col(&[1.0, 2.0, 3.0])),
+            ("c", f64_col(&[100.0, 200.0, 300.0])),
+        ]);
+        let extent = numeric_domain_union("x", "a", None, &batch, &HashMap::new(), &spec, false)
+            .expect("every column is Float64");
+        assert_eq!(extent, (1.0, 3.0));
+    }
+
+    /// A one-axis reference rule over its own rows, `x=ref`, with a `y`
+    /// Python filled from the bar and listed as inherited: the rule draws no
+    /// `y` (`Mark::inherited_positional`), so the band judge does not read
+    /// that filled `val`, which the rule's rows lack. The rejected reading,
+    /// the authored encoding with the filled `y`, opens a `null` band.
+    #[test]
+    fn a_one_axis_rule_judges_its_null_band_without_a_filled_opposite_channel() {
+        const SPEC: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"data_source":"lhs"},{"mark":"rule","encoding":{"x":{"field":"ref","type":"nominal"},"y":{"field":"val"}},"data_source":"rhs","inherited_positional":["y"]}]}"#;
+        let spec = spec_from(SPEC);
+        let lhs = columns_batch(vec![
+            ("cat", opt_str_col(&[Some("a"), Some("b"), Some("c")])),
+            ("val", f64_col(&[1.0, 2.0, 3.0])),
+        ]);
+        let rhs = columns_batch(vec![("ref", opt_str_col(&[Some("b"), None, None]))]);
+        let outputs = HashMap::from([
+            ("lhs".to_string(), lhs.clone()),
+            ("rhs".to_string(), rhs),
+            (FINAL_OUTPUT_KEY.to_string(), lhs.clone()),
+        ]);
+        let ladder = positional_category_union("x", "cat", Some("val"), &lhs, &outputs, &spec, false)
+            .expect("every category column is Utf8");
+        assert_eq!(ladder, strings(&["a", "b", "c"]));
+    }
+
     /// The ordinal counterpart: the inheriting layer's categories are those of
     /// the chart-level field it draws, after layer 0's own. The rejected
     /// reading returns layer 0's `["p", "q"]` alone.
     #[test]
     fn an_inheriting_layer_contributes_the_chart_categories_it_draws() {
-        const INHERITED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"h","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}}},{"mark":"tick","encoding":{"y":{"field":"v"}}}]}"#;
+        const INHERITED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"h","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}}},{"mark":"point","encoding":{"y":{"field":"v"}}}]}"#;
         let spec = spec_from(INHERITED);
         let batch = columns_batch(vec![
             ("g", opt_str_col(&[Some("p"), Some("q")])),

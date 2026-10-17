@@ -480,7 +480,7 @@ def test_facet_with_secondary_y_renders_right_axis_per_panel():
 # Chart.__add__'s column-collision suffix (chart.py ~line 1658) becomes
 # user-visible under independent y because the flagged slot titles its axis
 # from the layer's own (renamed) field.
-def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # FIXED (GH #71): _rename_encoding_fields now stamps the ORIGINAL field name back on as the channel's title whenever a rename occurs and no explicit title= was set, so the internal "__rhs_<n>" sentinel is only ever used for data lookup, never shown to the user
+def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # FIXED (GH #71): the right operand reads its own rows, where its renamed columns are restored, so the internal "__rhs_<n>" name never reaches a layer binding
     """Two members with DIFFERENT data but overlapping column names:
     __add__ renames the RHS columns to '{col}__rhs_{n}' before the
     diagonal concat. Under resolve={"y": "independent"} the renamed field
@@ -497,11 +497,9 @@ def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # FIXED
 
 
 def test_heterogeneous_dual_axis_explicit_title_wins_over_stamped_original_name():
-    """An explicit user ``title=`` on the renamed RHS channel must survive the
-    collision rename untouched: `_rename_encoding_fields` stamps the ORIGINAL
-    field name as the display title only when the user set none (the
-    ``"title" not in val._kwargs`` guard). Pins precedence: user title >
-    stamped original name > renamed field."""
+    """An explicit user ``title=`` on the RHS channel survives the merge of
+    two frames sharing a column name: the right operand binds its own
+    column, restored inside its own rows, with the title the caller wrote."""
     df_a = _df()
     df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
     bars = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
@@ -563,19 +561,12 @@ def test_right_associated_triple_merge_with_shared_columns_does_not_collide():
     assert svg.strip().startswith("<svg")
 
 
-def test_heterogeneous_dual_axis_auto_tooltip_carries_original_field_as_title():  # FIXED (GH #71): _auto_tooltip_fields (_spec_build.py) now carries a "title" key -- sourced from the channel's own stamped title -- mirroring the shape the explicit multi-field Tooltip(*fields) path already emits
+def test_heterogeneous_dual_axis_auto_tooltip_names_the_original_field():  # FIXED (GH #71): the secondary layer reads its own rows, so its auto tooltip names the column the caller wrote
     """Interactive auto-tooltip injection (``SpecBuildMixin._auto_tooltip_fields``)
-    must carry the ORIGINAL column name as the tooltip entry's display title for
-    a renamed secondary-layer field: ``field`` legitimately stays the renamed
-    column (Rust reads the actual data by that name), but ``title`` is
-    presentation-only and must never show the internal ``__rhs_<n>`` sentinel.
-
-    This pins the Python-side ChartSpec contract. The Rust half of the chain
-    landed in the same sweep unit: ``MetadataColumns::from_ctx``
-    (``crates/ferrum-core/src/render/draw.rs``) now prefers ``.title`` over
-    ``.field`` for ``TooltipField.name`` (pinned by its own Rust unit test,
-    ``tooltip_name_prefers_title_over_field_when_title_set``), so the
-    rendered interactive scene shows the original name end to end.
+    names the secondary layer's own column for a field whose name the left
+    member's frame also has: the right member reads its own rows, where the
+    merge's renamed copy is restored under its original name, so no tooltip
+    entry ever names the internal ``__rhs_<n>`` column.
     """
     df_a = _df()
     df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
@@ -586,11 +577,8 @@ def test_heterogeneous_dual_axis_auto_tooltip_carries_original_field_as_title():
     spec, _data, _viewport, _theme, _cfg = merged._render_inputs(_auto_tooltips=True)
     layers = json.loads(spec.to_json())["layers"]
     secondary_fields = layers[1]["encoding"]["tooltip_fields"]
-    y_entry = next(f for f in secondary_fields if f["field"].startswith("y__rhs_"))
-    assert y_entry.get("title") == "y", (
-        f"secondary layer's auto-injected tooltip field must display the "
-        f"original column name 'y' as its title, not the renamed field: {y_entry}"
-    )
+    assert [f["field"] for f in secondary_fields] == ["x", "y"]
+    assert not any("__rhs_" in json.dumps(f) for f in secondary_fields)
 
 
 def test_base_without_y_encoding_plus_secondary_renders():

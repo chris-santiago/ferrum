@@ -106,6 +106,28 @@ pub struct FacetSpec {
     /// same scoping rule as `row_title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_sort: Option<serde_json::Value>,
+    /// Rows that repeat in every panel along the facet fields their frame
+    /// lacks, one entry per composition operand whose frame lacks one: a
+    /// layer over another frame shows in every panel, its statistic running
+    /// on its own rows per panel (ggplot2's rule for a layer missing the
+    /// faceting variable). Every other row with a null facet value belongs
+    /// to no panel and is dropped with a warning. Empty, and absent from the
+    /// wire, for a chart over one frame.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repeat: Vec<FacetRepeat>,
+}
+
+/// One composition operand's rows that repeat across panels: the rows whose
+/// Boolean `marker` column is true, repeated along each of `fields` (the
+/// facet's wrap/column field, its row field, or both) because that operand's
+/// frame lacks them, and partitioned normally along any facet field it has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FacetRepeat {
+    /// The row-marker column, true on exactly the operand's rows.
+    pub marker: String,
+    /// The facet fields the operand's frame lacks.
+    pub fields: Vec<String>,
 }
 
 impl FacetSpec {
@@ -289,6 +311,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -311,6 +334,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -330,6 +354,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("spacing"));
@@ -350,6 +375,7 @@ mod tests {
             },
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -374,6 +400,7 @@ mod tests {
             },
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("resolve"), "all-shared resolve must be omitted: {json}");
@@ -394,6 +421,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("title"), "absent title/row_title must be omitted: {json}");
@@ -415,6 +443,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""title":"Species""#), "title must serialize: {json}");
@@ -698,6 +727,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
         }
     }
 
@@ -739,6 +769,7 @@ mod tests {
             resolve: FacetResolve::default(),
             sort: Some(serde_json::json!("descending")),
             row_sort: Some(serde_json::json!({"field": "v", "op": "mean"})),
+            repeat: Vec::new(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""sort":"descending""#), "sort must serialize: {json}");

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use crate::spec::layer::PositionalChannel;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +113,57 @@ impl Mark {
             Mark::Text | Mark::Arc | Mark::Polygon => channel == Opacity,
             Mark::Image | Mark::Ribbon | Mark::Label | Mark::Geoshape => false,
         }
+    }
+
+    /// Whether this mark draws the span channels `x2`/`y2`, read from what
+    /// each mark's builder takes: a bar's, rect's, area's and ribbon's other
+    /// edge, a rule's and segment's other end. Every other mark carries an
+    /// inherited span binding without drawing it.
+    pub(crate) fn draws_span_channels(self) -> bool {
+        match self {
+            Mark::Bar | Mark::Rect | Mark::Rule | Mark::Segment | Mark::Area | Mark::Ribbon => true,
+            Mark::Point | Mark::Line | Mark::Text | Mark::Tick | Mark::Polygon | Mark::Image | Mark::Arc
+            | Mark::Label | Mark::Geoshape => false,
+        }
+    }
+
+    /// Whether this mark draws the positional channels `x`/`y`. Every mark
+    /// does but a geoshape, which draws its geometry column through its
+    /// projection. An arc draws them as its polar theta and radius.
+    pub(crate) fn draws_position_channels(self) -> bool {
+        match self {
+            Mark::Geoshape => false,
+            Mark::Point | Mark::Line | Mark::Bar | Mark::Area | Mark::Rule | Mark::Text | Mark::Tick
+            | Mark::Rect | Mark::Polygon | Mark::Image | Mark::Ribbon | Mark::Segment | Mark::Arc
+            | Mark::Label => true,
+        }
+    }
+
+    /// Which of the `offered` positional bindings a layer of this mark takes
+    /// from its parent, given the positional channels it writes itself
+    /// (`own`): the channels it draws. A span channel (`x2`/`y2`) only on a
+    /// mark that draws spans ([`Self::draws_span_channels`]). `x`/`y` on every
+    /// mark that draws them ([`Self::draws_position_channels`]), except that a
+    /// rule or tick declaring exactly one of `x`/`y`, with no span written or
+    /// taken, is a one-axis reference line or rug and draws only the channel
+    /// it declared. A rule assembling a ranged or diagonal
+    /// shape partly from inherited span channels keeps assembling it. The
+    /// result lists the taken channels in wire order; `own` channels are never
+    /// in it.
+    pub(crate) fn inherited_positional(
+        self,
+        own: &[PositionalChannel],
+        offered: &[PositionalChannel],
+    ) -> Vec<PositionalChannel> {
+        let candidates = || PositionalChannel::ALL.into_iter().filter(|c| offered.contains(c) && !own.contains(c));
+        let spans: Vec<PositionalChannel> =
+            candidates().filter(|c| c.is_span() && self.draws_span_channels()).collect();
+        let draws_a_span = !spans.is_empty() || own.iter().any(|c| c.is_span());
+        let one_axis = matches!(self, Mark::Rule | Mark::Tick)
+            && !draws_a_span
+            && own.contains(&PositionalChannel::X) != own.contains(&PositionalChannel::Y);
+        let takes_position = self.draws_position_channels() && !one_axis;
+        candidates().filter(|c| if c.is_span() { spans.contains(c) } else { takes_position }).collect()
     }
 
     /// Whether this mark draws a constant `size=`.
@@ -440,6 +493,36 @@ pub(crate) fn mark_style_fields<'py>(
     Ok(fields)
 }
 
+/// `ferrum._core.mark_inherited_positional(mark, own, offered)`:
+/// [`Mark::inherited_positional`] over wire names, the positional channels
+/// (`"x"`, `"y"`, `"x2"`, `"y2"`) a layer of `mark` writing `own` takes of the
+/// `offered` parent bindings, in wire order. Python's effective encoding
+/// filters its inherited positional channels through it rather than keeping
+/// a list of its own. Refuses an unknown mark or channel name. Registered in
+/// `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn mark_inherited_positional(
+    mark: &str,
+    own: Vec<String>,
+    offered: Vec<String>,
+) -> pyo3::PyResult<Vec<&'static str>> {
+    let mark = parse_mark_arg(mark)?;
+    let channels = |names: &[String]| -> pyo3::PyResult<Vec<PositionalChannel>> {
+        names
+            .iter()
+            .map(|name| {
+                PositionalChannel::from_wire(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown positional channel '{name}'; expected one of [x, y, x2, y2]"
+                    ))
+                })
+            })
+            .collect()
+    };
+    let taken = mark.inherited_positional(&channels(&own)?, &channels(&offered)?);
+    Ok(taken.into_iter().map(PositionalChannel::as_str).collect())
+}
+
 impl fmt::Display for Mark {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -487,6 +570,75 @@ impl FromStr for Mark {
 
 #[cfg(test)]
 mod tests {
+    use crate::spec::layer::PositionalChannel::{self, X, X2, Y, Y2};
+
+    /// The span-drawing marks, read from each builder: the marks whose
+    /// builders read an `x2`/`y2` column. Pinned per mark so a new builder
+    /// reading a span is a visible table change.
+    #[test]
+    fn the_span_drawing_marks_are_the_builders_that_read_a_span() {
+        let drawing: Vec<&str> = all_marks().filter(|m| m.draws_span_channels()).map(|m| m.as_str()).collect();
+        assert_eq!(drawing, ["bar", "area", "rule", "rect", "ribbon", "segment"]);
+    }
+
+    /// Per mark, what a layer writing nothing positional takes of a parent
+    /// binding all four channels: `x`/`y` on every mark but a geoshape, the
+    /// spans only on a span-drawing mark.
+    #[test]
+    fn a_layer_writing_nothing_takes_x_y_and_the_spans_its_mark_draws() {
+        for mark in all_marks() {
+            let taken = mark.inherited_positional(&[], &[X, Y, X2, Y2]);
+            let position = if mark.draws_position_channels() { vec![X, Y] } else { vec![] };
+            let spans = if mark.draws_span_channels() { vec![X2, Y2] } else { vec![] };
+            let expected: Vec<PositionalChannel> = position.into_iter().chain(spans).collect();
+            assert_eq!(taken, expected, "{mark}");
+        }
+    }
+
+    /// Only a geoshape draws no position channel, so it takes no inherited
+    /// `x`/`y`. An arc keeps them: it draws them as its polar theta and
+    /// radius.
+    #[test]
+    fn only_a_geoshape_draws_no_position_channel() {
+        let not_drawing: Vec<&str> =
+            all_marks().filter(|m| !m.draws_position_channels()).map(|m| m.as_str()).collect();
+        assert_eq!(not_drawing, ["geoshape"]);
+        assert_eq!(Mark::Geoshape.inherited_positional(&[], &[X, Y]), Vec::<PositionalChannel>::new());
+        assert_eq!(Mark::Arc.inherited_positional(&[], &[X, Y]), vec![X, Y]);
+    }
+
+    /// A rule or tick declaring exactly one of `x`/`y` with no span is a
+    /// one-axis line or rug and takes nothing else. A rule that takes an
+    /// inherited span keeps assembling its ranged shape. Any other mark, or a
+    /// rule or tick declaring both or neither, takes `x`/`y`.
+    #[test]
+    fn a_one_axis_rule_or_tick_takes_no_opposite_channel() {
+        for mark in [Mark::Rule, Mark::Tick] {
+            assert_eq!(mark.inherited_positional(&[Y], &[X]), Vec::<PositionalChannel>::new(), "{mark}");
+            assert_eq!(mark.inherited_positional(&[X], &[Y]), Vec::<PositionalChannel>::new(), "{mark}");
+            assert_eq!(mark.inherited_positional(&[], &[X, Y]), vec![X, Y], "{mark}");
+        }
+        assert_eq!(Mark::Rule.inherited_positional(&[X], &[Y, X2]), vec![Y, X2]);
+        assert_eq!(Mark::Rule.inherited_positional(&[X, X2], &[Y]), vec![Y]);
+        assert_eq!(Mark::Tick.inherited_positional(&[X], &[Y, X2]), Vec::<PositionalChannel>::new());
+        assert_eq!(Mark::Point.inherited_positional(&[Y], &[X]), vec![X]);
+    }
+
+    /// The Python door: wire names in, wire names out, in wire order; an
+    /// unknown channel or mark is refused.
+    #[test]
+    fn the_pyfunction_speaks_wire_names() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            mark_inherited_positional("line", names(&[]), names(&["y2", "x", "x2", "y"])).unwrap(),
+            ["x", "y"]
+        );
+        assert_eq!(mark_inherited_positional("rule", names(&["y"]), names(&["x"])).unwrap(), Vec::<&str>::new());
+        pyo3::Python::initialize();
+        assert!(mark_inherited_positional("rule", names(&["z"]), names(&[])).is_err());
+        assert!(mark_inherited_positional("nope", names(&[]), names(&[])).is_err());
+    }
+
     use super::*;
 
     #[test]

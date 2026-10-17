@@ -464,12 +464,9 @@ fn build_geometry(
     // encoded y keeps the exact pre-fix fixed length unconditionally.
     //
     // `y_field(ctx, spec)` reads `ctx.spec.encoding.y`, which — for a
-    // layered tick — is `build_panel_mark_batches`'s DrawCtx-local
-    // `layer_spec_encoding`, not the raw chart/layer merge. That function's
-    // own-span-axis normalization (`scene_build.rs`, extended to
-    // `Mark::Tick` in the batch-E task-3 review-gate cycle 3) clears this
-    // channel back to `None` whenever the layer declared only `x` itself and
-    // the chart's own `y` was purely inherited via `Encoding::inherit_from`.
+    // layered tick — is the layer's completed encoding
+    // (`Layer::completed_encoding`), which gives a tick declaring only `x`
+    // no inherited `y` (`Mark::inherited_positional`).
     // So this check is a property of what the layer ACTUALLY DECLARED, not
     // of the assembly path that built it: a bare rug layered under a sibling
     // that supplies `y` (`fm.layer(scatter, mark_tick(band_size=...)

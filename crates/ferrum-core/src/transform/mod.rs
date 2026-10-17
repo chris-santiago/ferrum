@@ -45,6 +45,7 @@ pub(crate) mod expr;
 // Phase 12 data transforms
 pub(crate) mod filter;
 pub(crate) mod calculate;
+pub(crate) mod project;
 pub(crate) mod fold;
 pub(crate) mod pivot;
 pub(crate) mod join_aggregate;

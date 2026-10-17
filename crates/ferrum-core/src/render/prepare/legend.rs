@@ -1846,8 +1846,6 @@ mod tests {
             independent_y: false, coord: None,
             reads_chart_data: true,
             color_is_own: color_field.is_some(),
-            x_is_own: false,
-            y_is_own: false,
             size_is_own: false,
             stroke_width_is_own: false,
         }

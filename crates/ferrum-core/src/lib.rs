@@ -149,6 +149,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spec::mark::marks_drawing_constant_size, m)?)?;
     m.add_function(wrap_pyfunction!(spec::mark::mark_style_fields, m)?)?;
     m.add_function(wrap_pyfunction!(spec::mark::style_table_marks, m)?)?;
+    // Which inherited positional bindings a layer's mark draws (`Mark::inherited_positional`),
+    // the rule Python's effective encoding and Rust's layer completion share.
+    m.add_function(wrap_pyfunction!(spec::mark::mark_inherited_positional, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::blend_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::stroke_cap_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::stroke_join_accepted_values, m)?)?;

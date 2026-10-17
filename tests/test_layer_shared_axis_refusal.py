@@ -380,7 +380,8 @@ _ORDINAL_UNION_CONTROL_HASHES = {
     "integer_category_ordinal_union": {
         "fm.layer": "b8cc832a7a444d3e",
         "+": "c1439d743c0b264a",
-        "interactive": "5e5f785f6862c6b4",
+        # Each operand's marks index its own rows.
+        "interactive": "ebdf704a9eaf0c41",
     },
 }
 

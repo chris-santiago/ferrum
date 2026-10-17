@@ -609,7 +609,7 @@ fn overlay_axis<'g, 'a>(
         let lead = &leaves[group[position]];
         leaf_post_flip_encoding(lead, channel)
             .is_some_and(|enc| {
-                let located = locate_seed_field(&enc.field, lead.spec, lead.final_batch, lead.transform_outputs);
+                let located = locate_seed_field(channel.as_str(), &enc.field, lead.spec, lead.final_batch, lead.transform_outputs);
                 column_reads_categorical(enc, located)
             })
     })
@@ -778,7 +778,7 @@ fn refuse_unplaceable_overlay_members<'a>(
         // only, so a non-positional channel never reaches here; it would
         // judge no member rather than panic if that guard is ever loosened.
         let Some(enc) = leaf_post_flip_encoding(leaf, channel) else { continue };
-        let Some(located) = locate_seed_field(&enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
+        let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
         else {
             continue;
         };
@@ -909,7 +909,7 @@ fn leaf_positional_domain(
         }
     }
 
-    let located = locate_seed_field(&enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
+    let located = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: channel.as_str(),
             field: enc.field.clone(),
@@ -2050,6 +2050,7 @@ mod tests {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },

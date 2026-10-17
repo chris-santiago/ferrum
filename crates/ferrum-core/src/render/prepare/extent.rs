@@ -522,10 +522,10 @@ mod tests {
     }
 
     /// `fix_transform_extents_for_facet`'s match ends in a wildcard
-    /// (`_ => t.clone()`), which is deliberate — `TransformSpec` has 42
+    /// (`_ => t.clone()`), which is deliberate — `TransformSpec` has 43
     /// variants and only 9 carry an extent to pin, so an exhaustive
     /// wildcard-free match (the `ScaleSpec::positional_extent` precedent)
-    /// would add 33 no-op arms. But a wildcard means a new extent-carrying
+    /// would add 34 no-op arms. But a wildcard means a new extent-carrying
     /// variant can land with no pin and nothing fails: archaeology bug #7's
     /// exact failure mode, which already re-armed once for `DensityData`
     /// (`render/prepare/mod.rs`'s density-data facet-extent test comment
@@ -538,7 +538,7 @@ mod tests {
     ///
     /// - `extent_carrying` (right-hand side): every kind in
     ///   `all_transform_kinds()` (the canonical enumeration — the same
-    ///   `for_each_transform!` table `TransformSpec`'s 42 variants are
+    ///   `for_each_transform!` table `TransformSpec`'s 43 variants are
     ///   generated from) whose `entry_for_kind(kind).params` carries one of
     ///   the four extent field names. The registry's `params` list is
     ///   itself drift-proven equal to each spec struct's real serde fields

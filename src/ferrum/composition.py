@@ -1332,11 +1332,11 @@ def _lower_any(
             leaf_nodes=leaf_nodes,
         )
 
-    if isinstance(node, LayerChart) and node._y_independent():
-        # An independent-y (dual-axis) LayerChart nested inside a composite
-        # does not fit the overlay composite tree (a composite panel carries
-        # no per-layer y-scale-slot concept -- see _composite_tree's
-        # docstring), so it lowers through the SAME merged flat leaf path
+    if isinstance(node, LayerChart) and node._renders_merged():
+        # An independent-y (dual-axis) or faceted LayerChart nested inside a
+        # composite does not fit the overlay composite tree (a composite panel
+        # carries no per-layer y-scale-slot concept and no facet grid -- see
+        # _composite_tree's docstring and _renders_merged), so it lowers through the SAME merged flat leaf path
         # to_svg()/._render_interactive() use at the tree root (GH #52 spec
         # §4 "Nesting"): one leaf ChartSpec whose layers carry the
         # independent_y flags, resolved leaf-locally by Rust. The leaf does
@@ -3761,11 +3761,12 @@ class LayerChart(_ChartLike):
     null-padded diagonal concat for heterogeneous data, named-transform
     routing for per-layer transforms.
 
-    Render routing (three routes): the ``_y_independent()`` predicate
-    selects the static path — (1) static shared/default y → the Phase B
-    overlay composite tree (``_composite_tree``); (2) static
-    independent y → the merged flat single-panel chart
-    (``_build_merged`` → ``to_svg``) — while (3) the interactive
+    Render routing (three routes): the ``_renders_merged()`` predicate
+    selects the static path — (1) static shared/default y with no
+    faceted member → the Phase B overlay composite tree
+    (``_composite_tree``); (2) static independent y, or any member with a
+    facet → the merged flat single-panel chart (``_build_merged`` →
+    ``to_svg``) — while (3) the interactive
     entry point ALWAYS uses the merged flat chart regardless of resolve
     (``_render_interactive_merged``) because selections/hit-testing
     require overlays to be ONE scene panel.  Nested lowering follows the
@@ -4059,6 +4060,18 @@ class LayerChart(_ChartLike):
         """Return whether ``resolve={"y": "independent"}`` was requested (GH #52)."""
         return _resolve_scale_modes(self._resolve).get("y") == "independent"
 
+    def _renders_merged(self) -> bool:
+        """Return whether static output renders the merged chart rather than the overlay tree.
+
+        True for an independent y (GH #52: the overlay has no per-layer
+        y-scale slot) and for a member with a facet: an overlay is one
+        panel and cannot carry a facet grid, so the merged chart's ``+``
+        facet rule draws it, as the interactive route already does.
+        """
+        return self._y_independent() or any(
+            _is_leaf_chart(c) and c._facet is not None for c in self._charts
+        )
+
     def to_svg(self) -> str:
         """Render the layered charts to an SVG string.
 
@@ -4075,7 +4088,7 @@ class LayerChart(_ChartLike):
         str
             SVG markup with all layers rendered in a single plot area.
         """
-        if self._y_independent():
+        if self._renders_merged():
             return self._build_merged().to_svg()
         lowered = self._composite_tree(auto_tooltips=False)
         return lowered.render_svg()
@@ -4548,9 +4561,13 @@ def _warn_on_layer_conflicts(lhs, rhs) -> None:
     ``coord`` is no longer on that list: since `#172`(1) the RHS's coordinate
     system travels with the layers it contributes (:func:`_carry_layer_coord`),
     so naming it here would report a drop that no longer happens. The theme and
-    the facet ARE still the primary layer's alone.
+    the facet ARE still the primary layer's alone, so a right operand's own
+    theme or facet that differs from the left's is reported; a right operand
+    with no facet of its own loses nothing (its rows join the left's facet).
     """
-    if (rhs._theme is not None and rhs._theme != lhs._theme) or rhs._facet != lhs._facet:
+    theme_dropped = rhs._theme is not None and rhs._theme != lhs._theme
+    facet_dropped = rhs._facet is not None and rhs._facet != lhs._facet
+    if theme_dropped or facet_dropped:
         warnings.warn(
             "Layered chart `+`: secondary layer's theme/facet is ignored; primary layer wins.",
             UserWarning,

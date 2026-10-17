@@ -17,6 +17,52 @@ pub enum PositionalChannel {
     Y2,
 }
 
+impl PositionalChannel {
+    /// The four channels, in wire order.
+    pub(crate) const ALL: [PositionalChannel; 4] =
+        [PositionalChannel::X, PositionalChannel::Y, PositionalChannel::X2, PositionalChannel::Y2];
+
+    /// The wire name: `"x"`, `"y"`, `"x2"` or `"y2"`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            PositionalChannel::X => "x",
+            PositionalChannel::Y => "y",
+            PositionalChannel::X2 => "x2",
+            PositionalChannel::Y2 => "y2",
+        }
+    }
+
+    /// The channel a wire name names, or `None` for any other string.
+    pub(crate) fn from_wire(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == name)
+    }
+
+    /// Whether this is a span channel (`x2`/`y2`).
+    pub(crate) fn is_span(self) -> bool {
+        matches!(self, PositionalChannel::X2 | PositionalChannel::Y2)
+    }
+
+    /// This channel's binding slot in `encoding`.
+    pub(crate) fn slot(self, encoding: &Encoding) -> &Option<crate::spec::encoding::EncodingSpec> {
+        match self {
+            PositionalChannel::X => &encoding.x,
+            PositionalChannel::Y => &encoding.y,
+            PositionalChannel::X2 => &encoding.x2,
+            PositionalChannel::Y2 => &encoding.y2,
+        }
+    }
+
+    /// This channel's binding slot in `encoding`, mutably.
+    pub(crate) fn slot_mut(self, encoding: &mut Encoding) -> &mut Option<crate::spec::encoding::EncodingSpec> {
+        match self {
+            PositionalChannel::X => &mut encoding.x,
+            PositionalChannel::Y => &mut encoding.y,
+            PositionalChannel::X2 => &mut encoding.x2,
+            PositionalChannel::Y2 => &mut encoding.y2,
+        }
+    }
+}
+
 /// A non-positional encoding channel name: one wire key of [`Encoding`]
 /// other than the positional `x`, `y`, `x2` and `y2` — the domain
 /// [`Layer::inherited_channels`] ranges over. Deserializes from exactly those
@@ -62,14 +108,9 @@ pub struct Layer {
     /// when a layered operand gets a `data_source` and would otherwise lose
     /// every chart positional channel it never bound itself (a
     /// `_promote_layer_channels`-style copy with provenance). Read only by
-    /// [`LayerPrepared::from_chart_and_layer`] to
-    /// decide `x_is_own`/`y_is_own`: a channel listed here is treated
-    /// exactly as the standalone-inherited case the own-span normalization
-    /// (`scene_build`'s rule/tick own-span rule) already clears, not as a
-    /// layer-declared one. No other Rust reader looks at this field — every
-    /// other consumer (domain unions, axis titles, legends) reads
-    /// `encoding` itself, which already carries the filled value, exactly
-    /// as it reads a flat operand's own snapshot. Empty (the default) for
+    /// [`Self::completed_encoding`]: a channel listed here is an inherited
+    /// one, kept only when the layer's mark draws it
+    /// ([`Mark::inherited_positional`]), not a layer-declared one. Empty (the default) for
     /// every layer that declares its own channels or inherits none,
     /// including every pre-existing spec, so the field is omitted from the
     /// wire then and round-trips byte-identically.
@@ -191,6 +232,59 @@ impl Default for Layer {
 }
 
 impl Layer {
+    /// The positional channels this layer writes itself: those its encoding
+    /// binds that Python did not fill from a parent
+    /// ([`Self::inherited_positional`]).
+    pub(crate) fn own_positional(&self) -> Vec<PositionalChannel> {
+        PositionalChannel::ALL
+            .into_iter()
+            .filter(|c| c.slot(&self.encoding).is_some() && !self.inherited_positional.contains(c))
+            .collect()
+    }
+
+    /// This layer's encoding completed from `parent`, the chart-level
+    /// encoding: the one completion every reader of a layer's channels sees.
+    /// A layer reading the chart's data inherits every unbound channel, one
+    /// on its own output only the non-positional ones. Of the positional
+    /// bindings it did not write itself (inherited here, or filled by Python
+    /// and listed in [`Self::inherited_positional`]) it keeps only those its
+    /// mark draws ([`Mark::inherited_positional`]), so a mark never carries a
+    /// positional binding it never draws.
+    pub(crate) fn completed_encoding(&self, parent: &Encoding) -> Encoding {
+        let mut encoding = self.encoding.clone();
+        if self.data_source.is_some() {
+            encoding.inherit_non_positional(parent);
+        } else {
+            encoding.inherit_from(parent);
+        }
+        let own = self.own_positional();
+        let offered: Vec<PositionalChannel> = PositionalChannel::ALL
+            .into_iter()
+            .filter(|c| c.slot(&encoding).is_some() && !own.contains(c))
+            .collect();
+        let taken = self.mark.inherited_positional(&own, &offered);
+        for channel in offered.into_iter().filter(|c| !taken.contains(c)) {
+            *channel.slot_mut(&mut encoding) = None;
+        }
+        encoding
+    }
+
+    /// This layer's own encoding without the positional channels Python
+    /// filled that its mark does not draw: the channels it binds itself, as
+    /// its completed encoding ([`Self::completed_encoding`]) keeps them. The
+    /// read a per-layer domain loop takes, so a channel the mark never draws
+    /// widens no axis and judges no null band.
+    pub(crate) fn drawn_own_encoding(&self, parent: &Encoding) -> Encoding {
+        let completed = self.completed_encoding(parent);
+        let mut encoding = self.encoding.clone();
+        for channel in PositionalChannel::ALL {
+            if channel.slot(&completed).is_none() {
+                *channel.slot_mut(&mut encoding) = None;
+            }
+        }
+        encoding
+    }
+
     /// The coordinate system this layer's marks are placed in: its own when it
     /// declares one, else the chart's.
     ///
@@ -611,5 +705,56 @@ mod tests {
         .map(|c| serde_json::to_value(c).unwrap().as_str().unwrap().to_owned())
         .collect();
         assert_eq!(channel_names, encoding_keys);
+    }
+
+    fn bound(field: &str) -> Option<crate::spec::encoding::EncodingSpec> {
+        Some(crate::spec::encoding::EncodingSpec { field: field.into(), ..Default::default() })
+    }
+
+    /// The chart-level parent the completion tests inherit from: every
+    /// positional channel bound.
+    fn spanning_parent() -> Encoding {
+        Encoding { x: bound("px"), y: bound("py"), x2: bound("px2"), y2: bound("py2"), ..Default::default() }
+    }
+
+    fn layer_of(mark: Mark, encoding: Encoding) -> Layer {
+        Layer { mark, encoding, ..Default::default() }
+    }
+
+    /// A line draws no span: completion gives it the parent's `x`/`y` and
+    /// drops the `x2`/`y2` it would never draw. The rejected reading,
+    /// `inherit_from` alone, keeps both span channels.
+    #[test]
+    fn completion_drops_the_span_channels_a_line_does_not_draw() {
+        let line = layer_of(Mark::Line, Encoding::default());
+        let completed = line.completed_encoding(&spanning_parent());
+        assert_eq!((completed.x, completed.y), (bound("px"), bound("py")));
+        assert_eq!((completed.x2, completed.y2), (None, None));
+    }
+
+    /// A rule writing only `y`, under a parent with no span, is a one-axis
+    /// reference line: it takes no inherited `x`. A rule under a spanning
+    /// parent takes the spans and so keeps assembling its ranged shape.
+    #[test]
+    fn completion_gives_a_one_axis_rule_no_opposite_channel() {
+        let rule = layer_of(Mark::Rule, Encoding { y: bound("own"), ..Default::default() });
+        let flat_parent = Encoding { x: bound("px"), y: bound("py"), ..Default::default() };
+        let completed = rule.completed_encoding(&flat_parent);
+        assert_eq!((completed.x, completed.y), (None, bound("own")));
+        let ranged = rule.completed_encoding(&spanning_parent());
+        assert_eq!((ranged.x, ranged.x2, ranged.y2), (bound("px"), bound("px2"), bound("py2")));
+    }
+
+    /// A positional channel Python filled and listed in
+    /// `inherited_positional` is inherited: a one-axis rule on its own output
+    /// drops it. Unlisted, the same value is the layer's own and stays.
+    #[test]
+    fn completion_treats_a_listed_filled_channel_as_inherited() {
+        let filled = Encoding { x: bound("own"), y: bound("filled"), ..Default::default() };
+        let mut rule = Layer { data_source: Some("rows".into()), ..layer_of(Mark::Rule, filled) };
+        rule.inherited_positional = vec![PositionalChannel::Y];
+        assert_eq!(rule.completed_encoding(&Encoding::default()).y, None);
+        rule.inherited_positional.clear();
+        assert_eq!(rule.completed_encoding(&Encoding::default()).y, bound("filled"));
     }
 }

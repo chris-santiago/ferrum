@@ -28,6 +28,7 @@ from ferrum._core import (
 )
 from ferrum._facet import (
     build_facet_dict as _build_facet_dict_fn,
+    facet_repeat as _facet_repeat_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
 from ferrum._coerce import normalize_for_rust
@@ -262,25 +263,7 @@ def _scale_type_accepts_zero(scale_type: Any) -> bool:
 _AUTO_TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
 
 
-def _field_titles(enc: dict, restored: dict[str, str]) -> dict[str, str]:
-    """The original name each merge-renamed field of a wire *enc* is shown under.
-
-    *restored* maps each column a merge renamed for this layer to the name
-    the caller wrote (``_Layer.column_renames``, read backwards), so a
-    renamed column shows its original name on an entry with no title of its
-    own, even when bound only through a channel that takes no title. A
-    column the merge did not rename keeps its name, whatever it looks like,
-    and a title the caller wrote titles its own channel alone, never another
-    channel's entry for the same column.
-    """
-    return {
-        ch_dict["field"]: restored[ch_dict["field"]]
-        for ch_dict in enc.values()
-        if isinstance(ch_dict, dict) and ch_dict.get("field") in restored
-    }
-
-
-def _auto_tooltip_fields(enc: dict, titles: dict[str, str] | None = None) -> list[dict]:
+def _auto_tooltip_fields(enc: dict) -> list[dict]:
     """Derive auto-tooltip ``{"field": ...}`` entries from one encoding dict.
 
     Shared by :meth:`SpecBuildMixin._inject_auto_tooltips`'s chart-level and
@@ -292,23 +275,17 @@ def _auto_tooltip_fields(enc: dict, titles: dict[str, str] | None = None) -> lis
     ----------
     enc : dict
         A parsed-JSON encoding dict (channel name -> ``{"field": ..., ...}``).
-    titles : dict, optional
-        A title per field, for a field whose channel carries none: a
-        merge-renamed column's original name (:func:`_field_titles`).
 
     Returns
     -------
     list of dict
         ``[{"field": name}, ...]`` in ``_RENDERER_HONORED_CHANNELS`` order,
         deduplicated by field name. When the channel's serialized dict
-        carries an explicit ``title`` -- either user-set, or stamped by
-        ``Chart.__add__``'s collision-rename to preserve the original
-        column name (see ``_layer_transforms._rename_encoding_fields``, GH #71) -- the
-        entry also carries a ``"title"`` display key, mirroring the shape
-        the explicit multi-field ``Tooltip(*fields)`` path already emits in
-        :meth:`SpecBuildMixin._build_encoding_specs`. ``field`` always stays
-        the (possibly renamed) column used for the actual value lookup;
-        ``title`` is presentation-only.
+        carries the caller's ``title``, the entry also carries it as a
+        ``"title"`` display key, mirroring the shape the explicit
+        multi-field ``Tooltip(*fields)`` path already emits in
+        :meth:`SpecBuildMixin._build_encoding_specs`. ``field`` is the
+        column used for the value lookup; ``title`` is presentation-only.
     """
     auto_fields: list[dict] = []
     seen: set[str] = set()
@@ -321,7 +298,7 @@ def _auto_tooltip_fields(enc: dict, titles: dict[str, str] | None = None) -> lis
         field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
         if field and isinstance(field, str) and field not in seen:
             entry: dict = {"field": field}
-            title = ch_dict.get("title") or (titles or {}).get(field)
+            title = ch_dict.get("title")
             if title:
                 entry["title"] = title
             auto_fields.append(entry)
@@ -942,9 +919,17 @@ class SpecBuildMixin:
         """Convert internal _facet to the JSON dict Rust's FacetSpec expects.
 
         Delegates to :func:`ferrum._facet.build_facet_dict`; the facet machinery
-        lives in ``_facet.py`` (cohesion finding C2/C10).
+        lives in ``_facet.py`` (cohesion finding C2/C10). On a ``+``
+        composition over different frames, each operand frame lacking a facet
+        field is declared under ``repeat`` by its row marker, so Rust draws
+        its rows in every panel along that field
+        (:func:`ferrum._facet.facet_repeat`).
         """
-        return _build_facet_dict_fn(self._facet, self._data)
+        d = _build_facet_dict_fn(self._facet, self._data)
+        repeat = _facet_repeat_fn(d, self._operand_columns)
+        if repeat:
+            d["repeat"] = repeat
+        return d
 
     def _infer_facet_cardinality(self, col_name: str | None) -> int:
         """Return the number of distinct values in *col_name* from self._data.
@@ -1212,25 +1197,6 @@ class SpecBuildMixin:
             tf_list.append({"field": f})
         kw["tooltip_fields"] = json.dumps(tf_list)
 
-    def _layer_column_restores(self, n_layers: int) -> list[dict[str, str]]:
-        """Per wire layer, each column a merge renamed for it mapped back to the caller's name.
-
-        Read from the resolved chart's layers, which serialize one wire
-        layer each in order (``to_spec``), off their ``column_renames``:
-        the rename record ``Chart.__add__`` writes, never the column's name.
-        """
-        if not n_layers:
-            return []
-        layers = self._with_polars_data()._resolve_pending()._layers or []
-        if len(layers) != n_layers:
-            raise ValueError(
-                f"auto tooltips: the chart resolves to {len(layers)} layers but its spec "
-                f"serializes {n_layers}; each wire layer must come from one chart layer"
-            )
-        return [
-            {renamed: original for original, renamed in layer.column_renames} for layer in layers
-        ]
-
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
 
@@ -1326,7 +1292,7 @@ class SpecBuildMixin:
             [{"field": f} for f in sorted(selection_field_names)] if selection_field_names else None
         )
 
-        for layer, restored in zip(layers, self._layer_column_restores(len(layers)), strict=True):
+        for layer in layers:
             layer_enc = layer.get("encoding") or {}
             if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
                 continue
@@ -1341,12 +1307,11 @@ class SpecBuildMixin:
             # otherwise take from the chart level, naming the columns its
             # own rows carry. Either way the layer draws the tooltip it
             # draws alone.
-            titles = _field_titles(layer_enc, restored)
             carried = set(layer.get("inherited_channels") or ()) | set(
                 layer.get("inherited_positional") or ()
             )
             own = {channel: value for channel, value in layer_enc.items() if channel not in carried}
-            layer_auto_fields = _auto_tooltip_fields(own, titles=titles)
+            layer_auto_fields = _auto_tooltip_fields(own)
             if not layer_auto_fields:
                 parent = {
                     channel: value
@@ -1354,7 +1319,7 @@ class SpecBuildMixin:
                     if channel != "tooltip_fields"
                     and ("data_source" not in layer or channel not in _POSITIONAL)
                 }
-                layer_auto_fields = _auto_tooltip_fields({**parent, **layer_enc}, titles=titles)
+                layer_auto_fields = _auto_tooltip_fields({**parent, **layer_enc})
             if selection_fields:
                 seen_fields = {f.get("field") for f in layer_auto_fields}
                 layer_auto_fields = layer_auto_fields + [

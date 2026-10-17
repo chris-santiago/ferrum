@@ -116,31 +116,8 @@ pub struct LayerPrepared {
     /// is inherited even though it sits on the layer's own encoding: Python
     /// wrote the parent's binding there and recorded that it did.
     pub color_is_own: bool,
-    /// Whether THIS layer's own (pre-merge) encoding declared an `x` / `y`
-    /// channel, as opposed to `encoding.x` / `encoding.y` (above) having been
-    /// filled in by [`Encoding::inherit_from`](crate::spec::encoding::Encoding::inherit_from)
-    /// from the chart level. The positional analog of [`color_is_own`], added
-    /// for the same reason (batch-A Task 13 spec c3, 2026-09-01): a reference
-    /// line declares the axis it belongs to by declaring exactly one
-    /// positional channel, and an inherited channel from a chart that happens
-    /// to set chart-level `x`/`y` must not be allowed to flip that axis. Like
-    /// `color_is_own`, this changes nothing about `encoding` itself — every
-    /// consumer that reads the merged positional channels (scale domains, the
-    /// axis builders, position grouping) sees exactly what it saw before; the
-    /// flags exist only so `scene_build.rs`'s per-layer `DrawCtx` construction
-    /// can decide whether a `Mark::Rule` layer's span axis is its own
-    /// declaration or borrowed. For `from_chart_only` (a chart with no
-    /// `layers`) there is no parent to inherit from, so "own" and "declared at
-    /// all" coincide.
-    ///
-    /// [`color_is_own`]: LayerPrepared::color_is_own
-    pub x_is_own: bool,
-    /// Whether THIS layer declared its own `y` channel — see [`x_is_own`].
-    ///
-    /// [`x_is_own`]: LayerPrepared::x_is_own
-    pub y_is_own: bool,
     /// Whether THIS layer's own encoding declared `size` / `stroke_width`,
-    /// captured before the merge the way [`x_is_own`] is. A line's width
+    /// captured before the merge the way [`color_is_own`] is. A line's width
     /// bindings outrank inherited ones: `scene_build` drops an inherited
     /// `size` or `stroke_width` from a line layer's `DrawCtx` encoding
     /// whenever the layer has another width source, so only a layer that
@@ -149,7 +126,6 @@ pub struct LayerPrepared {
     /// is inherited, as for [`color_is_own`].
     ///
     /// [`color_is_own`]: LayerPrepared::color_is_own
-    /// [`x_is_own`]: LayerPrepared::x_is_own
     pub size_is_own: bool,
     /// Whether THIS layer declared its own `stroke_width` channel — see
     /// [`size_is_own`].
@@ -185,8 +161,6 @@ impl LayerPrepared {
             independent_y: false,
             reads_chart_data: true,
             color_is_own: spec.encoding.color.is_some(),
-            x_is_own: spec.encoding.x.is_some(),
-            y_is_own: spec.encoding.y.is_some(),
             size_is_own: spec.encoding.size.is_some(),
             stroke_width_is_own: spec.encoding.stroke_width.is_some(),
             // A chart with no `layers` has no per-layer coord to resolve: its
@@ -211,42 +185,24 @@ impl LayerPrepared {
         // comment on [`LayerPrepared`]).
         //
         // `inherited_channels` is the non-positional counterpart of
-        // `inherited_positional` below: a channel Python wrote onto the
+        // `inherited_positional` (read by `completed_encoding`): a channel Python wrote onto the
         // layer's own encoding from its parent is present there but was never
         // declared by this layer, so it draws as an inherited one.
         let inherits = |channel| layer.inherited_channels.contains(&channel);
         let color_is_own =
             layer.encoding.color.is_some() && !inherits(crate::spec::layer::InheritedChannel::Color);
-        // Same capture-before-merge for the positional channels (batch-A Task
-        // 13 spec c3) — see `x_is_own`'s doc comment on [`LayerPrepared`].
-        // `inherited_positional` excludes a channel Python filled onto the
-        // layer's own encoding from an operand's chart-level encoding during
-        // `+` routing: that channel
-        // is present on `layer.encoding` but was never declared by this
-        // layer, so it is treated exactly as the standalone-inherited case —
-        // otherwise a filled span channel on a `mark_rule`/`mark_tick` layer
-        // would read as "own" and the own-span normalization would stop
-        // clearing it, turning an inherited spanning rule into a
-        // wrongly-owned one.
-        let x_is_own = layer.encoding.x.is_some()
-            && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::X);
-        let y_is_own = layer.encoding.y.is_some()
-            && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::Y);
         let size_is_own =
             layer.encoding.size.is_some() && !inherits(crate::spec::layer::InheritedChannel::Size);
         let stroke_width_is_own = layer.encoding.stroke_width.is_some()
             && !inherits(crate::spec::layer::InheritedChannel::StrokeWidth);
-        let mut encoding = layer.encoding.clone();
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the
         // chart level. Inheriting x/y would inject the primary batch's field
         // into a layer that reads a different named output, causing marks like
-        // rule to iterate over rows they don't own.
-        if layer.data_source.is_some() {
-            encoding.inherit_non_positional(&spec.encoding);
-        } else {
-            encoding.inherit_from(&spec.encoding);
-        }
+        // rule to iterate over rows they don't own. Of the positional bindings
+        // the layer did not write, it keeps only those its mark draws, so the
+        // gate, the mark builder and every domain read judge one encoding.
+        let mut encoding = layer.completed_encoding(&spec.encoding);
         // An independent-y layer's y scale is its own, never the chart's: the
         // chart-level y scale belongs to the primary axis (a bar's zero
         // anchor, say), while this layer's axis spans its own data, as
@@ -271,8 +227,6 @@ impl LayerPrepared {
             independent_y: layer.independent_y,
             reads_chart_data: layer.data_source.is_none() || layer.reads_chart_data,
             color_is_own,
-            x_is_own,
-            y_is_own,
             size_is_own,
             stroke_width_is_own,
             coord: layer.effective_coord(spec.coord.as_ref()).cloned(),
@@ -281,28 +235,12 @@ impl LayerPrepared {
 
     /// Swap every coordinate-space field between the x and y roles (CoordFlip).
     ///
-    /// The provenance flags are coordinate-space-consistent (spec §4.4,
-    /// "Extended 2026-09-02, T13 spec c4"): whatever stage swaps the positional
-    /// channels swaps `x_is_own`/`y_is_own` with them, so a flag always
-    /// describes the slot its channel currently occupies, and a coord-flipped
-    /// rule span renders exactly as its unflipped counterpart does on the other
-    /// axis. The swap therefore lives here as ONE operation over the whole
-    /// coordinate-space group rather than as a sequence of field swaps at the
-    /// call site: a coordinate-space field added to this struct later is an
-    /// omission visible in this single method instead of a silent half-swap
-    /// somewhere in the pipeline.
-    ///
-    /// The invariant is load-bearing for `scene_build`'s rule own-span-axis
-    /// normalization. Flags left behind by the swap would describe the PRE-flip
-    /// slots while `encoding` held the POST-flip ones, so the normalization
-    /// would clear the layer's OWN channel and keep the inherited one: the
-    /// exact inversion of its intent, refusing `mark_rule().encode(x=...)`
-    /// under `CoordFlip` and drawing an inherited column's values for a flipped
-    /// layered reference line.
-    ///
-    /// It is equally load-bearing for `mark_style.value_axis` (`#172`(2)) —
-    /// the third member of the group, and the field whose omission from this
-    /// method proved the doc comment above right.
+    /// The swap lives here as ONE operation over the whole coordinate-space
+    /// group rather than as a sequence of field swaps at the call site: a
+    /// coordinate-space field added to this struct later is an omission
+    /// visible in this single method instead of a silent half-swap somewhere
+    /// in the pipeline. `mark_style.value_axis` (`#172`(2)) is the second
+    /// member of the group, beside the encoding itself.
     ///
     /// # The one coordinate-space field this method deliberately does NOT swap
     ///
@@ -332,7 +270,6 @@ impl LayerPrepared {
         // flip mapping, shared with `numeric_domain_union`'s coordinate-space
         // -aware layer read so the two can never disagree.
         self.encoding.flip_positional();
-        std::mem::swap(&mut self.x_is_own, &mut self.y_is_own);
         // `#172`(2): `mark_style.value_axis` NAMES A CHANNEL, so it is a
         // coordinate-space field and belongs to the group this method owns —
         // the omission this doc comment anticipated.
@@ -1286,7 +1223,7 @@ pub fn prepare_render_inputs(
     // Clone spec and substitute the rendering encoding so resolve_scales works
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
-    let rendering_encoding = &establishing_encoding(&layers)?;
+    let rendering_encoding = &establishing_encoding(spec, &layers)?;
     let mut rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
@@ -1577,17 +1514,36 @@ fn run_transforms_with_facet(
     // Wrap mode (fspec.row is None): partition on fspec.field only — behavior unchanged.
     // Each partition carries (col_val, optional_row_val) → RecordBatch.
     // Grid mode populates the row value; wrap mode leaves it None.
+    //
+    // A row its operand's frame lacks a facet field for repeats along that
+    // field in every panel (`FacetSpec::repeat`); every other row with a null
+    // facet value belongs to no panel and is dropped, one warning per field.
+    refuse_malformed_facet_repeats(fspec)?;
+    let col_repeat = facet_repeat_mask(normalized, &fspec.repeat, &fspec.field)?;
+    let mut dropped_nulls = vec![(
+        fspec.field.as_str(),
+        null_facet_rows(facet_str_arr(normalized, &fspec.field)?, &col_repeat),
+    )];
     let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if let Some(row_field) = &fspec.row {
-        partition_batch_by_two_fields(normalized, &fspec.field, row_field)?
-            .into_iter()
-            .map(|((col_val, row_val), batch)| ((col_val, Some(row_val)), batch))
-            .collect()
+        let row_repeat = facet_repeat_mask(normalized, &fspec.repeat, row_field)?;
+        dropped_nulls.push((row_field.as_str(), null_facet_rows(facet_str_arr(normalized, row_field)?, &row_repeat)));
+        partition_batch_by_two_fields(
+            normalized,
+            (&fspec.field, &col_repeat),
+            (row_field, &row_repeat),
+        )?
+        .into_iter()
+        .map(|((col_val, row_val), batch)| ((col_val, Some(row_val)), batch))
+        .collect()
     } else {
-        partition_batch_by_field(normalized, &fspec.field)?
+        partition_batch_by_field(normalized, &fspec.field, &col_repeat)?
             .into_iter()
             .map(|(col_val, batch)| ((col_val, None), batch))
             .collect()
     };
+    if partitions.is_empty() {
+        return Err(RenderError::EmptyDomain { channel: "facet".to_string(), field: fspec.field.clone() });
+    }
 
     // Grid dims for the per-cell panel-size estimate (M2): grid mode's
     // nrows/ncols are explicit on the facet spec; wrap mode's ncols is
@@ -1614,8 +1570,17 @@ fn run_transforms_with_facet(
         // facet level must degrade like a `groupby` group, not refuse the
         // whole chart the way an actual whole-frame rank-deficient fit does).
         is_partition: true,
+        facet_fields: std::iter::once(&fspec.field).chain(&fspec.row).cloned().collect(),
         ..TransformContext::default()
     };
+    for (field, rows) in dropped_nulls {
+        if rows > 0 {
+            ctx.warn(crate::transform::context::TransformWarning::FacetNullRowsDropped {
+                field: field.to_string(),
+                rows,
+            });
+        }
+    }
 
     // Pin a shared value-axis extent from the full (pre-partition) batch for
     // every extent-carrying transform (Kde / Bin / Violin / Kde2D / Bin2D)
@@ -1789,11 +1754,35 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
 /// legend) is the one the scale's kind and the legend's title come from.
 /// The scale's domain still spans every drawing layer
 /// (`scale_resolve`'s per-layer reads).
-fn establishing_encoding(layers: &[LayerPrepared]) -> Result<crate::spec::encoding::Encoding, RenderError> {
+///
+/// The positional axes follow the same rule: an `x`/`y` layer 0 does not
+/// draw (a one-axis reference rule, which takes no inherited opposite
+/// channel) is established by the first later layer that draws it, else by
+/// the chart-level binding layer 0 reads its data under, so the axis keeps
+/// its field when no layer draws the channel.
+fn establishing_encoding(
+    spec: &ChartSpec,
+    layers: &[LayerPrepared],
+) -> Result<crate::spec::encoding::Encoding, RenderError> {
     let (lead, rest) = layers.split_first().ok_or(RenderError::LayeredChartNoLayers)?;
     let mut encoding = lead.encoding.clone();
     for layer in rest {
         encoding.take_unbound_auxiliary_scale_channels(&layer.encoding);
+    }
+    if spec.layers.is_some() {
+        let mut chart = spec.encoding.clone();
+        if crate::spec::coord::flips_positional_channels(lead.coord.as_ref()) {
+            chart.flip_positional();
+        }
+        for channel in [crate::spec::layer::PositionalChannel::X, crate::spec::layer::PositionalChannel::Y] {
+            if channel.slot(&encoding).is_some() {
+                continue;
+            }
+            let shares_axis = |layer: &&LayerPrepared| !(channel == crate::spec::layer::PositionalChannel::Y && layer.independent_y);
+            let drawn = rest.iter().filter(shares_axis).find_map(|layer| channel.slot(&layer.encoding).clone());
+            let read_under = || channel.slot(&chart).clone().filter(|_| lead.data_source.is_none());
+            *channel.slot_mut(&mut encoding) = drawn.or_else(read_under);
+        }
     }
     Ok(encoding)
 }
@@ -1909,13 +1898,12 @@ pub(crate) struct SecondaryYAxes {
 ///
 /// **Where it runs, and why there.** `scene_build`, immediately before
 /// `validate_mark_encoding`, on the DrawCtx-local `layer_spec.encoding` — the
-/// post-normalization copy the mark builder actually reads — and against the
-/// layer's own PRE-position-adjust batch. Both refusal gates therefore judge
-/// one encoding: a refusal gate and the geometry must not
-/// disagree about a layer's shape. Placed on the other side of the rule/tick own-span
-/// normalization, this gate refused a `mark_rule`/`mark_tick`
-/// layer for an inherited channel that normalization then cleared and no
-/// builder ever read — e.g. a chart whose `x` names a named-fan-out transform
+/// copy the mark builder actually reads — and against the layer's own
+/// PRE-position-adjust batch. Both refusal gates therefore judge one
+/// encoding: a refusal gate and the geometry must not disagree about a
+/// layer's shape. Because layer completion gives a one-axis `mark_rule`/
+/// `mark_tick` no inherited opposite channel, the gate never refuses one
+/// for a channel no builder reads — e.g. a chart whose `x` names a named-fan-out transform
 /// output column (absent from `__final__`, found by `locate_field` only in the
 /// named output) plus an added `mark_rule().encode(y=…)`, which renders
 /// correctly and must keep rendering. `scale_resolve::resolve_layer_y_slot_scale`
@@ -1941,19 +1929,19 @@ pub(crate) struct SecondaryYAxes {
 ///
 /// **Known boundary.** Marks that ignore positional channels entirely
 /// (`Mark::Arc`, `Mark::Geoshape`) are still refusable on an inherited `x`/`y`
-/// they never read — nothing normalizes those away the way rule/tick's own-span
-/// rule does. Left as-is deliberately: every constructible shape was already
-/// degenerate (`mark_arc` under a non-Polar coord refuses earlier via
+/// they never read — layer completion keeps every inherited `x`/`y` on them
+/// ([`crate::spec::mark::Mark::inherited_positional`]). Left as-is
+/// deliberately: every constructible shape was already degenerate
+/// (`mark_arc` under a non-Polar coord refuses earlier via
 /// [`RenderError::MarkRequiresCoord`], and its dropped-channel case already
-/// warns), so widening the gate with a per-mark "does this mark read
-/// positional channels" table would add a second, drift-prone answer to a
-/// question `dispatch_mark_build` already owns.
+/// warns).
 ///
 /// Checks in a fixed channel order so the reported channel is deterministic
 /// when a layer gets more than one of them wrong.
 ///
-/// `encoding` is the encoding the layer's mark builder will see (after the
-/// rule/tick own-span normalization), and `batch` the layer's own batch; the
+/// `encoding` is the encoding the layer's mark builder will see (the
+/// layer's completed encoding, [`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding)),
+/// and `batch` the layer's own batch; the
 /// layer's other facts come from `layer`. A missing column's remedy
 /// ([`RenderError::LayerUnknownColumn::remedy`]) is classified by
 /// [`missing_column_remedy`] against `pipeline`.
@@ -1999,6 +1987,27 @@ pub(in crate::render) fn validate_layer_positional_columns(
 pub(in crate::render) struct PipelineBatches<'a> {
     pub(in crate::render) source: &'a Schema,
     pub(in crate::render) outputs: &'a HashMap<String, RecordBatch>,
+    /// The chart's top-level transforms, read for the input a layer's branch
+    /// starts from ([`chart_rows_schema`]).
+    pub(in crate::render) transforms: &'a [crate::transform::core::TransformSpec],
+}
+
+/// The schema of the rows a layer reading its chart's data starts from: the
+/// published batch its branch reads as `input` when the layer's
+/// `data_source` names a top-level branch that reads one (a composition's
+/// left operand's own rows), else the pipeline's source schema.
+fn chart_rows_schema<'a>(layer: &LayerPrepared, pipeline: &PipelineBatches<'a>) -> Option<SchemaRef> {
+    use crate::transform::core::TransformSpec;
+    let input = layer.data_source.as_deref().and_then(|name| {
+        pipeline.transforms.iter().find_map(|t| match t {
+            TransformSpec::Branch(b) if b.name == name => b.input.as_deref(),
+            _ => None,
+        })
+    });
+    match input {
+        Some(key) => pipeline.outputs.get(key).map(RecordBatch::schema),
+        None => Some(Arc::new(pipeline.source.clone())),
+    }
 }
 
 /// Where a column missing from a layer's own batch exists, for a layer that
@@ -2009,7 +2018,10 @@ pub(in crate::render) struct PipelineBatches<'a> {
 /// Precedence: the source batch first, since a source column the chain
 /// dropped is drawable from the source; then any batch the pipeline
 /// produced, where the column is a statistic another layer's mark computes;
-/// otherwise the column exists nowhere (a typo) and gets `None`.
+/// otherwise the column exists nowhere (a typo) and gets `None`. The source
+/// is the rows the layer's chart data starts from ([`chart_rows_schema`]): a
+/// composition's left operand's own rows, never the merged frame, which
+/// holds a sibling operand's columns too.
 fn missing_column_remedy(
     name: &str,
     layer: &LayerPrepared,
@@ -2018,54 +2030,13 @@ fn missing_column_remedy(
     use crate::render::MissingColumnRemedy;
     if !layer.reads_chart_data {
         None
-    } else if pipeline.source.index_of(name).is_ok() {
+    } else if chart_rows_schema(layer, pipeline).is_some_and(|schema| schema.index_of(name).is_ok()) {
         Some(MissingColumnRemedy::Source)
     } else if pipeline.outputs.values().any(|b| b.column_by_name(name).is_some()) {
         Some(MissingColumnRemedy::Statistic)
     } else {
         None
     }
-}
-
-/// The rule/tick own-span-axis normalization (spec §4.4). A reference-line
-/// layer, or a rug tick, declares the axis it belongs to by declaring
-/// exactly one positional channel. When the chart (or, for the y-slot route,
-/// the merged encoding) also binds the opposite channel, that layer's own
-/// shape is one-channel but the encoding handed to the mark builder would
-/// otherwise carry both — so this clears the inherited one, leaving only the
-/// channel the layer actually declared. Deliberately narrow: only for
-/// `Mark::Rule`/`Mark::Tick`, and only when the encoding binds neither `x2`
-/// nor `y2` — a ranged/diagonal shape assembled partly from inherited
-/// channels keeps assembling it, and a layer that declares both `x` and `y`
-/// itself (a composite tick layer such as a boxplot whisker-cap) keeps its
-/// own two-channel shape.
-///
-/// Shared by [`crate::render::scene_build`]'s per-panel `layer_geometry_encoding`
-/// (which also applies its own color/width steps around this one) and
-/// [`crate::render::scale_resolve::resolve_layer_y_slot_scale`] (the
-/// `SecondaryY(...)`/independent-y route), each of which normalizes before
-/// calling [`validate_layer_positional_columns`] — so the gate and the mark
-/// builder judge the SAME encoding on both routes: an independent-y tick
-/// that declares only `y`, with `x` inherited from the chart, is never
-/// refused on that inherited `x`, since neither route's mark builder ever
-/// reads it.
-pub(in crate::render) fn normalize_rule_tick_own_span(
-    mut encoding: crate::spec::encoding::Encoding,
-    mark: crate::spec::mark::Mark,
-    x_is_own: bool,
-    y_is_own: bool,
-) -> crate::spec::encoding::Encoding {
-    if matches!(mark, crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick)
-        && encoding.x2.is_none()
-        && encoding.y2.is_none()
-    {
-        match (x_is_own, y_is_own) {
-            (true, false) => encoding.y = None,
-            (false, true) => encoding.x = None,
-            _ => {}
-        }
-    }
-    encoding
 }
 
 /// What [`build_axes`] produces: the axis inputs, the two resolved primary tick
@@ -4021,12 +3992,97 @@ fn facet_str_arr<'a>(
         })
 }
 
+/// Refuse a `FacetSpec::repeat` entry naming a field the facet does not
+/// split by: Python names only the facet's own fields, so any other is a
+/// malformed wire, not a field to ignore.
+fn refuse_malformed_facet_repeats(fspec: &crate::layout::FacetSpec) -> Result<(), RenderError> {
+    for entry in &fspec.repeat {
+        if let Some(field) =
+            entry.fields.iter().find(|f| **f != fspec.field && Some(*f) != fspec.row.as_ref())
+        {
+            return Err(RenderError::ScaleResolutionFailed(format!(
+                "facet repeat for rows marked '{}' names '{field}', which is not a facet field",
+                entry.marker
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Per row of `batch`, whether it repeats along `field` in every panel: its
+/// marker is true in a `repeats` entry naming `field`. All false when no
+/// entry names it. A marker the batch lacks, or one that is not Boolean, is a
+/// malformed wire and is refused.
+fn facet_repeat_mask(
+    batch: &RecordBatch,
+    repeats: &[crate::layout::FacetRepeat],
+    field: &str,
+) -> Result<Vec<bool>, RenderError> {
+    let mut mask = vec![false; batch.num_rows()];
+    for entry in repeats.iter().filter(|e| e.fields.iter().any(|f| f == field)) {
+        let column = batch
+            .column_by_name(&entry.marker)
+            .ok_or_else(|| RenderError::UnknownColumn { name: entry.marker.clone() })?;
+        let marker = column.as_any().downcast_ref::<arrow::array::BooleanArray>().ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!(
+                "facet repeat marker '{}' must be Boolean",
+                entry.marker
+            ))
+        })?;
+        for (row, repeats) in mask.iter_mut().enumerate() {
+            *repeats |= marker.is_valid(row) && marker.value(row);
+        }
+    }
+    Ok(mask)
+}
+
+/// How many rows of a facet field's `values` belong to no panel: null and
+/// not repeated across panels.
+fn null_facet_rows(values: &StringArray, repeat: &[bool]) -> usize {
+    repeat.iter().enumerate().filter(|&(row, &repeats)| !repeats && values.is_null(row)).count()
+}
+
+/// `panel` with `value` written into its Utf8 `field` column on every row
+/// `repeated` marks, so a repeated row carries the panel it is drawn in, as
+/// every other row in the panel does. Unchanged when no row repeats.
+fn write_repeated_facet_value(
+    panel: RecordBatch,
+    field: &str,
+    value: &str,
+    repeated: &[bool],
+) -> Result<RecordBatch, RenderError> {
+    if !repeated.contains(&true) {
+        return Ok(panel);
+    }
+    let index = panel.schema().index_of(field).map_err(|_| RenderError::UnknownColumn { name: field.to_string() })?;
+    let values = facet_str_arr(&panel, field)?;
+    let written: StringArray = values
+        .iter()
+        .zip(repeated)
+        .map(|(own, &repeats)| if repeats { Some(value) } else { own })
+        .collect();
+    let mut columns: Vec<ArrayRef> = panel.columns().to_vec();
+    columns[index] = Arc::new(written);
+    RecordBatch::try_new(panel.schema(), columns)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("facet repeat for '{field}': {e}")))
+}
+
+/// The rows `mask` keeps, each paired with whether it repeats.
+fn kept_repeats(mask: &arrow::array::BooleanArray, repeat: &[bool]) -> Vec<bool> {
+    repeat.iter().enumerate().filter(|&(row, _)| mask.value(row)).map(|(_, &repeats)| repeats).collect()
+}
+
 /// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
+///
+/// The panel values come from the rows that do not `repeat`; a row that
+/// repeats joins every panel, carrying that panel's value in `field`. A
+/// non-repeated row with a null value joins none.
 fn partition_batch_by_field(
     batch: &RecordBatch,
     field: &str,
+    repeat: &[bool],
 ) -> Result<Vec<(String, RecordBatch)>, RenderError> {
     use arrow::array::BooleanArray;
     use arrow::compute::filter_record_batch;
@@ -4034,7 +4090,8 @@ fn partition_batch_by_field(
     // Collect distinct values in first-appearance order.
     let mut order: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for v in arr.iter().flatten() {
+    for (v, &repeats) in arr.iter().zip(repeat) {
+        let Some(v) = v.filter(|_| !repeats) else { continue };
         let s = v.to_string();
         if seen.insert(s.clone()) {
             order.push(s);
@@ -4044,10 +4101,12 @@ fn partition_batch_by_field(
     for value in order {
         let mask: BooleanArray = arr
             .iter()
-            .map(|v| Some(v.map(|s| s == value.as_str()).unwrap_or(false)))
+            .zip(repeat)
+            .map(|(v, &repeats)| Some(repeats || v == Some(value.as_str())))
             .collect();
         let filtered = filter_record_batch(batch, &mask)
             .map_err(|e| RenderError::ScaleResolutionFailed(format!("partition filter: {e}")))?;
+        let filtered = write_repeated_facet_value(filtered, field, &value, &kept_repeats(&mask, repeat))?;
         result.push((value, filtered));
     }
     Ok(result)
@@ -4253,16 +4312,24 @@ type GridPartitionKey = (String, String);
 /// Partition a RecordBatch by two Utf8 fields (col_field, row_field), returning
 /// `((col_val, row_val), filtered_batch)` pairs in row-major first-appearance
 /// order. Used by facet-before-transform in grid mode.
+///
+/// Each field comes with its repeat mask: a row repeating along a field joins
+/// every value of it, carrying each cell's value, and is partitioned normally
+/// along the other. A row that does not repeat along a field and is null
+/// there joins no cell. Distinct values along a field come from the kept rows
+/// that do not repeat along it.
 fn partition_batch_by_two_fields(
     batch: &RecordBatch,
-    col_field: &str,
-    row_field: &str,
+    (col_field, col_repeat): (&str, &[bool]),
+    (row_field, row_repeat): (&str, &[bool]),
 ) -> Result<Vec<(GridPartitionKey, RecordBatch)>, RenderError> {
     use arrow::array::{Array, BooleanArray};
     use arrow::compute::filter_record_batch;
 
     let col_arr = facet_str_arr(batch, col_field)?;
     let row_arr = facet_str_arr(batch, row_field)?;
+    let joins_col = |i: usize| col_repeat[i] || !col_arr.is_null(i);
+    let joins_row = |i: usize| row_repeat[i] || !row_arr.is_null(i);
 
     // Collect distinct (row_val, col_val) pairs in row-major first-appearance order.
     let mut row_order: Vec<String> = Vec::new();
@@ -4271,16 +4338,20 @@ fn partition_batch_by_two_fields(
     let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for i in 0..batch.num_rows() {
-        if row_arr.is_null(i) || col_arr.is_null(i) {
+        if !joins_col(i) || !joins_row(i) {
             continue;
         }
-        let rv = row_arr.value(i).to_string();
-        let cv = col_arr.value(i).to_string();
-        if row_seen.insert(rv.clone()) {
-            row_order.push(rv);
+        if !row_repeat[i] {
+            let rv = row_arr.value(i).to_string();
+            if row_seen.insert(rv.clone()) {
+                row_order.push(rv);
+            }
         }
-        if col_seen.insert(cv.clone()) {
-            col_order.push(cv);
+        if !col_repeat[i] {
+            let cv = col_arr.value(i).to_string();
+            if col_seen.insert(cv.clone()) {
+                col_order.push(cv);
+            }
         }
     }
 
@@ -4289,10 +4360,9 @@ fn partition_batch_by_two_fields(
         for col_v in &col_order {
             let mask: BooleanArray = (0..batch.num_rows())
                 .map(|i| {
-                    if col_arr.is_null(i) || row_arr.is_null(i) {
-                        return Some(false);
-                    }
-                    Some(col_arr.value(i) == col_v.as_str() && row_arr.value(i) == row_v.as_str())
+                    let in_col = col_repeat[i] || (!col_arr.is_null(i) && col_arr.value(i) == col_v.as_str());
+                    let in_row = row_repeat[i] || (!row_arr.is_null(i) && row_arr.value(i) == row_v.as_str());
+                    Some(in_col && in_row)
                 })
                 .collect();
             // Skip (row_v, col_v) pairs that have no rows in this batch (sparse cross-products).
@@ -4302,6 +4372,8 @@ fn partition_batch_by_two_fields(
             let filtered = filter_record_batch(batch, &mask).map_err(|e| {
                 RenderError::ScaleResolutionFailed(format!("partition filter: {e}"))
             })?;
+            let filtered = write_repeated_facet_value(filtered, col_field, col_v, &kept_repeats(&mask, col_repeat))?;
+            let filtered = write_repeated_facet_value(filtered, row_field, row_v, &kept_repeats(&mask, row_repeat))?;
             result.push(((col_v.clone(), row_v.clone()), filtered));
         }
     }
@@ -4319,6 +4391,77 @@ mod grid_partition_tests {
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    /// No row repeats along either field: every pre-repeat partition.
+    fn no_repeat(batch: &RecordBatch) -> Vec<bool> {
+        vec![false; batch.num_rows()]
+    }
+
+    fn utf8(batch: &RecordBatch, field: &str) -> Vec<Option<String>> {
+        facet_str_arr(batch, field).expect("Utf8 facet column").iter().map(|v| v.map(str::to_string)).collect()
+    }
+
+    /// A wrap partition over `c = [p, q, null, null, null]` whose rows 2 and 3
+    /// repeat: each panel holds its own row plus both repeated rows, written
+    /// with the panel's value; row 4 (null, not repeated) is in no panel and
+    /// is the one counted. The rejected reading partitions the repeated rows
+    /// by their null value, so they reach no panel.
+    #[test]
+    fn a_repeated_row_joins_every_wrap_panel_with_its_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("p"), Some("q"), None, None, None])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let repeat = [false, false, true, true, false];
+        let partitions = partition_batch_by_field(&batch, "c", &repeat).unwrap();
+        let values: Vec<&str> = partitions.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(values, ["p", "q"]);
+        for (value, panel) in &partitions {
+            assert_eq!(utf8(panel, "c"), vec![Some(value.clone()); 3]);
+        }
+        let v = |panel: &RecordBatch| {
+            panel.column_by_name("v").unwrap().as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec()
+        };
+        assert_eq!(v(&partitions[0].1), [1.0, 3.0, 4.0]);
+        assert_eq!(v(&partitions[1].1), [2.0, 3.0, 4.0]);
+        assert_eq!(null_facet_rows(facet_str_arr(&batch, "c").unwrap(), &repeat), 1);
+    }
+
+    /// A grid whose second frame lacks only the row field: its rows (2, 3)
+    /// partition by their column value and repeat down every row value. The
+    /// rejected reading drops them for their null row value.
+    #[test]
+    fn a_row_lacking_only_the_row_field_repeats_down_its_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("col_cat", DataType::Utf8, true),
+            Field::new("row_cat", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c1"), Some("c2"), Some("c1"), Some("c2")])),
+                Arc::new(StringArray::from(vec![Some("r1"), Some("r2"), None, None])),
+            ],
+        )
+        .unwrap();
+        let row_repeat = [false, false, true, true];
+        let partitions =
+            partition_batch_by_two_fields(&batch, ("col_cat", &no_repeat(&batch)), ("row_cat", &row_repeat)).unwrap();
+        let cells: Vec<(&str, &str, usize)> =
+            partitions.iter().map(|((c, r), b)| (c.as_str(), r.as_str(), b.num_rows())).collect();
+        assert_eq!(cells, [("c1", "r1", 2), ("c2", "r1", 1), ("c1", "r2", 1), ("c2", "r2", 2)]);
+        let (_, r2c2) = &partitions[3];
+        assert_eq!(utf8(r2c2, "row_cat"), [Some("r2".to_string()), Some("r2".to_string())]);
+        assert_eq!(utf8(r2c2, "col_cat"), [Some("c2".to_string()), Some("c2".to_string())]);
+    }
 
     /// Build a 3×3 grid batch: 3 row categories × 3 col categories, 2 data rows each.
     fn grid_3x3_batch() -> RecordBatch {
@@ -4352,7 +4495,7 @@ mod grid_partition_tests {
     #[test]
     fn partition_by_two_fields_produces_correct_count() {
         let batch = grid_3x3_batch();
-        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        let partitions = partition_batch_by_two_fields(&batch, ("col_cat", &no_repeat(&batch)), ("row_cat", &no_repeat(&batch))).unwrap();
         // 3 row values × 3 col values = 9 partitions.
         assert_eq!(
             partitions.len(),
@@ -4365,7 +4508,7 @@ mod grid_partition_tests {
     #[test]
     fn partition_by_two_fields_each_partition_has_correct_row_count() {
         let batch = grid_3x3_batch();
-        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        let partitions = partition_batch_by_two_fields(&batch, ("col_cat", &no_repeat(&batch)), ("row_cat", &no_repeat(&batch))).unwrap();
         for ((col_v, row_v), part_batch) in &partitions {
             assert_eq!(
                 part_batch.num_rows(),
@@ -4379,7 +4522,7 @@ mod grid_partition_tests {
     #[test]
     fn partition_by_two_fields_row_major_order() {
         let batch = grid_3x3_batch();
-        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        let partitions = partition_batch_by_two_fields(&batch, ("col_cat", &no_repeat(&batch)), ("row_cat", &no_repeat(&batch))).unwrap();
         // Row-major: (r1,c1), (r1,c2), (r1,c3), (r2,c1), ...
         let keys: Vec<(&str, &str)> = partitions
             .iter()

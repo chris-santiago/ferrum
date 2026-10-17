@@ -1053,6 +1053,14 @@ def mark_string_kwargs() -> list[str]: ...
 # table (``Mark::size_drawing``). Every other mark refuses a constant size.
 def marks_drawing_constant_size() -> list[str]: ...
 
+# The subset of ``offered`` (inherited positional channels, wire names ``x``,
+# ``y``, ``x2``, ``y2``) a layer of primitive ``mark`` takes, given the
+# positional channels ``own`` it writes itself, in wire order: from Rust's one
+# per-mark table (``Mark::inherited_positional``). A span channel is taken
+# only by a mark that draws it; a rule or tick writing exactly one of x/y and
+# no span takes no other. An unknown mark or channel raises ``ValueError``.
+def mark_inherited_positional(mark: str, own: list[str], offered: list[str]) -> list[str]: ...
+
 # Run the render-time constant-size rule early: raise ``ValueError`` with the
 # render refusal's exact text, voiced as ``entry``, when ``mark`` never draws a
 # constant size or ``size`` is not a finite number above zero. ``mark`` must be

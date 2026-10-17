@@ -34,7 +34,7 @@ from ferrum._encode_lowering import (
 from ferrum.encoding._aliases import layered_chart_detail, resolved_channel
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, _POLAR_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._layer import _Layer
+from ferrum._layer import _Layer, inherited_positional_taken
 
 
 class _NamedTransform:
@@ -121,12 +121,19 @@ class ChartRows:
         On a flat chart, the index in ``chart._transforms`` where the mark's
         statistics begin, where a later ``.transform(...)`` is inserted;
         ``None`` on a composition, whose later steps append.
+    columns :
+        The columns of the chart's data before *steps*, when the pipeline's
+        input holds other rows too: on a ``+`` composition, its left
+        operand's, since the composition's frame also holds the right
+        operand's rows and columns. ``None`` when the data is the input
+        itself, or its columns are not known.
     """
 
     input: str | None
     steps: tuple
     at_tail: bool
     boundary: int | None
+    columns: tuple[str, ...] | None = None
 
 
 def _chain_steps(transforms: list) -> tuple:
@@ -445,37 +452,6 @@ _POSITIONAL = ("x", "y", "x2", "y2")
 _CHART_CHANNELS = frozenset(_POSITIONAL) | _POLAR_CHANNELS | _FACET_CHANNELS
 
 
-def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
-    """Return a copy of *encoding* with field names replaced per *renames*.
-
-    *renames* maps original column names to their internal collision-rename
-    (the ``__rhs_<n>`` suffix ``Chart.__add__`` applies to a right column
-    that collides with a left one). The renamed field is required for
-    correct data lookup, but the internal name must never be what the user
-    sees, so whenever a channel's field is renamed, the caller has not set
-    an explicit ``title=`` and the channel honors ``title``, the ORIGINAL
-    field name is stamped on as the channel's title. A channel that takes no
-    title (``Tooltip``, the opacity family) keeps its kwargs as written.
-    """
-    import copy
-
-    out = {}
-    for ch, val in encoding.items():
-        if isinstance(val, ChannelBase):
-            if val.field in renames:
-                original_field = val.field
-                val = copy.copy(val)
-                val.field = renames[original_field]
-                if "title" not in val._kwargs and "title" in type(val)._honored_kwargs:
-                    val._kwargs = {**val._kwargs, "title": original_field}
-        elif isinstance(val, str):
-            bare, _, suffix = val.partition(":")
-            if bare in renames:
-                val = renames[bare] + (":" + suffix if suffix else "")
-        out[ch] = val
-    return out
-
-
 def _effective_encoding(layer: _Layer, parent: dict) -> dict:
     """The bindings *layer* draws: its own merged over its *parent*'s, channel by channel.
 
@@ -494,14 +470,17 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
     (``data_source``) takes no positional channel from *parent*, as Rust's
     ``inherit_non_positional`` gives it none; its x/y fallback is copied onto
     it by ``ferrum.chart._fill_chart_positional``. A parent field names the
-    same-named column of the rows the layer reads: under the layer's
-    ``column_renames`` when those rows carry a merge's renamed columns. A
-    ``None`` value binds nothing, so the parent's binding arrives as for a
-    channel the layer leaves out. A binding an earlier step carried onto the
+    same-named column of the rows the layer reads. A ``None`` value binds
+    nothing, so the parent's binding arrives as for a channel the layer
+    leaves out. A binding an earlier step carried onto the
     layer from a nearer parent (:func:`_own_channels`) is drawn, but shadows
-    no alias spelling of it the way the layer's own does.
+    no alias spelling of it the way the layer's own does. A parent's x, y, x2
+    or y2 arrives only where the layer's mark draws it
+    (:func:`~ferrum._layer.inherited_positional_taken`), so the layer's
+    statistic never groups by a positional field it does not draw.
     """
-    own = {resolved_channel(channel) for channel in _own_channels(layer)}
+    own_channels = _own_channels(layer)
+    own = {resolved_channel(channel) for channel in own_channels}
     bound = _bound(layer.encoding)
     # A channel the layer binds under the parent's own spelling keeps the
     # parent's position in the result (the layer's value replaces it below),
@@ -513,8 +492,13 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
         if (layer.data_source is None or channel not in _POSITIONAL)
         and (channel in bound or resolved_channel(channel) not in own)
     }
-    if layer.column_renames:
-        inherited = _rename_encoding_fields(inherited, dict(layer.column_renames))
+    offered = [channel for channel in _POSITIONAL if channel in inherited and channel not in bound]
+    taken = inherited_positional_taken(layer.mark, own_channels, offered)
+    inherited = {
+        channel: value
+        for channel, value in inherited.items()
+        if channel not in offered or channel in taken
+    }
     return {**inherited, **bound}
 
 
@@ -597,8 +581,7 @@ def _carried_bindings(layer: _Layer, parent: dict, drawn: dict) -> dict:
     Rust completes each layer from the chart-level encoding, *parent*, so an
     inherited binding *drawn* takes unchanged from *parent* stays there. The
     layer carries the rest: its own bindings, and each inherited one its
-    statistic lowered or its renamed columns renamed, which the chart-level
-    copy does not name.
+    statistic lowered, which the chart-level copy does not name.
     """
     bound = _bound(layer.encoding)
     return {
@@ -611,10 +594,10 @@ def _carried_bindings(layer: _Layer, parent: dict, drawn: dict) -> dict:
 def _layers_over_parent(layers: list, parent: dict) -> list:
     """Prepare each of *layers* to draw its effective encoding over *parent*.
 
-    A layer whose inherited bindings name renamed columns carries them
-    (:func:`_carried_bindings`), listed as inherited. A layer reading the chart's tail whose
-    effective encoding computes a statistic will read that statistic's named
-    output, where Rust passes it none of the chart's positional channels, so
+    Each layer carries only its own bindings (:func:`_carried_bindings`); the
+    rest it inherits from *parent* on the wire. A layer reading the chart's
+    tail whose effective encoding computes a statistic will read that
+    statistic's named output, where Rust passes it none of the chart's positional channels, so
     it takes them from the chart's encoding (``positional_source="encoding"``,
     filled by ``ferrum.chart._fill_chart_positional``, which lists each copy
     in ``inherited_positional``).
@@ -658,21 +641,32 @@ def _statistic_columns(encoding: dict) -> set:
     return columns
 
 
+def _record_columns(data, rows: ChartRows) -> list[str] | None:
+    """The columns of the data record *rows* over the frame *data*, when known; else ``None``.
+
+    Known when no step of the record advances the chain: then they are the
+    record's own ``columns`` (a composition's left operand's), else, when
+    the record starts from the source, *data*'s columns. An encoding
+    aggregate or bin is computed per layer and is no chain step. Rows a
+    user's ``.transform(...)`` step produced are the engine's to know.
+    """
+    if data is None or any(_advances_chain(t) for t in rows.steps):
+        return None
+    if rows.columns is not None:
+        return list(rows.columns)
+    if rows.input is not None:
+        return None
+    return list(data.columns)
+
+
 def _known_chart_data_columns(chart) -> list[str] | None:
     """The columns of *chart*'s data, when Python knows them; else ``None``.
 
-    The chart's data record (:func:`_chart_rows_of`) is known when it starts
-    from the source and no step of it advances the chain: its columns are
-    then the chart's data columns (after a ``+`` merge's renames). An
-    encoding aggregate or bin is computed per layer and is no chain step.
-    Rows a user's ``.transform(...)`` step produced are the engine's to know.
+    Read off the chart's data record (:func:`_chart_rows_of`) by
+    :func:`_record_columns`: on a ``+`` composition they are its left
+    operand's, never the combined frame's.
     """
-    if chart._data is None:
-        return None
-    rows = _chart_rows_of(chart)
-    if rows.input is not None or any(_advances_chain(t) for t in rows.steps):
-        return None
-    return list(chart._data.columns)
+    return _record_columns(chart._data, _chart_rows_of(chart))
 
 
 def _known_columns(layer: _Layer, chart) -> list[str] | None:

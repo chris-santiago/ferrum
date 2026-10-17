@@ -576,11 +576,15 @@ def _y_only_rule(route):
 
 
 def test_a_right_layer_takes_the_left_binding_as_written_even_after_a_retitle(route):
-    """The y-only rule gets the histogram's written x="a", never its binned bin_start."""
+    """The y-only rule takes no x at all, never the histogram's binned bin_start.
+
+    A one-axis rule draws no x, so it takes neither the histogram's written
+    ``x="a"`` nor its resolved ``bin_start``, before or after a retitle.
+    """
     composed = _histogram_left() + _y_only_rule(route)
     for chart in (composed, composed.labs(x="T")):
         rule = json.loads(chart.to_spec().to_json())["layers"][-1]
-        assert rule["encoding"]["x"]["field"].split("__rhs_")[0] == "a", rule
+        assert "x" not in rule["encoding"], rule
     assert _plot_marks(composed.labs(x="T").to_svg()) == _plot_marks(composed.to_svg())
 
 

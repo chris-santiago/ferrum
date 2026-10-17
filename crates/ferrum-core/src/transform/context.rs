@@ -105,6 +105,16 @@ pub(crate) enum TransformWarning {
         columns: String,
         disposition: String,
     },
+    /// `rows` rows have a null value in the facet `field` and belong to no
+    /// panel, so the facet partition dropped them. Rows of a composition
+    /// operand whose frame lacks the field are not counted: they repeat in
+    /// every panel instead (`layout::FacetRepeat`). Pushed once per facet
+    /// field by `render::prepare::run_transforms_with_facet`, the one place
+    /// rows are assigned to panels.
+    FacetNullRowsDropped {
+        field: String,
+        rows: usize,
+    },
 }
 
 impl std::fmt::Display for TransformWarning {
@@ -149,6 +159,15 @@ impl std::fmt::Display for TransformWarning {
                 "{transform}: every row has a null in its groupby key ({columns}), so the data \
                  could not be split into groups; {disposition}"
             ),
+            TransformWarning::FacetNullRowsDropped { field, rows } => {
+                let (noun, verb, belong, pronoun) =
+                    if *rows == 1 { ("row", "has", "belongs", "it was") } else { ("rows", "have", "belong", "they were") };
+                write!(
+                    f,
+                    "facet '{field}': {rows} {noun} {verb} a null '{field}' and {belong} to no panel, so \
+                     {pronoun} dropped; fill or filter the nulls in '{field}'"
+                )
+            }
         }
     }
 }
@@ -293,6 +312,13 @@ pub struct TransformContext {
     /// since `prepare_render_inputs` → `run_transforms_with_facet` runs
     /// per leaf, independent of composite nesting.
     pub is_partition: bool,
+    /// The facet field names a partition run splits by (the wrap/column
+    /// field, then the row field in grid mode); empty outside one. Set only
+    /// by `render::prepare::run_transforms_with_facet`, beside
+    /// `is_partition`. `Project` keeps these columns on every row whatever
+    /// its list says, because the facet value is the panel's and belongs to
+    /// every row in it (`transform::project`'s doc).
+    pub facet_fields: Vec<String>,
     /// The degrade-warning sink (GH #162). `Rc<RefCell<_>>`, not a bare
     /// `RefCell<Vec<_>>`, because `apply_transforms_named` (`core.rs`) does
     /// `let mut step_ctx = ctx.clone();` once per transform in the pipeline —

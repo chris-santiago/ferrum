@@ -209,12 +209,18 @@ def test_two_unfiltered_frames_span_both():
     assert ticks[0] <= 5 and ticks[-1] >= 40, ticks
 
 
-def test_a_layer_inheriting_a_re_encoded_chart_field_widens_the_axis():
-    """The tick binds no x, so it draws the composition's x="c" and the axis covers it."""
+@pytest.mark.parametrize("mark, widens", [("point", True), ("tick", False)])
+def test_a_layer_inheriting_a_re_encoded_chart_field_widens_the_axis_only_where_it_draws_x(
+    mark, widens
+):
+    """A layer binding only y takes the composition's x="c" only when its mark draws x.
+
+    A point draws x, so it draws ``c`` and the axis covers 300. A y-only tick
+    is a one-axis mark: it takes no inherited x, so the axis stays layer
+    0's ``a`` (1 to 3).
+    """
     frame = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [1.0, 2.0, 3.0], "c": [100.0, 200.0, 300.0]})
-    chart = (
-        fm.Chart(frame).mark_point().encode(x="a", y="b")
-        + fm.Chart(frame).mark_tick().encode(y="b")
-    ).encode(x="c")
+    other = getattr(fm.Chart(frame), f"mark_{mark}")().encode(y="b")
+    chart = (fm.Chart(frame).mark_point().encode(x="a", y="b") + other).encode(x="c")
     ticks = _x_ticks(chart)
-    assert ticks[-1] >= 300, ticks
+    assert (ticks[-1] >= 300) is widens, ticks

@@ -178,7 +178,7 @@ pub(in crate::render) fn build_axis_scale(
     // A data-aware sort aggregates the opposite channel's field, which lives
     // beside the bound field in the chart's data, so the sort reads the batch
     // `locate_field` finds first.
-    let seed = locate_seed_field(&enc.field, spec, primary_batch, transform_outputs)
+    let seed = locate_seed_field(channel, &enc.field, spec, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;

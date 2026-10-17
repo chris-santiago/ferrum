@@ -1192,10 +1192,7 @@ impl Encoding {
         inherit_encoding_spec(&mut self.x2, &parent.x2);
         inherit_encoding_spec(&mut self.y2, &parent.y2);
         inherit_encoding_spec(&mut self.text, &parent.text);
-        inherit_encoding_spec(&mut self.tooltip, &parent.tooltip);
-        if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
-            self.tooltip_fields = parent.tooltip_fields.clone();
-        }
+        self.inherit_tooltip(parent);
         inherit_encoding_spec(&mut self.href, &parent.href);
         inherit_encoding_spec(&mut self.description, &parent.description);
         inherit_encoding_spec(&mut self.key, &parent.key);
@@ -1205,6 +1202,22 @@ impl Encoding {
         inherit_encoding_spec(&mut self.stroke_dash, &parent.stroke_dash);
         inherit_encoding_spec(&mut self.angle, &parent.angle);
         inherit_encoding_spec(&mut self.fill_opacity, &parent.fill_opacity);
+    }
+
+    /// Inherit the tooltip channel from `parent` as one channel, whichever of
+    /// its two spellings (`tooltip`, one field; `tooltip_fields`, a list)
+    /// either side uses. A layer that binds neither takes the parent's whole
+    /// tooltip; a layer that binds either keeps its own and takes none of the
+    /// parent's, so a written tooltip is never overridden by the parent's
+    /// list. A layer's own `tooltip` on the parent's field still takes the
+    /// parent's metadata (title, format), as every other channel does.
+    fn inherit_tooltip(&mut self, parent: &Encoding) {
+        if self.tooltip.is_none() && self.tooltip_fields.is_none() {
+            self.tooltip = parent.tooltip.clone();
+            self.tooltip_fields = parent.tooltip_fields.clone();
+        } else if self.tooltip.is_some() {
+            inherit_encoding_spec(&mut self.tooltip, &parent.tooltip);
+        }
     }
 
     /// Like `inherit_from` but skips positional channels (x, y, x2, y2).
@@ -1219,10 +1232,7 @@ impl Encoding {
         inherit_encoding_spec(&mut self.shape, &parent.shape);
         inherit_encoding_spec(&mut self.opacity, &parent.opacity);
         inherit_encoding_spec(&mut self.text, &parent.text);
-        inherit_encoding_spec(&mut self.tooltip, &parent.tooltip);
-        if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
-            self.tooltip_fields = parent.tooltip_fields.clone();
-        }
+        self.inherit_tooltip(parent);
         inherit_encoding_spec(&mut self.href, &parent.href);
         inherit_encoding_spec(&mut self.description, &parent.description);
         inherit_encoding_spec(&mut self.key, &parent.key);
@@ -1346,8 +1356,7 @@ impl Encoding {
     /// mapping locally — spec §4.4, "Extended 2026-09-02":
     ///
     /// - [`crate::render::prepare::LayerPrepared::flip_coords`] applies it to
-    ///   each layer's rendering encoding (and swaps the `x_is_own`/`y_is_own`
-    ///   provenance flags with it, since those describe these same slots).
+    ///   each layer's rendering encoding.
     /// - [`crate::render::scale_resolve::numeric_domain_union`] applies it to
     ///   read a still-authored `spec.layers` encoding in the post-flip space
     ///   its `channel` argument names.

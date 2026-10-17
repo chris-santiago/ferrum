@@ -2642,6 +2642,7 @@ fn faceted_xy_spec(
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: y_resolve },
@@ -2863,6 +2864,7 @@ fn t4_shared_facet_categorical_x_unions_global_categories() {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Shared, y: ResolveMode::Shared },
@@ -2932,6 +2934,7 @@ fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
@@ -3031,6 +3034,7 @@ fn faceted_nominal_sort_spec(
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: crate::layout::facet::ResolveMode::Shared },
@@ -3203,6 +3207,7 @@ fn faceted_size_spec() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3235,6 +3240,7 @@ fn faceted_continuous_color_spec() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3267,6 +3273,7 @@ fn faceted_opacity_spec() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3683,6 +3690,7 @@ fn faceted_categorical_color_spec() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3855,6 +3863,7 @@ fn faceted_shape_spec() -> ChartSpec {
             row_title: None,
             sort: None,
             row_sort: None,
+            repeat: Vec::new(),
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -6285,6 +6294,7 @@ fn shared_facet_fill_opacity_unions_the_global_domain() {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: FacetResolve::default(),
@@ -6433,6 +6443,7 @@ fn n2_with_facet(mut spec: ChartSpec, field: &str) -> ChartSpec {
         row_title: None,
         sort: None,
         row_sort: None,
+        repeat: Vec::new(),
         mode: FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: FacetResolve::default(),
@@ -8140,4 +8151,38 @@ fn a_descending_zero_x_domain_draws_its_points() {
     let plain = render(serde_json::json!({"type": "linear", "domain": [20.0, 0.0]}));
     assert_eq!(zeroed.matches("<circle").count(), 3, "three points");
     assert_eq!(zeroed, plain);
+}
+
+/// With no chart-level `x`, the axis binding falls back to the first layer
+/// whose own `x` its mark draws. Layer 0 is a one-axis rule writing `y`, with
+/// an `x` Python filled and listed as inherited: the rule draws no `x`, so the
+/// fallback skips it and takes the point layer's `g`. The rejected reading,
+/// the raw authored encoding, returns the rule's filled `f`.
+#[test]
+fn the_axis_fallback_skips_a_filled_channel_the_layers_mark_never_draws() {
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"y":{"field":"v"}},"layers":[{"mark":"rule","encoding":{"x":{"field":"f"},"y":{"field":"v"}},"data_source":"a","inherited_positional":["x"]},{"mark":"point","encoding":{"x":{"field":"g"},"y":{"field":"v"}},"data_source":"b"}]}"#,
+    )
+    .expect("valid spec");
+    let (x, _) = positional_binding(&spec, PositionalChannel::X);
+    assert_eq!(x.map(|e| e.field.clone()), Some("g".to_string()));
+}
+
+/// A geoshape draws no position channel, so a layered geoshape on its own
+/// output with no `x`/`y` of its own is not refused for missing them, while a
+/// point in its place, which draws both, still is.
+#[test]
+fn a_geoshape_layer_needs_no_position_channel() {
+    let json = |mark: &str| {
+        format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"a"}},"y":{{"field":"b"}}}},"layers":[{{"mark":"point","encoding":{{"x":{{"field":"a"}},"y":{{"field":"b"}}}}}},{{"mark":"{mark}","encoding":{{}},"data_source":"shapes"}}]}}"#
+        )
+    };
+    let geoshape: ChartSpec = serde_json::from_str(&json("geoshape")).expect("valid spec");
+    assert!(validate_drawing_layers_can_plot(&geoshape, &geoshape.encoding).is_ok());
+    let point: ChartSpec = serde_json::from_str(&json("point")).expect("valid spec");
+    assert!(matches!(
+        validate_drawing_layers_can_plot(&point, &point.encoding),
+        Err(RenderError::LayerMissingPositionalChannel { layer: 1, .. })
+    ));
 }
