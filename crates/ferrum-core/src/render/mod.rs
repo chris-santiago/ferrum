@@ -146,6 +146,39 @@ pub(crate) struct LayerAxisColumnDetail {
     pub(crate) dtype: String,
 }
 
+/// The payload of [`RenderError::RasterColorNotQuantitative`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RasterColorRefusal {
+    /// The refused image's layer, numbered as the layers the scale reads
+    /// are (an overlay group's across its members, in member order).
+    pub(crate) layer: usize,
+    pub(crate) entry: String,
+    pub(crate) field: String,
+    pub(crate) reason: RasterColorReason,
+}
+
+/// Why a raster image's color scale is categorical
+/// ([`RenderError::RasterColorNotQuantitative`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RasterColorReason {
+    /// The image's own binding declares this type (`nominal`, `ordinal`).
+    Declared(&'static str),
+    /// Another layer's categorical binding establishes the scale, or an
+    /// area's binding, which groups color by category.
+    CategoricalScale { layer: usize, field: String },
+}
+
+impl std::fmt::Display for RasterColorReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RasterColorReason::Declared(kind) => write!(f, "it is declared {kind}"),
+            RasterColorReason::CategoricalScale { layer, field } => {
+                write!(f, "the chart's color scale is categorical, established by layer {layer} ('{field}')")
+            }
+        }
+    }
+}
+
 /// The remedy [`RenderError::LayerUnknownColumn`] names, by where the
 /// missing column exists for a layer that reads its chart's data
 /// (`prepare::validate_layer_columns` classifies it).
@@ -644,8 +677,30 @@ pub enum RenderError {
     /// resolution (`scale_resolve::resolve_layer_y_slot_scale`, which runs
     /// the same gate before resolving), so both routes report the real
     /// channel and the real fact through one constructor.
+    ///
+    /// `entry` is the public call that built the layer when a desugaring
+    /// call did (`prepare::public_layer` gives it no index): the message then
+    /// names that call instead of an internal layer index the caller never
+    /// wrote. `None` for a layer the caller placed, named `layer {layer}`.
+    /// Boxed, for `clippy::result_large_err` and nothing else, as
+    /// [`Self::LayerCoordUnplaceable`]'s `reason` is.
+    /// A raster image's `color` names the field its cells hold, which are
+    /// numbers, but its color scale is categorical: the binding declares a
+    /// nominal or ordinal type, or another layer's categorical binding
+    /// establishes the chart's color scale (or the mark groups color, as an
+    /// area does). A categorical scale has no color for a cell value, so the
+    /// image would draw nothing: REFUSE MALFORMED. Decided where a color
+    /// scale's kind is decided (`scale_resolve::build_color_scale` and the
+    /// admitted reads beside it), on every route. `entry` voices the image
+    /// layer by ruling F (`mark_raster` for a layer that call built, else
+    /// `layer {i}: mark_image`), `field` is the cells' field, `reason` why
+    /// the scale is categorical.
+    /// Boxed, for `clippy::result_large_err` and nothing else, as
+    /// [`Self::LayerCoordUnplaceable`]'s `reason` is.
+    RasterColorNotQuantitative(Box<RasterColorRefusal>),
     LayerUnknownColumn {
         layer: usize,
+        entry: Option<Box<str>>,
         channel: &'static str,
         name: String,
         coord_flipped: bool,
@@ -1053,6 +1108,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         other @ (RenderError::InvalidViewport { .. }
         | RenderError::EmptyBatch
         | RenderError::UnknownColumn { .. }
+        | RenderError::RasterColorNotQuantitative(_)
         | RenderError::InvalidColor(_)
         | RenderError::EncodingTypeMismatch { .. }
         | RenderError::TransformFailed(_)
@@ -1362,8 +1418,18 @@ impl std::fmt::Display for RenderError {
                      the layer its own scale with resolve={{\"{channel}\": \"independent\"}}."
                 )
             }
+            Self::RasterColorNotQuantitative(refusal) => {
+                let RasterColorRefusal { entry, field, reason, .. } = &**refusal;
+                write!(
+                f,
+                "{entry}: encoding 'color' names the raster's cell values '{field}', which are quantitative, \
+                 but {reason}. Drop type= (or the categorical color binding), or draw categorical cells \
+                 with mark_rect."
+                )
+            }
             Self::LayerUnknownColumn {
                 layer,
+                entry,
                 channel,
                 name,
                 coord_flipped,
@@ -1371,9 +1437,13 @@ impl std::fmt::Display for RenderError {
                 independent_y,
             } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                match entry {
+                    Some(entry) => write!(f, "{entry}: ")?,
+                    None => write!(f, "layer {layer}: ")?,
+                }
                 write!(
                     f,
-                    "layer {layer}: encoding '{channel}' references unknown column '{name}' \
+                    "encoding '{channel}' references unknown column '{name}' \
                      (not present in that layer's data)"
                 )?;
                 match (remedy, independent_y) {
@@ -2161,6 +2231,25 @@ pub enum RenderWarning {
         channel: String,
         field: String,
     },
+    /// An auxiliary-scale channel (color, size, shape, the opacity family,
+    /// stroke dash, stroke width) is bound, but no mark of any layer binding
+    /// it draws the channel (`Mark::draws_channel`), so it builds no scale and
+    /// no legend: WARN DEGRADED, once per channel, before any scale resolves
+    /// (`prepare::undrawn_channel_warnings`). Voiced as
+    /// [`Self::StatisticDroppedChannel`] is, naming the first layer binding
+    /// the channel: `layer` is its index when the caller placed it, `entry`
+    /// the public call that built it, `mark` its mark; `channel` is the wire
+    /// name and `field` the bound column. `cells` is the field a raster
+    /// image's cells hold when the layer is one: it colors by that field and
+    /// draws a `color` naming it, so the message names it.
+    ChannelNotDrawn {
+        layer: Option<usize>,
+        entry: String,
+        mark: crate::spec::mark::Mark,
+        channel: String,
+        field: String,
+        cells: Option<String>,
+    },
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -2400,6 +2489,24 @@ impl std::fmt::Display for RenderWarning {
                     "{entry}: {channel} '{field}' was dropped: the statistic this {mark} mark draws \
                      does not carry '{field}', so it draws without {channel}"
                 )
+            }
+            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                match cells {
+                    Some(cells) => write!(
+                        f,
+                        "{entry}: {channel} '{field}' has no effect: the image colors its cells by their \
+                         '{cells}' values (field=) and does not read {channel}='{field}', so it gets no \
+                         scale and no legend; it was ignored"
+                    ),
+                    None => write!(
+                        f,
+                        "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} (this \
+                         {mark} mark does not), so it gets no scale and no legend; it was ignored"
+                    ),
+                }
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {
                 let positional = excluded_channel_is_positional(channel);

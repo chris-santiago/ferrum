@@ -694,7 +694,9 @@ def _refuse_missing_statistic_inputs(layers: list, chart) -> None:
     (:func:`_effective_encoding`), so a statistic it inherits from its parent
     is checked over the rows it reads too. Checked where Python knows those
     rows (:func:`_known_columns`). A missing column is voiced by the render
-    gate's own message (``ferrum._core.layer_unknown_column_message``): the
+    gate's own message (``ferrum._core.layer_unknown_column_message``), naming
+    a layer a figure or composite mark built by that call (``_Layer.entry``)
+    as the gate does: the
     statistic remedy when it is another layer's statistic output or a column
     the chart's composite mark binds (one its layers reading a named output
     draw), else the plain message. Any other layer is left to the transform
@@ -732,7 +734,9 @@ def _refuse_missing_statistic_inputs(layers: list, chart) -> None:
             if field in missing:
                 remedy = "statistic" if field in statistics else "plain"
                 raise ValueError(
-                    layer_unknown_column_message(i, channel, field, remedy, layer.independent_y)
+                    layer_unknown_column_message(
+                        i, channel, field, remedy, layer.independent_y, entry=layer.entry
+                    )
                 )
 
 

@@ -29,7 +29,7 @@
 
 use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 
-use crate::render::color::{ContinuousScheme, NamedContinuous};
+use crate::render::scale_resolve::ColorScale;
 use crate::render::draw::{col_as_f64, col_as_str, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::rasterize::encode_png;
@@ -68,7 +68,146 @@ pub(crate) fn raster_extent_columns(
     }
 }
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// The columns a layer of `mark` draws for its binding `field` on the
+/// rendered `channel`: a raster image's extent columns on `x`/`y`
+/// ([`raster_extent_columns`]) and, on `color`, the column naming the field
+/// its cells hold ([`RASTER_VALUE_FIELD`], see [`image_draws_color`]); else
+/// `field` itself. The one answer to "which column does this layer draw
+/// here", read by the column gate (which judges each of them against the
+/// layer's batch) and by an axis's typing read (`scale_resolve`'s
+/// `locate_seed_field`, which types the axis from the first); the domain
+/// union reads the extent pair through [`raster_extent_columns`] and a
+/// raster's color domain its cells (`scale_resolve`'s typed raster cell
+/// read, `AuxReadKind::RasterCells`). Published to
+/// Python as [`drawn_positional_columns_py`], which the auto tooltip reads so
+/// it lists a positional field only where a layer draws that field itself.
+pub(crate) fn drawn_columns<'f>(
+    mark: crate::spec::mark::Mark,
+    url: Option<&crate::spec::encoding::EncodingSpec>,
+    channel: &str,
+    field: &'f str,
+) -> Vec<&'f str> {
+    if let Some(extent) = raster_extent_columns(mark, url, channel) {
+        return extent.to_vec();
+    }
+    if channel == "color" && mark == crate::spec::mark::Mark::Image && url_tile_field(url).is_none() {
+        return vec![RASTER_VALUE_FIELD];
+    }
+    vec![field]
+}
+
+pub(crate) use crate::transform::raster::{RASTER_VALUE_FIELD, RASTER_VALUE_SCALE};
+
+/// The field a raster batch's cells hold ([`RASTER_VALUE_FIELD`]), or `None`
+/// for a batch that is no Raster output.
+pub(crate) fn raster_value_field(batch: &arrow::record_batch::RecordBatch) -> Option<&str> {
+    let column = batch.column_by_name(RASTER_VALUE_FIELD)?.as_any().downcast_ref::<arrow::array::StringArray>()?;
+    column.iter().flatten().next()
+}
+
+/// Whether a layer of `mark` draws `color` through a raster's cells: it is a
+/// url-less image, and its own color binding, else the one it inherits from
+/// `parent` (its authored chart encoding), names the field its cells hold
+/// (`cells`, its Raster batch's [`raster_value_field`]). A raster image
+/// draws its cells, so its color is the field they hold. The one answer
+/// every reader asks: the image builder (of the layer's completed encoding,
+/// its own parent), the reads of the chart color scale and of the cell scale
+/// (`scale_resolve`'s `aux_reads` and `raster_cell_reads`), and `prepare`'s
+/// drawn bindings and undrawn-channel warnings. A sibling layer's color
+/// binding never enters it.
+pub(crate) fn image_draws_color(
+    mark: crate::spec::mark::Mark,
+    encoding: &crate::spec::encoding::Encoding,
+    parent: &crate::spec::encoding::Encoding,
+    cells: Option<&str>,
+) -> bool {
+    let url = encoding.url.as_ref().or(parent.url.as_ref());
+    mark == crate::spec::mark::Mark::Image
+        && url_tile_field(url).is_none()
+        && encoding.color.as_ref().or(parent.color.as_ref()).is_some_and(|color| cells == Some(color.field.as_str()))
+}
+
+/// The color domain a raster image's cells `(lo, hi)` (their finite min and
+/// max) span as the image draws them: from zero when every cell is
+/// non-negative (a count, a density, a non-negative mean), so the least
+/// populated cell stays off the scheme's first color and a uniform raster
+/// draws the scheme's top color; else `(lo, hi)` as they are, so a mean
+/// spanning negatives keeps its full range. The zero anchor is the one bar
+/// and linear scales take ([`crate::render::scale_resolve::extend_extent_to_zero`]).
+/// Read by the image's own scale and by the chart's color domain over a
+/// raster's cells (`scale_resolve`'s `aux_numeric_union`), so a colorbar
+/// spans the domain the image draws. An all-zero raster is `(0, 0)`, whose
+/// cells the scale maps to its midpoint; an empty one draws no cell.
+pub(crate) fn raster_cell_domain((lo, hi): (f64, f64)) -> (f64, f64) {
+    if lo >= 0.0 {
+        crate::render::scale_resolve::extend_extent_to_zero(lo, hi)
+    } else {
+        (lo, hi)
+    }
+}
+
+/// The finite extent `(min, max)` of a raster batch's cells (every row's
+/// `pixel_data` decoded), or `None` for a batch that is no Raster output or
+/// holds no finite cell: what a raster image's color domain reads
+/// (`scale_resolve`'s raster cell reads), as its extent columns are what its
+/// axes read.
+pub(crate) fn raster_cell_extent(batch: &arrow::record_batch::RecordBatch) -> Option<(f64, f64)> {
+    raster_cell_values(batch).fold(None, |extent: Option<(f64, f64)>, v| match extent {
+        None => Some((v, v)),
+        Some((lo, hi)) => Some((lo.min(v), hi.max(v))),
+    })
+}
+
+/// Every finite cell of a raster batch (every row's `pixel_data` decoded);
+/// empty for a batch that is no Raster output. What a `Quantile` color scale
+/// bound to a raster's cells samples, as it samples a column on any other
+/// mark.
+pub(crate) fn raster_cell_values(batch: &arrow::record_batch::RecordBatch) -> impl Iterator<Item = f64> + '_ {
+    batch
+        .column_by_name("pixel_data")
+        .and_then(|column| column.as_any().downcast_ref::<BinaryArray>())
+        .into_iter()
+        .flat_map(|pixels| pixels.iter().flatten())
+        .flat_map(|bytes| bytes.chunks_exact(8).map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]))))
+        .filter(|v| v.is_finite())
+}
+
+/// The transform a raster batch's cells' color maps through, from the scale
+/// its `value_scale` column names ([`RASTER_VALUE_SCALE`]): symlog with
+/// constant 1 (`log1p` on non-negative cells) for `symlog`, else linear.
+pub(crate) fn raster_value_transform(batch: &arrow::record_batch::RecordBatch) -> crate::render::scale_resolve::ColorTransform {
+    use crate::render::scale_resolve::ColorTransform;
+    let scale = batch
+        .column_by_name(RASTER_VALUE_SCALE)
+        .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>())
+        .and_then(|column| column.iter().flatten().next());
+    match scale {
+        Some("symlog") => ColorTransform::Symlog { constant: 1.0 },
+        _ => ColorTransform::Linear,
+    }
+}
+
+/// `ferrum._core.drawn_positional_columns(mark, has_url, channel, field)`:
+/// the columns a layer of `mark` draws for its binding `field` on the
+/// `channel` ([`drawn_columns`]); `has_url` says
+/// whether an image layer binds `url` (the url-tile path, which draws its
+/// own fields). Python's per-layer auto tooltip lists a positional field
+/// only when this answer is the field itself. Refuses an unknown mark.
+/// Registered in `lib.rs`.
+#[pyo3::pyfunction]
+#[pyo3(name = "drawn_positional_columns")]
+pub(crate) fn drawn_positional_columns_py(
+    mark: &str,
+    has_url: bool,
+    channel: &str,
+    field: &str,
+) -> pyo3::PyResult<Vec<String>> {
+    let mark = crate::spec::mark::parse_mark_arg(mark)?;
+    let url = crate::spec::encoding::EncodingSpec::default();
+    Ok(drawn_columns(mark, has_url.then_some(&url), channel, field).into_iter().map(str::to_string).collect())
+}
+
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
 
@@ -79,25 +218,25 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Polar/Geo is a legitimate, silent no-op.
     match &ctx.spec.coord {
         Some(crate::spec::coord::CoordKind::Polar { .. }) => {
-            return MarkBuildResult::empty_because(
+            return Ok(MarkBuildResult::empty_because(
                 MarkBatchKind::Image,
                 "mark_image() does not support CoordPolar; both its url-tile and \
                  raster paths place images in Cartesian pixel space",
-            );
+            ));
         }
         Some(crate::spec::coord::CoordKind::Geo { .. }) => {
-            return MarkBuildResult::empty_because(
+            return Ok(MarkBuildResult::empty_because(
                 MarkBatchKind::Image,
                 "mark_image() does not support CoordGeo; both its url-tile and \
                  raster paths place images in Cartesian pixel space",
-            );
+            ));
         }
         _ => {}
     }
 
     match url_tile_field(ctx.spec.encoding.url.as_ref()) {
         // ── URL-tile path ──────────────────────────────────────────────────
-        Some(field) => build_url_tiles(ctx, field),
+        Some(field) => Ok(build_url_tiles(ctx, field)),
         // ── Raster path ────────────────────────────────────────────────────
         None => build_raster(ctx),
     }
@@ -216,11 +355,15 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
 }
 
 /// Raster path: single-row Raster transform output → one colormap-rendered PNG.
-fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// Refuses a raster whose cells hold a finite value that no color scale
+/// reached: scale resolution gives every image a scale (the chart's color
+/// scale or the shared cell scale) whenever a cell is finite, so the image
+/// never silently draws nothing.
+fn build_raster(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Image);
+    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Image));
     // #118: reached only when `build()`'s dispatch found no `url` encoding
     // (the URL-tile path's own presence/dtype guards are unreachable/
     // already-covered classes — see the doc above `build`) — so every
@@ -231,11 +374,11 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Raster transform behind it — a genuine defect (the user asked for an
     // image and named no source for one), not a documented degrade.
     let empty_no_data = || {
-        MarkBuildResult::empty_because(
+        Ok(MarkBuildResult::empty_because(
             MarkBatchKind::Image,
             "mark_image() requires either a `url` encoding channel or Raster-transform \
              data (produced by mark_raster()); this batch has neither",
-        )
+        ))
     };
 
     let batch = ctx.batch;
@@ -298,31 +441,44 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         return empty_no_data();
     }
 
-    // Resolve colormap: mark_style.group.cmap → theme.palette.sequential_scheme → Viridis.
-    let named = ctx
-        .mark_style
-        .group
-        .cmap
-        .as_deref()
-        .and_then(NamedContinuous::from_name)
-        .unwrap_or_else(|| {
-            NamedContinuous::from_name(&ctx.theme.palette.sequential_scheme)
-                .unwrap_or(NamedContinuous::Viridis)
-        });
-    let scheme = ContinuousScheme::Named(named);
+    // The cells map through one color scale, resolved with the chart's
+    // scales: the chart's color scale when the image draws color (its binding
+    // names the field the cells hold), whose colorbar describes them;
+    // otherwise the one scale every raster drawing no color shares
+    // (`ResolvedScales::raster_cells`), across facet panels too.
+    let draws_color =
+        image_draws_color(crate::spec::mark::Mark::Image, &ctx.spec.encoding, &ctx.spec.encoding, raster_value_field(batch));
+    let scale = match draws_color {
+        true => ctx.scales.color.as_ref(),
+        false => ctx.scales.raster_cells.as_ref(),
+    };
+    // A categorical scale has no color for a cell value; scale resolution
+    // refuses one over a raster's cells, so none reaches here.
+    let scale = match scale {
+        Some(ColorScale::Categorical { .. }) => {
+            return Ok(MarkBuildResult::empty_because(
+                MarkBatchKind::Image,
+                "a raster image's cells draw through a continuous or discretizing color scale",
+            ))
+        }
+        Some(scale) => scale,
+        // No cell holds a finite value: every cell is transparent.
+        None if raster_cell_values(batch).next().is_none() => return empty(),
+        None => {
+            return Err(crate::render::RenderError::ScaleResolutionFailed(
+                "a raster image's cells hold finite values, but no color scale was resolved for them".to_string(),
+            ))
+        }
+    };
 
-    // Decode f64 values and map through colormap to produce RGBA8 pixels.
+    // Decode each cell and map it through the scale to RGBA8; an empty (NaN)
+    // cell is transparent.
     let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
     for chunk in pixel_bytes.chunks_exact(8) {
-        let v = f64::from_le_bytes(chunk.try_into().expect("invariant: chunks_exact(8) guarantees 8-byte slices"));
-        if v.is_nan() {
-            rgba.extend_from_slice(&[0, 0, 0, 0]);
-        } else {
-            let c = scheme.sample(v);
-            rgba.push(c.red);
-            rgba.push(c.green);
-            rgba.push(c.blue);
-            rgba.push(c.alpha);
+        let v = f64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+        match scale.lookup_f64(v).filter(|_| v.is_finite()) {
+            Some(c) => rgba.extend_from_slice(&[c.red, c.green, c.blue, c.alpha]),
+            None => rgba.extend_from_slice(&[0, 0, 0, 0]),
         }
     }
 
@@ -363,14 +519,15 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // raster covers a data rect, not a point. It is inert because
     // `for_each_along` skips `Image` nodes; if that skip is lifted, move the
     // anchor to the extent's center first.
-    MarkBuildResult::populated(MarkBatchKind::Image, vec![node], vec![0], &meta)
-        .with_glyph_anchors(vec![(svg_x, svg_y_top)])
+    Ok(MarkBuildResult::populated(MarkBatchKind::Image, vec![node], vec![0], &meta)
+        .with_glyph_anchors(vec![(svg_x, svg_y_top)]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    use crate::render::color::{ContinuousScheme, NamedContinuous};
     use crate::render::draw::resolve_mark_style;
     use crate::render::scale_resolve::resolve_scales;
     use crate::spec::chart::ChartSpec;
@@ -468,7 +625,9 @@ mod tests {
         }
     }
 
-    /// Build a single-row Raster output batch.
+    /// Build a single-row Raster output batch of `count` cells, as the
+    /// Raster transform publishes it (its value field and linear value
+    /// scale included).
     fn raster_batch(
         x_min: f64, x_max: f64, y_min: f64, y_max: f64,
         width: u32, height: u32, pixel_bytes: Vec<u8>,
@@ -481,6 +640,8 @@ mod tests {
             Field::new("width", DataType::UInt32, false),
             Field::new("height", DataType::UInt32, false),
             Field::new("pixel_data", DataType::Binary, false),
+            Field::new(RASTER_VALUE_FIELD, DataType::Utf8, false),
+            Field::new(RASTER_VALUE_SCALE, DataType::Utf8, false),
         ]));
         let pixel_array = BinaryArray::from(vec![pixel_bytes.as_slice()]);
         RecordBatch::try_new(
@@ -493,6 +654,8 @@ mod tests {
                 Arc::new(UInt32Array::from(vec![width])),
                 Arc::new(UInt32Array::from(vec![height])),
                 Arc::new(pixel_array),
+                Arc::new(StringArray::from(vec!["count"])),
+                Arc::new(StringArray::from(vec!["linear"])),
             ],
         )
         .unwrap()
@@ -546,7 +709,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(), 1,
             "expected an Image node");
         // Verify PNG data is present.
@@ -556,6 +719,30 @@ mod tests {
             } else { false }
         });
         assert!(has_png, "expected inline PNG image data");
+    }
+
+    /// A raster whose finite cells reach the builder with no color scale is
+    /// refused with a typed error, never drawn as nothing; one whose cells
+    /// are all empty draws nothing, its legitimate empty.
+    #[test]
+    fn a_raster_with_finite_cells_and_no_scale_is_refused() {
+        let pack = |values: [f64; 4]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let spec = image_spec((0.0, 1.0), (0.0, 1.0));
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
+        let finite = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pack([0.0, 1.0, f64::NAN, 2.0]));
+        let (mut scales, _) = resolve_scales(&spec, &finite, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        scales.raster_cells = None;
+        scales.color = None;
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &finite, mark_style: &mark_style };
+        assert_eq!(
+            super::build(&ctx).err().map(|e| e.to_string()).as_deref(),
+            Some("scale resolution failed: a raster image's cells hold finite values, but no color scale was resolved for them")
+        );
+        let empty = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pack([f64::NAN; 4]));
+        let ctx = DrawCtx { batch: &empty, ..ctx };
+        assert!(super::build(&ctx).expect("draws nothing").nodes.is_empty());
     }
 
     /// #118 RED proof: both build paths place images in Cartesian pixel
@@ -592,7 +779,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         assert!(result.nodes.is_empty(), "CoordPolar must not render an image");
         let reason = result.empty_reason.expect("CoordPolar must name why nothing was drawn");
         assert!(reason.0.contains("CoordPolar"), "got {:?}", reason.0);
@@ -615,7 +802,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         assert!(result.nodes.is_empty(), "CoordGeo must not render an image");
         let reason = result.empty_reason.expect("CoordGeo must name why nothing was drawn");
         assert!(reason.0.contains("CoordGeo"), "got {:?}", reason.0);
@@ -640,7 +827,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         assert_eq!(
             result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(),
             1,
@@ -669,7 +856,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(), 1,
             "expected exactly one Image node");
     }
@@ -690,7 +877,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).expect("builds");
         // With scales mapping data [0,10] -> pixel [0,100], the image should span
         // x=0, w=100, h=100.
         let img = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Image { .. }));
@@ -736,7 +923,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
         assert_eq!(
             result.nodes.len(), 3,
             "expected 3 Image nodes for 3 input rows, got {}", result.nodes.len()
@@ -760,7 +947,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
         assert_eq!(result.nodes.len(), 1, "expected 1 Image node");
         let has_url_variant = result.nodes.iter().any(|n| {
             matches!(n, ferrum_scene::SceneNode::Image {
@@ -785,7 +972,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
         assert_eq!(result.nodes.len(), 1);
         if let ferrum_scene::SceneNode::Image { x, y, w, h, .. } = &result.nodes[0] {
             // Center point is at pixel 50; tile half-size is 16.
@@ -816,7 +1003,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
         assert_eq!(result.nodes.len(), 2, "plain URL row should be silently skipped");
     }
 
@@ -905,7 +1092,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
 
         assert_eq!(result.nodes.len(), 3, "expected 3 Image nodes");
 
@@ -938,7 +1125,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
 
         assert_eq!(result.nodes.len(), 2);
         assert!(result.tooltips.is_none(), "tooltips must be None when no tooltip encoding");
@@ -966,11 +1153,102 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).expect("builds");
 
         assert_eq!(result.nodes.len(), 1, "raster path must emit exactly one node");
         assert!(result.tooltips.is_none(), "raster without tooltip encoding: tooltips must be None");
         assert!(result.hrefs.is_none(), "raster without href encoding: hrefs must be None");
         assert!(result.descriptions.is_none(), "raster without description encoding: descriptions must be None");
+    }
+
+    /// The one drawn-column answer: a raster image draws `x`/`y` through its
+    /// extent columns; a url-tile image, any other mark and any other
+    /// channel draw the bound field.
+    #[test]
+    fn drawn_positional_columns_name_a_raster_images_extent_columns() {
+        let url = EncodingSpec { field: "u".into(), ..Default::default() };
+        assert_eq!(drawn_columns(Mark::Image, None, "x", "x"), RASTER_X_EXTENT);
+        assert_eq!(drawn_columns(Mark::Image, None, "y", "y"), RASTER_Y_EXTENT);
+        assert_eq!(drawn_columns(Mark::Image, None, "x2", "x2"), ["x2"]);
+        assert_eq!(drawn_columns(Mark::Image, Some(&url), "x", "x"), ["x"]);
+        assert_eq!(drawn_columns(Mark::Point, None, "x", "x"), ["x"]);
+    }
+
+    /// The published drawn-column answer: a raster image's `x`/`y` draw its
+    /// extent columns and its `color` the column naming its cells' field; a
+    /// url-tile image and every other mark draw their own field. Python's
+    /// auto tooltip lists a positional field only when the answer is the
+    /// field itself.
+    #[test]
+    fn the_published_drawn_columns_answer_matches_the_render() {
+        assert_eq!(drawn_positional_columns_py("image", false, "x", "x").unwrap(), ["x_min", "x_max"]);
+        assert_eq!(drawn_positional_columns_py("image", false, "color", "z").unwrap(), ["value_field"]);
+        assert_eq!(drawn_positional_columns_py("image", true, "x", "x").unwrap(), ["x"]);
+        assert_eq!(drawn_positional_columns_py("point", false, "x", "x").unwrap(), ["x"]);
+        assert!(drawn_positional_columns_py("nope", false, "x", "x").is_err());
+    }
+
+    /// A raster image drawing no color maps its cells through a continuous
+    /// scale over its own cell extent: the lowest drawn value takes the
+    /// scheme's first color, the highest its last, an empty cell stays
+    /// transparent. Rejects the private `[0, vmax]` normalization, under
+    /// which a negative mean took the floor color with every value below
+    /// zero.
+    #[test]
+    fn a_raster_image_maps_its_cells_through_one_scale_over_their_extent() {
+        let cells = [-2.0, 6.0, f64::NAN, 2.0];
+        let bytes: Vec<u8> = cells.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x_min", DataType::Float64, false),
+                Field::new("x_max", DataType::Float64, false),
+                Field::new("y_min", DataType::Float64, false),
+                Field::new("y_max", DataType::Float64, false),
+                Field::new("width", DataType::UInt32, false),
+                Field::new("height", DataType::UInt32, false),
+                Field::new("pixel_data", DataType::Binary, false),
+                Field::new(RASTER_VALUE_FIELD, DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0])),
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(Float64Array::from(vec![0.0])),
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(UInt32Array::from(vec![2])),
+                Arc::new(UInt32Array::from(vec![2])),
+                Arc::new(BinaryArray::from(vec![bytes.as_slice()])),
+                Arc::new(StringArray::from(vec!["z"])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(raster_value_field(&batch), Some("z"));
+        assert_eq!(raster_cell_extent(&batch), Some((-2.0, 6.0)), "the finite cells' extent, NaN skipped");
+        let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
+        let scale = ColorScale::Continuous { domain: (-2.0, 6.0), scheme: scheme.clone(), midpoint: None, transform: crate::render::scale_resolve::ColorTransform::Linear };
+        assert_eq!(scale.lookup_f64(-2.0), Some(scheme.sample(0.0)));
+        assert_eq!(scale.lookup_f64(6.0), Some(scheme.sample(1.0)));
+    }
+
+    /// A raster's cell domain runs from zero when every cell is non-negative,
+    /// so a count of 1 maps off the scheme's first color and a uniform raster
+    /// draws its top color; a mean spanning negatives keeps its own
+    /// `[min, max]`. An all-zero raster maps to the midpoint, dividing by
+    /// nothing. Rejects the `[min, max]` mapping, under which count-1 cells
+    /// took the scheme's first, near-background color.
+    #[test]
+    fn a_raster_cell_domain_runs_from_zero_when_every_cell_is_non_negative() {
+        let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
+        let through = |cells: (f64, f64), v: f64| {
+            ColorScale::Continuous { domain: raster_cell_domain(cells), scheme: scheme.clone(), midpoint: None, transform: crate::render::scale_resolve::ColorTransform::Linear }
+                .lookup_f64(v)
+        };
+        assert_eq!(raster_cell_domain((1.0, 5.0)), (0.0, 5.0));
+        assert_eq!(through((1.0, 5.0), 1.0), Some(scheme.sample(0.2)), "a count of 1 is off t=0");
+        assert_ne!(through((1.0, 5.0), 1.0), Some(scheme.sample(0.0)));
+        assert_eq!(through((3.0, 3.0), 3.0), Some(scheme.sample(1.0)), "a uniform raster draws the top color");
+        assert_eq!(raster_cell_domain((-2.0, 6.0)), (-2.0, 6.0), "a negative-spanning mean keeps its range");
+        assert_eq!(through((-2.0, 6.0), -2.0), Some(scheme.sample(0.0)));
+        assert_eq!(raster_cell_domain((0.0, 0.0)), (0.0, 0.0));
+        assert_eq!(through((0.0, 0.0), 0.0), Some(scheme.sample(0.5)), "an all-zero raster draws, at the midpoint");
     }
 }

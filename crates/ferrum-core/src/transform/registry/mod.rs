@@ -528,6 +528,8 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 ("width", DataType::UInt32),
                 ("height", DataType::UInt32),
                 ("pixel_data", DataType::Binary),
+                (crate::transform::raster::RASTER_VALUE_FIELD, DataType::Utf8),
+                (crate::transform::raster::RASTER_VALUE_SCALE, DataType::Utf8),
             ],
             secondary_outputs: vec![],
             params: vec![

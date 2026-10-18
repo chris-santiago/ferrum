@@ -39,7 +39,7 @@ from ferrum import LetterValue
 from ferrum._core import secondary_key
 from ferrum._layer import _Layer
 from ferrum._registry import registry_secondary_columns
-from ferrum.marks.composite import _LV_OUTLIERS_KEY, _LV_TRANSFORM_NAME
+from ferrum.marks.composite import _LV_OUTLIERS_KEY, _LV_TRANSFORM_NAME, _lv_depth_key
 
 # ---------------------------------------------------------------------------
 # Independent oracle: mirrors letter_value.rs's documented formulas
@@ -226,20 +226,29 @@ def test_letter_value_used_directly_fences_at_the_outermost_values():
 
     values = [float(i) for i in range(1, 10)]
     df = pl.DataFrame({"g": ["a"] * len(values), "v": values})
+    # Each layer reads one of the transform's own outputs, as mark_boxen()'s
+    # bands and outlier points do: the innermost band reads its depth output
+    # and the points the outlier rows. The chart's own rows are the source
+    # frame, which carries no ``group``.
     chart = (
         fm.Chart(df)
         .transform(LetterValue(value="v", group="g", k_depth="full", name=_LV_TRANSFORM_NAME))
-        .mark_rect()
-        .encode(x="group", y="lower", y2="upper")
-        .layer(
-            _Layer(
-                name="outlier",
-                mark="point",
-                encoding={"x": "group", "y": "value"},
-                data_source=secondary_key(_LV_TRANSFORM_NAME, _LV_OUTLIERS_KEY),
-            )
-        )
+        .properties()
     )
+    chart._layers = [
+        _Layer(
+            name="band",
+            mark="rect",
+            encoding={"x": "group", "y": "lower", "y2": "upper"},
+            data_source=secondary_key(_LV_TRANSFORM_NAME, _lv_depth_key(1)),
+        ),
+        _Layer(
+            name="outlier",
+            mark="point",
+            encoding={"x": "group", "y": "value"},
+            data_source=secondary_key(_LV_TRANSFORM_NAME, _LV_OUTLIERS_KEY),
+        ),
+    ]
     svg = chart.to_svg()
     assert _circle_count(svg) == 2
 

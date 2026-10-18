@@ -7,11 +7,11 @@
 //!   nx:      UInt32
 //!   ny:      UInt32
 //!   extent:  List<Float64>   length 4: [xmin, xmax, ymin, ymax]
-//!   <group>: Utf8 (OPTIONAL trailing column — present only in grouped Kde2D output)
+//!   <group>: any dtype (OPTIONAL trailing columns — the groupby keys of grouped Kde2D output)
 //!
-//! When a trailing Utf8 column is present beyond the 6 known fields, the batch
-//! is treated as grouped Kde2D output (one row per group). The contour
-//! extraction runs once per row and the group key is propagated to every output
+//! When columns are present beyond the 6 known fields, the batch is treated as
+//! grouped Kde2D output (one row per group). The contour extraction runs once
+//! per row and each group key is propagated, in its own dtype, to every output
 //! vertex so downstream marks can `color=<group>`.
 //!
 //! Output (one row per polyline vertex, NOT per polyline):
@@ -19,7 +19,7 @@
 //!   level_value: Float64
 //!   contour_x:   Float64
 //!   contour_y:   Float64
-//!   [<group>:    Utf8]   — only when input is grouped
+//!   [<group>:    input dtype]   — only when input is grouped
 //!
 //! `level_id` encoding:
 //!   - Isoline mode: (level_index << 16) | segment_index
@@ -43,8 +43,8 @@
 //! band instead of none. `smooth=false` is unaffected by the reorder,
 //! since there is no smoothing step to move.
 
-use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray, UInt32Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, UInt32Array};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::PyResult;
@@ -466,20 +466,15 @@ fn contour_one_surface(
     }
 }
 
-/// Detect the optional group column: the trailing field beyond the 6 known
-/// Kde2D surface columns, if it has Utf8 type. Returns `(field_name, column_index)`
-/// or `None` when no group column is present.
-fn detect_group_col(batch: &RecordBatch) -> Option<(String, usize)> {
+/// The group-key columns of a grouped Kde2D batch: every field after its 6
+/// surface columns, one per `groupby` key, in whatever dtype Kde2D kept
+/// (string, integer, floating-point or boolean). Empty for an ungrouped batch.
+fn group_key_columns(batch: &RecordBatch) -> Vec<(FieldRef, ArrayRef)> {
     const SURFACE_COLS: usize = 6;
     let schema = batch.schema();
-    if schema.fields().len() > SURFACE_COLS {
-        let idx = SURFACE_COLS; // one trailing column by convention
-        let field = schema.field(idx);
-        if field.data_type() == &DataType::Utf8 {
-            return Some((field.name().to_string(), idx));
-        }
-    }
-    None
+    (SURFACE_COLS..schema.fields().len())
+        .map(|idx| (Arc::clone(&schema.fields()[idx]), Arc::clone(batch.column(idx))))
+        .collect()
 }
 
 pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -502,8 +497,8 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         return empty_output(spec.fill);
     }
 
-    // Detect the optional group column (trailing Utf8 field beyond the 6 surface cols).
-    let group_col = detect_group_col(batch);
+    // The optional group-key columns (every field beyond the 6 surface cols).
+    let group_cols = group_key_columns(batch);
 
     // Accumulate output across all rows (one row = one surface, possibly one group).
     let mut all_level_ids: Vec<u32> = Vec::new();
@@ -512,7 +507,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     let mut all_ys: Vec<f64> = Vec::new();
     let mut all_x2s: Vec<f64> = Vec::new(); // isoline only
     let mut all_y2s: Vec<f64> = Vec::new(); // isoline only
-    let mut all_group_tags: Vec<String> = Vec::new(); // grouped path only
+    let mut all_group_rows: Vec<u32> = Vec::new(); // grouped path only: each vertex's surface row
 
     // FA-8: level_ids restart at 0 for every surface (per-surface seg/cell
     // counter), so multiple grouped surfaces would emit colliding ids. Offset
@@ -520,14 +515,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     // level_id column is globally unique. For a single surface the base stays 0,
     // keeping existing (ungrouped) output byte-identical.
     let mut level_id_base: u32 = 0;
-
-    let group_arr: Option<&StringArray> = group_col.as_ref().map(|(_, col_idx)| {
-        batch
-            .column(*col_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("group column confirmed Utf8 by detect_group_col")
-    });
 
     for row in 0..batch.num_rows() {
         let grid_x = extract_list_f64_row(batch, "grid_x", row)?;
@@ -578,16 +565,18 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             all_y2s.extend(y2s);
         }
 
-        // Tag every output vertex with the group key when grouped.
-        if let Some(garr) = group_arr {
-            let key = garr.value(row).to_string();
-            all_group_tags.extend(std::iter::repeat_n(key, n_new));
+        // Tag every output vertex with its surface's row when grouped, so the
+        // group keys are taken from that row below.
+        if !group_cols.is_empty() {
+            let row = u32::try_from(row)
+                .map_err(|_| PyValueError::new_err("stat_contour: more grouped surfaces than u32 rows"))?;
+            all_group_rows.extend(std::iter::repeat_n(row, n_new));
         }
     }
 
     build_output(
         spec.fill,
-        &group_col,
+        &group_cols,
         AccumulatedOutput {
             level_ids: all_level_ids,
             level_vals: all_level_vals,
@@ -595,7 +584,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             ys: all_ys,
             x2s: all_x2s,
             y2s: all_y2s,
-            group_tags: all_group_tags,
+            group_rows: all_group_rows,
         },
     )
 }
@@ -610,60 +599,53 @@ struct AccumulatedOutput {
     x2s: Vec<f64>,
     /// Non-empty only in isoline mode.
     y2s: Vec<f64>,
-    /// Non-empty only in grouped mode.
-    group_tags: Vec<String>,
+    /// Each vertex's surface row in the input batch; non-empty only in
+    /// grouped mode.
+    group_rows: Vec<u32>,
 }
 
 /// Assemble the final RecordBatch from accumulated output vectors.
 fn build_output(
     fill: bool,
-    group_col: &Option<(String, usize)>,
+    group_cols: &[(FieldRef, ArrayRef)],
     out: AccumulatedOutput,
 ) -> PyResult<RecordBatch> {
-    let AccumulatedOutput { level_ids, level_vals, xs, ys, x2s, y2s, group_tags } = out;
-    let has_group = group_col.is_some();
-
-    if fill {
-        let mut schema_fields = out_schema_isoband().fields().to_vec();
-        if let Some((name, _)) = group_col {
-            schema_fields.push(Arc::new(Field::new(name.as_str(), DataType::Utf8, false)));
-        }
-        let schema = Arc::new(Schema::new(schema_fields));
-        let mut cols: Vec<ArrayRef> = vec![
-            Arc::new(UInt32Array::from(level_ids)),
-            Arc::new(Float64Array::from(level_vals)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ];
-        if has_group {
-            cols.push(Arc::new(StringArray::from(
-                group_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )));
-        }
-        RecordBatch::try_new(schema, cols)
-            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    let AccumulatedOutput { level_ids, level_vals, xs, ys, x2s, y2s, group_rows } = out;
+    let (mut schema_fields, mut cols): (Vec<FieldRef>, Vec<ArrayRef>) = if fill {
+        (
+            out_schema_isoband().fields().to_vec(),
+            vec![
+                Arc::new(UInt32Array::from(level_ids)),
+                Arc::new(Float64Array::from(level_vals)),
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+            ],
+        )
     } else {
-        let mut schema_fields = out_schema_isoline().fields().to_vec();
-        if let Some((name, _)) = group_col {
-            schema_fields.push(Arc::new(Field::new(name.as_str(), DataType::Utf8, false)));
-        }
-        let schema = Arc::new(Schema::new(schema_fields));
-        let mut cols: Vec<ArrayRef> = vec![
-            Arc::new(UInt32Array::from(level_ids)),
-            Arc::new(Float64Array::from(level_vals)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float64Array::from(x2s)),
-            Arc::new(Float64Array::from(y2s)),
-        ];
-        if has_group {
-            cols.push(Arc::new(StringArray::from(
-                group_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )));
-        }
-        RecordBatch::try_new(schema, cols)
-            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+        (
+            out_schema_isoline().fields().to_vec(),
+            vec![
+                Arc::new(UInt32Array::from(level_ids)),
+                Arc::new(Float64Array::from(level_vals)),
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(Float64Array::from(x2s)),
+                Arc::new(Float64Array::from(y2s)),
+            ],
+        )
+    };
+    // Each group key keeps its input field and dtype, repeated over the
+    // vertices its surface emitted.
+    let group_rows = UInt32Array::from(group_rows);
+    for (field, column) in group_cols {
+        schema_fields.push(Arc::clone(field));
+        cols.push(
+            arrow::compute::take(column.as_ref(), &group_rows, None)
+                .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))?,
+        );
     }
+    RecordBatch::try_new(Arc::new(Schema::new(schema_fields)), cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
 }
 
 // ---------- PyO3 wrapper ----------
@@ -1651,5 +1633,43 @@ mod tests {
                 lv_col.value(i)
             );
         }
+    }
+
+    /// A grouped Kde2D batch's group column keeps its dtype through the
+    /// contour: an integer group is tagged on every vertex as an integer, so
+    /// a color by group draws one color per group whatever the key's dtype.
+    /// Rejects keeping only a Utf8 group column.
+    #[test]
+    fn contour_keeps_an_integer_group_column_in_its_dtype() {
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let n = 4usize;
+        let grid: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let peak = |c: f64| -> Vec<f64> {
+            (0..n * n)
+                .map(|i| {
+                    let (gx, gy) = ((i % n) as f64 - c, (i / n) as f64 - c);
+                    (-(gx * gx + gy * gy)).exp()
+                })
+                .collect()
+        };
+        let utf8 = make_grouped_kde2d_batch(
+            vec![(grid.clone(), grid.clone(), peak(1.0)), (grid.clone(), grid.clone(), peak(2.0))],
+            "grp",
+            vec!["0", "1"],
+        );
+        let mut fields = utf8.schema().fields().to_vec();
+        fields[6] = Arc::new(Field::new("grp", DataType::Int64, true));
+        let mut columns = utf8.columns().to_vec();
+        columns[6] = Arc::new(Int64Array::from(vec![0, 1]));
+        let int = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let spec = ContourSpec { thresholds: 2, fill: false, smooth: false, name: None };
+        let out = apply(&spec, &int).unwrap();
+        assert_eq!(out.schema().field(6).name(), "grp");
+        assert_eq!(out.schema().field(6).data_type(), &DataType::Int64);
+        let tags = out.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(tags.iter().any(|t| t == Some(0)) && tags.iter().any(|t| t == Some(1)), "both groups tagged");
+        let utf8_out = apply(&spec, &utf8).unwrap();
+        assert_eq!(out.num_rows(), utf8_out.num_rows(), "the same isolines as the Utf8 group");
     }
 }

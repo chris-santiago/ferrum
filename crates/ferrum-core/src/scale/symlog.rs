@@ -8,11 +8,11 @@ use super::core::{
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
-fn symlog_fwd(x: f64, c: f64) -> f64 {
+pub(crate) fn symlog_fwd(x: f64, c: f64) -> f64 {
     x.signum() * (x.abs() / c).ln_1p()
 }
 
-fn symlog_inv(y: f64, c: f64) -> f64 {
+pub(crate) fn symlog_inv(y: f64, c: f64) -> f64 {
     y.signum() * c * (y.abs().exp() - 1.0)
 }
 

@@ -885,6 +885,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -1004,6 +1005,7 @@ mod tests {
             stroke_width: None,
             x2: None, y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -1300,6 +1302,7 @@ mod tests {
                 DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -1638,6 +1641,7 @@ mod tests {
                 DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -1896,6 +1900,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -1958,6 +1963,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
@@ -2017,6 +2023,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();

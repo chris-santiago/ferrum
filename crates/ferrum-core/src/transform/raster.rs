@@ -3,18 +3,26 @@
 //! Output is a SINGLE-ROW batch:
 //!   x_min, x_max, y_min, y_max:  Float64
 //!   width, height:               UInt32
-//!   pixel_data:                  Binary  (normalized f64 values packed as 8-byte
-//!                                         little-endian blobs; length = width*height*8)
+//!   pixel_data:                  Binary  (the aggregated f64 cell values packed
+//!                                         as 8-byte little-endian blobs;
+//!                                         length = width*height*8; NaN = empty)
+//!   value_field:                 Utf8    (the field the cells hold: `field=`,
+//!                                         else the aggregate's name)
+//!   value_scale:                 Utf8    (`symlog` when `log_scale`, else
+//!                                         `linear`: the scale the cells' color
+//!                                         maps through)
 //!
-//! Each cell stores one f64 in [0.0, 1.0]. The render::marks::image drawer is
-//! responsible for resolving the colormap and encoding RGBA8 pixels from these
-//! values. This keeps the transform cmap-agnostic.
+//! Each cell stores its raw aggregated value. The render::marks::image drawer
+//! maps every cell through a color scale over those values and encodes RGBA8
+//! pixels, so the transform stays cmap-agnostic, the image and a colorbar
+//! describe one mapping, and `log_scale` compresses the color scale (symlog)
+//! rather than the values, so a colorbar reads raw counts.
 //!
 //! Resolution mode `Screen` reads `panel_pixel_size` from the TransformContext;
 //! when no context is provided (apply() default), it falls back to 256x256.
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float64Array, RecordBatch, UInt32Array,
+    Array, ArrayRef, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -25,6 +33,18 @@ use std::sync::Arc;
 use crate::transform::context::TransformContext;
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
+
+/// The raster batch's one-row Utf8 column naming the field its cells hold:
+/// the aggregated `field=` column, else the aggregate's own name (`count`,
+/// `density`, `any`). A color binding naming it is the color the image draws
+/// (`render::marks::image::image_draws_color`).
+pub(crate) const RASTER_VALUE_FIELD: &str = "value_field";
+
+/// The raster batch's one-row Utf8 column naming the scale its cells' color
+/// maps through, in `ScaleSpec`'s own tag vocabulary: `symlog` when
+/// `log_scale`, else `linear` (`render::marks::image::raster_value_transform`
+/// reads it).
+pub(crate) const RASTER_VALUE_SCALE: &str = "value_scale";
 
 /// `Raster`'s aggregate vocabulary: `RasterSpec.aggregate` stores it typed,
 /// and `registry::entry_for_kind("raster")` derives `methods`/
@@ -397,49 +417,8 @@ pub(crate) fn apply_with_context(
         }
     }
 
-    // 10. Apply log_scale: ln(1+v).
-    if spec.log_scale {
-        for i in 0..n_cells {
-            if values[i].is_nan() {
-                continue;
-            }
-            // ln1p of negative input is undefined for our purposes; clamp at 0.
-            let base = if values[i] < 0.0 { 0.0 } else { values[i] };
-            values[i] = (1.0 + base).ln();
-        }
-    }
-
-    // 11. Normalize to [0, 1] using max non-NaN, non-negative value.
-    let mut vmax = 0.0_f64;
-    for i in 0..n_cells {
-        let v = values[i];
-        if v.is_finite() && v > vmax {
-            vmax = v;
-        }
-    }
-    let normalized: Vec<f64> = values
-        .iter()
-        .map(|v| {
-            if !v.is_finite() {
-                // Preserve NaN sentinel so the image renderer emits transparent pixels.
-                return f64::NAN;
-            }
-            if vmax <= 0.0 {
-                return 0.0;
-            }
-            let n = v / vmax;
-            if n < 0.0 {
-                0.0
-            } else if n > 1.0 {
-                1.0
-            } else {
-                n
-            }
-        })
-        .collect();
-
-    // 12. Pack normalized f64 values as 8-byte little-endian blobs.
-    // The image drawer will apply the colormap and produce RGBA8 pixels.
+    // 10. Pack the cell values as 8-byte little-endian blobs.
+    // The image drawer maps them through a color scale to RGBA8 pixels.
     //
     // Cells are accumulated with `idx = gy*nxs + gx`, where `gy = 0` is the
     // `y_min` (bottom) data row. PNG/raster row 0 is the TOP of the image, and
@@ -451,12 +430,16 @@ pub(crate) fn apply_with_context(
         let data_row = nys - 1 - screen_row;
         for gx in 0..nxs {
             let idx = data_row * nxs + gx;
-            pixel_data.extend_from_slice(&normalized[idx].to_le_bytes());
+            pixel_data.extend_from_slice(&values[idx].to_le_bytes());
         }
     }
 
-    // 13. Build single-row output batch.
+    // 12. Build single-row output batch.
     let pixel_array = BinaryArray::from(vec![pixel_data.as_slice()]);
+    let value_field = spec.field.as_deref().unwrap_or(agg.as_str());
+    // `log_scale` names the scale the cells' color maps through; the cells
+    // keep their raw values.
+    let value_scale = if spec.log_scale { "symlog" } else { "linear" };
 
     let out_schema = Arc::new(Schema::new(vec![
         Field::new("x_min", DataType::Float64, false),
@@ -466,6 +449,8 @@ pub(crate) fn apply_with_context(
         Field::new("width", DataType::UInt32, false),
         Field::new("height", DataType::UInt32, false),
         Field::new("pixel_data", DataType::Binary, false),
+        Field::new(RASTER_VALUE_FIELD, DataType::Utf8, false),
+        Field::new(RASTER_VALUE_SCALE, DataType::Utf8, false),
     ]));
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(vec![xmin])),
@@ -475,6 +460,8 @@ pub(crate) fn apply_with_context(
         Arc::new(UInt32Array::from(vec![nx])),
         Arc::new(UInt32Array::from(vec![ny])),
         Arc::new(pixel_array),
+        Arc::new(StringArray::from(vec![value_field])),
+        Arc::new(StringArray::from(vec![value_scale])),
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_raster: {e}")))
@@ -494,8 +481,12 @@ use crate::transform::core::TransformSpec;
 ///
 /// Output is a single-row batch: ``x_min``, ``x_max``, ``y_min``,
 /// ``y_max`` (Float64 data extent), ``width`` / ``height`` (UInt32 grid
-/// dimensions), and ``pixel_data`` (Binary, normalized f64 values packed as
-/// 8-byte little-endian blobs, length = ``width*height*8``).
+/// dimensions), ``pixel_data`` (Binary, the aggregated f64 cell values
+/// packed as 8-byte little-endian blobs, length = ``width*height*8``, NaN for
+/// an empty cell), ``value_field`` (Utf8, the field the cells hold:
+/// ``field``, else the aggregate's name) and ``value_scale`` (Utf8,
+/// ``symlog`` when ``log_scale``, else ``linear``). The image mark colors
+/// each cell through a color scale over those raw values.
 ///
 /// Parameters
 /// ----------
@@ -516,8 +507,10 @@ use crate::transform::core::TransformSpec;
 ///     Cells with fewer than ``min_count`` observations are set to
 ///     transparent (alpha 0) in the output image.
 /// log_scale : bool, default False
-///     Apply ``log1p`` scaling to the aggregated values before normalising
-///     to the pixel range, compressing high-density outliers.
+///     Map the cells' color through a symlog scale (``log1p`` on
+///     non-negative values, sign-preserving through negatives), compressing
+///     high-density outliers. The cells keep their raw values, so a colorbar
+///     over them reads raw counts.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -724,11 +717,11 @@ mod tests {
             let i = (screen_row * width + col) * 8;
             f64::from_le_bytes(bytes[i..i + 8].try_into().unwrap())
         };
-        // The densest cell (3 points at high X/Y) is the normalized max (1.0).
+        // The densest cell (3 points at high X/Y) holds its count, 3.
         // In SCREEN order it must be the TOP-RIGHT cell: row 0, col 1.
         let top_right = raw(0, 1);
         let bottom_right = raw(1, 1);
-        assert!((top_right - 1.0).abs() < 1e-9,
+        assert!((top_right - 3.0).abs() < 1e-9,
             "high-Y data must render at the top (screen row 0); top_right={top_right}");
         assert!(bottom_right.is_nan(),
             "bottom-right must be empty for high-Y data; got {bottom_right}");
@@ -766,9 +759,13 @@ mod tests {
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
 
-        // Both nonempty cells have count=2 → max=2 → normalized=1.0.
-        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
-        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        // Both nonempty cells hold their count, 2, and the batch names the
+        // field the cells hold: the aggregate's own name.
+        assert!((p00 - 2.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 2.0).abs() < 1e-9, "p11={p11}");
+        let value_field = out.column_by_name(RASTER_VALUE_FIELD).unwrap()
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap().value(0).to_string();
+        assert_eq!(value_field, "count");
         // Empty cells = NaN (transparent sentinel for the image renderer).
         assert!(p01.is_nan(), "p01 should be NaN, got {p01}");
         assert!(p10.is_nan(), "p10 should be NaN, got {p10}");
@@ -797,14 +794,15 @@ mod tests {
         let out = apply(&spec, &b).unwrap();
 
         // Cell area = 0.7 * 0.7 / (2*2) — the extent is (0.1,0.8) by (0.1,0.8).
-        // Density values for the two filled cells are equal (count=2 each), so
-        // both normalize to 1.0. Empty cells are NaN (transparent).
+        // The two filled cells hold equal densities (count=2 each), 2/(4·A).
+        // Empty cells are NaN (transparent).
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
-        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
-        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        let area = (0.7 / 2.0) * (0.7 / 2.0);
+        assert!((p00 - 2.0 / (4.0 * area)).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - p00).abs() < 1e-9, "p11={p11}");
         assert!(p01.is_nan(), "p01 should be NaN, got {p01}");
         assert!(p10.is_nan(), "p10 should be NaN, got {p10}");
 
@@ -839,7 +837,7 @@ mod tests {
             vec![10.0, 20.0, 3.0, 5.0],
         );
 
-        // mean: cell (0,0) = 15, (1,1) = 4 → max=15 → (0,0)=1.0, (1,1)=4/15.
+        // mean: cell (0,0) = 15, (1,1) = 4, held as they are.
         let spec_mean = RasterSpec {
             x: "x".into(),
             y: "y".into(),
@@ -855,10 +853,10 @@ mod tests {
         let out_mean = apply(&spec_mean, &b).unwrap();
         let p00 = pixel_at(&out_mean, 0, 0);
         let p11 = pixel_at(&out_mean, 1, 1);
-        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
-        assert!((p11 - 4.0 / 15.0).abs() < 1e-9, "p11={p11}");
+        assert!((p00 - 15.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 4.0).abs() < 1e-9, "p11={p11}");
 
-        // sum: (0,0) = 30, (1,1) = 8 → max=30 → (0,0)=1.0, (1,1)=8/30.
+        // sum: (0,0) = 30, (1,1) = 8.
         let spec_sum = RasterSpec {
             x: "x".into(),
             y: "y".into(),
@@ -874,8 +872,11 @@ mod tests {
         let out_sum = apply(&spec_sum, &b).unwrap();
         let q00 = pixel_at(&out_sum, 0, 0);
         let q11 = pixel_at(&out_sum, 1, 1);
-        assert!((q00 - 1.0).abs() < 1e-9, "q00={q00}");
-        assert!((q11 - 8.0 / 30.0).abs() < 1e-9, "q11={q11}");
+        assert!((q00 - 30.0).abs() < 1e-9, "q00={q00}");
+        assert!((q11 - 8.0).abs() < 1e-9, "q11={q11}");
+        let value_field = out_sum.column_by_name(RASTER_VALUE_FIELD).unwrap()
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap().value(0).to_string();
+        assert_eq!(value_field, "f", "the cells hold the aggregated field");
     }
 
     #[test]
@@ -935,15 +936,16 @@ mod tests {
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
         // (0,0) survives: count=11 ≥ 10.
-        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        assert!((p00 - 11.0).abs() < 1e-9, "p00={p00}");
         // (1,1) masked: count=1 < 10 → NaN (transparent).
         assert!(p11.is_nan(), "p11 should be NaN, got {p11}");
     }
 
     #[test]
-    fn raster_log_scale_applies_log1p() {
+    fn raster_log_scale_keeps_raw_cells_and_names_a_symlog_scale() {
         pyo3::Python::initialize();
-        // Cell (0,0): 10 points; cell (1,1): 1 point. log1p(10)/log1p(10)=1, log1p(1)/log1p(10)≈0.289.
+        // Cell (0,0): 10 points; cell (1,1): 1 point: the cells keep their raw
+        // counts, and the batch names the symlog scale their color maps through.
         let xs: Vec<f64> = (0..10).map(|i| 0.1 + (i as f64) * 0.01).collect();
         let mut all_x = xs.clone();
         all_x.push(0.8);
@@ -965,11 +967,11 @@ mod tests {
         let out = apply(&spec, &b).unwrap();
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
-        // (0,0) max value → 1.0.
-        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
-        // (1,1) ratio = log1p(1)/log1p(10) = ln(2)/ln(11) ≈ 0.2891.
-        let expected = 2.0_f64.ln() / 11.0_f64.ln();
-        assert!((p11 - expected).abs() < 1e-9, "p11={p11}, expected={expected}");
+        assert!((p00 - 10.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        let value_scale = out.column_by_name(RASTER_VALUE_SCALE).unwrap()
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap().value(0).to_string();
+        assert_eq!(value_scale, "symlog");
     }
 
     #[test]

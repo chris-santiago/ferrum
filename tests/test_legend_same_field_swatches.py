@@ -428,13 +428,20 @@ def test_a_glyph_and_a_dash_folded_together_draw_the_glyph(df):
     pinned in Rust, at
     ``render::prepare::legend::tests::a_glyph_and_a_dash_folded_onto_one_entry_keep_the_glyph_and_report_the_dash``.
 
+    The lines draw the dashes and the attached points draw the glyphs: a line
+    draws no shape, so a line alone gets no shape scale and no glyphs at all
+    (the layer encoding model's undrawn-channel cells pin that).
+
     The mark assertion is load-bearing, not scene-setting: it establishes that
     the chart genuinely has three distinct patterns to lose. Without it a
     future change that stopped dashing the marks entirely would leave this test
     passing while asserting nothing.
     """
     chart = (
-        fm.Chart(df).mark_line().encode(x="x:Q", y="y:Q", color="g:N", shape="g", stroke_dash="g")
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x:Q", y="y:Q", color="g:N", shape="g", stroke_dash="g")
+        .layer(fm.Layer(mark="point"))
     )
     svg, _ = render(chart)
 

@@ -7361,7 +7361,7 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
         let encoding: crate::spec::encoding::Encoding =
             serde_json::from_value(serde_json::json!({ name: { "field": field } })).unwrap();
         let spec = ChartSpec { encoding, ..Default::default() };
-        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width } =
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width, raster_cells: _ } =
             build_auxiliary_scales(&spec, &spec.encoding, &batch, &HashMap::new(), &ThemeInputs::default(), None, &mut Vec::new())
                 .unwrap();
         let built = [
@@ -8185,4 +8185,39 @@ fn a_geoshape_layer_needs_no_position_channel() {
         validate_drawing_layers_can_plot(&point, &point.encoding),
         Err(RenderError::LayerMissingPositionalChannel { layer: 1, .. })
     ));
+}
+
+/// An unlayered `Overlay` member binding an auxiliary channel to a column
+/// its one batch lacks refuses as that chart alone does, naming the
+/// channel, though the group resolves the member's scales in its place.
+/// Rejects a group scale that skips the member's binding and draws it
+/// without the channel.
+#[test]
+fn an_unlayered_overlay_member_binding_an_absent_column_refuses() {
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    let chart = |color: &str| ChartSpec {
+        mark: crate::spec::mark::Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: color.into(), ..Default::default() }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", ArrowDataType::Float64, false)])),
+        vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+    )
+    .unwrap();
+    let outputs = HashMap::new();
+    let (absent, other) = (chart("w"), chart("x"));
+    let members = [
+        LeafResolveInput { spec: &absent, encoding: &absent.encoding, final_batch: &rows, transform_outputs: &outputs },
+        LeafResolveInput { spec: &other, encoding: &other.encoding, final_batch: &rows, transform_outputs: &outputs },
+    ];
+    let refusal = build_overlay_auxiliary_scales(&members, &absent.encoding, &ThemeInputs::default(), &mut Vec::new())
+        .expect_err("member 0's color names a column its rows lack");
+    assert_eq!(refusal.channel, "color");
+    assert_eq!(refusal.source, RenderError::UnknownColumn { name: "w".to_string() });
 }

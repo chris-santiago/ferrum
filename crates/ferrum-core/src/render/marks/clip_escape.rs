@@ -94,6 +94,7 @@ fn narrow_domain_scales() -> ResolvedScales {
         x2: None,
         y2: None,
         y_slots: Default::default(),
+        raster_cells: None,
     }
 }
 

@@ -1159,6 +1159,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
@@ -1218,6 +1219,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();

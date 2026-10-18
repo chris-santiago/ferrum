@@ -3078,23 +3078,27 @@ mod column_reads_categorical_tests {
 }
 
 /// `ferrum._core.layer_unknown_column_message(layer, channel, name, remedy,
-/// independent_y)`: the refusal text of
+/// independent_y, *, entry=None)`: the refusal text of
 /// [`RenderError::LayerUnknownColumn`], formatted by its own `Display`, so a
 /// Python check that knows a layer's schema before the render raises the
 /// render gate's words rather than a copy of them. `channel` is the channel
 /// as the caller wrote it, any of [`MESSAGE_CHANNELS`] (a statistic's input
 /// or groupby field can sit on any channel, `color`, `fill` or `detail` as
 /// well as a positional one), and the message names it verbatim; `remedy` is `"plain"`, `"source"` or `"statistic"`; `independent_y` picks
-/// the remedy's spelling for a layer with its own y axis. An unknown
-/// `channel` or `remedy` raises `ValueError`. Registered in `lib.rs`, typed
-/// in `src/ferrum/_core.pyi`.
+/// the remedy's spelling for a layer with its own y axis. `entry` is the
+/// public call that built the layer when a desugaring call did: the message
+/// then names that call instead of `layer {layer}`, as the render gate names
+/// it (`prepare::public_layer`). An unknown `channel` or `remedy` raises
+/// `ValueError`. Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
 #[pyfunction]
+#[pyo3(signature = (layer, channel, name, remedy, independent_y, *, entry = None))]
 pub(crate) fn layer_unknown_column_message(
     layer: usize,
     channel: &str,
     name: &str,
     remedy: &str,
     independent_y: bool,
+    entry: Option<String>,
 ) -> PyResult<String> {
     use super::MissingColumnRemedy;
     let Some(channel) = MESSAGE_CHANNELS.iter().copied().find(|c| *c == channel) else {
@@ -3115,6 +3119,7 @@ pub(crate) fn layer_unknown_column_message(
     };
     Ok(RenderError::LayerUnknownColumn {
         layer,
+        entry: entry.map(String::into_boxed_str),
         channel,
         name: name.to_string(),
         coord_flipped: false,
@@ -3183,7 +3188,7 @@ mod layer_unknown_column_message_tests {
     #[test]
     fn layer_unknown_column_message_publishes_the_gate_text() {
         let message = |remedy, independent_y| {
-            layer_unknown_column_message(2, "y", "v", remedy, independent_y).expect("a known remedy")
+            layer_unknown_column_message(2, "y", "v", remedy, independent_y, None).expect("a known remedy")
         };
         assert_eq!(message("plain", false), PLAIN);
         assert_eq!(message("plain", true), PLAIN);
@@ -3248,7 +3253,7 @@ mod layer_unknown_column_message_tests {
         };
         for (wire, _) in every_channel.channels() {
             let channel = wire.split('[').next().unwrap_or(&wire);
-            let message = layer_unknown_column_message(1, channel, "c", "statistic", false)
+            let message = layer_unknown_column_message(1, channel, "c", "statistic", false, None)
                 .unwrap_or_else(|e| panic!("channel '{channel}' is refused: {e}"));
             assert!(message.starts_with(&format!("layer 1: encoding '{channel}' references")), "{message}");
         }
@@ -3265,7 +3270,7 @@ mod layer_unknown_column_message_tests {
             "fill", "stroke", "detail", "theta", "theta2", "radius", "radius2", "x_error",
             "x_error2", "y_error", "y_error2", "order", "facet", "facet_col", "facet_row",
         ] {
-            let message = layer_unknown_column_message(1, channel, "nope", "plain", false)
+            let message = layer_unknown_column_message(1, channel, "nope", "plain", false, None)
                 .unwrap_or_else(|e| panic!("channel '{channel}' is refused: {e}"));
             assert_eq!(
                 message,
@@ -3282,12 +3287,26 @@ mod layer_unknown_column_message_tests {
     fn layer_unknown_column_message_refuses_an_unknown_channel_or_remedy() {
         pyo3::Python::initialize();
         pyo3::Python::attach(|py| {
-            let channel = layer_unknown_column_message(1, "colour", "c", "plain", false).unwrap_err();
+            let channel = layer_unknown_column_message(1, "colour", "c", "plain", false, None).unwrap_err();
             assert!(channel.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(channel.to_string().contains("'colour'"), "{channel}");
-            let remedy = layer_unknown_column_message(1, "x", "c", "typo", false).unwrap_err();
+            let remedy = layer_unknown_column_message(1, "x", "c", "typo", false, None).unwrap_err();
             assert!(remedy.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(remedy.to_string().contains("'typo'"), "{remedy}");
         });
+    }
+
+    /// The formatter speaks the gate's voice for a layer a desugaring call
+    /// built: given its `entry`, the message names that call, as the render
+    /// gate does; without one it names the layer index.
+    #[test]
+    fn the_message_names_a_desugared_layers_entry() {
+        assert_eq!(
+            layer_unknown_column_message(1, "color", "c", "plain", false, Some("residplot".into())).expect("known"),
+            "residplot: encoding 'color' references unknown column 'c' (not present in that layer's data)"
+        );
+        assert!(layer_unknown_column_message(1, "color", "c", "plain", false, None)
+            .expect("known")
+            .starts_with("layer 1: encoding 'color'"));
     }
 }

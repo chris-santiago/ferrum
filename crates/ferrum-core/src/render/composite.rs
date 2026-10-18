@@ -44,8 +44,10 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
+    admitted_aux_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
+    SortContext, SortRows,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
-    establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
+    establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
     column_reads_categorical, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, LayerUnion, LeafScaleContext, SharedDomain,
 };
 use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
@@ -390,10 +392,15 @@ fn resolve_channel(
                     ExcludedLayerPlacement::OwnScale,
                     warnings,
                 );
-                if let Some((_, scale)) = establishing_caller_scale(&axis) {
-                    resolve_caller_scale_group(&group, channel, scale, leaves, out)?;
-                    continue;
+                match establishing_caller_scale(&axis) {
+                    Some((_, scale)) => resolve_caller_scale_group(&group, channel, scale, leaves, out)?,
+                    None => {
+                        resolve_group(&group, channel, leaves, out)?;
+                        sort_overlay_categories(&group, channel, leaves, out, warnings)?;
+                    }
                 }
+                impose_overlay_axis(&group, channel, leaves, out, warnings)?;
+                continue;
             }
             resolve_group(&group, channel, leaves, out)?;
         }
@@ -594,8 +601,10 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
     }
 }
 
-/// The members of an `Overlay` group's axis on `channel`: each member, by
-/// its position in the group, with its own scale there, in member order.
+/// The members of an `Overlay` group's axis on `channel`: each member that
+/// draws the channel (its rendering encoding binds it), by its position in
+/// the group, with its own scale there, in member order. The first of them
+/// establishes the axis; a member drawing nothing there has no say in it.
 fn overlay_axis<'g, 'a>(
     group: &'g [usize],
     channel: Channel,
@@ -604,6 +613,7 @@ fn overlay_axis<'g, 'a>(
     let members = group
         .iter()
         .enumerate()
+        .filter(move |&(_, &idx)| leaf_post_flip_encoding(&leaves[idx], channel).is_some())
         .map(move |(index, &idx)| AxisMember { index, own_scale: leaf_own_scale(&leaves[idx], channel) });
     AxisMembers::new(members, |position| {
         let lead = &leaves[group[position]];
@@ -613,6 +623,162 @@ fn overlay_axis<'g, 'a>(
                 column_reads_categorical(enc, located)
             })
     })
+}
+
+/// Order an `Overlay` group's shared categorical domain by its establishing
+/// member's data-aware `sort=` (the first member drawing the channel), read
+/// over that member's own rows as its own scale reads them
+/// ([`establishing_sort_rows`]), and give every member sharing the domain
+/// that order. So the static overlay orders the axis as the same layers
+/// merged with `+` do; a shared ordinal domain is otherwise authoritative and
+/// no member re-sorts it. A group without a sort, or with a numeric domain,
+/// keeps its union order.
+fn sort_overlay_categories(
+    group: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeResolveError> {
+    let Some((establishing, enc)) =
+        group.iter().find_map(|&idx| leaf_post_flip_encoding(&leaves[idx], channel).map(|enc| (idx, enc)))
+    else {
+        return Ok(());
+    };
+    let Some(sort) = enc.sort.as_ref() else { return Ok(()) };
+    let slot = |ctx: &LeafScaleContext| match channel {
+        Channel::X => ctx.x.clone(),
+        Channel::Y => ctx.y.clone(),
+        Channel::Color | Channel::Size => None,
+    };
+    let Some(SharedDomain::Ordinal(mut categories)) = slot(&out[establishing]) else { return Ok(()) };
+    sort_member_categories(&mut categories, sort, enc, &leaves[establishing], channel, warnings)?;
+    for &idx in group {
+        if matches!(slot(&out[idx]), Some(SharedDomain::Ordinal(_))) {
+            out[idx].set(channel, SharedDomain::Ordinal(categories.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Order `categories` by a member's data-aware `sort=` over its own rows, as
+/// its own scale orders them ([`establishing_sort_rows`]; an unlayered
+/// member's one batch and its own fields): the one ordering both overlay
+/// routes share (the auto union, [`sort_overlay_categories`], and a member's
+/// own categorical scale, [`establishing_categories`]).
+fn sort_member_categories(
+    categories: &mut Vec<String>,
+    sort: &serde_json::Value,
+    enc: &crate::spec::encoding::EncodingSpec,
+    leaf: &LeafResolveInput<'_>,
+    channel: Channel,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeResolveError> {
+    let rows = establishing_sort_rows(channel.as_str(), leaf.spec, leaf.final_batch, leaf.transform_outputs, false)
+        .unwrap_or(SortRows {
+            batch: leaf.final_batch,
+            x_field: leaf.encoding.x.as_ref().map(|e| e.field.as_str()),
+            y_field: leaf.encoding.y.as_ref().map(|e| e.field.as_str()),
+        });
+    let coord_flipped = matches!(leaf.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let sort_ctx = SortContext {
+        category_field: &enc.field,
+        batch: rows.batch,
+        x_field: rows.x_field,
+        y_field: rows.y_field,
+        coord_flipped,
+    };
+    apply_sort_to_domain(categories, Some(sort), &sort_ctx, warnings).map_err(|source| {
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped }
+    })
+}
+
+/// The categories an `Overlay` member's own categorical scale draws on
+/// `channel`, as `+` builds that member's axis: the scale's stated domain,
+/// else the distinct values, in first-appearance order, of the column it
+/// draws ([`locate_seed_field`]), ordered by its `sort=` over its own rows
+/// ([`sort_member_categories`]). `None` when its rows lack the column.
+fn establishing_categories(
+    leaf: &LeafResolveInput<'_>,
+    channel: Channel,
+    enc: &crate::spec::encoding::EncodingSpec,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Option<Vec<String>>, CompositeResolveError> {
+    if let Some(stated) = explicit_ordinal_domain(enc) {
+        return Ok(Some(stated));
+    }
+    let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs) else {
+        return Ok(None);
+    };
+    let mut categories = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: false }
+    })?;
+    if let Some(sort) = enc.sort.as_ref() {
+        sort_member_categories(&mut categories, sort, enc, leaf, channel, warnings)?;
+    }
+    Ok(Some(categories))
+}
+
+/// Give every member of an `Overlay` group that draws nothing on the
+/// positional `channel` the axis the group's establishing member draws there
+/// (the first member drawing it): that member's binding, typed by the column
+/// it draws, and the group's resolved domain, through the member's
+/// [`LeafScaleContext::impose`]. The group's first member draws the panel's
+/// chrome, so a first member drawing nothing on `channel` (a one-axis
+/// reference rule) shows the axis the other members are placed on, as the
+/// same layers merged with `+` show it. Applied after either route resolves
+/// the group: the auto path's shared domain, or the caller's scale
+/// ([`resolve_caller_scale_group`]), which the imposed binding carries; the
+/// domain is imposed only when the group assigned one (a stated-domain
+/// scale reaches the member through its binding). An establishing member
+/// whose own scale is categorical (band, point, ordinal) takes neither route
+/// (no group sharing, no continuous caller scale): the group's axis is then
+/// that member's own categorical axis, as on `+`, imposed with its
+/// categories in order ([`establishing_categories`]) and its sort cleared,
+/// since the order is in the domain.
+fn impose_overlay_axis(
+    group: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeResolveError> {
+    let draws = |idx: usize| leaf_post_flip_encoding(&leaves[idx], channel);
+    let Some((establishing, enc)) = group.iter().find_map(|&idx| draws(idx).map(|enc| (idx, enc))) else { return Ok(()) };
+    let (mut domain, group_scale) = match channel {
+        Channel::X => (out[establishing].x.clone(), out[establishing].x_scale.clone()),
+        Channel::Y => (out[establishing].y.clone(), out[establishing].y_scale.clone()),
+        Channel::Color | Channel::Size => return Ok(()),
+    };
+    let leaf = &leaves[establishing];
+    let own_categorical = enc.scale.as_ref().is_some_and(is_categorical_scale);
+    let mut sort = enc.sort.clone();
+    if domain.is_none() && group_scale.is_none() {
+        // Nothing resolved the group's axis as one; a member's own
+        // categorical scale is the axis it draws.
+        if !own_categorical {
+            return Ok(());
+        }
+        let Some(categories) = establishing_categories(leaf, channel, enc, warnings)? else { return Ok(()) };
+        domain = Some(SharedDomain::Ordinal(categories));
+        sort = None;
+    }
+    let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs) else {
+        return Ok(());
+    };
+    let binding = crate::spec::encoding::EncodingSpec {
+        type_: Some(infer_spec_type(enc, located.col.data_type())),
+        scale: group_scale.or_else(|| enc.scale.clone()),
+        sort,
+        ..enc.clone()
+    };
+    for &idx in group.iter().filter(|&&idx| draws(idx).is_none()) {
+        if let Some(domain) = &domain {
+            out[idx].set(channel, domain.clone());
+        }
+        out[idx].impose(channel, binding.clone());
+    }
+    Ok(())
 }
 
 /// A leaf's own encoding for the positional `channel`, or `None` for a
@@ -690,7 +856,8 @@ fn resolve_caller_scale_group(
 /// function.
 ///
 /// When no caller scale establishes the axis, the panel's own axis type is
-/// decided by the group's first member; its flip state always is. The same
+/// decided by the group's first member drawing the channel; the panel's flip
+/// state is always the first member's. The same
 /// "Layer 0 is exempt... the panel's axes
 /// are resolved from its own post-flip encoding" precedent
 /// [`crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable`]
@@ -729,7 +896,7 @@ fn resolve_caller_scale_group(
 /// (`scale_resolve::require_layers_placeable_on_caller_scale`) judges every
 /// layer the same way.
 ///
-/// At most `group[0]`'s own domain is resolved here (`resolve_group`, called
+/// At most the establishing member's own domain is resolved here (`resolve_group`, called
 /// right after this returns, resolves every member's on its own): reading
 /// a domain this function never uses would let a LATER member's unrelated
 /// resolution failure pre-empt an EARLIER member's typed refusal below,
@@ -748,11 +915,17 @@ fn refuse_unplaceable_overlay_members<'a>(
     use crate::render::arrow_cast::{require_exchanged_column_servable, PanelAxisKind};
     let (establishing, axis_kind) = match establishing_caller_scale(axis) {
         Some((position, _)) => (position, PanelAxisKind::Continuous),
-        None => match leaf_channel_domain(&leaves[group[0]], channel)? {
-            Some(SharedDomain::Numeric { .. }) => (0, PanelAxisKind::Continuous),
-            Some(SharedDomain::Ordinal(_)) => (0, PanelAxisKind::Categorical),
-            None => return Ok(()),
-        },
+        None => {
+            let Some(position) = group.iter().position(|&idx| leaf_post_flip_encoding(&leaves[idx], channel).is_some())
+            else {
+                return Ok(());
+            };
+            match leaf_channel_domain(&leaves[group[position]], channel)? {
+                Some(SharedDomain::Numeric { .. }) => (position, PanelAxisKind::Continuous),
+                Some(SharedDomain::Ordinal(_)) => (position, PanelAxisKind::Categorical),
+                None => return Ok(()),
+            }
+        }
     };
     let panel_flipped = crate::spec::coord::flips_positional_channels(
         leaves[group[0]].spec.coord.as_ref(),
@@ -1015,6 +1188,10 @@ fn leaf_positional_domain(
 /// `enc.scale` (user scale wins — the leaf render short-circuits on it, so the
 /// resolve pass must exclude it to stay consistent). Color has no independent
 /// facet option (`FacetResolve` only covers x/y), so faceted leaves participate.
+///
+/// A layered leaf reads as its own color scale does: the kind from the
+/// establishing layer's column, the domain over every drawing layer whose
+/// column reads that way ([`leaf_aux_reads`]).
 fn leaf_color_domain(
     leaf: &LeafResolveInput<'_>,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
@@ -1022,57 +1199,131 @@ fn leaf_color_domain(
     if enc.scale.is_some() {
         return Ok(None);
     }
-
-    let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
-        .ok_or_else(|| CompositeResolveError::UnknownField {
-            channel: Channel::Color.as_str(),
-            field: enc.field.clone(),
-            // "color" is never positional, so `CoordFlip` never touches it —
-            // `user_facing_channel` is identity regardless (R3).
-            coord_flipped: false,
-        })?;
-
-    // FA-5: area marks always group color discretely — treat any dtype as
-    // categorical, exactly as `build_color_scale`'s `force_categorical` does, so
-    // the shared domain lands on the categorical scale the area leaf builds.
-    let force_categorical = matches!(leaf.spec.mark, crate::spec::mark::Mark::Area);
+    let channel = Channel::Color;
+    let reads = leaf_aux_reads(leaf, "color");
+    let resolve_error = |source| CompositeResolveError::DomainResolve {
+        channel: channel.as_str(),
+        field: enc.field.clone(),
+        source,
+        coord_flipped: false, // "color" is never positional, so `CoordFlip` never touches it.
+    };
+    // FA-5: an area that draws color groups it discretely — treat any dtype
+    // as categorical, exactly as `build_color_scale`'s `grouping_area` does, so
+    // the shared domain lands on the categorical scale the leaf builds.
+    let force_categorical =
+        crate::render::scale_resolve::color_grouping_area(leaf.spec.mark, reads.as_deref().unwrap_or_default()).is_some();
+    // A raster image's cells establish a numeric domain, as the leaf's own
+    // color scale reads them. A categorical scale over them shares nothing:
+    // the leaf's own render refuses it.
+    if let Some(reads) = reads.as_deref().filter(|reads| reads.first().is_some_and(AuxRead::is_raster_cells)) {
+        let categorical = force_categorical || matches!(enc.type_, Some(SpecDataType::Nominal | SpecDataType::Ordinal));
+        let Ok(reads) = admitted_aux_reads(reads, "color", false, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+        else {
+            return Ok(None);
+        };
+        if categorical {
+            return Ok(None);
+        }
+        let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
+        let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(resolve_error)?;
+        return Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }));
+    }
+    let Some(located) = leaf_aux_column(leaf, enc, channel, reads.as_deref())? else { return Ok(None) };
     let dtype = infer_spec_type(enc, located.col.data_type());
     let is_continuous = !force_categorical
         && matches!(dtype, SpecDataType::Quantitative | SpecDataType::Temporal)
         && crate::render::arrow_cast::is_numeric(located.col.data_type());
 
-    if is_continuous {
-        Ok(Some(numeric_extent_domain(located.col)))
-    } else {
-        let cats = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
-            CompositeResolveError::DomainResolve {
-                channel: Channel::Color.as_str(),
-                field: enc.field.clone(),
-                source,
-                coord_flipped: false, // "color" is never positional — see above.
-            }
-        })?;
-        Ok(Some(SharedDomain::Ordinal(cats)))
+    // The reads the leaf's own color scale admits: under force-categorical
+    // every column reads as categories. A raster's cells under a categorical
+    // scale are the leaf render's refusal, so they share nothing here.
+    let reads = match reads.map(|reads| match force_categorical {
+        true if reads.iter().any(AuxRead::is_raster_cells) => None,
+        true => Some(reads),
+        false => admitted_aux_reads(&reads, "color", !is_continuous, leaf.final_batch, leaf.transform_outputs, &mut Vec::new()).ok(),
+    }) {
+        Some(None) => return Ok(None),
+        Some(Some(reads)) => Some(reads),
+        None => None,
+    };
+    match (is_continuous, reads) {
+        (true, None) => Ok(Some(numeric_extent_domain(located.col))),
+        (true, Some(reads)) => {
+            let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
+            let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(resolve_error)?;
+            Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
+        }
+        (false, None) => {
+            let cats = distinct_values_in_order(located.batch, &enc.field).map_err(resolve_error)?;
+            Ok(Some(SharedDomain::Ordinal(cats)))
+        }
+        (false, Some(reads)) => {
+            let union = aux_category_union(&reads, leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
+            Ok(union.map(|(cats, _)| SharedDomain::Ordinal(cats)))
+        }
     }
 }
 
-/// One leaf's standalone size domain, or `None` if size is unencoded.
+/// One leaf's standalone size domain, or `None` if size is unencoded or no
+/// layer of a layered leaf draws it.
 ///
 /// Size is always a numeric extent (`build_size_scale` derives `[min, max]` from
-/// the column). An explicit user size `scale` only pins the pixel *range*, never
-/// the data domain, so it does not exclude the leaf from domain sharing.
+/// the column, over every drawing layer's on a layered leaf). An explicit user
+/// size `scale` only pins the pixel *range*, never the data domain, so it does
+/// not exclude the leaf from domain sharing.
 fn leaf_size_domain(
     leaf: &LeafResolveInput<'_>,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     let Some(enc) = leaf.encoding.size.as_ref() else { return Ok(None) };
-    let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
-        .ok_or_else(|| CompositeResolveError::UnknownField {
-            channel: Channel::Size.as_str(),
+    let channel = Channel::Size;
+    let reads = leaf_aux_reads(leaf, "size");
+    let Some(located) = leaf_aux_column(leaf, enc, channel, reads.as_deref())? else { return Ok(None) };
+    let Some(reads) = reads else { return Ok(Some(numeric_extent_domain(located.col))) };
+    let reads = admitted_aux_reads(&reads, "size", false, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+        .map_err(|source| CompositeResolveError::DomainResolve {
+            channel: channel.as_str(),
             field: enc.field.clone(),
-            // "size" is never positional — see `leaf_color_domain`'s note above.
+            source,
             coord_flipped: false,
         })?;
-    Ok(Some(numeric_extent_domain(located.col)))
+    let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
+    let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(|source| {
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: false }
+    })?;
+    Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
+}
+
+/// A layered leaf's reads of the auxiliary channel `name`: every layer drawing
+/// it, each from the batch it draws, as the leaf's own scale reads them.
+/// `None` for an unlayered leaf, whose one mark draws its one batch.
+fn leaf_aux_reads<'a>(leaf: &LeafResolveInput<'a>, name: &str) -> Option<Vec<AuxRead<'a>>> {
+    let layers = leaf.spec.layers.as_deref()?;
+    let channel = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == name)?;
+    Some(aux_reads(layers, &leaf.spec.encoding, channel, leaf.final_batch, leaf.transform_outputs))
+}
+
+/// The column that decides a leaf's auxiliary scale: the establishing
+/// layer's (the first of `reads`) on a layered leaf, the one batch's
+/// otherwise. `None` when no layer of a layered leaf draws the channel, so it
+/// contributes no domain.
+fn leaf_aux_column<'a>(
+    leaf: &LeafResolveInput<'a>,
+    enc: &crate::spec::encoding::EncodingSpec,
+    channel: Channel,
+    reads: Option<&[AuxRead<'a>]>,
+) -> Result<Option<crate::render::scale_resolve::LocatedColumn<'a>>, CompositeResolveError> {
+    let located = match reads {
+        Some([]) => return Ok(None),
+        Some([lead, ..]) => lead.locate(leaf.final_batch, leaf.transform_outputs),
+        None => locate_field(&enc.field, leaf.final_batch),
+    };
+    located.map(Some).ok_or_else(|| CompositeResolveError::UnknownField {
+        channel: channel.as_str(),
+        field: enc.field.clone(),
+        // An auxiliary channel is never positional, so `CoordFlip` never
+        // touches it: `user_facing_channel` is identity regardless.
+        coord_flipped: false,
+    })
 }
 
 /// A [`SharedDomain::Numeric`] over a located Arrow column's finite extent.
@@ -1211,6 +1462,40 @@ mod tests {
             final_batch: &o.batch,
             transform_outputs: &o.outputs,
         }
+    }
+
+    /// A leaf's shared color domain follows the leaf's own scale: a point's
+    /// quantitative color beside an uncolored area is numeric in either layer
+    /// order, and an area drawing the color groups it into categories. Only
+    /// an area layer that draws color groups it, never the chart's mark.
+    #[test]
+    fn a_leafs_color_domain_is_categorical_only_under_an_area_drawing_color() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let xy = Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() };
+        let colored = Encoding { color: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..xy.clone() };
+        let layer = |mark: Mark, encoding: &Encoding| Layer { mark, encoding: encoding.clone(), ..Default::default() };
+        let leaf = |layers: Vec<Layer>| {
+            let spec = ChartSpec { mark: layers[0].mark, encoding: xy.clone(), layers: Some(layers), ..ChartSpec::default() };
+            LeafOwned { spec, encoding: colored.clone(), outputs: outputs(&batch), batch: batch.clone() }
+        };
+        for layers in [vec![layer(Mark::Area, &xy), layer(Mark::Point, &colored)], vec![layer(Mark::Point, &colored), layer(Mark::Area, &xy)]] {
+            let o = leaf(layers);
+            assert!(matches!(leaf_color_domain(&input(&o)), Ok(Some(SharedDomain::Numeric { .. }))), "uncolored area beside a point");
+        }
+        let o = leaf(vec![layer(Mark::Point, &colored), layer(Mark::Area, &colored)]);
+        assert!(matches!(leaf_color_domain(&input(&o)), Ok(Some(SharedDomain::Ordinal(_)))), "an area drawing color groups it");
     }
 
     // -- congruence -----------------------------------------------------------
@@ -1780,10 +2065,10 @@ mod tests {
 
     #[test]
     fn box_transform_children_share_whisker_extent() {
-        // Leaf encodes y on the raw "value" column, but a layer reads the
-        // "upper" whisker column from a named output whose extent is wider than
-        // the raw column. numeric_domain_union must union the layer field, so the
-        // shared domain reaches the whisker, not just raw min/max.
+        // The leaf's one layer draws the "upper" whisker column from a named
+        // output whose extent is wider than the raw column, which no layer
+        // draws. numeric_domain_union reads the layer's field from its own
+        // batch, so the shared domain is the whiskers' extent.
         let l0 = box_leaf(&[1.0, 2.0], &[0.5, 8.0]);
         let l1 = box_leaf(&[3.0, 4.0], &[2.0, 12.0]);
         let tree = composite(
@@ -2210,8 +2495,12 @@ mod tests {
         let final_batch = num_batch("value", raw);
         let mut outs = outputs(&final_batch);
         outs.insert("box".to_string(), num_batch("upper", whisker));
+        // The leaf's rendering encoding is its establishing layer's, the
+        // whisker rect's own `y`, as `prepare` builds it.
+        let mut encoding = spec.encoding.clone();
+        encoding.y = Some(enc("upper"));
         LeafOwned {
-            encoding: spec.encoding.clone(),
+            encoding,
             spec,
             batch: final_batch,
             outputs: outs,
@@ -3780,5 +4069,225 @@ mod tests {
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
         assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
+    }
+
+    // -- establishing member and layer -----------------------------------------
+
+    /// An `Overlay` group's first member drawing no `x` (a one-axis rule on
+    /// its own frame) takes the axis the member drawing `x` establishes:
+    /// that member's binding, typed by the column it draws, over the group's
+    /// domain, so the first member's chrome shows the bars' categories, as
+    /// `+` does. The drawing member keeps its own resolution. Rejects the
+    /// first member deciding an axis it does not draw.
+    #[test]
+    fn an_overlay_member_drawing_no_x_takes_the_axis_the_drawing_member_establishes() {
+        let mut rule_spec = spec_with(Encoding { y: Some(enc("w")), ..Encoding::default() });
+        rule_spec.mark = Mark::Rule;
+        let rule = owned(rule_spec, num_batch("w", &[1.0, 2.0]));
+        let bars = LeafOwned {
+            spec: spec_with(Encoding { x: Some(enc("g")), y: Some(enc("v")), ..Encoding::default() }),
+            encoding: Encoding { x: Some(enc("g")), y: Some(enc("v")), ..Encoding::default() },
+            batch: RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![3.0, 5.0]))],
+            )
+            .unwrap(),
+            outputs: HashMap::new(),
+        };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(None, Some("w")), leaf_node(Some("g"), Some("v"))],
+            shared_both(),
+        );
+        let inputs = [input(&rule), input(&bars)];
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("the group resolves");
+        let categories = SharedDomain::Ordinal(vec!["a".to_string(), "b".to_string()]);
+        let (binding, domain) = ctx[0].imposed(Channel::X).expect("the rule takes the bars' x axis");
+        assert_eq!(binding.field, "g");
+        assert_eq!(binding.type_, Some(SpecDataType::Nominal), "typed by the column the bars draw");
+        assert_eq!(domain, Some(&categories));
+        assert_eq!(ctx[1].x.as_ref(), Some(&categories));
+        assert!(ctx[1].imposed(Channel::X).is_none(), "a member drawing x keeps its own axis");
+        assert!(ctx[0].imposed(Channel::Y).is_none() && ctx[1].imposed(Channel::Y).is_none(), "both draw y");
+    }
+
+    /// A layered leaf's color domain is read as its own color scale reads it:
+    /// over every layer that draws color, each from the batch it draws. The
+    /// leaf's second layer draws its own output's categories, which its
+    /// chart rows do not hold. Rejects reading the leaf's chart rows alone.
+    #[test]
+    fn a_layered_leaf_shares_the_color_domain_of_every_layer_drawing_it() {
+        use crate::spec::layer::Layer;
+        let chart = Encoding { x: Some(enc("x")), y: Some(enc("x")), color: Some(enc("c")), ..Encoding::default() };
+        let spec = ChartSpec {
+            encoding: chart.clone(),
+            layers: Some(vec![
+                Layer { mark: Mark::Point, encoding: chart.clone(), ..Default::default() },
+                Layer { mark: Mark::Point, encoding: chart.clone(), data_source: Some("other".into()), ..Default::default() },
+            ]),
+            ..base_spec()
+        };
+        let rows = |cats: &[&str]| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("x", DataType::Float64, false),
+                    Field::new("c", DataType::Utf8, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0; cats.len()])),
+                    Arc::new(StringArray::from(cats.to_vec())),
+                ],
+            )
+            .unwrap()
+        };
+        let mut layered = owned(spec, rows(&["p", "q"]));
+        layered.outputs.insert("other".to_string(), rows(&["q", "r"]));
+        let plain = owned(spec_with(chart), rows(&["s"]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&layered), input(&plain)];
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("resolves");
+        let expected: Vec<String> = ["p", "q", "r", "s"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(ctx[0].color, Some(SharedDomain::Ordinal(expected)));
+    }
+
+    /// An `Overlay` group whose axis a caller's continuous scale establishes
+    /// imposes that axis on a first member drawing no `x`, as the auto path
+    /// does: the drawing member's binding carrying the caller's scale, over
+    /// the group's extent when the scale states no domain; a stated domain
+    /// reaches the member through the binding's scale alone.
+    #[test]
+    fn a_caller_scale_overlay_imposes_its_axis_on_a_member_drawing_no_x() {
+        use crate::spec::encoding::ScaleSpec;
+        let scale = |json: serde_json::Value| -> ScaleSpec { serde_json::from_value(json).expect("a scale") };
+        for (stated, scale) in [
+            (false, scale(serde_json::json!({"type": "log"}))),
+            (true, scale(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]}))),
+        ] {
+            let mut rule_spec = spec_with(Encoding { y: Some(enc("w")), ..Encoding::default() });
+            rule_spec.mark = Mark::Rule;
+            let rule = owned(rule_spec, num_batch("w", &[1.0, 2.0]));
+            let x = EncodingSpec { scale: Some(scale.clone()), ..enc("v") };
+            let points = owned(spec_with(Encoding { x: Some(x.clone()), y: Some(enc("v")), ..Encoding::default() }), num_batch("v", &[1.0, 5.0]));
+            let tree = composite(
+                CompositeLayout::Overlay,
+                vec![leaf_node(None, Some("w")), CompositeNode::Leaf { spec: Box::new(points.spec.clone()), data: 0, label: None }],
+                shared_both(),
+            );
+            let inputs = [input(&rule), input(&points)];
+            let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("the group resolves");
+            let (binding, domain) = ctx[0].imposed(Channel::X).expect("the rule takes the caller's x axis");
+            assert_eq!(binding.field, "v");
+            assert_eq!(binding.scale.as_ref(), Some(&scale), "the binding carries the caller's scale");
+            assert_eq!(domain.is_some(), !stated, "the extent only when the scale states no domain");
+        }
+    }
+
+    /// An `Overlay` group's shared categories follow its establishing
+    /// member's data-aware sort, read over that member's own rows, so the
+    /// static overlay orders the axis as `+` does; every member takes that
+    /// order. Rejects the order-preserving union, which ignored the sort.
+    #[test]
+    fn an_overlay_orders_its_categories_by_the_establishing_members_sort() {
+        let mut rule_spec = spec_with(Encoding { y: Some(enc("v")), ..Encoding::default() });
+        rule_spec.mark = Mark::Rule;
+        let rule = owned(rule_spec, num_batch("v", &[1.0, 2.0]));
+        let sorted_x = EncodingSpec { sort: Some(serde_json::json!("-y")), ..enc("g") };
+        let bars_encoding = Encoding { x: Some(sorted_x), y: Some(enc("w")), ..Encoding::default() };
+        let bars = owned(
+            spec_with(bars_encoding),
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Utf8, false),
+                    Field::new("w", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(vec!["a", "b", "c"])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))],
+            )
+            .unwrap(),
+        );
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(None, Some("v")), CompositeNode::Leaf { spec: Box::new(bars.spec.clone()), data: 0, label: None }],
+            shared_both(),
+        );
+        let inputs = [input(&rule), input(&bars)];
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("resolves");
+        let order = SharedDomain::Ordinal(["c", "b", "a"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(ctx[1].x.as_ref(), Some(&order), "the bars' own w orders them");
+        assert_eq!(ctx[0].imposed(Channel::X).and_then(|(_, domain)| domain), Some(&order));
+    }
+
+    /// An `Overlay` group whose drawing member carries its own categorical
+    /// scale (band, point, ordinal) imposes that member's own axis on a first
+    /// member drawing nothing there: its categories, in its own order, under
+    /// its scale, on either channel, and sorted by its `sort=` over its own
+    /// rows as `+` sorts them. Rejects leaving the untitled 0..1 axis.
+    #[test]
+    fn an_overlay_imposes_a_drawing_members_own_categorical_axis() {
+        use crate::spec::encoding::ScaleSpec;
+        let rows = || {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Utf8, false),
+                    Field::new("w", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(vec!["a", "b", "c"])), Arc::new(Float64Array::from(vec![1.0, 3.0, 2.0]))],
+            )
+            .unwrap()
+        };
+        let scales: [ScaleSpec; 3] = [
+            serde_json::from_value(serde_json::json!({"type": "band", "paddingInner": 0.2})).unwrap(),
+            serde_json::from_value(serde_json::json!({"type": "point"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"type": "ordinal"})).unwrap(),
+        ];
+        for channel in [Channel::X, Channel::Y] {
+            for (scale, sort, expected) in [
+                (scales[0].clone(), None, ["a", "b", "c"]),
+                (scales[1].clone(), None, ["a", "b", "c"]),
+                (scales[2].clone(), None, ["a", "b", "c"]),
+                (scales[0].clone(), Some(serde_json::json!("-y")), ["b", "c", "a"]),
+            ] {
+                let category = EncodingSpec { scale: Some(scale.clone()), sort: sort.clone(), ..enc("g") };
+                let (rule_encoding, bar_encoding) = match channel {
+                    Channel::X => (
+                        Encoding { y: Some(enc("w")), ..Encoding::default() },
+                        Encoding { x: Some(category), y: Some(enc("w")), ..Encoding::default() },
+                    ),
+                    _ => (
+                        Encoding { x: Some(enc("w")), ..Encoding::default() },
+                        Encoding { y: Some(category), x: Some(enc("w")), ..Encoding::default() },
+                    ),
+                };
+                if sort.is_some() && channel == Channel::Y {
+                    continue;
+                }
+                let mut rule_spec = spec_with(rule_encoding);
+                rule_spec.mark = Mark::Rule;
+                let rule = owned(rule_spec, num_batch("w", &[1.0, 2.0]));
+                let bars = owned(spec_with(bar_encoding), rows());
+                let tree = composite(
+                    CompositeLayout::Overlay,
+                    vec![
+                        CompositeNode::Leaf { spec: Box::new(rule.spec.clone()), data: 0, label: None },
+                        CompositeNode::Leaf { spec: Box::new(bars.spec.clone()), data: 0, label: None },
+                    ],
+                    shared_both(),
+                );
+                let inputs = [input(&rule), input(&bars)];
+                let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("resolves");
+                let (binding, domain) = ctx[0].imposed(channel).expect("the rule takes the bars' categorical axis");
+                assert_eq!(binding.field, "g");
+                assert_eq!(binding.scale.as_ref(), Some(&scale));
+                assert!(binding.sort.is_none(), "the order is in the domain");
+                let categories: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+                assert_eq!(domain, Some(&SharedDomain::Ordinal(categories)), "{scale:?} {sort:?}");
+            }
+        }
     }
 }

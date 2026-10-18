@@ -291,7 +291,7 @@ pub(crate) fn build_color_legend(
                     .collect();
                 (entries, None)
             }
-            Some(ColorScale::Continuous { domain, scheme, midpoint }) => {
+            Some(ColorScale::Continuous { domain, scheme, midpoint, transform }) => {
                 // The bar is drawn from `colorbar_color`, the scale with
                 // `configure_color` applied. Contract: it has the resolved
                 // scale's variant, because `apply_color_config_to_color_scale`
@@ -300,14 +300,18 @@ pub(crate) fn build_color_legend(
                 // passes that configured clone. The fallback arm (no clone, or
                 // another variant) is reached only by a caller passing `None`,
                 // and then the resolved scale is the one the marks read.
-                let (domain, scheme, midpoint) = match colorbar_color {
-                    Some(ColorScale::Continuous { domain, scheme, midpoint }) => (domain, scheme, midpoint),
-                    _ => (domain, scheme, midpoint),
+                let (domain, scheme, midpoint, transform) = match colorbar_color {
+                    Some(ColorScale::Continuous { domain, scheme, midpoint, transform }) => {
+                        (domain, scheme, midpoint, transform)
+                    }
+                    _ => (domain, scheme, midpoint, transform),
                 };
-                let stops = continuous_colorbar_stops(*domain, scheme, *midpoint);
+                let stops = continuous_colorbar_stops(*domain, scheme, *midpoint, *transform);
                 // Tick labels: check for explicit tickLabels override from the
                 // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
-                // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
+                // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0,
+                // each reading the data value at its position through the
+                // scale's transform (raw counts on a symlog raster bar).
                 // When `format=` is set, apply a Python-style format spec to each tick value.
                 let custom_tick_labels = custom_tick_labels.clone();
                 // `cb_domain` is the numeric span the labels cover — carried for
@@ -320,7 +324,7 @@ pub(crate) fn build_color_legend(
                     let labels = (0..5)
                         .map(|i| {
                             let t = i as f64 / 4.0;
-                            let v = lo + t * (hi - lo);
+                            let v = transform.value_at((lo, hi), t);
                             if format_spec.is_some() || format_type == Some("time") {
                                 crate::render::format::format_value_with_spec(
                                     v,
@@ -1498,7 +1502,8 @@ fn size_legend_symbol(
 
 /// The `linearGradient` stops of a continuous colorbar, drawn from the same
 /// mapping the marks use so the bar shows a value's cell color at that
-/// value's (linear) position.
+/// value's position in the scale's `transform` space (linear, or symlog,
+/// where a position's label reads `transform.value_at`).
 ///
 /// Eleven evenly spaced positions keep the gradient smooth without bloating
 /// the SVG. With no midpoint each position `t` samples the scheme at `t`
@@ -1520,10 +1525,10 @@ fn continuous_colorbar_stops(
     domain: (f64, f64),
     scheme: &crate::render::color::ContinuousScheme,
     midpoint: Option<f64>,
+    transform: crate::render::scale_resolve::ColorTransform,
 ) -> Vec<(f64, String)> {
     use crate::render::color::fmt_svg;
     use crate::render::marks::legend::colorbar_offset_text;
-    use crate::render::scale_resolve::normalize_continuous;
     const N_STOPS: usize = 11;
     let mut positions: Vec<f64> = (0..N_STOPS).map(|i| i as f64 / (N_STOPS - 1) as f64).collect();
     let plain = |positions: Vec<f64>| -> Vec<(f64, String)> {
@@ -1534,7 +1539,8 @@ fn continuous_colorbar_stops(
     };
     let (lo, hi) = domain;
     if lo < mid && mid < hi {
-        let p_mid = (mid - lo) / (hi - lo);
+        let f = |x: f64| transform.forward(x);
+        let p_mid = (f(mid) - f(lo)) / (f(hi) - f(lo));
         let p_mid_text = colorbar_offset_text(p_mid);
         if p_mid_text == colorbar_offset_text(0.5) {
             return plain(positions);
@@ -1547,7 +1553,7 @@ fn continuous_colorbar_stops(
     positions
         .into_iter()
         .map(|p| {
-            let t = normalize_continuous(domain, midpoint, lo + p * (hi - lo));
+            let t = transform.normalize(domain, midpoint, transform.value_at((lo, hi), p));
             (p, fmt_svg(scheme.sample(t)))
         })
         .collect()
@@ -1672,6 +1678,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 
@@ -1849,6 +1856,7 @@ mod tests {
             size_is_own: false,
             stroke_width_is_own: false,
             dropped_reads: Vec::new(),
+            raster_value_field: None,
         }
     }
 
@@ -1896,6 +1904,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
@@ -1923,6 +1932,7 @@ mod tests {
             domain: (0.001, 0.0031),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         };
         let mut spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
@@ -1969,6 +1979,7 @@ mod tests {
             domain: (lo as f64, hi as f64),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let mut spec = spec_with_color_field("v");
         spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
@@ -2019,6 +2030,7 @@ mod tests {
             domain: (lo as f64, hi as f64),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec_with = |format: &str| {
             let mut spec = spec_with_color_field("v");
@@ -2152,6 +2164,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
@@ -2179,6 +2192,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Ribbon, Some("v"))];
@@ -2237,6 +2251,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![
@@ -2281,6 +2296,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let mut spec = spec_with_color_field("v");
         spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
@@ -2321,6 +2337,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         // Size shares the SAME field ("v") as color, on a genuine numeric
         // scale — the same-field merge condition `build_aux_legends` checks.
@@ -2384,6 +2401,7 @@ mod tests {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         scales.color = None;
         scales.size = Some(SizeScale {
@@ -2538,6 +2556,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         scales.size = Some(SizeScale {
             inner: ScaleKind::Linear(LinearScale::new_internal(
@@ -2581,6 +2600,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         scales.size = Some(SizeScale {
             inner: ScaleKind::Linear(LinearScale::new_internal(
@@ -2681,6 +2701,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![
@@ -2712,6 +2733,7 @@ mod tests {
             domain: (0.0, 100.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let spec = spec_with_color_field("v");
         let layers = vec![
@@ -3091,6 +3113,7 @@ mod tests {
             domain,
             scheme: ContinuousScheme::Named(NamedContinuous::BlueToRed),
             midpoint,
+            transform: crate::render::scale_resolve::ColorTransform::Linear,
         }
     }
 

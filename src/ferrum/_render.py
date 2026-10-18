@@ -386,7 +386,7 @@ class _RenderMixin:
                 "resolution": "screen",
                 "blend": None,
                 "min_count": None,
-                "log_scale": False,
+                "log_scale": None,
             },
             desugar_raster,
             prior_mark=None,

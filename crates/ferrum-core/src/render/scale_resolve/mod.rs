@@ -55,6 +55,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
+    admitted_aux_reads, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
@@ -876,7 +877,67 @@ pub enum ColorScale {
         scheme: crate::render::color::ContinuousScheme,
         /// Explicit diverging midpoint. `None` → pure-linear (sequential).
         midpoint: Option<f64>,
+        /// The space the domain is normalized in ([`ColorTransform`]):
+        /// linear for every scale but a symlog one.
+        transform: ColorTransform,
     },
+}
+
+/// The space a continuous color scale normalizes in: linear, or symlog with
+/// constant `c` (`sign(x) * ln(1 + |x| / c)`, `scale::symlog`'s transform),
+/// which compresses a long tail (a raster's counts under `log_scale`, a
+/// `Color(scale=SymlogScale())`) while staying defined at zero and through
+/// negatives. The domain stays in data units; only the normalization moves,
+/// so a colorbar's labels read data values at the inverse positions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColorTransform {
+    Linear,
+    Symlog { constant: f64 },
+}
+
+impl ColorTransform {
+    /// `v` in the transform's space.
+    pub(crate) fn forward(self, v: f64) -> f64 {
+        match self {
+            ColorTransform::Linear => v,
+            ColorTransform::Symlog { constant } => crate::scale::symlog::symlog_fwd(v, constant),
+        }
+    }
+
+    /// The data value at `y` in the transform's space.
+    pub(crate) fn invert(self, y: f64) -> f64 {
+        match self {
+            ColorTransform::Linear => y,
+            ColorTransform::Symlog { constant } => crate::scale::symlog::symlog_inv(y, constant),
+        }
+    }
+
+    /// `v` normalized to `t ∈ [0, 1]` over `domain` (and the diverging
+    /// `midpoint`), in the transform's space ([`normalize_continuous`]).
+    pub(crate) fn normalize(self, (lo, hi): (f64, f64), midpoint: Option<f64>, v: f64) -> f64 {
+        let f = |x: f64| self.forward(x);
+        normalize_continuous((f(lo), f(hi)), midpoint.map(f), f(v))
+    }
+
+    /// The data value at position `t ∈ [0, 1]` along `domain`: where a
+    /// colorbar's label at `t` reads.
+    pub(crate) fn value_at(self, (lo, hi): (f64, f64), t: f64) -> f64 {
+        let (lo, hi) = (self.forward(lo), self.forward(hi));
+        self.invert(lo + t * (hi - lo))
+    }
+
+    /// The transform a color scale spec states: symlog for a `SymlogScale`,
+    /// linear for a `LinearScale`; `None` for no scale or any other type,
+    /// which leaves the transform to the data (a raster's `value_scale`) or
+    /// linear.
+    pub(crate) fn of_scale(scale: Option<&crate::spec::encoding::ScaleSpec>) -> Option<Self> {
+        use crate::spec::encoding::ScaleSpec;
+        match scale? {
+            ScaleSpec::Symlog { constant, .. } => Some(ColorTransform::Symlog { constant: *constant }),
+            ScaleSpec::Linear { system_injected: false, .. } => Some(ColorTransform::Linear),
+            _ => None,
+        }
+    }
 }
 
 impl ColorScale {
@@ -906,8 +967,8 @@ impl ColorScale {
     /// Returns `None` for categorical scales.
     pub fn lookup_f64(&self, value: f64) -> Option<Color> {
         match self {
-            Self::Continuous { domain, scheme, midpoint } => {
-                let t = normalize_continuous(*domain, *midpoint, value);
+            Self::Continuous { domain, scheme, midpoint, transform } => {
+                let t = transform.normalize(*domain, *midpoint, value);
                 Some(scheme.sample(t))
             }
             Self::Discretizing(buckets) => buckets.lookup(value),
@@ -1342,6 +1403,11 @@ pub struct ResolvedScales {
     /// (see [`StrokeWidthScale`]); marks draw the mapped width, never the raw
     /// column value.
     pub stroke_width: Option<StrokeWidthScale>,
+    /// The scale every raster image that draws no `color` maps its cells
+    /// through: a continuous scale over every such image's cells, in the
+    /// images' colormap, with no legend (`domain::raster_cell_reads`). `None`
+    /// when the chart has no such image.
+    pub raster_cells: Option<ColorScale>,
     // Phase 8b: paired-channel field names. The x2/y2 axis is shared with x/y
     // (their domain is unioned in `build_axis_scale`); this field surfaces the
     // bound field name so downstream code (mark drawers, legends) can read it
@@ -1366,7 +1432,8 @@ impl ResolvedScales {
     /// copy of the auxiliary slots through here keeps a new appearance channel
     /// from having to be threaded into three literals.
     fn from_axes_and_auxiliary(x: ScaleKind, y: ScaleKind, aux: AuxiliaryScales) -> Self {
-        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width } = aux;
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width, raster_cells } =
+            aux;
         ResolvedScales {
             x,
             y,
@@ -1378,6 +1445,7 @@ impl ResolvedScales {
             stroke_opacity,
             stroke_dash,
             stroke_width,
+            raster_cells,
             x2: None,
             y2: None,
             y_slots: YScaleSlots::default(),
@@ -1575,6 +1643,7 @@ pub(in crate::render) struct AuxiliaryScales {
     stroke_opacity: Option<OpacityScale>,
     stroke_dash: Option<StrokeDashScale>,
     stroke_width: Option<StrokeWidthScale>,
+    raster_cells: Option<ColorScale>,
 }
 
 /// Build the auxiliary (non-positional) scales for a chart spec.
@@ -1620,7 +1689,12 @@ fn build_auxiliary_scales(
             transform_outputs,
             theme,
             composite,
-            |slot| domain::aux_reads(spec.layers.as_deref(), chart_encoding, slot),
+            |channel| {
+                spec.layers
+                    .as_deref()
+                    .map(|layers| domain::aux_reads(layers, chart_encoding, channel, primary_batch, transform_outputs))
+            },
+            domain::raster_cell_reads(spec, chart_encoding, primary_batch, transform_outputs),
             warnings,
         )
         .map_err(|refusal| refusal.source)
@@ -1677,6 +1751,12 @@ pub(in crate::render) fn build_overlay_auxiliary_scales(
     let Some(lead) = members.first() else {
         return Ok(AuxiliaryScales::default());
     };
+    let mut member_reads = HashMap::new();
+    for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
+        let reads = domain::overlay_aux_reads(members, channel)
+            .map_err(|source| AuxScaleRefusal { channel: channel.name, source })?;
+        member_reads.insert(channel.name, reads);
+    }
     let mut spec = ChartSpec { encoding: encoding.clone(), ..lead.spec.clone() };
     resolve_param_domains(&mut spec);
     resolve_auxiliary_scales(
@@ -1685,7 +1765,8 @@ pub(in crate::render) fn build_overlay_auxiliary_scales(
         lead.transform_outputs,
         theme,
         CompositeAuxDomains::default(),
-        |slot| domain::overlay_aux_reads(members, slot),
+        |channel| member_reads.get(channel.name).cloned(),
+        domain::overlay_raster_cell_reads(members),
         warnings,
     )
 }
@@ -1705,23 +1786,39 @@ struct CompositeAuxDomains<'a> {
     size: Option<&'a SharedDomain>,
 }
 
-/// The binding an auxiliary channel reads off an encoding (`|e| e.color.as_ref()`).
-type AuxSlot<'s> = &'s dyn for<'e> Fn(&'e crate::spec::encoding::Encoding) -> Option<&'e crate::spec::encoding::EncodingSpec>;
-
 /// Resolve every auxiliary scale of `spec` from its establishing encoding
-/// (`spec.encoding`), each channel's domain read through `reads` (the reads
-/// of the binding a channel slot selects, in layer order).
+/// (`spec.encoding`), each channel's domain read through `reads`: `None` for
+/// an unlayered spec, whose one mark draws its one batch, else the reads of
+/// every layer drawing the channel, in layer order. A channel of a layered
+/// spec that no layer draws builds no scale (and so no legend), whatever the
+/// encoding binds: no reader takes its domain from rows no mark draws.
+/// `cell_reads` are the cells of every raster image drawing no color
+/// (`domain::raster_cell_reads`), which make the one `raster_cells` scale.
+#[allow(clippy::too_many_arguments)]
 fn resolve_auxiliary_scales<'r>(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
     composite: CompositeAuxDomains<'_>,
-    reads: impl Fn(AuxSlot<'_>) -> Vec<domain::AuxRead<'r>>,
+    reads: impl Fn(crate::spec::encoding::AuxiliaryScaleChannel) -> Option<Vec<domain::AuxRead<'r>>>,
+    cell_reads: Vec<domain::AuxRead<'r>>,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<AuxiliaryScales, AuxScaleRefusal> {
-    // FA-5: area marks always group color discretely; force categorical.
-    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+    let mut encoding = spec.encoding.clone();
+    let mut channel_reads: HashMap<&'static str, Vec<domain::AuxRead<'r>>> = HashMap::new();
+    for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
+        match reads(channel) {
+            Some(drawn) if drawn.is_empty() => *channel.binding_mut(&mut encoding) = None,
+            drawn => {
+                channel_reads.insert(channel.name, drawn.unwrap_or_default());
+            }
+        }
+    }
+    let reads = |name: &str| channel_reads.get(name).map(Vec::as_slice).unwrap_or_default();
+    let spec = &ChartSpec { encoding, ..spec.clone() };
+    // FA-5: an area that draws color groups it discretely; force categorical.
+    let grouping_area = domain::color_grouping_area(spec.mark, reads("color"));
     // T3: when the chart is faceted, auxiliary non-positional channels (continuous
     // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
     // marks normalize through the same domain as the global legend/colorbar.
@@ -1735,21 +1832,20 @@ fn resolve_auxiliary_scales<'r>(
     // every layer that draws it, each reading the field it draws from the
     // batch it draws, as the positional axes do (`aux_reads`).
     let refused = |channel: &'static str| move |source: RenderError| AuxScaleRefusal { channel, source };
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, composite.color, coord_flipped, &reads(&|e| e.color.as_ref()))
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, grouping_area, aux_shared, composite.color, coord_flipped, reads("color"))
         .map_err(refused("color"))?;
     warnings.extend(color_warns);
-    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, &reads(&|e| e.size.as_ref()))
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, reads("size"))
         .map_err(refused("size"))?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &reads(&|e| e.shape.as_ref()))
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, reads("shape"))
         .map_err(refused("shape"))?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
     // closure is only here so each call site reads as the channel it resolves
     // rather than repeating the six-argument call.
     let mut opacity_scale = |channel: OpacityChannel| -> Result<Option<OpacityScale>, AuxScaleRefusal> {
-        let channel_reads = reads(&|e| channel.slot(e).as_ref());
-        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &channel_reads)
+        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme, reads(channel.context()))
             .map_err(refused(channel.context()))?;
         warnings.extend(warns);
         Ok(scale)
@@ -1757,13 +1853,15 @@ fn resolve_auxiliary_scales<'r>(
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &reads(&|e| e.stroke_dash.as_ref()))
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, reads("stroke_dash"))
         .map_err(refused("stroke_dash"))?;
     warnings.extend(dash_warns);
-    let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &reads(&|e| e.stroke_width.as_ref()))
+    let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, reads("stroke_width"))
         .map_err(refused("stroke_width"))?;
     warnings.extend(width_warns);
-    Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width })
+    let raster_cells = color::raster_cell_scale(None, &cell_reads, None, theme, primary_batch, transform_outputs, warnings)
+        .map_err(refused("color"))?;
+    Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width, raster_cells })
 }
 
 /// The chart's color scale alone: the `color` [`resolve_scales_with_leaf_context`]
@@ -1989,7 +2087,8 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
 /// caller-supplied pixel range differs, and domain-derived tick fractions do not
 /// depend on it, so the two resolutions agree bit-for-bit on the domain.
 ///
-/// The layer's own encoding overlays the chart encoding, `layers: None` stops
+/// The layer's completed encoding is the one it draws ([`crate::render::prepare::LayerPrepared::encoding`]:
+/// its own bindings and the chart-level ones its mark takes), `layers: None` stops
 /// [`numeric_domain_union`] from re-unioning sibling layers' y fields (so this
 /// slot spans exactly its own data), and `domainParam` references are substituted
 /// into concrete domains via [`resolve_param_domains`] BEFORE resolution — the
@@ -2013,11 +2112,9 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
     let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
 
-    let mut merged_encoding = spec.encoding.clone();
-    merged_encoding.overlay_from(&layer.encoding);
     let mut layer_spec = ChartSpec {
         mark: layer.mark,
-        encoding: merged_encoding,
+        encoding: layer.encoding.clone(),
         layers: None,
         ..spec.clone()
     };
@@ -2460,6 +2557,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 fill_opacity: None, stroke_opacity: None, stroke_dash: None,
                 stroke_width: None,
                 x2: None, y2: None, y_slots: YScaleSlots::default(),
+                raster_cells: None,
             },
             warnings,
         ));
@@ -2608,13 +2706,27 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // batch when the spec carries a matching Stack adjustment whose
     // resolved value axis is X. See `position::axis_batch_for_x` for the
     // rationale.
+    //
+    // An overlay member drawing nothing on an axis resolves the one its
+    // group imposes, over the group's domain, from no column of its own
+    // (`LeafScaleContext::imposed`).
+    let imposed = |channel: Channel, pixel_range, warnings: &mut Vec<_>| {
+        let (binding, domain) = leaf_scales?.imposed(channel)?;
+        positional::imposed_axis_scale(channel.as_str(), binding, domain, pixel_range, warnings)
+    };
     let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
-    let mut x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
+    let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
+        Some(x) => x?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?,
+    };
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
+    let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
+        Some(y) => y?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?,
+    };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.

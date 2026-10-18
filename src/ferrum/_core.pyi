@@ -1067,6 +1067,13 @@ def mark_inherited_positional(mark: str, own: list[str], offered: list[str]) -> 
 # the mark's builder. An unknown mark raises ``ValueError``.
 def mark_drawn_channels(mark: str) -> list[str]: ...
 
+# The columns a layer of primitive ``mark`` draws for its binding ``field`` on
+# ``channel``: a raster image's extent columns on ``x``/``y`` and its value
+# column on ``color``, else ``[field]``. ``has_url`` says whether an image
+# layer binds ``url`` (the url-tile path, which draws its own fields). From
+# Rust's one drawn-column answer; an unknown mark raises ``ValueError``.
+def drawn_positional_columns(mark: str, has_url: bool, channel: str, field: str) -> list[str]: ...
+
 # Run the render-time constant-size rule early: raise ``ValueError`` with the
 # render refusal's exact text, voiced as ``entry``, when ``mark`` never draws a
 # constant size or ``size`` is not a finite number above zero. ``mark`` must be
@@ -1102,10 +1109,17 @@ def column_reads_categorical(schema: Any, field: str) -> bool: ...
 # channel, ...; ``ferrum.encoding._channel_policy._SPEC_KNOWN_CHANNELS``), and
 # the message names it as written; ``remedy`` is ``"plain"``, ``"source"`` or
 # ``"statistic"``; ``independent_y`` picks the remedy's spelling for a layer
-# with its own y axis. Any other ``channel``, or an unknown ``remedy``, raises
-# ``ValueError``.
+# with its own y axis; ``entry`` names a layer a figure or composite mark built
+# by that public call in place of ``layer {layer}``. Any other ``channel``, or
+# an unknown ``remedy``, raises ``ValueError``.
 def layer_unknown_column_message(
-    layer: int, channel: str, name: str, remedy: str, independent_y: bool
+    layer: int,
+    channel: str,
+    name: str,
+    remedy: str,
+    independent_y: bool,
+    *,
+    entry: str | None = None,
 ) -> str: ...
 
 # #176: the ``interpolate=`` vocabulary, published from Rust's

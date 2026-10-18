@@ -750,7 +750,7 @@ def desugar_raster(
     resolution: Any = "screen",
     blend: str | None = None,
     min_count: Optional[int] = None,
-    log_scale: bool = False,
+    log_scale: bool | None = None,
 ) -> MarkDesugarResult:
     """Datashader-style raster aggregation mark desugar.
 
@@ -809,8 +809,13 @@ def desugar_raster(
     min_count : int or None, default None
         Pixel cells with fewer than ``min_count`` points render as
         transparent.
-    log_scale : bool, default False
-        Whether to apply log-scale mapping to cell counts before colormap.
+    log_scale : bool or None, default None
+        Whether the cells' color scale is symlog rather than linear. The
+        ``Raster`` transform keeps every cell's raw aggregate and records
+        this choice as the scale the cells color through, so a colorbar
+        labels raw values either way. ``None`` is symlog for ``"count"``
+        and ``"density"`` and linear otherwise; ``True`` or ``False`` is
+        honored on any aggregate.
 
     Returns
     -------
@@ -833,9 +838,10 @@ def desugar_raster(
     if x_field is None or y_field is None:
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
 
-    # Default to log-scale for count/density aggregates to improve contrast
-    # when most cells are empty and a few have high counts.
-    effective_log_scale = log_scale if log_scale else (aggregate in ("count", "density"))
+    # Unset, a count or density raster colors through symlog: most cells hold
+    # few rows and a few hold many, so a linear scale washes the sparse cells
+    # out. An explicit choice is honored on any aggregate.
+    effective_log_scale = aggregate in ("count", "density") if log_scale is None else log_scale
     transforms = [
         Raster(
             x=x_field,

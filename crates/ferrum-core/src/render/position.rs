@@ -1761,6 +1761,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 
@@ -2309,7 +2310,7 @@ mod tests {
             false,
         ));
         let (x, y) = if ordinal_on_x { (ord, lin) } else { (lin, ord) };
-        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default() }
+        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(), raster_cells: None }
     }
 
     /// Batch with a categorical band column `cat`, a numeric value column `val`,
@@ -2470,6 +2471,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 
@@ -4392,6 +4394,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 
@@ -5944,7 +5947,7 @@ mod tests {
         let lin = ScaleKind::Linear(LinearScale::new_internal(
             vec![0.0, 100.0], vec![0.0, 100.0], false, false,
         ));
-        ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default() }
+        ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(), raster_cells: None }
     }
 
     /// Design-gate finding: the two tests above only exercise
@@ -6137,6 +6140,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         };
         let b = batch_cat_val_grp();
         let enc = enc_xy("cat", "val", Some("grp"));

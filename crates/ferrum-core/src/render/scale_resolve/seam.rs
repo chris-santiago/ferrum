@@ -276,6 +276,18 @@ pub(crate) struct LeafScaleContext {
     /// the leaf's own encoding.
     pub(crate) x_scale: Option<crate::spec::encoding::ScaleSpec>,
     pub(crate) y_scale: Option<crate::spec::encoding::ScaleSpec>,
+    /// The positional binding this leaf's `x`/`y` axis takes from its
+    /// `Overlay` group when it draws nothing on that channel: the group's
+    /// establishing member's (its field, title, axis config, the caller scale
+    /// the group resolves with, and `type_` stamped from the column it
+    /// draws), set by
+    /// `composite::impose_overlay_axis` beside the group's domain in
+    /// [`Self::x`]/[`Self::y`]. `prepare` puts it on the leaf's rendering
+    /// encoding only, so the leaf's chrome describes the axis the group
+    /// draws while its marks draw what they always did. `None` (the default)
+    /// leaves the leaf's own axis.
+    pub(crate) imposed_x: Option<crate::spec::encoding::EncodingSpec>,
+    pub(crate) imposed_y: Option<crate::spec::encoding::EncodingSpec>,
     /// Layout-stage-only signal (never affects `prepare_render_inputs`, which
     /// always builds the channel's legend bundle in full) that the compositor
     /// is rendering one figure-level legend for this channel and this leaf's
@@ -388,6 +400,26 @@ impl LeafScaleContext {
         } else {
             OverlayLegends::None
         })
+    }
+
+    /// Impose `binding` on this leaf's positional `channel` (see
+    /// [`Self::imposed_x`]). Color and size carry no such slot.
+    pub(crate) fn impose(&mut self, channel: Channel, binding: crate::spec::encoding::EncodingSpec) {
+        match channel {
+            Channel::X => self.imposed_x = Some(binding),
+            Channel::Y => self.imposed_y = Some(binding),
+            Channel::Color | Channel::Size => {}
+        }
+    }
+
+    /// The binding imposed on positional `channel`, with the group domain it
+    /// resolves over when the group assigned one (see [`Self::imposed_x`]).
+    pub(crate) fn imposed(&self, channel: Channel) -> Option<(&crate::spec::encoding::EncodingSpec, Option<&SharedDomain>)> {
+        match channel {
+            Channel::X => self.imposed_x.as_ref().map(|binding| (binding, self.x.as_ref())),
+            Channel::Y => self.imposed_y.as_ref().map(|binding| (binding, self.y.as_ref())),
+            Channel::Color | Channel::Size => None,
+        }
     }
 
     /// Record the caller scale this leaf's positional `channel` resolves with

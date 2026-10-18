@@ -54,6 +54,7 @@ import pytest
 
 import ferrum as fm
 from tests._hue_probe import has_colorbar, legend_labels, paint_colors, render
+from tests._svg_rects import mark_layer, svg_elements
 
 # Kinds whose mark groups, aggregates, or fills rows by the hue column. These
 # must all answer identically for one Int64 hue -- the uniformity that
@@ -102,13 +103,14 @@ def _contour_twin(dtype: pl.DataType) -> pl.DataFrame:
     ).with_columns(pl.col("grp").cast(dtype))
 
 
-# boxen's outlier points draw the letter-value statistic's outlier rows,
-# which do not carry the hue column, so the hue is dropped from them with a
-# warning (an independent fact of boxen, not of hue typing).
-_CATPLOT_BOXEN_OUTLIER_WARNING = (
-    "catplot: color 'grp' was dropped: the statistic this point mark draws "
+# boxen's bands and outlier points draw the letter-value statistic's rows,
+# which do not carry the hue column, so each drops the hue with a warning and
+# no layer draws it (an independent fact of boxen, not of hue typing).
+_CATPLOT_BOXEN_HUE_WARNINGS = [
+    f"catplot: color 'grp' was dropped: the statistic this {mark} mark draws "
     "does not carry 'grp', so it draws without color"
-)
+    for mark in ("rect", "point")
+]
 
 
 def _assert_dtype_parity(build, *, frame=_twin, expected_warnings=()) -> str:
@@ -178,7 +180,7 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
             "category's center and are not dodged per hue group; use "
             'Chart.mark_violin(inner="none") to drop the inner mark'
         ],
-        "boxen": [_CATPLOT_BOXEN_OUTLIER_WARNING],
+        "boxen": _CATPLOT_BOXEN_HUE_WARNINGS,
     }.get(kind, [])
     _assert_dtype_parity(build, expected_warnings=expected_warnings)
 
@@ -273,21 +275,29 @@ def test_catplot_hue_order_types_the_color_channel_too() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _segment_colors(svg: str) -> set[str]:
+    """The stroke of every isoline segment drawn inside the plot area, lowercased."""
+    return {
+        segment["stroke"].lower()
+        for segment in svg_elements(mark_layer(svg), "line", lambda attrs: "stroke" in attrs)
+    }
+
+
 def test_contour_groupby_renders_one_color_per_group() -> None:
     """Two groups' isolines get two colors, not one.
 
     ``desugar_contour`` binds its ``groupby`` column onto a ``segment`` mark,
-    which is in the silent set -- the Int64 case drew both distributions'
-    contours in a single color with no warning at all.
+    and the contour output keeps the group column in its own dtype. Counted
+    on the segments inside the plot area, not on every paint: the legend
+    alone paints both palette colors, so a render drawing every isoline in
+    one color under a two-entry legend (the Int64 group column dropped from
+    the contour's rows) would pass a whole-document color count.
     """
-    int_svg = _assert_dtype_parity(
-        lambda df: fm.Chart(df).mark_contour(groupby="grp").encode(x="x", y="y"),
-        frame=_contour_twin,
-    )
-    palette = paint_colors(int_svg)
-    assert {"#2563eb", "#dc2626"} <= palette, (
-        f"expected both categorical palette colors on the contour segments, got {sorted(palette)}"
-    )
+    build = lambda df: fm.Chart(df).mark_contour(groupby="grp").encode(x="x", y="y")  # noqa: E731
+    int_svg = _assert_dtype_parity(build, frame=_contour_twin)
+    utf8_svg, _ = render(build(_contour_twin(pl.Utf8)))
+    assert _segment_colors(int_svg) == {"#2563eb", "#dc2626"}
+    assert _segment_colors(int_svg) == _segment_colors(utf8_svg)
 
 
 @pytest.mark.parametrize("figure", ["regplot", "lmplot"])
@@ -331,10 +341,9 @@ def test_relplot_line_hue_renders_one_polyline_per_group() -> None:
     ("figure", "kwargs"),
     [
         ("catplot", {"x": "cat", "y": "y", "kind": "bar"}),
-        ("catplot", {"x": "cat", "y": "y", "kind": "boxen"}),
         ("displot", {"x": "x", "kind": "hist"}),
     ],
-    ids=["catplot-bar", "catplot-boxen", "displot-hist"],
+    ids=["catplot-bar", "displot-hist"],
 )
 def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs: dict) -> None:
     """A two-value group column gets two swatches, never a 0..1 colorbar.
@@ -343,14 +352,20 @@ def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs
     0 / 0.25 / 0.5 / 0.75 / 1 for a column holding exactly two distinct
     values is a truth claim about the mapping that no mark expresses.
     """
-    expected_warnings = [_CATPLOT_BOXEN_OUTLIER_WARNING] if kwargs.get("kind") == "boxen" else []
-    svg = _assert_dtype_parity(
-        lambda df: getattr(fm, figure)(df, hue="grp", **kwargs),
-        expected_warnings=expected_warnings,
-    )
+    svg = _assert_dtype_parity(lambda df: getattr(fm, figure)(df, hue="grp", **kwargs))
     assert len(legend_labels(svg)) == 2, (
         f"expected a two-entry swatch legend, got {legend_labels(svg)}"
     )
+
+
+def test_a_boxen_hue_no_layer_draws_gets_neither_a_swatch_legend_nor_a_colorbar() -> None:
+    """No boxen layer draws the hue, so neither dtype draws a legend of any kind."""
+    svg = _assert_dtype_parity(
+        lambda df: fm.catplot(df, x="cat", y="y", kind="boxen", hue="grp"),
+        expected_warnings=_CATPLOT_BOXEN_HUE_WARNINGS,
+    )
+    assert legend_labels(svg) == []
+    assert not has_colorbar(svg)
 
 
 # ---------------------------------------------------------------------------

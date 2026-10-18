@@ -3969,6 +3969,9 @@ class LayerChart(_ChartLike):
             new._configure = list(merged_configure)
             new._theme = primary_theme
             layers.append(new)
+        from ferrum.chart import _refuse_cross_operand_reactive_names
+
+        _refuse_cross_operand_reactive_names(self._charts)
         for c in layers:
             # A member produced by `chart + SecondaryY(...)` (GH #71) already
             # carries its own flagged independent-y layer -- this shared-y

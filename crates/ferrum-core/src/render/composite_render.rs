@@ -348,6 +348,39 @@ pub(crate) fn render_composite_scene(
         });
     }
     refuse_redefined_selections(tree, leaves)?;
+    // A selection declared on one member of an overlay group reaches every
+    // member, as `+` reaches every layer, once the refusal above has read
+    // what each member declared.
+    //
+    // Each leaf's spec then enters with its primary y owner resolved
+    // (`with_primary_y_owner`), so every later pass (pass-1 prepare, the
+    // resolve inputs, the final render) reads one flag set; the same
+    // normalization `prepare` and `build_scene` apply is then a borrowed
+    // no-op for a leaf. At most one owned clone per leaf.
+    let reached: Vec<Option<ChartSpec>> = overlay_selection_reach(tree, leaves)
+        .into_iter()
+        .zip(leaves)
+        .map(|(reached, leaf)| {
+            let spec = reached.as_ref().unwrap_or(leaf.spec);
+            match super::scale_resolve::with_primary_y_owner(spec) {
+                std::borrow::Cow::Owned(normalized) => Some(normalized),
+                std::borrow::Cow::Borrowed(_) => reached,
+            }
+        })
+        .collect();
+    let reached_leaves: Vec<CompositeLeafInput<'_>> = leaves
+        .iter()
+        .zip(&reached)
+        .map(|(leaf, spec)| CompositeLeafInput {
+            spec: spec.as_ref().unwrap_or(leaf.spec),
+            batch: leaf.batch,
+            theme: leaf.theme,
+            viewport: leaf.viewport,
+            config: leaf.config,
+            chart_config: leaf.chart_config,
+        })
+        .collect();
+    let leaves = reached_leaves.as_slice();
 
     // Pass 1 (resolve) needs each leaf's transformed data + rendering encoding.
     // Prepare every leaf once with no context (context only seeds scale
@@ -1072,6 +1105,17 @@ fn overlay_auxiliary_groups(tree: &CompositeNode) -> Vec<OverlayGroupPlan> {
     out
 }
 
+/// The member of an overlay group drawing the group's `layer`, its members'
+/// layers numbered in member order as the group's scales read them (an
+/// unlayered member's one mark is one layer).
+fn overlay_member_of_layer(members: std::ops::Range<usize>, inputs: &[LeafResolveInput<'_>], layer: usize) -> Option<usize> {
+    let mut end = 0;
+    members.into_iter().find(|&i| {
+        end += inputs[i].spec.layers.as_ref().map_or(1, Vec::len);
+        layer < end
+    })
+}
+
 /// Resolve the grouped auxiliary channels of every group
 /// [`overlay_auxiliary_groups`] names as one layered chart resolves them over
 /// its layers, and record the result on each member's
@@ -1085,7 +1129,9 @@ fn overlay_auxiliary_groups(tree: &CompositeNode) -> Vec<OverlayGroupPlan> {
 /// channel has nothing to resolve and is left as it is.
 ///
 /// A refusal resolving a grouped channel names the member that set that
-/// channel up, the first member binding it.
+/// channel up, the first member binding it, unless it refuses one member's
+/// marks (a raster image's cells under a categorical color scale), which it
+/// then names.
 fn plan_overlay_auxiliary(
     groups: &[OverlayGroupPlan],
     leaves: &[CompositeLeafInput<'_>],
@@ -1105,12 +1151,19 @@ fn plan_overlay_auxiliary(
             continue;
         }
         let refused = |refusal: super::scale_resolve::AuxScaleRefusal| {
-            let establishing = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS
-                .iter()
-                .find(|channel| channel.name == refusal.channel)
-                .and_then(|channel| members.clone().find(|&i| channel.binding(inputs[i].encoding).is_some()))
+            let refused_member = match &refusal.source {
+                RenderError::RasterColorNotQuantitative(raster) => overlay_member_of_layer(members.clone(), inputs, raster.layer),
+                _ => None,
+            };
+            let index = refused_member
+                .or_else(|| {
+                    crate::spec::encoding::AUXILIARY_SCALE_CHANNELS
+                        .iter()
+                        .find(|channel| channel.name == refusal.channel)
+                        .and_then(|channel| members.clone().find(|&i| channel.binding(inputs[i].encoding).is_some()))
+                })
                 .unwrap_or(start);
-            CompositeRenderError::LeafRender { kind: "leaf", index: establishing, source: refusal.source }
+            CompositeRenderError::LeafRender { kind: "leaf", index, source: refusal.source }
         };
         // Built under the members' theme (the legends `prepare` builds) and
         // under that theme with their shared chart config (the marks and
@@ -2700,6 +2753,44 @@ fn refuse_redefined_selections(
         }
     }
     Ok(())
+}
+
+/// Each leaf's spec with the selections its all-leaf `Overlay` group's other
+/// members declared ([`overlay_auxiliary_groups`]): its own selections, then
+/// every selection a sibling declared under a name it lacks (the first
+/// declaration per name; [`refuse_redefined_selections`] has refused any
+/// two that differ). The members of an overlay are layers of one chart, so
+/// a selection one declares reaches all of them, as one declared on a `+`
+/// operand reaches every layer; each member's tooltip reader skips a field
+/// its rows lack, so the selection matches only members whose rows carry
+/// it. `None` for a leaf whose selections are unchanged, including every
+/// leaf outside an overlay group: a nested overlay's selections stay its
+/// own.
+fn overlay_selection_reach(tree: &CompositeNode, leaves: &[CompositeLeafInput<'_>]) -> Vec<Option<ChartSpec>> {
+    let mut reached: Vec<Option<ChartSpec>> = vec![None; leaves.len()];
+    for group in overlay_auxiliary_groups(tree) {
+        let members = group.members;
+        let mut declared: Vec<&SelectionSpec> = Vec::new();
+        for selection in leaves[members.clone()].iter().flat_map(|leaf| &leaf.spec.selections) {
+            if !declared.iter().any(|earlier| earlier.name() == selection.name()) {
+                declared.push(selection);
+            }
+        }
+        for i in members {
+            let own = &leaves[i].spec.selections;
+            let missing: Vec<SelectionSpec> = declared
+                .iter()
+                .filter(|selection| !own.iter().any(|mine| mine.name() == selection.name()))
+                .map(|selection| (*selection).clone())
+                .collect();
+            if !missing.is_empty() {
+                let mut spec = leaves[i].spec.clone();
+                spec.selections.extend(missing);
+                reached[i] = Some(spec);
+            }
+        }
+    }
+    reached
 }
 
 /// Each leaf's position in the composition as its user built it, in leaf
@@ -5794,10 +5885,9 @@ mod tests {
         // `prepare::prepare_render_inputs` UNCONDITIONALLY for every leaf,
         // BEFORE `resolve_composite_scales` ever runs (this file, ~line 170).
         // That per-leaf prepare independently builds a provisional axis scale
-        // for layer 0's encoding via `build_axis_scale`, which calls the exact
-        // same `locate_field(&enc.field, primary_batch, transform_outputs)`
-        // composite.rs's `leaf_channel_domain` calls (composite.rs:410,
-        // positional.rs:87) — same field, same batch, same transform_outputs.
+        // for layer 0's encoding via `build_axis_scale`, which reads the
+        // exact same column (`locate_seed_field`) composite.rs's
+        // `leaf_channel_domain` reads — same field, same batch.
         // So a genuinely-missing x/y field always fails at the per-leaf
         // `prepare_render_inputs` step FIRST, as `RenderError::UnknownColumn`
         // wrapped into `CompositeRenderError::LeafRender { index, .. }` — never
@@ -8974,6 +9064,86 @@ mod tests {
         assert_eq!(render_hconcat_pair(linked).unwrap().selections.len(), 1, "identical declarations merge");
     }
 
+    /// A field selection one overlay member declares reaches every member,
+    /// as one declared on a `+` operand reaches every layer: the member that
+    /// declares nothing carries it in its tooltip, its rows holding the
+    /// field. The refusal reads only declarations, so a redefinition names
+    /// the declaring member, never one the selection merely reached.
+    #[test]
+    fn an_overlay_members_field_selection_reaches_a_sibling_that_declares_nothing() {
+        let field_selection = |name: &str, kind: &str| -> SelectionSpec {
+            serde_json::from_str(&format!(
+                r#"{{"type":"{kind}","name":"{name}","fields":["x"],"encodings":null{}}}"#,
+                if kind == "point" {
+                    r#","nearest":false,"toggle":"shift_key","on":"click","clear":"click","resolve":"global""#
+                } else {
+                    r#","translate":true,"zoom":true,"mark":null,"resolve":"global""#
+                }
+            ))
+            .unwrap()
+        };
+        let declaring = |selection: SelectionSpec| ChartSpec { selections: vec![selection], ..scatter_spec() };
+        let overlay = |leaf: &dyn Fn(usize) -> CompositeNode| composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]);
+        let scene = render_tree(overlay, vec![scatter_spec(), declaring(field_selection("s", "point"))]).unwrap();
+        let tooltip_fields = |panel: usize| -> Vec<String> {
+            scene.panels[panel].marks[0].tooltips.as_ref().map_or_else(Vec::new, |tips| {
+                tips[0].fields.iter().map(|f| f.name.clone()).collect()
+            })
+        };
+        assert_eq!(tooltip_fields(0), ["x"], "the member declaring nothing matches by x too");
+        assert_eq!(tooltip_fields(1), ["x"]);
+
+        let nested = |leaf: &dyn Fn(usize) -> CompositeNode| {
+            composite(
+                CompositeLayout::Vconcat,
+                vec![composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]), leaf(2)],
+            )
+        };
+        let specs = vec![scatter_spec(), declaring(field_selection("s", "point")), declaring(field_selection("s", "interval"))];
+        let err = render_tree(nested, specs).err().map(|e| e.to_string()).expect("refused");
+        assert!(
+            err.contains("layer 2 of overlay in chart 1 of vconcat declares type='point'"),
+            "the refusal names the declaring member: {err}"
+        );
+    }
+
+    /// A composite leaf's spec enters with its primary y owner resolved:
+    /// a leaf whose only y drawer is an independent-y layer (on its own
+    /// output, the column `w` the chart rows lack) contributes that layer's
+    /// y to the y domain its row shares, as its own render draws it on the
+    /// primary axis. Rejects the composite pass reading the raw flag,
+    /// under which the leaf shared no y and its sibling's axis left its
+    /// values off.
+    #[test]
+    fn a_composite_leaf_enters_with_its_primary_y_owner_resolved() {
+        let independent: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "rule",
+            "encoding": {"x": {"field": "x"}},
+            "transforms": [{"type": "branch", "name": "own", "transforms": [{"type": "calculate", "as_field": "w", "expr": "datum[\"y\"]"}]}],
+            "layers": [
+                {"mark": "rule", "encoding": {"x": {"field": "x"}}},
+                {"mark": "point", "data_source": "own", "independent_y": true, "encoding": {"x": {"field": "x"}, "y": {"field": "w"}}},
+            ],
+        }))
+        .unwrap();
+        let mut tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_with(independent.clone(), 0), leaf_node_with(scatter_spec(), 1)],
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.y = crate::layout::facet::ResolveMode::Shared;
+        }
+        let holds = [
+            LeafHold { spec: independent, batch: xy_batch(&[1.0, 2.0, 3.0], &[100.0, 200.0, 300.0]), ..hold() },
+            LeafHold { spec: scatter_spec(), batch: xy_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]), ..hold() },
+        ];
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let sibling_axis = serde_json::to_string(&scene.panels[1].axes).unwrap();
+        assert!(sibling_axis.contains("\"300\""), "the sibling's shared y axis spans the leaf's y: {sibling_axis}");
+    }
+
     /// One leaf declaring the same selection name twice with different
     /// definitions names BOTH sides, never an empty position: `first_leaf ==
     /// leaf` here, so a fix that re-reads the same position index twice must
@@ -9415,6 +9585,85 @@ mod tests {
             let err = try_overlay_route(&pair, shared_xy()).map(|_| ()).expect_err("the leaf refuses");
             assert_eq!(err.to_string(), format!("failed to render composite leaf leaf #0: fill_opacity scale: {reason}; {remedy}"));
         }
+    }
+
+    /// The `+` of a point colored by the raster's value field and the raster,
+    /// in either order, as a leaf of a concat: the image draws its cells
+    /// through its own cell scale, and the point keeps its color scale. A
+    /// sibling's color binding never makes the image draw color. Rejects the
+    /// leaf whose image drew nothing, without a warning.
+    #[test]
+    fn a_concat_leaf_draws_a_raster_beside_a_sibling_colored_by_its_value_field() {
+        pyo3::Python::initialize();
+        let batch = raster_sibling_batch();
+        for spec in raster_sibling_specs() {
+            let hold = color_hold_with(spec.clone(), batch.clone(), ThemeInputs::default());
+            let leaves = [leaf_input(&hold, 300.0, 200.0)];
+            let tree = composite(CompositeLayout::Hconcat, vec![leaf_node_with(spec, 0)]);
+            let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+            let images = mark_nodes(&scene).into_iter().filter(|node| node.starts_with("Image")).count();
+            assert_eq!(images, 1, "the raster draws: {warnings:?}");
+        }
+    }
+
+    /// `x`, `y` and a numeric `count` column a point can color by.
+    fn raster_sibling_batch() -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("count", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 1.0, 0.5])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 0.5])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A count raster `+` a point colored by `count`, in both orders, as
+    /// Python lowers them.
+    fn raster_sibling_specs() -> Vec<ChartSpec> {
+        let image = serde_json::json!({"mark": "image", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "data_source": "raster", "entry": "mark_raster"});
+        let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "count"}}});
+        [[point.clone(), image.clone()], [image, point]]
+            .into_iter()
+            .map(|layers| {
+                serde_json::from_value(serde_json::json!({
+                    "data": {"kind": "named", "name": "default"}, "mark": layers[0]["mark"],
+                    "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                    "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": 2, "name": "raster"}],
+                    "layers": layers,
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// An overlay refusing a raster member's cells under a categorical color
+    /// scale another member establishes names the raster member's leaf, the
+    /// one whose marks cannot draw, with the text `+` gives.
+    #[test]
+    fn an_overlay_names_the_raster_member_whose_cells_it_refuses() {
+        pyo3::Python::initialize();
+        let batch = aux_batch();
+        let point = aux_member(Mark::Point, Encoding { color: binding("g"), ..Default::default() });
+        let raster: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"}, "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "count"}},
+            "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": 2, "name": "raster"}],
+            "layers": [{"mark": "image", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "data_source": "raster", "entry": "mark_raster"}],
+        }))
+        .unwrap();
+        let err = try_overlay_route(&[(point, batch.clone()), (raster, batch)], shared_xy()).map(|_| ()).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #1: mark_raster: encoding 'color' names the raster's cell values \
+             'count', which are quantitative, but the chart's color scale is categorical, established by layer 0 ('g'). \
+             Drop type= (or the categorical color binding), or draw categorical cells with mark_rect."
+        );
     }
 
     /// A chart config's color schemes reach the overlay's one color scale as

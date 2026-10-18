@@ -1640,6 +1640,36 @@ def test_the_gate_message_names_every_encode_channel_as_written():
         layer_unknown_column_message(1, "not_a_channel", "nope", "plain", False)
 
 
+def test_the_gate_message_names_a_layer_a_public_call_built_by_that_call():
+    """With ``entry``, the formatter speaks as the render gate does for a desugared layer."""
+    from ferrum._core import layer_unknown_column_message
+
+    assert layer_unknown_column_message(1, "size", "nope", "plain", False, entry="lmplot") == (
+        "lmplot: encoding 'size' references unknown column 'nope' (not present in that "
+        "layer's data)"
+    )
+    assert layer_unknown_column_message(1, "size", "nope", "plain", False) == _plain("size", "nope")
+
+
+@pytest.mark.parametrize("interactive", [False, True], ids=["static", "interactive"])
+def test_a_figure_built_layers_missing_statistic_input_is_named_by_the_figure(interactive):
+    """A figure's scatter layer aggregating a column its rows lack is refused as ``lmplot``.
+
+    The check runs in Python, where the layer's rows are known, with the
+    gate's own words. Rejects naming the figure's internal ``layer 0``,
+    which the caller never placed.
+    """
+    rng = np.random.default_rng(0)
+    frame = pl.DataFrame({"x": rng.normal(0, 1, 30), "y": rng.normal(0, 1, 30)})
+    chart = fm.lmplot(frame, x="x", y="y", encode={"size": fm.Size("nope", aggregate="mean")})
+    with pytest.raises(ValueError) as exc:
+        chart.interactive().to_html() if interactive else chart.to_svg()
+    assert str(exc.value) == (
+        "lmplot: encoding 'size' references unknown column 'nope' (not present in that "
+        "layer's data)"
+    )
+
+
 def test_the_gate_channels_are_the_encode_channels_plus_the_wire_only_ones():
     """Both directions: the gate names exactly the channels a layer's wire encoding can carry.
 

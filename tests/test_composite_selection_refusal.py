@@ -39,6 +39,12 @@ def test_hconcat_refuses_a_redefined_selection_naming_both_charts() -> None:
 
 
 def test_a_redefinition_inside_a_nested_layerchart_names_its_layer() -> None:
+    """The refusal names the member that declared the selection, not one it reaches.
+
+    A field selection declared on one ``LayerChart`` member reaches its
+    siblings when the overlay renders; the plain first member never declared
+    it, so it is never named.
+    """
     plain = fm.Chart(_DF).mark_line().encode(x="x", y="y")
     layered = fm.LayerChart(plain, _declaring(fm.selection_point(name="s")))
     other = _declaring(fm.selection_interval(name="s"))
@@ -56,3 +62,32 @@ def test_identical_declarations_link_without_refusal() -> None:
     shared = fm.selection_point(name="s")
     svg = (_declaring(shared) | _declaring(fm.selection_point(name="s"))).to_svg()
     assert svg.count("<circle") == 6
+
+
+def test_two_members_of_one_layerchart_redefining_a_selection_are_both_named() -> None:
+    """Each member keeps its own definition, so the refusal names both declaring members."""
+    layered = fm.LayerChart(
+        _declaring(fm.selection_point(name="s")), _declaring(fm.selection_interval(name="s"))
+    )
+    with pytest.raises(ValueError) as err:
+        layered.to_svg()
+    assert str(err.value) == (
+        "overlay: selection 's' is declared twice with different definitions: layer 1 of "
+        "overlay declares type='point', layer 2 of overlay declares type='interval'. " + _ADVICE
+    )
+
+
+def test_a_redefinition_after_a_plain_member_names_the_two_declaring_members() -> None:
+    """A plain first member a sibling's selection reaches is not named by the refusal."""
+    plain = fm.Chart(_DF).mark_line().encode(x="x", y="y")
+    layered = fm.LayerChart(
+        plain,
+        _declaring(fm.selection_point(name="s")),
+        _declaring(fm.selection_interval(name="s")),
+    )
+    with pytest.raises(ValueError) as err:
+        layered.to_svg()
+    assert str(err.value) == (
+        "overlay: selection 's' is declared twice with different definitions: layer 2 of "
+        "overlay declares type='point', layer 3 of overlay declares type='interval'. " + _ADVICE
+    )

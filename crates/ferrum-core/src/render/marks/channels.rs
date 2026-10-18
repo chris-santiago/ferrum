@@ -503,6 +503,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 
@@ -645,6 +646,7 @@ mod tests {
             domain: (1.0, 3.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         }));
         let (cat, num) = run_loader(&spec, &batch, &scales);
         assert!(cat.is_none(), "continuous scale must not load the categorical column");

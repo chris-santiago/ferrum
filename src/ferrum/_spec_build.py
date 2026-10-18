@@ -443,18 +443,29 @@ def _remap_polar_channels(coord, enc: dict) -> dict:
 
 
 def _layer_drawn_encoding(layer: dict, encoding: dict) -> dict:
-    """The channels of *encoding* the wire *layer*'s mark draws: positional ones and its table's.
+    """The channels of *encoding* the wire *layer*'s mark draws from the bound field itself.
 
-    Read from Rust's one per-mark table (``ferrum._core.mark_drawn_channels``).
+    A non-positional channel is kept when the mark draws it (Rust's per-mark
+    table, ``ferrum._core.mark_drawn_channels``). A positional channel is kept
+    when the layer draws its own field there (Rust's drawn-column answer,
+    ``ferrum._core.drawn_positional_columns``): a raster image draws its
+    ``x``/``y`` through extent columns its rows hold instead of the bound
+    fields, so neither is listed.
     """
-    from ferrum._core import mark_drawn_channels
+    from ferrum._core import drawn_positional_columns, mark_drawn_channels
 
-    drawn = set(mark_drawn_channels(layer["mark"]))
-    return {
-        channel: value
-        for channel, value in encoding.items()
-        if channel in _POSITIONAL or channel in drawn
-    }
+    mark = layer["mark"]
+    drawn = set(mark_drawn_channels(mark))
+    has_url = "url" in encoding or "url" in (layer.get("encoding") or {})
+    kept = {}
+    for channel, value in encoding.items():
+        if channel in _POSITIONAL:
+            field = value.get("field") if isinstance(value, dict) else None
+            if field is None or drawn_positional_columns(mark, has_url, channel, field) == [field]:
+                kept[channel] = value
+        elif channel in drawn:
+            kept[channel] = value
+    return kept
 
 
 class SpecBuildMixin:

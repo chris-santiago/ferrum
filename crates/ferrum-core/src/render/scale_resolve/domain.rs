@@ -23,35 +23,13 @@ pub(crate) struct LocatedColumn<'a> {
     pub(crate) col: &'a dyn Array,
 }
 
-/// Pick the batch whose schema contains `field` and return both the batch
-/// and the resolved column. Prefer `primary_batch` for back-compat
-/// single-batch behavior; fall back to named outputs.
-///
-/// The named-output fallback iterates keys in **sorted order** rather than
-/// raw `HashMap` order. When the field appears in several named outputs
-/// (e.g. boxen publishes `group` in every `lv_depth_K` slice plus
-/// `lv_outliers`), the categorical domain is built from `located.batch` via
-/// first-appearance order, so the *choice* of batch must be deterministic.
-/// `HashMap` iteration order is unspecified and varies per process, which
-/// previously made boxen renders non-deterministic (byte-identical-golden
-/// violation). Sorting the keys pins the selection.
-pub(in crate::render) fn locate_field<'a>(
-    field: &str,
-    primary_batch: &'a RecordBatch,
-    transform_outputs: &'a HashMap<String, RecordBatch>,
-) -> Option<LocatedColumn<'a>> {
-    if let Some(c) = primary_batch.column_by_name(field) {
-        return Some(LocatedColumn { batch: primary_batch, col: c.as_ref() });
-    }
-    let mut keys: Vec<&String> = transform_outputs.keys().collect();
-    keys.sort_unstable();
-    for key in keys {
-        let batch = &transform_outputs[key];
-        if let Some(c) = batch.column_by_name(field) {
-            return Some(LocatedColumn { batch, col: c.as_ref() });
-        }
-    }
-    None
+/// The column `field` of an unlayered spec's one batch, `primary_batch`, the
+/// batch its one mark draws; `None` when that batch lacks it. A layered
+/// spec reads each layer's column from the batch that layer draws
+/// ([`LayerSource`]), never by searching batches for a column of that name:
+/// a same-named column elsewhere is data no mark of the layer draws.
+pub(in crate::render) fn locate_field<'a>(field: &str, primary_batch: &'a RecordBatch) -> Option<LocatedColumn<'a>> {
+    primary_batch.column_by_name(field).map(|c| LocatedColumn { batch: primary_batch, col: c.as_ref() })
 }
 
 /// Where the batch a layer draws lives: the chart's data (the primary batch,
@@ -198,6 +176,73 @@ fn drawn_channel_slots<'a>(spec: &'a ChartSpec, layer: &'a Layer, channel: &str)
     ChannelSlots { value: field(value), span: field(span), opposite: field(opposite) }
 }
 
+/// The rows a data-aware sort of a layered `channel` aggregates over, and the
+/// fields `x_field`/`y_field` a channel shorthand (`sort="-y"`) names: the
+/// establishing layer's ([`establishing_axis_layer`]) pre-statistic rows
+/// (`prepare::pre_statistic_rows`) and the fields that layer draws on the
+/// rendered x and y. So a sort orders the axis by the establishing layer's
+/// own data, whichever operand's frame the chart rows hold. `None` for a
+/// spec with no layers, which sorts over its one batch.
+pub(in crate::render) struct SortRows<'a> {
+    pub(in crate::render) batch: &'a RecordBatch,
+    pub(in crate::render) x_field: Option<&'a str>,
+    pub(in crate::render) y_field: Option<&'a str>,
+}
+
+pub(in crate::render) fn establishing_sort_rows<'a>(
+    channel: &str,
+    spec: &'a ChartSpec,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> Option<SortRows<'a>> {
+    let (_, layer) = establishing_axis_layer(spec, spec.layers.as_deref()?, channel)?;
+    let batch = crate::render::prepare::pre_statistic_rows(
+        layer.data_source.as_deref(),
+        &spec.transforms,
+        primary_batch,
+        transform_outputs,
+        include_final,
+    );
+    Some(SortRows {
+        batch,
+        x_field: drawn_channel_slots(spec, layer, "x").value,
+        y_field: drawn_channel_slots(spec, layer, "y").value,
+    })
+}
+
+/// `spec` with the primary y axis owned by a layer that draws y: when no
+/// layer sharing the primary y axis draws y ([`drawn_channel_slots`], the
+/// predicate [`establishing_axis_layer`] reads), the first `independent_y`
+/// layer that draws y has its flag cleared, so it establishes the primary
+/// axis. Independence with no shared axis to differ from is vacuous, and the
+/// establishing rule (the first layer drawing a channel owns it) then holds
+/// for y as for every channel. Applied where a render's spec enters: in
+/// `prepare::prepare_render_inputs`, in `scene_build::build_scene`, and at a
+/// composite leaf's entry (`composite_render::render_composite_scene`, so the
+/// composite resolve pass reads the leaf's normalized flags too), so the
+/// slot plan, the axes and every domain read see one flag set. `spec` itself
+/// (borrowed) whenever a sharing layer draws y, or no layer does.
+pub(in crate::render) fn with_primary_y_owner(spec: &ChartSpec) -> std::borrow::Cow<'_, ChartSpec> {
+    use std::borrow::Cow;
+    let Some(layers) = spec.layers.as_deref() else { return Cow::Borrowed(spec) };
+    if layers.iter().any(|layer| drawn_channel_slots(spec, layer, "y").value.is_some()) {
+        return Cow::Borrowed(spec);
+    }
+    let shared = |layer: &Layer| Layer { independent_y: false, ..layer.clone() };
+    let Some(owner) = layers
+        .iter()
+        .position(|layer| layer.independent_y && drawn_channel_slots(spec, &shared(layer), "y").value.is_some())
+    else {
+        return Cow::Borrowed(spec);
+    };
+    let mut normalized = spec.clone();
+    if let Some(layer) = normalized.layers.as_mut().and_then(|layers| layers.get_mut(owner)) {
+        layer.independent_y = false;
+    }
+    Cow::Owned(normalized)
+}
+
 /// The layer, with its index, whose batch a layered axis's bound field is
 /// read from first: layer 0 when it draws `channel`
 /// ([`drawn_channel_slots`]), else the first later layer that does, the same
@@ -219,20 +264,41 @@ fn establishing_axis_layer<'a>(
 
 /// One read of a chart-level non-positional channel's domain (color, size,
 /// the opacity family, shape, stroke_dash) on a layered spec: the layer's
-/// index, its batch ([`LayerSource`]), and the binding it draws there on the
-/// channel. `pub` (its fields are not) because the crate-visible scale
-/// builders take a slice of it; this module is private to `scale_resolve`.
+/// index, its batch ([`LayerSource`]), the field it draws there, and what
+/// the read holds ([`AuxReadKind`]). `pub` (its fields are not) because the
+/// crate-visible scale builders take a slice of it; this module is private
+/// to `scale_resolve`.
 #[derive(Clone, Copy)]
 pub struct AuxRead<'a> {
     layer: usize,
+    /// The mark of the layer that draws this read.
+    mark: Mark,
     source: LayerSource<'a>,
     field: &'a str,
-    binding: &'a crate::spec::encoding::EncodingSpec,
+    kind: AuxReadKind<'a>,
+}
+
+/// What an [`AuxRead`] holds: a column of its batch, bound by `binding`; or
+/// a raster image's cells, the values its Raster batch's `pixel_data` packs
+/// (no column holds them), which the image colors in its colormap `cmap`.
+/// `entry` is the image layer's public call (`mark_raster`), when a call
+/// built it.
+#[derive(Clone, Copy)]
+enum AuxReadKind<'a> {
+    Column { binding: &'a crate::spec::encoding::EncodingSpec },
+    RasterCells { cmap: Option<&'a str>, entry: Option<&'a str> },
 }
 
 impl<'a> AuxRead<'a> {
+    /// The index of the layer this read is (its position among the members'
+    /// merged layers for an overlay group's read).
+    pub(in crate::render) fn layer(&self) -> usize {
+        self.layer
+    }
+
     /// The column this read draws, in the batch its layer draws; `None` when
-    /// that batch lacks the field.
+    /// that batch lacks the field, and for a raster image's cells, which no
+    /// column holds.
     pub(in crate::render) fn locate<'b>(
         &self,
         primary_batch: &'b RecordBatch,
@@ -241,55 +307,285 @@ impl<'a> AuxRead<'a> {
     where
         'a: 'b,
     {
-        self.source.locate(self.field, primary_batch, transform_outputs)
+        match self.kind {
+            AuxReadKind::Column { .. } => self.source.locate(self.field, primary_batch, transform_outputs),
+            AuxReadKind::RasterCells { .. } => None,
+        }
+    }
+
+    /// Whether this read is a raster image's cells.
+    pub(in crate::render) fn is_raster_cells(&self) -> bool {
+        matches!(self.kind, AuxReadKind::RasterCells { .. })
+    }
+
+    /// The field this read draws.
+    pub(in crate::render) fn field(&self) -> &'a str {
+        self.field
+    }
+
+    /// The refusal of a raster image's cells under a categorical color scale
+    /// ([`RenderError::RasterColorNotQuantitative`]), voiced by the image
+    /// layer's public call (ruling F: `mark_raster`, else `layer {i}:
+    /// mark_image`); `None` for a column read.
+    pub(in crate::render) fn raster_color_refusal(&self, reason: crate::render::RasterColorReason) -> Option<RenderError> {
+        let AuxReadKind::RasterCells { entry, .. } = self.kind else { return None };
+        let entry = match entry.filter(|entry| *entry != "mark_image") {
+            Some(entry) => entry.to_string(),
+            None => format!("layer {}: mark_image", self.layer),
+        };
+        Some(RenderError::RasterColorNotQuantitative(Box::new(crate::render::RasterColorRefusal {
+            layer: self.layer,
+            entry,
+            field: self.field.to_string(),
+            reason,
+        })))
+    }
+
+    /// The colormap a raster image's cells draw in (`mark_raster(cmap=)`);
+    /// `None` for a column read or an image naming none.
+    pub(in crate::render) fn cmap(&self) -> Option<&'a str> {
+        match self.kind {
+            AuxReadKind::RasterCells { cmap, .. } => cmap,
+            AuxReadKind::Column { .. } => None,
+        }
+    }
+
+    /// The transform a raster image's cells map through, which its Raster
+    /// batch names ([`crate::render::marks::image::raster_value_transform`]);
+    /// `None` for a column read.
+    pub(in crate::render) fn raster_transform(
+        &self,
+        primary_batch: &RecordBatch,
+        transform_outputs: &HashMap<String, RecordBatch>,
+    ) -> Option<super::ColorTransform> {
+        match self.kind {
+            AuxReadKind::RasterCells { .. } => self
+                .source
+                .batch(primary_batch, transform_outputs)
+                .map(crate::render::marks::image::raster_value_transform),
+            AuxReadKind::Column { .. } => None,
+        }
+    }
+
+    /// The Raster batch a raster image's cells are read from; `None` for a
+    /// column read.
+    pub(in crate::render) fn raster_batch<'b>(
+        &self,
+        primary_batch: &'b RecordBatch,
+        transform_outputs: &'b HashMap<String, RecordBatch>,
+    ) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
+        match self.kind {
+            AuxReadKind::RasterCells { .. } => self.source.batch(primary_batch, transform_outputs),
+            AuxReadKind::Column { .. } => None,
+        }
+    }
+
+    /// Whether this read's values read as categories: a column by its
+    /// binding's declared type or its dtype ([`column_reads_categorical`]);
+    /// a raster image's cells never, they are numbers.
+    pub(in crate::render) fn reads_categorical(&self, primary_batch: &RecordBatch, transform_outputs: &HashMap<String, RecordBatch>) -> bool {
+        match self.kind {
+            AuxReadKind::Column { binding } => {
+                let located = self.source.locate(self.field, primary_batch, transform_outputs);
+                located.is_some() && column_reads_categorical(binding, located)
+            }
+            AuxReadKind::RasterCells { .. } => false,
+        }
+    }
+
+    /// The numeric extent this read contributes, and whether it holds any
+    /// value: a column's `extent` (on a faceted chart, a read of the chart's
+    /// data unioned with the all-panels batch), or a raster image's cells'
+    /// finite extent as the image draws it
+    /// ([`crate::render::marks::image::raster_cell_domain`]). `None` when
+    /// there is nothing to read (a batch lacking the field, a raster with no
+    /// finite cell).
+    fn extent(
+        &self,
+        primary_batch: &RecordBatch,
+        transform_outputs: &HashMap<String, RecordBatch>,
+        facet_shared: bool,
+        extent: &impl Fn(&dyn Array, &str) -> Result<(f64, f64), RenderError>,
+    ) -> Result<Option<ReadExtent>, RenderError> {
+        use crate::render::marks::image::{raster_cell_domain, raster_cell_extent};
+        match self.kind {
+            AuxReadKind::RasterCells { .. } => Ok(self
+                .source
+                .batch(primary_batch, transform_outputs)
+                .and_then(raster_cell_extent)
+                .map(|cells| ReadExtent { extent: raster_cell_domain(cells), has_values: true })),
+            AuxReadKind::Column { .. } => {
+                let Some(located) = self.source.locate(self.field, primary_batch, transform_outputs) else {
+                    return Ok(None);
+                };
+                let mut read_extent = extent(located.col, self.field)?;
+                if facet_shared && self.source == LayerSource::Chart {
+                    read_extent = super::union_panel_with_global_extent(read_extent, self.field, transform_outputs);
+                }
+                Ok(Some(ReadExtent { extent: read_extent, has_values: located.col.null_count() != located.col.len() }))
+            }
+        }
     }
 }
 
-/// The reads that make up a chart-level non-positional channel's domain, in
-/// layer order, one per layer: every layer that draws the channel,
+/// The extent one [`AuxRead`] contributes, and whether it holds any value
+/// (a column all null contributes its extent only when no read has one).
+struct ReadExtent {
+    extent: (f64, f64),
+    has_values: bool,
+}
+
+/// The reads that make up a layered spec's non-positional `channel` domain,
+/// in layer order, one per layer: every layer that draws the channel,
 /// reading the field it draws from the batch it draws ([`LayerSource::of`]).
-/// A layer binding the channel itself draws its own field; a layer binding
-/// nothing there draws the chart-level binding, which `prepare` gives a layer
-/// on the chart's data (`inherit_from`) and a layer on its own output
+/// A layer draws the channel when its mark draws it
+/// ([`Mark::draws_channel`]) and its batch carries the column it binds there.
+/// The column gate (`prepare::validate_layer_columns`) has already refused
+/// every drawn binding whose column a layer's batch lacks, but for an
+/// inherited one a statistic's output drops, which that layer draws without:
+/// so a layer whose batch lacks the column is exactly a layer that does not
+/// draw it. A layer binding the channel itself draws its own field; a layer
+/// binding nothing there draws the chart-level binding, which `prepare` gives
+/// a layer on the chart's data (`inherit_from`) and a layer on its own output
 /// (`inherit_non_positional`) alike. The same layer-to-batch rule the
 /// positional union reads by ([`seed_reads`]), without its positional-only
-/// skip of `data_source` layers. Empty for an unlayered spec, whose one mark
-/// draws the primary batch. The first read is the establishing layer's: layer
-/// 0 when it draws the channel, else the first layer that does, the layer
-/// whose binding the rendering encoding carries (`prepare`'s
-/// `establishing_encoding`).
+/// skip of `data_source` layers.
+///
+/// A raster image draws `color` through its cells when its binding names the
+/// field they hold ([`crate::render::marks::image::image_draws_color`]): its
+/// read is the cells of its Raster batch ([`AuxReadKind::RasterCells`]).
+///
+/// The first read is the establishing layer's: the first layer that draws
+/// the channel, layer 0 when it does, the layer whose binding the rendering
+/// encoding carries (`prepare`'s `establishing_encoding`). Empty when no layer
+/// draws the channel, which then gets no scale and no legend.
 pub(in crate::render) fn aux_reads<'a>(
-    layers: Option<&'a [Layer]>,
+    layers: &'a [Layer],
     chart_encoding: &'a crate::spec::encoding::Encoding,
-    slot: impl Fn(&'a crate::spec::encoding::Encoding) -> Option<&'a crate::spec::encoding::EncodingSpec>,
+    channel: crate::spec::encoding::AuxiliaryScaleChannel,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
 ) -> Vec<AuxRead<'a>> {
     let mut reads: Vec<AuxRead<'a>> = Vec::new();
-    for (index, layer) in layers.unwrap_or_default().iter().enumerate() {
-        let Some(binding) = slot(&layer.encoding).or_else(|| slot(chart_encoding)) else { continue };
-        reads.push(AuxRead { layer: index, source: LayerSource::of(layer), field: binding.field.as_str(), binding });
+    for (index, layer) in layers.iter().enumerate() {
+        let Some(binding) = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())
+        else {
+            continue;
+        };
+        let field = binding.field.as_str();
+        let source = LayerSource::of(layer);
+        if channel.drawn_as() == crate::spec::layer::InheritedChannel::Color {
+            if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, primary_batch, transform_outputs) {
+                let kind = AuxReadKind::RasterCells { cmap, entry: layer.entry.as_deref() };
+                reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind });
+                continue;
+            }
+        }
+        if !layer.mark.draws_channel(channel.drawn_as()) || source.locate(field, primary_batch, transform_outputs).is_none() {
+            continue;
+        }
+        reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding } });
     }
     reads
 }
 
-/// The reads of an overlay group's auxiliary channel: every member's reads of
-/// the binding `slot` selects, in member order, each read from the batch it
-/// draws and named by the index its layer has in the layer list the members
-/// merged with `+` form (each member's layers in order, an unlayered member
-/// one layer). A layered member reads as [`aux_reads`] reads its layers; an
-/// unlayered one draws its rendering encoding's binding from the batch
-/// holding the field ([`locate_field`]), as its own scale reads it. A member
-/// the field reaches no batch of contributes nothing.
+/// The colormap a raster image `layer` draws its cells in, when it draws
+/// color through them ([`crate::render::marks::image::image_draws_color`]):
+/// `Some(cmap)` (itself `None` when the layer names no colormap); `None` for
+/// every other layer.
+fn raster_cells_drawn<'a>(
+    layer: &'a Layer,
+    chart_encoding: &crate::spec::encoding::Encoding,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> Option<Option<&'a str>> {
+    let batch = LayerSource::of(layer).batch(primary_batch, transform_outputs)?;
+    let cells = crate::render::marks::image::raster_value_field(batch);
+    crate::render::marks::image::image_draws_color(layer.mark, &layer.encoding, chart_encoding, cells)
+        .then(|| layer.mark_style.as_ref().and_then(|style| style.cmap.as_deref()))
+}
+
+/// The reads of the cells of every raster image that draws no `color` (its
+/// color unbound, or bound to another field, which warns): one
+/// [`AuxReadKind::RasterCells`] read per url-less image layer whose batch is
+/// a Raster output, named by the field its cells hold; for a spec with no
+/// layers, its one batch when the chart is such an image. The scale these
+/// reads make (`scale_resolve`'s `raster_cells` scale) colors every such
+/// image, so one cell scale spans every panel of a faceted raster and every
+/// image of a chart, as the bound color scale does.
+///
+/// Whether an image draws color is one answer, its own: the layer's color
+/// binding, else the one it inherits from the authored `chart_encoding`
+/// ([`aux_reads`] asks the same of the same pair, and the image builder of
+/// the layer's completed encoding). A sibling layer's color binding, which
+/// the rendering encoding may carry as the establishing one, never makes an
+/// image draw color.
+pub(in crate::render) fn raster_cell_reads<'a>(
+    spec: &'a ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+) -> Vec<AuxRead<'a>> {
+    use crate::render::marks::image::{image_draws_color, raster_value_field, url_tile_field};
+    let undrawn = |mark: Mark,
+                   encoding: &crate::spec::encoding::Encoding,
+                   parent: &crate::spec::encoding::Encoding,
+                   style: Option<&'a crate::spec::mark_style::MarkKwargsSpec>,
+                   entry: Option<&'a str>,
+                   source: LayerSource<'a>,
+                   index: usize| {
+        let url = encoding.url.as_ref().or(parent.url.as_ref());
+        if mark != Mark::Image || url_tile_field(url).is_some() {
+            return None;
+        }
+        let batch = source.batch(primary_batch, transform_outputs)?;
+        let field = raster_value_field(batch)?;
+        if image_draws_color(mark, encoding, parent, Some(field)) {
+            return None;
+        }
+        let cmap = style.and_then(|style| style.cmap.as_deref());
+        Some(AuxRead { layer: index, mark, source, field, kind: AuxReadKind::RasterCells { cmap, entry } })
+    };
+    match spec.layers.as_deref() {
+        Some(layers) => layers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                let style = layer.mark_style.as_ref();
+                undrawn(layer.mark, &layer.encoding, chart_encoding, style, layer.entry.as_deref(), LayerSource::of(layer), index)
+            })
+            .collect(),
+        None => undrawn(spec.mark, &spec.encoding, &spec.encoding, spec.mark_style.as_ref(), spec.entry.as_deref(), LayerSource::Chart, 0)
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// The reads of an overlay group's auxiliary `channel`: every member's reads
+/// of it, in member order, each read from the batch it draws and named by the
+/// index its layer has in the layer list the members merged with `+` form
+/// (each member's layers in order, an unlayered member one layer). A layered
+/// member reads as [`aux_reads`] reads its layers; an unlayered one draws its
+/// rendering encoding's binding, which carries only a channel its mark draws,
+/// from its one batch ([`locate_field`]), as its own scale reads it; a
+/// binding to a column that batch lacks is refused as that chart alone
+/// refuses it ([`RenderError::UnknownColumn`]), since the group resolves the
+/// member's scale in its place. A layered member's bindings were judged by
+/// its own column gate when it was prepared.
 pub(in crate::render) fn overlay_aux_reads<'a>(
     members: &[super::LeafResolveInput<'a>],
-    slot: impl Fn(&'a crate::spec::encoding::Encoding) -> Option<&'a crate::spec::encoding::EncodingSpec> + Copy,
-) -> Vec<AuxRead<'a>> {
+    channel: crate::spec::encoding::AuxiliaryScaleChannel,
+) -> Result<Vec<AuxRead<'a>>, RenderError> {
     let mut reads: Vec<AuxRead<'a>> = Vec::new();
     let mut first_layer = 0;
     for input in members {
         let (final_batch, transform_outputs) = (input.final_batch, input.transform_outputs);
         match input.spec.layers.as_deref() {
             Some(layers) => {
-                for read in aux_reads(Some(layers), &input.spec.encoding, slot) {
+                for read in aux_reads(layers, &input.spec.encoding, channel, final_batch, transform_outputs) {
                     let Some(batch) = read.source.batch(final_batch, transform_outputs) else { continue };
                     reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), ..read });
                 }
@@ -297,14 +593,50 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
             }
             None => {
                 first_layer += 1;
-                let Some(binding) = slot(input.encoding) else { continue };
+                let Some(binding) = channel.binding(input.encoding).as_ref() else { continue };
                 let field = binding.field.as_str();
-                let Some(located) = locate_field(field, final_batch, transform_outputs) else { continue };
-                reads.push(AuxRead { layer: first_layer - 1, source: LayerSource::Batch(located.batch), field, binding });
+                let located =
+                    locate_field(field, final_batch).ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+                reads.push(AuxRead {
+                    layer: first_layer - 1,
+                    mark: input.spec.mark,
+                    source: LayerSource::Batch(located.batch),
+                    field,
+                    kind: AuxReadKind::Column { binding },
+                });
             }
         }
     }
+    Ok(reads)
+}
+
+/// The raster cell reads of an overlay group ([`raster_cell_reads`] over
+/// each member, in member order, numbered as [`overlay_aux_reads`] numbers
+/// its layers), so the group's images share one cell scale, as the same
+/// layers merged with `+` do.
+pub(in crate::render) fn overlay_raster_cell_reads<'a>(members: &[super::LeafResolveInput<'a>]) -> Vec<AuxRead<'a>> {
+    let mut reads = Vec::new();
+    let mut first_layer = 0;
+    for input in members {
+        for read in raster_cell_reads(input.spec, &input.spec.encoding, input.final_batch, input.transform_outputs) {
+            let Some(batch) = read.source.batch(input.final_batch, input.transform_outputs) else { continue };
+            reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), ..read });
+        }
+        first_layer += input.spec.layers.as_ref().map_or(1, Vec::len);
+    }
     reads
+}
+
+/// The layer of the area that groups a color scale by category (FA-5): the
+/// first area layer among the layers drawing color (`reads`, a layered
+/// spec's color reads), or layer 0 for an unlayered area chart, which has no
+/// reads. Only an area that draws color groups it, so an area beside the
+/// layers that do changes nothing, in whatever order they are layered.
+pub(in crate::render) fn color_grouping_area(chart_mark: Mark, reads: &[AuxRead<'_>]) -> Option<usize> {
+    match reads {
+        [] => (chart_mark == Mark::Area).then_some(0),
+        reads => reads.iter().find(|read| read.mark == Mark::Area).map(|read| read.layer),
+    }
 }
 
 /// The reads a chart-level `channel` scale admits into its domain: those whose
@@ -317,7 +649,9 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
 /// draws; one that reads the other way stays out of the domain, and one
 /// [`RenderWarning::LayerScaleExcluded`] names its layer, its marks drawing
 /// through the shared scale ([`crate::render::ExcludedLayerPlacement::SharedAxis`]).
-/// A read whose batch lacks its field adds nothing to a domain and is kept.
+/// A raster image's cells under a categorical scale would draw nothing, so
+/// they are refused ([`RenderError::RasterColorNotQuantitative`]) rather
+/// than left out.
 pub(in crate::render) fn admitted_aux_reads<'a>(
     reads: &[AuxRead<'a>],
     channel: &str,
@@ -325,13 +659,18 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
-) -> Vec<AuxRead<'a>> {
-    let Some((lead, rest)) = reads.split_first() else { return Vec::new() };
+) -> Result<Vec<AuxRead<'a>>, RenderError> {
+    let Some((lead, rest)) = reads.split_first() else { return Ok(Vec::new()) };
     let mut admitted = vec![*lead];
     for read in rest {
-        let located = read.source.locate(read.field, primary_batch, transform_outputs);
-        let conflicts = located.is_some()
-            && column_reads_categorical(read.binding, located) != scale_reads_categorical;
+        let conflicts = read.reads_categorical(primary_batch, transform_outputs) != scale_reads_categorical
+            && (read.is_raster_cells() || read.locate(primary_batch, transform_outputs).is_some());
+        if conflicts && scale_reads_categorical {
+            let reason = crate::render::RasterColorReason::CategoricalScale { layer: lead.layer, field: lead.field.to_string() };
+            if let Some(refusal) = read.raster_color_refusal(reason) {
+                return Err(refusal);
+            }
+        }
         if conflicts {
             warnings.push(RenderWarning::LayerScaleExcluded {
                 layer: read.layer,
@@ -343,7 +682,7 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
             admitted.push(*read);
         }
     }
-    admitted
+    Ok(admitted)
 }
 
 /// The numeric domain of a chart-level non-positional channel on a layered
@@ -353,8 +692,13 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
 /// ([`super::union_panel_with_global_extent`]); a layer's own output is
 /// already the all-panels one. A column with no value joins only when no
 /// read has one, so the result is exactly the single read's extent whenever
-/// one layer draws the channel. `None` when no read's batch holds its field,
-/// leaving the caller its unlayered read (and its refusal).
+/// one layer draws the channel. A raster image's cells join as the image
+/// draws them ([`crate::render::marks::image::raster_cell_domain`]: from
+/// zero when every cell is non-negative), so the scale every drawing layer
+/// reads, and its colorbar, span the domain the image draws. Every read
+/// [`aux_reads`] lists draws its
+/// field, so the result is `None` only for no reads: an unlayered spec, which
+/// reads its one batch instead.
 pub(in crate::render) fn aux_numeric_union(
     reads: &[AuxRead<'_>],
     primary_batch: &RecordBatch,
@@ -365,13 +709,13 @@ pub(in crate::render) fn aux_numeric_union(
     let mut union: Option<(f64, f64)> = None;
     let mut first: Option<(f64, f64)> = None;
     for read in reads {
-        let Some(located) = read.source.locate(read.field, primary_batch, transform_outputs) else { continue };
-        let mut read_extent = extent(located.col, read.field)?;
-        if facet_shared && read.source == LayerSource::Chart {
-            read_extent = super::union_panel_with_global_extent(read_extent, read.field, transform_outputs);
-        }
+        let Some(ReadExtent { extent: read_extent, has_values }) =
+            read.extent(primary_batch, transform_outputs, facet_shared, &extent)?
+        else {
+            continue;
+        };
         first.get_or_insert(read_extent);
-        if located.col.null_count() == located.col.len() {
+        if !has_values {
             continue;
         }
         union = Some(union.map_or(read_extent, |(lo, hi)| (lo.min(read_extent.0), hi.max(read_extent.1))));
@@ -386,7 +730,7 @@ pub(in crate::render) fn aux_numeric_union(
 /// the chart's data takes the all-panels batch on a faceted chart
 /// ([`super::shared_categorical_batch`]). Returns the domain and the first
 /// contributing batch, which a data-aware `sort=` aggregates over; `None`
-/// when no read's batch holds its field.
+/// for no reads (an unlayered spec, which reads its one batch instead).
 pub(in crate::render) fn aux_category_union<'b>(
     reads: &[AuxRead<'b>],
     primary_batch: &'b RecordBatch,
@@ -395,7 +739,7 @@ pub(in crate::render) fn aux_category_union<'b>(
 ) -> Result<Option<(Vec<String>, &'b RecordBatch)>, RenderError> {
     let mut union: Option<(Vec<String>, &'b RecordBatch)> = None;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for read in reads {
+    for read in reads.iter().filter(|read| !read.is_raster_cells()) {
         let batch = match read.source {
             LayerSource::Chart => {
                 super::shared_categorical_batch(primary_batch, read.field, transform_outputs, facet_shared)
@@ -448,12 +792,14 @@ fn layer_flips(layer: &Layer, chart_coord: Option<&crate::spec::coord::CoordKind
 }
 
 /// The column an axis's bound `field` is typed and ordered by: in a layered
-/// spec, the batch of the layer that establishes `channel`
+/// spec, the column the layer that establishes `channel` draws
 /// ([`establishing_axis_layer`]: layer 0 when it draws the channel, else the
-/// first layer that does), which draws it. When that batch lacks the field,
-/// [`locate_field`] answers, so the axis can still be typed; the domain union
-/// itself reads only the batches that draw the field
-/// ([`numeric_domain_union_over`], [`positional_category_union`]).
+/// first layer that does), read from the batch it draws. A raster image draws
+/// its axis through its extent columns, so its first one types the axis
+/// ([`crate::render::marks::image::drawn_columns`]). A spec with
+/// no layers reads its one batch ([`locate_field`]). `None` when that batch
+/// lacks the column: no other batch's same-named column describes what the
+/// establishing layer draws.
 pub(in crate::render) fn locate_seed_field<'a>(
     channel: &str,
     field: &str,
@@ -461,11 +807,12 @@ pub(in crate::render) fn locate_seed_field<'a>(
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
 ) -> Option<LocatedColumn<'a>> {
-    spec.layers
-        .as_deref()
-        .and_then(|layers| establishing_axis_layer(spec, layers, channel))
-        .and_then(|(_, layer)| LayerSource::of(layer).locate(field, primary_batch, transform_outputs))
-        .or_else(|| locate_field(field, primary_batch, transform_outputs))
+    let Some((_, layer)) = spec.layers.as_deref().and_then(|layers| establishing_axis_layer(spec, layers, channel)) else {
+        return locate_field(field, primary_batch);
+    };
+    let url = layer.encoding.url.as_ref().or(spec.encoding.url.as_ref());
+    let drawn = crate::render::marks::image::drawn_columns(layer.mark, url, channel, field);
+    LayerSource::of(layer).locate(drawn.first()?, primary_batch, transform_outputs)
 }
 
 /// Aggregate operation used by data-aware sort forms (channel shorthand and
@@ -1105,7 +1452,7 @@ pub(in crate::render) fn establishing_caller_scale<'a, I: Iterator<Item = AxisMe
     (!is_categorical_scale(scale)).then_some((idx, scale))
 }
 
-fn is_categorical_scale(scale: &crate::spec::encoding::ScaleSpec) -> bool {
+pub(in crate::render) fn is_categorical_scale(scale: &crate::spec::encoding::ScaleSpec) -> bool {
     use crate::spec::encoding::ScaleSpec;
     matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. })
 }
@@ -1796,10 +2143,7 @@ fn distinct_positional_categories_shared(
 /// propagates every other failure with `?`, and why this is deliberately not a
 /// `Quantitative`/`Temporal` type test.
 ///
-/// An unlayered spec reads its seed from the one batch [`locate_field`]
-/// deterministically chooses: a category *vector* is ordered, and `HashMap`
-/// iteration order is unspecified (the bug
-/// `locate_field_named_output_fallback_is_deterministic` pins).
+/// An unlayered spec reads its seed from its one batch ([`locate_field`]).
 ///
 /// `include_final` and `paired_positional` mean what they mean for
 /// [`distinct_positional_categories_shared`], and every contribution goes
@@ -2027,46 +2371,14 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(arr))]).unwrap()
     }
 
-    /// Regression guard for the boxen render non-determinism bug: when a field
-    /// (e.g. `group`) is absent from the primary batch but present in several
-    /// named outputs whose rows differ in order, `locate_field` must pick the
-    /// *same* batch every time. Raw `HashMap` iteration order is unspecified and
-    /// varied per process, producing distinct categorical domains (hence
-    /// distinct SVGs) across repeated renders of the same chart.
+    /// An unlayered spec's one mark draws its one batch: `locate_field` reads
+    /// that batch alone, so a field it lacks is not found, whichever other
+    /// batch holds a column of that name.
     #[test]
-    fn locate_field_named_output_fallback_is_deterministic() {
-        // Mimic boxen's fan-out: several named outputs each carry `group`, but
-        // in different row orders. Sorted-key selection lands on "lv".
-        let primary = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Float64,
-            true,
-        )])));
-
-        // Build the map fresh on every iteration so HashMap seeding differs, and
-        // assert the located batch's first row is stable regardless.
-        let mut first_seen: Option<String> = None;
-        for _ in 0..64 {
-            let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
-            outputs.insert("lv".to_string(), group_batch(vec!["A", "B", "Z"]));
-            outputs.insert("lv_depth_1".to_string(), group_batch(vec!["Z", "A", "B"]));
-            outputs.insert("lv_depth_2".to_string(), group_batch(vec!["B", "Z", "A"]));
-            outputs.insert("lv_outliers".to_string(), group_batch(vec!["Z", "B", "A"]));
-
-            let located = locate_field("group", &primary, &outputs)
-                .expect("group present in named outputs");
-            let col = located.col.as_any().downcast_ref::<StringArray>().unwrap();
-            let first = col.value(0).to_string();
-            match &first_seen {
-                None => first_seen = Some(first),
-                Some(prev) => assert_eq!(
-                    prev, &first,
-                    "locate_field must select the same named output across runs"
-                ),
-            }
-        }
-        // Sorted keys: "lv" < "lv_depth_1" < … so the "lv" batch (A, B, Z) wins.
-        assert_eq!(first_seen.as_deref(), Some("A"));
+    fn locate_field_reads_only_the_unlayered_batch() {
+        let primary = group_batch(vec!["A", "B"]);
+        assert!(locate_field("value", &primary).is_none());
+        assert!(locate_field("group", &primary).is_some_and(|located| std::ptr::eq(located.batch, &primary)));
     }
 
     // --- layer_wants_bar_zero_anchor: per-term unit tests --------------------
@@ -4035,5 +4347,64 @@ mod tests {
         let err = positional_category_union("x", "nowhere", Some("v"), &batch, &HashMap::new(), &spec, false)
             .expect_err("a bound field no batch holds is refused");
         assert_eq!(err, RenderError::UnknownColumn { name: "nowhere".to_string() });
+    }
+
+    /// A layered axis is typed from the column its establishing layer draws,
+    /// in the batch it draws: a raster image draws `x` through its extent
+    /// columns, so `x_min` types the axis, not the source column `x` the
+    /// chart rows hold. Rejects typing the axis from a same-named column of
+    /// another batch.
+    #[test]
+    fn a_raster_image_types_its_axis_from_its_extent_columns() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let x = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+        let image = Layer {
+            mark: Mark::Image,
+            encoding: Encoding { x: x.clone(), ..Default::default() },
+            data_source: Some("raster".into()),
+            ..Default::default()
+        };
+        let spec = ChartSpec { encoding: Encoding { x, ..Default::default() }, layers: Some(vec![image]), ..Default::default() };
+        let column = |name: &str, values: Vec<f64>| {
+            let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(arrow::array::Float64Array::from(values))]).unwrap()
+        };
+        let rows = column("x", vec![1.0, 2.0]);
+        let mut outputs = HashMap::new();
+        outputs.insert("raster".to_string(), column("x_min", vec![-3.0]));
+        let located = locate_seed_field("x", "x", &spec, &rows, &outputs).expect("the image draws x_min");
+        assert!(std::ptr::eq(located.batch, &outputs["raster"]), "read from the batch the image draws");
+        outputs.insert("raster".to_string(), column("x", vec![0.0]));
+        assert!(
+            locate_seed_field("x", "x", &spec, &rows, &outputs).is_none(),
+            "no other column of the batch types the axis, nor the chart rows' x"
+        );
+    }
+
+    /// A layered channel's reads list only the layers that draw it: a layer
+    /// whose mark does not draw the channel, and a layer whose batch lacks
+    /// the column (a statistic dropped it), contribute nothing, and the first
+    /// read is the first layer that does draw it.
+    #[test]
+    fn aux_reads_list_only_the_layers_that_draw_the_channel() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        let color = |field: &str| Encoding { color: Some(EncodingSpec { field: field.into(), ..Default::default() }), ..Default::default() };
+        let layers = vec![
+            Layer { mark: Mark::Image, encoding: color("c"), ..Default::default() },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), data_source: Some("stats".into()), ..Default::default() },
+            Layer { mark: Mark::Point, encoding: color("c"), ..Default::default() },
+        ];
+        let chart = color("c");
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["A"]))],
+        )
+        .unwrap();
+        // The statistic's output carries no `c`.
+        let mut outputs = HashMap::new();
+        outputs.insert("stats".to_string(), group_batch(vec!["B"]));
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [2]);
     }
 }

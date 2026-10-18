@@ -477,10 +477,10 @@ def _v1_cases() -> dict[str, Case]:
     cases: dict[str, Case] = {}
     for channel, (value, _mark) in _VALUE_CHANNELS.items():
         binder = _binder(channel)
-        legends = legend_set(_quiet(binder).to_svg())
+        legends = legend_set(_quiet(lambda binder=binder: binder().to_svg()))
         cases |= _cases(f"V1/{channel}/binder-then-line", plus_doors(binder, line, legends=legends))
         bound_line = lambda channel=channel, value=value: line(**{channel: value})  # noqa: E731
-        bound_legends = legend_set(_quiet(bound_line).to_svg())
+        bound_legends = legend_set(_quiet(lambda bound_line=bound_line: bound_line().to_svg()))
         cases |= _cases(
             f"V1/{channel}/point-then-bound-line",
             plus_doors(P, bound_line, legends=bound_legends),
@@ -2643,39 +2643,100 @@ def test_a_right_operands_own_facet_is_still_warned_and_ignored():
 
 
 # ---------------------------------------------------------------------------
-# Current behavior pinned for a later task (not the target)
+# P5: layer 0 is judged by the column gate like every later layer
 # ---------------------------------------------------------------------------
 #
-# These pin what the built engine draws today for three cases the model
-# wants refused or drawn differently. They state the present output plainly
-# so a change to it is seen; the target belongs to a later task.
+# The first layer that draws a channel establishes its scale, axis and legend
+# from its own rows, and no reader falls back to another layer's batch. So a
+# layer 0 binding to a column only another operand's frame holds is refused in
+# the gate's one message, as a later layer's is (cell A7 below), rather than
+# drawing an axis or legend read from rows it does not draw.
+
+
+def _layer_zero_absent(channel: str, field: str) -> str:
+    return (
+        f"layer 0: encoding '{channel}' references unknown column '{field}' "
+        "(not present in that layer's data)"
+    )
+
+
+# Left operand (bound to a column only the right's frame holds), right
+# operand, and the refused channel and field.
+_LAYER_ZERO_OPERANDS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart], str, str]] = {
+    "x-other-frame": (lambda: P(x="w"), lambda: P(df2), "x", "w"),
+    "color-left": (lambda: P(color="w"), lambda: P(df2), "color", "w"),
+    "color-left-over-df2": (lambda: P(df2, color="k"), P, "color", "k"),
+    "size-left": (lambda: P(size="w"), lambda: P(df2), "size", "w"),
+    "shape-left-over-df2": (lambda: P(df2, shape="k"), P, "shape", "k"),
+}
+
+
+def _layer_zero_refusals() -> dict[str, tuple[Callable[[], Any], tuple[str, ...], str]]:
+    """Each operand pair on ``+``, LCm (both outputs) and LayerChart's interactive route."""
+    cases: dict[str, tuple[Callable[[], Any], tuple[str, ...], str]] = {}
+    both = ("static", "interactive")
+    for name, (a, b, channel, field) in _LAYER_ZERO_OPERANDS.items():
+        message = _layer_zero_absent(channel, field)
+        cases[f"{name}/+"] = (lambda a=a, b=b: a() + b(), both, message)
+        cases[f"{name}/LCm"] = (
+            lambda a=a, b=b: fm.LayerChart(a(), b())._build_merged(),
+            both,
+            message,
+        )
+        cases[f"{name}/LCx"] = (lambda a=a, b=b: fm.LayerChart(a(), b()), ("interactive",), message)
+    for channel in ("x", "color"):
+        cases[f"{channel}-other-frame/LD"] = (
+            lambda channel=channel: P(**{channel: "w"}).layer(fm.Layer(data=df2, mark="point")),
+            both,
+            _layer_zero_absent(channel, "w"),
+        )
+    return cases
+
+
+_LAYER_ZERO_REFUSALS = _layer_zero_refusals()
 
 
 @pytest.mark.parametrize(
-    ("build", "marks", "legends"),
+    ("case", "kind"),
     [
-        (lambda: P(x="w") + P(df2), {"circle": 6}, {}),
-        (lambda: P(color="w") + P(df2), {"circle": 14}, {"w": ("1", "2.25", "3.5", "4.75", "6")}),
-        (
-            lambda: fm.LayerChart(P(color="w"), P(df2))._build_merged(),
-            {"circle": 14},
-            {"w": ("1", "2.25", "3.5", "4.75", "6")},
-        ),
+        (case, kind)
+        for case, (_, kinds, _) in sorted(_LAYER_ZERO_REFUSALS.items())
+        for kind in kinds
     ],
-    ids=["layer0-x-other-frame", "color-left", "LCm-color"],
 )
-def test_today_a_binding_to_a_column_only_the_other_frame_has_still_draws(build, marks, legends):
-    """Today: layer 0 bound to a column only the other operand's frame holds is not refused.
+def test_P5_layer_zeros_binding_to_a_column_only_another_frame_holds_is_refused(case, kind):
+    """P5: layer 0 is refused on the channel it draws from a column its own rows lack.
 
-    Layer 0's ``x="w"`` draws none of the left's points (6 circles are df2's),
-    and its color on ``w`` draws a legend read from the other frame's rows.
-    The model refuses them; layer 0 is exempt from the column gate today and
-    the engine reads the field outside its own batch. A later layer's
-    binding is refused (cell A7 below).
+    Rejects reading the field outside layer 0's batch: ``P(x="w") + P(df2)``
+    drew df2's 6 circles on a ``w`` axis, and ``P(color="w") + P(df2)``
+    a ``w`` legend read from df2's rows, for points that draw neither.
     """
-    svg = _quiet(lambda: build().to_svg())
-    assert tag_counts(svg) == marks
-    assert legend_set(svg) == legends
+    build, _, message = _LAYER_ZERO_REFUSALS[case]
+    with pytest.raises(ValueError) as refused:
+        chart = build()
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == message
+
+
+@pytest.mark.parametrize("case", sorted(_LAYER_ZERO_OPERANDS))
+def test_P5_the_static_overlay_refuses_the_member_with_its_leaf_message(case):
+    """LCs renders each member as its own unlayered leaf, which keeps the flat chart's message."""
+    a, b, _, field = _LAYER_ZERO_OPERANDS[case]
+    with pytest.raises(ValueError) as refused:
+        fm.LayerChart(a(), b()).to_svg()
+    assert str(refused.value) == (
+        f"failed to render composite leaf leaf #0: unknown column '{field}' referenced by an encoding"
+    )
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("channel", ["x", "color", "size"])
+def test_P5_an_unlayered_charts_missing_column_keeps_its_message(channel, kind):
+    """The control: a flat chart has no layer to name, so its refusal is unchanged."""
+    with pytest.raises(ValueError) as refused:
+        chart = P(**{channel: "w"})
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == "unknown column 'w' referenced by an encoding"
 
 
 # ---------------------------------------------------------------------------
@@ -2999,18 +3060,26 @@ def _dropped(entry: str, mark: str, channel: str, field: str) -> str:
 _W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
     "mark_boxen-color": (
         lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
-        [_dropped("mark_boxen", "point", "color", "c")],
-        "03f2fae70d706aafac90797b57e800c7d5cf026ab1b7bf16a9d81de2fa5b76c0",
+        [
+            _dropped("mark_boxen", "rect", "color", "c"),
+            _dropped("mark_boxen", "point", "color", "c"),
+        ],
+        "07f1b8d46631dea387c8f79f4956694dc0fafe773c1b08f5561f4b717593c83c",
     ),
     "catplot-boxen-hue": (
         lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
-        [_dropped("catplot", "point", "color", "grp")],
-        "f102bc411159b027438aee275985b550c5ae47eb7797d8d85e8ad045db17a1d1",
+        [_dropped("catplot", "rect", "color", "grp"), _dropped("catplot", "point", "color", "grp")],
+        "075af3fbd416f1ca564e7f5d87da2390f1dea61d68a4e9f4020c770cca83a41f",
     ),
     "mark_qq-color": (
         lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
-        [_dropped("mark_qq", "rule", "color", "c")],
-        "cb1a6d003edd2bedc566a85d310eb266430b00e0143ea0d5681cede1af393827",
+        [_dropped("mark_qq", "point", "color", "c"), _dropped("mark_qq", "rule", "color", "c")],
+        "07689d9d5965f22dbf35554e8b4bfdcd6fbafeccdef82ff21c8d496ada94f5a8",
+    ),
+    "mark_contour-color": (
+        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g"),
+        [_dropped("mark_contour", "segment", "color", "g")],
+        "abf76917ca5eccf1d7f1995b92485a75f466f263a8053d03c999f212fdf20e46",
     ),
     "lmplot-encode-color": (
         lambda: fm.lmplot(_W_CAT, x="x", y="y", encode={"color": "cat"}),
@@ -3022,7 +3091,10 @@ _W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
     ),
     "catplot-point-tooltip": (
         lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="point", tooltip="grp"),
-        [_dropped("catplot", "point", "tooltip", "grp")],
+        [
+            _dropped("catplot", "rule", "tooltip", "grp"),
+            _dropped("catplot", "point", "tooltip", "grp"),
+        ],
         "d6002ccc9dd6882e00677cb808ef3fe957791e384381c9fab34961d2698a2dd6",
     ),
 }
@@ -3030,11 +3102,12 @@ _W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
 
 @pytest.mark.parametrize("case", sorted(_W_CASES))
 def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(case):
-    """Ruling W: the statistic sub-layer warns and draws the SVG it drew before the gate.
+    """Ruling W: every statistic sub-layer, layer 0 included, warns and draws without the channel.
 
     Rejects refusing a call whose column is in the user's data (the
-    statistic's output, not the user, dropped it), and rejects dropping it
-    silently.
+    statistic's output, not the user, dropped it), rejects dropping it
+    silently, and rejects exempting layer 0 (boxen's rect, qq's point,
+    catplot's error-bar rule) from the warning its later layers give.
     """
     import hashlib
 
@@ -3046,6 +3119,43 @@ def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(ca
     assert hashlib.sha256(svg.encode()).hexdigest() == digest
 
 
+# Each statistic chart whose every layer drops the bound channel, and the
+# same chart without the binding.
+_W_UNDRAWN: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+    "mark_boxen-color": (
+        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
+        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z"),
+    ),
+    "catplot-boxen-hue": (
+        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
+        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen"),
+    ),
+    "mark_qq-color": (
+        lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
+        lambda: fm.Chart(df).mark_qq().encode(x="z"),
+    ),
+    "mark_contour-color": (
+        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g"),
+        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_W_UNDRAWN))
+def test_A7_W_a_channel_every_layer_drops_draws_no_scale_and_no_legend(case):
+    """P5: when no layer draws the bound channel there is no scale and no legend.
+
+    The chart renders the bytes it renders without the binding. Rejects a
+    legend read from the chart's source rows over marks that draw none of
+    its colors (boxen and qq drew a ``c`` legend over uncolored marks), and
+    rejects refusing the contour, whose rows the user supplied with ``g``.
+    """
+    bound, unbound = _W_UNDRAWN[case]
+    svg = _quiet(lambda: bound().to_svg())
+    assert legend_set(svg) == {}
+    assert svg == _quiet(lambda: unbound().to_svg())
+
+
 def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack():
     """The control: a ``Layer(data=)`` line reads the user's rows, so the host's color refuses."""
     with pytest.raises(ValueError) as refused:
@@ -3053,44 +3163,1183 @@ def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack()
     assert str(refused.value) == _absent("color", "c")
 
 
-def test_today_a_secondary_y_on_a_left_chain_names_the_statistic_remedy():
-    """Today: X11 with a left chain refuses with the statistic remedy, not the plain message.
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+def test_X11_a_column_only_another_operands_rows_hold_gets_the_plain_message(kind):
+    """X11 with a left chain: the right operand's own ``w`` is the user's rows, not a statistic.
 
-    The right operand's own rows hold ``w``, and the render gate's remedy
-    search finds it there.
+    Rejects the statistic remedy, which told the caller to compute ``w`` in
+    a transform when it is a column of the other operand's frame.
     """
     with pytest.raises(ValueError) as refused:
-        ((_filtered(P()) + P(df2, y="w")) + SY("w")).to_svg()
+        chart = (_filtered(P()) + P(df2, y="w")) + SY("w")
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == _W_ABSENT
+
+
+def test_X3_a_statistic_another_layers_mark_computes_keeps_the_statistic_remedy():
+    """The control: a histogram's ``count`` is a statistic output, so its remedy stays."""
+    with pytest.raises(ValueError) as refused:
+        _hist().layer(layer("tick", y="count")).to_svg()
     assert str(refused.value) == (
-        "layer 2: encoding 'y' references unknown column 'w' (not present in that layer's data)"
-        " — 'w' is a statistic another layer's mark computes for itself; compute it in the "
-        "chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every layer reads "
-        "it, or draw it from its own chart with "
-        'fm.LayerChart(base, other, resolve={"y": "independent"})'
+        "layer 1: encoding 'y' references unknown column 'count' (not present in that layer's "
+        "data) — 'count' is a statistic another layer's mark computes for itself; compute it in "
+        "the chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every layer reads "
+        "it, or draw it from its own chart composed with `+`"
     )
 
 
-def test_today_the_static_overlay_takes_its_x_axis_from_a_first_member_drawing_no_x():
-    """Today: ``LayerChart(rule(df2, y="w"), bar(df, x="g"))`` static draws a 0..1 numeric x axis.
+# A rule drawing only one axis beside a bar drawing both, per axis the rule
+# leaves to the bar.
+_ONE_AXIS_RULE_AND_BAR: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "x": (lambda: mk("rule", df2, y="w"), lambda: mk("bar", x="g", y="y")),
+    "y": (lambda: mk("rule", df2, x="w"), lambda: mk("bar", y="g", x="y")),
+}
 
-    The overlay's axis chrome comes from its first member, which draws no x;
-    ``+``, LCm and LCi draw the bars' a, b.
+
+@pytest.mark.parametrize("door", ["+", "LCm"])
+@pytest.mark.parametrize("axis", sorted(_ONE_AXIS_RULE_AND_BAR))
+def test_the_static_overlay_takes_an_axis_its_first_member_does_not_draw_from_the_drawing_member(
+    axis, door
+):
+    """P5 on LCs: the bar, the first member drawing the axis, establishes it.
+
+    ``LayerChart(rule(df2, y="w"), bar(x="g"))`` draws x a, b titled ``g``
+    and titles ``['w', 'g']``, as ``+`` and LCm do. Rejects taking the axis
+    from the first member, which draws no x: it drew an untitled 0..1 axis
+    describing no mark.
     """
-    svg = _quiet(lambda: fm.LayerChart(mk("rule", df2, y="w"), mk("bar", x="g", y="y")).to_svg())
-    assert _x_tick_labels(svg) == [
-        "0",
-        "0.1",
-        "0.2",
-        "0.3",
-        "0.4",
-        "0.5",
-        "0.6",
-        "0.7",
-        "0.8",
-        "0.9",
-        "1",
-    ]
-    assert axis_titles(svg) == ["w"]
+    a, b = _ONE_AXIS_RULE_AND_BAR[axis]
+    overlay = _quiet(lambda: fm.LayerChart(a(), b()).to_svg())
+    other = {
+        "+": lambda: a() + b(),
+        "LCm": lambda: fm.LayerChart(a(), b())._build_merged(),
+    }[door]
+    svg = _quiet(lambda: other().to_svg())
+    assert chrome_text(overlay) == chrome_text(svg)
+    assert axis_titles(overlay) == axis_titles(svg) == (["w", "g"] if axis == "x" else ["g", "w"])
+    assert tag_counts(overlay) == tag_counts(svg)
+    if axis == "x":
+        assert _x_tick_labels(overlay) == ["a", "b"]
+
+
+def test_the_independent_y_layer_chart_draws_the_bars_x_axis_beside_a_rule_drawing_no_x():
+    """LCi of the x cell: the shared x is the bar's a, b, titled ``g``; y gains its own axis."""
+    a, b = _ONE_AXIS_RULE_AND_BAR["x"]
+    svg = _quiet(lambda: fm.LayerChart(a(), b(), resolve={"y": "independent"}).to_svg())
+    plus = _quiet(lambda: (a() + b()).to_svg())
+    assert _x_tick_labels(svg) == ["a", "b"]
+    assert axis_titles(svg) == ["w", "g", "y"]
+    assert tag_counts(svg) == tag_counts(plus)
+
+
+def test_the_static_overlay_keeps_refusing_a_category_on_the_axis_its_first_member_draws():
+    """The rule draws x on ``w``, so it decides the continuous x; the bar's string ``g`` is refused."""
+    with pytest.raises(ValueError) as refused:
+        fm.LayerChart(mk("rule", df2, x="w"), mk("bar", x="g", y="y")).to_svg()
+    assert str(refused.value) == (
+        "composite scale resolution failed: failed to resolve shared x domain for field 'g': "
+        "layer 1: column 'g' (Utf8) cannot be drawn on the shared x axis, which is continuous "
+        "— a layered chart (fm.layer(...) / chart + chart) merges its members onto one panel. "
+        'Cast the column, or give the layer its own scale with resolve={"x": "independent"}.'
+    )
+
+
+# The same pair under a caller's scale on the axis the first member does not
+# draw: a log scale (no stated domain) and a stated domain.
+_CALLER_SCALED_RULE_AND_POINT: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "x-log": (
+        lambda: mk("rule", df2, y="w"),
+        lambda: mk("point", x=fm.X("v", scale=fm.LogScale()), y="y"),
+    ),
+    "x-stated-domain": (
+        lambda: mk("rule", df2, y="w"),
+        lambda: mk("point", x=fm.X("v", scale=fm.LinearScale(domain=[0, 10])), y="y"),
+    ),
+    "y-log": (
+        lambda: mk("rule", df2, x="w"),
+        lambda: mk("point", x="v", y=fm.Y("y", scale=fm.LogScale())),
+    ),
+    "y-stated-domain": (
+        lambda: mk("rule", df2, x="w"),
+        lambda: mk("point", x="v", y=fm.Y("y", scale=fm.LinearScale(domain=[0, 10]))),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", ["+", "LCm"])
+@pytest.mark.parametrize("case", sorted(_CALLER_SCALED_RULE_AND_POINT))
+def test_the_static_overlay_takes_a_caller_scaled_axis_from_the_member_drawing_it(case, door):
+    """P5 on LCs under a caller's scale: the point, which draws the axis, establishes it.
+
+    Rejects keeping the rule's untitled 0..1 axis because the caller's scale
+    resolved the group on its own route: ``+`` and LCm draw the point's
+    titled axis, log or stated domain.
+    """
+    a, b = _CALLER_SCALED_RULE_AND_POINT[case]
+    overlay = _quiet(lambda: fm.LayerChart(a(), b()).to_svg())
+    other = {
+        "+": lambda: a() + b(),
+        "LCm": lambda: fm.LayerChart(a(), b())._build_merged(),
+    }[door]
+    svg = _quiet(lambda: other().to_svg())
+    assert chrome_text(overlay) == chrome_text(svg)
+    assert axis_titles(overlay) == axis_titles(svg)
+    assert axis_titles(overlay) == (["w", "v"] if case.startswith("x") else ["y", "w"])
+    assert tag_counts(overlay) == tag_counts(svg)
+
+
+# A rule drawing one axis beside a member whose own categorical scale draws
+# the other, and the category order that member's rows give.
+_CATEGORICAL_SCALED_RULE_AND_MARK: dict[
+    str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart], list[str]]
+] = {
+    "x-band": (
+        lambda: mk("rule", df2, y="w"),
+        lambda: mk("bar", df2, x=fm.X("g", scale=fm.BandScale(padding_inner=0.2)), y="w"),
+        ["a", "b", "c"],
+    ),
+    "x-point": (
+        lambda: mk("rule", df2, y="w"),
+        lambda: mk("point", df2, x=fm.X("g", scale=fm.PointScale()), y="w"),
+        ["a", "b", "c"],
+    ),
+    "y-band": (
+        lambda: mk("rule", df2, x="w"),
+        lambda: mk("bar", df2, y=fm.Y("g", scale=fm.BandScale(padding_inner=0.2)), x="w"),
+        ["a", "b", "c"],
+    ),
+    "x-band-sorted": (
+        lambda: mk("rule", df2, y="w"),
+        lambda: mk(
+            "bar", df2, x=fm.X("g", scale=fm.BandScale(padding_inner=0.2), sort="-y"), y="w"
+        ),
+        ["c", "b", "a"],
+    ),
+}
+
+
+@pytest.mark.parametrize("door", ["+", "LCm"])
+@pytest.mark.parametrize("case", sorted(_CATEGORICAL_SCALED_RULE_AND_MARK))
+def test_the_static_overlay_takes_a_categorical_axis_from_the_member_whose_scale_draws_it(
+    case, door
+):
+    """P5 on LCs under a band, point or ordinal scale: that member's categories are the axis.
+
+    Equal to ``+`` and LCm on every tick, title and mark count, in the order
+    the member's own sort gives over its own rows. Rejects keeping the
+    rule's untitled 0..1 axis because a categorical scale takes neither the
+    union nor the caller-scale route.
+    """
+    a, b, categories = _CATEGORICAL_SCALED_RULE_AND_MARK[case]
+    overlay = _quiet(lambda: fm.LayerChart(a(), b()).to_svg())
+    other = {
+        "+": lambda: a() + b(),
+        "LCm": lambda: fm.LayerChart(a(), b())._build_merged(),
+    }[door]
+    svg = _quiet(lambda: other().to_svg())
+    assert chrome_text(overlay) == chrome_text(svg)
+    assert axis_titles(overlay) == axis_titles(svg)
+    assert tag_counts(overlay) == tag_counts(svg)
+    labels = chrome_text(overlay)
+    assert [label for label in labels if label in {"a", "b", "c"}] == categories
+
+
+# A sibling's only y drawer marked independent, on both doors that mark it.
+_LONE_INDEPENDENT_Y: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+    "LCi": (
+        lambda: fm.LayerChart(
+            mk("rule", df2, x="w"), mk("bar", y="g", x="y"), resolve={"y": "independent"}
+        ),
+        lambda: mk("rule", df2, x="w") + mk("bar", y="g", x="y"),
+    ),
+    "SY": (
+        lambda: mk("rule", df2, x="w") + SY("z", mark="point"),
+        lambda: mk("rule", df2, x="w") + mk("point", df2, x="w", y="z"),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_LONE_INDEPENDENT_Y))
+def test_the_only_y_drawer_owns_the_primary_axis_though_marked_independent(door):
+    """With no shared layer drawing y, the independent layer establishes the left axis.
+
+    The chart draws one y axis, on the left, as ``+`` does. Rejects an
+    untitled 0..1 primary axis describing no mark beside a right-hand axis
+    for the layer's own y.
+    """
+    independent, plus = _LONE_INDEPENDENT_Y[door]
+    svg = _quiet(lambda: independent().to_svg())
+    expected = _quiet(lambda: plus().to_svg())
+    assert chrome_text(svg) == chrome_text(expected)
+    assert axis_titles(svg) == axis_titles(expected)
+    assert tag_counts(svg) == tag_counts(expected)
+
+
+_SORT_ROWS = pl.DataFrame(
+    {
+        "g": ["a"] * 5 + ["b"] * 5 + ["c"] * 5,
+        "y": [float(v) for v in (1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 5, 6, 7, 8, 9)],
+    }
+)
+
+
+def _SORTED_BAR() -> fm.Chart:
+    """Bars over df2 sorted by their own ``w``: c, b, a."""
+    return mk("bar", df2, x=fm.X("g", sort="-y"), y="w")
+
+
+def _SORT_RULE() -> fm.Chart:
+    """A rule over df, which holds ``g`` but orders it a, c, b by ``v``."""
+    return mk("rule", y="v")
+
+
+def _SORT_RULE_NO_G() -> fm.Chart:
+    return mk("rule", df.drop("g"), y="v")
+
+
+def _SORTED_BOX() -> fm.Chart:
+    """Boxes sorted by their own raw ``y``: b, c, a."""
+    return fm.Chart(_SORT_ROWS).mark_boxplot().encode(x=fm.X("g", sort="-y"), y="y")
+
+
+# Each chart, and the category order its sorted layer's own rows give.
+_SORT_CASES: dict[str, tuple[Callable[[], Any], list[str]]] = {
+    "F/bar": (_SORTED_BAR, ["c", "b", "a"]),
+    "+/rule-over-df-then-bar": (lambda: _SORT_RULE() + _SORTED_BAR(), ["c", "b", "a"]),
+    "+/rule-without-g-then-bar": (lambda: _SORT_RULE_NO_G() + _SORTED_BAR(), ["c", "b", "a"]),
+    "+rev/bar-then-rule": (lambda: _SORTED_BAR() + _SORT_RULE(), ["c", "b", "a"]),
+    "LCs/bar-then-rule": (lambda: fm.LayerChart(_SORTED_BAR(), _SORT_RULE()), ["c", "b", "a"]),
+    "LCs/rule-then-bar": (lambda: fm.LayerChart(_SORT_RULE(), _SORTED_BAR()), ["c", "b", "a"]),
+    "LCm/rule-then-bar": (
+        lambda: fm.LayerChart(_SORT_RULE(), _SORTED_BAR())._build_merged(),
+        ["c", "b", "a"],
+    ),
+    "Fc/bar-shared-x": (
+        lambda: mk(
+            "bar",
+            df2.with_columns(f=pl.Series(["m", "n"] * 3)),
+            x=fm.X("g", sort="-y"),
+            y="w",
+        ).facet("f"),
+        ["c", "b", "a"],
+    ),
+    "F/boxplot": (_SORTED_BOX, ["b", "c", "a"]),
+    "+/boxplot-then-rule": (lambda: _SORTED_BOX() + _SORT_RULE(), ["b", "c", "a"]),
+    "+/rule-then-boxplot": (lambda: _SORT_RULE() + _SORTED_BOX(), ["b", "c", "a"]),
+    "LCs/rule-then-boxplot": (lambda: fm.LayerChart(_SORT_RULE(), _SORTED_BOX()), ["b", "c", "a"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SORT_CASES))
+def test_a_data_aware_sort_reads_the_establishing_layers_own_rows(case):
+    """``sort="-y"`` orders the categories by the sorted layer's own rows and its own y.
+
+    The bar sorts by df2's ``w`` (c, b, a) and the boxplot by its raw ``y``
+    (b, c, a) whatever stands beside them. Rejects sorting by another
+    operand's column (a rule over df ordered the bar a, c, b), leaving the
+    sort unapplied when the other frame lacks the category (a, b, c), and
+    the static overlay dropping a member's sort (a, b, c).
+    """
+    build, order = _SORT_CASES[case]
+    assert _x_tick_labels(_quiet(lambda: build().to_svg())) == order
+
+
+def test_a_layer_charts_reactive_name_collision_is_refused_alike_on_every_route():
+    """A name that is a variable parameter on one member and a selection on another.
+
+    LCs refuses as ``+`` and LCm do, in the merge's words. Rejects a second
+    text for the same collision on the static overlay.
+    """
+    message = (
+        "Reactive-parameter name collision (layer merge): 's' is a Selection on one side "
+        "and a VariableParameter on the other. A name must resolve to a single "
+        "reactive-object kind. Rename one of them."
+    )
+    a = lambda: P().add_params(fm.param(name="s", value=1))  # noqa: E731
+    b = lambda: line().add_selection(fm.selection_point(name="s"))  # noqa: E731
+    for build in (
+        lambda: a() + b(),
+        lambda: fm.LayerChart(a(), b())._build_merged(),
+        lambda: fm.LayerChart(a(), b()),
+    ):
+        with pytest.raises(ValueError) as refused:
+            build().to_svg()
+        assert str(refused.value) == message
+
+
+def _collision(context: str, first_kind: str) -> str:
+    other = "VariableParameter" if first_kind == "Selection" else "Selection"
+    return (
+        f"Reactive-parameter name collision ({context}): 's' is a {first_kind} on one side "
+        f"and a {other} on the other. A name must resolve to a single reactive-object kind. "
+        "Rename one of them."
+    )
+
+
+def _own_collision() -> fm.Chart:
+    """A chart declaring selection ``s`` and variable parameter ``s`` itself."""
+    return P().add_selection(fm.selection_point(name="s")).add_params(fm.param(name="s", value=1))
+
+
+@pytest.mark.parametrize(
+    "door",
+    ["F", "+left", "+right", "LCs", "LCm", "LCx"],
+)
+def test_a_charts_own_reactive_name_collision_is_refused_as_its_param_collection(door):
+    """One chart's own selection and parameter sharing a name refuse at its spec build.
+
+    On every door the operand carrying both is judged alone, as the chart
+    alone is. Rejects refusing a right operand's or a later member's own
+    collision as a merge between operands it never was.
+    """
+    build = {
+        "F": _own_collision,
+        "+left": lambda: _own_collision() + line(),
+        "+right": lambda: line() + _own_collision(),
+        "LCs": lambda: fm.LayerChart(line(), _own_collision()),
+        "LCm": lambda: fm.LayerChart(line(), _own_collision())._build_merged(),
+        "LCx": lambda: fm.LayerChart(line(), _own_collision()),
+    }[door]
+    with pytest.raises(ValueError) as refused:
+        chart = build()
+        chart.interactive().to_html() if door == "LCx" else chart.to_svg()
+    assert str(refused.value) == _collision("param collection", "Selection")
+
+
+def _declares_selection() -> fm.Chart:
+    return P().add_selection(fm.selection_point(name="s"))
+
+
+def _declares_parameter() -> fm.Chart:
+    return line().add_params(fm.param(name="s", value=1))
+
+
+@pytest.mark.parametrize("door", ["+", "LCs", "LCm"])
+@pytest.mark.parametrize(
+    ("order", "later_kind"),
+    [("selection-first", "VariableParameter"), ("parameter-first", "Selection")],
+)
+def test_a_reactive_name_across_operands_is_refused_as_a_merge(order, later_kind, door):
+    """A selection on one operand and a parameter of its name on another, in either order.
+
+    The later operand is checked against the earlier ones, in the merge's
+    words, on ``+``, LCs and LCm alike.
+    """
+    first, second = (
+        (_declares_selection, _declares_parameter)
+        if order == "selection-first"
+        else (_declares_parameter, _declares_selection)
+    )
+    build = {
+        "+": lambda: first() + second(),
+        "LCs": lambda: fm.LayerChart(first(), second()),
+        "LCm": lambda: fm.LayerChart(first(), second())._build_merged(),
+    }[door]
+    with pytest.raises(ValueError) as refused:
+        build().to_svg()
+    assert str(refused.value) == _collision("layer merge", later_kind)
+
+
+# ---------------------------------------------------------------------------
+# P5: each channel is established by the first layer that draws it, from the
+# rows that layer draws
+# ---------------------------------------------------------------------------
+
+_RASTER_RNG = np.random.default_rng(3)
+_RASTER_ROWS = pl.DataFrame(
+    {
+        "x": _RASTER_RNG.normal(0, 1, 400),
+        "y": _RASTER_RNG.normal(0, 1, 400),
+        "f": ["m", "n"] * 200,
+    }
+)
+
+
+def _raster(**encoding: Any) -> fm.Chart:
+    return fm.Chart(_RASTER_ROWS).mark_raster().encode(x="x", y="y", **encoding)
+
+
+# Charts whose establishing layer draws every bound field from its own rows:
+# a raster image draws x/y through its extent columns, an auxiliary channel is
+# established by the first layer whose mark draws it (catplot's box draws
+# size only on its outlier points), and an overlay whose first member draws
+# both axes establishes them.
+_ESTABLISHING_CONTROLS: dict[str, Callable[[], Any]] = {
+    "F/raster": lambda: _raster(),
+    "F/auto-raster": lambda: (
+        fm.Chart(_RASTER_ROWS)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .properties(render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"))
+    ),
+    "Fc/raster": lambda: _raster().facet("f"),
+    "F/catplot-box-size": lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="box", size="val"),
+    "F/contour-utf8-groupby": lambda: fm.Chart(df).mark_contour(groupby="g").encode(x="v", y="y"),
+    "LCs/first-member-draws-both-axes": lambda: fm.LayerChart(bar_mean(), mk("rule", df2, y="w")),
+}
+
+# The SVG each renders when every layer, layer 0 included, read a bound field
+# from whichever batch held it. A raster's cells map through a color scale
+# over [0, max] of their non-negative values, which draws the bytes the
+# image drew before it read a scale.
+_ESTABLISHING_CONTROL_DIGESTS = {
+    "F/raster": "f73507afe152bfdb98c902da73ac6b00aa136a7c4cf55b87f5118bea812a0034",
+    "F/auto-raster": "8412beedc32d0d99c327e9a03d6e431a0bede1ba05906be168b21a25d591b6a8",
+    "Fc/raster": "bf3950c5b0c510c151ca5793f67753c72d0177f841ed670bcb59cb023cb95846",
+    "F/catplot-box-size": "cabbacf2dda7460c3a41d28940deac87f5a2ca9b86d093b4eb0bd14c76677cee",
+    "F/contour-utf8-groupby": "d3ae503b8103f09448afe3cf190db052407db636f11db1bc55072f8e18de71dd",
+    "LCs/first-member-draws-both-axes": (
+        "828817e8a5935759f3bda63e6bc3035e50b154a57aa7b1ebde496265ee71f46e"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ESTABLISHING_CONTROLS))
+def test_P5_a_chart_whose_establishing_layer_draws_its_own_rows_renders_its_pinned_bytes(case):
+    import hashlib
+
+    svg = _quiet(lambda: _ESTABLISHING_CONTROLS[case]().to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _ESTABLISHING_CONTROL_DIGESTS[case]
+
+
+def _axis_chrome(svg: str) -> list[str]:
+    """The chart's chrome text without its axis titles: the tick labels, in document order."""
+    titles = set(axis_titles(svg))
+    return [text for text in chrome_text(svg) if text not in titles]
+
+
+def test_P5_a_raster_after_a_few_points_draws_what_the_reverse_order_draws():
+    """The gate judges a raster image on the extent columns it draws, not its bound ``x``/``y``.
+
+    ``P(5 rows) + raster`` renders the axes and marks ``raster + P(5 rows)``
+    draws. Rejects judging the image's ``x`` binding against its one-row
+    batch, which refused the chart. The x title stays layer 0's (``v``).
+    """
+    points = lambda: P(df.head(5))  # noqa: E731
+    after = _quiet(lambda: (points() + _raster()).to_svg())
+    before = _quiet(lambda: (_raster() + points()).to_svg())
+    assert _axis_chrome(after) == _axis_chrome(before)
+    assert tag_counts(after) == tag_counts(before) == {"circle": 5}
+    assert after.count("<image") == before.count("<image") == 1
+    assert axis_titles(after) == ["y", "v"]
+
+
+def _not_drawn(entry: str, channel: str, field: str, mark: str) -> str:
+    return (
+        f"{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} "
+        f"(this {mark} mark does not), so it gets no scale and no legend; it was ignored"
+    )
+
+
+# A channel bound where no layer's mark draws it: the bound chart, the same
+# chart without the binding, and the one warning.
+_UNDRAWN_CHANNELS: dict[str, tuple[Callable[[], Any], Callable[[], Any], str]] = {
+    "F/line-shape": (
+        lambda: line(shape="c"),
+        line,
+        _not_drawn("mark_line", "shape", "c", "line"),
+    ),
+    "F/raster-color": (
+        lambda: _raster(color="f"),
+        _raster,
+        "mark_raster: color 'f' has no effect: the image colors its cells by their 'count' "
+        "values (field=) and does not read color='f', so it gets no scale and no legend; "
+        "it was ignored",
+    ),
+    "L/own-shape": (
+        lambda: line().layer(layer("line", shape="c")),
+        lambda: line().layer(layer("line")),
+        _not_drawn("layer 1: mark_line", "shape", "c", "line"),
+    ),
+    "L/host-shape": (
+        lambda: line(shape="c").layer(layer("line")),
+        lambda: line().layer(layer("line")),
+        _not_drawn("layer 0: mark_line", "shape", "c", "line"),
+    ),
+    "+/shape": (
+        lambda: line(shape="c") + line(df2),
+        lambda: line() + line(df2),
+        _not_drawn("layer 0: mark_line", "shape", "c", "line"),
+    ),
+    "LCm/shape": (
+        lambda: fm.LayerChart(line(shape="c"), line(df2))._build_merged(),
+        lambda: fm.LayerChart(line(), line(df2))._build_merged(),
+        _not_drawn("layer 0: mark_line", "shape", "c", "line"),
+    ),
+    "LCs/shape": (
+        lambda: fm.LayerChart(line(shape="c"), line(df2)),
+        lambda: fm.LayerChart(line(), line(df2)),
+        _not_drawn("mark_line", "shape", "c", "line"),
+    ),
+}
+
+
+def _recorded_svg(build: Callable[[], Any]) -> tuple[str, list[str]]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = build().to_svg()
+    return svg, [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+
+
+@pytest.mark.parametrize("case", sorted(_UNDRAWN_CHANNELS))
+def test_P5_a_channel_no_layers_mark_draws_builds_no_scale_and_no_legend(case):
+    """A channel no layer's mark draws gets no scale and no legend, and warns once.
+
+    The chart renders the bytes it renders without the binding. Rejects a
+    shape legend beside a line that draws no glyph, and a color legend
+    beside a raster image whose color names a field other than the value
+    field its cells are colored by.
+    """
+    bound, unbound, message = _UNDRAWN_CHANNELS[case]
+    svg, caught = _recorded_svg(bound)
+    assert caught == [message]
+    assert legend_set(svg) == {}
+    assert svg == _quiet(lambda: unbound().to_svg())
+
+
+@pytest.mark.parametrize("case", sorted(_UNDRAWN_CHANNELS))
+def test_P5_a_channel_no_layers_mark_draws_has_no_interactive_legend(case):
+    bound, _, _ = _UNDRAWN_CHANNELS[case]
+    assert _quiet(lambda: interactive_legend_set(bound())) == {}
+
+
+_RASTER_VALUES = _RASTER_ROWS.with_columns(
+    z=pl.Series(np.random.default_rng(5).normal(0, 1, len(_RASTER_ROWS)))
+)
+
+
+def _mean_raster(**encoding: Any) -> fm.Chart:
+    return (
+        fm.Chart(_RASTER_VALUES)
+        .mark_raster(aggregate="mean", field="z")
+        .encode(x="x", y="y", **encoding)
+    )
+
+
+def test_P5_a_raster_color_naming_its_value_field_draws_a_colorbar_over_the_drawn_cells():
+    """A raster image draws color through its value field: the colorbar spans the cell means.
+
+    Rejects the colorless render with an undrawn-channel warning, and a
+    colorbar over the source column whose colors the cells do not use.
+    """
+    import hashlib
+
+    svg, caught = _recorded_svg(lambda: _mean_raster(color="z"))
+    assert caught == []
+    assert legend_set(svg) == {"z": ("-2.7", "-1.33", "0.04", "1.41", "2.77")}
+    assert "linearGradient" in svg
+    assert hashlib.sha256(svg.encode()).hexdigest() == (
+        "8b9f15c3b480ff81ee78725fbde2076689d8f96aadf1e99cba304506818fb97b"
+    )
+    assert _quiet(lambda: interactive_legend_set(_mean_raster(color="z"))) != {}
+
+
+def _few_raster_points() -> fm.Chart:
+    return fm.Chart(_RASTER_ROWS.head(5)).mark_point().encode(x="x", y="y")
+
+
+# Each raster door, and the tooltip field set of each interactive mark batch.
+_RASTER_TOOLTIPS: dict[str, tuple[Callable[[], Any], list[set[str]]]] = {
+    "F/raster": (_raster, [set()]),
+    "F/auto-raster": (_ESTABLISHING_CONTROLS["F/auto-raster"], [set()]),
+    "Fc/raster": (_ESTABLISHING_CONTROLS["Fc/raster"], [set(), set()]),
+    "+/raster-then-points": (lambda: _raster() + _few_raster_points(), [set(), {"x", "y"}]),
+    "+/points-then-raster": (lambda: _few_raster_points() + _raster(), [{"x", "y"}, set()]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RASTER_TOOLTIPS))
+def test_P5_a_raster_image_lists_no_auto_tooltip_for_the_axes_it_draws_through_extents(case):
+    """The auto tooltip lists only the fields a layer draws as its own columns.
+
+    A raster image draws ``x``/``y`` through its cells' extent columns, so
+    its auto tooltip lists neither and its interactive render succeeds; a
+    point beside it keeps its own ``x``, ``y``. Rejects refusing every
+    interactive raster on the bound ``x`` its rows lack, and rejects
+    rewriting the entries onto the extent columns, which read as four
+    constants on every cell.
+    """
+    build, expected = _RASTER_TOOLTIPS[case]
+    assert "<html" in _quiet(lambda: build().interactive().to_html()).lower()
+    assert _quiet(lambda: interactive_tooltip_fields(build())) == expected
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+def test_P5_a_raster_tooltip_naming_a_bound_axis_is_dropped_with_a_warning(kind):
+    """A raster's ``tooltip="x"`` is the chart's binding its image sub-layer inherits.
+
+    The image reads the raster statistic's cells, which carry no ``x``, so
+    the inherited tooltip is dropped with ruling W's warning and the image
+    carries no tooltip.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = _raster(tooltip="x")
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert _dropped("mark_raster", "image", "tooltip", "x") in {str(w.message) for w in caught}
+    if kind == "interactive":
+        assert _quiet(lambda: interactive_tooltip_fields(_raster(tooltip="x"))) == [set()]
+
+
+def _raster_color_refusal(field: str, reason: str) -> str:
+    return (
+        f"mark_raster: encoding 'color' names the raster's cell values '{field}', which are "
+        f"quantitative, but {reason}. Drop type= (or the categorical color binding), or draw "
+        "categorical cells with mark_rect."
+    )
+
+
+def _grouped_points() -> fm.Chart:
+    """Points colored by the categorical ``f``, over the raster's own rows."""
+    return fm.Chart(_RASTER_VALUES.head(5)).mark_point().encode(x="x", y="y", color="f")
+
+
+_COUNT_RASTER_BESIDE_CATEGORIES = (
+    "the chart's color scale is categorical, established by layer 0 ('f')"
+)
+
+_BOTH_KINDS = ("static", "interactive")
+_OTHER_LAYERS_SCALE = _raster_color_refusal("count", _COUNT_RASTER_BESIDE_CATEGORIES)
+
+# Each door: its build, the output kinds it is judged on, and the exact refusal.
+_RASTER_COLOR_REFUSALS: dict[str, tuple[Callable[[], Any], tuple[str, ...], str]] = {
+    **{
+        f"F/declared-{kind}": (
+            lambda kind=kind: _mean_raster(color=fm.Color("z", type=kind)),
+            _BOTH_KINDS,
+            _raster_color_refusal("z", f"it is declared {kind}"),
+        )
+        for kind in ("nominal", "ordinal")
+    },
+    "+/categorical-scale-of-another-layer": (
+        lambda: _grouped_points() + _raster(color="count"),
+        _BOTH_KINDS,
+        _OTHER_LAYERS_SCALE,
+    ),
+    "LCm/categorical-scale-of-another-layer": (
+        lambda: fm.LayerChart(_grouped_points(), _raster(color="count"))._build_merged(),
+        _BOTH_KINDS,
+        _OTHER_LAYERS_SCALE,
+    ),
+    # The static overlay renders the image as its own leaf (the second
+    # member, leaf #1), whose refusal the composite render wraps;
+    # LayerChart's interactive route is LCm's.
+    "LCs/categorical-scale-of-another-layer": (
+        lambda: fm.LayerChart(_grouped_points(), _raster(color="count")),
+        ("static",),
+        f"failed to render composite leaf leaf #1: {_OTHER_LAYERS_SCALE}",
+    ),
+    "LCx/categorical-scale-of-another-layer": (
+        lambda: fm.LayerChart(_grouped_points(), _raster(color="count")),
+        ("interactive",),
+        _OTHER_LAYERS_SCALE,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "kind"),
+    [
+        (case, kind)
+        for case, (_, kinds, _) in sorted(_RASTER_COLOR_REFUSALS.items())
+        for kind in kinds
+    ],
+)
+def test_P5_a_categorical_color_over_a_rasters_cells_is_refused(case, kind):
+    """A raster's cells are quantitative: a nominal or ordinal color over them is refused.
+
+    Declared on the raster, or established by another layer's categorical
+    scale the raster's value-field color would read. Rejects painting every
+    cell transparent with no message, a categorical scale finding no
+    category for a cell value.
+    """
+    build, _, message = _RASTER_COLOR_REFUSALS[case]
+    with pytest.raises(ValueError) as refused:
+        chart = build()
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == message
+
+
+def _count_raster(**color: Any) -> fm.Chart:
+    """A count raster coarse enough that its densest cell holds many rows."""
+    return fm.Chart(_RASTER_ROWS).mark_raster(resolution=8).encode(x="x", y="y", **color)
+
+
+def _colorbar(build: Callable[[], Any], kind: str) -> tuple[str, ...]:
+    legends = (
+        legend_set(_quiet(lambda: build().to_svg()))
+        if kind == "static"
+        else _quiet(lambda: interactive_legend_set(build()))
+    )
+    return legends["count"]
+
+
+# The count raster on every door that composes it.
+_COUNT_RASTER_DOORS: dict[str, Callable[[], Any]] = {
+    "F": lambda: _count_raster(color="count"),
+    "+": lambda: _count_raster(color="count") + _few_raster_points(),
+    "LCs": lambda: fm.LayerChart(_count_raster(color="count"), _few_raster_points()),
+    "LCm": lambda: fm.LayerChart(
+        _count_raster(color="count"), _few_raster_points()
+    )._build_merged(),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_COUNT_RASTER_DOORS))
+def test_P5_a_count_rasters_colorbar_reads_raw_counts_through_symlog(door, kind):
+    """The cells keep raw counts and the color scale owns the log compression.
+
+    The five labels sit at even steps of the symlog scale over [0, max]:
+    ``expm1(t * log1p(max))``, the densest cell's count at the top. Rejects
+    labels in log1p units (a top label of 3.76 for 42 rows).
+    """
+    import math
+
+    labels = _colorbar(_COUNT_RASTER_DOORS[door], kind)
+    top = float(labels[-1])
+    assert top == 42
+    expected = [math.expm1(t * math.log1p(top)) for t in (0, 0.25, 0.5, 0.75, 1)]
+    assert [float(label) for label in labels] == pytest.approx(expected, abs=0.06)
+
+
+def test_P5_a_linear_color_scale_on_a_count_raster_labels_counts_linearly():
+    """The caller's ``LinearScale`` replaces the raster's symlog default."""
+    labels = _colorbar(
+        lambda: _count_raster(color=fm.Color("count", scale=fm.LinearScale())), "static"
+    )
+    assert [float(label) for label in labels] == pytest.approx([0, 10.5, 21, 31.5, 42], abs=0.06)
+
+
+def test_P5_a_density_rasters_colorbar_reads_raw_density():
+    """A density raster's labels are densities, the top one the densest cell's."""
+    svg = _quiet(
+        lambda: (
+            fm.Chart(_RASTER_ROWS)
+            .mark_raster(aggregate="density")
+            .encode(x="x", y="y", color="density")
+            .to_svg()
+        )
+    )
+    labels = [float(label) for label in legend_set(svg)["density"]]
+    assert labels[0] == 0
+    assert labels[-1] > 10
+
+
+def _symlog_labels(lo: float, hi: float) -> list[float]:
+    """The five colorbar labels of a symlog scale over [lo, hi], at t = 0, .25, .5, .75, 1."""
+    import math
+
+    def forward(v: float) -> float:
+        return math.copysign(math.log1p(abs(v)), v)
+
+    def inverse(v: float) -> float:
+        return math.copysign(math.expm1(abs(v)), v)
+
+    return [inverse(forward(lo) + t * (forward(hi) - forward(lo))) for t in (0, 0.25, 0.5, 0.75, 1)]
+
+
+def _mean_raster_8(**kwargs: Any) -> fm.Chart:
+    return (
+        fm.Chart(_RASTER_VALUES)
+        .mark_raster(resolution=8, aggregate="mean", field="z", **kwargs)
+        .encode(x="x", y="y", color="z")
+    )
+
+
+# Each log_scale choice: the raster and its colorbar's expected labels.
+_LOG_SCALE_CASES: dict[str, tuple[Callable[[], fm.Chart], str, list[float]]] = {
+    "count/unset-is-symlog": (
+        lambda: _count_raster(color="count"),
+        "count",
+        _symlog_labels(0, 42),
+    ),
+    "count/false-is-linear": (
+        lambda: (
+            fm.Chart(_RASTER_ROWS)
+            .mark_raster(resolution=8, log_scale=False)
+            .encode(x="x", y="y", color="count")
+        ),
+        "count",
+        [0, 10.5, 21, 31.5, 42],
+    ),
+    "mean/unset-is-linear": (
+        _mean_raster_8,
+        "z",
+        [-1.64, -0.82, 0, 0.82, 1.63],
+    ),
+    "mean/true-is-symlog": (
+        lambda: _mean_raster_8(log_scale=True),
+        "z",
+        _symlog_labels(-1.64, 1.63),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", ["F", "+"])
+@pytest.mark.parametrize("case", sorted(_LOG_SCALE_CASES))
+def test_P5_a_rasters_log_scale_picks_its_color_scale_on_any_aggregate(case, door):
+    """``log_scale=None`` is symlog for count and density, linear otherwise; True/False are honored.
+
+    Rejects reading an explicit ``False`` as unset, which kept a count
+    raster log-compressed, and rejects ignoring ``True`` on a mean raster.
+    """
+    build, title, expected = _LOG_SCALE_CASES[case]
+    chart = (lambda: build() + _few_raster_points()) if door == "+" else build
+    labels = legend_set(_quiet(lambda: chart().to_svg()))[title]
+    # Labels are rounded for display: to 0.1 at this range, 0.01 near zero.
+    assert [float(label) for label in labels] == pytest.approx(expected, abs=0.06)
+
+
+def test_P5_a_rasters_log_scale_refuses_anything_but_a_truth_value_or_none():
+    with pytest.raises(ValueError) as refused:
+        fm.Chart(_RASTER_ROWS).mark_raster(log_scale="yes")
+    assert str(refused.value) == "mark_raster: log_scale must be True or False; got 'yes'"
+
+
+def test_P5_a_rasters_cmap_colors_its_cells_and_colorbar_when_color_names_the_value_field():
+    """``mark_raster(cmap="magma").encode(color="count")`` draws magma, cells and colorbar alike.
+
+    The cells draw the image the uncolored magma raster draws, and the
+    colorbar's gradient starts at magma's first color. Rejects the bound
+    color scale replacing the mark's cmap with the theme's scheme.
+    """
+
+    def magma(**color: Any) -> fm.Chart:
+        return (
+            fm.Chart(_RASTER_ROWS)
+            .mark_raster(resolution=8, cmap="magma")
+            .encode(x="x", y="y", **color)
+        )
+
+    def images(svg: str) -> list[str]:
+        return re.findall(r'href="(data:image/png;base64,[^"]+)"', svg)
+
+    bound = _quiet(lambda: magma(color="count").to_svg())
+    assert images(bound) == images(_quiet(lambda: magma().to_svg()))
+    assert images(bound) != images(_quiet(lambda: _count_raster(color="count").to_svg()))
+    assert re.findall(r'<stop[^>]*stop-color="([^"]+)"', bound)[0] == "#000004"
+
+
+_STEPS = ("#ffffcc", "#fd8d3c", "#800026")
+
+
+def _rgba(hex_color: str) -> tuple[int, int, int, int]:
+    return (int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16), 255)
+
+
+# Each discretizing scale on the count raster's color: the scale, the
+# legend's labels in raw counts, and the cell colors (None: any three).
+_STEPPED_RASTERS: dict[str, tuple[Any, tuple[str, ...], set | None]] = {
+    "quantize": (
+        fm.QuantizeScale(domain=[0, 42], range=list(_STEPS)),
+        ("0", "14", "28", "42"),
+        {_rgba(color) for color in _STEPS},
+    ),
+    "threshold": (
+        fm.ThresholdScale(domain=[5, 20], range=[0.0, 1.0, 2.0]),
+        ("0", "5", "20", "42"),
+        None,
+    ),
+}
+
+
+@pytest.mark.parametrize("door", ["F", "+"])
+@pytest.mark.parametrize("case", sorted(_STEPPED_RASTERS))
+def test_P5_a_discretizing_color_scale_steps_a_rasters_cells_by_bucket(case, door):
+    """A quantize or threshold color on a count raster draws one color per bucket.
+
+    The image's opaque cells take exactly as many colors as the scale has
+    buckets (a quantize scale's own range colors), and the legend's bucket
+    boundaries read raw counts. Rejects mapping the cells through a
+    continuous ramp, which drew one color per distinct count.
+    """
+    scale, labels, colors = _STEPPED_RASTERS[case]
+
+    def build() -> fm.Chart:
+        chart = _count_raster(color=fm.Color("count", scale=scale))
+        return chart + _few_raster_points() if door == "+" else chart
+
+    svg = _quiet(lambda: build().to_svg())
+    (cells,) = _panel_cell_colors(svg)
+    assert len(cells) == 3
+    if colors is not None:
+        assert set(cells) == colors
+    assert legend_set(svg) == {"count": labels}
+
+
+# Points over a few of the raster's rows, carrying a ``count`` column of their
+# own, so a sibling's color can name a raster's value field.
+_SIBLING_POINT_ROWS = _RASTER_VALUES.head(5).with_columns(
+    count=pl.Series([1.0, 5.0, 10.0, 20.0, 40.0])
+)
+
+
+def _sibling_points(field: str) -> fm.Chart:
+    return fm.Chart(_SIBLING_POINT_ROWS).mark_point().encode(x="x", y="y", color=field)
+
+
+def _unbound_count_raster() -> fm.Chart:
+    return fm.Chart(_RASTER_ROWS).mark_raster(resolution=8).encode(x="x", y="y")
+
+
+def _unbound_mean_raster() -> fm.Chart:
+    return (
+        fm.Chart(_RASTER_VALUES)
+        .mark_raster(resolution=8, aggregate="mean", field="z")
+        .encode(x="x", y="y")
+    )
+
+
+# Each raster beside points colored by the raster's value field.
+_SIBLING_RASTERS: dict[str, tuple[Callable[[], fm.Chart], str]] = {
+    "count": (_unbound_count_raster, "count"),
+    "mean-of-z": (_unbound_mean_raster, "z"),
+}
+
+
+def _sibling_doors(raster: Callable[[], fm.Chart], field: str) -> dict[str, Callable[[], Any]]:
+    return {
+        "+/points-then-raster": lambda: _sibling_points(field) + raster(),
+        "+/raster-then-points": lambda: raster() + _sibling_points(field),
+        "LD/points-on-the-raster": lambda: raster().layer(
+            fm.Layer(data=_SIBLING_POINT_ROWS, mark="point", encoding={"color": field})
+        ),
+        "LCm/points-first": lambda: fm.LayerChart(_sibling_points(field), raster())._build_merged(),
+        "LCm/raster-first": lambda: fm.LayerChart(raster(), _sibling_points(field))._build_merged(),
+        "LCs/points-first": lambda: fm.LayerChart(_sibling_points(field), raster()),
+        "LCs/raster-first": lambda: fm.LayerChart(raster(), _sibling_points(field)),
+    }
+
+
+@pytest.mark.parametrize(
+    ("raster", "door"),
+    [
+        (raster, door)
+        for raster in sorted(_SIBLING_RASTERS)
+        for door in sorted(_sibling_doors(*_SIBLING_RASTERS[raster]))
+    ],
+)
+def test_P5_a_raster_beside_points_colored_by_its_value_field_draws_its_own_cells(raster, door):
+    """The points' color is theirs: the raster, binding no color, draws on its own cell scale.
+
+    One image on every route, LayerChart's own included, equal to the
+    raster drawn alone, beside the points' colorbar, and every route draws
+    LayerChart's chrome, legend and marks. Rejects judging the image by the sibling's ``color="count"``,
+    which dropped it from the cell scale and drew no image.
+    """
+    build_raster, field = _SIBLING_RASTERS[raster]
+    svg = _quiet(lambda: _sibling_doors(build_raster, field)[door]().to_svg())
+    layer_chart = _quiet(lambda: fm.LayerChart(_sibling_points(field), build_raster()).to_svg())
+
+    def images(text: str) -> list[str]:
+        return re.findall(r'href="(data:image/png;base64,[^"]+)"', text)
+
+    assert images(svg) == images(_quiet(lambda: build_raster().to_svg()))
+    assert len(images(svg)) == 1
+    assert list(legend_set(svg)) == [field]
+    assert legend_set(svg) == legend_set(layer_chart)
+    assert chrome_text(svg) == chrome_text(layer_chart)
+    assert tag_counts(svg) == tag_counts(layer_chart) == {"circle": 5}
+
+
+_AREA_ROWS = _RASTER_VALUES.head(20).sort("x").with_columns(g=pl.Series(["a", "b"] * 10))
+
+
+def _area(**color: Any) -> fm.Chart:
+    return fm.Chart(_AREA_ROWS).mark_area().encode(x="x", y="y", **color)
+
+
+def _area_points(**color: Any) -> fm.Chart:
+    return fm.Chart(_AREA_ROWS).mark_point().encode(x="x", y="y", **color)
+
+
+# Each pair, and the color legend it draws: "colorbar" (continuous) or
+# "categorical" (one swatch per value).
+_AREA_GROUPING: dict[str, tuple[Callable[[], fm.Chart], str, str]] = {
+    "area-then-raster": (lambda: _area() + _count_raster(color="count"), "count", "colorbar"),
+    "raster-then-area": (lambda: _count_raster(color="count") + _area(), "count", "colorbar"),
+    "area-then-points-z": (lambda: _area() + _area_points(color="z"), "z", "colorbar"),
+    "points-z-then-area": (lambda: _area_points(color="z") + _area(), "z", "colorbar"),
+    "points-then-area-z": (lambda: _area_points() + _area(color="z"), "z", "categorical"),
+    "area-z-then-points": (lambda: _area(color="z") + _area_points(), "z", "categorical"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_AREA_GROUPING))
+def test_P5_an_area_groups_color_by_category_only_when_it_draws_color(case):
+    """An area beside a quantitative color leaves it continuous unless the area draws color.
+
+    An area drawing no color makes no demand on the color scale, in either
+    order: a raster's or a point's numeric color keeps its colorbar. An
+    area drawing color groups by it in either order, so its ``z`` is
+    categorical. Rejects keying the grouping on the chart's first mark,
+    which refused ``area + raster(color="count")``, gave
+    ``area + point(color="z")`` one swatch per value, and drew the area's
+    own ``z`` as a colorbar behind a point layer 0.
+    """
+    from tests._hue_probe import has_colorbar
+
+    build, title, kind = _AREA_GROUPING[case]
+    svg = _quiet(lambda: build().to_svg())
+    assert has_colorbar(svg) == (kind == "colorbar")
+    entries = legend_set(svg)[title]
+    if kind == "colorbar":
+        assert len(entries) == 5
+    else:
+        assert len(entries) == _AREA_ROWS["z"].n_unique()
+
+
+@pytest.mark.parametrize(("order", "layer"), [("area-then-raster", 0), ("raster-then-area", 1)])
+def test_P5_an_area_drawing_a_category_beside_a_rasters_cells_is_refused(order, layer):
+    """``area(color="g")`` makes the color scale categorical, which a raster's cells cannot read."""
+    build = (
+        (lambda: _area(color="g") + _count_raster(color="count"))
+        if order == "area-then-raster"
+        else (lambda: _count_raster(color="count") + _area(color="g"))
+    )
+    with pytest.raises(ValueError) as refused:
+        build().to_svg()
+    assert str(refused.value) == _raster_color_refusal(
+        "count", f"the chart's color scale is categorical, established by layer {layer} ('g')"
+    )
+
+
+_UNEVEN_FACETS_RNG = np.random.default_rng(7)
+_UNEVEN_FACETS = pl.DataFrame(
+    {
+        "x": _UNEVEN_FACETS_RNG.normal(0, 1, 400),
+        "y": _UNEVEN_FACETS_RNG.normal(0, 1, 400),
+        "f": ["m"] * 300 + ["n"] * 100,
+    }
+)
+
+
+def _panel_cell_colors(svg: str) -> list[Counter]:
+    """Each panel's raster image: how many of its pixels draw each opaque color."""
+    import base64
+
+    from _snapshots import decode_png_rgba
+
+    panels = []
+    for encoded in re.findall(r'href="data:image/png;base64,([^"]+)"', svg):
+        pixels, _, _ = decode_png_rgba(base64.b64decode(encoded))
+        panels.append(Counter(p for row in pixels for p in row if p[3] > 0))
+    return panels
+
+
+def test_P5_a_faceted_raster_drawing_no_color_maps_every_panel_through_one_cell_scale():
+    """Panels whose densest cells differ (300 rows vs 100) share one color scale.
+
+    A cell holding one row draws the same color in both panels; the denser
+    panel's top colors appear in it alone. Rejects scaling each panel by its
+    own maximum, which drew the sparse panel's single-row cells darker than
+    the dense panel's.
+    """
+    svg = _quiet(
+        lambda: (
+            fm.Chart(_UNEVEN_FACETS)
+            .mark_raster(resolution=12)
+            .encode(x="x", y="y")
+            .facet("f")
+            .to_svg()
+        )
+    )
+    dense, sparse = _panel_cell_colors(svg)
+    assert dense.most_common(1)[0][0] == sparse.most_common(1)[0][0]
+    assert set(sparse) < set(dense)
+
+
+def test_P5_a_rasters_cells_are_no_output_a_layer_can_read():
+    """A layer naming ``raster__cells`` is refused as any unknown output is."""
+    from ferrum._layer import _Layer
+
+    chart = _raster().layer(
+        _Layer(
+            name="cells",
+            mark="point",
+            encoding={"x": "x", "y": "y"},
+            data_source="raster__cells",
+        )
+    )
+    with pytest.raises(ValueError) as refused:
+        chart.to_svg()
+    assert str(refused.value) == (
+        "transform failed: layer 1 data_source 'raster__cells' not found in transform "
+        "outputs; available keys: [__final__, raster]"
+    )
+
+
+def test_P5_a_shape_one_layers_point_draws_is_established_by_that_point():
+    """The point draws shape, so its rows alone give the shape legend.
+
+    Rejects unioning the attached line's ``g`` values (df2's a, b, c) into
+    the domain: the line inherits the binding but draws no glyph.
+    """
+    svg = _quiet(lambda: P(shape="g").layer(fm.Layer(data=df2, mark="line")).to_svg())
+    assert legend_set(svg) == {"g": ("a", "b")}
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (
+            lambda: fm.Chart(df).mark_smooth().encode(x="v", y="y", color="c"),
+            "unknown column 'c' referenced by an encoding",
+        ),
+        (
+            lambda: fm.residplot(df, x="v", y="y", encode={"color": "c"}),
+            "residplot: encoding 'color' references unknown column 'c' (not present in that "
+            "layer's data) — this layer reads the chart's transformed rows, not its source "
+            "data; draw 'c' from the source by composing a separate chart with `+` instead",
+        ),
+    ],
+    ids=["mark_smooth-color", "residplot-encode-color"],
+)
+def test_P5_a_fit_whose_rows_lack_the_color_column_stays_refused(build, message):
+    """A fit's rows hold no ``c``, so its color is refused; residplot's residual layer 0 is gated."""
+    with pytest.raises(ValueError) as refused:
+        build().to_svg()
+    assert str(refused.value) == message
+
+
+# ---------------------------------------------------------------------------
+# A field selection declared on one LayerChart member reaches every member
+# ---------------------------------------------------------------------------
+
+_PICK_G = fm.selection_point(fields=["g"], name="pick_g")
+
+# Two members, each built fresh, carrying the selections each case declares.
+_SELECTION_MEMBERS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "declared-on-the-second": (P, lambda: line().add_selection(_PICK_C)),
+    "declared-on-the-first": (lambda: P().add_selection(_PICK_C), line),
+    "other-member-lacks-the-field": (lambda: P().add_selection(_PICK_C), lambda: line(df2)),
+    "one-on-each": (lambda: P().add_selection(_PICK_G), lambda: line().add_selection(_PICK_C)),
+}
+
+
+def _title_texts(svg: str) -> Counter:
+    return Counter(re.findall(r"<title>([^<]*)</title>", svg))
+
+
+@pytest.mark.parametrize("door", ["+", "LCm"])
+@pytest.mark.parametrize("case", sorted(_SELECTION_MEMBERS))
+def test_a_layer_chart_members_selection_reaches_every_member_on_the_static_overlay(case, door):
+    """LCs lists a field selection's field on every member whose rows carry it, as ``+`` does.
+
+    Rejects projecting a selection only onto the member that declared it:
+    ``LayerChart(P(), line().add_selection(pick_c))`` drew 1 ``<title>``
+    where ``+`` and LCm draw 9.
+    """
+    a, b = _SELECTION_MEMBERS[case]
+    overlay = _quiet(lambda: fm.LayerChart(a(), b()).to_svg())
+    other = {
+        "+": lambda: a() + b(),
+        "LCm": lambda: fm.LayerChart(a(), b())._build_merged(),
+    }[door]
+    expected = _title_texts(_quiet(lambda: other().to_svg()))
+    assert _title_texts(overlay) == expected
+    assert sum(expected.values()) > 1
 
 
 # ---------------------------------------------------------------------------

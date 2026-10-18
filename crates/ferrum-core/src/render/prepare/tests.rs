@@ -8314,7 +8314,7 @@ fn gate_refusal(spec: &ChartSpec) -> RenderError {
 
 /// The gate's message for a column on layer 1, as its formatter writes it.
 fn gate_message(channel: &'static str, name: &str, remedy: Option<crate::render::MissingColumnRemedy>, independent_y: bool) -> String {
-    RenderError::LayerUnknownColumn { layer: 1, channel, name: name.into(), coord_flipped: false, remedy, independent_y }
+    RenderError::LayerUnknownColumn { layer: 1, entry: None, channel, name: name.into(), coord_flipped: false, remedy, independent_y }
         .to_string()
 }
 
@@ -8373,15 +8373,15 @@ fn every_channel_naming_an_absent_column_refuses_with_the_plain_message() {
 /// A binding on a channel the layer's mark does not draw names no column it
 /// reads, so the gate does not judge it, own or inherited: a line's own
 /// `text` and `url`, and a chart-level `angle` every layer inherits that a
-/// line never draws. The control: the same own `text` on a text mark
-/// refuses.
+/// line never draws (layer 0 is a line too, so no layer draws it). The
+/// control: the same own `text` on a text mark refuses.
 #[test]
 fn a_binding_on_a_channel_the_mark_does_not_draw_is_not_judged() {
     let spec = |layer1_mark: &str| {
         let mut spec = column_gate_spec(
             serde_json::json!([]),
             serde_json::json!([
-                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
                 {"mark": layer1_mark, "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "nope"}, "url": {"field": "nope_url"}}},
             ]),
         );
@@ -8486,6 +8486,9 @@ fn own_bindings_raw_row_layers_and_unknown_columns_still_refuse_beside_a_statist
             {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}},
         ]),
     );
+    // Layer 0 binds its own tooltip, so only the statistic layer inherits the
+    // chart-level one.
+    nowhere.layers.as_mut().expect("layers")[0].encoding.tooltip = Some(EncodingSpec { field: "x".into(), ..Default::default() });
     nowhere.encoding.tooltip = Some(EncodingSpec { field: "nope".into(), ..Default::default() });
     assert_eq!(gate_refusal(&nowhere).to_string(), gate_message("tooltip", "nope", None, false));
 }
@@ -8505,8 +8508,8 @@ fn a_detail_naming_an_absent_column_refuses() {
 
 /// A field branch of a conditional layer 1 declared is checked against
 /// layer 1's rows and named by the conditional's channel. The control: the
-/// same conditional declared only by layer 0, over rows that hold its
-/// field, renders.
+/// same conditional declared only by layer 0 is layer 0's, and the refusal
+/// names layer 0.
 #[test]
 fn a_conditional_field_branch_naming_an_absent_column_refuses() {
     let conditional = |field: &str, layers: serde_json::Value| {
@@ -8528,7 +8531,7 @@ fn a_conditional_field_branch_naming_an_absent_column_refuses() {
     let mut declared_by_layer_0 = column_gate_spec(serde_json::json!([]), layers);
     declared_by_layer_0.conditionals = vec![serde_json::from_value(conditional("nope", serde_json::json!([0]))).expect("a conditional")];
     assert!(
-        !matches!(gate_render(&declared_by_layer_0, &column_gate_batch()).0, Err(RenderError::LayerUnknownColumn { .. })),
+        matches!(gate_refusal(&declared_by_layer_0), RenderError::LayerUnknownColumn { layer: 0, channel: "size", ref name, .. } if name == "nope"),
         "a conditional layer 1 did not declare is not layer 1's"
     );
 }
@@ -8549,10 +8552,11 @@ fn a_column_the_layers_own_statistic_produces_passes() {
     assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "both layers draw");
 }
 
-/// Layer 0 keeps its exemption: a column it names that its rows lack is not
-/// the gate's to refuse.
+/// Layer 0 of a layered spec is judged by the gate like every later layer:
+/// a column it names that its rows lack is refused in the gate's words,
+/// naming layer 0, before any scale reads it.
 #[test]
-fn layer_zero_stays_exempt_from_the_column_gate() {
+fn layer_zero_of_a_layered_spec_is_judged_by_the_column_gate() {
     let spec = column_gate_spec(
         serde_json::json!([]),
         serde_json::json!([
@@ -8560,8 +8564,10 @@ fn layer_zero_stays_exempt_from_the_column_gate() {
             {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
         ]),
     );
-    let (scene, _) = gate_render(&spec, &column_gate_batch());
-    assert!(!matches!(scene, Err(RenderError::LayerUnknownColumn { .. })), "{scene:?}");
+    assert_eq!(
+        gate_refusal(&spec).to_string(),
+        "layer 0: encoding 'tooltip' references unknown column 'nope' (not present in that layer's data)"
+    );
 }
 
 /// A layer reading a named output of its own (a `data_source` the wire does
@@ -8753,4 +8759,847 @@ fn sibling_sub_layers_of_one_call_dropping_one_column_warn_once() {
         dropped,
         ["mark_boxen: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color"]
     );
+}
+
+/// The prepared inputs `spec` builds over [`column_gate_batch`], or its
+/// refusal: the provisional scales and the rendering encoding every axis and
+/// legend reads.
+fn gate_prepare(spec: &ChartSpec) -> Result<PreparedInputs, RenderError> {
+    pyo3::Python::initialize();
+    prepare_render_inputs(
+        spec,
+        &column_gate_batch(),
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+}
+
+/// A statistic sub-layer at index 0 that inherits a drawn binding its
+/// statistic's output does not carry warns as a later one does, and when no
+/// layer draws the channel it gets no scale, so no legend describes marks
+/// that do not draw it. Rejects layer 0's exemption, which established the
+/// color scale and legend from the source rows no mark drew.
+#[test]
+fn a_statistic_layer_zero_drops_an_inherited_read_and_no_layer_draws_the_channel() {
+    let mut spec = column_gate_spec(
+        named_mean_z(),
+        serde_json::json!([
+            {"mark": "point", "data_source": "stats", "encoding": {"x": {"field": "mean_z"}, "y": {"field": "mean_z"}}},
+            {"mark": "rule", "data_source": "stats", "encoding": {"y": {"field": "mean_z"}}},
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    scene.expect("the statistic layers draw without the dropped channel");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        [
+            "layer 0: mark_point: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color",
+            "layer 1: mark_rule: color 'k' was dropped: the statistic this rule mark draws does not carry 'k', so it draws without color",
+        ]
+    );
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert!(prep.rendering_encoding().color.is_none(), "no layer draws color");
+    assert!(prep.provisional_scales.color.is_none(), "a channel no layer draws builds no scale");
+    assert!(prep.legend_entries.is_empty() && prep.colorbar.is_none(), "and no legend");
+}
+
+/// An auxiliary-scale channel is established by the first layer whose mark
+/// draws it: a line's own `shape` (a line draws no shape) neither decides the
+/// shape scale nor joins its domain, which is the point layer's `k` alone.
+/// Rejects establishing from the first layer that merely binds the channel.
+#[test]
+fn an_auxiliary_channel_is_established_by_the_first_layer_whose_mark_draws_it() {
+    let spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "shape": {"field": "g"}}},
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "shape": {"field": "k"}}},
+        ]),
+    );
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert_eq!(prep.rendering_encoding().shape.as_ref().map(|s| s.field.as_str()), Some("k"));
+    let shape = prep.provisional_scales.shape.as_ref().expect("the point draws shape");
+    assert_eq!(shape.domain, ["k0", "k1", "k2", "k3"], "the line's g is drawn by no mark");
+    assert!(
+        !prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })),
+        "a layer draws shape, so nothing warns"
+    );
+}
+
+/// A channel bound where no layer's mark draws it builds no scale and no
+/// legend and warns once, naming the channel, the field and the mark: an
+/// unlayered line's `shape`, and two line layers binding it.
+#[test]
+fn a_channel_no_layer_draws_builds_no_scale_and_warns_once() {
+    let flat: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "line",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "shape": {"field": "g"}},
+    }))
+    .expect("the flat spec deserializes");
+    let layered = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "shape": {"field": "g"}}},
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "shape": {"field": "g"}}},
+        ]),
+    );
+    for (spec, voice) in [(flat, "mark_line"), (layered, "layer 0: mark_line")] {
+        let prep = gate_prepare(&spec).expect("prepares");
+        assert!(prep.provisional_scales.shape.is_none(), "{voice}: no scale for a channel nothing draws");
+        assert!(prep.aux_legends.is_empty(), "{voice}: and no legend");
+        let undrawn: Vec<String> = prep
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. }))
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            undrawn,
+            [format!(
+                "{voice}: shape 'g' has no effect: no layer's mark draws shape (this line mark does not), so it \
+                 gets no scale and no legend; it was ignored"
+            )]
+        );
+    }
+}
+
+/// A column only another `+` operand's rows hold is no statistic: a layer
+/// whose rows are its operand's own snapshot (a branch over a published
+/// `Identity` row marker) refuses with the plain message, though the other
+/// operand's branch, its row marker and the unadvanced tail all hold the
+/// column. Rejects classifying any named output as a statistic.
+#[test]
+fn a_column_only_another_operands_rows_hold_gets_the_plain_message() {
+    let spec = column_gate_spec(
+        serde_json::json!([
+            {"type": "branch", "name": "left", "transforms": [
+                {"type": "project", "fields": ["x", "y"]},
+                {"type": "identity", "name": "rows"},
+            ]},
+            {"type": "branch", "name": "right", "transforms": [
+                {"type": "project", "fields": ["x", "y", "z"]},
+                {"type": "identity", "name": "rows"},
+            ]},
+            {"type": "branch", "name": "secondary", "input": "left_rows", "transforms": [{"type": "filter", "predicate": "true"}]},
+        ]),
+        serde_json::json!([
+            {"mark": "point", "data_source": "left", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {"mark": "point", "data_source": "right", "encoding": {"x": {"field": "x"}, "y": {"field": "z"}}},
+            {"mark": "line", "data_source": "secondary", "reads_chart_data": true, "encoding": {"x": {"field": "x"}, "y": {"field": "z"}}},
+        ]),
+    );
+    let err = gate_refusal(&spec);
+    assert_eq!(
+        err.to_string(),
+        "layer 2: encoding 'y' references unknown column 'z' (not present in that layer's data)"
+    );
+}
+
+/// The gate's refusal on a layer a desugaring call built names that call,
+/// not an internal layer index the caller never wrote; a layer the caller
+/// placed keeps its index.
+#[test]
+fn a_gate_refusal_on_a_desugared_layer_names_its_public_entry() {
+    let mut spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "nope"}}},
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+        ]),
+    );
+    spec.entry = Some("residplot".into());
+    assert_eq!(
+        gate_refusal(&spec).to_string(),
+        "residplot: encoding 'color' references unknown column 'nope' (not present in that layer's data)"
+    );
+}
+
+/// The rows each kind of layer starts from before its own statistic: a
+/// layer on the chart's rows starts from them (every panel's under a shared
+/// facet channel), a layer on a row output from that output, and a layer on
+/// a statistic's output from the rows its scope's statistic consumed: the
+/// row snapshot of the branch it is published under, or the chart's rows for
+/// a top-level statistic.
+#[test]
+fn a_layers_pre_statistic_rows_are_the_rows_its_statistic_consumed() {
+    let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
+        {"type": "branch", "name": "b", "transforms": [
+            {"type": "identity", "name": "marker"},
+            {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"], "name": "box"},
+        ]},
+        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"], "name": "stats"},
+    ]))
+    .expect("transforms");
+    let rows = |n: usize| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![0.0; n]))],
+        )
+        .expect("rows")
+    };
+    let primary = rows(1);
+    let mut outputs = HashMap::new();
+    for (key, n) in [(FINAL_OUTPUT_KEY, 2), ("b", 3), ("b_marker", 4), ("b_box", 5), ("stats", 6)] {
+        outputs.insert(key.to_string(), rows(n));
+    }
+    let read = |source: Option<&str>, include_final: bool| {
+        pre_statistic_rows(source, &transforms, &primary, &outputs, include_final).num_rows()
+    };
+    assert_eq!(read(None, false), 1, "chart rows");
+    assert_eq!(read(None, true), 2, "every panel's chart rows");
+    assert_eq!(read(Some("b"), false), 3, "a row output");
+    assert_eq!(read(Some("b_marker"), false), 4, "a row snapshot");
+    assert_eq!(read(Some("b_box"), false), 4, "a branch statistic's consumed rows: the branch's snapshot");
+    assert_eq!(read(Some("stats"), false), 1, "a top-level statistic's consumed rows: the chart's");
+}
+
+/// The user's row outputs: every branch tail, every named Identity snapshot
+/// at any nesting (the `+` operand's row marker, displot's rug data, a
+/// threshold line's data), and the tail when no unnamed step advanced it.
+#[test]
+fn user_row_outputs_name_the_three_producer_shapes_and_the_unadvanced_tail() {
+    let parse = |json: serde_json::Value| -> Vec<crate::transform::core::TransformSpec> {
+        serde_json::from_value(json).expect("transforms")
+    };
+    let operand = parse(serde_json::json!([
+        {"type": "branch", "name": "left", "transforms": [{"type": "filter", "predicate": "true"}, {"type": "identity", "name": "row"}]},
+    ]));
+    assert_eq!(user_row_outputs(&operand), ["left", "left_row", FINAL_OUTPUT_KEY]);
+    let rug = parse(serde_json::json!([
+        {"type": "identity", "name": "rug_data"},
+        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": [], "name": "hist"},
+    ]));
+    assert_eq!(user_row_outputs(&rug), ["rug_data", FINAL_OUTPUT_KEY]);
+    let advanced = parse(serde_json::json!([
+        {"type": "identity", "name": "threshold"},
+        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": []},
+    ]));
+    assert_eq!(user_row_outputs(&advanced), ["threshold"], "an advanced tail is a statistic's rows");
+}
+
+/// A data-aware sort orders a layered axis by the establishing layer's own
+/// rows and its own opposite binding: a bar operand sorted by its own `y`
+/// beside a rule over another frame orders its categories by the bar's
+/// values, though the rule's rows (layer 0) hold the same category column
+/// in another order. Rejects sorting over the chart rows.
+#[test]
+fn a_sort_orders_by_the_establishing_layers_own_rows_and_binding() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("side", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["l", "l", "l", "r", "r", "r"])),
+            Arc::new(StringArray::from(vec!["a", "b", "c", "a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![9.0, 1.0, 5.0, 0.0, 0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0])),
+        ],
+    )
+    .expect("batch");
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "rule",
+        "encoding": {"y": {"field": "v"}},
+        "transforms": [
+            {"type": "branch", "name": "left", "transforms": [{"type": "filter", "predicate": "datum.side == 'l'"}]},
+            {"type": "branch", "name": "right", "transforms": [{"type": "filter", "predicate": "datum.side == 'r'"}]},
+        ],
+        "layers": [
+            {"mark": "rule", "data_source": "left", "encoding": {"y": {"field": "v"}}},
+            {"mark": "bar", "data_source": "right", "encoding": {"x": {"field": "g", "sort": "-y"}, "y": {"field": "w"}}},
+        ],
+    }))
+    .expect("spec");
+    let prep = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("prepares");
+    match &prep.provisional_scales.x {
+        crate::render::scale_resolve::ScaleKind::Ordinal(scale) => {
+            assert_eq!(scale.ticks_internal(), ["c", "b", "a"], "ordered by the bar's own w, descending")
+        }
+        other => panic!("expected a categorical x axis, got {other:?}"),
+    }
+}
+
+/// When no layer sharing the primary y axis draws y, the first independent-y
+/// layer that does owns the primary axis: no secondary slot, and the primary
+/// y is that layer's. Rejects an untitled 0..1 left axis beside the layer's
+/// own right axis.
+#[test]
+fn the_only_y_drawer_owns_the_primary_axis_though_it_is_independent() {
+    let spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "rule", "encoding": {"x": {"field": "x"}}},
+            {"mark": "bar", "independent_y": true, "encoding": {"x": {"field": "z"}, "y": {"field": "g"}}},
+        ]),
+    );
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert!(!prep.y_slot_plan.has_independent(), "no secondary axis");
+    assert_eq!(prep.rendering_encoding().y.as_ref().map(|y| y.field.as_str()), Some("g"));
+    assert!(matches!(prep.provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)));
+}
+
+/// A raster image draws color through its cells: a color binding naming the
+/// field they hold builds the color scale over the drawn cell values (and so
+/// a colorbar), with no undrawn warning; one naming another field draws
+/// nothing, gets no scale, and warns naming the field the cells hold.
+#[test]
+fn a_raster_image_draws_the_color_its_cells_hold() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![-4.0, -2.0, 6.0, 8.0])),
+        ],
+    )
+    .expect("batch");
+    let spec = |color: &str| -> ChartSpec {
+        serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": color}},
+            "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "mean", "field": "z", "resolution": 2, "name": "raster"}],
+            "layers": [{"mark": "image", "data_source": "raster", "entry": "mark_raster", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}],
+        }))
+        .expect("spec")
+    };
+    let prepare = |spec: &ChartSpec| {
+        prepare_render_inputs(
+            spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect("prepares")
+    };
+    let drawn = prepare(&spec("z"));
+    match &drawn.provisional_scales.color {
+        Some(crate::render::scale_resolve::ColorScale::Continuous { domain, .. }) => {
+            assert_eq!(*domain, (-3.0, 7.0), "the drawn cell means, negatives kept")
+        }
+        other => panic!("expected a continuous color scale over the cells, got {other:?}"),
+    }
+    assert!(drawn.colorbar.is_some(), "a colorbar describes the cells");
+    assert!(!drawn.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
+
+    let other = prepare(&spec("x"));
+    assert!(other.provisional_scales.color.is_none());
+    let undrawn: Vec<String> = other
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        undrawn,
+        ["mark_raster: color 'x' has no effect: the image colors its cells by their 'z' values (field=) and does \
+          not read color='x', so it gets no scale and no legend; it was ignored"]
+    );
+}
+
+/// The colorbar of a raster drawing color through its cells spans the domain
+/// the image draws: a count raster colored by its `count` cells runs from
+/// zero to the densest cell, as the image's own scale does, so one scale
+/// describes the fill. Rejects a colorbar over `[min, max]` beside a fill
+/// anchored at zero.
+#[test]
+fn a_raster_colorbar_spans_the_domain_the_image_draws() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.1, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.1, 0.0, 1.0, 1.0])),
+        ],
+    )
+    .expect("batch");
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "count"}},
+        "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": 2, "name": "raster"}],
+        "layers": [{"mark": "image", "data_source": "raster", "entry": "mark_raster", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}],
+    }))
+    .expect("spec");
+    let prep = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("prepares");
+    let (lo, hi) = crate::render::marks::image::raster_cell_extent(&prep.transform_outputs["raster"]).expect("cells");
+    assert_eq!((lo, hi), (2.0, 3.0), "the drawn counts");
+    match &prep.provisional_scales.color {
+        Some(crate::render::scale_resolve::ColorScale::Continuous { domain, .. }) => {
+            assert_eq!(*domain, crate::render::marks::image::raster_cell_domain((lo, hi)));
+            assert_eq!(*domain, (0.0, 3.0), "from zero, as the image draws");
+        }
+        other => panic!("expected a continuous color scale over the cells, got {other:?}"),
+    }
+}
+
+use crate::render::scale_resolve::ColorScale;
+
+/// Rows for the raster tests: a dense cluster near (1, 1), a sparse one near
+/// (0, 0), a value `z` spanning negatives, a category `g` and a facet `f`
+/// whose panels differ in their densest cell.
+fn raster_rows() -> RecordBatch {
+    let mut x = vec![0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0];
+    let mut y = x.clone();
+    let mut f: Vec<&str> = vec!["m"; 7];
+    f.extend(["n", "n"]);
+    x.push(0.5);
+    y.push(0.5);
+    f.push("n");
+    let n = x.len();
+    let z: Vec<f64> = (0..n).map(|i| i as f64 - 4.0).collect();
+    let g: Vec<&str> = (0..n).map(|i| if i % 2 == 0 { "a" } else { "b" }).collect();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(Float64Array::from(z)),
+            Arc::new(StringArray::from(g)),
+            Arc::new(StringArray::from(f)),
+        ],
+    )
+    .expect("rows")
+}
+
+/// A raster wire as Python lowers `mark_raster`: the image layer on the
+/// Raster output `raster`, `raster` the transform's JSON, `color` the
+/// chart's color binding, `extra` more layers after the image, `facet` a
+/// facet field.
+fn raster_spec(raster: serde_json::Value, color: Option<serde_json::Value>, extra: serde_json::Value, facet: Option<&str>) -> ChartSpec {
+    let mut encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+    if let Some(color) = color {
+        encoding["color"] = color;
+    }
+    let mut layers = vec![serde_json::json!({
+        "mark": "image", "data_source": "raster", "entry": "mark_raster",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+    })];
+    layers.extend(extra.as_array().cloned().unwrap_or_default());
+    let mut spec = serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": encoding,
+        "transforms": [raster],
+        "layers": layers,
+    });
+    if let Some(field) = facet {
+        spec["facet"] = serde_json::json!({"field": field, "mode": {"kind": "wrap", "ncols": 2}});
+    }
+    serde_json::from_value(spec).expect("raster spec")
+}
+
+fn count_raster(log_scale: bool) -> serde_json::Value {
+    serde_json::json!({"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": 2, "log_scale": log_scale, "name": "raster"})
+}
+
+fn prepare_rows(spec: &ChartSpec) -> Result<PreparedInputs, RenderError> {
+    pyo3::Python::initialize();
+    prepare_render_inputs(
+        spec,
+        &raster_rows(),
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+}
+
+/// The pipeline's outputs are its own: no synthetic cells output is
+/// published beside a raster, so a layer naming one is refused as an
+/// unknown data source listing only pipeline outputs, a user output named
+/// like one renders, and a column a layer lacks gets the remedy it gets
+/// with no raster present. Rejects publishing the cells as an output.
+#[test]
+fn a_raster_publishes_no_output_of_its_own_cells() {
+    let prep = prepare_rows(&raster_spec(count_raster(false), None, serde_json::json!([]), None)).expect("prepares");
+    assert!(!prep.transform_outputs.keys().any(|key| key.ends_with("__cells")), "{:?}", prep.transform_outputs.keys());
+
+    let naming = raster_spec(
+        count_raster(false),
+        None,
+        serde_json::json!([{"mark": "point", "data_source": "raster__cells", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}]),
+        None,
+    );
+    let err = prepare_rows(&naming).err().expect("refused").to_string();
+    assert!(err.contains("data_source 'raster__cells' not found"), "{err}");
+    assert!(!err.contains("raster__cells,") && !err.contains("raster__cells]"), "only pipeline outputs listed: {err}");
+
+    let mut own = raster_spec(
+        count_raster(false),
+        None,
+        serde_json::json!([{"mark": "point", "data_source": "raster__cells", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}]),
+        None,
+    );
+    own.transforms.push(serde_json::from_value(serde_json::json!({"type": "branch", "name": "raster__cells", "transforms": [{"type": "filter", "predicate": "true"}]})).unwrap());
+    prepare_rows(&own).expect("a user output named like the cells renders");
+
+    let remedy = |with_raster: bool| {
+        let mut spec = raster_spec(
+            count_raster(false),
+            None,
+            serde_json::json!([{"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "count"}}}]),
+            None,
+        );
+        if !with_raster {
+            spec.layers.as_mut().unwrap().remove(0);
+            spec.transforms.clear();
+        }
+        prepare_rows(&spec).err().expect("count is no column of the rows").to_string()
+    };
+    assert_eq!(remedy(true).replace("layer 1", "layer 0"), remedy(false), "the raster's cells are no statistic another layer computes");
+}
+
+/// One cell scale spans every panel of a faceted raster drawing no color,
+/// as a bound color scale does: the `raster_cells` scale's domain is every
+/// panel's cells, from zero, so a count colors alike in panels whose
+/// densest cells differ. Rejects each panel's own extent.
+#[test]
+fn a_faceted_raster_drawing_no_color_shares_one_cell_scale() {
+    let prep = prepare_rows(&raster_spec(count_raster(false), None, serde_json::json!([]), Some("f"))).expect("prepares");
+    match &prep.provisional_scales.raster_cells {
+        Some(ColorScale::Continuous { domain, .. }) => assert_eq!(*domain, (0.0, 5.0), "panel m's densest cell is 5, n's is 2"),
+        other => panic!("expected one continuous cell scale, got {other:?}"),
+    }
+}
+
+/// A raster's cells are numbers: a nominal or ordinal color naming them, or
+/// another layer's categorical color establishing the chart's scale, has no
+/// color for a cell, so each is refused naming the
+/// image and why. An untyped or quantitative binding draws through a
+/// continuous scale. Rejects the transparent image a categorical scale drew.
+#[test]
+fn a_categorical_color_over_a_rasters_cells_is_refused() {
+    for kind in ["nominal", "ordinal"] {
+        let spec = raster_spec(count_raster(false), Some(serde_json::json!({"field": "count", "type": kind})), serde_json::json!([]), None);
+        assert_eq!(
+            prepare_rows(&spec).err().expect("refused").to_string(),
+            format!(
+                "mark_raster: encoding 'color' names the raster's cell values 'count', which are quantitative, but it is \
+                 declared {kind}. Drop type= (or the categorical color binding), or draw categorical cells with mark_rect."
+            )
+        );
+    }
+    let mut point_first = raster_spec(
+        count_raster(false),
+        None,
+        serde_json::json!([{"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}}}]),
+        None,
+    );
+    point_first.layers.as_mut().unwrap().rotate_left(1);
+    point_first.layers.as_mut().unwrap()[1].encoding.color = Some(EncodingSpec { field: "count".into(), ..Default::default() });
+    assert_eq!(
+        prepare_rows(&point_first).err().expect("refused").to_string(),
+        "mark_raster: encoding 'color' names the raster's cell values 'count', which are quantitative, but the chart's \
+         color scale is categorical, established by layer 0 ('g'). Drop type= (or the categorical color binding), or \
+         draw categorical cells with mark_rect."
+    );
+    for binding in [serde_json::json!({"field": "count"}), serde_json::json!({"field": "count", "type": "quantitative"})] {
+        let prep = prepare_rows(&raster_spec(count_raster(false), Some(binding), serde_json::json!([]), None)).expect("draws");
+        assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Continuous { .. })));
+    }
+}
+
+/// A count raster under `log_scale` keeps its raw cells and colors them
+/// through a symlog scale, so a cell normalizes to log1p(v)/log1p(max), as
+/// the image drew before, and its colorbar reads raw counts with the densest
+/// cell on top. A `LinearScale` maps the counts linearly; a mean raster under
+/// `log_scale` draws its negative cells, sign-preserving. Rejects a colorbar
+/// labelled in log1p values.
+#[test]
+fn a_log_scale_raster_colors_raw_cells_through_symlog_and_its_colorbar_reads_counts() {
+    use crate::render::scale_resolve::ColorTransform;
+    let prep = prepare_rows(&raster_spec(count_raster(true), Some(serde_json::json!({"field": "count"})), serde_json::json!([]), None)).expect("draws");
+    let Some(ColorScale::Continuous { domain, transform, .. }) = &prep.provisional_scales.color else { panic!("continuous") };
+    assert_eq!(*domain, (0.0, 7.0));
+    assert_eq!(*transform, ColorTransform::Symlog { constant: 1.0 });
+    let t = transform.normalize(*domain, None, 2.0);
+    assert!((t - 2.0_f64.ln_1p() / 7.0_f64.ln_1p()).abs() < 1e-12, "t={t}");
+    let labels = &prep.colorbar.as_ref().expect("a colorbar").tick_labels;
+    assert_eq!(labels.first().map(String::as_str), Some("0"));
+    assert_eq!(labels.last().map(String::as_str), Some("7"), "{labels:?}");
+
+    let linear = raster_spec(count_raster(true), Some(serde_json::json!({"field": "count", "scale": {"type": "linear"}})), serde_json::json!([]), None);
+    let prep = prepare_rows(&linear).expect("draws");
+    assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Continuous { transform: ColorTransform::Linear, .. })));
+
+    let mean = serde_json::json!({"type": "raster", "x": "x", "y": "y", "aggregate": "mean", "field": "z", "resolution": 2, "log_scale": true, "name": "raster"});
+    let prep = prepare_rows(&raster_spec(mean, None, serde_json::json!([]), None)).expect("draws");
+    let Some(scale @ ColorScale::Continuous { domain, .. }) = &prep.provisional_scales.raster_cells else { panic!("cell scale") };
+    assert!(domain.0 < 0.0, "negative cells kept: {domain:?}");
+    assert_ne!(scale.lookup_f64(domain.0), scale.lookup_f64(0.0), "a negative cell draws, not clamped to zero");
+}
+
+/// `Color(scale=SymlogScale())` maps through symlog on any mark, as the
+/// positional symlog scale does.
+#[test]
+fn a_symlog_color_scale_maps_through_symlog_on_a_point_chart() {
+    use crate::render::scale_resolve::ColorTransform;
+    let spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "z", "scale": {"type": "symlog", "constant": 1.0}}}},
+        ]),
+    );
+    let prep = gate_prepare(&spec).expect("prepares");
+    let Some(ColorScale::Continuous { transform, domain, .. }) = &prep.provisional_scales.color else { panic!("continuous") };
+    assert_eq!(*transform, ColorTransform::Symlog { constant: 1.0 });
+    assert_eq!(*domain, (10.0, 40.0));
+}
+
+
+/// Each facet panel's raster image as its decoded RGBA8 cells, in panel
+/// order, with the prepared inputs the scene drew from.
+fn raster_panel_cells(spec: &ChartSpec) -> (PreparedInputs, Vec<Vec<[u8; 4]>>) {
+    let prep = prepare_rows(spec).expect("prepares");
+    let scene = gate_render(spec, &raster_rows()).0.expect("renders");
+    let cells = scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Image { data: ferrum_scene::ImageData::Inline { bytes, .. }, .. } => {
+                let mut reader = png::Decoder::new(std::io::Cursor::new(bytes.as_slice())).read_info().expect("a png");
+                let mut buf = vec![0; reader.output_buffer_size().expect("sized")];
+                let info = reader.next_frame(&mut buf).expect("a frame");
+                Some(buf[..info.buffer_size()].chunks_exact(4).map(|px| [px[0], px[1], px[2], px[3]]).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    (prep, cells)
+}
+
+fn rgba(scale: &ColorScale, value: f64) -> [u8; 4] {
+    let c = scale.lookup_f64(value).expect("a color");
+    [c.red, c.green, c.blue, c.alpha]
+}
+
+const EMPTY_CELL: [u8; 4] = [0, 0, 0, 0];
+
+/// The drawn cells of `cells`, sorted, with the empty ones dropped.
+fn drawn(cells: &[[u8; 4]]) -> Vec<[u8; 4]> {
+    let mut drawn: Vec<[u8; 4]> = cells.iter().copied().filter(|px| *px != EMPTY_CELL).collect();
+    drawn.sort();
+    drawn
+}
+
+/// A raster count colored through a discretizing scale (`Quantize`,
+/// `Threshold`, a binned color's `BinOrdinal`, `Quantile`) steps its cells
+/// through that one scale, over the cells' zero-anchored domain: the cells
+/// holding 3 and 7 draw distinct bucket colors, empty cells stay
+/// transparent, and the legend is the scale's stepped bar (two stops per
+/// swatch at its band edges, one label per bound). Rejects the continuous
+/// ramp the cells drew under any binding, and a quantile cut from no sample.
+#[test]
+fn a_discretizing_color_steps_a_rasters_cells_and_draws_its_stepped_legend() {
+    let cases = [
+        (serde_json::json!({"type": "quantize", "range": ["#ff0000", "#00ff00", "#0000ff"]}), vec![0.0, 7.0 / 3.0, 14.0 / 3.0, 7.0]),
+        (serde_json::json!({"type": "threshold", "domain": [4.0]}), vec![0.0, 4.0, 7.0]),
+        (serde_json::json!({"type": "bin-ordinal", "bins": [2.0, 5.0]}), vec![0.0, 2.0, 5.0, 7.0]),
+        (serde_json::json!({"type": "quantile", "range": [0.0, 1.0]}), vec![3.0, 5.0, 7.0]),
+    ];
+    for (scale, bounds) in cases {
+        let color = serde_json::json!({"field": "count", "scale": scale});
+        let (prep, panels) = raster_panel_cells(&raster_spec(count_raster(false), Some(color), serde_json::json!([]), None));
+        let Some(stepped @ ColorScale::Discretizing(buckets)) = &prep.provisional_scales.color else {
+            panic!("{scale}: expected a discretizing scale, got {:?}", prep.provisional_scales.color)
+        };
+        assert_eq!(buckets.bounds(), bounds.as_slice(), "{scale}");
+        let [cells] = panels.as_slice() else { panic!("{scale}: one image, got {}", panels.len()) };
+        assert_eq!(cells.iter().filter(|px| **px == EMPTY_CELL).count(), 2, "{scale}: the empty cells stay transparent");
+        let mut expected = vec![rgba(stepped, 3.0), rgba(stepped, 7.0)];
+        expected.sort();
+        assert_eq!(drawn(cells), expected, "{scale}");
+        assert_ne!(expected[0], expected[1], "{scale}: 3 and 7 fall in distinct buckets");
+
+        let colorbar = prep.colorbar.as_ref().expect("a stepped legend");
+        let k = buckets.colors().len();
+        assert_eq!(colorbar.stops.len(), 2 * k, "{scale}");
+        for (i, pair) in colorbar.stops.chunks_exact(2).enumerate() {
+            assert_eq!(pair[0].1, pair[1].1, "{scale}: swatch {i} is flat");
+            assert_eq!((pair[0].0, pair[1].0), (i as f64 / k as f64, (i + 1) as f64 / k as f64), "{scale}");
+        }
+        assert_eq!(colorbar.tick_labels.len(), k + 1, "{scale}: {:?}", colorbar.tick_labels);
+    }
+}
+
+/// Faceted rasters share one discretizing scale's steps: its domain spans
+/// every panel's cells (densest 5 in panel m, 2 in n), so a cell holding 2
+/// draws the same bucket color in both panels. Rejects stepping each panel
+/// over its own cells, under which n's densest cell took the top swatch.
+#[test]
+fn faceted_rasters_share_a_discretizing_scales_steps() {
+    let color = serde_json::json!({"field": "count", "scale": {"type": "quantize", "range": ["#ff0000", "#00ff00", "#0000ff"]}});
+    let (prep, panels) = raster_panel_cells(&raster_spec(count_raster(false), Some(color), serde_json::json!([]), Some("f")));
+    let Some(stepped @ ColorScale::Discretizing(buckets)) = &prep.provisional_scales.color else { panic!("discretizing") };
+    assert_eq!(buckets.bounds(), [0.0, 5.0 / 3.0, 10.0 / 3.0, 5.0]);
+    let [m, n] = panels.as_slice() else { panic!("two panels, got {}", panels.len()) };
+    let sorted = |mut v: Vec<[u8; 4]>| {
+        v.sort();
+        v
+    };
+    assert_eq!(drawn(m), sorted(vec![rgba(stepped, 2.0), rgba(stepped, 5.0)]));
+    assert_eq!(drawn(n), sorted(vec![rgba(stepped, 1.0), rgba(stepped, 2.0)]));
+    assert_eq!(rgba(stepped, 2.0), [0, 255, 0, 255], "a 2 is the middle swatch in both panels");
+}
+
+/// `raster_rows` with a numeric `count` column a sibling can color by.
+fn raster_rows_with_count() -> RecordBatch {
+    let rows = raster_rows();
+    let count: Vec<f64> = (0..rows.num_rows()).map(|i| i as f64).collect();
+    let mut fields: Vec<Field> = rows.schema().fields().iter().map(|field| field.as_ref().clone()).collect();
+    fields.push(Field::new("count", DataType::Float64, false));
+    let mut columns = rows.columns().to_vec();
+    columns.push(Arc::new(Float64Array::from(count)));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+/// A raster beside a sibling colored by the field its cells hold (`count`
+/// for a count raster, `z` for a mean of `z`) draws its cells, by `+` in
+/// either order and by the Layer door (a point layer binding only color): an
+/// image's color is its own binding, never a sibling's, so it maps its cells
+/// through its own cell scale while the sibling keeps its color scale and
+/// legend. Rejects the image that drew nothing, without a warning, when the
+/// sibling's binding was read as the image's.
+#[test]
+fn a_raster_beside_a_sibling_colored_by_its_value_field_draws_its_cells() {
+    let mean = serde_json::json!({"type": "raster", "x": "x", "y": "y", "aggregate": "mean", "field": "z", "resolution": 2, "name": "raster"});
+    let xy = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+    for (raster, field) in [(count_raster(false), "count"), (mean, "z")] {
+        let colored = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": field}}});
+        let layer_door = serde_json::json!({"mark": "point", "encoding": {"color": {"field": field}}});
+        let raster_first = raster_spec(raster.clone(), None, serde_json::json!([colored]), None);
+        let mut point_first = raster_first.clone();
+        point_first.layers.as_mut().unwrap().rotate_left(1);
+        let door = raster_spec(raster.clone(), None, serde_json::json!([layer_door]), None);
+        for (door_name, spec) in [("r + p", raster_first), ("p + r", point_first), ("Layer", door)] {
+            assert_eq!(spec.encoding, serde_json::from_value(xy.clone()).unwrap(), "{door_name}: no chart-level color");
+            pyo3::Python::initialize();
+            let prep = prepare_render_inputs(
+                &spec,
+                &raster_rows_with_count(),
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::chart_config::ChartConfig::default(),
+                None,
+            )
+            .expect("prepares");
+            assert!(
+                matches!(prep.provisional_scales.raster_cells, Some(ColorScale::Continuous { .. })),
+                "{door_name} {field}: the image's own cell scale, got {:?}",
+                prep.provisional_scales.raster_cells
+            );
+            assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Continuous { .. })), "{door_name} {field}: the point's color");
+            assert!(prep.colorbar.is_some(), "{door_name} {field}: the point's color legend");
+            let (scene, warnings) = gate_render(&spec, &raster_rows_with_count());
+            let images: Vec<_> = scene
+                .expect("renders")
+                .panels
+                .iter()
+                .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.clone()))
+                .filter(|node| matches!(node, ferrum_scene::SceneNode::Image { .. }))
+                .collect();
+            assert_eq!(images.len(), 1, "{door_name} {field}: {warnings:?}");
+        }
+    }
+}
+
+/// A layered spec over a count raster: its layers in order, the chart's
+/// mark the first layer's, as Python lowers `a + b`.
+fn layered_over_raster(layers: serde_json::Value) -> ChartSpec {
+    let mark = layers[0]["mark"].clone();
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"}, "mark": mark,
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "transforms": [count_raster(false)],
+        "layers": layers,
+    }))
+    .expect("layered spec")
+}
+
+/// Only an area layer that draws color groups color by category, so the
+/// operand order never changes the outcome: an uncolored area beside a
+/// raster colored by its cells renders in either order (the cells through a
+/// continuous scale), an area colored by `g` beside it is refused in either
+/// order naming the area's layer and field, and a point's quantitative color
+/// beside an uncolored area stays continuous in either order. Rejects keying
+/// the grouping on the chart's mark (the first operand's), under which
+/// `area + raster` refused and `raster + area` rendered.
+#[test]
+fn an_area_groups_color_by_category_only_when_it_draws_color() {
+    let xy = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+    let area = |color: Option<&str>| {
+        let mut encoding = xy.clone();
+        if let Some(field) = color {
+            encoding["color"] = serde_json::json!({"field": field});
+        }
+        serde_json::json!({"mark": "area", "encoding": encoding})
+    };
+    let image = serde_json::json!({"mark": "image", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "count"}}, "data_source": "raster", "entry": "mark_raster"});
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "z"}}});
+
+    for layers in [serde_json::json!([area(None), image.clone()]), serde_json::json!([image.clone(), area(None)])] {
+        let prep = prepare_rows(&layered_over_raster(layers.clone())).expect("renders");
+        assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Continuous { .. })), "{layers}: {:?}", prep.provisional_scales.color);
+    }
+    for (layers, layer) in [(serde_json::json!([area(Some("g")), image.clone()]), 0), (serde_json::json!([image, area(Some("g"))]), 1)] {
+        assert_eq!(
+            prepare_rows(&layered_over_raster(layers.clone())).err().map(|e| e.to_string()),
+            Some(format!(
+                "mark_raster: encoding 'color' names the raster's cell values 'count', which are quantitative, but the \
+                 chart's color scale is categorical, established by layer {layer} ('g'). Drop type= (or the categorical \
+                 color binding), or draw categorical cells with mark_rect."
+            )),
+            "{layers}"
+        );
+    }
+    for layers in [serde_json::json!([area(None), point.clone()]), serde_json::json!([point.clone(), area(None)])] {
+        let prep = prepare_rows(&layered_over_raster(layers.clone())).expect("renders");
+        assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Continuous { .. })), "{layers}: {:?}", prep.provisional_scales.color);
+    }
+    let prep = prepare_rows(&layered_over_raster(serde_json::json!([point, area(Some("z"))]))).expect("renders");
+    assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Categorical { .. })), "an area drawing color groups it");
 }

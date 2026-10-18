@@ -57,11 +57,11 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 ///   3. Theme sequential/diverging scheme
 ///   4. Hard fallback: Viridis
 ///
-/// # FA-5 — `force_categorical` for area marks
+/// # FA-5 — `grouping_area` for area marks
 ///
-/// When `force_categorical = true`, the Quantitative/Temporal path is skipped
+/// When `grouping_area` is `Some`, the Quantitative/Temporal path is skipped
 /// and the color field is always resolved as a `Categorical` scale regardless
-/// of its Arrow dtype.  Set this flag for `mark_area`, which always groups rows
+/// of its Arrow dtype.  Set it for `mark_area`, which always groups rows
 /// into discrete per-color bands (via `col_as_ordinal_category_str`) and therefore
 /// must use the same categorical palette for both fills and legend swatches.
 ///
@@ -107,16 +107,19 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 /// else the first layer that does), read from the batch that layer draws; a
 /// later layer whose own color field reads the other way stays out of the
 /// union ([`admitted_aux_reads`], one
-/// `LayerScaleExcluded` each, returned first among the warnings). Under
-/// `force_categorical` every column reads as categories, so every layer is
-/// admitted.
+/// `LayerScaleExcluded` each, returned first among the warnings).
+/// `grouping_area` is the layer of an area that draws color, which groups it
+/// by category (FA-5, [`super::domain::color_grouping_area`]): under it
+/// every column reads as categories, so every layer is admitted, and a
+/// raster image's cells, which have none, are refused naming the layer that
+/// establishes the categorical scale.
 #[allow(clippy::too_many_arguments)]
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
-    force_categorical: bool,
+    grouping_area: Option<usize>,
     facet_shared: bool,
     composite_domain: Option<&SharedDomain>,
     // `spec.coord` is `CoordFlip`: `encoding` above is the RENDERED encoding,
@@ -129,13 +132,36 @@ pub fn build_color_scale(
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
     };
+    let force_categorical = grouping_area.is_some();
+    // A raster image's cells establish the scale: they are numbers, so a
+    // nominal or ordinal binding (or a mark that groups color) has no color
+    // for them, and the image would draw nothing.
+    if let Some(lead) = layer_reads.first().filter(|lead| lead.is_raster_cells()) {
+        let declared = match c_enc.type_ {
+            Some(SpecDataType::Nominal) => Some("nominal"),
+            Some(SpecDataType::Ordinal) => Some("ordinal"),
+            _ => None,
+        };
+        let reason = match declared {
+            Some(kind) => Some(crate::render::RasterColorReason::Declared(kind)),
+            None => grouping_area.map(|layer| area_establishes(layer, layer_reads, c_enc)),
+        };
+        if let Some(refusal) = reason.and_then(|reason| lead.raster_color_refusal(reason)) {
+            return Err(refusal);
+        }
+        let mut warnings = Vec::new();
+        let reads = admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?;
+        let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, &mut warnings)?;
+        return Ok((scale, warnings));
+    }
     // The column that decides the kind: the establishing layer's, read from
-    // the batch it draws, on a layered spec.
-    let located = layer_reads
-        .first()
-        .and_then(|lead| lead.locate(primary_batch, transform_outputs))
-        .or_else(|| locate_field(&c_enc.field, primary_batch, transform_outputs))
-        .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
+    // the batch it draws, on a layered spec; the one batch of an unlayered
+    // spec otherwise.
+    let located = match layer_reads.first() {
+        Some(lead) => lead.locate(primary_batch, transform_outputs),
+        None => locate_field(&c_enc.field, primary_batch),
+    }
+    .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
     let inferred = infer_spec_type(c_enc, located.col.data_type());
     // FA-5: When force_categorical is set (mark_area), treat any quantitative/temporal
@@ -149,9 +175,24 @@ pub fn build_color_scale(
     );
     let mut exclusions: Vec<crate::render::RenderWarning> = Vec::new();
     let layer_reads = if force_categorical {
+        // A mark that groups color reads every column as categories; a
+        // raster's cells have none.
+        if let (Some(lead), Some(raster), Some(layer)) =
+            (layer_reads.first(), layer_reads.iter().find(|read| read.is_raster_cells()), grouping_area)
+        {
+            // A lead whose own column reads as categories establishes the
+            // scale; otherwise the area forces it.
+            let reason = match lead.reads_categorical(primary_batch, transform_outputs) {
+                true => crate::render::RasterColorReason::CategoricalScale { layer: lead.layer(), field: lead.field().to_string() },
+                false => area_establishes(layer, layer_reads, c_enc),
+            };
+            if let Some(refusal) = raster.raster_color_refusal(reason) {
+                return Err(refusal);
+            }
+        }
         layer_reads.to_vec()
     } else {
-        admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)
+        admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)?
     };
     let layer_reads = layer_reads.as_slice();
     if is_continuous_color {
@@ -196,8 +237,9 @@ pub fn build_color_scale(
         // while the colorbar stayed global.
         let sample_batch =
             shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared);
+        let sample = || column_sample(sample_batch, &c_enc.field);
         if let Some((buckets, warnings)) =
-            build_discretizing_color_scale(c_enc, sample_batch, data_extent, theme)?
+            build_discretizing_color_scale(c_enc, sample, data_extent, theme)?
         {
             exclusions.extend(warnings);
             return Ok((Some(ColorScale::Discretizing(buckets)), exclusions));
@@ -212,7 +254,7 @@ pub fn build_color_scale(
             .or_else(|| composite_numeric_extent(composite_domain))
             .unwrap_or(data_extent);
 
-        let (scheme, scheme_warnings) = resolve_continuous_scheme(c_enc, theme, (lo, hi))?;
+        let (scheme, scheme_warnings) = resolve_continuous_scheme(c_enc, theme, (lo, hi), None)?;
         // Gap 2: resolve the diverging midpoint.  Priority:
         //   1. explicit `domain_mid`/`domainMid` field on DivergingScale spec
         //   2. middle element of a 3-tuple domain=[lo, mid, hi]
@@ -220,7 +262,9 @@ pub fn build_color_scale(
         // Sequential scales always get None (pure-linear).
         let midpoint = scale_diverging_midpoint(c_enc);
         exclusions.extend(scheme_warnings);
-        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), exclusions))
+        // A `SymlogScale` maps through symlog; every other scale linearly.
+        let transform = super::ColorTransform::of_scale(c_enc.scale.as_ref()).unwrap_or(super::ColorTransform::Linear);
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint, transform }), exclusions))
     } else {
         // Every categorical color scale is keyed per row by
         // `col_as_ordinal_category_str`, so the column must be category-readable
@@ -384,6 +428,9 @@ fn resolve_continuous_scheme(
     enc: &crate::spec::encoding::EncodingSpec,
     theme: &ThemeInputs,
     (lo, hi): (f64, f64),
+    // A mark's own colormap (`mark_raster(cmap=)`), after the encoding's and
+    // its scale's scheme and before the theme default.
+    mark_cmap: Option<&str>,
 ) -> Result<(crate::render::color::ContinuousScheme, Vec<crate::render::RenderWarning>), RenderError> {
     use crate::render::color::{ContinuousScheme, NamedContinuous};
     let mut warnings = Vec::new();
@@ -413,7 +460,9 @@ fn resolve_continuous_scheme(
                     } else {
                         &theme.palette.sequential_scheme
                     };
-                    NamedContinuous::from_name(theme_scheme)
+                    mark_cmap
+                        .and_then(NamedContinuous::from_name)
+                        .or_else(|| NamedContinuous::from_name(theme_scheme))
                         .map(ContinuousScheme::Named)
                         .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
                 }
@@ -511,6 +560,18 @@ struct BucketPartition {
     descending: bool,
 }
 
+/// The area at `layer` establishes a categorical color scale by the field it
+/// draws: its read's among `reads`, else the rendering binding's (an
+/// unlayered area chart, which has no reads).
+fn area_establishes(
+    layer: usize,
+    reads: &[AuxRead<'_>],
+    binding: &crate::spec::encoding::EncodingSpec,
+) -> crate::render::RasterColorReason {
+    let field = reads.iter().find(|read| read.layer() == layer).map_or(binding.field.as_str(), AuxRead::field);
+    crate::render::RasterColorReason::CategoricalScale { layer, field: field.to_string() }
+}
+
 /// Resolve a `Quantize`/`Quantile`/`Threshold`/`BinOrdinal` color encoding into
 /// bucket boundaries plus one flat color per bucket (spec §4.2).
 ///
@@ -524,16 +585,17 @@ struct BucketPartition {
 /// Returns `Err` for a `Threshold`/`BinOrdinal` boundary list that is neither
 /// ascending nor descending — see [`declared_boundaries`].
 ///
-/// `sample_batch` is the batch a `Quantile` spec reads its cut-point sample from
-/// when it declares no explicit one — the caller picks it via
-/// [`shared_categorical_batch`], so faceted panels agree.
+/// `sample` yields the values a `Quantile` spec takes its cut-points from when
+/// it declares no explicit sample: the encoded column (its caller picks the
+/// batch via [`shared_categorical_batch`], so faceted panels agree), or every
+/// raster's cells.
 fn build_discretizing_color_scale(
     enc: &crate::spec::encoding::EncodingSpec,
-    sample_batch: &RecordBatch,
+    sample: impl FnOnce() -> Vec<f64>,
     data_extent: (f64, f64),
     theme: &ThemeInputs,
 ) -> Result<Option<(DiscretizedColors, Vec<crate::render::RenderWarning>)>, RenderError> {
-    let Some(partition) = bucket_partition(enc, sample_batch, data_extent)? else {
+    let Some(partition) = bucket_partition(enc, sample, data_extent)? else {
         return Ok(None);
     };
     let n_buckets = partition.thresholds.len() + 1;
@@ -554,7 +616,7 @@ fn build_discretizing_color_scale(
 /// [`build_discretizing_color_scale`] for the `Ok(None)` and `Err` contracts.
 fn bucket_partition(
     enc: &crate::spec::encoding::EncodingSpec,
-    sample_batch: &RecordBatch,
+    sample: impl FnOnce() -> Vec<f64>,
     data_extent: (f64, f64),
 ) -> Result<Option<BucketPartition>, RenderError> {
     use crate::spec::encoding::ScaleSpec;
@@ -573,13 +635,14 @@ fn bucket_partition(
         }
         // Equal-frequency buckets at the sample's quantile cut-points; the
         // `range` fixes the bucket count. The sample is the declared `domain`
-        // when present, else the encoded column itself.
+        // when present, else the encoded values (`sample`): the column, or a
+        // raster's cells.
         ScaleSpec::Quantile { domain, range } => {
             let Some(outputs) = non_empty(range.as_deref()) else { return Ok(None) };
             let n = outputs.len();
             let sample = match non_empty(domain.as_deref()) {
                 Some(d) => d.to_vec(),
-                None => column_sample(sample_batch, &enc.field),
+                None => sample(),
             };
             let mut sorted: Vec<f64> = sample.into_iter().filter(|v| v.is_finite()).collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -774,7 +837,7 @@ fn bucket_colors(
         }
         return Ok((0..n_buckets).map(|i| entries[i % entries.len()]).collect());
     }
-    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, extent)?;
+    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, extent, None)?;
     warnings.extend(scheme_warnings);
     Ok((0..n_buckets)
         .map(|i| {
@@ -871,7 +934,7 @@ fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str
 /// domain here is what makes `heatmap(vmin=, vmax=)` take effect.
 ///
 /// A `Diverging` midpoint is carried separately by `scale_diverging_midpoint`
-/// and threaded into `ColorScale::Continuous { midpoint }` for piecewise-linear
+/// and threaded into `ColorScale::Continuous { midpoint, transform: crate::render::scale_resolve::ColorTransform::Linear }` for piecewise-linear
 /// normalization.
 ///
 /// Returns `None` when the spec declares no extent, allowing the caller to fall
@@ -928,3 +991,75 @@ fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Ve
         _ => None,
     }
 }
+
+/// The color scale a raster image's cells map through, the one helper for
+/// both the chart color scale a raster establishes (`binding`, its `color`)
+/// and the scale every raster drawing no color shares (`binding` `None`,
+/// `scale_resolve`'s `raster_cells` scale), so the two share their domain
+/// rule, transform and scheme.
+///
+/// - Domain: the union of `reads` (each raster's cells as the image draws
+///   them, [`crate::render::marks::image::raster_cell_domain`]: from zero
+///   when every cell is non-negative; a column read's extent), unless the
+///   binding states one, or a composite shares one.
+/// - Transform: the binding's `LinearScale`/`SymlogScale` when it states
+///   one, else the scale the first raster batch names (`value_scale`:
+///   symlog under `log_scale`), else linear.
+/// - Scheme: the binding's scheme or scale scheme, else the first raster's
+///   colormap (`mark_raster(cmap=)`), else the theme default.
+///
+/// A discretizing binding (`Quantize`, `Threshold`, `BinOrdinal`) instead
+/// gives the discretizing scale it gives every other mark, over the same
+/// domain: the cells step through its buckets and its legend is its stepped
+/// bar.
+///
+/// `None` when no read holds a finite value (an empty raster).
+pub(in crate::render) fn raster_cell_scale(
+    binding: Option<&crate::spec::encoding::EncodingSpec>,
+    reads: &[AuxRead<'_>],
+    composite_domain: Option<&SharedDomain>,
+    theme: &ThemeInputs,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<Option<ColorScale>, RenderError> {
+    let numeric = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
+    let Some(data_domain) = aux_numeric_union(reads, primary_batch, transform_outputs, false, numeric)? else {
+        return Ok(None);
+    };
+    if !(data_domain.0.is_finite() && data_domain.1.is_finite()) {
+        return Ok(None);
+    }
+    // A discretizing binding (`Quantize`, `Threshold`, a binned color's
+    // `BinOrdinal`) steps the cells through the one discretizing scale it
+    // draws on any mark, over the cells' domain; its legend is that scale's
+    // stepped bar.
+    if let Some(enc) = binding {
+        let sample = || {
+            reads
+                .iter()
+                .filter_map(|read| read.raster_batch(primary_batch, transform_outputs))
+                .flat_map(crate::render::marks::image::raster_cell_values)
+                .collect()
+        };
+        if let Some((buckets, bucket_warnings)) = build_discretizing_color_scale(enc, sample, data_domain, theme)? {
+            warnings.extend(bucket_warnings);
+            return Ok(Some(ColorScale::Discretizing(buckets)));
+        }
+    }
+    let default_binding = crate::spec::encoding::EncodingSpec::default();
+    let enc = binding.unwrap_or(&default_binding);
+    let domain = binding
+        .and_then(scale_explicit_domain)
+        .or_else(|| composite_numeric_extent(composite_domain))
+        .unwrap_or(data_domain);
+    let raster = reads.iter().find(|read| read.is_raster_cells());
+    let transform = super::ColorTransform::of_scale(enc.scale.as_ref())
+        .or_else(|| raster.and_then(|read| read.raster_transform(primary_batch, transform_outputs)))
+        .unwrap_or(super::ColorTransform::Linear);
+    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, domain, raster.and_then(AuxRead::cmap))?;
+    warnings.extend(scheme_warnings);
+    let midpoint = binding.and_then(scale_diverging_midpoint);
+    Ok(Some(ColorScale::Continuous { domain, scheme, midpoint, transform }))
+}
+

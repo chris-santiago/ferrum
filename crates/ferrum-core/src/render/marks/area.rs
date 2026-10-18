@@ -1206,6 +1206,7 @@ mod tests {
                 ]),
             }),
             size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -1300,6 +1301,7 @@ mod tests {
                 ]),
             }),
             size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -2136,6 +2138,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![1.0, 4.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(y_domain.to_vec(), vec![95.0, 5.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };

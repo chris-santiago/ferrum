@@ -1232,6 +1232,37 @@ def _strip_layer_conditionals(
     return stripped, tuple(owned)
 
 
+def _refuse_cross_operand_reactive_names(charts: list) -> None:
+    """Refuse a name one operand declares as a selection and an earlier one as a variable parameter.
+
+    Each of *charts*, in order, is checked against the operands before it
+    only: its selections against their variable parameters, its variable
+    parameters against their selections, in ``+``'s words
+    (:func:`_check_param_collision`, context ``layer merge``). A chart's
+    own selection and parameter sharing a name are left to its spec build,
+    which refuses them as a ``param collection`` collision on every door.
+    Shared by ``Chart.__add__`` (the merged left side, then the right
+    operand) and the static ``LayerChart`` overlay (its members in order).
+    """
+    from ferrum.parameter import VariableParameter
+
+    selection_names: set[str] = set()
+    variable_names: set[str] = set()
+    for chart in charts:
+        selections = {s.name for s in getattr(chart, "_selections", None) or [] if s is not None}
+        variables = {
+            p.name
+            for p in getattr(chart, "_params", None) or []
+            if isinstance(p, VariableParameter)
+        }
+        for name in sorted(selections & variable_names):
+            _check_param_collision(name, is_selection=True, context="layer merge")
+        for name in sorted(variables & selection_names):
+            _check_param_collision(name, is_selection=False, context="layer merge")
+        selection_names |= selections
+        variable_names |= variables
+
+
 def _check_param_collision(
     name: str,
     *,
@@ -3149,17 +3180,11 @@ class Chart(
         # Merge RHS selections and conditionals into the layered chart
         # so interactive features from all layers are preserved. Each side's
         # conditionals stay owned by that side's layers (bound above).
+        _refuse_cross_operand_reactive_names([new, rhs])
         if rhs._selections:
-            from ferrum.parameter import VariableParameter
-
-            existing_variable_names = {
-                p.name for p in new._params if p is not None and isinstance(p, VariableParameter)
-            }
             for s in rhs._selections:
                 if s is None:
                     continue
-                if s.name in existing_variable_names:
-                    _check_param_collision(s.name, is_selection=True, context="layer merge")
                 _append_unique_by_name(new._selections, s, entry="chart + chart")
         if rhs._conditionals:
             # One conditional per wire channel, enforced across the merge
@@ -3189,15 +3214,10 @@ class Chart(
                     )
                 new._conditionals.append(cond)
         if rhs._params:
-            from ferrum.parameter import VariableParameter
-
-            existing_selection_names = {s.name for s in new._selections if s is not None}
             existing_param_names = {p.name for p in new._params if p is not None}
             for p in rhs._params:
                 if p is None:
                     continue
-                if isinstance(p, VariableParameter) and p.name in existing_selection_names:
-                    _check_param_collision(p.name, is_selection=False, context="layer merge")
                 if p.name not in existing_param_names:
                     new._params.append(p)
         # Merge RHS configure/annotation/structural/override slots.

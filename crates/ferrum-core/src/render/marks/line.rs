@@ -1290,6 +1290,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 

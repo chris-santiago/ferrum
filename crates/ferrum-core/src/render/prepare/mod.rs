@@ -152,6 +152,11 @@ pub struct LayerPrepared {
     /// output that does not carry them; cleared from
     /// [`Self::drawn_encoding`]. Empty for every other layer.
     pub(in crate::render) dropped_reads: Vec<DroppedRead>,
+    /// The field this layer's cells hold when it is a raster image reading
+    /// a Raster output ([`crate::render::marks::image::raster_value_field`]),
+    /// set by `prepare_render_inputs` once the layer's batch is resolved: the
+    /// color binding such an image draws. `None` for every other layer.
+    pub(in crate::render) raster_value_field: Option<String>,
 }
 
 impl LayerPrepared {
@@ -172,6 +177,7 @@ impl LayerPrepared {
             // sole layer's coordinate system IS the chart's.
             coord: spec.coord.clone(),
             dropped_reads: Vec::new(),
+            raster_value_field: None,
         }
     }
 
@@ -237,6 +243,7 @@ impl LayerPrepared {
             stroke_width_is_own,
             coord: layer.effective_coord(spec.coord.as_ref()).cloned(),
             dropped_reads: Vec::new(),
+            raster_value_field: None,
         }
     }
 
@@ -399,15 +406,17 @@ impl LayerPrepared {
         encoding
     }
 
-    /// Whether this layer draws its binding on the channel `wire` names. A
-    /// positional channel is judged by layer completion
+    /// Whether this layer draws its binding on the channel `wire` names. A positional channel is judged by layer completion
     /// ([`crate::spec::layer::Layer::completed_encoding`]), so every one it
-    /// keeps is drawn.
+    /// keeps is drawn. A raster image draws `color` bound to the field its
+    /// cells hold ([`crate::render::marks::image::image_draws_color`] over
+    /// [`Self::raster_value_field`]).
     fn draws_binding(&self, wire: &str) -> bool {
         use crate::render::scale_resolve::OpacityChannel;
         use crate::spec::layer::InheritedChannel as C;
         match C::from_wire(wire) {
             None => true,
+            Some(C::Color) if self.raster_value_field.is_some() => self.draws_raster_color(),
             Some(C::Size) => self.drawn_size_field().is_some(),
             Some(C::StrokeWidth) => self.drawn_stroke_width_field().is_some(),
             Some(C::Opacity) => self.drawn_opacity_field(OpacityChannel::Opacity).is_some(),
@@ -415,6 +424,13 @@ impl LayerPrepared {
             Some(C::StrokeOpacity) => self.drawn_opacity_field(OpacityChannel::Stroke).is_some(),
             Some(other) => self.mark.draws_channel(other),
         }
+    }
+
+    /// Whether this layer is a raster image drawing `color` through its cells
+    /// ([`crate::render::marks::image::image_draws_color`] over its completed
+    /// encoding and [`Self::raster_value_field`]).
+    fn draws_raster_color(&self) -> bool {
+        crate::render::marks::image::image_draws_color(self.mark, &self.encoding, &self.encoding, self.raster_value_field.as_deref())
     }
 
     /// Whether this layer's own `stroke=`/`fill=` mark kwarg names a real
@@ -1273,6 +1289,10 @@ pub fn prepare_render_inputs(
     if batch.num_rows() == 0 {
         return Err(RenderError::EmptyBatch);
     }
+    // The primary y axis is owned by a layer that draws y (an independent-y
+    // layer when no sharing layer does), before any layer, slot or axis
+    // reads the flags.
+    let spec = &*crate::render::scale_resolve::with_primary_y_owner(spec);
 
     // Normalize Utf8View columns (e.g. from polars) to Utf8 so downstream
     // downcasts to StringArray succeed uniformly.
@@ -1339,9 +1359,15 @@ pub fn prepare_render_inputs(
         };
         layer_batches.push(batch);
     }
+    for (layer, batch) in layers.iter_mut().zip(&layer_batches) {
+        let url = layer.encoding.url.as_ref();
+        if layer.mark == crate::spec::mark::Mark::Image && crate::render::marks::image::url_tile_field(url).is_none() {
+            layer.raster_value_field = crate::render::marks::image::raster_value_field(batch).map(str::to_string);
+        }
+    }
 
-    // Every column a layer beyond the first draws is checked against its own
-    // rows here, once, before any scale resolution reads one, so a missing
+    // Every column each layer of a layered spec draws is checked against its
+    // own rows here, once, before any scale resolution reads one, so a missing
     // column is refused in the gate's words on every route
     // (`validate_layer_columns`). A statistic sub-layer's dropped inherited
     // reads are cleared from what it draws and warned about once per
@@ -1355,6 +1381,8 @@ pub fn prepare_render_inputs(
             }
             let raw = spec.layers.as_ref().and_then(|raw| raw.get(i));
             let flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
+            let entry = layer_entry(spec, i, layer.mark);
+            let voice = public_layer(spec, i, layer.mark).is_none().then(|| entry.clone());
             let dropped = validate_layer_columns(
                 i,
                 layer,
@@ -1364,8 +1392,8 @@ pub fn prepare_render_inputs(
                 flipped,
                 &spec.conditionals,
                 &pipeline,
+                voice,
             )?;
-            let entry = layer_entry(spec, i, layer.mark);
             for (k, read) in dropped.iter().enumerate() {
                 if dropped[..k].iter().any(|earlier| earlier.field == read.field) {
                     continue;
@@ -1413,8 +1441,8 @@ pub fn prepare_render_inputs(
 
     // Build provisional scales and axes from the rendering encoding: the first
     // layer's resolved encoding, which already incorporates CoordFlip, with
-    // each auxiliary-scale channel it does not draw taken from the first layer
-    // that does (`establishing_encoding`). For single-layer non-flipped specs
+    // each auxiliary-scale channel taken from the first layer that draws it
+    // (`establishing_encoding`). For single-layer non-flipped specs
     // this is identical to what Phase 7 computed (same encoding, same spec
     // fields).
     //
@@ -1422,7 +1450,7 @@ pub fn prepare_render_inputs(
     // Clone spec and substitute the rendering encoding so resolve_scales works
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
-    let rendering_encoding = &establishing_encoding(spec, &layers)?;
+    let rendering_encoding = &establishing_encoding(spec, &layers, &transformed, &transform_outputs, leaf_scales)?;
     let mut rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
@@ -1477,6 +1505,7 @@ pub fn prepare_render_inputs(
         .into_iter()
         .map(RenderWarning::Transform)
         .chain(column_warnings)
+        .chain(undrawn_channel_warnings(spec, &layers))
         .chain(layer_scale_warnings)
         .chain(drop_placeholder_only_warnings(provisional_scale_warnings))
         .collect();
@@ -1945,11 +1974,11 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
 
 /// The encoding a chart's scales, axes and legends are built from, over its
 /// prepared `layers` (each already completed from the chart-level encoding).
-/// Layer 0 owns the axes and every channel it draws, so its encoding is the
-/// base. An auxiliary-scale channel layer 0 does not draw still gets its one
-/// scale and legend when a later layer draws it: the first layer that does
-/// establishes the channel, so its binding (field, type, title, scale,
-/// legend) is the one the scale's kind and the legend's title come from.
+/// Layer 0 owns the axes, so its encoding is the base. Each auxiliary-scale
+/// channel is established by the first layer that draws it
+/// ([`establishing_binding`]), so its binding (field, type, title, scale,
+/// legend) is the one the scale's kind and the legend's title come from; a
+/// channel no layer draws is cleared, so it builds no scale and no legend.
 /// The scale's domain still spans every drawing layer
 /// (`scale_resolve`'s per-layer reads).
 ///
@@ -1957,15 +1986,22 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
 /// draw (a one-axis reference rule, which takes no inherited opposite
 /// channel) is established by the first later layer that draws it, else by
 /// the chart-level binding layer 0 reads its data under, so the axis keeps
-/// its field when no layer draws the channel.
+/// its field when no layer draws the channel. A composite `Overlay` member
+/// whose layers draw nothing on an axis takes the binding its group's
+/// establishing member imposes there (`leaf_scales`'
+/// [`LeafScaleContext::imposed`](crate::render::scale_resolve::LeafScaleContext::imposed)).
 fn establishing_encoding(
     spec: &ChartSpec,
     layers: &[LayerPrepared],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<crate::spec::encoding::Encoding, RenderError> {
     let (lead, rest) = layers.split_first().ok_or(RenderError::LayeredChartNoLayers)?;
     let mut encoding = lead.encoding.clone();
-    for layer in rest {
-        encoding.take_unbound_auxiliary_scale_channels(&layer.encoding);
+    for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
+        *channel.binding_mut(&mut encoding) =
+            establishing_binding(spec, layers, channel, primary_batch, transform_outputs);
     }
     if spec.layers.is_some() {
         let mut chart = spec.encoding.clone();
@@ -1982,7 +2018,73 @@ fn establishing_encoding(
             *channel.slot_mut(&mut encoding) = drawn.or_else(read_under);
         }
     }
+    if let Some(context) = leaf_scales {
+        use crate::render::scale_resolve::Channel;
+        for (slot, channel) in [(&mut encoding.x, Channel::X), (&mut encoding.y, Channel::Y)] {
+            if slot.is_none() {
+                *slot = context.imposed(channel).map(|(binding, _)| binding.clone());
+            }
+        }
+    }
     Ok(encoding)
+}
+
+/// The binding an auxiliary-scale `channel`'s scale and legend are
+/// established from: on a layered spec, that of the first layer drawing the
+/// channel, the first of `scale_resolve`'s per-layer reads
+/// ([`crate::render::scale_resolve::aux_reads`]), so the binding and the
+/// domain read the same layers; on an unlayered spec, the chart's own when
+/// its mark draws the channel. `None` when no layer draws it.
+fn establishing_binding(
+    spec: &ChartSpec,
+    layers: &[LayerPrepared],
+    channel: crate::spec::encoding::AuxiliaryScaleChannel,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> Option<crate::spec::encoding::EncodingSpec> {
+    let drawer = match spec.layers.as_deref() {
+        Some(raw) => {
+            let reads = crate::render::scale_resolve::aux_reads(raw, &spec.encoding, channel, primary_batch, transform_outputs);
+            layers.get(reads.first()?.layer())?
+        }
+        None => layers.first().filter(|layer| layer.mark.draws_channel(channel.drawn_as()))?,
+    };
+    channel.binding(&drawer.encoding).clone()
+}
+
+/// One [`RenderWarning::ChannelNotDrawn`] per auxiliary-scale channel some
+/// layer binds but no binding layer's mark draws
+/// ([`crate::spec::mark::Mark::draws_channel`]; a raster image draws only a
+/// `color` naming the field its cells hold,
+/// [`crate::render::marks::image::image_draws_color`]): the channel builds no scale and
+/// no legend ([`establishing_binding`]), so the binding has no effect. It
+/// names the first layer binding the channel. A channel a drawing mark's
+/// statistic drops is not this case: the column gate warns about that one.
+fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<RenderWarning> {
+    let mut warnings = Vec::new();
+    for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
+        let mut binding = layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| channel.binding(&layer.encoding).as_ref().map(|enc| (i, layer, enc)));
+        let Some((first, layer, enc)) = binding.next() else { continue };
+        let drawn = |layer: &LayerPrepared| match layer.raster_value_field.is_some() && channel.name == "color" {
+            true => layer.draws_raster_color(),
+            false => layer.mark.draws_channel(channel.drawn_as()),
+        };
+        if drawn(layer) || binding.any(|(_, layer, _)| drawn(layer)) {
+            continue;
+        }
+        warnings.push(RenderWarning::ChannelNotDrawn {
+            layer: public_layer(spec, first, layer.mark),
+            entry: layer_entry(spec, first, layer.mark),
+            mark: layer.mark,
+            channel: channel.name.to_string(),
+            field: enc.field.clone(),
+            cells: layer.raster_value_field.clone().filter(|_| channel.name == "color"),
+        });
+    }
+    warnings
 }
 
 /// Refuse a malformed sort-field object anywhere it could reach render
@@ -2097,7 +2199,7 @@ pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::
     (spec.layers.is_some() && layer_entry(spec, li, mark) == format!("mark_{}", mark.as_str())).then_some(li)
 }
 
-/// Refuse a layer beyond the first that names a column absent from that
+/// Refuse a layer of a layered spec that names a column absent from that
 /// layer's own resolved batch, on any channel it draws (spec §4/§6; the
 /// model's P7), and report the inherited reads a statistic sub-layer drops.
 ///
@@ -2140,14 +2242,22 @@ pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::
 /// a `Branch` output) and a column found nowhere still refuse.
 ///
 /// **Scope (normative, spec §4).**
-/// - Layer 0 is exempt: it already raises [`RenderError::UnknownColumn`] from
-///   scale resolution, and standalone single-mark charts must keep that exact
-///   error.
+/// - Every layer of a layered spec is judged, layer 0 included: a channel's
+///   scale, axis and legend are read only from the batch of a layer that
+///   draws it, so a layer 0 binding to a column only another layer's rows
+///   hold would otherwise draw nothing while an axis or legend described
+///   it. A chart with no `layers` (`raw` is `None`) is not judged here: its
+///   one mark keeps scale resolution's [`RenderError::UnknownColumn`].
+/// - A raster image draws `x`/`y` through its extent columns
+///   ([`crate::render::marks::image::drawn_columns`]), so those
+///   are the columns judged on its axes. A tooltip entry is judged on its
+///   own field, so an `x`/`y` entry on a raster image, whose one-row batch
+///   holds the extent rather than the source column, is dropped with ruling
+///   W's warning (the image reads a statistic's output).
 /// - The batch is the layer's OWN resolved batch — base data for
-///   `data_source: None`, the named transform output otherwise — never the
-///   union `locate_field` searches. A field that exists only in some sibling
-///   transform output is precisely the silent-drop shape: the scale resolves,
-///   the marks cannot.
+///   `data_source: None`, the named transform output otherwise — never a
+///   union of batches. A field that exists only in some sibling transform
+///   output is precisely the silent-drop shape: the marks cannot draw it.
 /// - Zero-row layers never reach here (the caller skips them first), so an
 ///   empty batch still means "nothing to draw", not "broken encoding".
 ///
@@ -2160,7 +2270,9 @@ pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::
 /// `layers`), which says which bindings are the layer's own; `conditionals`
 /// are the chart's (the gate reads the ones this layer declared). A missing
 /// column's remedy ([`RenderError::LayerUnknownColumn::remedy`]) is
-/// classified by [`missing_column_remedy`] against `pipeline`.
+/// classified by [`missing_column_remedy`] against `pipeline`. `voice` is
+/// how the refusal names the layer: its index for a layer the caller
+/// placed, else the public call that built it ([`public_layer`]).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn validate_layer_columns(
     layer_index: usize,
@@ -2171,8 +2283,9 @@ pub(in crate::render) fn validate_layer_columns(
     coord_flipped: bool,
     conditionals: &[crate::spec::chart::ChartConditional],
     pipeline: &PipelineBatches<'_>,
+    voice: Option<String>,
 ) -> Result<Vec<DroppedRead>, RenderError> {
-    if layer_index == 0 {
+    if raw.is_none() {
         return Ok(Vec::new());
     }
     let statistic_layer = reads_statistic_output(layer, pipeline.transforms);
@@ -2187,6 +2300,7 @@ pub(in crate::render) fn validate_layer_columns(
         }
         return Err(RenderError::LayerUnknownColumn {
             layer: layer_index,
+            entry: voice.map(String::into_boxed_str),
             channel: read.channel,
             name: read.field.to_string(),
             coord_flipped,
@@ -2243,14 +2357,19 @@ fn layer_column_reads<'a>(
         let written = raw.encoding.bindings().into_iter().any(|(own, _)| own == wire);
         written && InheritedChannel::from_wire(wire).is_none_or(|c| !raw.inherited_channels.contains(&c))
     };
+    let url = encoding.url.as_ref();
     let (positional, other): (Vec<_>, Vec<_>) = encoding
         .bindings()
         .into_iter()
-        .map(|(wire, enc)| ColumnRead {
-            channel: python_channel(wire),
-            wire: Some(wire),
-            field: enc.field.as_str(),
-            inherited: !is_positional(wire) && !owns(wire),
+        .flat_map(|(wire, enc)| {
+            crate::render::marks::image::drawn_columns(layer.mark, url, wire, enc.field.as_str())
+                .into_iter()
+                .map(move |field| ColumnRead {
+                    channel: python_channel(wire),
+                    wire: Some(wire),
+                    field,
+                    inherited: !is_positional(wire) && !owns(wire),
+                })
         })
         .partition(|read| read.wire.is_some_and(is_positional));
     let detail = layer
@@ -2288,29 +2407,52 @@ fn python_channel(wire: &'static str) -> &'static str {
     }
 }
 
-/// Whether `layer` reads a statistic's output: it names a `data_source` no
-/// `Branch` in `transforms` publishes, at any nesting (a nested branch's
-/// tail is published scoped under its enclosing branch, as
-/// [`secondary_key`](crate::transform::registry::secondary_key) scopes it).
-/// A layer with no `data_source`, or one reading a `Branch` output, reads
-/// the user's rows.
+/// Whether `layer` reads a statistic's output: it names a `data_source` that
+/// is not one of the user's row outputs ([`user_row_outputs`]). A layer with
+/// no `data_source`, or one reading a row output, reads the user's rows.
 fn reads_statistic_output(layer: &LayerPrepared, transforms: &[crate::transform::core::TransformSpec]) -> bool {
-    fn branch_tails(transforms: &[crate::transform::core::TransformSpec]) -> Vec<String> {
-        use crate::transform::core::TransformSpec;
-        let mut tails = Vec::new();
-        for t in transforms {
-            if let TransformSpec::Branch(b) = t {
-                tails.push(b.name.clone());
-                tails.extend(
-                    branch_tails(&b.transforms)
+    layer.data_source.as_deref().is_some_and(|name| !user_row_outputs(transforms).iter().any(|rows| rows == name))
+}
+
+/// The pipeline outputs whose rows are the user's rather than a statistic's,
+/// the one answer every "is this a statistic" question reads: every
+/// `Branch`'s tail; every named `Identity` snapshot, at any nesting (an
+/// output inside a branch scoped under it, as
+/// [`secondary_key`](crate::transform::registry::secondary_key) scopes it);
+/// and the tail ([`FINAL_OUTPUT_KEY`]) when no unnamed step advanced it, so
+/// it is the source (a composition's merged frame).
+///
+/// **Contract.** A named `Identity` is a snapshot of the user's rows: its
+/// producers (a `+` operand's row marker, `displot`'s rug data, a threshold
+/// line's data) publish one over rows no statistic changed, and the
+/// producer helper (`identity_transform` in Python) states the same.
+pub(in crate::render) fn user_row_outputs(transforms: &[crate::transform::core::TransformSpec]) -> Vec<String> {
+    use crate::transform::core::{spec_name, TransformSpec};
+    let mut keys = Vec::new();
+    for t in transforms {
+        match t {
+            TransformSpec::Branch(b) => {
+                keys.push(b.name.clone());
+                keys.extend(
+                    named_row_snapshots(&b.transforms)
                         .iter()
                         .map(|inner| crate::transform::registry::secondary_key(Some(&b.name), inner)),
                 );
             }
+            TransformSpec::Identity(identity) => keys.extend(identity.name.clone()),
+            _ => {}
         }
-        tails
     }
-    layer.data_source.as_deref().is_some_and(|name| !branch_tails(transforms).iter().any(|tail| tail == name))
+    if transforms.iter().all(|t| matches!(t, TransformSpec::Branch(_)) || spec_name(t).is_some()) {
+        keys.push(FINAL_OUTPUT_KEY.to_string());
+    }
+    keys
+}
+
+/// The row outputs a branch's own steps publish ([`user_row_outputs`]
+/// without the tail, which a branch publishes as the branch itself).
+fn named_row_snapshots(transforms: &[crate::transform::core::TransformSpec]) -> Vec<String> {
+    user_row_outputs(transforms).into_iter().filter(|key| key != FINAL_OUTPUT_KEY).collect()
 }
 
 /// Every batch a chart's pipeline saw: its SOURCE schema, taken before any
@@ -2346,15 +2488,65 @@ fn chart_rows_schema<'a>(layer: &LayerPrepared, pipeline: &PipelineBatches<'a>) 
     }
 }
 
+/// The rows a layer draws from before any statistic of its own: what a
+/// data-aware sort on the layer's binding aggregates over, since a
+/// statistic's output (a boxplot's `box`) carries the category but not the
+/// raw field the sort names.
+/// - A layer with no `data_source` starts from the chart rows: `primary_batch`,
+///   or the all-panels tail ([`FINAL_OUTPUT_KEY`]) when the channel is
+///   shared across facet panels (`include_final`).
+/// - A layer reading one of the user's row outputs ([`user_row_outputs`])
+///   starts from that output.
+/// - A layer reading a statistic's output starts from the rows its scope's
+///   statistic consumed: the row snapshot of the `Branch` the output is
+///   published under (the `+` operand's row marker, else the branch's tail),
+///   or the chart rows for a top-level statistic.
+///
+/// Every named output already spans every panel, so a faceted channel reads
+/// the same key.
+pub(in crate::render) fn pre_statistic_rows<'b>(
+    data_source: Option<&str>,
+    transforms: &[crate::transform::core::TransformSpec],
+    primary_batch: &'b RecordBatch,
+    transform_outputs: &'b HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> &'b RecordBatch {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::registry::secondary_key;
+    let chart_rows = || match include_final {
+        true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(primary_batch),
+        false => primary_batch,
+    };
+    let Some(source) = data_source else { return chart_rows() };
+    if user_row_outputs(transforms).iter().any(|rows| rows == source) {
+        return transform_outputs.get(source).unwrap_or_else(|| chart_rows());
+    }
+    let scoping = transforms.iter().find_map(|t| match t {
+        TransformSpec::Branch(b) if source.starts_with(&secondary_key(Some(&b.name), "")) => Some(b),
+        _ => None,
+    });
+    match scoping {
+        Some(branch) => named_row_snapshots(&branch.transforms)
+            .last()
+            .and_then(|snapshot| transform_outputs.get(&secondary_key(Some(&branch.name), snapshot)))
+            .or_else(|| transform_outputs.get(&branch.name))
+            .unwrap_or_else(|| chart_rows()),
+        None => chart_rows(),
+    }
+}
+
 /// Where a column missing from a layer's own batch exists, for a layer that
 /// reads its chart's data ([`LayerPrepared::reads_chart_data`]). Every
 /// other layer (a `+` operand's branch reader) reads rows of its own, so
 /// neither remedy is true of it and it gets `None`, the plain message.
 ///
 /// Precedence: the source batch first, since a source column the chain
-/// dropped is drawable from the source; then any batch the pipeline
-/// produced, where the column is a statistic another layer's mark computes;
-/// otherwise the column exists nowhere (a typo) and gets `None`. The source
+/// dropped is drawable from the source; then a statistic's output (any batch
+/// the pipeline produced but the user's row outputs, [`user_row_outputs`]), where
+/// the column is a statistic another layer's mark computes; otherwise
+/// `None`: the column exists nowhere (a typo), or only in rows of the user's
+/// that are not this layer's (another operand's own rows), which no remedy
+/// reaches. The source
 /// is the rows the layer's chart data starts from ([`chart_rows_schema`]): a
 /// composition's left operand's own rows, never the merged frame, which
 /// holds a sibling operand's columns too.
@@ -2368,11 +2560,19 @@ fn missing_column_remedy(
         None
     } else if chart_rows_schema(layer, pipeline).is_some_and(|schema| schema.index_of(name).is_ok()) {
         Some(MissingColumnRemedy::Source)
-    } else if pipeline.outputs.values().any(|b| b.column_by_name(name).is_some()) {
+    } else if statistic_outputs_hold(name, pipeline) {
         Some(MissingColumnRemedy::Statistic)
     } else {
         None
     }
+}
+
+/// Whether a statistic's output holds column `name`: a batch the pipeline
+/// produced that is not one of the user's row outputs
+/// ([`user_row_outputs`]).
+fn statistic_outputs_hold(name: &str, pipeline: &PipelineBatches<'_>) -> bool {
+    let rows = user_row_outputs(pipeline.transforms);
+    pipeline.outputs.iter().any(|(key, batch)| !rows.contains(key) && batch.column_by_name(name).is_some())
 }
 
 /// What [`build_axes`] produces: the axis inputs, the two resolved primary tick

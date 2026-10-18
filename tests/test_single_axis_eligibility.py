@@ -200,28 +200,22 @@ def test_the_refused_shape_would_otherwise_have_dropped_its_marks() -> None:
     assert not _is_unit_scale(axis_tick_labels(svg, axis="y"))
 
 
-def test_independent_y_layer_does_not_claim_the_primary_axis() -> None:
-    """A secondary-axis layer's ``y`` stays in its own slot.
+def test_an_independent_y_layer_drawing_the_only_y_owns_the_primary_axis() -> None:
+    """The curve, the only layer drawing ``y``, establishes the primary axis.
 
-    ``LayerChart(rug, curve, resolve={"y": "independent"})`` draws its curve
-    against a right-hand axis. Letting that layer supply the PRIMARY binding
-    emitted two identical density axes — a left axis duplicating the right one.
-    That is a different wrong, not an improvement, so the primary keeps the
-    synthesized scale and the real domain lives on the secondary axis only.
-
-    (That the primary is a fabricated ladder at all is a separate, pre-existing
-    defect on this shape; this test pins only that the change did not alter it.)
+    ``LayerChart(rug, curve, resolve={"y": "independent"})``: the rug draws
+    no ``y``, so there is no shared axis for the curve to be independent of.
+    The curve's density domain is drawn once, on the left, as ``rug + curve``
+    draws it, and there is no right axis. Rejects a fabricated 0..1 primary
+    axis describing no mark beside the curve's own right axis.
     """
     chart = fm.LayerChart(_rug_chart(), _curve_chart(), resolve={"y": "independent"})
 
     svg = chart.to_svg()
 
     primary_y = axis_tick_labels(svg, axis="y")
-    assert _is_unit_scale(primary_y), (
-        "the primary y axis must keep the synthesized unit scale rather than "
-        f"duplicate the independent layer's density domain; got {primary_y}"
-    )
-    # The density domain is present exactly once, on the secondary axis.
+    assert not _is_unit_scale(primary_y), primary_y
+    assert primary_y == axis_tick_labels((_rug_chart() + _curve_chart()).to_svg(), axis="y")
     density_labels = [t for t in re.findall(r"<text[^>]*>([^<]*)</text>", svg) if t == "0.13"]
     assert len(density_labels) == 1, (
         f"the density domain must appear on one axis only, found {len(density_labels)}"

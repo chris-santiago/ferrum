@@ -638,24 +638,31 @@ def test_mark_errorband_color_sort_none_byte_identical():
 
 
 # ---------------------------------------------------------------------------
-# boxen / swarm exclusions still hold — hue_order acts via the chart-level
-# encoding cascade (the top-level `encoding.color` Rust reads for the
-# shared legend), not via `_prep_color_field` / per-layer color threading,
-# which these two kinds deliberately omit (documented load-bearing,
-# _desugar.py). This pins that the exclusion still lets hue_order act, it
-# just acts through a different mechanism than box/violin/errorbar/errorband.
+# boxen / swarm omit `_prep_color_field` / per-layer color threading
+# (documented load-bearing, _desugar.py). Swarm's points carry the hue column,
+# so hue_order still acts through the color scale they establish. Boxen's
+# bands and outlier points read letter-value statistic rows with no hue
+# column: no layer draws the hue, so there is no color scale for hue_order to
+# order, and each statistic layer warns that it dropped the hue.
 # ---------------------------------------------------------------------------
 
 
-def test_catplot_boxen_hue_order_swap_still_changes_output():
+def test_catplot_boxen_hue_order_has_nothing_to_order():
     df = _tips_df()
-    svg_a = fm.catplot(
-        df, x="day", y="tip", hue="sex", kind="boxen", hue_order=["Female", "Male"]
-    ).to_svg()
-    svg_b = fm.catplot(
-        df, x="day", y="tip", hue="sex", kind="boxen", hue_order=["Male", "Female"]
-    ).to_svg()
-    assert svg_a != svg_b
+    renders = []
+    for order in (["Female", "Male"], ["Male", "Female"]):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            renders.append(
+                fm.catplot(df, x="day", y="tip", hue="sex", kind="boxen", hue_order=order).to_svg()
+            )
+        assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == [
+            f"catplot: color 'sex' was dropped: the statistic this {mark} mark draws does "
+            "not carry 'sex', so it draws without color"
+            for mark in ("rect", "point")
+        ]
+    assert renders[0] == renders[1]
+    assert renders[0] == fm.catplot(df, x="day", y="tip", kind="boxen").to_svg()
 
 
 def test_catplot_swarm_hue_order_swap_still_changes_output():

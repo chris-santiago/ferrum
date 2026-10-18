@@ -1063,11 +1063,18 @@ pub struct Encoding {
 #[derive(Clone, Copy)]
 pub(crate) struct AuxiliaryScaleChannel {
     pub(crate) name: &'static str,
+    drawn: crate::spec::layer::InheritedChannel,
     slot: fn(&Encoding) -> &Option<EncodingSpec>,
     slot_mut: fn(&mut Encoding) -> &mut Option<EncodingSpec>,
 }
 
 impl AuxiliaryScaleChannel {
+    /// The channel a mark draws this one as, the key of the table of which
+    /// marks draw it ([`crate::spec::mark::Mark::draws_channel`]).
+    pub(crate) fn drawn_as(self) -> crate::spec::layer::InheritedChannel {
+        self.drawn
+    }
+
     /// This channel's binding on `encoding`.
     pub(crate) fn binding(self, encoding: &Encoding) -> &Option<EncodingSpec> {
         (self.slot)(encoding)
@@ -1081,21 +1088,22 @@ impl AuxiliaryScaleChannel {
 
 /// The channels the renderer builds a chart-wide auxiliary scale for, in
 /// `scale_resolve`'s `AuxiliaryScales` field order: the one list the
-/// establishing fill ([`Encoding::take_unbound_auxiliary_scale_channels`])
-/// walks and `ferrum._core.auxiliary_scale_channels()` publishes. Each scale
+/// establishing fills (`prepare`'s `establishing_encoding` for a chart, an
+/// overlay group's [`Encoding::take_unbound_auxiliary_scale_channels`]) walk
+/// and `ferrum._core.auxiliary_scale_channels()` publishes. Each scale
 /// is built once per chart from the chart's rendering encoding, whose binding
 /// on each of these channels is the establishing layer's (layer 0 when it
 /// draws the channel, else the first layer that does); on a layered spec each
 /// domain spans every drawing layer's own column.
 pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 8] = [
-    AuxiliaryScaleChannel { name: "color", slot: |e| &e.color, slot_mut: |e| &mut e.color },
-    AuxiliaryScaleChannel { name: "size", slot: |e| &e.size, slot_mut: |e| &mut e.size },
-    AuxiliaryScaleChannel { name: "shape", slot: |e| &e.shape, slot_mut: |e| &mut e.shape },
-    AuxiliaryScaleChannel { name: "opacity", slot: |e| &e.opacity, slot_mut: |e| &mut e.opacity },
-    AuxiliaryScaleChannel { name: "fill_opacity", slot: |e| &e.fill_opacity, slot_mut: |e| &mut e.fill_opacity },
-    AuxiliaryScaleChannel { name: "stroke_opacity", slot: |e| &e.stroke_opacity, slot_mut: |e| &mut e.stroke_opacity },
-    AuxiliaryScaleChannel { name: "stroke_dash", slot: |e| &e.stroke_dash, slot_mut: |e| &mut e.stroke_dash },
-    AuxiliaryScaleChannel { name: "stroke_width", slot: |e| &e.stroke_width, slot_mut: |e| &mut e.stroke_width },
+    AuxiliaryScaleChannel { name: "color", drawn: crate::spec::layer::InheritedChannel::Color, slot: |e| &e.color, slot_mut: |e| &mut e.color },
+    AuxiliaryScaleChannel { name: "size", drawn: crate::spec::layer::InheritedChannel::Size, slot: |e| &e.size, slot_mut: |e| &mut e.size },
+    AuxiliaryScaleChannel { name: "shape", drawn: crate::spec::layer::InheritedChannel::Shape, slot: |e| &e.shape, slot_mut: |e| &mut e.shape },
+    AuxiliaryScaleChannel { name: "opacity", drawn: crate::spec::layer::InheritedChannel::Opacity, slot: |e| &e.opacity, slot_mut: |e| &mut e.opacity },
+    AuxiliaryScaleChannel { name: "fill_opacity", drawn: crate::spec::layer::InheritedChannel::FillOpacity, slot: |e| &e.fill_opacity, slot_mut: |e| &mut e.fill_opacity },
+    AuxiliaryScaleChannel { name: "stroke_opacity", drawn: crate::spec::layer::InheritedChannel::StrokeOpacity, slot: |e| &e.stroke_opacity, slot_mut: |e| &mut e.stroke_opacity },
+    AuxiliaryScaleChannel { name: "stroke_dash", drawn: crate::spec::layer::InheritedChannel::StrokeDash, slot: |e| &e.stroke_dash, slot_mut: |e| &mut e.stroke_dash },
+    AuxiliaryScaleChannel { name: "stroke_width", drawn: crate::spec::layer::InheritedChannel::StrokeWidth, slot: |e| &e.stroke_width, slot_mut: |e| &mut e.stroke_width },
 ];
 
 /// Merge a single `parent` `EncodingSpec` into a `child` slot.

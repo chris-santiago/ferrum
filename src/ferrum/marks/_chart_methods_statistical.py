@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
 from ferrum._layer import _PendingMark, merge_style
-from ferrum._validate import validate_choice, validate_optional_vocabulary
+from ferrum._validate import coerce_bool, validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import ORIENT_CHOICES
 from ferrum.marks.composite import _MISSING
@@ -1133,7 +1133,7 @@ class StatisticalMarksMixin:
         resolution="screen",
         blend=None,
         min_count=None,
-        log_scale=False,
+        log_scale=None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -1184,9 +1184,15 @@ class StatisticalMarksMixin:
         min_count : int or None, optional
             Minimum count threshold; pixels below this are rendered transparent.
             ``None`` (default) shows all pixels.
-        log_scale : bool, optional
-            Apply a log transform to pixel values before colour mapping.
-            Default is ``False``.
+        log_scale : bool or None, optional
+            Whether the cells' color scale is symlog (``log1p``-compressed)
+            rather than linear. The cells always keep their raw aggregate
+            values, so a ``color=`` colorbar on the value field labels raw
+            counts, densities or means either way. ``None`` (default) is
+            symlog for ``"count"`` and ``"density"`` and linear for every
+            other aggregate; ``True`` or ``False`` is honored on any
+            aggregate. An explicit ``Color(scale=...)`` on the value field
+            wins over it. Any other value raises ``ValueError`` at this call.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -1229,6 +1235,8 @@ class StatisticalMarksMixin:
         validate_aggregate("raster", "mark_raster", aggregate)
         require_aggregate_field("raster", "mark_raster", aggregate, field)
         validate_optional_vocabulary("mark_raster", "blend", blend, blend_accepted_values())
+        if log_scale is not None:
+            log_scale = coerce_bool("mark_raster", "log_scale", log_scale)
 
         # #136 (close-remediation): when the Chart already carries data
         # (Chart(df).mark_raster(...), not a deferred-data chart), field=

@@ -438,6 +438,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -505,6 +506,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -566,6 +568,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -618,6 +621,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -700,6 +704,7 @@ mod tests {
                 vec![0.0, 1.0], vec![100.0, 0.0], false, false,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };

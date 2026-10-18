@@ -1754,7 +1754,7 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
         Mark::Tick => super::marks::tick::build(ctx),
         Mark::Rect => super::marks::rect::build(ctx),
         Mark::Polygon => Ok(super::marks::polygon::build(ctx)),
-        Mark::Image => Ok(super::marks::image::build(ctx)),
+        Mark::Image => super::marks::image::build(ctx),
         Mark::Ribbon => Ok(super::marks::ribbon::build(ctx)),
         Mark::Arc => super::marks::arc::build(ctx),
         Mark::Label => super::marks::label::build(ctx),
@@ -2417,7 +2417,7 @@ mod tests {
         use crate::render::color::{ContinuousScheme, NamedContinuous};
         use crate::render::scale_resolve::ColorScale;
         let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
-        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme, midpoint: None };
+        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme, midpoint: None, transform: crate::render::scale_resolve::ColorTransform::Linear };
         let paint = ClearablePaint::Paint(crate::render::color::from_rgb(0x77, 0x77, 0x77));
         // The continuous branch must consume the f64 directly (no round-trip):
         // the resolved color equals scale.lookup_f64(value).

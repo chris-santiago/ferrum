@@ -572,6 +572,14 @@ def identity_transform(name: str):
     public ``ferrum.Identity`` is the unrelated *position adjustment*
     (``fm.Identity()`` for ``position=``), and a bare re-export invites
     exactly that mix-up.
+
+    A named Identity is a snapshot of the user's rows, never of a
+    statistic's output: every site places it over rows the user supplied
+    (an operand's frame, the chart rows before a statistic). The render
+    reads it on that contract: a column found only in such a snapshot is
+    the user's data, so its missing-column refusal never names the
+    statistic remedy, and a layer reading one is a raw-rows layer, not a
+    statistic sub-layer.
     """
     from ferrum._core import PyIdentity
 

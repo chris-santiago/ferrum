@@ -21,6 +21,7 @@ import itertools
 import json
 import math
 import re
+import warnings
 
 import numpy as np
 import polars as pl
@@ -368,6 +369,12 @@ class TestOrdering:
 #: point/bar honored only the kwargs -- because nothing compared the kinds.
 _ALL_KINDS = ["strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"]
 
+#: The kinds whose marks draw the hue, so a hue legend lists its levels. Boxen's
+#: letter-value bands and outlier points read statistic rows that carry no hue
+#: column, so its hue draws no color and no legend, with a warning per layer
+#: (pinned by ``test_a_boxen_hue_draws_no_legend_and_warns_per_layer``).
+_HUE_LEGEND_KINDS = [kind for kind in _ALL_KINDS if kind != "boxen"]
+
 #: The kinds a caller can hand an already-built category CHANNEL to. All eight
 #: -- ``kind="count"`` used to build its ``Aggregate`` from the raw ``x=``
 #: argument, so a channel object there raised inside the transform constructor
@@ -424,7 +431,7 @@ class TestCallerChannelOptions:
         ).to_svg()
         assert via_channel == via_kwarg
 
-    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    @pytest.mark.parametrize("kind", _HUE_LEGEND_KINDS)
     def test_color_channel_sort_orders_the_legend(self, cat_df, kind):
         svg = fm.catplot(
             cat_df, **_catplot_kwargs(kind, x="cat", hue=fm.Color("grp", sort=["Y", "X"]))
@@ -507,7 +514,7 @@ class TestCallerChannelOptions:
         ).to_svg()
         assert cat_axis_labels(svg) == ["d", "c", "b", "a"]
 
-    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    @pytest.mark.parametrize("kind", _HUE_LEGEND_KINDS)
     def test_hue_order_wins_over_a_channel_hue_on_every_kind(self, cat_df, kind):
         """The color channel's own precedence answer, uniformly (#190).
 
@@ -531,6 +538,29 @@ class TestCallerChannelOptions:
             ),
         ).to_svg()
         assert hue_legend_labels(svg) == ["Y", "X"]
+
+    @pytest.mark.parametrize(
+        "hue_kwargs",
+        [{"hue": fm.Color("grp", sort=["Y", "X"])}, {"hue": "grp", "hue_order": ["Y", "X"]}],
+        ids=["channel-sort", "hue-order"],
+    )
+    def test_a_boxen_hue_draws_no_legend_and_warns_per_layer(self, cat_df, hue_kwargs):
+        """Boxen's bands and outlier points draw statistic rows with no ``grp``.
+
+        No layer draws the hue, so there is no color scale and no legend for
+        either spelling of the order, and each statistic layer warns that it
+        dropped the hue. Rejects a ``Y, X`` legend over boxes that draw none
+        of its colors.
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = fm.catplot(cat_df, **_catplot_kwargs("boxen", x="cat", **hue_kwargs)).to_svg()
+        assert hue_legend_labels(svg) == []
+        assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == [
+            f"catplot: color 'grp' was dropped: the statistic this {mark} mark draws does "
+            f"not carry 'grp', so it draws without color"
+            for mark in ("rect", "point")
+        ]
 
 
 # ---------------------------------------------------------------------------

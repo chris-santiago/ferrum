@@ -92,6 +92,9 @@ pub fn build_scene(
     // → byte-identical.
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<SceneGraph, RenderError> {
+    // The primary y owner `prepare` resolved, so the per-panel scales read
+    // the same layer flags as the prepared layers and slot plan.
+    let spec = &*scale_resolve::with_primary_y_owner(spec);
     // #230-8 (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). A
     // projected coordinate system (`Polar` or `Geo`) combined with any
     // `BreakAxis` structural spec is refused, before any geometry — break or
@@ -4039,6 +4042,7 @@ mod tests {
             stroke_width_is_own: false,
             coord: None,
             dropped_reads: Vec::new(),
+            raster_value_field: None,
         }
     }
 
@@ -8862,10 +8866,10 @@ mod tests {
 
     /// The finding itself. Layer 1 names a positional column that lives in the
     /// BASE batch but not in the `data_source` output it actually reads — the
-    /// exact silent-drop shape, because `scale_resolve::locate_field` searches
-    /// every named output and so happily resolves a scale for it, while the
-    /// mark builder reads only this layer's own batch and produced an empty
-    /// mark batch. The gate must refuse, naming the layer index and column.
+    /// exact silent-drop shape: a scale could resolve from the base batch
+    /// while the mark builder reads only this layer's own batch and produces
+    /// an empty mark batch. The gate must refuse, naming the layer index and
+    /// column.
     #[test]
     fn layer_one_positional_column_absent_from_its_own_batch_raises_naming_layer() {
         pyo3::Python::initialize();
@@ -8926,14 +8930,13 @@ mod tests {
         );
     }
 
-    /// Layer 0 is exempt: a standalone/primary layer with a missing positional
-    /// column keeps raising the plain `UnknownColumn` it always did — the gate
-    /// must not restate that error in a second vocabulary. Asserted through the
-    /// same whole-pipeline entry point every other test here uses (rather than
-    /// against `prepare_render_inputs` alone), so it pins the error a USER
-    /// sees, not merely the one prepare returns internally.
+    /// Layer 0 of a layered spec is judged by the gate like every later
+    /// layer: its missing positional column is refused in the gate's words,
+    /// naming layer 0. The unlayered chart keeps scale resolution's plain
+    /// `UnknownColumn`. Asserted through the same whole-pipeline entry point
+    /// every other test here uses, so it pins the error a USER sees.
     #[test]
-    fn layer_zero_missing_positional_column_still_raises_plain_unknown_column() {
+    fn layer_zero_missing_positional_column_is_refused_by_the_gate() {
         pyo3::Python::initialize();
         let (mut spec, batch) = layer_gate_binned_spec();
         spec.layers
@@ -8949,8 +8952,23 @@ mod tests {
 
         let err = try_build_scene_for(&spec, &batch).expect_err("layer 0's y is unresolvable");
         assert!(
+            matches!(err, RenderError::LayerUnknownColumn { layer: 0, channel: "y", ref name, remedy: None, .. } if name == "no_such_column"),
+            "got {err:?}"
+        );
+
+        let unlayered = ChartSpec {
+            encoding: crate::spec::encoding::Encoding {
+                y: Some(EncodingSpec { field: "no_such_column".into(), ..Default::default() }),
+                ..spec.encoding.clone()
+            },
+            layers: None,
+            transforms: Vec::new(),
+            ..spec
+        };
+        let err = try_build_scene_for(&unlayered, &batch).expect_err("the chart's y is unresolvable");
+        assert!(
             matches!(err, RenderError::UnknownColumn { ref name } if name == "no_such_column"),
-            "layer 0 must keep its existing error shape, got {err:?}"
+            "an unlayered chart keeps its error shape, got {err:?}"
         );
     }
 
@@ -9399,22 +9417,14 @@ mod tests {
     /// Second gate fixture, for the inherited-channel half: the chart-level
     /// `x` names `bin_start`, a column that exists ONLY in the named fan-out
     /// `Bin` output — `__final__` keeps the base schema, so every layer whose
-    /// `data_source` is `None` reads a batch that does NOT carry it. Scale
-    /// resolution still succeeds, because `scale_resolve::domain::locate_field`
-    /// searches the named outputs too; that mismatch is what makes this shape
-    /// the interesting one.
+    /// `data_source` is `None` reads a batch that does NOT carry it.
     ///
-    /// Layer 0 is a bar on the output-only columns (renders empty, layer 0 is
-    /// exempt); layer 1 carries `layer1_mark` and declares only its own
+    /// Layer 0 is a bar drawing the binned output, which carries
+    /// `bin_start`/`count`, so it establishes the `x` axis from its own
+    /// rows; layer 1 carries `layer1_mark` and declares only its own
     /// `y="y0"` under the chart-level `x`. A one-axis `Mark::Rule`/`Mark::Tick`
     /// takes no inherited `x` at layer completion; every other mark takes it
     /// and its builder really does read it.
-    ///
-    /// This is the reviewer's live repro, in Python terms:
-    /// ```text
-    /// base = fm.Chart(df).mark_bar().encode(x="bin_start", y="count").transform(fm.Bin("x", name="b"))
-    /// (base + fm.Chart(df).mark_rule().encode(y="y")).to_svg()
-    /// ```
     fn layer_gate_output_only_x_spec(layer1_mark: Mark) -> (ChartSpec, RecordBatch) {
         use crate::spec::encoding::EncodingSpec;
 
@@ -9427,6 +9437,11 @@ mod tests {
         spec.encoding.color = None;
         let layers = spec.layers.as_mut().expect("layers");
         layers[0].mark = Mark::Bar;
+        layers[0].data_source = Some("binned".into());
+        layers[0].encoding.x = Some(EncodingSpec {
+            field: "bin_start".into(),
+            ..Default::default()
+        });
         layers[0].encoding.y = Some(EncodingSpec {
             field: "count".into(),
             ..Default::default()
@@ -9471,6 +9486,100 @@ mod tests {
         assert!(
             counts.last().is_some_and(|&n| n > 0),
             "the tick layer must emit nodes: {counts:?}"
+        );
+    }
+
+    // ── raster image tooltips read the columns the image draws ──────────
+
+    /// The rows the four raster doors render: 40 points on `x`/`y`, a facet
+    /// column `f`.
+    fn raster_tooltip_batch() -> RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let n = 40;
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("f", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..n).map(|i| f64::from(i) / 4.0).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from((0..n).map(|i| f64::from(i % 7)).collect::<Vec<_>>())),
+                Arc::new(StringArray::from((0..n).map(|i| if i % 2 == 0 { "a" } else { "b" }).collect::<Vec<_>>())),
+            ],
+        )
+        .expect("schema and columns agree")
+    }
+
+    /// The wire an interactive render of a raster image sends, as Python
+    /// lowers it: the image layer reads the Raster output, with `image_tip`
+    /// as its tooltip entries (the auto tooltip lists none, since the image
+    /// draws no column of its own on x/y); `entry` is the layer's public call
+    /// (`mark_raster`; auto-raster substitutes the same layer), `facet` a
+    /// facet field, `point` a point layer over the chart's rows after the
+    /// image, carrying its own `x`/`y` tooltip.
+    fn raster_tooltip_spec(entry: Option<&str>, facet: Option<&str>, point: bool, image_tip: serde_json::Value) -> ChartSpec {
+        let xy = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+        let mut image = xy.clone();
+        image["tooltip_fields"] = image_tip;
+        let mut point_encoding = xy.clone();
+        point_encoding["tooltip_fields"] = serde_json::json!([{"field": "x"}, {"field": "y"}]);
+        let mut layers = vec![serde_json::json!({"mark": "image", "data_source": "raster", "entry": entry, "encoding": image})];
+        if point {
+            layers.push(serde_json::json!({"mark": "point", "encoding": point_encoding}));
+        }
+        let mut spec = serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": xy,
+            "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": "screen", "log_scale": true, "name": "raster"}],
+            "layers": layers,
+        });
+        if let Some(field) = facet {
+            spec["facet"] = serde_json::json!({"field": field, "mode": {"kind": "wrap", "ncols": 2}});
+        }
+        serde_json::from_value(spec).expect("the raster wire deserializes")
+    }
+
+    /// Every raster door's interactive render draws: the image carries no
+    /// tooltip of its x/y (it draws no column of its own there), and a point
+    /// layer beside it keeps its own `x`/`y` tooltip. An explicit `x`
+    /// tooltip on the image names a column its rows do not hold, so it is
+    /// refused in the image's own voice. Rejects rewriting the entry onto the
+    /// image's extent columns, a constant on every cell.
+    #[test]
+    fn a_raster_image_draws_no_xy_tooltip_and_refuses_an_explicit_one() {
+        pyo3::Python::initialize();
+        let batch = raster_tooltip_batch();
+        let none = serde_json::Value::Null;
+        let doors = [
+            ("mark_raster", raster_tooltip_spec(Some("mark_raster"), None, false, none.clone())),
+            ("auto-raster", raster_tooltip_spec(None, None, false, none.clone())),
+            ("faceted raster", raster_tooltip_spec(Some("mark_raster"), Some("f"), false, none.clone())),
+            ("raster + point", raster_tooltip_spec(Some("mark_raster"), None, true, none)),
+        ];
+        for (door, spec) in doors {
+            let scene = try_build_scene_for(&spec, &batch).unwrap_or_else(|e| panic!("{door}: {e}"));
+            let images: Vec<_> = scene
+                .panels
+                .iter()
+                .flat_map(|panel| &panel.marks)
+                .filter(|marks| marks.kind == ferrum_scene::MarkBatchKind::Image)
+                .collect();
+            assert!(!images.is_empty(), "{door}: the image draws");
+            assert!(images.iter().all(|image| image.tooltips.is_none()), "{door}: no image tooltip");
+            if door == "raster + point" {
+                let points = scene.panels[0].marks.iter().find(|m| m.kind == ferrum_scene::MarkBatchKind::Point).expect("the point draws");
+                let names: Vec<&str> = points.tooltips.as_ref().expect("point tooltips")[0].fields.iter().map(|f| f.name.as_str()).collect();
+                assert_eq!(names, ["x", "y"], "the point reads its own columns");
+            }
+        }
+        let explicit = raster_tooltip_spec(Some("mark_raster"), None, false, serde_json::json!([{"field": "x"}]));
+        assert_eq!(
+            try_build_scene_for(&explicit, &batch).expect_err("the image's rows hold no x").to_string(),
+            "mark_raster: encoding 'tooltip' references unknown column 'x' (not present in that layer's data)"
         );
     }
 
@@ -9667,9 +9776,11 @@ mod tests {
         let field = |name: &str| {
             Some(EncodingSpec { field: name.into(), ..Default::default() })
         };
+        // Layer 0 draws `y` too, so the primary y axis is its own and an
+        // independent-y layer 1 keeps its own axis.
         let layer0 = Layer {
             mark: Mark::Tick,
-            encoding: Encoding { x: field("total"), ..Default::default() },
+            encoding: Encoding { x: field("total"), y: field("total"), ..Default::default() },
             ..Default::default()
         };
         let layer1 = Layer {
@@ -9743,15 +9854,13 @@ mod tests {
         let (mut spec, batch) = layer_gate_chain_tail_spec("nope");
         spec.transforms.clear();
         // Without the aggregate, "total" no longer exists anywhere; the
-        // chart-level encoding and layer 0's (exempt from the gate, but must
-        // still resolve so the pipeline reaches layer 1) now bind the column
+        // chart-level encoding and layer 0's (judged by the gate first, so it
+        // must resolve for the pipeline to reach layer 1) now bind the column
         // the untransformed source batch actually has.
-        spec.encoding.x = Some(crate::spec::encoding::EncodingSpec {
-            field: "value".into(),
-            ..Default::default()
-        });
-        spec.layers.as_mut().unwrap()[0].encoding.x =
-            Some(crate::spec::encoding::EncodingSpec { field: "value".into(), ..Default::default() });
+        let value = || Some(crate::spec::encoding::EncodingSpec { field: "value".into(), ..Default::default() });
+        spec.encoding.x = value();
+        let layer0 = &mut spec.layers.as_mut().unwrap()[0].encoding;
+        (layer0.x, layer0.y) = (value(), value());
 
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("layer 1 still names a column absent from its own batch");
@@ -9989,17 +10098,15 @@ mod tests {
 
     /// The column gate judges an independent-y layer's completed encoding as
     /// it judges every other layer's.
-    /// Layer 1 (`independent_y`) declares only its own `y`; its `x` is
-    /// INHERITED from the chart-level encoding, which names a column
-    /// ("value") absent from layer 1's own tail (a `Filter` publishes it
-    /// bare under a named output first, then an unnamed `Aggregate` drops it
-    /// from `__final__`) — so `locate_field` can still resolve an `x` scale
-    /// for the chart from that named output, but layer 1's own batch never
-    /// carries "value". Because layer 1 is a `Mark::Tick` declaring only
-    /// `y`, layer completion gives it no inherited `x`, so the gate never
-    /// checks it and the chart renders; a tick taking the inherited `x`
-    /// would be refused on "value" even though the mark builder never reads
-    /// it.
+    /// Layer 1 (`independent_y`) declares only its own `y`; the chart-level
+    /// `x` names a column ("value") absent from layer 1's own tail (a
+    /// `Filter` publishes it bare under a named output first, then an
+    /// unnamed `Aggregate` drops it from `__final__`), so layer 1's own
+    /// batch never carries "value". Because layer 1 is a `Mark::Tick`
+    /// declaring only `y`, layer completion gives it no inherited `x`, so
+    /// neither the gate nor its own y-slot resolution reads it and the chart
+    /// renders; a tick taking the inherited `x` would be refused on "value"
+    /// even though the mark builder never reads it.
     #[test]
     fn independent_y_tick_with_inherited_x_found_only_in_a_named_output_renders() {
         pyo3::Python::initialize();
@@ -10013,9 +10120,11 @@ mod tests {
         use std::sync::Arc;
 
         let field = |name: &str| Some(EncodingSpec { field: name.into(), ..Default::default() });
+        // Layer 0 draws `y` too, so the primary y axis is its own and layer 1
+        // keeps its own independent axis.
         let layer0 = Layer {
             mark: Mark::Tick,
-            encoding: Encoding { x: field("total"), ..Default::default() },
+            encoding: Encoding { x: field("total"), y: field("y_own"), ..Default::default() },
             ..Default::default()
         };
         let layer1 = Layer {
@@ -10197,9 +10306,11 @@ mod tests {
                 name: name.map(Into::into),
             })
         };
+        // Layer 0 draws `y` too, so the primary y axis is its own and an
+        // independent-y layer 1 keeps its own axis.
         let layer0 = Layer {
             mark: Mark::Tick,
-            encoding: Encoding { x: field("mean_v"), ..Default::default() },
+            encoding: Encoding { x: field("mean_v"), y: field("mean_v"), ..Default::default() },
             ..Default::default()
         };
         let layer1: Layer = serde_json::from_value(layer1).expect("the layer wire JSON deserializes");
@@ -10446,6 +10557,7 @@ mod tests {
             x2: None,
             y2: None,
             y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 

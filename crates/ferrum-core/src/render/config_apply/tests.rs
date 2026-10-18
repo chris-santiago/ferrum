@@ -1856,6 +1856,7 @@ mod chart_config_application_tests {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let cfg = ColorConfigSpec {
             domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]),
@@ -1881,6 +1882,7 @@ mod chart_config_application_tests {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let cfg = ColorConfigSpec {
             range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),
@@ -1921,6 +1923,7 @@ mod chart_config_application_tests {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
         });
         let cfg = ColorConfigSpec {
             range: Some(vec![
@@ -2341,6 +2344,7 @@ mod chart_config_application_tests {
                 domain: (0.0, 1.0),
                 scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
                 midpoint: None,
+transform: crate::render::scale_resolve::ColorTransform::Linear,
             });
             let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair)).unwrap();
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");

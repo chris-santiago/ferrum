@@ -1013,6 +1013,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 200.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1093,6 +1094,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 100.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -1184,6 +1186,7 @@ mod tests {
                 vec!["a".to_string(), "b".to_string()], vec![0.0, 100.0], DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1247,6 +1250,7 @@ mod tests {
                 y_range.to_vec(), DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1550,6 +1554,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1615,6 +1620,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1953,6 +1959,7 @@ mod tests {
                 )),
                 y: y_scale(),
                 color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+                raster_cells: None,
             };
             let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -2000,6 +2007,7 @@ mod tests {
                 x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
                 y: y_scale(),
                 color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+                raster_cells: None,
             };
             let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -2069,6 +2077,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 60.0], vec![300.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -2154,6 +2163,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -2253,6 +2263,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -2493,6 +2504,7 @@ mod tests {
                 vec![0.0, 30.0], vec![300.0, 0.0], false, false,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
@@ -2569,6 +2581,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![300.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
@@ -3080,6 +3093,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
@@ -3137,6 +3151,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
@@ -3195,6 +3210,7 @@ mod tests {
             stroke_dash: None,
             stroke_width: None,
             x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
@@ -3256,6 +3272,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -3333,6 +3350,7 @@ mod tests {
             x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 300.0], DiscreteLayout::UNPADDED)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -3419,6 +3437,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -3498,6 +3517,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -3709,6 +3729,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["1".into(), "2".into(), "3".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         // Sanity: this schema is genuinely stamp-less.
         assert!(!crate::render::position::BatchPositionMeta::from_batch(&batch).stack_value_on_x(), "test batch must carry no value-on-X stamp");
@@ -3788,6 +3809,7 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![300.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         assert_eq!(mark_style.paint.corner_radius, 8.0, "fixture sanity: theme corner radius must reach the resolved style");
@@ -3837,6 +3859,7 @@ mod tests {
         crate::render::scale_resolve::ResolvedScales {
             x, y,
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
         }
     }
 

@@ -159,6 +159,8 @@ fn sorted_categorical_domain(
     coord_flipped: bool,
     layer_reads: &[AuxRead<'_>],
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
+    // A layered spec's every read draws its field, so the union is `None`
+    // only for an unlayered spec, which reads its one batch.
     let (layer_categories, domain_batch) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
         Some((categories, first_batch)) => (Some(categories), first_batch),
         None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared)),
@@ -188,13 +190,13 @@ fn sorted_categorical_domain(
 
 /// The data extent of a numeric auxiliary channel (size, the opacity family)
 /// bound to `field`. On a layered spec (`layer_reads` non-empty) it is the
-/// union over every layer's own column ([`aux_numeric_union`]) that reads as
-/// numbers: the scale is continuous, so a later layer's categorical column
-/// stays out, with one `LayerScaleExcluded` in `warnings`
-/// ([`admitted_aux_reads`]). Otherwise, or when no layer's batch holds its
-/// field, `field` read from `batch`, unioned on a faceted chart with the
-/// all-panels batch so marks scale through the same domain as the legend.
-/// `channel` names the channel in a dtype refusal and an exclusion.
+/// union over every drawing layer's own column ([`aux_numeric_union`]) that
+/// reads as numbers: the scale is continuous, so a later layer's categorical
+/// column stays out, with one `LayerScaleExcluded` in `warnings`
+/// ([`admitted_aux_reads`]). On an unlayered spec, `field` read from `batch`,
+/// unioned on a faceted chart with the all-panels batch so marks scale
+/// through the same domain as the legend. `channel` names the channel in a
+/// dtype refusal and an exclusion.
 fn numeric_aux_extent(
     field: &str,
     channel: &'static str,
@@ -204,7 +206,7 @@ fn numeric_aux_extent(
     layer_reads: &[AuxRead<'_>],
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<(f64, f64), RenderError> {
-    let layer_reads = admitted_aux_reads(layer_reads, channel, false, batch, transform_outputs, warnings);
+    let layer_reads = admitted_aux_reads(layer_reads, channel, false, batch, transform_outputs, warnings)?;
     let extent = |col: &dyn arrow::array::Array, field: &str| {
         column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
             field: field.to_string(),
@@ -212,8 +214,9 @@ fn numeric_aux_extent(
             context: Some(channel),
         })
     };
-    if let Some(union) = aux_numeric_union(&layer_reads, batch, transform_outputs, facet_shared, extent)? {
-        return Ok(union);
+    if !layer_reads.is_empty() {
+        return aux_numeric_union(&layer_reads, batch, transform_outputs, facet_shared, extent)?
+            .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() });
     }
     let col = batch
         .column_by_name(field)
@@ -540,17 +543,15 @@ pub fn build_stroke_dash_scale(
             entries: range.iter().map(|v| v.to_string()).collect(),
         });
     }
-    let col = match layer_reads.first().and_then(|lead| lead.locate(batch, transform_outputs)) {
-        Some(located) => located.col,
-        None => batch
-            .column_by_name(&dash_enc.field)
-            .ok_or_else(|| RenderError::UnknownColumn { name: dash_enc.field.clone() })?
-            .as_ref(),
-    };
+    let col = match layer_reads.first() {
+        Some(lead) => lead.locate(batch, transform_outputs).map(|located| located.col),
+        None => batch.column_by_name(&dash_enc.field).map(|col| col.as_ref()),
+    }
+    .ok_or_else(|| RenderError::UnknownColumn { name: dash_enc.field.clone() })?;
     let categorical =
         infer_spec_type(dash_enc, col.data_type()) != crate::spec::encoding::DataType::Quantitative;
     let mut warnings = Vec::new();
-    let layer_reads = admitted_aux_reads(layer_reads, "stroke_dash", categorical, batch, transform_outputs, &mut warnings);
+    let layer_reads = admitted_aux_reads(layer_reads, "stroke_dash", categorical, batch, transform_outputs, &mut warnings)?;
     if !categorical {
         // Numeric column: palette indices, no categorical resolution.
         return Ok((None, warnings));

@@ -600,7 +600,9 @@ fn run_branch(
     Ok(tail)
 }
 
-fn spec_name(spec: &TransformSpec) -> Option<&str> {
+/// The name a step publishes its output under: a named step's `name`, a
+/// `Branch`'s own, `None` for an unnamed step, which advances the chain.
+pub(crate) fn spec_name(spec: &TransformSpec) -> Option<&str> {
     // The module + wrapper columns of the table are unused here; we keep
     // them in the pattern so spec_name reads off the same source of truth.
     macro_rules! arm {
