@@ -14,6 +14,19 @@
 //! forced Utf8 stringification; an ungrouped call (`spec.group = None`)
 //! still emits an all-null Utf8 `group` column, matching prior behavior.
 //!
+//! `spec.groupby` names further key columns: letter values are computed per
+//! combination of `group` and every `groupby` field, and every output batch
+//! (primary and secondary) appends one column per `groupby` field, named and
+//! typed as its input column, after its own columns. An empty `groupby`
+//! appends nothing. A row with a null on a `groupby` field belongs to no
+//! combination and is dropped, with one warning per field naming the
+//! dropped-row count; a `groupby` field equal to `group` is `group`'s own
+//! dimension and keeps its pooling. A whole-frame call whose drop removed at
+//! least one row and left no plottable value refuses; inside a facet panel
+//! (`TransformContext::is_partition`) it degrades to an empty panel instead.
+//! A call that dropped nothing returns whatever it computes, an empty batch
+//! included, exactly as the ungrouped call does.
+//!
 //! Secondary named outputs:
 //! - `outliers` (or `<name>_outliers`): `[group: <original dtype>|Null, value: Float64, is_outlier: Bool]`,
 //!   filtered to rows where the input value falls outside the outermost letter-value
@@ -26,7 +39,7 @@
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int32Array, RecordBatch, StringArray,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -35,8 +48,9 @@ use std::sync::Arc;
 
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
-    group_partition_multi, groupby_key_at, materialize_groupby_col, validate_groupby_columns,
-    KeyValue, NullKeyPolicy,
+    batch_with_groupby_columns, deserialize_groupby_vec, group_partition_multi, groupby_key_at,
+    materialize_groupby_col, refuse_groupby_output_collision, refuse_repeated_groupby_names,
+    validate_groupby_columns, warn_null_groupby_rows_dropped, KeyValue, NullKeyPolicy,
 };
 
 /// Maximum depth for per-depth named outputs.
@@ -100,6 +114,16 @@ pub(crate) struct LetterValueSpec {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub group: Option<String>,
+    /// Key columns beyond `group`: letter values are computed per combination
+    /// of `group` and these, and every output batch carries them. A field
+    /// equal to `group` is allowed, so a caller can carry the category column
+    /// under its own name.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     pub k_depth: KDepth,
     #[serde(default = "default_outlier_threshold")]
     pub outlier_threshold: f64,
@@ -159,57 +183,170 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
 
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
 
+/// One letter-value combination: its `group` value (null when the call has
+/// no `group`) and its `groupby` values, in `spec.groupby` order. Ordered by
+/// `group` first, so an empty `groupby` orders exactly as `group` alone.
+type ComboKey = (KeyValue, Vec<KeyValue>);
+
+/// The output dtypes of a call's key columns, split as [`ComboKey`] is:
+/// `group`'s (Utf8 for an ungrouped call's all-null column) and each
+/// `groupby` field's.
+type KeyDtypes = (DataType, Vec<DataType>);
+
+/// The columns a call partitions its rows by, and how a partition key maps
+/// back onto `group` and `groupby`: `group` (when set) leads, then every
+/// `groupby` field other than `group`. A `groupby` field equal to `group`
+/// reads `group`'s own value instead of partitioning by it twice.
+struct KeyColumns {
+    columns: Vec<String>,
+    has_group: bool,
+    /// Each `groupby` field's position in `columns`.
+    by_positions: Vec<usize>,
+}
+
+impl KeyColumns {
+    fn of(spec: &LetterValueSpec) -> Self {
+        let mut columns: Vec<String> = spec.group.iter().cloned().collect();
+        let by_positions = spec
+            .groupby
+            .iter()
+            .map(|field| match columns.iter().position(|c| c == field) {
+                Some(at) => at,
+                None => {
+                    columns.push(field.clone());
+                    columns.len() - 1
+                }
+            })
+            .collect();
+        Self { columns, has_group: spec.group.is_some(), by_positions }
+    }
+
+    /// Split per-column values (a row's key, or the columns' dtypes) into
+    /// `group`'s value and the `groupby` values, in `spec.groupby` order.
+    /// `no_group` stands for `group` when the call has none: a null key, or
+    /// the Utf8 dtype of an ungrouped call's all-null `group` column.
+    /// `values` holds one entry per column for every key the `Pool`
+    /// partition or [`extract_values`] builds.
+    fn split<T: Clone + std::fmt::Debug>(&self, values: &[T], no_group: T) -> PyResult<(T, Vec<T>)> {
+        let at = |i: usize| {
+            values.get(i).cloned().ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "stat_letter_value: internal error: {values:?} has no key column {i}"
+                ))
+            })
+        };
+        let group = if self.has_group { at(0)? } else { no_group };
+        let by = self.by_positions.iter().map(|&i| at(i)).collect::<PyResult<Vec<_>>>()?;
+        Ok((group, by))
+    }
+
+    fn combo(&self, key: &[KeyValue]) -> PyResult<ComboKey> {
+        self.split(key, KeyValue::Null)
+    }
+
+    /// The `groupby` fields whose null keys are dropped with a warning:
+    /// every one but a field equal to `group`, which is `group`'s own
+    /// dimension and keeps its pooling policy.
+    fn dropping_fields(&self, spec: &LetterValueSpec) -> Vec<String> {
+        spec.groupby
+            .iter()
+            .filter(|field| spec.group.as_ref() != Some(*field))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a combination holds a null on one of the
+    /// [`KeyColumns::dropping_fields`] dimensions, so its rows belong to no
+    /// combination.
+    fn drops(&self, (_, by): &ComboKey) -> bool {
+        self.by_positions
+            .iter()
+            .zip(by)
+            .any(|(&at, value)| !(self.has_group && at == 0) && matches!(value, KeyValue::Null))
+    }
+
+    /// The `"col=value"` label naming one combination in a
+    /// [`TransformWarning`]'s `group` field (`context.rs`'s documented
+    /// contract), built with the same [`describe_group_keys`] formatter every
+    /// sibling adopter (`smooth.rs`, `robust.rs`) uses, so the label text
+    /// cannot drift from theirs.
+    ///
+    /// Names each distinct key column once, so `groupby=[group]` labels
+    /// exactly as `group` alone does. `None` when no key column holds a
+    /// value: no key column at all, or a null `group` with nothing else to
+    /// identify the combination.
+    fn label(&self, (group, by): &ComboKey) -> Option<String> {
+        let mut values = vec![KeyValue::Null; self.columns.len()];
+        if self.has_group {
+            if let Some(slot) = values.first_mut() {
+                *slot = group.clone();
+            }
+        }
+        for (&at, value) in self.by_positions.iter().zip(by) {
+            if let Some(slot) = values.get_mut(at) {
+                *slot = value.clone();
+            }
+        }
+        if values.iter().all(|value| matches!(value, KeyValue::Null)) {
+            return None;
+        }
+        Some(describe_group_keys(&self.columns, &values))
+    }
+}
+
 struct DepthRow {
     group: KeyValue,
+    by: Vec<KeyValue>,
     depth: i32,
     lower: f64,
     upper: f64,
     level: String,
 }
 
-/// Extract `(group key, value)` pairs (dropping null/NaN values) plus the
-/// group column's dtype for output materialization.
+/// Extract `(combination key, value)` pairs in input row order (dropping
+/// null/NaN values).
 ///
-/// `spec.group = None` (ungrouped) reports [`DataType::Utf8`] — matching the
-/// prior all-null Utf8 `group` output column — and every row's key is
-/// [`KeyValue::Null`]. A `spec.group = Some(col)` is resolved and dtype-checked
-/// through the shared [`validate_groupby_columns`] (the same request-level
-/// validator `group_partition_multi` itself calls, and every groupby-taking
-/// sibling transform uses), rather than a hand-duplicated existence lookup
-/// and dtype gate — one rule, one wording, enforced once. Every supported
-/// dtype (the same set every groupby-taking sibling transform accepts) is
-/// then read through the shared [`groupby_key_at`] extractor, so a null group
-/// VALUE (as opposed to no group column at all) also maps to
-/// `KeyValue::Null` and the two null-group and no-group cases pool together,
-/// exactly as the prior `Option<String>` representation did.
-fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<(Vec<(KeyValue, f64)>, DataType)> {
+/// The key columns ([`KeyColumns`]) are resolved and dtype-checked through
+/// the shared [`validate_groupby_columns`] (the same request-level validator
+/// `group_partition_multi` itself calls, and every groupby-taking sibling
+/// transform uses), and every row's key is read through the shared
+/// [`groupby_key_at`] extractor, so a null `group` VALUE maps to
+/// `KeyValue::Null` and pools with the other null-`group` rows, exactly as
+/// [`compute_depths`]' `Pool` partition does, while a row with a null on a
+/// [`KeyColumns::dropping_fields`] dimension is dropped, as
+/// [`compute_depths`] drops it. With no `group` and no `groupby`, every row's
+/// key is `(Null, [])`.
+fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(ComboKey, f64)>> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
         .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
     let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
 
-    let group_cols: Vec<String> = spec.group.iter().cloned().collect();
-    let resolved = validate_groupby_columns(batch, &group_cols, "stat_letter_value")?;
-    let group_info: Option<(ArrayRef, DataType)> =
-        resolved.first().map(|(gi, dt)| (batch.column(*gi).clone(), dt.clone()));
-    let group_dtype = group_info.as_ref().map(|(_, dt)| dt.clone()).unwrap_or(DataType::Utf8);
+    let key_columns = KeyColumns::of(spec);
+    let resolved = validate_groupby_columns(batch, &key_columns.columns, "stat_letter_value")?;
 
     let mut out = Vec::with_capacity(varr.len());
     for i in 0..varr.len() {
         if varr.is_null(i) { continue; }
         let v = varr.value(i);
         if v.is_nan() { continue; }
-        let key = match &group_info {
-            None => KeyValue::Null,
-            Some((arr, dt)) => groupby_key_at(arr.as_ref(), dt, i).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "stat_letter_value: internal error extracting group key at row {i}"
-                ))
-            })?,
-        };
-        out.push((key, v));
+        let key = resolved
+            .iter()
+            .map(|(gi, dt)| {
+                groupby_key_at(batch.column(*gi).as_ref(), dt, i).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "stat_letter_value: internal error extracting group key at row {i}"
+                    ))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let combo = key_columns.combo(&key)?;
+        if key_columns.drops(&combo) {
+            continue;
+        }
+        out.push((combo, v));
     }
-    Ok((out, group_dtype))
+    Ok(out)
 }
 
 pub(crate) fn apply(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -229,18 +366,24 @@ pub(crate) fn apply_with_context(
             "stat_letter_value: outlier_threshold must be finite and >= 0",
         ));
     }
-    let (depths, group_dtype) = compute_depths(spec, batch, ctx)?;
-    build_primary_batch(&depths, &group_dtype)
+    let (depths, dtypes) = compute_depths(spec, batch, ctx)?;
+    build_primary_batch(spec, &depths, &dtypes)
 }
 
-/// Determine the order in which groups are emitted.
+/// Determine the order in which combinations are emitted.
 ///
-/// With `sort = None` the order is lexicographic over the (optional) group key
-/// — identical to the historical `BTreeMap` iteration order. With `sort =
-/// Some`, groups are ranked by the requested per-group aggregate over the
-/// non-null, non-NaN value rows [`compute_depths`] assigns to each group (so
-/// `count` counts only the rows that boxen actually plots). Ties are broken
-/// lexicographically for byte-deterministic output.
+/// With `sort = None` the order is lexicographic over the combination key
+/// (`group` first, then the `groupby` values) — identical to the historical
+/// `BTreeMap` iteration order. With `sort = Some`, the CATEGORIES (the
+/// `group` values that make the categorical axis) are ranked by the requested
+/// aggregate over the non-null, non-NaN value rows [`compute_depths`] assigns
+/// to all of the category's combinations (so `count` counts only the rows
+/// that boxen actually plots), and each category's combinations follow in
+/// key order. Ranking each combination on its own would order the axis by a
+/// single combination's aggregate instead of the category's. Ties are broken
+/// lexicographically for byte-deterministic output. Without `groupby` every
+/// category has exactly one combination, so this ranks groups as it always
+/// has.
 ///
 /// This ranking has no equivalent in [`group_partition_multi`] —
 /// no other groupby-taking transform in the crate ranks its groups by an
@@ -250,15 +393,14 @@ pub(crate) fn apply_with_context(
 /// already resolved which rows belong to which group.
 fn group_order(
     sort: &Option<LetterValueSort>,
-    grouped: &BTreeMap<KeyValue, Vec<f64>>,
-) -> Vec<KeyValue> {
+    grouped: &BTreeMap<ComboKey, Vec<f64>>,
+) -> Vec<ComboKey> {
     // BTreeMap keys are already ordered by KeyValue's Ord impl (Null first,
     // then the typed variants in their natural order — lexicographic for a
     // Utf8 group column, numeric for an Int/UInt/Float/Bool one); this is
     // the `sort = None` answer and the tie-break baseline.
-    let lexicographic: Vec<KeyValue> = grouped.keys().cloned().collect();
     let Some(sort) = sort else {
-        return lexicographic;
+        return grouped.keys().cloned().collect();
     };
 
     let aggregate = |vs: &[f64]| -> f64 {
@@ -282,13 +424,22 @@ fn group_order(
         }
     };
 
+    // Each category's pooled values and its combinations, in key order.
+    let mut categories: BTreeMap<&KeyValue, (Vec<f64>, Vec<ComboKey>)> = BTreeMap::new();
+    for (key, vs) in grouped {
+        let (pooled, combos) = categories.entry(&key.0).or_default();
+        pooled.extend_from_slice(vs);
+        combos.push(key.clone());
+    }
+
     // Rank lexicographic order by aggregate; stable sort keeps lexicographic
     // order among ties, then we reverse for descending.
-    let mut ordered = lexicographic;
-    ordered.sort_by(|a, b| {
-        let av = aggregate(grouped.get(a).map(Vec::as_slice).unwrap_or(&[]));
-        let bv = aggregate(grouped.get(b).map(Vec::as_slice).unwrap_or(&[]));
-        let cmp = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+    let mut ranked: Vec<(f64, Vec<ComboKey>)> = categories
+        .into_values()
+        .map(|(pooled, combos)| (aggregate(&pooled), combos))
+        .collect();
+    ranked.sort_by(|(av, _), (bv, _)| {
+        let cmp = av.partial_cmp(bv).unwrap_or(std::cmp::Ordering::Equal);
         match sort.order {
             SortOrder::Asc => cmp,
             SortOrder::Desc => cmp.reverse(),
@@ -297,7 +448,7 @@ fn group_order(
         // stable, so equal aggregates retain ascending-lexicographic order
         // under both directions.
     });
-    ordered
+    ranked.into_iter().flat_map(|(_, combos)| combos).collect()
 }
 
 /// Resolve the value column, partition `batch` by `spec.group` through the
@@ -349,19 +500,40 @@ fn group_order(
 ///     unconditionally for both its branches — replacing a real policy this
 ///     module already owns with a policy borrowed from a different transform
 ///     shape, not a simplification.
+///
+/// `Pool` covers `group` only. The partition runs over `group` and the
+/// `groupby` fields under the one policy, and the combinations holding a null
+/// on a [`KeyColumns::dropping_fields`] dimension are then dropped here, with
+/// [`warn_null_groupby_rows_dropped`]'s per-field warning: a null `groupby`
+/// key, unlike a null `group`, is not drawn as its own combination.
 fn compute_depths(
     spec: &LetterValueSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
-) -> PyResult<(Vec<DepthRow>, DataType)> {
+) -> PyResult<(Vec<DepthRow>, KeyDtypes)> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
         .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
     let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
 
-    let group_cols: Vec<String> = spec.group.iter().cloned().collect();
-    let partition = group_partition_multi(batch, &group_cols, "stat_letter_value", NullKeyPolicy::Pool, ctx)?;
-    let group_dtype = partition.dtypes.first().cloned().unwrap_or(DataType::Utf8);
+    refuse_repeated_groupby_names("stat_letter_value", &spec.groupby)?;
+    refuse_groupby_output_collision("stat_letter_value", &spec.groupby, &output_column_names())?;
+    let key_columns = KeyColumns::of(spec);
+    let dropping_fields = key_columns.dropping_fields(spec);
+    // With a dropping field, the partition's all-null warning could only
+    // fire when that field is null on every row, where it would claim the
+    // rows were pooled; they are dropped instead, and the per-field drop
+    // warning below says so. Without one, the partition reports for `group`.
+    let quiet = TransformContext::default();
+    let partition_ctx = if dropping_fields.is_empty() { ctx } else { &quiet };
+    let partition = group_partition_multi(
+        batch,
+        &key_columns.columns,
+        "stat_letter_value",
+        NullKeyPolicy::Pool,
+        partition_ctx,
+    )?;
+    let dtypes = key_columns.split(&partition.dtypes, DataType::Utf8)?;
 
     // Per-group (non-null, non-NaN) sorted values. The partitioner decides
     // WHICH rows belong to which group; filtering by the VALUE column's own
@@ -381,9 +553,15 @@ fn compute_depths(
     // Skipping the insert here restores the exact invariant the
     // pre-migration `pairs`-based map always had: every key in `groups` has
     // at least one real value.
-    let mut groups: BTreeMap<KeyValue, Vec<f64>> = BTreeMap::new();
+    warn_null_groupby_rows_dropped(batch, &dropping_fields, "stat_letter_value", ctx);
+    let mut groups: BTreeMap<ComboKey, Vec<f64>> = BTreeMap::new();
+    let mut dropped_rows = 0_usize;
     for (key, rows) in &partition.groups {
-        let g = key.first().cloned().unwrap_or(KeyValue::Null);
+        let g = key_columns.combo(key)?;
+        if key_columns.drops(&g) {
+            dropped_rows += rows.len();
+            continue;
+        }
         let mut vs: Vec<f64> = rows.iter().filter_map(|&r| {
             if varr.is_null(r) { return None; }
             let v = varr.value(r);
@@ -395,6 +573,13 @@ fn compute_depths(
         }
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         groups.insert(g, vs);
+    }
+    // Only the null-key drop refuses: a call that dropped nothing returns
+    // what it computed, an empty batch included, as the ungrouped call does.
+    // One facet panel the drop emptied degrades to an empty panel (the drop
+    // warning already names it); the whole frame left empty refuses.
+    if dropped_rows > 0 && groups.is_empty() && !ctx.is_partition {
+        return Err(PyValueError::new_err("stat_letter_value: empty input after filter"));
     }
     let order = group_order(&spec.sort, &groups);
 
@@ -410,26 +595,9 @@ fn compute_depths(
             // #162's named case: the strategy computed a depth deeper than
             // this transform can emit (12 Tukey letters / named per-depth
             // outputs) and it was silently capped.
-            // `g` is the group KEY (e.g. `KeyValue::Str("big")` or
-            // `KeyValue::Int(6)`); `TransformWarning::group`'s documented
-            // contract is a `"col=value"` label (`context.rs`'s doc), built
-            // here with the same `describe_group_keys` formatter every
-            // sibling adopter (`smooth.rs`, `robust.rs`) uses, so the label
-            // text cannot drift from theirs. `g` is `KeyValue::Null` in
-            // exactly the two cases with no real "col=value" to report: no
-            // group column at all, or this group's own key being null —
-            // `spec.group.is_some()` disambiguates the latter from the
-            // former, but both fall back to `group: None`.
-            let group = if matches!(g, KeyValue::Null) {
-                None
-            } else {
-                spec.group.as_ref().map(|col| {
-                    describe_group_keys(std::slice::from_ref(col), std::slice::from_ref(g))
-                })
-            };
             ctx.warn(TransformWarning::ParameterClamped {
                 transform: "LetterValue".into(),
-                group,
+                group: key_columns.label(g),
                 param: "k_depth".into(),
                 requested: raw_k.to_string(),
                 applied: k.to_string(),
@@ -450,7 +618,8 @@ fn compute_depths(
                 format!("depth_{depth}")
             };
             rows.push(DepthRow {
-                group: g.clone(),
+                group: g.0.clone(),
+                by: g.1.clone(),
                 depth: depth as i32,
                 lower,
                 upper,
@@ -458,17 +627,51 @@ fn compute_depths(
             });
         }
     }
-    Ok((rows, group_dtype))
+    Ok((rows, dtypes))
 }
 
-fn build_primary_batch(rows: &[DepthRow], group_dtype: &DataType) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("group", group_dtype.clone(), true),
-        Field::new("depth", DataType::Int32, false),
-        Field::new("lower", DataType::Float64, false),
-        Field::new("upper", DataType::Float64, false),
-        Field::new("level", DataType::Utf8, false),
-    ]));
+/// The primary batch's own columns, before any `groupby` column; `group`
+/// is declared at the ungrouped call's Utf8 and takes `group`'s input dtype
+/// otherwise. Read by [`build_primary_batch`] and the `letter_value`
+/// registry entry.
+pub(crate) const PRIMARY_COLUMNS: &[(&str, DataType)] = &[
+    ("group", DataType::Utf8),
+    ("depth", DataType::Int32),
+    ("lower", DataType::Float64),
+    ("upper", DataType::Float64),
+    ("level", DataType::Utf8),
+];
+
+/// Every column name this transform writes itself, across its primary and
+/// secondary batches: the names a `groupby` field is refused against.
+fn output_column_names() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in PRIMARY_COLUMNS.iter().chain(OUTLIERS_COLUMNS).chain(DEPTH_COLUMNS) {
+        if !names.iter().any(|n| n == name) {
+            names.push((*name).to_string());
+        }
+    }
+    names
+}
+
+/// A batch's fields from one of the column tables above: `group` takes
+/// `group_dtype` and is the one nullable column.
+fn own_fields(columns: &[(&str, DataType)], group_dtype: &DataType) -> Vec<Field> {
+    columns
+        .iter()
+        .map(|(name, dt)| {
+            let dt = if *name == "group" { group_dtype.clone() } else { dt.clone() };
+            Field::new(*name, dt, *name == "group")
+        })
+        .collect()
+}
+
+fn build_primary_batch(
+    spec: &LetterValueSpec,
+    rows: &[DepthRow],
+    (group_dtype, by_dtypes): &KeyDtypes,
+) -> PyResult<RecordBatch> {
+    let fields = own_fields(PRIMARY_COLUMNS, group_dtype);
     let group_keys: Vec<Vec<KeyValue>> = rows.iter().map(|r| vec![r.group.clone()]).collect();
     let group_col =
         materialize_groupby_col(&group_keys, 0, group_dtype).map_err(PyValueError::new_err)?;
@@ -483,8 +686,8 @@ fn build_primary_batch(rows: &[DepthRow], group_dtype: &DataType) -> PyResult<Re
         Arc::new(Float64Array::from(uppers)),
         Arc::new(StringArray::from(levels.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
     ];
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_letter_value: {e}")))
+    let by_keys: Vec<Vec<KeyValue>> = rows.iter().map(|r| r.by.clone()).collect();
+    batch_with_groupby_columns(&spec.groupby, by_dtypes, &by_keys, fields, cols, "stat_letter_value")
 }
 
 /// The outlier batch's key under default construction; a spec `name` prefixes
@@ -517,12 +720,16 @@ pub(crate) fn depth_key(k: usize) -> String {
 }
 
 /// Compute the secondary named outputs: outliers + depth_1..depth_12.
+///
+/// Reads the combinations back off `primary_batch`: its `group` column and
+/// one column per `groupby` field, each at its own dtype.
 pub(crate) fn secondary_outputs(
     spec: &LetterValueSpec,
     input_batch: &RecordBatch,
     primary_batch: &RecordBatch,
 ) -> PyResult<Vec<(String, RecordBatch)>> {
-    let group_dtype = primary_batch.schema().field(0).data_type().clone();
+    let primary_schema = primary_batch.schema();
+    let group_dtype = primary_schema.field(0).data_type().clone();
     let groups_col = primary_batch.column(0);
     let depths_col = primary_batch.column(1).as_any().downcast_ref::<Int32Array>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Int32Array for 'depth' column"))?;
@@ -530,22 +737,40 @@ pub(crate) fn secondary_outputs(
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Float64Array for 'lower' column"))?;
     let uppers_col = primary_batch.column(3).as_any().downcast_ref::<Float64Array>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Float64Array for 'upper' column"))?;
+    let by_cols: Vec<(ArrayRef, DataType)> = spec
+        .groupby
+        .iter()
+        .map(|name| {
+            let i = primary_schema.index_of(name).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "stat_letter_value: expected groupby column '{name}' in the primary batch"
+                ))
+            })?;
+            Ok((primary_batch.column(i).clone(), primary_schema.field(i).data_type().clone()))
+        })
+        .collect::<PyResult<_>>()?;
+    let by_dtypes: Vec<DataType> = by_cols.iter().map(|(_, dt)| dt.clone()).collect();
 
-    // Reads row `i`'s group key from the primary batch's "group" column at
-    // its own (possibly non-Utf8) dtype, via the shared extractor rather than
-    // a hardcoded `StringArray` downcast.
-    let group_at = |i: usize| -> PyResult<KeyValue> {
-        groupby_key_at(groups_col.as_ref(), &group_dtype, i).ok_or_else(|| {
+    // Reads row `i`'s key from one of the primary batch's key columns at its
+    // own (possibly non-Utf8) dtype, via the shared extractor rather than a
+    // hardcoded `StringArray` downcast.
+    let key_at = |arr: &ArrayRef, dt: &DataType, i: usize| -> PyResult<KeyValue> {
+        groupby_key_at(arr.as_ref(), dt, i).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "stat_letter_value: internal error extracting group key at row {i}"
             ))
         })
     };
+    let combo_at = |i: usize| -> PyResult<ComboKey> {
+        let group = key_at(groups_col, &group_dtype, i)?;
+        let by = by_cols.iter().map(|(arr, dt)| key_at(arr, dt, i)).collect::<PyResult<_>>()?;
+        Ok((group, by))
+    };
 
-    // Per-group max-depth (lower, upper) extents — the outermost letter value.
-    let mut tail: BTreeMap<KeyValue, (i32, f64, f64)> = BTreeMap::new();
+    // Per-combination max-depth (lower, upper) extents — the outermost letter value.
+    let mut tail: BTreeMap<ComboKey, (i32, f64, f64)> = BTreeMap::new();
     for i in 0..primary_batch.num_rows() {
-        let g = group_at(i)?;
+        let g = combo_at(i)?;
         let d = depths_col.value(i);
         let lo = lowers_col.value(i);
         let hi = uppers_col.value(i);
@@ -557,13 +782,15 @@ pub(crate) fn secondary_outputs(
 
     // ---- outliers output ----
     // For each non-null input row: classify as outlier if value falls outside
-    //   [lower_K - threshold*(upper_K - lower_K), upper_K + threshold*(upper_K - lower_K)].
+    //   [lower_K - threshold*(upper_K - lower_K), upper_K + threshold*(upper_K - lower_K)]
+    // of its own combination's outermost letter values.
     // Only rows that ARE outliers are emitted (schema unchanged: `is_outlier`
     // survives as a column but is always `true` on the rows that reach it) —
     // the batch is a filtered outlier list, not a flagged copy of every input
     // row, so a boxen chart's outlier layer draws only the points it names.
-    let (input_pairs, _) = extract_values(spec, input_batch)?;
-    let mut o_groups: Vec<KeyValue> = Vec::new();
+    let input_pairs = extract_values(spec, input_batch)?;
+    let mut o_groups: Vec<Vec<KeyValue>> = Vec::new();
+    let mut o_by: Vec<Vec<KeyValue>> = Vec::new();
     let mut o_vals: Vec<f64> = Vec::new();
     let mut o_flags: Vec<bool> = Vec::new();
     for (g, v) in &input_pairs {
@@ -578,59 +805,54 @@ pub(crate) fn secondary_outputs(
         if !is_outlier {
             continue;
         }
-        o_groups.push(g.clone());
+        o_groups.push(vec![g.0.clone()]);
+        o_by.push(g.1.clone());
         o_vals.push(*v);
         o_flags.push(is_outlier);
     }
-    // Column names/nullability still come from the shared consts (no drift
-    // risk); only the "group" entry's declared dtype is overridden to this
-    // call's actual group dtype, since the consts describe the schema under
-    // DEFAULT (ungrouped, Utf8) construction — see their doc comments and
+    // Column names/nullability come from the shared consts (no drift risk);
+    // only the "group" entry's declared dtype is overridden to this call's
+    // actual group dtype, since the consts describe the schema under DEFAULT
+    // (ungrouped, Utf8) construction — see their doc comments and
     // `registry::letter_value_secondary_outputs`.
-    let outliers_schema = Arc::new(Schema::new(
-        OUTLIERS_COLUMNS
-            .iter()
-            .map(|(name, dt)| {
-                let dt = if *name == "group" { group_dtype.clone() } else { dt.clone() };
-                Field::new(*name, dt, *name == "group")
-            })
-            .collect::<Vec<_>>(),
-    ));
-    let o_group_keys: Vec<Vec<KeyValue>> = o_groups.iter().map(|k| vec![k.clone()]).collect();
     let o_group_col =
-        materialize_groupby_col(&o_group_keys, 0, &group_dtype).map_err(PyValueError::new_err)?;
-    let outliers_batch = RecordBatch::try_new(
-        outliers_schema,
+        materialize_groupby_col(&o_groups, 0, &group_dtype).map_err(PyValueError::new_err)?;
+    let outliers_batch = batch_with_groupby_columns(
+        &spec.groupby,
+        &by_dtypes,
+        &o_by,
+        own_fields(OUTLIERS_COLUMNS, &group_dtype),
         vec![
             o_group_col,
             Arc::new(Float64Array::from(o_vals)) as ArrayRef,
             Arc::new(BooleanArray::from(o_flags)) as ArrayRef,
         ],
-    ).map_err(|e| PyValueError::new_err(format!("stat_letter_value outliers: {e}")))?;
+        "stat_letter_value outliers",
+    )?;
 
     // ---- per-depth outputs (depth_1..depth_12) ----
-    // Each depth_K output is the primary rows filtered to depth==K, projecting only
-    // [group, lower, upper, level] (no depth column — implicit in the output name).
-    let depth_schema = Arc::new(Schema::new(
-        DEPTH_COLUMNS
-            .iter()
-            .map(|(name, dt)| {
-                let dt = if *name == "group" { group_dtype.clone() } else { dt.clone() };
-                Field::new(*name, dt, *name == "group")
-            })
-            .collect::<Vec<_>>(),
-    ));
+    // Each depth_K output is the primary rows filtered to depth==K, projecting
+    // [group, lower, upper, level] plus the groupby columns (no depth column —
+    // implicit in the output name).
     let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'level' column"))?;
-    let mut by_depth: BTreeMap<i32, (Vec<KeyValue>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
+    #[derive(Clone, Default)]
+    struct DepthSlice {
+        groups: Vec<Vec<KeyValue>>,
+        by: Vec<Vec<KeyValue>>,
+        lowers: Vec<f64>,
+        uppers: Vec<f64>,
+        levels: Vec<String>,
+    }
+    let mut by_depth: BTreeMap<i32, DepthSlice> = BTreeMap::new();
     for i in 0..primary_batch.num_rows() {
-        let d = depths_col.value(i);
-        let g = group_at(i)?;
-        let entry = by_depth.entry(d).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
-        entry.0.push(g);
-        entry.1.push(lowers_col.value(i));
-        entry.2.push(uppers_col.value(i));
-        entry.3.push(level_col.value(i).to_string());
+        let (group, by) = combo_at(i)?;
+        let slice = by_depth.entry(depths_col.value(i)).or_default();
+        slice.groups.push(vec![group]);
+        slice.by.push(by);
+        slice.lowers.push(lowers_col.value(i));
+        slice.uppers.push(uppers_col.value(i));
+        slice.levels.push(level_col.value(i).to_string());
     }
 
     let key_outliers = crate::transform::registry::secondary_key(spec.name.as_deref(), OUTLIERS_KEY);
@@ -638,21 +860,23 @@ pub(crate) fn secondary_outputs(
     let mut out: Vec<(String, RecordBatch)> = Vec::new();
     out.push((key_outliers, outliers_batch));
     for k in 1..=K_MAX_NAMED {
-        let (groups_v, lowers_v, uppers_v, levels_v) = by_depth
-            .get(&(k as i32))
-            .map(|t| t.clone())
-            .unwrap_or_else(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
-        let group_keys_v: Vec<Vec<KeyValue>> = groups_v.iter().map(|k| vec![k.clone()]).collect();
-        let group_col_v = materialize_groupby_col(&group_keys_v, 0, &group_dtype)
+        let slice = by_depth.remove(&(k as i32)).unwrap_or_default();
+        let group_col_v = materialize_groupby_col(&slice.groups, 0, &group_dtype)
             .map_err(PyValueError::new_err)?;
         let cols: Vec<ArrayRef> = vec![
             group_col_v,
-            Arc::new(Float64Array::from(lowers_v)) as ArrayRef,
-            Arc::new(Float64Array::from(uppers_v)) as ArrayRef,
-            Arc::new(StringArray::from(levels_v.iter().map(|s| s.as_str()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(Float64Array::from(slice.lowers)) as ArrayRef,
+            Arc::new(Float64Array::from(slice.uppers)) as ArrayRef,
+            Arc::new(StringArray::from(slice.levels.iter().map(|s| s.as_str()).collect::<Vec<_>>())) as ArrayRef,
         ];
-        let batch = RecordBatch::try_new(depth_schema.clone(), cols)
-            .map_err(|e| PyValueError::new_err(format!("stat_letter_value depth_{k}: {e}")))?;
+        let batch = batch_with_groupby_columns(
+            &spec.groupby,
+            &by_dtypes,
+            &slice.by,
+            own_fields(DEPTH_COLUMNS, &group_dtype),
+            cols,
+            &format!("stat_letter_value depth_{k}"),
+        )?;
         out.push((crate::transform::registry::secondary_key(spec.name.as_deref(), &depth_key(k)), batch));
     }
     Ok(out)
@@ -712,10 +936,18 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// ``k_depth``. Used to draw boxen plots that reveal the full distributional
 /// shape for large datasets.
 ///
-/// Output columns: ``letter``, ``value_lo``, ``value_hi`` (Float64 edges
-/// of each letter-value interval) plus ``is_outlier`` (Bool) for the
-/// ``Outliers``-equivalent rows, optionally preceded by the ``group``
-/// column.
+/// Output columns: ``group`` (the ``group`` column's values and type, all
+/// null Utf8 when ``group`` is unset), ``depth`` (Int32, 1 at the median),
+/// ``lower`` and ``upper`` (Float64 letter values at probabilities
+/// ``2**-depth`` and ``1 - 2**-depth``) and ``level`` (the Tukey letter,
+/// ``"M"``, ``"F"``, ``"E"``, ...), one row per depth per combination, then
+/// one column per ``groupby`` field. Two further named outputs (prefixed
+/// ``<name>_`` when ``name`` is set): ``outliers`` holds ``group``,
+/// ``value`` (Float64) and ``is_outlier`` (Bool, always true) for each
+/// input row beyond its combination's outermost letter values, and
+/// ``depth_1`` through ``depth_12`` hold ``group``, ``lower``, ``upper`` and
+/// ``level`` for that depth's rows (empty past the deepest depth). Each also
+/// ends with the ``groupby`` columns.
 ///
 /// Parameters
 /// ----------
@@ -726,6 +958,14 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// group : str, optional
 ///     Single group-key column; letter-values computed independently per
 ///     group.
+/// groupby : list of str, default []
+///     Further key columns; letter values are computed per combination of
+///     ``group`` and these, and every output carries one column per field,
+///     named and typed as its input column. A row with a null on a
+///     ``groupby`` field is dropped, with one warning per field naming the
+///     dropped-row count, and a call left with no plottable value raises. A
+///     field may equal ``group``; it then keeps ``group``'s rule, where null
+///     ``group`` rows form their own combination.
 /// k_depth : {"tukey", "proportion", "trustworthy", "full"}, \
 ///           default "proportion"
 ///     Algorithm for choosing the number of letter-value levels:
@@ -768,15 +1008,19 @@ impl PyLetterValue {
     #[pyo3(signature = (
         value, *,
         group = None,
+        groupby = vec![],
         k_depth = "proportion",
         k_proportion = 0.007,
         outlier_threshold = 0.0,
         name = None,
         sort = None,
     ))]
+    // One parameter per Python keyword argument of the constructor.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         value: &str,
         group: Option<String>,
+        groupby: Vec<String>,
         k_depth: &str,
         k_proportion: f64,
         outlier_threshold: f64,
@@ -786,6 +1030,7 @@ impl PyLetterValue {
         if value.is_empty() {
             return Err(PyValueError::new_err("LetterValue: value must be non-empty"));
         }
+        refuse_repeated_groupby_names("LetterValue", &groupby)?;
         if !outlier_threshold.is_finite() || outlier_threshold < 0.0 {
             return Err(PyValueError::new_err(
                 "LetterValue: outlier_threshold must be finite and >= 0",
@@ -811,6 +1056,7 @@ impl PyLetterValue {
         Ok(PyLetterValue(TransformSpec::LetterValue(LetterValueSpec {
             value: value.to_string(),
             group,
+            groupby,
             k_depth: kd,
             outlier_threshold,
             name,
@@ -821,8 +1067,8 @@ impl PyLetterValue {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::LetterValue(s) => format!(
-                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={}, sort={:?}, name={:?})",
-                s.value, s.group, s.k_depth, s.outlier_threshold, s.sort, s.name,
+                "LetterValue(value='{}', group={:?}, groupby={:?}, k_depth={:?}, outlier_threshold={}, sort={:?}, name={:?})",
+                s.value, s.group, s.groupby, s.k_depth, s.outlier_threshold, s.sort, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -834,6 +1080,7 @@ impl PyLetterValue {
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::Schema;
 
     fn batch1col(name: &str, vs: Vec<f64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, true)]));
@@ -862,6 +1109,7 @@ mod tests {
         let values: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
         let batch = batch1col("x", values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(),
             group: None,
             k_depth: KDepth::Full,
@@ -888,6 +1136,7 @@ mod tests {
         let values: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Full,
@@ -914,6 +1163,7 @@ mod tests {
     fn letter_value_tukey_default_does_not_warn() {
         let batch = batch1col("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(),
             group: None,
             k_depth: KDepth::Tukey,
@@ -929,6 +1179,7 @@ mod tests {
     #[test]
     fn test_letter_value_round_trip_json() {
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(),
             group: Some("g".into()),
             k_depth: KDepth::Proportion { p: 0.007 },
@@ -950,6 +1201,7 @@ mod tests {
         // A valid sort dict round-trips losslessly (byte-identity for the
         // ferrum-produced wire: LetterValueSort serializes exactly {op, order}).
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Tukey,
@@ -984,6 +1236,7 @@ mod tests {
         let vs: Vec<f64> = (1..=100).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1027,6 +1280,7 @@ mod tests {
         let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1054,6 +1308,7 @@ mod tests {
         vs.push(1000.0);
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1093,6 +1348,7 @@ mod tests {
         vs.push(1000.0);
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1125,6 +1381,7 @@ mod tests {
         let vs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1161,6 +1418,7 @@ mod tests {
         let vs: Vec<f64> = (0..8192).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1190,6 +1448,7 @@ mod tests {
         let vs: Vec<f64> = (1..=100).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1207,6 +1466,7 @@ mod tests {
         let vs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1245,6 +1505,7 @@ mod tests {
         let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1265,6 +1526,7 @@ mod tests {
         let values: Vec<f64> = vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 5.0, 6.0, 7.0];
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Full,
             outlier_threshold: 1.5,
@@ -1284,6 +1546,7 @@ mod tests {
         let values: Vec<f64> = vec![1.0, 2.0, 1.0, 2.0, 15.0, 15.0];
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Full,
             outlier_threshold: 1.5,
@@ -1308,6 +1571,7 @@ mod tests {
         ];
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Full,
             outlier_threshold: 1.5,
@@ -1348,6 +1612,7 @@ mod tests {
             vec![6, 6, 6, 6, 6, 8, 8, 8, 8, 8],
         );
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("cyl".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1398,6 +1663,7 @@ mod tests {
             ],
         ).unwrap();
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("d".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1434,6 +1700,7 @@ mod tests {
             ],
         ).unwrap();
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("d".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1463,6 +1730,7 @@ mod tests {
         let groups = vec![7i64; n];
         let batch = batch_value_int64_group(vs, groups);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("cyl".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1512,6 +1780,7 @@ mod tests {
             ],
         ).unwrap();
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1541,6 +1810,7 @@ mod tests {
         let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1591,6 +1861,7 @@ mod tests {
         ];
         let batch = batch_grouped(groups, values);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: Some("g".into()),
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
@@ -1647,6 +1918,7 @@ mod tests {
         let vs: Vec<f64> = (1..=9).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Full,
             outlier_threshold: default_outlier_threshold(),
@@ -1684,6 +1956,7 @@ mod tests {
         let vs: Vec<f64> = std::iter::repeat(5.0).take(10).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
+            groupby: Vec::new(),
             value: "x".into(), group: None,
             k_depth: KDepth::Tukey,
             outlier_threshold: default_outlier_threshold(),
@@ -1697,5 +1970,477 @@ mod tests {
             outliers.1.num_rows(), 0,
             "nothing lies beyond a constant group's single letter value"
         );
+    }
+
+    // ── groupby: one statistic per groupby combination ───────────────────
+
+    fn lv_spec(json: serde_json::Value) -> LetterValueSpec {
+        serde_json::from_value(json).expect("a well-formed LetterValue wire spec")
+    }
+
+    /// A batch of nullable Utf8 key columns plus a Float64 `v` column.
+    fn keyed_batch(keys: &[(&str, Vec<Option<&str>>)], v: Vec<f64>) -> RecordBatch {
+        let mut fields: Vec<Field> =
+            keys.iter().map(|(name, _)| Field::new(*name, DataType::Utf8, true)).collect();
+        fields.push(Field::new("v", DataType::Float64, true));
+        let mut cols: Vec<ArrayRef> = keys
+            .iter()
+            .map(|(_, vals)| Arc::new(StringArray::from(vals.clone())) as ArrayRef)
+            .collect();
+        cols.push(Arc::new(Float64Array::from(v)));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+    }
+
+    fn strs(b: &RecordBatch, name: &str) -> Vec<Option<String>> {
+        let a = b.column_by_name(name).unwrap_or_else(|| panic!("no column '{name}'"));
+        let a = a.as_any().downcast_ref::<StringArray>().unwrap();
+        (0..a.len()).map(|i| (!a.is_null(i)).then(|| a.value(i).to_string())).collect()
+    }
+
+    fn floats(b: &RecordBatch, name: &str) -> Vec<f64> {
+        let a = b.column_by_name(name).unwrap_or_else(|| panic!("no column '{name}'"));
+        let a = a.as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..a.len()).map(|i| a.value(i)).collect()
+    }
+
+    fn ints(b: &RecordBatch, name: &str) -> Vec<i32> {
+        let a = b.column_by_name(name).unwrap_or_else(|| panic!("no column '{name}'"));
+        let a = a.as_any().downcast_ref::<Int32Array>().unwrap();
+        (0..a.len()).map(|i| a.value(i)).collect()
+    }
+
+    fn some(vals: &[&str]) -> Vec<Option<String>> {
+        vals.iter().map(|s| Some(s.to_string())).collect()
+    }
+
+    fn secondary<'a>(outs: &'a [(String, RecordBatch)], key: &str) -> &'a RecordBatch {
+        &outs.iter().find(|(k, _)| k == key).unwrap_or_else(|| panic!("no output '{key}'")).1
+    }
+
+    /// Two hue combinations inside category `a` get their own letter values,
+    /// not `a`'s pooled ones: the pooled median of `a` is 4.5, a value
+    /// neither combination has.
+    #[test]
+    fn letter_value_groupby_computes_per_combination_and_carries_the_key() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"); 5].into_iter().chain(vec![Some("a"); 3]).chain(vec![Some("b"); 3]).collect()),
+                ("h", vec![Some("x"); 5].into_iter().chain(vec![Some("y"); 3]).chain(vec![Some("x"); 3]).collect()),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 100.0, 200.0, 300.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), some(&["a", "a", "a", "b"]));
+        assert_eq!(strs(&out, "h"), some(&["x", "x", "y", "x"]));
+        assert_eq!(ints(&out, "depth"), vec![1, 2, 1, 1]);
+        assert_eq!(floats(&out, "lower"), vec![3.0, 2.0, 20.0, 200.0]);
+        assert_eq!(floats(&out, "upper"), vec![3.0, 4.0, 20.0, 200.0]);
+    }
+
+    /// Two groupby fields partition per combination; with no `group` the
+    /// `group` column stays all-null, as an ungrouped call's does.
+    #[test]
+    fn letter_value_groupby_two_fields_computes_per_combination() {
+        let batch = keyed_batch(
+            &[
+                ("h1", vec![Some("p"), Some("p"), Some("p"), Some("p"), Some("s"), Some("s")]),
+                ("h2", vec![Some("q"), Some("q"), Some("q"), Some("r"), Some("q"), Some("q")]),
+            ],
+            vec![1.0, 2.0, 3.0, 7.0, 5.0, 6.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "groupby": ["h1", "h2"], "k_depth": {"type": "full"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "h1"), some(&["p", "p", "s"]));
+        assert_eq!(strs(&out, "h2"), some(&["q", "r", "q"]));
+        assert_eq!(floats(&out, "lower"), vec![2.0, 7.0, 5.5]);
+        assert_eq!(strs(&out, "group"), vec![None, None, None]);
+    }
+
+    /// An absent `groupby` and an explicit empty one are the same spec, and
+    /// the empty list is not written back to the wire.
+    #[test]
+    fn letter_value_empty_groupby_matches_absent_groupby() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"), Some("a"), Some("a"), Some("b"), Some("b")])],
+            vec![1.0, 2.0, 30.0, 4.0, 5.0],
+        );
+        let absent = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "k_depth": {"type": "full"},
+        }));
+        let empty = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": [], "k_depth": {"type": "full"},
+        }));
+        assert_eq!(absent, empty);
+        assert!(serde_json::to_value(&empty).unwrap().get("groupby").is_none());
+        let a = apply(&absent, &batch).unwrap();
+        let e = apply(&empty, &batch).unwrap();
+        assert_eq!(a, e);
+        let names: Vec<String> = e.schema().fields().iter().map(|f| f.name().clone()).collect();
+        assert_eq!(names, ["group", "depth", "lower", "upper", "level"]);
+        assert_eq!(
+            secondary_outputs(&absent, &batch, &a).unwrap(),
+            secondary_outputs(&empty, &batch, &e).unwrap(),
+        );
+    }
+
+    /// The outlier and per-depth batches carry the groupby key too, and the
+    /// outlier fence is each combination's own: pooled over `a`, 2.0 would be
+    /// an outlier and 10.0 would not.
+    #[test]
+    fn letter_value_groupby_secondary_outputs_fence_per_combination() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"); 10]),
+                ("h", vec![Some("x"); 5].into_iter().chain(vec![Some("y"); 5]).collect()),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let primary = apply(&spec, &batch).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secondary(&outs, OUTLIERS_KEY);
+        assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
+        assert_eq!(strs(outliers, "h"), some(&["x", "x", "y", "y"]));
+        let depth_1 = secondary(&outs, &depth_key(1));
+        assert_eq!(strs(depth_1, "h"), some(&["x", "y"]));
+        assert_eq!(floats(depth_1, "lower"), vec![3.0, 30.0]);
+        let depth_2 = secondary(&outs, &depth_key(2));
+        assert_eq!(strs(depth_2, "h"), some(&["x", "y"]));
+        assert_eq!(floats(depth_2, "upper"), vec![4.0, 40.0]);
+    }
+
+    /// A one-row combination computes its own degenerate statistic and a
+    /// combination with no plottable value emits nothing; neither disturbs
+    /// its siblings.
+    #[test]
+    fn letter_value_groupby_small_combinations_compute_their_own_statistic() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"), Some("a"), Some("a"), Some("b"), Some("b"), Some("b")]),
+                ("h", vec![Some("x"), Some("y"), Some("y"), Some("x"), Some("x"), Some("x")]),
+            ],
+            vec![7.0, f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), some(&["a", "b"]));
+        assert_eq!(strs(&out, "h"), some(&["x", "x"]));
+        assert_eq!(floats(&out, "lower"), vec![7.0, 2.0]);
+        assert_eq!(floats(&out, "upper"), vec![7.0, 2.0]);
+    }
+
+    fn ctx_warnings(ctx: &TransformContext) -> Vec<TransformWarning> {
+        ctx.warnings.borrow().clone()
+    }
+
+    /// A null `groupby` key belongs to no combination: its rows are dropped
+    /// from the primary, outlier and depth batches alike, with one warning
+    /// naming the field and the count. Pooled into a null combination, the
+    /// two null rows would draw their own box, and 100 and 200 would sit in
+    /// no fence of `x`'s.
+    #[test]
+    fn letter_value_groupby_null_key_rows_are_dropped_with_a_warning() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"); 5]),
+                ("h", vec![None, None, Some("x"), Some("x"), Some("x")]),
+            ],
+            vec![100.0, 200.0, 1.0, 2.0, 3.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(strs(&out, "h"), some(&["x"]));
+        assert_eq!(floats(&out, "lower"), vec![2.0]);
+        let warnings = ctx_warnings(&ctx);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(
+            warnings[0].to_string(),
+            "LetterValue: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+             fill or filter the nulls in 'h'"
+        );
+
+        let outs = secondary_outputs(&spec, &batch, &out).unwrap();
+        let outliers = secondary(&outs, OUTLIERS_KEY);
+        assert_eq!(floats(outliers, "value"), vec![1.0, 3.0]);
+        assert_eq!(strs(outliers, "h"), some(&["x", "x"]));
+        let depth_1 = secondary(&outs, &depth_key(1));
+        assert_eq!(strs(depth_1, "h"), some(&["x"]));
+        assert_eq!(floats(depth_1, "lower"), vec![2.0]);
+    }
+
+    /// Dropping every row's null `groupby` key leaves nothing to plot, which
+    /// refuses rather than drawing an empty chart.
+    #[test]
+    fn letter_value_groupby_all_null_keys_refuse() {
+        pyo3::Python::initialize();
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"), Some("a")]), ("h", vec![None, None])],
+            vec![1.0, 2.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let err = apply(&spec, &batch).unwrap_err().to_string();
+        assert_eq!(err, "ValueError: stat_letter_value: empty input after filter");
+    }
+
+    /// A grouped call that drops nothing behaves exactly like the ungrouped
+    /// call: all-NaN values (or no rows at all) return an empty batch, not a
+    /// refusal. Only rows removed by the null-key drop can make it refuse.
+    #[test]
+    fn letter_value_groupby_without_null_keys_returns_empty_like_ungrouped() {
+        let all_nan = keyed_batch(
+            &[("g", vec![Some("a"), Some("a")]), ("h", vec![Some("x"), Some("y")])],
+            vec![f64::NAN, f64::NAN],
+        );
+        let no_rows = keyed_batch(&[("g", vec![]), ("h", vec![])], vec![]);
+        let grouped = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ungrouped = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "k_depth": {"type": "full"},
+        }));
+        for batch in [&all_nan, &no_rows] {
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&grouped, batch, &ctx).expect("nothing was dropped");
+            assert_eq!(out.num_rows(), 0);
+            assert_eq!(apply(&ungrouped, batch).unwrap().num_rows(), 0);
+            assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
+        }
+    }
+
+    /// A `groupby` field equal to `group` is `group`'s own dimension: a null
+    /// `group` still pools into its own combination, unwarned, exactly as
+    /// without `groupby`.
+    #[test]
+    fn letter_value_groupby_equal_to_group_keeps_group_null_pooling() {
+        let batch = keyed_batch(&[("g", vec![None, None, Some("a")])], vec![1.0, 3.0, 9.0]);
+        let grouped = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&grouped, &batch, &ctx).unwrap();
+        assert_eq!(strs(&out, "group"), vec![None, Some("a".to_string())]);
+        assert_eq!(strs(&out, "g"), vec![None, Some("a".to_string())]);
+        assert_eq!(floats(&out, "lower"), vec![2.0, 9.0]);
+        assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
+    }
+
+    /// The depth-cap label names each distinct key column once, so
+    /// `groupby=[group]` labels exactly as `group` alone does, for a real and
+    /// for a null `group` value alike.
+    #[test]
+    fn letter_value_groupby_equal_to_group_labels_as_group_alone() {
+        let clamped_labels = |spec: &LetterValueSpec, batch: &RecordBatch| -> Vec<Option<String>> {
+            let ctx = TransformContext::default();
+            apply_with_context(spec, batch, &ctx).unwrap();
+            ctx_warnings(&ctx)
+                .into_iter()
+                .filter_map(|w| match w {
+                    TransformWarning::ParameterClamped { group, .. } => Some(group),
+                    _ => None,
+                })
+                .collect()
+        };
+        let alone = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "k_depth": {"type": "full"},
+        }));
+        let grouped = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
+        }));
+        let values: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
+        let named = keyed_batch(&[("g", vec![Some("big"); 10_000])], values.clone());
+        assert_eq!(clamped_labels(&grouped, &named), vec![Some("g=big".to_string())]);
+        assert_eq!(clamped_labels(&grouped, &named), clamped_labels(&alone, &named));
+        let null = keyed_batch(&[("g", vec![None; 10_000])], values);
+        assert_eq!(clamped_labels(&grouped, &null), vec![None]);
+        assert_eq!(clamped_labels(&grouped, &null), clamped_labels(&alone, &null));
+    }
+
+    /// With `groupby` naming `group`, the outlier and depth batches carry the
+    /// category under its own name too, equal to their `group` column.
+    #[test]
+    fn letter_value_groupby_equal_to_group_secondary_outputs_carry_it() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"); 5].into_iter().chain(vec![Some("b"); 5]).collect())],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
+        }));
+        let primary = apply(&spec, &batch).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secondary(&outs, OUTLIERS_KEY);
+        assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
+        assert_eq!(strs(outliers, "g"), some(&["a", "a", "b", "b"]));
+        assert_eq!(strs(outliers, "g"), strs(outliers, "group"));
+        let depth_2 = secondary(&outs, &depth_key(2));
+        assert_eq!(strs(depth_2, "g"), some(&["a", "b"]));
+        assert_eq!(strs(depth_2, "g"), strs(depth_2, "group"));
+    }
+
+    /// With `groupby` but no `group`, the secondary batches keep their
+    /// all-null `group` column and carry the `groupby` key.
+    #[test]
+    fn letter_value_groupby_without_group_secondary_outputs_carry_it() {
+        let batch = keyed_batch(
+            &[("h", vec![Some("x"); 5].into_iter().chain(vec![Some("y"); 5]).collect())],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let primary = apply(&spec, &batch).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secondary(&outs, OUTLIERS_KEY);
+        assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
+        assert_eq!(strs(outliers, "h"), some(&["x", "x", "y", "y"]));
+        assert_eq!(strs(outliers, "group"), vec![None; 4]);
+        let depth_1 = secondary(&outs, &depth_key(1));
+        assert_eq!(strs(depth_1, "h"), some(&["x", "y"]));
+        assert_eq!(strs(depth_1, "group"), vec![None, None]);
+        assert_eq!(floats(depth_1, "lower"), vec![3.0, 30.0]);
+    }
+
+    /// A non-text `groupby` key keeps its input type on every batch.
+    #[test]
+    fn letter_value_groupby_int_key_keeps_its_type() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(arrow::array::Int64Array::from(vec![7, 7, 7, 3])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 30.0, 4.0])),
+        ]).unwrap();
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "groupby": ["k"], "k_depth": {"type": "full"},
+        }));
+        let primary = apply(&spec, &batch).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        for (name, b) in std::iter::once(("primary", &primary)).chain(outs.iter().map(|(k, b)| (k.as_str(), b))) {
+            let field = b.schema().field_with_name("k").unwrap_or_else(|_| panic!("{name} lacks 'k'")).clone();
+            assert_eq!(field.data_type(), &DataType::Int64, "{name}");
+        }
+        let k = primary.column_by_name("k").unwrap().as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        assert_eq!(k.values().to_vec(), vec![3, 7]);
+    }
+
+    #[test]
+    fn letter_value_groupby_missing_column_refuses() {
+        pyo3::Python::initialize();
+        let batch = keyed_batch(&[("g", vec![Some("a")])], vec![1.0]);
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["ghost"], "k_depth": {"type": "full"},
+        }));
+        let err = apply(&spec, &batch).unwrap_err().to_string();
+        assert!(
+            err.contains("stat_letter_value: groupby column 'ghost' not found"),
+            "{err}"
+        );
+    }
+
+    /// A groupby column named like one of this transform's output columns
+    /// would make every reader of that column read the wrong one.
+    #[test]
+    fn letter_value_groupby_output_collision_refuses() {
+        pyo3::Python::initialize();
+        for taken in ["group", "lower", "value", "is_outlier"] {
+            let batch = keyed_batch(&[(taken, vec![Some("a")])], vec![1.0]);
+            let spec = lv_spec(serde_json::json!({
+                "value": "v", "groupby": [taken], "k_depth": {"type": "full"},
+            }));
+            let err = apply(&spec, &batch).unwrap_err().to_string();
+            assert!(err.contains("collides"), "{taken}: {err}");
+        }
+    }
+
+    /// `sort` ranks the categorical-axis categories by their pooled
+    /// aggregate, then lists each category's combinations in key order.
+    /// Ranking each combination on its own would put `a` first (its `x`
+    /// combination sums to 100, the largest), though `b`'s pooled sum (120)
+    /// beats `a`'s (101).
+    #[test]
+    fn letter_value_groupby_sort_ranks_categories_by_pooled_aggregate() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"), Some("a"), Some("b"), Some("b")]),
+                ("h", vec![Some("x"), Some("y"), Some("x"), Some("y")]),
+            ],
+            vec![100.0, 1.0, 60.0, 60.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+            "sort": {"op": "sum", "order": "desc"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), some(&["b", "b", "a", "a"]));
+        assert_eq!(strs(&out, "h"), some(&["x", "y", "x", "y"]));
+    }
+
+    /// The depth-cap warning names the whole combination whose depth was
+    /// capped.
+    #[test]
+    fn letter_value_groupby_depth_cap_names_the_combination() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("big"); 10_000]), ("h", vec![Some("x"); 10_000])],
+            (0..10_000).map(|i| i as f64).collect(),
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext::default();
+        apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                TransformWarning::ParameterClamped { group: Some(g), .. } if g == "g=big, h=x"
+            ),
+            "got {warnings:?}"
+        );
+    }
+
+    /// A `groupby` field equal to `group` carries the category under its
+    /// own name without partitioning by it twice.
+    #[test]
+    fn letter_value_groupby_may_name_the_group_column() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"), Some("a"), Some("a"), Some("b")])],
+            vec![1.0, 2.0, 3.0, 9.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), some(&["a", "b"]));
+        assert_eq!(strs(&out, "g"), some(&["a", "b"]));
+        assert_eq!(floats(&out, "lower"), vec![2.0, 9.0]);
+    }
+
+    #[test]
+    fn letter_value_constructor_takes_groupby_and_refuses_a_repeat() {
+        pyo3::Python::initialize();
+        let ok = PyLetterValue::new("v", Some("g".into()), vec!["h".into()], "tukey", 0.007, 0.0, None, None)
+            .expect("a groupby list constructs");
+        assert!(matches!(&ok.0, TransformSpec::LetterValue(s) if s.groupby == ["h"]));
+        let err = PyLetterValue::new("v", None, vec!["h".into(), "h".into()], "tukey", 0.007, 0.0, None, None)
+            .err()
+            .expect("a repeated groupby name refuses")
+            .to_string();
+        assert!(err.contains("LetterValue: groupby column 'h' is repeated"), "{err}");
     }
 }

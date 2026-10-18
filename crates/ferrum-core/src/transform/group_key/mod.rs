@@ -305,6 +305,27 @@ pub(crate) fn groupby_field_nullable() -> bool {
     true
 }
 
+/// Build one output batch from a transform's own `fields`/`cols` followed by
+/// one column per `groupby` field: named as the field, typed as `dtypes`,
+/// nullable ([`groupby_field_nullable`]), and read from each row's key in
+/// `keys` (one `KeyValue` per `groupby` field, in order). `context` prefixes
+/// a batch-construction error in the calling transform's voice.
+pub(crate) fn batch_with_groupby_columns(
+    groupby: &[String],
+    dtypes: &[DataType],
+    keys: &[Vec<KeyValue>],
+    mut fields: Vec<Field>,
+    mut cols: Vec<ArrayRef>,
+    context: &str,
+) -> PyResult<RecordBatch> {
+    for (gi, (name, dt)) in groupby.iter().zip(dtypes).enumerate() {
+        fields.push(Field::new(name, dt.clone(), groupby_field_nullable()));
+        cols.push(materialize_groupby_col(keys, gi, dt).map_err(PyValueError::new_err)?);
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)
+        .map_err(|e| PyValueError::new_err(format!("{context}: {e}")))
+}
+
 /// Build an empty (zero-row) output column for the given groupby dtype.
 ///
 /// Used by transforms (e.g. violin) that emit a valid, correctly-typed output
@@ -696,6 +717,8 @@ fn display_name_for_label(label: &str) -> &str {
         "stat_summary" => "Summary",
         "stat_smooth" => "Smooth",
         "stat_kde" => "Kde",
+        "stat_qq" => "QQ",
+        "stat_letter_value" => "LetterValue",
         "data_impute" => "Impute",
         "data_window" => "DataWindow",
         // `robust.rs` already passes the Python-facing name as its `label`
@@ -743,6 +766,34 @@ pub(crate) fn warn_if_group_keys_all_null(
         columns: group_cols.join(", "),
         disposition: null_keys.all_null_disposition().to_string(),
     });
+}
+
+/// Report, once per `fields` entry holding a null, how many rows a null in
+/// that field dropped from every group, as
+/// [`TransformWarning::NullKeyRowsDropped`] in the `groupby` scope: the same
+/// warning, in the same words, the facet partition gives a null facet value.
+/// For the grouped transforms whose `groupby` drops a null key with a warning
+/// rather than silently (`LetterValue`, `QQ`); call it with the fields whose
+/// null rows the transform actually drops. A field absent from `batch` counts
+/// nothing: the partition has already refused it.
+pub(crate) fn warn_null_groupby_rows_dropped(
+    batch: &RecordBatch,
+    fields: &[String],
+    label: &str,
+    warn_ctx: &TransformContext,
+) {
+    for field in fields {
+        let rows = batch.column_by_name(field).map_or(0, |column| column.null_count());
+        if rows > 0 {
+            warn_ctx.warn(TransformWarning::NullKeyRowsDropped {
+                scope: crate::transform::context::NullKeyScope::Groupby {
+                    transform: display_name_for_label(label).to_string(),
+                },
+                field: field.clone(),
+                rows,
+            });
+        }
+    }
 }
 
 /// Give an UNGROUPED request exactly one whole-batch group, even when the

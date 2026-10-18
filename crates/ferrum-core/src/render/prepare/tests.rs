@@ -8054,7 +8054,7 @@ fn rows_whose_frame_lacks_the_facet_field_repeat_in_every_panel() {
     assert_eq!(str_col(out, "panel"), ["p", "p", "q", "q"]);
     assert_eq!(
         warnings,
-        [crate::transform::context::TransformWarning::FacetNullRowsDropped { field: "c".into(), rows: 1 }]
+        [crate::transform::context::TransformWarning::NullKeyRowsDropped { scope: crate::transform::context::NullKeyScope::Facet, field: "c".into(), rows: 1 }]
     );
     assert_eq!(
         warnings[0].to_string(),
@@ -8073,7 +8073,7 @@ fn null_facet_values_without_a_repeat_are_dropped_with_a_count() {
         .expect("null facet values drop, they do not fail the chart");
     assert_eq!(
         warnings,
-        [crate::transform::context::TransformWarning::FacetNullRowsDropped { field: "c".into(), rows: 3 }]
+        [crate::transform::context::TransformWarning::NullKeyRowsDropped { scope: crate::transform::context::NullKeyScope::Facet, field: "c".into(), rows: 3 }]
     );
     assert!(warnings[0].to_string().starts_with("facet 'c': 3 rows have a null 'c'"), "{}", warnings[0]);
 }
@@ -8206,12 +8206,12 @@ fn a_grid_facet_warns_per_field_for_its_null_rows() {
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
     let (outputs, warnings, _) =
         run_transforms_with_facet(&spec, &batch, viewport, &theme).expect("null facet rows drop, they do not fail");
-    use crate::transform::context::TransformWarning::FacetNullRowsDropped;
+    use crate::transform::context::{NullKeyScope::Facet, TransformWarning::NullKeyRowsDropped};
     assert_eq!(
         warnings,
         [
-            FacetNullRowsDropped { field: "c".into(), rows: 2 },
-            FacetNullRowsDropped { field: "r".into(), rows: 2 },
+            NullKeyRowsDropped { scope: Facet, field: "c".into(), rows: 2 },
+            NullKeyRowsDropped { scope: Facet, field: "r".into(), rows: 2 },
         ]
     );
     // The repeated row (v = 6) joins both rows of its `q` column.
@@ -9602,4 +9602,92 @@ fn an_area_groups_color_by_category_only_when_it_draws_color() {
     }
     let prep = prepare_rows(&layered_over_raster(serde_json::json!([point, area(Some("z"))]))).expect("renders");
     assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Categorical { .. })), "an area drawing color groups it");
+}
+
+/// A frame faceted on `f` whose grouped statistic drops null `h` keys.
+fn null_key_facet_run(
+    transform: &str,
+    f: Vec<&str>,
+    h: Vec<Option<&str>>,
+    v: Vec<f64>,
+) -> Result<TransformRun, RenderError> {
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},
+        "transforms":[{transform}],
+        "facet":{{"field":"f","mode":{{"kind":"wrap","ncols":2}}}}}}"#
+    );
+    let spec: crate::spec::chart::ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("f", DataType::Utf8, true),
+        Field::new("h", DataType::Utf8, true),
+        Field::new("v", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(f)),
+            Arc::new(StringArray::from(h)),
+            Arc::new(Float64Array::from(v)),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    run_transforms_with_facet(&spec, &batch, viewport, &theme)
+}
+
+const NULL_KEY_TRANSFORMS: [(&str, &str); 2] = [
+    ("LetterValue", r#"{"type":"letter_value","value":"v","groupby":["h"],"k_depth":{"type":"full"}}"#),
+    ("QQ", r#"{"type":"qq","field":"v","groupby":["h"],"emit_line":false}"#),
+];
+
+/// A facet panel whose every `h` key is null is emptied by the null-key drop
+/// and degrades to an empty panel, warned, while the other panel renders: the
+/// refusal belongs to the whole chart left with nothing, not to one panel.
+#[test]
+fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
+    for (name, transform) in NULL_KEY_TRANSFORMS {
+        let (outputs, warnings, _) = null_key_facet_run(
+            transform,
+            vec!["p", "p", "p", "q", "q"],
+            vec![Some("x"), Some("x"), Some("x"), None, None],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+        .unwrap_or_else(|e| panic!("{name}: one emptied panel must not fail the chart: {e}"));
+        let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
+        assert!(out.num_rows() > 0, "{name}: panel p renders");
+        assert!(str_col(out, "f").iter().all(|f| f == "p"), "{name}: only panel p has rows");
+        assert_eq!(
+            warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+                 fill or filter the nulls in 'h'"
+            )],
+            "{name}"
+        );
+    }
+}
+
+/// Two panels each dropping one null-key row report the chart's count once:
+/// one warning saying 2 rows, not two identical warnings saying 1 that
+/// Python's warning filter would collapse into one.
+#[test]
+fn the_null_key_drop_count_sums_across_facet_panels() {
+    for (name, transform) in NULL_KEY_TRANSFORMS {
+        let (_, warnings, _) = null_key_facet_run(
+            transform,
+            vec!["p", "p", "p", "q", "q", "q"],
+            vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+                 fill or filter the nulls in 'h'"
+            )],
+            "{name}"
+        );
+    }
 }

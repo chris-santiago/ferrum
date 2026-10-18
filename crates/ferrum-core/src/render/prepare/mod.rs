@@ -1802,7 +1802,8 @@ fn run_transforms_with_facet(
     };
     for (field, rows) in dropped_nulls {
         if rows > 0 {
-            ctx.warn(crate::transform::context::TransformWarning::FacetNullRowsDropped {
+            ctx.warn(crate::transform::context::TransformWarning::NullKeyRowsDropped {
+                scope: crate::transform::context::NullKeyScope::Facet,
                 field: field.to_string(),
                 rows,
             });
@@ -1867,7 +1868,10 @@ fn run_transforms_with_facet(
     // #162: `ctx` is the SAME context across every partition in the loop
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
-    let warnings = ctx.warnings.borrow_mut().drain(..).collect();
+    // A transform's per-panel null-key drop counts sum to the frame's count.
+    let warnings = crate::transform::context::merge_partition_null_key_counts(
+        ctx.warnings.borrow_mut().drain(..).collect(),
+    );
     Ok((normalize_transform_outputs(combined)?, warnings, swarms))
 }
 

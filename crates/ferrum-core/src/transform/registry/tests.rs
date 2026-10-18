@@ -440,6 +440,7 @@ fn qq_outputs_match_actual_schema() {
     pyo3::Python::initialize();
     use crate::transform::qq::QQSpec;
     let spec = QQSpec {
+        groupby: Vec::new(),
         field: "v".into(),
         distribution: "normal".into(),
         dequantize: false,
@@ -514,6 +515,7 @@ fn letter_value_outputs_match_actual_schema() {
     pyo3::Python::initialize();
     use crate::transform::letter_value::{KDepth, LetterValueSpec};
     let spec = LetterValueSpec {
+        groupby: Vec::new(),
         value: "v".into(),
         group: Some("g".into()),
         k_depth: KDepth::Tukey,
@@ -875,6 +877,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         })),
         ("contour", Contour(ContourSpec { thresholds: 6, fill: false, smooth: true, name: None })),
         ("qq", Qq(QQSpec {
+            groupby: Vec::new(),
             field: "v".into(), distribution: "normal".into(), dequantize: false, emit_line: true,
             seed: 0, name: None,
         })),
@@ -904,6 +907,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             x_field: "x".into(), y_field: "y".into(), x: (0.0, 1.0), y: (0.0, 1.0), name: None,
         })),
         ("letter_value", LetterValue(LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(), group: None, k_depth: KDepth::Tukey, outlier_threshold: 1.5,
             name: None, sort: None,
         })),
@@ -2098,6 +2102,7 @@ fn qq_secondary_outputs_match_actual_batches() {
     assert_secondary_outputs_match(
         "qq",
         TransformSpec::Qq(QQSpec {
+            groupby: Vec::new(),
             field: "v".into(),
             distribution: "normal".into(),
             dequantize: false,
@@ -2139,6 +2144,7 @@ fn letter_value_secondary_outputs_match_actual_batches() {
     assert_secondary_outputs_match(
         "letter_value",
         TransformSpec::LetterValue(LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Tukey,
@@ -2194,6 +2200,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
         use crate::transform::qq::QQSpec;
         let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
         let spec = TransformSpec::Qq(QQSpec {
+            groupby: Vec::new(),
             field: "v".into(),
             distribution: "normal".into(),
             dequantize: false,
@@ -2225,6 +2232,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
             &["a", "a", "a", "a", "a", "a", "a", "a"],
         );
         let spec = TransformSpec::LetterValue(LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Tukey,
@@ -2265,6 +2273,7 @@ fn pinned_secondary_keys_captured_from_head() {
         use crate::transform::qq::QQSpec;
         let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
         let unnamed = TransformSpec::Qq(QQSpec {
+            groupby: Vec::new(),
             field: "v".into(),
             distribution: "normal".into(),
             dequantize: false,
@@ -2278,6 +2287,7 @@ fn pinned_secondary_keys_captured_from_head() {
         assert_eq!(keys, vec!["qq_line".to_string()], "qq, name=None");
 
         let named = TransformSpec::Qq(QQSpec {
+            groupby: Vec::new(),
             field: "v".into(),
             distribution: "normal".into(),
             dequantize: false,
@@ -2299,6 +2309,7 @@ fn pinned_secondary_keys_captured_from_head() {
             &["a", "a", "a", "a", "a", "a", "a", "a"],
         );
         let unnamed = TransformSpec::LetterValue(LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Tukey,
@@ -2314,6 +2325,7 @@ fn pinned_secondary_keys_captured_from_head() {
         assert_eq!(keys, expected, "letter_value, name=None");
 
         let named = TransformSpec::LetterValue(LetterValueSpec {
+            groupby: Vec::new(),
             value: "v".into(),
             group: Some("g".into()),
             k_depth: KDepth::Tukey,
@@ -2395,6 +2407,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
             use crate::transform::qq::{QQSpec, QQ_LINE_KEY};
             let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
             let spec = TransformSpec::Qq(QQSpec {
+                groupby: Vec::new(),
                 field: "v".into(),
                 distribution: "normal".into(),
                 dequantize: false,
@@ -2416,6 +2429,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
                 &["a", "a", "a", "a", "a", "a", "a", "a"],
             );
             let spec = TransformSpec::LetterValue(LetterValueSpec {
+                groupby: Vec::new(),
                 value: "v".into(),
                 group: Some("g".into()),
                 k_depth: KDepth::Tukey,

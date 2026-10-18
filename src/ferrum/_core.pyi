@@ -670,6 +670,7 @@ class QQ:
         dequantize: bool = False,
         emit_line: bool = True,
         seed: int = 0,
+        groupby: List[str] = ...,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -753,6 +754,7 @@ class LetterValue:
         value: str,
         *,
         group: Optional[str] = None,
+        groupby: List[str] = ...,
         k_depth: str = "proportion",
         k_proportion: float = 0.007,
         outlier_threshold: float = 0.0,

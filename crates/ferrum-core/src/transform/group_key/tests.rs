@@ -744,6 +744,8 @@ fn group_key_all_null_warning_uses_the_python_facing_name_not_the_wire_tag() {
         ("stat_summary", "Summary"),
         ("stat_smooth", "Smooth"),
         ("stat_kde", "Kde"),
+        ("stat_qq", "QQ"),
+        ("stat_letter_value", "LetterValue"),
         ("data_impute", "Impute"),
         ("data_window", "DataWindow"),
         // `robust.rs` already passes the display name as `label` (the

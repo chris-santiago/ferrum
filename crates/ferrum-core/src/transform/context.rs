@@ -105,16 +105,68 @@ pub(crate) enum TransformWarning {
         columns: String,
         disposition: String,
     },
-    /// `rows` rows have a null value in the facet `field` and belong to no
-    /// panel, so the facet partition dropped them. Rows of a composition
-    /// operand whose frame lacks the field are not counted: they repeat in
-    /// every panel instead (`layout::FacetRepeat`). Pushed once per facet
-    /// field by `render::prepare::run_transforms_with_facet`, the one place
-    /// rows are assigned to panels.
-    FacetNullRowsDropped {
+    /// `rows` rows have a null value in the key `field` and belong to no
+    /// panel or group, so the partition `scope` names dropped them.
+    ///
+    /// For [`NullKeyScope::Facet`], pushed once per facet field by
+    /// `render::prepare::run_transforms_with_facet`, the one place rows are
+    /// assigned to panels; rows of a composition operand whose frame lacks
+    /// the field are not counted, since they repeat in every panel instead
+    /// (`layout::FacetRepeat`). For [`NullKeyScope::Groupby`], pushed once
+    /// per `groupby` field by
+    /// [`crate::transform::group_key::warn_null_groupby_rows_dropped`], for
+    /// the grouped transforms whose `groupby` drops a null key with a
+    /// warning (`LetterValue`, `QQ`).
+    NullKeyRowsDropped {
+        scope: NullKeyScope,
         field: String,
         rows: usize,
     },
+}
+
+/// Sum the `groupby`-scope [`TransformWarning::NullKeyRowsDropped`] counts
+/// that one transform pushed once per facet panel into one warning per
+/// (transform, field), at the first one's position, so the count the user
+/// reads is the whole frame's, as the facet scope's own count is. Every other
+/// warning passes through unchanged and in order.
+pub(crate) fn merge_partition_null_key_counts(
+    warnings: Vec<TransformWarning>,
+) -> Vec<TransformWarning> {
+    let mut merged: Vec<TransformWarning> = Vec::with_capacity(warnings.len());
+    let mut at: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for warning in warnings {
+        if let TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby { transform },
+            field,
+            rows,
+        } = &warning
+        {
+            let key = (transform.clone(), field.clone());
+            if let Some(&i) = at.get(&key) {
+                if let Some(TransformWarning::NullKeyRowsDropped { rows: total, .. }) =
+                    merged.get_mut(i)
+                {
+                    *total += rows;
+                }
+                continue;
+            }
+            at.insert(key, merged.len());
+        }
+        merged.push(warning);
+    }
+    merged
+}
+
+/// Which partition dropped [`TransformWarning::NullKeyRowsDropped`]'s rows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "partition", rename_all = "snake_case")]
+pub(crate) enum NullKeyScope {
+    /// The facet partition: a null facet value belongs to no panel.
+    Facet,
+    /// A transform's `groupby` partition: a null key belongs to no group.
+    /// `transform` is the transform's Python-facing name.
+    Groupby { transform: String },
 }
 
 impl std::fmt::Display for TransformWarning {
@@ -159,12 +211,16 @@ impl std::fmt::Display for TransformWarning {
                 "{transform}: every row has a null in its groupby key ({columns}), so the data \
                  could not be split into groups; {disposition}"
             ),
-            TransformWarning::FacetNullRowsDropped { field, rows } => {
+            TransformWarning::NullKeyRowsDropped { scope, field, rows } => {
                 let (noun, verb, belong, pronoun) =
                     if *rows == 1 { ("row", "has", "belongs", "it was") } else { ("rows", "have", "belong", "they were") };
+                let (speaker, home) = match scope {
+                    NullKeyScope::Facet => (format!("facet '{field}'"), "panel"),
+                    NullKeyScope::Groupby { transform } => (transform.clone(), "group"),
+                };
                 write!(
                     f,
-                    "facet '{field}': {rows} {noun} {verb} a null '{field}' and {belong} to no panel, so \
+                    "{speaker}: {rows} {noun} {verb} a null '{field}' and {belong} to no {home}, so \
                      {pronoun} dropped; fill or filter the nulls in '{field}'"
                 )
             }
@@ -359,6 +415,16 @@ mod tests {
 
     fn all_variants() -> Vec<TransformWarning> {
         vec![
+            TransformWarning::NullKeyRowsDropped {
+                scope: NullKeyScope::Facet,
+                field: "c".into(),
+                rows: 1,
+            },
+            TransformWarning::NullKeyRowsDropped {
+                scope: NullKeyScope::Groupby { transform: "QQ".into() },
+                field: "h".into(),
+                rows: 3,
+            },
             TransformWarning::DegenerateFit {
                 transform: "Smooth".into(),
                 group: Some("g=a".into()),
@@ -422,7 +488,7 @@ mod tests {
     #[test]
     fn transform_warning_display_never_leaks_variant_names() {
         let leak_tokens =
-            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull"];
+            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull", "NullKeyRowsDropped", "NullKeyScope"];
         for w in all_variants() {
             let text = w.to_string();
             for token in leak_tokens {

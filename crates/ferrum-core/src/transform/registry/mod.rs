@@ -502,7 +502,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 crate::transform::qq::QQ_LINE_KEY.to_string(),
                 crate::transform::qq::QQ_LINE_COLUMNS.to_vec(),
             )],
-            params: vec!["field", "distribution", "dequantize", "emit_line", "seed", "name"],
+            params: vec![
+                "field", "distribution", "dequantize", "emit_line", "seed", "groupby", "name",
+            ],
         },
         // `method` is a closed 7-value vocabulary (`LinkageMethod`) validated
         // hard at `PyLinkage::new` (linkage.rs) — same PyO3-constructor-time
@@ -579,15 +581,11 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ..Default::default()
         },
         "letter_value" => TransformRegistryEntry {
-            outputs: vec![
-                ("group", DataType::Utf8),
-                ("depth", DataType::Int32),
-                ("lower", DataType::Float64),
-                ("upper", DataType::Float64),
-                ("level", DataType::Utf8),
-            ],
+            outputs: crate::transform::letter_value::PRIMARY_COLUMNS.to_vec(),
             secondary_outputs: letter_value_secondary_outputs(),
-            params: vec!["value", "group", "k_depth", "outlier_threshold", "name", "sort"],
+            params: vec![
+                "value", "group", "groupby", "k_depth", "outlier_threshold", "name", "sort",
+            ],
             ..Default::default()
         },
         "logistic" => TransformRegistryEntry {

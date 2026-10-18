@@ -372,6 +372,7 @@ ROWS: list[Row] = [
             dequantize=True,
             emit_line=False,
             seed=91,
+            groupby=["qq_g"],
             name="qq_nm",
         ),
         dict(
@@ -380,6 +381,7 @@ ROWS: list[Row] = [
             dequantize="dequantize=true",
             emit_line="emit_line=false",
             seed="seed=91",
+            groupby='groupby=["qq_g"]',
             name='name=Some("qq_nm")',
         ),
     ),
@@ -519,6 +521,7 @@ ROWS: list[Row] = [
         dict(
             value="lv_v",
             group="lv_g",
+            groupby=["lv_h"],
             k_depth="tukey",
             outlier_threshold=2.25,
             name="lv_nm",
@@ -527,6 +530,7 @@ ROWS: list[Row] = [
         dict(
             value="value='lv_v'",
             group='group=Some("lv_g")',
+            groupby='groupby=["lv_h"]',
             k_depth="k_depth=Tukey",
             outlier_threshold="outlier_threshold=2.25",
             name='name=Some("lv_nm")',

@@ -329,7 +329,6 @@ impl TransformSpec {
                     Self::Bin2D(_)
                     | Self::Swarm(_)
                     | Self::Contour(_)
-                    | Self::Qq(_)
                     | Self::Linkage(_)
                     | Self::Hex(_)
                     | Self::Unpivot(_)
@@ -360,6 +359,7 @@ impl TransformSpec {
             Aggregate => aggregate,
             Summary => summary,
             BoxStats => box_stats,
+            Qq => qq,
             ErrorExtent => error_extent,
             Bin => bin,
             Kde2D => kde_2d,
@@ -1076,6 +1076,7 @@ mod tests {
         cases.push((
             "LetterValue",
             TransformSpec::LetterValue(LetterValueSpec {
+                groupby: Vec::new(),
                 value: "x".into(), group: None, k_depth: KDepth::Full,
                 outlier_threshold: 1.5, name: None, sort: None,
             }),
