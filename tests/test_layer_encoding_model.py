@@ -1436,6 +1436,337 @@ def test_V12_a_string_in_layer_encoding_draws_with_a_legend(case):
 
 
 # ---------------------------------------------------------------------------
+# G2, G5, V7, X4, V12, R1: one channel vocabulary on every door (spec §4.3, §6.5)
+# ---------------------------------------------------------------------------
+#
+# Every door reads a binding the way ``encode()`` does and refuses the same
+# malformed binding with the same text: a channel object, ``encode()``
+# keyword arguments, shorthand, ``Layer(encoding=)`` (attached and with its
+# own data) and a figure's ``encode=`` and ``layers=``.
+
+
+def _channel_classes() -> dict[str, type]:
+    from ferrum.encoding import _channel_class_map
+
+    return dict(_channel_class_map())
+
+
+# Channels whose bin= is honored: the positional bin (x, y) and the binned
+# color scale (color and its aliases).
+_BIN_HONORED = frozenset({"x", "y", "color", "fill", "stroke"})
+_BIN_REFUSED = sorted(set(_channel_classes()) - _BIN_HONORED)
+
+# Spec §4.3's channels that refuse aggregate=: a grouping, link, facet or
+# error channel draws no aggregated value.
+_AGGREGATE_REFUSED = (
+    "detail",
+    "shape",
+    "stroke_dash",
+    "key",
+    "href",
+    "description",
+    "url",
+    "facet",
+    "facet_row",
+    "facet_col",
+    "x_error",
+    "y_error",
+)
+
+
+def _bin_refusal(channel: str, value: Any) -> str:
+    return (
+        f"{channel}(bin={value!r}) is not supported: {channel} draws no binned value. "
+        "Bin the field with .transform(fm.Bin(...)) and bind its output column, or drop bin=."
+    )
+
+
+def _aggregate_refusal(channel: str, value: Any) -> str:
+    return (
+        f"{channel}(aggregate={value!r}) is not supported: {channel} draws no aggregated "
+        "value. Compute the aggregate with .transform(fm.transform_aggregate(...)) and "
+        "bind its output column, or drop aggregate=."
+    )
+
+
+def _vocabulary_doors(name: str, value: Callable[[], Any]) -> dict[str, Callable[[], Any]]:
+    """Every door one binding of channel *name* is written on; *value* builds it inside the door."""
+    return {
+        "object": value,
+        "encode": lambda: P().encode(**{name: value()}),
+        "L": lambda: P().layer(fm.Layer(mark="point", encoding={name: value()})),
+        "LD": lambda: P().layer(fm.Layer(data=df2, mark="point", encoding={name: value()})),
+        "figure": lambda: fm.relplot(df, x="v", y="y", encode={name: value()}),
+        "figure-layers": lambda: fm.relplot(
+            df, x="v", y="y", layers=[fm.Layer(mark="point", encoding={name: value()})]
+        ),
+    }
+
+
+_BIN_SPELLINGS: dict[str, Callable[[], Any]] = {
+    "True": lambda: True,
+    "Bin": lambda: fm.Bin("z", bin_count=3),
+}
+
+_BIN_REFUSAL_CASES = {
+    f"{'V7' if name in _VALUE_CHANNELS else 'G5'}/{name}/{spelling}/{door}": (name, spelling, door)
+    for name in _BIN_REFUSED
+    for spelling in _BIN_SPELLINGS
+    for door in _vocabulary_doors(name, lambda: None)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BIN_REFUSAL_CASES))
+def test_G5_V7_a_bin_on_a_channel_drawing_no_binned_value_is_refused_on_every_door(case):
+    """G5/V7: ``bin=`` on any channel but x, y and the color family refuses at construction.
+
+    Rejects the warn-and-keep path, whose bin still lowered into a step that
+    replaced the chart's rows: ``P(size=fm.Size("z", bin=True))`` drew 39
+    circles from 8 rows.
+    """
+    name, spelling, door = _BIN_REFUSAL_CASES[case]
+    cls = _channel_classes()[name]
+    bin_value = _BIN_SPELLINGS[spelling]()
+    build = _vocabulary_doors(name, lambda: cls("z", bin=bin_value))[door]
+    with pytest.raises(ValueError) as refused:
+        build()
+    assert str(refused.value) == _bin_refusal(cls.__name__, bin_value)
+
+
+_AGGREGATE_REFUSAL_CASES = {
+    f"G2/{name}/{spelling}/{door}": (name, spelling, door)
+    for name in _AGGREGATE_REFUSED
+    for spelling in ("object", "shorthand")
+    for door in _vocabulary_doors(name, lambda: None)
+    if not (spelling == "shorthand" and door == "object")
+}
+
+
+@pytest.mark.parametrize("case", sorted(_AGGREGATE_REFUSAL_CASES))
+def test_G2_an_aggregate_on_a_channel_drawing_no_aggregated_value_is_refused_on_every_door(case):
+    """G2: ``aggregate=`` on a grouping, link, facet or error channel refuses at construction.
+
+    The shorthand cells reject reading ``Layer(encoding={"detail": "mean(z)"})``
+    as a literal column named ``mean(z)``: a layer string means what
+    ``encode()`` makes of it.
+    """
+    name, spelling, door = _AGGREGATE_REFUSAL_CASES[case]
+    cls = _channel_classes()[name]
+    value = (lambda: cls("z", aggregate="mean")) if spelling == "object" else (lambda: "mean(z)")
+    with pytest.raises(ValueError) as refused:
+        _vocabulary_doors(name, value)[door]()
+    assert str(refused.value) == _aggregate_refusal(cls.__name__, "mean")
+
+
+_UNSET_STATISTICS = {
+    "aggregate=None": {"aggregate": None},
+    "bin=None": {"bin": None},
+    "bin=False": {"bin": False},
+}
+
+
+@pytest.mark.parametrize("unset", sorted(_UNSET_STATISTICS))
+@pytest.mark.parametrize("name", sorted(_channel_classes()))
+def test_an_unset_aggregate_or_bin_neither_refuses_nor_warns_on_any_channel(name, unset):
+    """None is unset: ``aggregate=None``, ``bin=None`` and ``bin=False`` ask for nothing.
+
+    Rejects the honored-kwarg warning ``Detail(aggregate=None)`` raised, and
+    a refusal keyed on the kwarg's presence rather than its value.
+    """
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    cls = _channel_classes()[name]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        channel = cls("z", **_UNSET_STATISTICS[unset])
+    assert channel.to_implicit_transforms() == []
+
+
+@pytest.mark.parametrize("door", ["F", "L"])
+def test_an_unset_bin_or_aggregate_draws_what_the_bare_binding_draws(door):
+    """An unset statistic changes nothing: the SVG equals the binding written without it."""
+    unset = fm.Size("z", bin=False, aggregate=None)
+    if door == "F":
+        built, bare = P(size=unset), P(size="z")
+    else:
+        built = P().layer(layer("point", y="r", size=unset))
+        bare = P().layer(layer("point", y="r", size="z"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert built.to_svg() == bare.to_svg()
+
+
+_X4: dict[str, Case] = {
+    "sum/L": Case(
+        lambda: P().layer(fm.Layer(mark="point", encoding={"y": "sum(y)"})),
+        (P, lambda: P(y="sum(y)")),
+        chart_level=None,
+    ),
+    "sum/LD": Case(
+        lambda: P().layer(fm.Layer(data=df2, mark="point", encoding={"y": "sum(y)"})),
+        (P, lambda: P(df2, y="sum(y)")),
+        chart_level=None,
+    ),
+    "count/L": Case(
+        lambda: P().layer(fm.Layer(mark="point", encoding={"y": "count()"})),
+        (P, lambda: P(y="count()")),
+        chart_level=None,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_X4))
+def test_X4_a_layer_encoding_shorthand_aggregates_that_layer(case):
+    """X4: ``Layer(encoding={"y": "sum(y)"})`` aggregates the layer, as ``encode(y="sum(y)")`` does.
+
+    Rejects the literal reading: ``"sum(y)"`` was refused as an unknown
+    column of that name.
+    """
+    check_rendering(_X4[case])
+
+
+@pytest.mark.parametrize("type_", ["Q", "N", "O", "T"])
+def test_X4_a_layer_encoding_type_suffix_sets_the_type(type_):
+    """X4: ``"r:Q"`` binds ``r`` with that type, on the layer and on its wire encoding.
+
+    Rejects the literal reading, which bound a column named ``r:Q``.
+    """
+    built = fm.Layer(mark="point", encoding={"y": f"r:{type_}"})
+    assert built.encoding["y"] == fm.Y("r", type=type_)
+    wire_y = _wire(P().layer(built))["layers"][1]["encoding"]["y"]
+    assert wire_y["field"] == "r"
+    assert (
+        wire_y["type"]
+        == {"Q": "quantitative", "N": "nominal", "O": "ordinal", "T": "temporal"}[type_]
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_channel_classes()))
+def test_V12_a_layer_string_equals_the_channel_object_spelling(name):
+    """V12: a string in ``Layer(encoding=)`` is the channel object ``encode()`` builds from it."""
+    cls = _channel_classes()[name]
+    assert fm.Layer(encoding={name: "z"}).encoding[name] == cls("z")
+    assert fm.Layer(encoding={name: "z:O"}).encoding[name] == cls("z", type="O")
+    assert (
+        fm.Layer(encoding={name: "z"}).encoding[name] == P().encode(**{name: "z"})._encoding[name]
+    )
+
+
+# Channel -> (field, mark) a layer draws it with.
+_DRAWN_STRING_CHANNELS = {
+    **_VALUE_CHANNELS,
+    "shape": ("c", "point"),
+    "stroke_dash": ("c", "line"),
+    "detail": ("c", "line"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_DRAWN_STRING_CHANNELS))
+def test_V12_a_layer_string_draws_what_the_channel_object_draws(name):
+    """V12: the string and the object spelling of one layer binding render the same bytes."""
+    field, mark = _DRAWN_STRING_CHANNELS[name]
+    cls = _channel_classes()[name]
+    as_string = P().layer(layer(mark, y="r", **{name: field}))
+    as_object = P().layer(layer(mark, y="r", **{name: cls(field)}))
+    assert _quiet(as_string.to_svg) == _quiet(as_object.to_svg)
+
+
+def test_X4_an_unknown_op_in_a_layer_string_is_refused_as_encode_refuses_it():
+    """X4: ``"foo(y)"`` names an unknown aggregate on every door, not an unknown column."""
+    with pytest.raises(ValueError) as from_encode:
+        P(y="foo(y)").to_svg()
+    with pytest.raises(ValueError) as from_layer:
+        P().layer(fm.Layer(mark="point", encoding={"y": "foo(y)"})).to_svg()
+    assert str(from_layer.value) == str(from_encode.value)
+    assert str(from_layer.value).startswith("AggregateOp: unknown fn 'foo'")
+
+
+# Every value kind an encoding key can carry, built inside the test.
+_ANY_VALUE: dict[str, Callable[[], Any]] = {
+    "str": lambda: "y",
+    "object": lambda: fm.Y("y"),
+    "none": lambda: None,
+    "conditional": lambda: _PICK_C.when(fm.value("#d62728")).otherwise(fm.value("#cccccc")),
+    "repeat": lambda: fm.Repeat.column,
+    "int": lambda: 3,
+}
+
+
+@pytest.mark.parametrize("value", sorted(_ANY_VALUE))
+@pytest.mark.parametrize("name", ["bogus", "order", "colour"])
+def test_X4_an_unknown_channel_in_a_layer_encoding_is_refused_as_encode_refuses_it(name, value):
+    """X4: a name ``encode()`` does not take is refused at ``Layer`` construction, whatever its value.
+
+    Rejects carrying it to the wire: ``bogus`` was warned and dropped, and
+    the wire-only ``order`` reached the render as a channel ``encode()``
+    never offers. The ``None`` cells reject skipping the name check for an
+    unset value, which let ``encoding={"colour": None}`` render as if
+    nothing were wrong; the conditional cells reject answering in the
+    conditional vocabulary's voice instead of ``encode()``'s.
+    """
+    with pytest.raises(ValueError) as from_encode:
+        P().encode(**{name: _ANY_VALUE[value]()})
+    with pytest.raises(ValueError) as from_layer:
+        fm.Layer(mark="point", encoding={name: _ANY_VALUE[value]()})
+    assert str(from_layer.value) == str(from_encode.value) == f"unknown encoding channel: {name!r}"
+
+
+@pytest.mark.parametrize("name", sorted(_channel_classes()))
+def test_a_none_binding_binds_nothing_on_encode_and_layer_encoding(name):
+    """None is unset on both doors: the SVG equals the chart written without the kwarg.
+
+    Rejects ``encode(color=None)``'s ``TypeError``, which made ``encode()``
+    refuse what ``Layer(encoding=)`` reads as unset, and a ``None`` that
+    clears an earlier binding.
+    """
+    assert _quiet(P().encode(**{name: None}).to_svg) == _quiet(P().to_svg)
+    assert _quiet(P(color="c").encode(**{name: None}).to_svg) == _quiet(P(color="c").to_svg)
+    own = {"y": "r"} if name != "y" else {"x": "r"}
+    with_none = P().layer(fm.Layer(mark="point", encoding={**own, name: None}))
+    without = P().layer(fm.Layer(mark="point", encoding=own))
+    assert _quiet(with_none.to_svg) == _quiet(without.to_svg)
+
+
+@pytest.mark.parametrize("value", [3, 2.5, ["y"]], ids=["int", "float", "list"])
+def test_X4_a_layer_value_that_is_no_binding_is_refused_as_encode_refuses_it(value):
+    """X4: a value that is neither a string nor a channel object is a ``TypeError`` on both doors.
+
+    Rejects passing it to the wire, where ``encoding={"y": 3}`` rendered.
+    """
+    kind = type(value).__name__
+    with pytest.raises(TypeError) as from_encode:
+        P().encode(y=value)
+    with pytest.raises(TypeError) as from_layer:
+        fm.Layer(mark="point", encoding={"y": value})
+    assert str(from_encode.value) == (
+        f"encode(y=...) expects str, Y instance, or Repeat placeholder; got {kind}"
+    )
+    assert str(from_layer.value) == (
+        f"Layer(encoding={{'y': ...}}) expects str, Y instance, or Repeat placeholder; got {kind}"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_channel_classes()))
+def test_a_statistic_rebinding_stamps_only_kwargs_its_channel_honors(name):
+    """A copy re-pointed at a statistic's output keeps a ``title`` only where the channel honors it.
+
+    Rejects stamping the source field as ``title=`` on every channel, which
+    a tooltip or text label refuses at construction.
+    """
+    from ferrum._encode_lowering import _rebind_channel
+
+    cls = _channel_classes()[name]
+    honored = cls._honored_kwargs
+    statistic = {"aggregate": "mean"} if "aggregate" in honored else {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rebound = _rebind_channel(cls("z", **statistic), "mean_z")
+    assert set(rebound._kwargs) <= honored
+    assert ("title" in rebound._kwargs) == ("title" in honored)
+
+
+# ---------------------------------------------------------------------------
 # G1, G3, G4, G6: grouping channels
 # ---------------------------------------------------------------------------
 
@@ -2800,6 +3131,40 @@ def test_A7_a_drawn_binding_its_layers_rows_lack_is_refused(case, kind):
     lack it.
     """
     build, message = _A7_REFUSALS[case]
+    with pytest.raises(ValueError) as refused:
+        chart = build()
+        chart.to_svg() if kind == "static" else chart.interactive().to_html()
+    assert str(refused.value) == message
+
+
+_R1_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
+    "L": (
+        lambda: P().layer(fm.Layer(mark="line", encoding={"color": "nope"})),
+        _absent("color", "nope"),
+    ),
+    "+s": (lambda: P() + line(color="nope"), _absent("color", "nope")),
+    "SY-host": (
+        lambda: P().layer(fm.Layer(mark="line", encoding={"color": "nope"})) + SY("r"),
+        _absent("color", "nope"),
+    ),
+    "SY-composed": (
+        lambda: (P() + SY("r")).layer(fm.Layer(mark="line", encoding={"color": "nope"})),
+        "layer 2: encoding 'color' references unknown column 'nope' "
+        "(not present in that layer's data)",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_R1_REFUSALS))
+def test_R1_an_unknown_column_on_a_non_positional_channel_is_refused_with_the_plain_message(
+    door, kind
+):
+    """R1: a layer's color naming a column its rows lack refuses at render, plain message.
+
+    Rejects drawing the layer uncolored under no legend.
+    """
+    build, message = _R1_REFUSALS[door]
     with pytest.raises(ValueError) as refused:
         chart = build()
         chart.to_svg() if kind == "static" else chart.interactive().to_html()
@@ -4423,9 +4788,8 @@ def test_a_layer_binding_every_channel_itself_ignores_its_parent():
 
 
 def test_none_channel_values_stay_unset_and_inherit_nothing_new():
-    with pytest.raises(TypeError):
-        P().encode(color=None)
-    chart = (P() + line(y="r")).encode()
+    assert _quiet(P().encode(color=None).to_svg) == _quiet(P().to_svg)
+    chart = (P() + line(y="r")).encode(color=None)
     assert "color" not in _wire(chart)["encoding"]
 
 

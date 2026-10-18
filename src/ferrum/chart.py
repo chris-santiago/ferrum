@@ -114,6 +114,7 @@ from ferrum._facet import (
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
+from ferrum.encoding._resolve import channel_class, channel_for_value
 from ferrum.encoding._aliases import layered_chart_detail
 from ferrum.selection import ConditionalSpec
 
@@ -2405,6 +2406,9 @@ class Chart(
             Any other valid channel names (``x_error``, ``y_error``, ``theta``,
             ``radius``, etc.).
 
+        A ``None`` value binds nothing: the channel keeps what it had, so
+        ``encode(color=None)`` leaves the chart as it was.
+
         Returns
         -------
         Chart
@@ -2415,7 +2419,8 @@ class Chart(
         ValueError
             If an unknown channel name is passed.
         TypeError
-            If a value is not a string, channel instance, or Repeat placeholder.
+            If a value is not ``None``, a string, a channel instance, or a Repeat
+            placeholder.
 
         Examples
         --------
@@ -2438,10 +2443,15 @@ class Chart(
         # against the final _encoding once every channel in this call has
         # been processed (see _refuse_alias_field_dropped_with_kept_conditional).
         alias_conditional_sources: dict[str, str] = {}
+        # Every key is checked before its value is read, so an unknown name is
+        # refused even when it carries None. A None binds nothing: the
+        # channel keeps what it had, as a None in Layer(encoding=) leaves the
+        # channel to the layer's parent.
+        for name in channels:
+            channel_class(name)
+        channels = {name: value for name, value in channels.items() if value is not None}
         for name, value in channels.items():
-            cls = _channel_class_for(name)
-            if cls is None:
-                raise ValueError(f"unknown encoding channel: {name!r}")
+            cls = channel_class(name)
 
             if isinstance(value, ConditionalSpec):
                 # encode(<channel>=cond): the wire channel is KNOWN from the
@@ -2462,71 +2472,49 @@ class Chart(
                 )
                 continue
 
-            if isinstance(value, ChannelBase):
-                channel = value
-                cond = channel._kwargs.get("condition")
-                if cond is not None:
-                    # ChannelClass(field=..., condition=<ConditionalSpec>): the
-                    # H9 sibling of the encode(<channel>=cond) form above --
-                    # same translation (stamp the channel from the encode key,
-                    # append to _conditionals, auto-register the selection),
-                    # except the base field encoding also has to be preserved.
-                    # Rebuild the channel without `condition` in its kwargs so
-                    # it never reaches to_encoding_spec_dict -- the per-channel
-                    # EncodingSpec.condition blob it would have round-tripped
-                    # through had exactly one writer (_emit_condition, deleted
-                    # by #237) and no reader; the real conditional lives only
-                    # in _conditionals. The wire
-                    # channel resolves through the SAME vocabulary the
-                    # encode(<channel>=cond) form above uses, so the two
-                    # spellings cannot disagree about which channels accept a
-                    # conditional or where fill/stroke land.
-                    if not isinstance(cond, ConditionalSpec):
-                        raise TypeError(
-                            f"{cls.__name__}(condition=...) must be a ConditionalSpec built "
-                            f"via sel.when(...).otherwise(...) (or fm.when(sel).then(...)"
-                            f".otherwise(...)); got {type(cond).__name__}. Use one of the two "
-                            f"working forms: encode({name}=<ConditionalSpec>) or "
-                            f"{cls.__name__}(field=..., condition=<ConditionalSpec>)."
-                        )
-                    wire = conditional_wire_channel(name)
-                    _append_conditional(
-                        new,
-                        cond,
-                        source_key=name,
-                        claimed_here=claimed_here,
-                        context="encode()",
-                        declare=declare,
-                    )
-                    if wire != name:
-                        # name is an alias source (only "fill" today -- the
-                        # refusal registry already excludes "stroke"):
-                        # checked below once this channel's own field lands
-                        # in new._encoding[name].
-                        alias_conditional_sources[wire] = name
-                    remaining_kwargs = {
-                        k: v for k, v in channel._kwargs.items() if k != "condition"
-                    }
-                    channel = channel.__class__(channel.field, **remaining_kwargs)
-            elif isinstance(value, str):
-                field, type_, agg = parse_shorthand(value)
-                kw = {}
-                if type_:
-                    kw["type"] = type_
-                if agg:
-                    kw["aggregate"] = agg
-                channel = cls(field, **kw)
-            else:
-                # Phase 9: accept Repeat sentinels (Repeat.column / .row / .layer).
-                from ferrum.repeat import _RepeatPlaceholder
-
-                if isinstance(value, _RepeatPlaceholder):
-                    channel = cls(value)
-                else:
+            channel = channel_for_value(name, value, declare=declare(name))
+            cond = channel._kwargs.get("condition")
+            if cond is not None:
+                # ChannelClass(field=..., condition=<ConditionalSpec>): the
+                # H9 sibling of the encode(<channel>=cond) form above --
+                # same translation (stamp the channel from the encode key,
+                # append to _conditionals, auto-register the selection),
+                # except the base field encoding also has to be preserved.
+                # Rebuild the channel without `condition` in its kwargs so
+                # it never reaches to_encoding_spec_dict -- the per-channel
+                # EncodingSpec.condition blob it would have round-tripped
+                # through had exactly one writer (_emit_condition, deleted
+                # by #237) and no reader; the real conditional lives only
+                # in _conditionals. The wire
+                # channel resolves through the SAME vocabulary the
+                # encode(<channel>=cond) form above uses, so the two
+                # spellings cannot disagree about which channels accept a
+                # conditional or where fill/stroke land.
+                if not isinstance(cond, ConditionalSpec):
                     raise TypeError(
-                        f"encode({name}=...) expects str, {cls.__name__} instance, "
-                        f"or Repeat placeholder; got {type(value).__name__}"
+                        f"{cls.__name__}(condition=...) must be a ConditionalSpec built "
+                        f"via sel.when(...).otherwise(...) (or fm.when(sel).then(...)"
+                        f".otherwise(...)); got {type(cond).__name__}. Use one of the two "
+                        f"working forms: encode({name}=<ConditionalSpec>) or "
+                        f"{cls.__name__}(field=..., condition=<ConditionalSpec>)."
                     )
+                wire = conditional_wire_channel(name)
+                _append_conditional(
+                    new,
+                    cond,
+                    source_key=name,
+                    claimed_here=claimed_here,
+                    context="encode()",
+                    declare=declare,
+                )
+                if wire != name:
+                    # name is an alias source (only "fill" today -- the
+                    # refusal registry already excludes "stroke"):
+                    # checked below once this channel's own field lands
+                    # in new._encoding[name].
+                    alias_conditional_sources[wire] = name
+                remaining_kwargs = {k: v for k, v in channel._kwargs.items() if k != "condition"}
+                channel = channel.__class__(channel.field, **remaining_kwargs)
 
             new._encoding[name] = channel
             new._transforms.extend(channel.to_implicit_transforms())
@@ -3909,8 +3897,6 @@ class Chart(
                 # The field is set to None so shorthand in _encoding is kept;
                 # if the existing entry is a plain str we preserve it and wrap.
                 if isinstance(existing, str):
-                    from ferrum._shorthand import parse_shorthand
-
                     parsed_field, parsed_type, _ = parse_shorthand(existing)
                     base_kwargs: dict = {}
                     if parsed_type is not None:

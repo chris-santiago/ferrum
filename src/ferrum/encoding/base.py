@@ -93,6 +93,25 @@ _NO_AGGREGATE_MESSAGE = (
     "bind its output column, or drop aggregate=."
 )
 
+_NO_BIN_MESSAGE = (
+    "{channel}(bin={value!r}) is not supported: {channel} draws no binned value. "
+    "Bin the field with .transform(fm.Bin(...)) and bind its output column, or drop bin=."
+)
+
+
+def _unset_statistic(kwarg: str, value: Any) -> bool:
+    """Whether *value* leaves the statistic kwarg *kwarg* unset.
+
+    ``aggregate=None``, ``bin=None`` and ``bin=False`` ask for nothing, so a
+    channel that does not honor the kwarg neither refuses nor warns about them.
+    """
+    if kwarg == "aggregate":
+        return value is None
+    if kwarg == "bin":
+        return value is None or value is False
+    return False
+
+
 _NO_LEGEND_MESSAGE = (
     "{channel}({kwarg}={value!r}) is not supported: {channel} draws no legend of "
     "its own, so there is nothing for {kwarg}= to customize."
@@ -485,6 +504,9 @@ class ChannelBase:
     # Kwargs this channel permanently refuses for a reason other than having
     # no legend, keyed to a message template (see `_FACET_COLUMNS_MESSAGE`).
     _refused_kwargs: ClassVar[dict[str, str]] = {}
+    # Color, Fill and Stroke set this True: their ``bin=`` builds a binned
+    # color scale, so it is not refused as drawing no binned value.
+    _binned_color_scale: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Apply the derived honored-kwarg bits once the class body has run.
@@ -542,8 +564,10 @@ class ChannelBase:
         self._kwargs = dict(kwargs)
         self._validate()
 
-        for k in self._kwargs:
+        for k, value in self._kwargs.items():
             if k in self._honored_kwargs:
+                continue
+            if _unset_statistic(k, value):
                 continue
             refusal = self._refusal_message(k)
             if refusal is not None:
@@ -559,11 +583,13 @@ class ChannelBase:
         template = self._refused_kwargs.get(kwarg)
         if template is None and kwarg == "title":
             template = _NO_TITLE_MESSAGE
-        # A channel whose mark draws no aggregated value would still lower
-        # its aggregate= into a step that rewrites the chart's rows, so it
-        # is refused rather than warned about.
-        if template is None and kwarg == "aggregate" and self._kwargs[kwarg] is not None:
+        # A channel whose mark draws no aggregated or binned value would still
+        # lower its aggregate= or bin= into a step that rewrites the chart's
+        # rows, so it is refused rather than warned about.
+        if template is None and kwarg == "aggregate":
             template = _NO_AGGREGATE_MESSAGE
+        if template is None and kwarg == "bin" and not self._binned_color_scale:
+            template = _NO_BIN_MESSAGE
         if template is None:
             return None
         return template.format(

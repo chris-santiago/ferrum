@@ -1686,7 +1686,10 @@ def test_the_gate_channels_are_the_encode_channels_plus_the_wire_only_ones():
     assert named == (set(_channel_class_map()) - {"tooltip_field"}) | {"order", "tooltip_fields"}
 
 
-_GROUPING_TYPOS = ["fill", "stroke", "detail", "order", "color", "tooltip", "stroke_dash"]
+# ``order`` is a wire-only channel: ``Layer(encoding=)`` refuses it as an
+# unknown channel at construction, as ``encode()`` does, so it never reaches
+# the gate from a layer.
+_GROUPING_TYPOS = ["fill", "stroke", "detail", "color", "tooltip", "stroke_dash"]
 
 
 def _typo_grouping(channel: str) -> fm.Chart:

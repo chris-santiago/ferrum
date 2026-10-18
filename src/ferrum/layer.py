@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ferrum.encoding._resolve import channel_class, channel_for_value
 from ferrum.marks.base import resolve_layer_style
 
 _LAYER_TRANSFORMS_REFUSAL = (
@@ -9,6 +10,29 @@ _LAYER_TRANSFORMS_REFUSAL = (
     "its own chart with .transform(...) and compose it with +, which routes the "
     "transform to that layer alone."
 )
+
+
+def _layer_encoding(encoding: dict) -> dict:
+    """Return *encoding* with each binding read as ``encode()`` reads it.
+
+    Every key is checked first, so an unknown channel name is refused
+    whatever its value. A ``None`` value stays unset and a bare
+    ``ConditionalSpec`` stays as written: ``Chart.layer`` lifts it into the
+    chart's conditionals, as ``encode(color=cond)`` does. *encoding* is not
+    mutated.
+    """
+    from ferrum.selection import ConditionalSpec
+
+    for name in encoding:
+        channel_class(name)
+    return {
+        name: (
+            value
+            if value is None or isinstance(value, ConditionalSpec)
+            else channel_for_value(name, value, declare=f"Layer(encoding={{{name!r}: ...}})")
+        )
+        for name, value in encoding.items()
+    }
 
 
 class Layer:
@@ -31,7 +55,12 @@ class Layer:
         Identifier for this layer, used by composite-mark expansion and
         layer-targeted mark overrides. ``None`` for unnamed layers.
     encoding : dict, optional
-        Mapping of channel names to ``ChannelBase`` objects.  Defaults to an
+        Mapping of channel names to bindings, read as ``Chart.encode()``
+        reads its keyword arguments: a channel object, a shorthand string
+        (``"sum(y)"``, ``"r:Q"``, ``"count()"``) that means the channel
+        object it spells, or a ``Repeat`` placeholder. ``None`` leaves the
+        channel unset. An unknown channel name raises ``ValueError`` and any
+        other value ``TypeError``, as ``encode()`` does. Defaults to an
         empty dict when omitted.  A channel's own ``condition=`` kwarg (e.g.
         ``fm.Color(field, condition=sel.when(...).otherwise(...))``) is
         honored: ``Chart.layer()`` lifts it into the chart's real
@@ -85,7 +114,7 @@ class Layer:
         self.data = data
         self.mark = mark
         self.name = name
-        self.encoding = encoding or {}
+        self.encoding = _layer_encoding(encoding or {})
         self.transforms = []
         self.mark_kwargs = resolve_layer_style("Layer", mark, mark_kwargs or {})
 

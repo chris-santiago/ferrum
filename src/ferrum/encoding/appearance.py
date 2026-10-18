@@ -57,6 +57,7 @@ class Color(ChannelBase):
 
     _channel_name = "color"
     _legend_surface = "own"
+    _binned_color_scale = True
 
     # {"type","legend","scale","title","sort","scheme"} plus "condition",
     # added by ChannelBase.__init_subclass__ -- "color" is a real conditional
@@ -343,6 +344,7 @@ class Fill(ChannelBase):
 
     _channel_name = "fill"
     _legend_surface = "own"
+    _binned_color_scale = True
 
     # {"type","legend","scale","title","scheme"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- "fill" aliases to "color" and gains
@@ -398,6 +400,7 @@ class Stroke(ChannelBase):
 
     _channel_name = "stroke"
     _legend_surface = "own"
+    _binned_color_scale = True
 
     # {"type","legend","scale","title","scheme"} — no "condition": a stroke
     # conditional would repaint the fill (no EncodingValue::StrokeColor), so
