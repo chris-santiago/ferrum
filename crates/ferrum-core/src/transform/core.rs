@@ -723,6 +723,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"bin""#), "missing tag: {json}");
@@ -758,6 +760,8 @@ mod tests {
                 agg_field: None,
                 agg: None,
                 name: None,
+                per_row: false,
+                aggregates: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -805,6 +809,8 @@ mod tests {
                 agg_field: None,
                 agg: None,
                 name: None,
+                per_row: false,
+                aggregates: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -836,6 +842,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         });
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("name"), "name=None must be omitted: {json}");
@@ -902,6 +910,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         });
         let ctx = TransformContext::default();
         let with_ctx = spec.apply_with_context(&batch, &ctx).unwrap();
@@ -1153,6 +1163,8 @@ mod tests {
                 field: "v".into(), mode: BinMode::Fixed { n: 2 }, extent: None,
                 nice: false, cumulative: false, shared_extent: false,
                 groupby: vec!["g".into()], agg_field: None, agg: None, name: None,
+                per_row: false,
+                aggregates: None,
             }),
             value_and_all_null_group("v", vec![1.0, 2.0]),
         ));

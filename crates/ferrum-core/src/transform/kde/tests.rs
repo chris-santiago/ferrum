@@ -1278,6 +1278,8 @@ fn test_kde_count_scale_ungrouped_scales_by_n_times_bin_width() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let bin_out = crate::transform::bin::apply(&bin_spec, &batch).unwrap();
     let bin_starts = bin_out
@@ -1336,6 +1338,8 @@ fn actual_bin_widths_per_group(
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let bin_out = crate::transform::bin::apply(&bin_spec, batch).unwrap();
     widths_by_group_from_bin_output(&bin_out, &group_cols[0])
@@ -1584,6 +1588,8 @@ fn test_kde_count_scale_faceted_grouped_matches_bin_actual_panel_width() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let kde_spec = KdeSpec {
         groupby: group_cols.clone(),
@@ -1809,6 +1815,8 @@ fn actual_bin_width_ungrouped(
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let bin_out = crate::transform::bin::apply(&bin_spec, batch).unwrap();
     let s = bin_out.schema();
@@ -1887,6 +1895,8 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
                 agg_field: None,
                 agg: None,
                 name: None,
+                per_row: false,
+                aggregates: None,
             };
             let bin_out = crate::transform::bin::apply(&bin_spec, &batch).unwrap();
             let widths = widths_by_group_from_bin_output(&bin_out, "g");

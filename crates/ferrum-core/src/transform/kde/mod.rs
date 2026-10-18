@@ -199,6 +199,8 @@ fn count_scale_bin_spec(spec: &KdeSpec, mode: &BinMode) -> BinSpec {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     }
 }
 

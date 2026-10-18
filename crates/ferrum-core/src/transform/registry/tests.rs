@@ -201,6 +201,8 @@ fn bin_outputs_match_actual_schema() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
     let out = crate::transform::bin::apply(&spec, &batch).unwrap();
@@ -240,6 +242,8 @@ fn bin_outputs_match_actual_schema_with_agg() {
         agg_field: Some("w".into()),
         agg: Some(crate::transform::aggregate::AggFn::Mean),
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0]), ("w", &[10.0, 20.0, 30.0, 40.0, 50.0])]);
     let out = crate::transform::bin::apply(&spec, &batch).unwrap();
@@ -837,6 +841,8 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             field: "v".into(), mode: BinMode::Fixed { n: 4 }, extent: None, nice: false,
             cumulative: false, shared_extent: false, groupby: vec![],
             agg_field: None, agg: None, name: None,
+            per_row: false,
+            aggregates: None,
         })),
         ("bin_2d", Bin2D(Bin2DSpec {
             x: "x".into(), y: "y".into(), bins_x: BinMode::Fixed { n: 3 },

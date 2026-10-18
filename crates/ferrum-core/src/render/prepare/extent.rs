@@ -336,6 +336,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec)], &v_batch());
         let TransformSpec::Bin(pinned) = &out[0] else { panic!("expected a Bin transform back") };
@@ -627,6 +629,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         });
         let branch = |name: &str, transforms| {
             TransformSpec::Branch(BranchSpec { name: name.into(), input: None, transforms })

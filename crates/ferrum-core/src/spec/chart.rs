@@ -857,6 +857,8 @@ mod tests {
                 agg_field: None,
                 agg: None,
                 name: None,
+                per_row: false,
+                aggregates: None,
             })],
             ..Default::default()
         };

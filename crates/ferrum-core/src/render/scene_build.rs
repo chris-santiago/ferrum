@@ -8929,6 +8929,8 @@ mod tests {
                 agg_field: None,
                 agg: None,
                 name: Some("binned".into()),
+                per_row: false,
+                aggregates: None,
             })],
             layers: Some(vec![layer0, layer1]),
             ..Default::default()

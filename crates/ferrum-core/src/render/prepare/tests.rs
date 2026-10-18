@@ -483,6 +483,8 @@ fn fix_extents_pins_bin_to_niced_global_extent() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
     let TransformSpec::Bin(pinned) = &out[0] else {
@@ -596,6 +598,8 @@ fn fix_extents_respects_user_extent() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let kde = KdeSpec {
         field: "v".into(),
@@ -660,6 +664,8 @@ fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
         agg_field: None,
         agg: None,
         name: None,
+        per_row: false,
+        aggregates: None,
     };
     let kde_spec = KdeSpec {
         field: "v".into(),
@@ -2662,6 +2668,8 @@ fn spec_with_one_bin(name: Option<String>) -> ChartSpec {
         agg_field: None,
         agg: None,
         name,
+        per_row: false,
+        aggregates: None,
     })];
     if !named {
         // Unnamed/chained: after Bin, the encoding fields ("price", "weight")
@@ -5938,6 +5946,8 @@ fn normalize_transform_outputs_casts_a_real_transforms_large_utf8_groupby_echo()
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         }
     }
 

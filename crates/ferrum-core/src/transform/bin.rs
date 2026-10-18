@@ -3,10 +3,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
-use crate::transform::aggregate::{AggColumn, AggFn};
+use crate::transform::aggregate::{extract_aggregate_ops, AggColumn, AggFn, AggregateOp};
 use crate::transform::vocabulary::Vocabulary;
 use crate::transform::bin_mode::{resolve_bin_count, BinMode};
 use crate::transform::context::TransformContext;
@@ -109,7 +110,8 @@ pub(crate) fn shared_bin_edges(
                 .iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
             if lo == hi {
-                return Ok(Some((lo - 0.5, lo + 0.5, 1)));
+                let (start, end) = single_unit_bin(lo);
+                return Ok(Some((start, end, 1)));
             }
             (lo, hi, spec.nice)
         }
@@ -161,6 +163,22 @@ pub(crate) struct BinSpec {
     /// well-defined running-total form, so `agg_value` is always the
     /// non-cumulative per-bin statistic even when `cumulative=true`.
     pub agg: Option<AggFn>,
+    /// When `true`, the output is every input row, in order, with all its
+    /// columns, plus `bin_start` and `bin_end`: the edges of the bin the
+    /// aggregating `Bin` counts the row into, from the same edge rule
+    /// ([`group_edges`]). A row the aggregating `Bin` counts in no bin (a null
+    /// or NaN value, or a value outside an explicit `extent`) carries null
+    /// edges. Refused with `groupby`, `agg_field`/`agg`, `aggregates` or
+    /// `cumulative` ([`check_options`]).
+    pub per_row: bool,
+    /// Several named per-bin aggregates: each entry adds a nullable Float64
+    /// column named by its `as_`, after `density` and in entry order, holding
+    /// the entry's fn over its field's values in each (bin, group), with the
+    /// null/NaN policy and empty-bin null that `agg` documents. A `count`
+    /// entry on a field counts the field's non-null values; on `"*"` it
+    /// counts the bin's rows. Refused with `agg_field`/`agg`, and when empty
+    /// or when an output name repeats or collides ([`check_aggregates`]).
+    pub aggregates: Option<Vec<AggregateOp>>,
     pub name: Option<String>,
 }
 
@@ -209,6 +227,15 @@ struct BinWire {
     agg_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     agg: Option<String>,
+    /// Written only when set, so every `Bin` that does not bin per row keeps
+    /// its exact bytes.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    per_row: bool,
+    /// The same `{field, fn, as}` entries `Aggregate`'s `ops` carries, so an
+    /// unknown fn is refused with `Aggregate`'s own text. Written only when
+    /// set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    aggregates: Option<Vec<AggregateOp>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     name: Option<String>,
 }
@@ -250,6 +277,8 @@ impl TryFrom<BinWire> for BinSpec {
             groupby: w.groupby,
             agg_field: w.agg_field,
             agg,
+            per_row: w.per_row,
+            aggregates: w.aggregates,
             name: w.name,
         })
     }
@@ -279,6 +308,8 @@ impl From<BinSpec> for BinWire {
             groupby: s.groupby,
             agg_field: s.agg_field,
             agg: s.agg.map(|f| f.as_str().to_string()),
+            per_row: s.per_row,
+            aggregates: s.aggregates,
             name: s.name,
         }
     }
@@ -354,35 +385,144 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    // Resolved ONCE regardless of groupby, so agg_field/agg pairing and
-    // vocabulary validation happen exactly once (not once per group, and not
-    // skipped when a grouped batch happens to produce zero groups).
-    let agg_col = resolve_bin_agg(spec, batch)?;
+    // A wire-built spec meets the parameter checks only here; the PyO3 door
+    // runs them at construction.
+    check_options(spec).map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))?;
+    if spec.per_row {
+        return apply_per_row(spec, batch);
+    }
+    // Resolved ONCE regardless of groupby, so the aggregate columns are
+    // validated exactly once (not once per group, and not skipped when a
+    // grouped batch happens to produce zero groups).
+    let aggs = resolve_bin_aggregates(spec, batch)?;
     // D-GROUPBY-1: groupby is now Vec<String>. Non-empty → grouped path.
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby, agg_col.as_ref(), ctx);
+        return apply_grouped(spec, batch, &spec.groupby, &aggs, ctx);
     }
-    apply_one_group(spec, batch, None, agg_col.as_ref())
+    apply_one_group(spec, batch, None, &aggs)
 }
 
-/// Resolve `spec`'s optional per-bin aggregate column (batch-E T7).
-///
-/// `agg_field`/`agg` must be set together ([`check_agg_pairing`]; a wire-built
-/// spec meets that check only here). When both are set, `agg_field` is
-/// resolved via [`AggColumn::resolve`], the same numeric-widening/null-drop policy
-/// `stat_aggregate` uses — so a bin's `agg_value` matches what `Aggregate`
-/// would compute over the same rows.
-fn resolve_bin_agg(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Option<AggColumn>> {
-    check_agg_pairing(spec.agg_field.is_some(), spec.agg.is_some())
-        .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))?;
-    let (Some(field), Some(fn_)) = (&spec.agg_field, spec.agg) else {
-        return Ok(None);
+/// The parameter combinations `Bin` refuses whatever the data, checked in
+/// this order: unpaired `agg_field`/`agg` ([`check_agg_pairing`]), `per_row`
+/// with a parameter that groups, aggregates or accumulates rows (a per-row
+/// output has no group, aggregate or running total to carry), and a
+/// malformed `aggregates` list ([`check_aggregates`]). The one refusal text;
+/// each door prefixes itself.
+fn check_options(spec: &BinSpec) -> Result<(), String> {
+    check_agg_pairing(spec.agg_field.is_some(), spec.agg.is_some())?;
+    if spec.per_row {
+        let conflict = [
+            (!spec.groupby.is_empty(), "groupby"),
+            (spec.agg_field.is_some(), "agg_field/agg"),
+            (spec.aggregates.is_some(), "aggregates"),
+            (spec.cumulative, "cumulative"),
+        ]
+        .into_iter()
+        .find_map(|(set, param)| set.then_some(param));
+        if let Some(param) = conflict {
+            return Err(format!("per_row cannot be combined with {param}"));
+        }
+    }
+    match &spec.aggregates {
+        Some(entries) => check_aggregates(spec, entries),
+        None => Ok(()),
+    }
+}
+
+/// `aggregates`' own rules: it replaces `agg_field`/`agg` rather than adding
+/// to them, holds at least one entry, and names each output column once,
+/// apart from `Bin`'s own columns and the `groupby` columns it sits beside.
+/// An entry reads a field unless it is `count` on `""` or `"*"`, as
+/// `AggregateOp` reads it.
+fn check_aggregates(spec: &BinSpec, entries: &[AggregateOp]) -> Result<(), String> {
+    if spec.agg_field.is_some() {
+        return Err("aggregates cannot be combined with agg_field/agg".into());
+    }
+    if entries.is_empty() {
+        return Err("aggregates must hold at least one entry".into());
+    }
+    let own = bin_output_field_names(&[]);
+    let mut seen = HashSet::new();
+    for (i, op) in entries.iter().enumerate() {
+        let name = op.as_.as_str();
+        if name.is_empty() {
+            return Err(format!("aggregates entry {i} has an empty output name"));
+        }
+        if matches!(op.field.as_str(), "" | "*") && !op.is_count_star() {
+            return Err(format!(
+                "aggregates entry '{name}' needs a field; only count may count rows with \"*\""
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("aggregates output name '{name}' appears more than once"));
+        }
+        if own.iter().any(|o| o == name) {
+            return Err(format!(
+                "aggregates output name '{name}' collides with Bin's own output column '{name}'"
+            ));
+        }
+        if spec.groupby.iter().any(|g| g == name) {
+            return Err(format!(
+                "aggregates output name '{name}' collides with groupby column '{name}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One per-bin aggregate output column: its name and what it reads.
+struct BinAggregate {
+    name: String,
+    source: BinAggregateSource,
+}
+
+enum BinAggregateSource {
+    /// A field's values, under [`AggColumn`]'s policy.
+    Field(AggColumn),
+    /// `count` on `""` or `"*"`: the number of rows in the bin.
+    Rows,
+}
+
+impl BinAggregate {
+    /// The aggregate over one non-empty bin's original row indices.
+    fn over(&self, rows: &[usize]) -> f64 {
+        match &self.source {
+            BinAggregateSource::Field(col) => col.aggregate_rows(rows),
+            BinAggregateSource::Rows => rows.len() as f64,
+        }
+    }
+}
+
+/// Resolve `spec`'s per-bin aggregate columns, in output order: the one
+/// `agg_value` column of `agg_field`/`agg`, each `aggregates`
+/// entry, or none. A field is resolved via [`AggColumn::resolve`], the same
+/// numeric-widening/null-drop policy `stat_aggregate` uses, so each column
+/// matches what `Aggregate` would compute over the same rows.
+fn resolve_bin_aggregates(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Vec<BinAggregate>> {
+    let field_column = |param: &str, field: &str, fn_: AggFn| -> PyResult<BinAggregateSource> {
+        let idx = batch.schema().index_of(field).map_err(|_| {
+            PyValueError::new_err(format!("stat_bin: {param} column '{field}' not found"))
+        })?;
+        Ok(BinAggregateSource::Field(AggColumn::resolve(batch.column(idx), field, fn_, "stat_bin")?))
     };
-    let schema = batch.schema();
-    let idx = schema.index_of(field).map_err(|_| {
-        PyValueError::new_err(format!("stat_bin: agg_field column '{field}' not found"))
-    })?;
-    Ok(Some(AggColumn::resolve(batch.column(idx), field, fn_, "stat_bin")?))
+    if let (Some(field), Some(fn_)) = (&spec.agg_field, spec.agg) {
+        return Ok(vec![BinAggregate {
+            name: "agg_value".into(),
+            source: field_column("agg_field", field, fn_)?,
+        }]);
+    }
+    spec.aggregates
+        .iter()
+        .flatten()
+        .map(|op| {
+            let source = if op.is_count_star() {
+                BinAggregateSource::Rows
+            } else {
+                field_column("aggregates field", &op.field, op.fn_)?
+            };
+            Ok(BinAggregate { name: op.as_.clone(), source })
+        })
+        .collect()
 }
 
 /// `Bin`'s field requirement: `agg_field` and `agg` are set together or not
@@ -399,28 +539,16 @@ fn apply_one_group(
     spec: &BinSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
-    agg_col: Option<&AggColumn>,
+    aggs: &[BinAggregate],
 ) -> PyResult<RecordBatch> {
-    build_bin_batch(compute_one_group(spec, batch, only_indices, agg_col, None)?)
+    build_bin_batch(compute_one_group(spec, batch, only_indices, aggs, None)?, aggs)
 }
 
-/// This transform's per-group compute: resolve the column, clean/bin the
-/// values, and return the four (or five, with `agg`) output columns as plain
-/// `Vec`s — no `RecordBatch` built here. [`apply_one_group`] wraps this with
-/// [`build_bin_batch`] for the ungrouped entry point; [`apply_grouped`] calls
-/// this directly per partition and extends its own accumulator `Vec`s from
-/// the typed result.
-///
-/// `shared_edges`, when `Some`, are the `(lo, hi, n_bins)` every group of a
-/// `shared_extent` request is counted into ([`shared_bin_edges`]); this group
-/// then derives no extent or count of its own.
-fn compute_one_group(
-    spec: &BinSpec,
-    batch: &RecordBatch,
-    only_indices: Option<&[usize]>,
-    agg_col: Option<&AggColumn>,
-    shared_edges: Option<(f64, f64, usize)>,
-) -> PyResult<BinColumns> {
+/// `spec.field` widened to Float64, refused by name when missing or
+/// non-numeric. Integer columns are cast so that Int32/Int64 columns work
+/// without requiring the caller to pre-cast (e.g. JointChart marginal
+/// histograms); `coerce_to_float64` is the single source for this cast.
+fn binned_column(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Float64Array> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!(
@@ -429,87 +557,159 @@ fn compute_one_group(
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
         ))
     })?;
-    // Auto-cast integer types to Float64 so that Int32/Int64 columns work without
-    // requiring the caller to pre-cast (e.g. JointChart marginal histograms).
-    // `coerce_to_float64` is the single source for this cast (XFORM-05).
-    let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field)?;
+    coerce_to_float64(batch.column(idx), "stat_bin", &spec.field)
+}
+
+/// The edges one group's clean values are counted into.
+enum GroupEdges {
+    /// `n_bins` equal-width bins over `[lo, hi]`: `[start, end)` each, the
+    /// last edge inclusive.
+    Binned { lo: f64, hi: f64, n_bins: usize },
+    /// Every clean value equals this one: the single unit bin around it.
+    SingleUnit(f64),
+}
+
+impl GroupEdges {
+    /// Edge `i` of `n_bins` equal-width bins over `[lo, hi]`.
+    fn edge(lo: f64, hi: f64, n_bins: usize, i: usize) -> f64 {
+        lo + (hi - lo) * (i as f64) / (n_bins as f64)
+    }
+
+    /// The index of the bin counting `v`, `None` outside `[lo, hi]`.
+    fn bin_index(lo: f64, hi: f64, n_bins: usize, v: f64) -> Option<usize> {
+        if v < lo || v > hi {
+            return None;
+        }
+        // Last edge is inclusive; otherwise [lo, hi) per bin.
+        if v == hi {
+            return Some(n_bins - 1);
+        }
+        let raw = ((v - lo) / (hi - lo) * (n_bins as f64)).floor() as usize;
+        Some(raw.min(n_bins - 1))
+    }
+
+    /// `(bin_start, bin_end)` of the bin counting the clean value `v`, `None`
+    /// when no bin counts it.
+    fn bin_of(&self, v: f64) -> Option<(f64, f64)> {
+        match *self {
+            GroupEdges::Binned { lo, hi, n_bins } => Self::bin_index(lo, hi, n_bins, v)
+                .map(|i| (Self::edge(lo, hi, n_bins, i), Self::edge(lo, hi, n_bins, i + 1))),
+            GroupEdges::SingleUnit(u) => Some(single_unit_bin(u)),
+        }
+    }
+}
+
+/// The single unit bin `[v - 0.5, v + 0.5]` an all-equal group bins into, so
+/// a set with no spread still draws one bar of unit width.
+fn single_unit_bin(v: f64) -> (f64, f64) {
+    (v - 0.5, v + 0.5)
+}
+
+/// The edge rule every `Bin` output reads, for one group's non-empty clean
+/// values: the `shared_edges` of a `shared_extent` request when given, else
+/// the explicit `extent` or the values' own extent (an all-equal set takes
+/// the single unit bin), niced only when auto-derived, with the bin-count
+/// rule over the values.
+fn group_edges(
+    spec: &BinSpec,
+    clean: &[f64],
+    shared_edges: Option<(f64, f64, usize)>,
+) -> PyResult<GroupEdges> {
+    if let Some((lo, hi, n_bins)) = shared_edges {
+        return Ok(GroupEdges::Binned { lo, hi, n_bins });
+    }
+    let (lo, hi) = match spec.extent {
+        Some((a, b)) if a < b => (a, b),
+        Some((a, b)) => return Err(PyValueError::new_err(format!(
+            "stat_bin: extent must satisfy lo < hi; got ({a}, {b})"
+        ))),
+        None => {
+            let (lo, hi) = clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+            if lo == hi {
+                return Ok(GroupEdges::SingleUnit(lo));
+            }
+            (lo, hi)
+        }
+    };
+    // Optional "nice" rounding of the extent, plus bin-count resolution.
+    // Only nices when extent is auto-derived (not when the caller explicitly
+    // set extent). See `resolve_bin_extent`'s doc for the target-selection
+    // rule (Fixed{n} vs Sturges fallback).
+    let should_nice = spec.nice && spec.extent.is_none();
+    let (lo, hi, n_bins) = resolve_bin_extent(clean, &spec.mode, lo, hi, should_nice, "stat_bin")?;
+    Ok(GroupEdges::Binned { lo, hi, n_bins })
+}
+
+/// This transform's per-group compute: resolve the column, clean/bin the
+/// values, and return the four output columns plus one per aggregate as
+/// plain `Vec`s — no `RecordBatch` built here. [`apply_one_group`] wraps this
+/// with [`build_bin_batch`] for the ungrouped entry point; [`apply_grouped`]
+/// calls this directly per partition and extends its own accumulator `Vec`s
+/// from the typed result.
+///
+/// `shared_edges`, when `Some`, are the `(lo, hi, n_bins)` every group of a
+/// `shared_extent` request is counted into ([`shared_bin_edges`]); this group
+/// then derives no extent or count of its own.
+fn compute_one_group(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+    aggs: &[BinAggregate],
+    shared_edges: Option<(f64, f64, usize)>,
+) -> PyResult<BinColumns> {
+    let arr = binned_column(spec, batch)?;
 
     // Drop nulls and NaN; optionally restrict to a subset of row indices (for
     // groupby). `row_idx[i]` is `clean[i]`'s ORIGINAL row index, needed to
-    // look up `agg_field`'s value for exactly the same rows a bin counts.
+    // look up each aggregate's value for exactly the same rows a bin counts.
     let (clean, row_idx) = clean_float64_values_indexed(&arr, only_indices);
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
     if clean.is_empty() {
-        return Ok(empty_bin_columns(agg_col.is_some()));
+        return Ok(empty_bin_columns(aggs.len()));
     }
 
-    let (lo, hi, n_bins) = match shared_edges {
-        Some(edges) => edges,
-        None => {
-            let (lo, hi) = match spec.extent {
-                Some((a, b)) if a < b => (a, b),
-                Some((a, b)) => return Err(PyValueError::new_err(format!(
-                    "stat_bin: extent must satisfy lo < hi; got ({a}, {b})"
-                ))),
-                None => {
-                    let (lo, hi) = clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                        (a.min(v), b.max(v))
-                    });
-                    if lo == hi {
-                        // Spec §4.1 numeric edge: all-equal → single unit bin. Every
-                        // clean row falls in this one bin, so its agg_value (when
-                        // requested) aggregates the full `row_idx` set.
-                        let agg_value = agg_col.map(|ac| ac.aggregate_rows(&row_idx));
-                        return Ok(single_unit_bin_columns(lo, clean.len() as u64, agg_value));
-                    }
-                    (lo, hi)
-                }
-            };
-            // Optional "nice" rounding of the extent, plus bin-count resolution.
-            // Only nices when extent is auto-derived (not when the caller explicitly
-            // set extent). See `resolve_bin_extent`'s doc for the target-selection
-            // rule (Fixed{n} vs Sturges fallback).
-            let should_nice = spec.nice && spec.extent.is_none();
-            resolve_bin_extent(&clean, &spec.mode, lo, hi, should_nice, "stat_bin")?
+    let (lo, hi, n_bins) = match group_edges(spec, &clean, shared_edges)? {
+        GroupEdges::Binned { lo, hi, n_bins } => (lo, hi, n_bins),
+        // Every clean row falls in the one unit bin, so each aggregate
+        // aggregates the full `row_idx` set.
+        GroupEdges::SingleUnit(v) => {
+            let agg_values = aggs.iter().map(|a| a.over(&row_idx)).collect();
+            return Ok(single_unit_bin_columns(v, clean.len() as u64, agg_values));
         }
     };
 
-    let edges: Vec<f64> = (0..=n_bins)
-        .map(|i| lo + (hi - lo) * (i as f64) / (n_bins as f64))
-        .collect();
+    let edges: Vec<f64> = (0..=n_bins).map(|i| GroupEdges::edge(lo, hi, n_bins, i)).collect();
 
     let mut counts = vec![0u64; n_bins];
     // Per-bin ORIGINAL row indices, collected only when an aggregate was
     // requested (avoids the allocation entirely on the byte-stable default
     // path).
-    let mut bin_rows: Vec<Vec<usize>> = if agg_col.is_some() { vec![Vec::new(); n_bins] } else { Vec::new() };
+    let mut bin_rows: Vec<Vec<usize>> = if aggs.is_empty() { Vec::new() } else { vec![Vec::new(); n_bins] };
     for (i, v) in clean.iter().enumerate() {
-        if *v < lo || *v > hi { continue; }
-        // Last edge is inclusive; otherwise [lo, hi) per bin.
-        let pos = if *v == hi {
-            n_bins - 1
-        } else {
-            let raw = ((*v - lo) / (hi - lo) * (n_bins as f64)).floor() as usize;
-            raw.min(n_bins - 1)
-        };
+        let Some(pos) = GroupEdges::bin_index(lo, hi, n_bins, *v) else { continue };
         counts[pos] += 1;
-        if agg_col.is_some() {
+        if !aggs.is_empty() {
             bin_rows[pos].push(row_idx[i]);
         }
     }
 
-    // Per-bin aggregate (batch-E T7), independent of `cumulative` — see the
-    // `agg` field's doc comment. A structurally empty bin (no rows landed in
-    // its range) yields `None` (Arrow null), never `Aggregate`'s own
-    // all-null convention (`NaN`/`0`), which only applies to a NON-empty bin
-    // whose `agg_field` values are all null/NaN.
-    let agg_values: Option<Vec<Option<f64>>> = agg_col.map(|ac| {
-        bin_rows
-            .iter()
-            .map(|rows| if rows.is_empty() { None } else { Some(ac.aggregate_rows(rows)) })
-            .collect()
-    });
+    // Per-bin aggregates, independent of `cumulative` — see the `agg` field's
+    // doc comment. A structurally empty bin (no rows landed in its range)
+    // yields `None` (Arrow null), never `Aggregate`'s own all-null convention
+    // (`NaN`/`0`), which only applies to a NON-empty bin whose field values
+    // are all null/NaN.
+    let agg_values: Vec<Vec<Option<f64>>> = aggs
+        .iter()
+        .map(|a| {
+            bin_rows
+                .iter()
+                .map(|rows| if rows.is_empty() { None } else { Some(a.over(rows)) })
+                .collect()
+        })
+        .collect();
 
     let total = clean.len() as f64;
     let bin_starts: Vec<f64> = (0..n_bins).map(|i| edges[i]).collect();
@@ -549,6 +749,45 @@ fn compute_one_group(
     })
 }
 
+/// The two columns a `per_row` `Bin` appends to its input.
+const PER_ROW_COLUMNS: [&str; 2] = ["bin_start", "bin_end"];
+
+/// `per_row`: every input row, in order and with every input column, plus
+/// `bin_start`/`bin_end` from [`group_edges`] over all the clean values, so
+/// each row carries the edges of the bin the aggregating `Bin` counts it
+/// into. A row counted in no bin carries nulls. An input column named like
+/// an appended one is refused rather than shadowed.
+fn apply_per_row(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    let schema = batch.schema();
+    if let Some(taken) = PER_ROW_COLUMNS.iter().find(|c| schema.index_of(c).is_ok()) {
+        return Err(PyValueError::new_err(format!(
+            "stat_bin: per_row output column '{taken}' collides with an input column of the same \
+             name; rename the input column"
+        )));
+    }
+    let arr = binned_column(spec, batch)?;
+    let (clean, row_idx) = clean_float64_values_indexed(&arr, None);
+    let mut starts: Vec<Option<f64>> = vec![None; batch.num_rows()];
+    let mut ends: Vec<Option<f64>> = vec![None; batch.num_rows()];
+    if !clean.is_empty() {
+        let edges = group_edges(spec, &clean, None)?;
+        for (v, &row) in clean.iter().zip(&row_idx) {
+            if let Some((start, end)) = edges.bin_of(*v) {
+                starts[row] = Some(start);
+                ends[row] = Some(end);
+            }
+        }
+    }
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields.extend(PER_ROW_COLUMNS.map(|name| Field::new(name, DataType::Float64, true)));
+    let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
+    cols.push(Arc::new(Float64Array::from(starts)));
+    cols.push(Arc::new(Float64Array::from(ends)));
+    let schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
+}
+
 /// Partition input batch by the groupby columns, call `compute_one_group` per
 /// partition, and concatenate the typed columns into a single batch with the
 /// group columns appended after the 4th field.
@@ -563,16 +802,12 @@ fn apply_grouped(
     spec: &BinSpec,
     batch: &RecordBatch,
     group_cols: &[String],
-    agg_col: Option<&AggColumn>,
+    aggs: &[BinAggregate],
     warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition via the shared helper (first-appearance order,
     // null-key skip, dtype-preservation — same policy as single-column path).
-    refuse_groupby_output_collision(
-        "stat_bin",
-        group_cols,
-        &bin_output_field_names(agg_col.is_some()),
-    )?;
+    refuse_groupby_output_collision("stat_bin", group_cols, &bin_output_field_names(aggs))?;
     let partition =
         group_partition_multi(batch, group_cols, "stat_bin", NullKeyPolicy::Skip, warn_ctx)?;
 
@@ -584,17 +819,17 @@ fn apply_grouped(
     let mut all_ends: Vec<f64> = Vec::new();
     let mut all_counts: Vec<u64> = Vec::new();
     let mut all_densities: Vec<f64> = Vec::new();
-    let mut all_agg_values: Vec<Option<f64>> = Vec::new();
+    let mut all_agg_values: Vec<Vec<Option<f64>>> = vec![Vec::new(); aggs.len()];
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for (g, ixs) in &partition.groups {
-        let cols = compute_one_group(spec, batch, Some(ixs), agg_col, shared_edges)?;
+        let cols = compute_one_group(spec, batch, Some(ixs), aggs, shared_edges)?;
         let n = cols.starts.len();
         all_starts.extend(cols.starts);
         all_ends.extend(cols.ends);
         all_counts.extend(cols.counts);
         all_densities.extend(cols.densities);
-        if let Some(agg_values) = cols.agg_values {
-            all_agg_values.extend(agg_values);
+        for (all, values) in all_agg_values.iter_mut().zip(cols.agg_values) {
+            all.extend(values);
         }
         group_keys_out.extend(std::iter::repeat_n(g.clone(), n));
     }
@@ -605,35 +840,35 @@ fn apply_grouped(
             ends: all_ends,
             counts: all_counts,
             densities: all_densities,
-            agg_values: agg_col.is_some().then_some(all_agg_values),
+            agg_values: all_agg_values,
         },
+        aggs,
         group_keys_out, group_cols, &partition.dtypes,
     )
 }
 
-/// The four (or five, with `agg`) per-row output columns shared by
+/// The four per-row output columns, plus one per aggregate, shared by
 /// [`build_bin_batch`] and [`build_bin_batch_grouped`]. Bundled into one
-/// struct — rather than 4-5 positional `Vec` params on each builder —
-/// because `build_bin_batch_grouped` already carries 3 groupby params of its
-/// own; adding `agg_values` as a 5th positional param would push it past
-/// clippy's `too_many_arguments` threshold.
+/// struct — rather than positional `Vec` params on each builder — because
+/// `build_bin_batch_grouped` already carries 3 groupby params of its own,
+/// which would push it past clippy's `too_many_arguments` threshold.
 struct BinColumns {
     starts: Vec<f64>,
     ends: Vec<f64>,
     counts: Vec<u64>,
     densities: Vec<f64>,
-    /// `Some`, adds a nullable `agg_value: Float64` column after `density`
-    /// (batch-E T7). `None` reproduces the pre-T7 4-column schema
-    /// byte-for-byte — every existing caller that never sets `agg`.
-    agg_values: Option<Vec<Option<f64>>>,
+    /// One nullable Float64 column per [`BinAggregate`], in the same order,
+    /// after `density`. Empty reproduces the 4-column schema byte-for-byte —
+    /// every caller that sets no aggregate.
+    agg_values: Vec<Vec<Option<f64>>>,
 }
 
 impl BinColumns {
     /// The `bin_start`/`bin_end`/`count`/`density` fields/arrays every bin
-    /// output batch carries, plus the optional `agg_value` field/array when
-    /// `agg_values` is `Some`. Shared by both builders below so the 4-vs-5
-    /// column decision is made in exactly one place.
-    fn into_fields_and_cols(self) -> (Vec<Field>, Vec<ArrayRef>) {
+    /// output batch carries, plus one field/array per aggregate, named by
+    /// `aggs`. Shared by both builders below so the column list is decided in
+    /// exactly one place.
+    fn into_fields_and_cols(self, aggs: &[BinAggregate]) -> (Vec<Field>, Vec<ArrayRef>) {
         let mut fields = vec![
             Field::new("bin_start", DataType::Float64, false),
             Field::new("bin_end",   DataType::Float64, false),
@@ -646,9 +881,9 @@ impl BinColumns {
             Arc::new(UInt64Array::from(self.counts)),
             Arc::new(Float64Array::from(self.densities)),
         ];
-        if let Some(agg) = self.agg_values {
-            fields.push(Field::new("agg_value", DataType::Float64, true));
-            cols.push(Arc::new(Float64Array::from(agg)));
+        for (agg, values) in aggs.iter().zip(self.agg_values) {
+            fields.push(Field::new(&agg.name, DataType::Float64, true));
+            cols.push(Arc::new(Float64Array::from(values)));
         }
         (fields, cols)
     }
@@ -658,36 +893,30 @@ impl BinColumns {
 /// list a `groupby` request is checked against by
 /// [`refuse_groupby_output_collision`]. Derived from
 /// [`BinColumns::into_fields_and_cols`] itself rather than re-spelled, so the
-/// collision guard cannot fall behind the 4-vs-5 column decision.
-fn bin_output_field_names(with_agg: bool) -> Vec<String> {
-    let (fields, _) = BinColumns {
-        starts: Vec::new(),
-        ends: Vec::new(),
-        counts: Vec::new(),
-        densities: Vec::new(),
-        agg_values: with_agg.then_some(Vec::new()),
-    }
-    .into_fields_and_cols();
+/// collision guard cannot fall behind the column decision.
+fn bin_output_field_names(aggs: &[BinAggregate]) -> Vec<String> {
+    let (fields, _) = empty_bin_columns(aggs.len()).into_fields_and_cols(aggs);
     fields.into_iter().map(|f| f.name().clone()).collect()
 }
 
-fn build_bin_batch(cols: BinColumns) -> PyResult<RecordBatch> {
-    let (fields, cols) = cols.into_fields_and_cols();
+fn build_bin_batch(cols: BinColumns, aggs: &[BinAggregate]) -> PyResult<RecordBatch> {
+    let (fields, cols) = cols.into_fields_and_cols(aggs);
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
 }
 
-/// See [`BinColumns::agg_values`]'s doc — same optional 5th column, inserted
-/// before the groupby columns so `agg_value` (when present) always sits
-/// right after `density` regardless of groupby arity.
+/// See [`BinColumns::agg_values`]'s doc — the aggregate columns are inserted
+/// before the groupby columns so they always sit right after `density`
+/// regardless of groupby arity.
 fn build_bin_batch_grouped(
     cols: BinColumns,
+    aggs: &[BinAggregate],
     group_keys: Vec<Vec<KeyValue>>,
     group_col_names: &[String],
     group_dtypes: &[DataType],
 ) -> PyResult<RecordBatch> {
-    let (mut fields, mut cols) = cols.into_fields_and_cols();
+    let (mut fields, mut cols) = cols.into_fields_and_cols(aggs);
     // FA-7: preserve original groupby dtypes (nullable for FA-9 null keys,
     // though null keys are skipped upstream for stat_bin).
     for (name, dtype) in group_col_names.iter().zip(group_dtypes.iter()) {
@@ -703,26 +932,25 @@ fn build_bin_batch_grouped(
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
 }
 
-fn empty_bin_columns(with_agg: bool) -> BinColumns {
+fn empty_bin_columns(n_aggs: usize) -> BinColumns {
     BinColumns {
         starts: Vec::new(),
         ends: Vec::new(),
         counts: Vec::new(),
         densities: Vec::new(),
-        agg_values: with_agg.then_some(Vec::new()),
+        agg_values: vec![Vec::new(); n_aggs],
     }
 }
 
-fn single_unit_bin_columns(v: f64, count: u64, agg_value: Option<f64>) -> BinColumns {
-    let start = v - 0.5;
-    let end   = v + 0.5;
+fn single_unit_bin_columns(v: f64, count: u64, agg_values: Vec<f64>) -> BinColumns {
+    let (start, end) = single_unit_bin(v);
     let density = (count as f64) / ((count as f64) * (end - start));
     BinColumns {
         starts: vec![start],
         ends: vec![end],
         counts: vec![count],
         densities: vec![density],
-        agg_values: agg_value.map(|v| vec![Some(v)]),
+        agg_values: agg_values.into_iter().map(|v| vec![Some(v)]).collect(),
     }
 }
 
@@ -737,7 +965,9 @@ use crate::transform::core::TransformSpec;
 /// (UInt64), and ``density`` (Float64, integrates to 1 over the range).
 /// When ``cumulative=True``, ``count`` and ``density`` become running totals.
 /// When ``agg_field``/``agg`` are set, the output additionally gains
-/// ``agg_value`` (Float64): the per-bin aggregate of ``agg_field``.
+/// ``agg_value`` (Float64): the per-bin aggregate of ``agg_field``; with
+/// ``aggregates``, one such column per entry. With ``per_row=True`` the
+/// output is instead every input row with ``bin_start``/``bin_end`` appended.
 ///
 /// Parameters
 /// ----------
@@ -776,6 +1006,22 @@ use crate::transform::core::TransformSpec;
 ///     the aggregate of ``agg_field``'s values over each bin's rows, with
 ///     ``Aggregate``'s own null/NaN-drop policy. A bin with no rows in its
 ///     range yields a null ``agg_value`` (not ``NaN``, not ``0``).
+/// per_row : bool, default False
+///     When True, return every input row, in order and with every input
+///     column, plus ``bin_start``/``bin_end``: the edges of the bin the
+///     aggregating ``Bin`` (same data and parameters) counts the row into.
+///     A null or NaN value, or a value outside ``extent``, gets null edges.
+///     Refused with ``groupby``, ``agg_field``/``agg``, ``aggregates`` or
+///     ``cumulative``, and when the input already has a ``bin_start`` or
+///     ``bin_end`` column.
+/// aggregates : list[AggregateOp], optional
+///     ``AggregateOp(field, fn_, as_)`` entries, as ``Aggregate(ops=)`` takes
+///     them, each adding a column ``as_``: ``fn_`` over ``field``'s values in
+///     each (bin, group), with ``agg``'s vocabulary and null policy.
+///     ``count`` on a field counts its non-null values; on ``"*"`` it counts
+///     the bin's rows. Refused with ``agg_field``/``agg``, when empty, and
+///     when an ``as_`` repeats or names a ``groupby`` column or one of
+///     ``bin_start``, ``bin_end``, ``count``, ``density``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -797,7 +1043,7 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bins = None, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, shared_extent = false, groupby = None, agg_field = None, agg = None, name = None))]
+    #[pyo3(signature = (field, *, bins = None, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, shared_extent = false, groupby = None, agg_field = None, agg = None, per_row = false, aggregates = None, name = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
@@ -811,6 +1057,8 @@ impl PyBin {
         groupby: Option<&Bound<'_, PyAny>>,
         agg_field: Option<String>,
         agg: Option<String>,
+        per_row: bool,
+        aggregates: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -838,6 +1086,8 @@ impl PyBin {
         let bin_err = |e: String| PyValueError::new_err(format!("Bin: {e}"));
         check_agg_pairing(agg_field.is_some(), agg.is_some()).map_err(|e| bin_err(e.into()))?;
         let agg = agg.map(|m| AggFn::parse_or_refuse("agg", &m)).transpose().map_err(bin_err)?;
+        let aggregates =
+            aggregates.map(|ops| extract_aggregate_ops("Bin: aggregates", ops)).transpose()?;
         let groupby = parse_groupby_pyany(groupby)?;
         // `bins` names the whole decision in one value — the rule-bearing
         // spelling `Bin2D(bins_x=)` and `Kde(count_scale=)` already accept,
@@ -866,7 +1116,7 @@ impl PyBin {
                 }
             }
         };
-        Ok(PyBin(TransformSpec::Bin(BinSpec {
+        let spec = BinSpec {
             field: field.to_string(),
             mode,
             extent,
@@ -876,8 +1126,12 @@ impl PyBin {
             groupby,
             agg_field,
             agg,
+            per_row,
+            aggregates,
             name,
-        })))
+        };
+        check_options(&spec).map_err(bin_err)?;
+        Ok(PyBin(TransformSpec::Bin(spec)))
     }
 
     fn __repr__(&self) -> String {
@@ -901,15 +1155,26 @@ impl PyBin {
                     .explicit_rule_name()
                     .map(|rule| format!(", bins='{rule}'"))
                     .unwrap_or_default();
+                // `per_row` and `aggregates` print only when set, so a Bin
+                // without them keeps its repr.
+                let per_row_term = if s.per_row { ", per_row=True" } else { "" };
+                let aggregates_term = s
+                    .aggregates
+                    .as_ref()
+                    .map(|entries| {
+                        let entries: Vec<String> = entries.iter().map(AggregateOp::repr).collect();
+                        format!(", aggregates=[{}]", entries.join(", "))
+                    })
+                    .unwrap_or_default();
                 format!(
                     "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={}, \
-                     shared_extent={}, groupby={:?}, agg_field={:?}, agg={:?}, name={:?}{})",
+                     shared_extent={}, groupby={:?}, agg_field={:?}, agg={:?}, name={:?}{}{}{})",
                     s.field, bin_count, bin_width, s.extent,
                     if s.nice { "True" } else { "False" },
                     if s.cumulative { "True" } else { "False" },
                     if s.shared_extent { "True" } else { "False" },
                     s.groupby, s.agg_field, s.agg.map(AggFn::as_str), s.name,
-                    bins_term,
+                    bins_term, per_row_term, aggregates_term,
                 )
             }
             #[allow(unreachable_patterns)]
@@ -963,6 +1228,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 5);
@@ -994,6 +1261,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let densities = col_f64(&out, "density");
@@ -1021,6 +1290,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 4);
@@ -1040,6 +1311,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -1069,6 +1342,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let counts = col_u64(&out, "count");
@@ -1091,6 +1366,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("ghost"), "err: {err}");
@@ -1118,6 +1395,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         let msg = err.to_string();
@@ -1146,6 +1425,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let result = apply(&spec, &batch);
         assert!(result.is_ok(), "Int64 should auto-cast to Float64: {:?}", result.err());
@@ -1169,6 +1450,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let starts = col_f64(&out, "bin_start");
@@ -1201,6 +1484,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let counts = col_u64(&out, "count");
@@ -1231,6 +1516,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -1253,6 +1540,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -1274,6 +1563,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -1302,6 +1593,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ext = super::global_extent(&spec, &batch);
         let Some((lo, hi)) = ext else {
@@ -1328,6 +1621,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ext = super::global_extent(&spec, &batch);
         let Some((lo, hi)) = ext else {
@@ -1382,6 +1677,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let batch = batch_with(values);
         let Some((lo, hi)) = super::global_extent(&spec, &batch) else {
@@ -1430,6 +1727,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ext = super::global_extent(&spec, &batch);
         // When extent is already set, global_extent returns it directly.
@@ -1452,6 +1751,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ext = super::global_extent(&spec, &batch);
         assert_eq!(ext, None, "global_extent on missing field must return None");
@@ -1478,6 +1779,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ext = super::global_extent(&spec, &batch);
         let Some((lo, hi)) = ext else {
@@ -1609,6 +1912,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
 
@@ -1675,6 +1980,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let out = apply(&spec, &batch).unwrap();
 
@@ -1714,6 +2021,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""groupby":["col"]"#), "must serialize as array, got: {json}");
@@ -1748,6 +2057,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         }
     }
 
@@ -2260,6 +2571,8 @@ mod tests {
             agg_field: Some(agg_field.into()),
             agg: Some(AggFn::parse(agg).expect("a declared AggFn spelling")),
             name: None,
+            per_row: false,
+            aggregates: None,
         }
     }
 
@@ -2551,6 +2864,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let err = apply(&spec, &batch)
             .expect_err("grouping by a column named 'count' must refuse");
@@ -2587,6 +2902,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         };
         let ctx = TransformContext::default();
         let out = apply_with_context(&spec, &batch, &ctx).unwrap();
@@ -2629,7 +2946,7 @@ mod tests {
         pyo3::Python::attach(|py| {
             let err = PyBin::new(
                 "x", None, None, None, None, true, false, false, None,
-                Some("w".into()), Some("geomean".into()), None,
+                Some("w".into()), Some("geomean".into()), false, None, None,
             )
             .unwrap_err();
             assert_eq!(
@@ -2685,6 +3002,8 @@ mod tests {
             agg_field: None,
             agg: None,
             name: None,
+            per_row: false,
+            aggregates: None,
         }
     }
 
@@ -2808,5 +3127,492 @@ mod tests {
             .map(|i| (col_f64(&a, "bin_start").value(i), col_f64(&a, "bin_end").value(i)))
             .collect();
         assert_eq!(groups[0].1, a_edges, "group A alone bins as an ungrouped Bin over its rows");
+    }
+
+    // ── per_row: every input row with the edges the aggregating Bin computes ──
+
+    fn bin_json(json: &str) -> BinSpec {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// The refusal text a wire-built `Bin` raises, from the wire itself or
+    /// from `apply`.
+    fn refusal(json: &str, batch: &RecordBatch) -> String {
+        pyo3::Python::initialize();
+        match serde_json::from_str::<BinSpec>(json) {
+            Err(e) => e.to_string(),
+            Ok(spec) => pyo3::Python::attach(|py| {
+                apply(&spec, batch).expect_err("the spec must be refused").value(py).to_string()
+            }),
+        }
+    }
+
+    fn per_row_batch(xs: Vec<Option<f64>>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let ids: Vec<i64> = (0..xs.len() as i64).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("id", DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(xs)), Arc::new(Int64Array::from(ids))],
+        )
+        .unwrap()
+    }
+
+    fn field_names(b: &RecordBatch) -> Vec<String> {
+        b.schema().fields().iter().map(|f| f.name().clone()).collect()
+    }
+
+    /// `(bin_start, bin_end)` per output row, `None` where the row is null.
+    fn edge_pairs(b: &RecordBatch) -> Vec<Option<(f64, f64)>> {
+        let (s, e) = (col_f64(b, "bin_start"), col_f64(b, "bin_end"));
+        (0..b.num_rows())
+            .map(|i| {
+                assert_eq!(s.is_null(i), e.is_null(i), "row {i}: start and end are null together");
+                (!s.is_null(i)).then(|| (s.value(i), e.value(i)))
+            })
+            .collect()
+    }
+
+    /// Every row keeps its place and its columns, and carries the edges of the
+    /// aggregating bin that counts it: for each parameter set the per-row
+    /// edges are found among the aggregating output's edges, and each edge
+    /// pair occurs exactly as many times as that bin's count. A value outside
+    /// an explicit extent is counted in no bin, so its row carries nulls.
+    #[test]
+    fn per_row_keeps_every_row_with_the_aggregating_bin_edges() {
+        let xs = vec![3.2, 7.9, 1.0, 12.5, 5.5, 9.1, 0.4, 6.6, 11.0, 2.2, 8.8, 4.4, 10.0];
+        let batch = per_row_batch(xs.iter().copied().map(Some).collect());
+        for params in [
+            "",
+            r#","bin_count":4"#,
+            r#","bin_width":2.5"#,
+            r#","bin_rule":"fd""#,
+            r#","nice":false"#,
+            r#","bin_count":3,"nice":false"#,
+            r#","extent":[0.0,15.0]"#,
+            r#","extent":[2.0,10.0],"bin_count":4"#,
+        ] {
+            let agg = apply(&bin_json(&format!(r#"{{"field":"x"{params}}}"#)), &batch).unwrap();
+            let bins: Vec<((f64, f64), u64)> = (0..agg.num_rows())
+                .map(|i| {
+                    let edge = (col_f64(&agg, "bin_start").value(i), col_f64(&agg, "bin_end").value(i));
+                    (edge, col_u64(&agg, "count").value(i))
+                })
+                .collect();
+            let per = apply(&bin_json(&format!(r#"{{"field":"x"{params},"per_row":true}}"#)), &batch)
+                .unwrap();
+            assert_eq!(field_names(&per), ["x", "id", "bin_start", "bin_end"], "{params}");
+            assert_eq!(per.num_rows(), xs.len(), "{params}");
+            assert_eq!(per.column(0), batch.column(0), "{params}: the binned column is unchanged");
+            assert_eq!(per.column(1), batch.column(1), "{params}: rows keep their order");
+            let pairs = edge_pairs(&per);
+            let edges: Vec<(f64, f64)> = bins.iter().map(|(e, _)| *e).collect();
+            let expected = count_into(&xs, &edges);
+            for (bin, ((edge, count), want)) in bins.iter().zip(&expected).enumerate() {
+                assert_eq!(count, want, "{params}: bin {bin} oracle");
+                let carried = pairs.iter().filter(|p| **p == Some(*edge)).count() as u64;
+                assert_eq!(carried, *count, "{params}: rows carrying bin {bin}'s edges");
+            }
+            let unbinned = pairs.iter().filter(|p| p.is_none()).count() as u64;
+            assert_eq!(unbinned, xs.len() as u64 - expected.iter().sum::<u64>(), "{params}");
+        }
+        let clipped = apply(
+            &bin_json(r#"{"field":"x","extent":[2.0,10.0],"bin_count":4,"per_row":true}"#),
+            &batch,
+        )
+        .unwrap();
+        let pairs = edge_pairs(&clipped);
+        for (i, x) in xs.iter().enumerate() {
+            assert_eq!(pairs[i].is_none(), !(2.0..=10.0).contains(x), "row {i} ({x})");
+        }
+    }
+
+    /// A null or NaN value keeps its row, with null bin columns.
+    #[test]
+    fn per_row_null_and_nan_rows_keep_their_place_with_null_edges() {
+        let batch = per_row_batch(vec![Some(1.0), None, Some(f64::NAN), Some(4.0), Some(2.5)]);
+        let per = apply(&bin_json(r#"{"field":"x","bin_count":2,"nice":false,"per_row":true}"#), &batch)
+            .unwrap();
+        assert_eq!(per.num_rows(), 5);
+        assert_eq!(per.column(1), batch.column(1));
+        assert_eq!(
+            edge_pairs(&per),
+            vec![Some((1.0, 2.5)), None, None, Some((2.5, 4.0)), Some((2.5, 4.0))]
+        );
+    }
+
+    /// Empty input gives empty output with the two bin columns; an all-null
+    /// column keeps every row with null bin columns.
+    #[test]
+    fn per_row_empty_and_all_null_input() {
+        let per = apply(&bin_json(r#"{"field":"x","per_row":true}"#), &per_row_batch(vec![])).unwrap();
+        assert_eq!(per.num_rows(), 0);
+        assert_eq!(field_names(&per), ["x", "id", "bin_start", "bin_end"]);
+        let per = apply(&bin_json(r#"{"field":"x","per_row":true}"#), &per_row_batch(vec![None, None]))
+            .unwrap();
+        assert_eq!(edge_pairs(&per), vec![None, None]);
+    }
+
+    /// One distinct value bins into the single unit bin the aggregating `Bin`
+    /// emits.
+    #[test]
+    fn per_row_one_distinct_value_is_the_single_unit_bin() {
+        let batch = per_row_batch(vec![Some(5.0), Some(5.0), None, Some(5.0)]);
+        let agg = apply(&bin_json(r#"{"field":"x"}"#), &batch).unwrap();
+        assert_eq!(agg.num_rows(), 1);
+        let unit = (col_f64(&agg, "bin_start").value(0), col_f64(&agg, "bin_end").value(0));
+        assert_eq!(unit, (4.5, 5.5));
+        let per = apply(&bin_json(r#"{"field":"x","per_row":true}"#), &batch).unwrap();
+        assert_eq!(edge_pairs(&per), vec![Some(unit), Some(unit), None, Some(unit)]);
+    }
+
+    /// `per_row` keeps each row, so it cannot also group, aggregate or
+    /// accumulate: each combination is refused by the parameter's name.
+    #[test]
+    fn per_row_refuses_each_conflicting_parameter_by_name() {
+        let batch = per_row_batch(vec![Some(1.0), Some(2.0)]);
+        for (params, name) in [
+            (r#","groupby":["id"]"#, "groupby"),
+            (r#","agg_field":"id","agg":"mean""#, "agg_field/agg"),
+            (
+                r#","aggregates":[{"field":"id","fn":"mean","as":"m"},{"field":"id","fn":"max","as":"n"}]"#,
+                "aggregates",
+            ),
+            (r#","cumulative":true"#, "cumulative"),
+        ] {
+            assert_eq!(
+                refusal(&format!(r#"{{"field":"x","per_row":true{params}}}"#), &batch),
+                format!("stat_bin: per_row cannot be combined with {name}"),
+            );
+        }
+        assert_eq!(
+            refusal(r#"{"field":"x","per_row":true,"agg":"mean"}"#, &batch),
+            "stat_bin: agg_field and agg must both be set, or both omitted",
+            "an unpaired agg is refused as unpaired first, on every door",
+        );
+    }
+
+    /// An input column named like a per-row output column is refused, not
+    /// overwritten or duplicated.
+    #[test]
+    fn per_row_refuses_an_input_column_named_like_its_output() {
+        for taken in ["bin_start", "bin_end"] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, true),
+                Field::new(taken, DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![1.0, 2.0])), Arc::new(Float64Array::from(vec![0.0, 0.0]))],
+            )
+            .unwrap();
+            assert_eq!(
+                refusal(r#"{"field":"x","per_row":true}"#, &batch),
+                format!(
+                    "stat_bin: per_row output column '{taken}' collides with an input column of \
+                     the same name; rename the input column"
+                ),
+            );
+        }
+    }
+
+    // ── aggregates: several named aggregates per (bin, group) ───────────────
+
+    /// Each entry adds its own column after `density`, in entry order; each
+    /// column equals the `agg_value` the single `agg_field`/`agg` form computes
+    /// with the same op, and a structurally empty bin is null in every column.
+    #[test]
+    fn aggregates_add_one_column_per_entry_matching_the_single_agg_form() {
+        let batch = batch_with_agg(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 9.0],
+            vec![Some(10.0), Some(20.0), Some(60.0), Some(40.0), None, Some(90.0)],
+        );
+        let base = r#""field":"x","bin_count":3,"extent":[1.0,9.0],"nice":false"#;
+        let out = apply(
+            &bin_json(&format!(
+                r#"{{{base},"aggregates":[{{"field":"w","fn":"mean","as":"m"}},{{"field":"w","fn":"max","as":"top"}},{{"field":"w","fn":"std","as":"sd"}}]}}"#
+            )),
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(field_names(&out), ["bin_start", "bin_end", "count", "density", "m", "top", "sd"]);
+        assert_eq!(col_f64_opt(&out, "m"), vec![Some(30.0), Some(40.0), Some(90.0)]);
+        assert_eq!(col_f64_opt(&out, "top"), vec![Some(60.0), Some(40.0), Some(90.0)]);
+        for (column, op) in [("m", "mean"), ("top", "max"), ("sd", "stdev")] {
+            let single = apply(
+                &bin_json(&format!(r#"{{{base},"agg_field":"w","agg":"{op}"}}"#)),
+                &batch,
+            )
+            .unwrap();
+            let a = col_f64_opt(&out, column);
+            let b = col_f64_opt(&single, "agg_value");
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{column} matches agg={op}");
+        }
+        let empty_bin = batch_with_agg(vec![1.0, 9.0], vec![Some(1.0), Some(2.0)]);
+        let out = apply(
+            &bin_json(&format!(
+                r#"{{{base},"aggregates":[{{"field":"w","fn":"sum","as":"s"}},{{"field":"w","fn":"count","as":"c"}}]}}"#
+            )),
+            &empty_bin,
+        )
+        .unwrap();
+        assert_eq!(col_u64(&out, "count").values().to_vec(), vec![1, 0, 1]);
+        assert_eq!(col_f64_opt(&out, "s"), vec![Some(1.0), None, Some(2.0)]);
+        assert_eq!(col_f64_opt(&out, "c"), vec![Some(1.0), None, Some(1.0)]);
+    }
+
+    /// `count` on a field counts the field's non-null values in each bin, at
+    /// any dtype; `count` on `"*"` counts the bin's rows.
+    #[test]
+    fn aggregates_count_on_a_field_counts_its_non_null_values() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("w", DataType::Float64, true),
+            Field::new("s", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 7.0, 8.0, 9.0])),
+                Arc::new(Float64Array::from(vec![Some(1.0), None, Some(f64::NAN), Some(4.0), Some(5.0), None])),
+                Arc::new(StringArray::from(vec![Some("a"), None, Some("c"), None, None, Some("f")])),
+            ],
+        )
+        .unwrap();
+        let out = apply(
+            &bin_json(
+                r#"{"field":"x","bin_count":2,"extent":[1.0,9.0],"nice":false,"aggregates":[{"field":"w","fn":"count","as":"nw"},{"field":"s","fn":"count","as":"ns"},{"field":"*","fn":"count","as":"rows"}]}"#,
+            ),
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(col_f64_opt(&out, "nw"), vec![Some(1.0), Some(2.0)]);
+        assert_eq!(col_f64_opt(&out, "ns"), vec![Some(2.0), Some(1.0)]);
+        assert_eq!(col_f64_opt(&out, "rows"), vec![Some(3.0), Some(3.0)]);
+    }
+
+    /// With `groupby` and `shared_extent`, every group is counted into the
+    /// pooled edges and each entry is computed per (bin, group).
+    #[test]
+    fn aggregates_with_shared_extent_groups_use_the_pooled_edges() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let (two, pooled) = two_group_batch();
+        let xs = col_f64(&two, "x").values().to_vec();
+        let ws: Vec<f64> = xs.iter().map(|x| 2.0 * x).collect();
+        let gs = two.column(1).clone();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![two.column(0).clone(), gs, Arc::new(Float64Array::from(ws))],
+        )
+        .unwrap();
+        let reference = apply(&bin_json(r#"{"field":"x"}"#), &batch_with(pooled)).unwrap();
+        let reference_edges: Vec<(f64, f64)> = (0..reference.num_rows())
+            .map(|i| (col_f64(&reference, "bin_start").value(i), col_f64(&reference, "bin_end").value(i)))
+            .collect();
+        let out = apply(
+            &bin_json(
+                r#"{"field":"x","groupby":["g"],"shared_extent":true,"aggregates":[{"field":"w","fn":"sum","as":"total"},{"field":"w","fn":"min","as":"low"}]}"#,
+            ),
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(field_names(&out), ["bin_start", "bin_end", "count", "density", "total", "low", "g"]);
+        let groups = edges_by_group(&out);
+        assert_eq!(groups.len(), 2);
+        let g = out.column(6).as_any().downcast_ref::<StringArray>().unwrap();
+        let (starts, ends) = (col_f64(&out, "bin_start"), col_f64(&out, "bin_end"));
+        let (total, low) = (col_f64_opt(&out, "total"), col_f64_opt(&out, "low"));
+        for (name, edges, _) in &groups {
+            assert_eq!(edges, &reference_edges, "group {name} uses the pooled edges");
+        }
+        let keys = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let bin_of = |v: f64| count_into(&[v], &reference_edges).iter().position(|c| *c == 1);
+        for i in 0..out.num_rows() {
+            let bin = reference_edges.iter().position(|e| *e == (starts.value(i), ends.value(i)));
+            let in_bin: Vec<f64> = xs
+                .iter()
+                .zip(keys.iter())
+                .filter(|(x, k)| *k == Some(g.value(i)) && bin_of(**x) == bin)
+                .map(|(x, _)| *x)
+                .collect();
+            if in_bin.is_empty() {
+                assert_eq!((total[i], low[i]), (None, None), "row {i}: an empty bin is null");
+            } else {
+                let sum: f64 = in_bin.iter().map(|x| 2.0 * x).sum();
+                let min = in_bin.iter().map(|x| 2.0 * x).fold(f64::INFINITY, f64::min);
+                assert_eq!((total[i], low[i]), (Some(sum), Some(min)), "row {i}");
+            }
+        }
+    }
+
+    /// Every malformed `aggregates` combination is refused by name.
+    #[test]
+    fn aggregates_refuses_each_malformed_combination_by_name() {
+        let batch = batch_with_agg(vec![1.0, 2.0], vec![Some(1.0), Some(2.0)]);
+        let entries = |a: &str, b: &str| {
+            format!(r#""aggregates":[{{"field":"w","fn":"mean","as":"{a}"}},{{"field":"w","fn":"max","as":"{b}"}}]"#)
+        };
+        let cases: Vec<(String, String)> = vec![
+            (
+                format!(r#"{{"field":"x","agg_field":"w","agg":"mean",{}}}"#, entries("m", "n")),
+                "stat_bin: aggregates cannot be combined with agg_field/agg".into(),
+            ),
+            (
+                format!(r#"{{"field":"x","agg":"mean",{}}}"#, entries("m", "n")),
+                "stat_bin: agg_field and agg must both be set, or both omitted".into(),
+            ),
+            (
+                r#"{"field":"x","aggregates":[]}"#.into(),
+                "stat_bin: aggregates must hold at least one entry".into(),
+            ),
+            (
+                format!(r#"{{"field":"x",{}}}"#, entries("m", "m")),
+                "stat_bin: aggregates output name 'm' appears more than once".into(),
+            ),
+            (
+                format!(r#"{{"field":"x",{}}}"#, entries("m", "")),
+                "stat_bin: aggregates entry 1 has an empty output name".into(),
+            ),
+            (
+                r#"{"field":"x","aggregates":[{"field":"","fn":"mean","as":"m"}]}"#.into(),
+                "stat_bin: aggregates entry 'm' needs a field; only count may count rows with \"*\"".into(),
+            ),
+            (
+                r#"{"field":"x","aggregates":[{"field":"zz","fn":"mean","as":"m"}]}"#.into(),
+                "stat_bin: aggregates field column 'zz' not found".into(),
+            ),
+            (
+                format!(r#"{{"field":"x","groupby":["w"],{}}}"#, entries("m", "w")),
+                "stat_bin: aggregates output name 'w' collides with groupby column 'w'".into(),
+            ),
+        ];
+        for own in ["bin_start", "bin_end", "count", "density"] {
+            assert_eq!(
+                refusal(&format!(r#"{{"field":"x",{}}}"#, entries("m", own)), &batch),
+                format!("stat_bin: aggregates output name '{own}' collides with Bin's own output column '{own}'"),
+            );
+        }
+        for (json, want) in cases {
+            assert_eq!(refusal(&json, &batch), want, "{json}");
+        }
+        let unknown = refusal(
+            r#"{"field":"x","aggregates":[{"field":"w","fn":"geomean","as":"m"}]}"#,
+            &batch,
+        );
+        let aggregate_wire = serde_json::from_str::<crate::transform::aggregate::AggregateSpec>(
+            r#"{"ops":[{"field":"w","fn":"geomean","as":"m"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        let body = format!("unknown fn 'geomean'; expected {}", AggFn::accepted_values());
+        assert!(unknown.starts_with(&body), "{unknown}");
+        assert!(aggregate_wire.starts_with(&body), "Aggregate refuses with the same text: {aggregate_wire}");
+    }
+
+    /// A `Bin` without the new fields writes the same bytes as before; the
+    /// new fields round-trip when set.
+    #[test]
+    fn per_row_and_aggregates_wire_is_additive() {
+        let plain = bin_json(r#"{"field":"x"}"#);
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"field":"x","nice":true,"cumulative":false,"shared_extent":false}"#
+        );
+        let agg = bin_json(r#"{"field":"x","agg_field":"w","agg":"mean","groupby":["g"]}"#);
+        assert_eq!(
+            serde_json::to_string(&agg).unwrap(),
+            r#"{"field":"x","nice":true,"cumulative":false,"shared_extent":false,"groupby":["g"],"agg_field":"w","agg":"mean"}"#
+        );
+        for json in [
+            r#"{"field":"x","nice":true,"cumulative":false,"shared_extent":false,"per_row":true}"#,
+            r#"{"field":"x","nice":true,"cumulative":false,"shared_extent":false,"aggregates":[{"field":"w","fn":"mean","as":"m"},{"field":"w","fn":"variance","as":"v"}]}"#,
+        ] {
+            assert_eq!(serde_json::to_string(&bin_json(json)).unwrap(), json);
+        }
+    }
+
+    /// The PyO3 door builds the same spec the wire reads, and refuses each
+    /// malformed combination with the wire's text under its own prefix.
+    #[test]
+    fn pyo3_bin_accepts_per_row_and_aggregates() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            use crate::transform::aggregate::PyAggregateOp;
+            use pyo3::types::{PyList, PyString};
+            let op = |f: &str, o: &str, a: &str| {
+                let fn_ = AggFn::parse(o).expect("a declared AggFn spelling");
+                pyo3::Py::new(py, PyAggregateOp(AggregateOp { field: f.into(), fn_, as_: a.into() }))
+                    .unwrap()
+                    .into_any()
+            };
+            let entries = |ops: &[(&str, &str, &str)]| {
+                PyList::new(py, ops.iter().map(|(f, o, a)| op(f, o, a))).unwrap().into_any()
+            };
+            let build = |per_row: bool,
+                         groupby: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
+                         aggregates: Option<&pyo3::Bound<'_, pyo3::PyAny>>| {
+                PyBin::new("x", None, None, None, None, true, false, false, groupby, None, None, per_row, aggregates, None)
+            };
+            let spec_of = |b: PyBin| match b.0 {
+                TransformSpec::Bin(s) => s,
+                other => panic!("expected a Bin, got {other:?}"),
+            };
+            let per_row = build(true, None, None).unwrap();
+            assert_eq!(per_row.__repr__().matches(", per_row=True").count(), 1, "{}", per_row.__repr__());
+            assert_eq!(spec_of(per_row), bin_json(r#"{"field":"x","per_row":true}"#));
+            let many = build(false, None, Some(&entries(&[("w", "mean", "m"), ("w", "std", "s")]))).unwrap();
+            assert!(
+                many.__repr__().ends_with(
+                    ", aggregates=[AggregateOp(field='w', fn_='mean', as_='m'), \
+                     AggregateOp(field='w', fn_='stdev', as_='s')])"
+                ),
+                "{}",
+                many.__repr__()
+            );
+            assert_eq!(
+                spec_of(many),
+                bin_json(
+                    r#"{"field":"x","aggregates":[{"field":"w","fn":"mean","as":"m"},{"field":"w","fn":"stdev","as":"s"}]}"#
+                )
+            );
+            let plain = build(false, None, None).unwrap().__repr__();
+            assert!(!plain.contains("per_row") && !plain.contains("aggregates"), "{plain}");
+
+            let refused = |r: PyResult<PyBin>| r.expect_err("refused").value(py).to_string();
+            let g = PyString::new(py, "g").into_any();
+            assert_eq!(
+                refused(build(true, Some(&g), None)),
+                "Bin: per_row cannot be combined with groupby"
+            );
+            assert_eq!(
+                refused(build(false, None, Some(&entries(&[])))),
+                "Bin: aggregates must hold at least one entry"
+            );
+            assert_eq!(
+                refused(build(false, Some(&g), Some(&entries(&[("w", "mean", "g")])))),
+                "Bin: aggregates output name 'g' collides with groupby column 'g'"
+            );
+            assert_eq!(
+                refused(build(false, None, Some(&g))),
+                "Bin: aggregates must be a list of AggregateOp"
+            );
+            let tuple_entry = PyList::new(py, [op("w", "mean", "m"), ("w", "max", "n").into_pyobject(py).unwrap().into_any().unbind()])
+                .unwrap()
+                .into_any();
+            assert_eq!(
+                refused(build(false, None, Some(&tuple_entry))),
+                "Bin: aggregates[1] must be an AggregateOp"
+            );
+        });
     }
 }

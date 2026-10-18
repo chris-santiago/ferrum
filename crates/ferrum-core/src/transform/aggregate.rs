@@ -288,14 +288,14 @@ impl AggregateOp {
     /// The `AggregateOp(...)` repr, spelled with the constructor's keywords
     /// and `fn_`'s canonical spelling (so the `var` alias renders
     /// `variance`). Shared by `AggregateOp.__repr__` and `Aggregate`'s `ops=`.
-    fn repr(&self) -> String {
+    pub(crate) fn repr(&self) -> String {
         format!("AggregateOp(field='{}', fn_='{}', as_='{}')",
             self.field, self.fn_.as_str(), self.as_)
     }
 
     /// The `count():Q` shorthand: a row-counting fn with field `""` or `"*"`,
     /// which needs no column lookup.
-    fn is_count_star(&self) -> bool {
+    pub(crate) fn is_count_star(&self) -> bool {
         self.fn_.counts_rows_without_field() && (self.field.is_empty() || self.field == "*")
     }
 }
@@ -533,6 +533,25 @@ impl PyAggregateOp {
     }
 }
 
+/// A Python list of `AggregateOp` objects as their specs, refused by
+/// position when the value is not a list or an item is not an `AggregateOp`.
+/// `label` is the door and parameter (`"Aggregate: ops"`). Shared by every
+/// door that takes aggregate entries, so each spells them as `AggregateOp`.
+pub(crate) fn extract_aggregate_ops(label: &str, ops: &Bound<'_, PyAny>) -> PyResult<Vec<AggregateOp>> {
+    let ops_list: &Bound<'_, PyList> = ops
+        .downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err(format!("{label} must be a list of AggregateOp")))?;
+    ops_list
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            item.extract::<PyAggregateOp>().map(|op| op.0).map_err(|_| {
+                PyValueError::new_err(format!("{label}[{i}] must be an AggregateOp"))
+            })
+        })
+        .collect()
+}
+
 /// Group-by aggregation transform.
 ///
 /// Computes one or more scalar summaries (mean, sum, count, min, max, median)
@@ -570,17 +589,9 @@ impl PyAggregate {
         groupby: Option<Vec<String>>,
         name: Option<String>,
     ) -> PyResult<Self> {
-        let ops_list: &Bound<'_, PyList> = ops.downcast::<PyList>()
-            .map_err(|_| PyValueError::new_err("Aggregate: ops must be a list of AggregateOp"))?;
-        if ops_list.is_empty() {
+        let parsed_ops = extract_aggregate_ops("Aggregate: ops", ops)?;
+        if parsed_ops.is_empty() {
             return Err(PyValueError::new_err("Aggregate: ops must be non-empty"));
-        }
-        let mut parsed_ops = Vec::with_capacity(ops_list.len());
-        for (i, item) in ops_list.iter().enumerate() {
-            let op = item.extract::<PyAggregateOp>().map_err(|_| {
-                PyValueError::new_err(format!("Aggregate: ops[{i}] must be an AggregateOp"))
-            })?;
-            parsed_ops.push(op.0);
         }
         let gb = groupby.unwrap_or_default();
         // The duplicate-groupby refusal (spec §6) is the shared rule every

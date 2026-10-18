@@ -509,6 +509,8 @@ class Bin:
         groupby: Optional[Union[str, List[str]]] = None,
         agg_field: Optional[str] = None,
         agg: Optional[str] = None,
+        per_row: bool = False,
+        aggregates: Optional[List[AggregateOp]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

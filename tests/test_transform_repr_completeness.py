@@ -31,7 +31,7 @@ hardcoded, the bug class this test exists for (decision doc §8).
 
 - ``Bin`` renders whichever of ``bins``/``bin_count``/``bin_width`` built the
   mode (the reverse projection), plus ``shared_extent``, ``groupby``,
-  ``agg_field``, ``agg``, ``name``.
+  ``agg_field``, ``agg``, ``per_row``, ``aggregates``, ``name``.
 - ``Hex``/``Raster``: ``extent_x``/``extent_y`` are facet-pinned, not
   constructor parameters; the signature-derived leg never asks for them.
 - ``DensityData``/``LoessData``/``RegressionData``: constructor parameters
@@ -120,6 +120,28 @@ ROWS: list[Row] = [
         "Bin",
         dict(field="bin_f", bin_width=2.75),
         dict(field="field='bin_f'", bin_width="bin_width=Some(2.75)"),
+    ),
+    Row(
+        "Bin",
+        dict(field="bin_f", per_row=True),
+        dict(field="field='bin_f'", per_row="per_row=True"),
+    ),
+    Row(
+        "Bin",
+        dict(
+            field="bin_f",
+            aggregates=[
+                _core.AggregateOp("bin_w", "mean", "bin_m"),
+                _core.AggregateOp("bin_w", "var", "bin_v"),
+            ],
+        ),
+        dict(
+            field="field='bin_f'",
+            aggregates=(
+                "aggregates=[AggregateOp(field='bin_w', fn_='mean', as_='bin_m'), "
+                "AggregateOp(field='bin_w', fn_='variance', as_='bin_v')]"
+            ),
+        ),
     ),
     Row(
         "Bin2D",
