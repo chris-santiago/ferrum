@@ -298,11 +298,15 @@ def test_ghost_channel_docstrings_do_not_narrate_render_status():
     for the honored-kwarg contract.  Per-channel docstrings must not duplicate it
     in prose (``"reserved for future use"`` / ``"no-op today"``), which drifts.
     X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2 are all
-    secondary-extent channels honoring only ``{"type"}``.
+    secondary-extent channels honoring ``{"type"}``; the span ends (X2, Y2,
+    Theta2, Radius2) also honor ``aggregate``, since they draw the value they
+    are bound to.
     """
     from ferrum.encoding import X2, Y2, XError, YError, XError2, YError2
-    from ferrum.encoding._honored import SECONDARY_EXTENT
+    from ferrum.encoding._honored import AGGREGATE, SECONDARY_EXTENT
     from ferrum.encoding.positional import Theta2, Radius2
+
+    span_ends = {X2, Y2, Theta2, Radius2}
 
     ghost_channels = [X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2]
     for cls in ghost_channels:
@@ -317,6 +321,7 @@ def test_ghost_channel_docstrings_do_not_narrate_render_status():
             "the honored-kwarg contract lives in _honored_kwargs (ENC-09)."
         )
         # The machine-readable contract is the single source of truth.
-        assert cls._honored_kwargs == SECONDARY_EXTENT, (
-            f"{cls.__name__}._honored_kwargs is not the SECONDARY_EXTENT role."
+        role = SECONDARY_EXTENT | AGGREGATE if cls in span_ends else SECONDARY_EXTENT
+        assert cls._honored_kwargs == role, (
+            f"{cls.__name__}._honored_kwargs is not its secondary-extent role."
         )

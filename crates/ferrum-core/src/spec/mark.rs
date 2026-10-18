@@ -149,6 +149,19 @@ impl Mark {
         }
     }
 
+    /// Whether a layer of this mark takes an INHERITED binding of `channel`
+    /// as a binding, so it draws it where [`Self::draws_channel`] says the
+    /// mark draws the channel. False only for a text's color: a text draws
+    /// only a color it binds itself, so its labels stay legible on the marks
+    /// they annotate, and an inherited color reaches it only as a grouping
+    /// key, the layer's `group` ([`crate::spec::encoding::Encoding::group`]),
+    /// which groups its statistic, dodge and stack as the color groups the
+    /// marks beside it. Applied where a layer is completed from its parent
+    /// ([`crate::spec::layer::Layer::completed_encoding`]).
+    pub(crate) fn draws_inherited(self, channel: crate::spec::layer::InheritedChannel) -> bool {
+        !matches!((self, channel), (Mark::Text, crate::spec::layer::InheritedChannel::Color))
+    }
+
     /// Whether this mark draws the span channels `x2`/`y2`, read from what
     /// each mark's builder takes: a bar's, rect's, area's and ribbon's other
     /// edge, a rule's and segment's other end. Every other mark carries an
@@ -171,6 +184,16 @@ impl Mark {
             | Mark::Rect | Mark::Polygon | Mark::Image | Mark::Ribbon | Mark::Segment | Mark::Arc
             | Mark::Label => true,
         }
+    }
+
+    /// Whether this mark stacks the theta channel of a `CoordPolar` itself:
+    /// an arc always sweeps its theta into a pie, and a text with
+    /// `Theta(stack=...)` stacks its labels into that sweep
+    /// (`render::marks::text::polar_label_placement`). Their theta `stack` is
+    /// that sweep's, never a value axis for the position adjustment to stack
+    /// (`render::position::position_encoding`).
+    pub(crate) fn stacks_polar_theta(self) -> bool {
+        matches!(self, Mark::Arc | Mark::Text)
     }
 
     /// Which of the `offered` positional bindings a layer of this mark takes
@@ -249,7 +272,8 @@ impl Mark {
         ];
         const TEXT: &[StyleField] = &[
             drawn("fill"), drawn("opacity"), drawn("font_size"), drawn("font_weight"), drawn("align"),
-            drawn("baseline"), drawn("dx"), drawn("dy"), drawn("angle"), drawn("limit"), drawn("blend"),
+            drawn("baseline"), drawn("dx"), drawn("dy"), drawn("angle"), drawn("limit"),
+            drawn_with("radius", PolarLabel), drawn("blend"),
         ];
         const TICK: &[StyleField] = &[
             drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
@@ -435,6 +459,10 @@ pub enum StyleNeed {
     /// A layered chart. A single bar chart anchors at zero through
     /// `mark_bar(zero=)`, which the chart consumes; a layer reads its own.
     LayeredChart,
+    /// A text label under `CoordPolar` with a theta encoding and no radius
+    /// encoding: the label's distance from the polar center is then the
+    /// style's to set.
+    PolarLabel,
 }
 
 impl StyleNeed {
@@ -450,6 +478,7 @@ impl StyleNeed {
             Self::UrlChannel => "url_channel",
             Self::RasterData => "raster_data",
             Self::LayeredChart => "layered_chart",
+            Self::PolarLabel => "polar_label",
         }
     }
 
@@ -476,6 +505,7 @@ impl StyleNeed {
             Self::UrlChannel => "a url encoding",
             Self::RasterData => "raster data from mark_raster()",
             Self::LayeredChart => "a layered chart (a single bar chart sets it through mark_bar(zero=))",
+            Self::PolarLabel => "a polar coord (CoordPolar) with a theta encoding and no radius encoding",
         };
         fixed.to_string()
     }
@@ -555,6 +585,26 @@ pub(crate) fn mark_inherited_positional(
     };
     let taken = mark.inherited_positional(&channels(&own)?, &channels(&offered)?);
     Ok(taken.into_iter().map(PositionalChannel::as_str).collect())
+}
+
+/// `ferrum._core.mark_draws_inherited(mark, channel)`: whether a layer of
+/// `mark` takes an inherited binding of the non-positional `channel` (an
+/// `Encoding` wire name) as a binding ([`Mark::draws_inherited`]). Python's
+/// effective encoding asks it which inherited channels become a grouping key
+/// instead of a binding, rather than keeping a list of its own. Refuses an
+/// unknown mark or channel name. Registered in `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn mark_draws_inherited(mark: &str, channel: &str) -> pyo3::PyResult<bool> {
+    use crate::spec::layer::InheritedChannel;
+    let mark = parse_mark_arg(mark)?;
+    let channel = InheritedChannel::from_wire(channel).ok_or_else(|| {
+        let names: Vec<&str> = InheritedChannel::ALL.into_iter().map(InheritedChannel::as_str).collect();
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown non-positional channel '{channel}'; expected one of [{}]",
+            names.join(", ")
+        ))
+    })?;
+    Ok(mark.draws_inherited(channel))
 }
 
 /// `ferrum._core.mark_drawn_channels(mark)`: the non-positional channels
@@ -796,6 +846,23 @@ mod tests {
         }
         assert_eq!(Mark::Segment.style_field("arrow_size").and_then(|f| f.needs), Some(StyleNeed::Arrow));
         assert_eq!(Mark::Point.style_field("font_size"), None);
+    }
+
+    /// Every mark takes every inherited binding but a text's color, and the
+    /// published answer is the table's; an unknown mark or channel refuses.
+    #[test]
+    fn draws_inherited_declines_only_a_texts_color() {
+        use crate::spec::layer::InheritedChannel;
+        for mark in all_marks() {
+            for channel in InheritedChannel::ALL {
+                let declined = mark == Mark::Text && channel == InheritedChannel::Color;
+                assert_eq!(mark.draws_inherited(channel), !declined, "{mark} {}", channel.as_str());
+                assert_eq!(mark_draws_inherited(mark.as_str(), channel.as_str()).unwrap(), !declined);
+            }
+        }
+        pyo3::Python::initialize();
+        assert!(mark_draws_inherited("text", "x").is_err(), "a positional channel is no inherited channel");
+        assert!(mark_draws_inherited("txt", "color").is_err());
     }
 
     /// The published dict is the table, in order, each need by its wire name.

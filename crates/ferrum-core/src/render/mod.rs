@@ -812,6 +812,15 @@ pub enum RenderError {
     /// ignored; it refuses instead. Python's `Layer` refuses the same input at
     /// construction; this refuses a hand-built spec that carries one.
     LayerTransformsUnsupported { layer: usize, count: usize },
+    /// A `group` grouping key ([`crate::spec::encoding::Encoding::group`])
+    /// where nothing reads it: on the chart-level encoding (`layer: None`),
+    /// which is no layer's, or on a layer whose mark draws the color it
+    /// inherits ([`crate::spec::mark::Mark::draws_inherited`]) and so groups
+    /// by that color. The key belongs only on a layer that inherits a color it
+    /// does not draw (a text's), so anywhere else it could only be ignored; it
+    /// refuses instead. Python writes it only there; this refuses a hand-built
+    /// spec.
+    GroupKeyMisplaced { layer: Option<usize>, mark: crate::spec::mark::Mark },
     /// `conditionals[index].layers` names layer `layer`, but the chart has
     /// only `layers` layers (one when it is unlayered). The scope could only
     /// be ignored, so it refuses instead. Python stamps a conditional with the
@@ -844,6 +853,12 @@ pub enum RenderError {
     /// [`draw::check_constant_size`]; the text names the mark's own sizing
     /// kwarg where it has one ([`crate::spec::mark::Mark::size_knob`]).
     MarkSizeNotDrawn { mark: crate::spec::mark::Mark, value: f64 },
+    /// A pixel-distance style field (`radius=` on `mark_text`) that is
+    /// negative or not finite: a distance from the polar center exists only
+    /// as a finite value `>= 0` (0 is the center itself), the pixel contract
+    /// every pixel kwarg keeps. REFUSE MALFORMED, from
+    /// [`draw::resolve_mark_style`] for every producer.
+    MarkStylePixelOutOfRange { mark: crate::spec::mark::Mark, field: &'static str, value: f64 },
     /// A drawn vertex of a sized line would take a width that is not finite
     /// and `> 0`, the scene's `widths` contract: its size value maps to a
     /// non-positive area on the size scale, or a row with no usable size
@@ -1185,6 +1200,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayeredChartNoLayers
         // A layer index and a transform count, no channel token.
         | RenderError::LayerTransformsUnsupported { .. }
+        // A layer index and a mark, no channel token.
+        | RenderError::GroupKeyMisplaced { .. }
         // Two indices and a layer count, no channel token.
         | RenderError::ConditionalLayerOutOfRange { .. }
         // Two width bindings, no channel token.
@@ -1192,6 +1209,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // A mark and a number; a field name and a width.
         | RenderError::MarkSizeOutOfRange { .. }
         | RenderError::MarkSizeNotDrawn { .. }
+        | RenderError::MarkStylePixelOutOfRange { .. }
         | RenderError::LineWidthNotPositive { .. }
         // A scene-contract fault, no channel token.
         | RenderError::TaperedStrokeMalformed { .. }
@@ -1516,6 +1534,18 @@ impl std::fmt::Display for RenderError {
                 "conditionals[{index}].layers names layer {layer}, but the chart has {layers} \
                  layer(s); name only the layers that declared the conditional."
             ),
+            Self::GroupKeyMisplaced { layer: None, .. } => write!(
+                f,
+                "ChartSpec.encoding.group is set on the chart-level encoding, where nothing reads \
+                 it: group is a layer's grouping key for a color that layer inherits but does not \
+                 draw (a text's). Remove it, and bind color on the chart to group its layers."
+            ),
+            Self::GroupKeyMisplaced { layer: Some(layer), mark } => write!(
+                f,
+                "layer {layer}: layers[{layer}].encoding.group is set on a mark_{mark} layer, which \
+                 draws the color it inherits and groups by it, so group has no effect there. Remove \
+                 group from this layer, or bind color on it to group it by another field."
+            ),
             Self::LayerTransformsUnsupported { layer, count } => write!(
                 f,
                 "layer {layer}: layers[{layer}].transforms carries {count} transform(s), but a \
@@ -1593,6 +1623,7 @@ impl std::fmt::Display for RenderError {
             Self::LineWidthConflict { .. } | Self::LineWidthNotPositive { .. } => self.fmt_as("mark_line", f),
             Self::MarkSizeOutOfRange { mark, .. }
             | Self::MarkSizeNotDrawn { mark, .. }
+            | Self::MarkStylePixelOutOfRange { mark, .. }
             | Self::MarkStyleNotDrawn { mark, .. } => self.fmt_as(&format!("mark_{}", mark.as_str()), f),
             Self::InLayer { layer, entry, source } => {
                 if let Some(layer) = layer {
@@ -1666,6 +1697,13 @@ impl RenderError {
             }
             Self::MarkSizeNotDrawn { mark, value } => {
                 write!(f, "{entry}(size=...) {}.", mark_size_not_drawn_reason(*mark, *value))
+            }
+            // The pixel contract's own wording (`ferrum._validate.coerce_pixel_value`).
+            Self::MarkStylePixelOutOfRange { field, value, .. } if value.is_finite() => {
+                write!(f, "{entry}({field}=...) must be non-negative; received {value}")
+            }
+            Self::MarkStylePixelOutOfRange { field, value, .. } => {
+                write!(f, "{entry}({field}=...) must be a finite numeric pixel value; received {value}")
             }
             Self::LineWidthNotPositive { source } => match &**source {
                 NonPositiveLineWidth::Scaled { field, value, area } => write!(
@@ -2214,6 +2252,20 @@ pub enum RenderWarning {
         field: String,
         needs: crate::spec::mark::StyleNeed,
     },
+    /// A polar text layer draws its labels at their own theta values, while an
+    /// arc in the same panel stacks that theta into a pie, so the labels sit
+    /// off the wedges they name: WARN DEGRADED, once per text layer. A stack
+    /// on the text's theta (`Theta(..., stack=True)`, written on the text or
+    /// on the theta it inherits) puts each label at its wedge's mid-angle.
+    /// Voiced as [`Self::MarkStyleInert`] is: `layer` is the text layer's
+    /// index when the caller placed it, `entry` the public call that built
+    /// it. It names no column: the drawn one is often an internal name an
+    /// aggregate or a rename wrote, which the remedy could not be written
+    /// with.
+    PolarLabelsUnstacked {
+        layer: Option<usize>,
+        entry: String,
+    },
     /// A statistic sub-layer inherited a binding on a channel its mark draws,
     /// but the statistic's output does not carry the bound column (the
     /// chart's source does), so the layer draws without that channel: WARN
@@ -2480,6 +2532,18 @@ impl std::fmt::Display for RenderWarning {
                     needs.describe(*mark)
                 )
             }
+            RenderWarning::PolarLabelsUnstacked { layer, entry } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                write!(
+                    f,
+                    "{entry}: these labels sit at their own theta values, but an arc in the same panel \
+                     stacks that theta into a pie, so they sit off its wedges; write stack=True on the \
+                     text's theta (Theta(..., stack=True), on the text or on the theta it inherits) to \
+                     place each label in its wedge"
+                )
+            }
             RenderWarning::StatisticDroppedChannel { layer, entry, mark, channel, field } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
@@ -2501,11 +2565,22 @@ impl std::fmt::Display for RenderWarning {
                          '{cells}' values (field=) and does not read {channel}='{field}', so it gets no \
                          scale and no legend; it was ignored"
                     ),
-                    None => write!(
-                        f,
-                        "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} (this \
-                         {mark} mark does not), so it gets no scale and no legend; it was ignored"
-                    ),
+                    None => {
+                        // A mark that draws the channel only when it binds it
+                        // declined an inherited binding.
+                        let declined = crate::spec::layer::InheritedChannel::from_wire(channel)
+                            .is_some_and(|c| mark.draws_channel(c) && !mark.draws_inherited(c));
+                        let why = if declined {
+                            format!("a {mark} mark draws only a {channel} it binds itself")
+                        } else {
+                            format!("this {mark} mark does not")
+                        };
+                        write!(
+                            f,
+                            "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
+                             ({why}), so it gets no scale and no legend; it was ignored"
+                        )
+                    }
                 }
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {

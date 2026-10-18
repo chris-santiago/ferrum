@@ -1961,7 +1961,9 @@ def test_a_faceted_aggregated_size_renders_every_panels_points():
 # A channel that draws no aggregated value refuses aggregate=.
 # ---------------------------------------------------------------------------
 
-# Each channel class and the encode() key that builds it.
+# Each channel class and the encode() key that builds it. The span ends and the
+# polar channels draw the value they are bound to, so they honor aggregate=
+# (test_layer_encoding_model.py's S2 and P2 cells).
 _NO_VALUE_CHANNELS = {
     "Detail": "detail",
     "Shape": "shape",
@@ -1973,16 +1975,10 @@ _NO_VALUE_CHANNELS = {
     "Facet": "facet",
     "FacetRow": "facet_row",
     "FacetCol": "facet_col",
-    "X2": "x2",
-    "Y2": "y2",
     "XError": "x_error",
     "XError2": "x_error2",
     "YError": "y_error",
     "YError2": "y_error2",
-    "Theta": "theta",
-    "Theta2": "theta2",
-    "Radius": "radius",
-    "Radius2": "radius2",
 }
 
 

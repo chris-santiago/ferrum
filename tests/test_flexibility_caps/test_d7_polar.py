@@ -27,7 +27,8 @@ Root causes (identified, not yet fixed):
     (``_channel_class_map``) has no entries for ``"theta2"`` or ``"radius2"``.
 
   Python — ``ferrum/coord.py``:
-    ``_resolve_polar_remapping()`` in ``chart.py`` maps ``theta`` → x/y and
+    the polar remap (``SpecBuildMixin._with_polar_channels_lowered`` in
+    ``_spec_build.py``) maps ``theta`` → x/y and
     ``radius`` → y/x but has no code path for ``theta2`` → x2/y2 or
     ``radius2`` → y2/x2.
 

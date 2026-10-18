@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
+from ferrum._encode_lowering import _aggregated_encoding
 from ferrum._layer import _Layer, _PendingMark, inherited_positional_taken
 from ferrum._layer_transforms import (
     ChartRows,
@@ -53,7 +54,7 @@ from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin, _validate_sort_object
 from ferrum.marks.base import MarkBase
-from ferrum.position import _STACKABLE_MARKS
+from ferrum.position import _STACKABLE_MARKS, stack_honored, warn_stack_ignored  # noqa: F401  (_STACKABLE_MARKS re-exported for chart importers)
 
 # Re-exported from this module so existing ``from ferrum.chart import ...``
 # importers keep resolving after the cohesion split (CHART-01/02): the canonical
@@ -68,38 +69,18 @@ from ferrum._desugar import (  # noqa: F401  (back-compat re-export)
 from ferrum._layer import _FLAT_MARK_METHODS
 
 
-def _strip_unstackable(d: dict, mark: str | None) -> None:
-    """Strip an unsupported ``stack=`` from a non-stackable mark's encoding dict.
+def _strip_unstackable(d: dict, mark: str | None, *, polar_theta: bool) -> None:
+    """Strip an unsupported ``stack=`` from the encoding dict of a mark that draws it.
 
-    Only ``bar``/``area`` consume the ``__stack_y_base__`` column emitted by
-    ``apply_stack``; every other mark silently drops its marks when the stacking
-    path runs. When ``stack=`` is requested on such a mark we pop it (so the mark
-    renders unstacked) and emit a one-time ``UserWarning`` naming the dropped
-    field. A falsy ``stack`` (``None``/``False``) means "do not stack" and is a
-    no-op, so it is left untouched. Shared by the single-chart and layered paths.
-
-    Uses the fixed kwarg ``"stack"`` (not a per-mark ``f"stack_on_{mark}"``
-    key -- #240, 2026-09-11 wave-1 hardening: that baked the mark name into
-    the warn_once *key* as a workaround for the old (channel, kwarg)-only
-    identity, which would otherwise have let one mark's message permanently
-    suppress every other mark's. Now that warn_once keys on the resolved
-    message too, each mark's distinct message (it interpolates
-    ``stack_val``/``mark_label``) reaches the user on its own without the
-    key-hack.
+    The mark honors it per :func:`ferrum.position.stack_honored`; on any
+    other mark and channel the stacking path silently drops marks, so the
+    ``stack=`` is popped (the mark renders unstacked) and warned once
+    (:func:`ferrum.position.warn_stack_ignored`). A falsy ``stack``
+    (``None``/``False``) means "do not stack" and is left untouched. Shared
+    by the flat chart's encoding and each layer's own.
     """
-    if d.get("stack") and mark not in _STACKABLE_MARKS:
-        from ferrum._warn import warn_once
-
-        stack_val = d.pop("stack")
-        mark_label = f"mark_{mark}" if mark else "this mark"
-        warn_once(
-            "encoding",
-            "stack",
-            message=(
-                f"stack={stack_val!r} is not supported by {mark_label} and was ignored. "
-                "Stacking is only honored by mark_bar and mark_area."
-            ),
-        )
+    if d.get("stack") and not stack_honored(mark, polar_theta=polar_theta):
+        warn_stack_ignored(d.pop("stack"), mark)
 
 
 _logger = logging.getLogger(__name__)
@@ -224,10 +205,13 @@ def _refuse_data_source_collision(
 
 
 _POSITIONAL_CHANNELS = ("x", "y", "x2", "y2")
+# The channels a written record keeps: the positional ones, and the polar
+# ones a ``CoordPolar`` draws as x/y/x2/y2 once ``to_spec`` lowers them.
+_WRITTEN_CHANNELS = _POSITIONAL_CHANNELS + ("theta", "theta2", "radius", "radius2")
 
 
 def _written_bindings(chart: "Chart") -> dict:
-    """Return the positional bindings *chart*'s callers wrote, latest per channel.
+    """Return the positional and polar bindings *chart*'s callers wrote, latest per channel.
 
     A chart ``chart + chart`` produced carries them in ``_written_positional``:
     its left operand's at the merge, then each ``.encode(...)`` on the
@@ -240,7 +224,7 @@ def _written_bindings(chart: "Chart") -> dict:
     """
     if chart._written_positional is not None:
         return dict(chart._written_positional)
-    return {ch: chart._encoding[ch] for ch in _POSITIONAL_CHANNELS if ch in chart._encoding}
+    return {ch: chart._encoding[ch] for ch in _WRITTEN_CHANNELS if ch in chart._encoding}
 
 
 def _attach_host(chart: "Chart") -> "Chart":
@@ -1497,7 +1481,7 @@ class Chart(
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
         "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
         "_figure_caption",  # str or None — figure-level caption rendered below the SVG
-        "_written_positional",  # dict or None — the positional bindings the
+        "_written_positional",  # dict or None — the positional and polar bindings the
         # callers wrote, latest per channel (see _written_bindings): on a chart `+`
         # produced, and on a host whose mark statistics moved its tail when layers
         # were attached (_attach_host); None on any other chart.
@@ -2065,8 +2049,23 @@ class Chart(
             Rotation in degrees.
         limit : float, optional
             Maximum rendered width in pixels; clips overflow.
+        radius : float, optional
+            Under ``CoordPolar``, the distance in pixels from the center at
+            which a label placed by its ``theta`` wedge sits. Without it the
+            label sits mid-ring, ``(inner_radius + outer_radius) / 2`` (half
+            the outer radius on a pie); a ``radius`` encoding wins over it.
+            Warned and ignored on a Cartesian text and beside a ``radius``
+            encoding.
         position : Position, optional
             Position adjustment.
+
+        Notes
+        -----
+        Under ``CoordPolar`` a text that binds ``theta`` is placed as the arc
+        places its wedges: the theta values stack into one pie sweep (or one
+        band per category on a nominal theta) and each label sits at its
+        wedge's mid-angle, so ``arc + text`` over the same ``theta`` draws a
+        labelled pie.
 
         Returns
         -------
@@ -2522,7 +2521,7 @@ class Chart(
         # A positional channel bound here on a chart that keeps a written
         # record (a composition, or a host with attached layers) is its
         # callers' latest written binding (see _written_bindings).
-        bound = [name for name in channels if name in _POSITIONAL_CHANNELS]
+        bound = [name for name in channels if name in _WRITTEN_CHANNELS]
         if bound and new._written_positional is not None:
             new._written_positional = {
                 **new._written_positional,
@@ -3945,7 +3944,9 @@ class Chart(
         from ferrum import ChartSpec
 
         # Resolve any pending statistical mark desugar (mark called before encode).
-        resolved = self._with_polars_data()._resolve_pending()
+        # Every polar binding draws as x/y from here on, so each statistic
+        # below is lowered over the channels the chart actually draws.
+        resolved = self._with_polars_data()._resolve_pending()._with_polar_channels_lowered()
 
         # Chart.override spec-piece payload (encoding scales / mark style / coord).
         # Built on demand for standalone .to_spec() callers; the render path passes
@@ -3972,9 +3973,6 @@ class Chart(
             chart_detail = enc.pop("detail", None)
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
-        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
-        enc = self._resolve_polar_remapping(resolved, enc)
-
         # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
         # Runs BEFORE the encoding specs are built and before the aggregate
         # resolution: a Bin replaces the batch schema with its own columns, so
@@ -3991,18 +3989,14 @@ class Chart(
             effective_transforms = list(_chain_steps(effective_transforms))
         effective_transforms, enc = self._resolve_pending_bins(effective_transforms, enc)
 
-        # --- Aggregate field remap: map original field → output_col for encoding ---
-        # _PendingAggregate sentinels carry the original field name but Aggregate
-        # transforms emit the output under a new column name (e.g. "mean_val").
-        # Build a remap dict now so the EncodingSpec loop below uses the correct
-        # post-aggregation field name. Key: original_field, Value: output_col.
-        # Read off the post-bin-lowering list so an aggregate the Bin absorbed
-        # does not also remap its channel to a column nothing emits.
-        agg_field_remap: dict[str, str] = {}
-        for _t in effective_transforms:
-            # Use "is not None" so count() (field="") is included.
-            if isinstance(_t, _PendingAggregate) and _t.field is not None:
-                agg_field_remap[_t.field] = _t.output_col
+        # --- Aggregated channels draw their aggregate's output column ---
+        # The chart's one Aggregate (resolved below) emits each (field, op) under
+        # its own output column (e.g. "mean_val"), so every channel carrying
+        # aggregate= is re-pointed there. Read off the post-bin-lowering list:
+        # a channel whose aggregate the Bin absorbed was already re-pointed at
+        # the Bin's columns.
+        if any(isinstance(t, _PendingAggregate) for t in effective_transforms):
+            enc = _aggregated_encoding(enc)
 
         # Mark style: apply mark_* override last so it beats the chart's mark style.
         # A layered chart (multiple marks) has no single primary mark — apply_mark_style
@@ -4026,11 +4020,7 @@ class Chart(
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
-        kw.update(
-            self._build_encoding_specs(
-                resolved, enc, agg_field_remap, _override_payload, mark_zero=mark_zero
-            )
-        )
+        kw.update(self._build_encoding_specs(resolved, enc, _override_payload, mark_zero=mark_zero))
 
         # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
         effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
@@ -4063,7 +4053,7 @@ class Chart(
             # computes the statistics it binds or inherits whole, grouped by
             # that encoding.
             settled_layers = _fill_chart_positional(
-                _layers_over_parent(settled_layers, resolved._encoding), resolved
+                _layers_over_parent(settled_layers, resolved._encoding, resolved._coord), resolved
             )
             _refuse_missing_statistic_inputs(settled_layers, resolved)
             serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(

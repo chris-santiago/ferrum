@@ -88,6 +88,13 @@ pub struct MarkKwargsSpec {
     /// Max character length for text labels; truncates with "…" if exceeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    // ── polar label radius (text) ────────────────────────────────────────────
+    /// Distance in pixels from the polar center at which a text mark under
+    /// `CoordPolar` binding theta and no radius draws its labels. `None`/unset
+    /// puts each label mid-ring, halfway between the coord's inner and outer
+    /// radius. A finite value `>= 0`; anything else refuses at render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
     // ── S8: band_size (tick/rect) ────────────────────────────────────────────
     /// Rendered mark length as a fraction of the band width, uniformly a
     /// FULL-length factor across both consumers (GH #85): tick's crossbar/
@@ -421,6 +428,7 @@ mod tests {
             filled: _,
             shape: _,
             limit: _,
+            radius: _,
             band_size: _,
             line: _,
             borders: _,
@@ -446,6 +454,7 @@ mod tests {
                 "dy",
                 "angle",
                 "limit",
+                "radius",
                 "band_size",
                 "width",
                 "height",
@@ -479,6 +488,7 @@ mod tests {
                 "dx",
                 "dy",
                 "angle",
+                "radius",
                 "band_size",
                 "width",
                 "height",
@@ -517,6 +527,7 @@ mod tests {
             filled: _,
             shape: _,
             limit: _,
+            radius: _,
             band_size: _,
             line: _,
             borders: _,
@@ -565,6 +576,7 @@ mod tests {
             filled: _,
             shape: _,
             limit: _,
+            radius: _,
             band_size: _,
             line: _,
             borders: _,

@@ -618,6 +618,7 @@ This section is the canonical reference for that vocabulary. Docstrings across t
 | `dx`, `dy` | Fixed pixel offset from the anchor point. | text, label |
 | `angle` | Rotation in degrees. | text |
 | `limit` | Maximum rendered text width in pixels; clips overflow. | text |
+| `radius` | Under `CoordPolar`, the pixel distance from the center at which a text placed by its `theta` wedge sits; default mid-ring. | text |
 | `leader_line` | Draw a thin connecting line from the data point to the placed label. Default `False`. | label |
 | `interpolate` | Curve interpolation: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. (`mark_ribbon` also takes its own named `interpolate=` parameter.) | line, area, ribbon |
 | `line` | Whether to draw the area's top boundary as a line. Default `False`. | area |

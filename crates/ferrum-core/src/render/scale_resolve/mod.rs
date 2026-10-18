@@ -2144,6 +2144,9 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
 /// radius means "full radius", not a missing encoding. Only the coord's theta
 /// axis may be the sole positional channel here; a missing theta channel, or a
 /// non-polar coord, is not single-axis-eligible.
+/// Text under CoordPolar, the same: a label binding theta and no radius sits
+/// at its angle on a ring (`marks::text::polar_label_placement`), so its
+/// absent radius is a placement, not a missing encoding.
 ///
 /// `has_x`/`has_y` are the spec-wide bindings from [`positional_binding`], not
 /// `spec.encoding`'s own slots, so a layered arc finds its theta channel
@@ -2161,7 +2164,7 @@ fn mark_single_axis_eligible(
 ) -> bool {
     match mark {
         crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule => true,
-        crate::spec::mark::Mark::Arc => match coord {
+        crate::spec::mark::Mark::Arc | crate::spec::mark::Mark::Text => match coord {
             Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => match theta {
                 ferrum_scene::PolarThetaChannel::X => has_x,
                 ferrum_scene::PolarThetaChannel::Y => has_y,
@@ -2427,20 +2430,15 @@ fn positional_binding<'a>(
 /// own encoding by construction (that is how their slot resolves), so they
 /// satisfy the rule through the ordinary "own encoding" arm.
 ///
-/// **Why no `has_x`/`has_y` parameters, unlike [`single_axis_eligible`].** This
-/// runs only after the caller's two `x_enc.ok_or(…)?` / `y_enc.ok_or(…)?`, so
-/// both spec-wide bindings exist by the time it is reached: the pair
-/// [`mark_single_axis_eligible`] asks about is `(true, true)` here, always.
-/// Threading it from the call site advertised a data-dependent decision at a
-/// site where the decision is constant, and made a transposition of the two
-/// arguments an unobservable (equivalent) edit — the mutation gate found
-/// exactly that. Naming the constant at the one place it is asked states the
-/// precondition instead of hiding it in a parameter. The consequence is
-/// unchanged and now explicit: an `Arc` layer under a polar coord reads its
-/// theta arm as `true` whichever channel names theta, so this refusal never
-/// fires for an arc — which is correct here, since the coord's theta channel
-/// IS bound spec-wide (that is what the caller's `ok_or` proved) and an arc's
-/// radius channel is optional by design.
+/// **Eligibility is asked of the channels the layer draws.** Unlike
+/// [`single_axis_eligible`], which asks with the spec-wide bindings whether a
+/// synthesized scale may stand in for an absent axis, this asks
+/// [`mark_single_axis_eligible`] with the layer's own drawn `x`/`y`: a polar
+/// `Arc` or `Text` layer may go without its radius channel, but only when its
+/// theta channel reaches it. A sibling binding theta resolves the axis, not a
+/// field this layer can plot, so a polar layer no theta reaches is refused
+/// instead of drawing nothing. Called from the single-axis arm as well as the
+/// generic one, since a theta-only polar chart resolves through the former.
 fn validate_drawing_layers_can_plot(
     spec: &ChartSpec,
     chart_encoding: &crate::spec::encoding::Encoding,
@@ -2472,15 +2470,16 @@ fn validate_drawing_layers_can_plot(
         if coord_flipped {
             drawn.flip_positional();
         }
+        let (draws_x, draws_y) = (drawn.x.is_some(), drawn.y.is_some());
         for channel in [PositionalChannel::X, PositionalChannel::Y] {
             if channel.select(&drawn).0.is_some() {
                 continue;
             }
             // One channel is enough for this mark, so the axis it cannot reach
-            // is one its own builder is written to do without. Both spec-wide
-            // bindings are `true` here by this function's precondition — see
-            // its doc comment for why they are named rather than threaded.
-            if mark_single_axis_eligible(layer.mark, coord, /* has_x */ true, /* has_y */ true) {
+            // is one its own builder is written to do without — asked of the
+            // channels THIS layer draws, so a polar arc or text that no theta
+            // reaches is refused rather than drawn empty.
+            if mark_single_axis_eligible(layer.mark, coord, draws_x, draws_y) {
                 continue;
             }
             return Err(RenderError::LayerMissingPositionalChannel {
@@ -2613,7 +2612,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let has_x = x_enc.is_some();
     let has_y = y_enc.is_some();
 
-    // Tick, Rule, and Arc marks support single-axis mode: only x or only y is
+    // Tick, Rule, Arc and polar Text marks support single-axis mode: only x or only y is
     // bound anywhere in the spec, and the mark builder can proceed using just
     // the present channel. An ineligible spec falls through to the
     // unconditional x/y check below, which errors as before. Synthesize a dummy
@@ -2621,6 +2620,11 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // scale without scale_resolve erroring. See [`single_axis_eligible`] for
     // which marks the question is asked of and why.
     if single_axis_eligible(spec, has_x, has_y) {
+        if x_enc.is_some() != y_enc.is_some() {
+            // The synthesized axis serves the layers that do without it; each
+            // drawing layer still has to reach the channel it cannot.
+            validate_drawing_layers_can_plot(spec, chart_encoding)?;
+        }
         match (x_enc, y_enc) {
             (Some(x_enc), None) => {
                 // Stack-aware x-axis (GH #77 follow-up): see

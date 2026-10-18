@@ -1,6 +1,7 @@
 """Regression tests — Finding P8 (2026-08-27 design-review remediation batch).
 
-P8: ``_spec_build.py``'s ``_resolve_polar_remapping`` used to synthesize a
+P8: ``_spec_build.py``'s polar remap (``SpecBuildMixin._with_polar_channels_lowered``)
+used to synthesize a
 phantom positional channel for theta-only ``mark_arc`` charts under
 ``CoordPolar`` (``enc["y"] = enc["x"]`` when ``theta="x"``, mirrored for
 ``theta="y"``) so Rust's ``scale_resolve`` — which unconditionally required

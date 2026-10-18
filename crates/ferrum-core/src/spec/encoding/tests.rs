@@ -1071,6 +1071,7 @@ fn overlay_from_covers_all_12_channels() {
         stroke_dash: None,
         angle: None,
         fill_opacity: None,
+        group: None,
     };
     // Overlay only tooltip, href, description (the three that were missed
     // by the old inline merge).
@@ -1316,6 +1317,8 @@ fn channels_enumerates_every_populated_field_with_the_right_spec() {
         stroke_dash: spec("stroke_dash"),
         angle: spec("angle"),
         fill_opacity: spec("fill_opacity"),
+        // A grouping key, not a binding: no channel lists it.
+        group: spec("group"),
     };
     let channels = e.channels();
     let names: Vec<&str> = channels.iter().map(|(n, _)| n.as_str()).collect();

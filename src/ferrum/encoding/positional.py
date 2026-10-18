@@ -8,6 +8,7 @@ kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 from __future__ import annotations
 
 from ferrum.encoding._honored import (
+    AGGREGATE,
     PRIMARY_POSITIONAL,
     SECONDARY_EXTENT,
     POLAR_PRIMARY,
@@ -156,6 +157,10 @@ class X2(ChannelBase):
         Column name in the input DataFrame.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"max"``). It is
+        one more op in the chart's (or layer's) one aggregate, grouped like
+        ``x``: ``x="min(v)", x2="max(v)"`` draws one span per group.
 
     Examples
     --------
@@ -165,7 +170,7 @@ class X2(ChannelBase):
 
     _channel_name = "x2"
 
-    _honored_kwargs = SECONDARY_EXTENT
+    _honored_kwargs = SECONDARY_EXTENT | AGGREGATE
 
 
 class Y2(ChannelBase):
@@ -180,6 +185,10 @@ class Y2(ChannelBase):
         Column name in the input DataFrame.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"max"``). It is
+        one more op in the chart's (or layer's) one aggregate, grouped like
+        ``y``: ``y="min(v)", y2="max(v)"`` draws one span per group.
 
     Examples
     --------
@@ -189,7 +198,7 @@ class Y2(ChannelBase):
 
     _channel_name = "y2"
 
-    _honored_kwargs = SECONDARY_EXTENT
+    _honored_kwargs = SECONDARY_EXTENT | AGGREGATE
 
 
 class XError(ChannelBase):
@@ -309,6 +318,9 @@ class Theta(ChannelBase):
     stack : bool or str, optional
         Stacking behaviour for arc segments.  ``True`` enables stacking;
         ``False`` disables it; ``"normalize"`` produces percentage arcs.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"sum"``):
+        ``theta="sum(z)", color="g"`` draws one arc per ``g``.
 
     Notes
     -----
@@ -324,7 +336,7 @@ class Theta(ChannelBase):
 
     _channel_name = "theta"
 
-    _honored_kwargs = POLAR_PRIMARY
+    _honored_kwargs = POLAR_PRIMARY | AGGREGATE
     _stack_kwarg = True
 
 
@@ -345,6 +357,9 @@ class Radius(ChannelBase):
         ``"normalize"`` produces percentage rings; ``"center"`` produces a
         symmetric streamgraph-style layout.  ``False`` or ``None`` disables
         stacking.  Requires ``mark_bar`` under ``CoordPolar``.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"mean"``):
+        ``radius="mean(z)"`` draws each group's mean as its radius.
 
     Notes
     -----
@@ -372,7 +387,7 @@ class Radius(ChannelBase):
 
     _channel_name = "radius"
 
-    _honored_kwargs = POLAR_PRIMARY
+    _honored_kwargs = POLAR_PRIMARY | AGGREGATE
     _stack_kwarg = True
 
 
@@ -390,6 +405,10 @@ class Theta2(ChannelBase):
         Column name in the input DataFrame.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"max"``). It is
+        one more op in the chart's (or layer's) one aggregate, grouped like
+        ``theta``: ``theta="min(v)", theta2="max(v)"`` draws one span per group.
 
     Notes
     -----
@@ -410,7 +429,7 @@ class Theta2(ChannelBase):
 
     _channel_name = "theta2"
 
-    _honored_kwargs = SECONDARY_EXTENT
+    _honored_kwargs = SECONDARY_EXTENT | AGGREGATE
 
 
 class Radius2(ChannelBase):
@@ -427,6 +446,10 @@ class Radius2(ChannelBase):
         Column name in the input DataFrame.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    aggregate : str, optional
+        Aggregation operation applied before mapping (e.g. ``"max"``). It is
+        one more op in the chart's (or layer's) one aggregate, grouped like
+        ``radius``: ``radius="min(v)", radius2="max(v)"`` draws one span per group.
 
     Notes
     -----
@@ -447,4 +470,4 @@ class Radius2(ChannelBase):
 
     _channel_name = "radius2"
 
-    _honored_kwargs = SECONDARY_EXTENT
+    _honored_kwargs = SECONDARY_EXTENT | AGGREGATE

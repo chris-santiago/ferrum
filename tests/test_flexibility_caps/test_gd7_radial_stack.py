@@ -10,7 +10,7 @@ Fix: add ``"stack"`` to ``Radius._honored_kwargs`` and normalize
 ``Radius._validate``, matching the pattern in ``Y._validate``.
 
 The Rust stacking path already existed: under ``CoordPolar``, ``radius`` is
-remapped to ``y`` during ``_resolve_polar_remapping``; ``apply_stack``
+remapped to ``y`` by ``SpecBuildMixin._with_polar_channels_lowered``; ``apply_stack``
 (position.rs) reads ``encoding.y.stack`` and populates
 ``__stack_y_base__``; ``bar.rs build_polar`` reads that base as ``inner_r``
 so wedges stack outward.  The only missing piece was the Python-side

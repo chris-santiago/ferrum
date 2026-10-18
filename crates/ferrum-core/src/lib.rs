@@ -152,6 +152,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Which inherited positional bindings a layer's mark draws (`Mark::inherited_positional`),
     // the rule Python's effective encoding and Rust's layer completion share.
     m.add_function(wrap_pyfunction!(spec::mark::mark_inherited_positional, m)?)?;
+    m.add_function(wrap_pyfunction!(spec::mark::mark_draws_inherited, m)?)?;
     m.add_function(wrap_pyfunction!(spec::mark::mark_drawn_channels, m)?)?;
     m.add_function(wrap_pyfunction!(render::marks::image::drawn_positional_columns_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::blend_accepted_values, m)?)?;

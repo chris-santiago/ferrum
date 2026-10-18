@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from ferrum._core import (
+    mark_draws_inherited,
     mark_inherited_positional,
     mark_style_fields,
     marks_drawing_constant_size,
@@ -30,6 +31,17 @@ _FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", 
 
 
 _POSITIONAL_WIRE = ("x", "y", "x2", "y2")
+
+
+def draws_inherited_color(mark: Optional[str]) -> bool:
+    """Whether a layer drawing *mark* draws a color it inherits from a parent.
+
+    Rust's Mark table answers (``ferrum._core.mark_draws_inherited``): a text
+    draws only a color it binds itself, and an inherited color only groups
+    its statistic. A layer with no mark of its own draws a point
+    (:func:`layer_mark`).
+    """
+    return mark_draws_inherited(layer_mark(mark), "color")
 
 
 def inherited_positional_taken(mark: Optional[str], own: Any, offered: Any) -> set[str]:

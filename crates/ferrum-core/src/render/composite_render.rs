@@ -428,6 +428,7 @@ pub(crate) fn render_composite_scene(
     // which member reserves a legend gutter.
     plan_overlay_auxiliary(&overlay_groups_aux, leaves, &resolve_inputs, &prepared, &mut contexts, &mut warnings)?;
     drop(resolve_inputs);
+    warn_overlay_labels_off_a_pie(&overlay_groups_aux, leaves, &prepared, &mut warnings);
     // `prepared` stays alive through the line/ribbon exemption pre-pass below
     // (spec-review cycle-2 fix), which needs each leaf's REAL resolved
     // layers/marks (`prepared[i].layers`, from `LayerPrepared` — the same
@@ -1103,6 +1104,52 @@ fn overlay_auxiliary_groups(tree: &CompositeNode) -> Vec<OverlayGroupPlan> {
     let mut out = Vec::new();
     walk(tree, MemberChannels::default(), &mut 0, &mut out);
     out
+}
+
+/// Warn, once per text layer, where an overlay group's members draw a polar
+/// text at its own theta values in one member and a pie of that theta in
+/// another: the members share one panel, so the labels sit off its wedges as
+/// they would merged with `+`
+/// ([`crate::render::marks::text::labels_off_a_pie`]). A pairing inside one
+/// member is that member's own render's to warn. Layers are numbered in
+/// member order, as the group's scales read them.
+fn warn_overlay_labels_off_a_pie(
+    groups: &[OverlayGroupPlan],
+    leaves: &[CompositeLeafInput<'_>],
+    prepared: &[prepare::PreparedInputs],
+    warnings: &mut Vec<RenderWarning>,
+) {
+    use crate::render::marks::text::{labels_off_a_pie, PanelLayer};
+    for group in groups {
+        // (member, its own layer index) per group layer, and what it draws.
+        let owners: Vec<(usize, usize)> = group
+            .members
+            .clone()
+            .flat_map(|m| (0..prepared[m].layers.len()).map(move |li| (m, li)))
+            .collect();
+        let drawn: Vec<crate::spec::encoding::Encoding> =
+            owners.iter().map(|&(m, li)| prepared[m].layers[li].drawn_encoding()).collect();
+        let layers: Vec<PanelLayer<'_>> = owners
+            .iter()
+            .zip(&drawn)
+            .map(|(&(m, li), encoding)| {
+                let layer = &prepared[m].layers[li];
+                PanelLayer { mark: layer.mark, coord: layer.coord.as_ref(), encoding, scales: &prepared[m].provisional_scales }
+            })
+            .collect();
+        for (ti, ai) in labels_off_a_pie(&layers) {
+            let (member, li) = owners[ti];
+            if member == owners[ai].0 {
+                continue;
+            }
+            let mark = layers[ti].mark;
+            let entry = prepare::layer_entry(leaves[member].spec, li, mark);
+            let warning = RenderWarning::PolarLabelsUnstacked { layer: prepare::voiced_layer(ti, &entry, mark), entry };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
 }
 
 /// The member of an overlay group drawing the group's `layer`, its members'
@@ -5988,6 +6035,55 @@ mod tests {
     /// does not warn. The warning's need (a layered chart) and the rule
     /// therefore agree on both leaf shapes, whether the overlay shares its y
     /// scale or each leaf resolves its own.
+    /// `LayerChart(arc, text)` over one theta field: the members share one
+    /// panel, so labels at their own theta values beside the arc's pie warn,
+    /// naming `Theta(stack=True)`, as they do merged with `+`; stacked labels
+    /// do not.
+    #[test]
+    fn an_overlay_of_a_pie_and_unstacked_labels_warns_once() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let batch = || {
+            let schema = Schema::new(vec![Field::new("g", DataType::Utf8, false), Field::new("z", DataType::Float64, false)]);
+            RecordBatch::try_new(
+                std::sync::Arc::new(schema),
+                vec![
+                    std::sync::Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                    std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let leaf = |encoding: serde_json::Value, mark: &str| -> ChartSpec {
+            serde_json::from_value(serde_json::json!({
+                "data": {"kind": "named", "name": "default"}, "mark": mark, "encoding": encoding,
+                "coord": {"kind": "polar", "theta": "x", "start_angle": 0.0, "direction": "clockwise",
+                          "inner_radius": 0.0, "pad_angle": 0.0}}))
+            .unwrap()
+        };
+        let render_with = |stacked: bool, entry: Option<&str>| {
+            let theta = if stacked { serde_json::json!({"field": "z", "stack": "zero"}) } else { serde_json::json!({"field": "z"}) };
+            let mut text = leaf(serde_json::json!({"x": theta, "text": {"field": "g"}}), "text");
+            text.entry = entry.map(str::to_string);
+            let holds = [
+                color_hold_with(leaf(serde_json::json!({"x": {"field": "z"}, "color": {"field": "g"}}), "arc"), batch(), ThemeInputs::default()),
+                color_hold_with(text, batch(), ThemeInputs::default()),
+            ];
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let tree = overlay_tree(holds[0].spec.clone(), holds[1].spec.clone());
+            let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            warnings.iter().map(|w| w.to_string()).filter(|w| w.contains("stack=True")).collect::<Vec<_>>()
+        };
+        let render = |stacked: bool| render_with(stacked, None);
+        assert_eq!(render(false), [crate::render::marks::text::tests::polar_placement::UNSTACKED_WARNING]);
+        assert!(render(true).is_empty());
+        // A member a desugaring call built is voiced by that call alone: its
+        // group index counts layers the caller never wrote.
+        let built = render_with(false, Some("pie_chart"));
+        assert_eq!(built.len(), 1, "{built:?}");
+        assert!(built[0].starts_with("pie_chart: these labels sit"), "{}", built[0]);
+    }
+
     #[test]
     fn an_overlay_bar_leafs_zero_warns_inert_exactly_when_the_zero_anchor_ignores_it() {
         use crate::layout::facet::ResolveMode;

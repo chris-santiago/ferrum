@@ -3250,6 +3250,7 @@ mod layer_unknown_column_message_tests {
             stroke_dash: spec(),
             angle: spec(),
             fill_opacity: spec(),
+            group: spec(),
         };
         for (wire, _) in every_channel.channels() {
             let channel = wire.split('[').next().unwrap_or(&wire);

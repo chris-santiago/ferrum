@@ -450,7 +450,8 @@ struct ReadExtent {
 /// draw it. A layer binding the channel itself draws its own field; a layer
 /// binding nothing there draws the chart-level binding, which `prepare` gives
 /// a layer on the chart's data (`inherit_from`) and a layer on its own output
-/// (`inherit_non_positional`) alike. The same layer-to-batch rule the
+/// (`inherit_non_positional`) alike, unless its mark draws only a binding it
+/// owns ([`Mark::draws_inherited`]: a text's color). The same layer-to-batch rule the
 /// positional union reads by ([`seed_reads`]), without its positional-only
 /// skip of `data_source` layers.
 ///
@@ -471,6 +472,14 @@ pub(in crate::render) fn aux_reads<'a>(
 ) -> Vec<AuxRead<'a>> {
     let mut reads: Vec<AuxRead<'a>> = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
+        // A layer reads its own binding, or, when its mark takes an inherited
+        // binding of the channel ([`Mark::draws_inherited`]), the one Python
+        // listed on it or the chart's: a text yields no read for a color it
+        // does not own.
+        let drawn = channel.drawn_as();
+        if !layer.owns(drawn) && !layer.mark.draws_inherited(drawn) {
+            continue;
+        }
         let Some(binding) = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())
         else {
             continue;
@@ -4379,6 +4388,32 @@ mod tests {
             locate_seed_field("x", "x", &spec, &rows, &outputs).is_none(),
             "no other column of the batch types the axis, nor the chart rows' x"
         );
+    }
+
+    /// A text reads no color it does not own: neither the chart's nor one
+    /// Python listed on it as inherited, so its rows (here a `zz` no mark
+    /// draws) never reach the color scale. A text's own color reads.
+    #[test]
+    fn aux_reads_take_no_color_a_text_does_not_own() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use crate::spec::layer::InheritedChannel;
+        let color = |field: &str| Encoding { color: Some(EncodingSpec { field: field.into(), ..Default::default() }), ..Default::default() };
+        let layers = vec![
+            Layer { mark: Mark::Point, ..Default::default() },
+            Layer { mark: Mark::Text, ..Default::default() },
+            Layer { mark: Mark::Text, encoding: color("c"), inherited_channels: vec![InheritedChannel::Color], ..Default::default() },
+            Layer { mark: Mark::Text, encoding: color("c"), ..Default::default() },
+        ];
+        let chart = color("c");
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["zz"]))],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let outputs = HashMap::new();
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [0, 3]);
     }
 
     /// A layered channel's reads list only the layers that draw it: a layer

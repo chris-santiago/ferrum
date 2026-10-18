@@ -989,6 +989,7 @@ _VOICED_CALLEES: dict[str, Callable[[str], Any]] = {
     "check_mark_size": lambda voice: _base().check_mark_size(voice, "rule", 3.0),
     "coerce_finite_real": lambda voice: _base().coerce_finite_real(f"{voice}(opacity=...)", "x"),
     "coerce_non_negative_int": lambda voice: _base().coerce_non_negative_int(f"{voice}(n=...)", -1),
+    "_coerce_pixel_real": lambda voice: _base()._coerce_pixel_real(f"{voice}(radius=...)", -1.0),
     "coerce_bool": lambda voice: _base().coerce_bool(voice, "filled", "no"),
     "validate_str": lambda voice: _base().validate_str(voice, "shape", 3),
     "validate_choice": lambda voice: _base().validate_choice(

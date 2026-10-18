@@ -296,6 +296,7 @@ _SAMPLE: dict[str, Any] = {
     "filled": False,
     "shape": "square",
     "limit": 5,
+    "radius": 30.0,
     "band_size": 0.5,
     "line": True,
     "borders": True,
@@ -1117,6 +1118,15 @@ def _raster(style: dict) -> Any:
     return fm.Chart(_GRID).mark_raster(resolution=4, **style).encode(x="x", y="y")
 
 
+def _cartesian_text(style: dict) -> Any:
+    return fm.Chart(_NEEDS).mark_text(**style).encode(x="x", y="y", text="g")
+
+
+def _polar_text(style: dict, **encoding: str) -> Any:
+    chart = fm.Chart(_NEEDS).mark_text(**style).encode(theta="x", text="g", **encoding)
+    return chart.coord(fm.CoordPolar())
+
+
 def _layered_bar(style: dict) -> Any:
     """A bar layer on a chart of several layers, its values far from zero."""
     data = _CAT.with_columns(pl.col("v") + 50.0)
@@ -1162,6 +1172,12 @@ _NEED_SCENES: dict[str, _Scenes] = {
     "raster_data": _Scenes(lambda m, st: [_image(st)], lambda m, st: _raster(st)),
     "quantitative_color": _Scenes(
         lambda m, st: [_polygon(st, color="c")], lambda m, st: _polygon(st)
+    ),
+    # A text placed by its theta wedge: a Cartesian text and a polar text
+    # beside a radius encoding both lack it.
+    "polar_label": _Scenes(
+        lambda m, st: [_cartesian_text(st), _polar_text(st, radius="y")],
+        lambda m, st: _polar_text(st),
     ),
     # A flat bar's zero= is consumed by Python and never reaches the mark
     # (`test_a_flat_bar_figure_zero_is_consumed_not_put_on_the_wire`), so no

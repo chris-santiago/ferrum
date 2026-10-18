@@ -8872,6 +8872,91 @@ fn a_channel_no_layer_draws_builds_no_scale_and_warns_once() {
     }
 }
 
+/// A `group` key belongs only on a layer that inherits a color it does not
+/// draw (a text's). On the chart-level encoding, or on a layer whose mark
+/// draws its inherited color, nothing reads it, so it refuses with the
+/// remedy; on a text it prepares.
+#[test]
+fn a_group_key_off_a_text_layer_refuses() {
+    let layer = |mark: &str| {
+        serde_json::json!({"mark": mark, "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}, "group": {"field": "g"}}})
+    };
+    let layered = |mark: &str| {
+        let mut spec = serde_json::to_value(column_gate_spec(
+            serde_json::json!([]),
+            serde_json::json!([{"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}, layer(mark)]),
+        ))
+        .expect("serializes");
+        spec["encoding"]["color"] = serde_json::json!({"field": "g"});
+        serde_json::from_value::<ChartSpec>(spec).expect("deserializes")
+    };
+    let err = gate_prepare(&layered("point")).expect_err("a point draws its inherited color").to_string();
+    assert_eq!(
+        err,
+        "layer 1: layers[1].encoding.group is set on a mark_point layer, which draws the color it inherits and \
+         groups by it, so group has no effect there. Remove group from this layer, or bind color on it to group \
+         it by another field."
+    );
+    gate_prepare(&layered("text")).expect("a text holds its inherited color as its group key");
+
+    let mut chart_level = serde_json::to_value(layered("text")).expect("serializes");
+    chart_level["encoding"]["group"] = serde_json::json!({"field": "g"});
+    let chart_level: ChartSpec = serde_json::from_value(chart_level).expect("deserializes");
+    let err = gate_prepare(&chart_level).expect_err("the chart-level encoding is no layer's").to_string();
+    assert_eq!(
+        err,
+        "ChartSpec.encoding.group is set on the chart-level encoding, where nothing reads it: group is a layer's \
+         grouping key for a color that layer inherits but does not draw (a text's). Remove it, and bind color on \
+         the chart to group its layers."
+    );
+}
+
+/// A text-only chart whose color only a parent binds draws no color: a text
+/// draws only a color it binds itself, so nothing builds a color scale or a
+/// legend, and the color warns once as not drawn. The same holds when the
+/// texts hold the color as their `group` key, the wire Python writes. A text
+/// binding its own color draws it.
+#[test]
+fn a_text_only_chart_with_a_parent_color_warns_it_is_not_drawn() {
+    let text = |encoding: serde_json::Value| {
+        let mut layer = serde_json::json!({"mark": "text", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}}});
+        for (key, value) in encoding.as_object().expect("an object") {
+            layer["encoding"][key] = value.clone();
+        }
+        layer
+    };
+    let with_chart_color = |layers: serde_json::Value| {
+        let mut spec = serde_json::to_value(column_gate_spec(serde_json::json!([]), layers)).expect("serializes");
+        spec["encoding"]["color"] = serde_json::json!({"field": "g"});
+        serde_json::from_value::<ChartSpec>(spec).expect("deserializes")
+    };
+    let group = serde_json::json!({"group": {"field": "g"}});
+    for (case, spec) in [
+        ("parent color", with_chart_color(serde_json::json!([text(serde_json::json!({})), text(serde_json::json!({}))]))),
+        ("group key", with_chart_color(serde_json::json!([text(group.clone()), text(group)]))),
+    ] {
+        let prep = gate_prepare(&spec).unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert!(prep.provisional_scales.color.is_none(), "{case}: no color scale");
+        assert!(prep.legend_entries.is_empty(), "{case}: no legend");
+        let undrawn: Vec<String> = prep
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. }))
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            undrawn,
+            ["layer 0: mark_text: color 'g' has no effect: no layer's mark draws color (a text mark draws only a \
+              color it binds itself), so it gets no scale and no legend; it was ignored"],
+            "{case}"
+        );
+    }
+    let own = with_chart_color(serde_json::json!([text(serde_json::json!({"color": {"field": "g"}})), text(serde_json::json!({}))]));
+    let prep = gate_prepare(&own).expect("prepares");
+    assert!(prep.provisional_scales.color.is_some(), "a text's own color draws");
+    assert!(!prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
+}
+
 /// A column only another `+` operand's rows hold is no statistic: a layer
 /// whose rows are its operand's own snapshot (a branch over a published
 /// `Identity` row marker) refuses with the plain message, though the other

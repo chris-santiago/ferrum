@@ -292,6 +292,14 @@ impl Layer {
             .collect()
     }
 
+    /// Whether this layer binds the non-positional `channel` itself: bound on
+    /// its own encoding and not written there by Python from a parent
+    /// ([`Self::inherited_channels`]).
+    pub(crate) fn owns(&self, channel: InheritedChannel) -> bool {
+        self.encoding.bindings().iter().any(|(name, _)| *name == channel.as_str())
+            && !self.inherited_channels.contains(&channel)
+    }
+
     /// This layer's encoding completed from `parent`, the chart-level
     /// encoding: the one completion every reader of a layer's channels sees.
     /// A layer reading the chart's data inherits every unbound channel, one
@@ -299,13 +307,19 @@ impl Layer {
     /// bindings it did not write itself (inherited here, or filled by Python
     /// and listed in [`Self::inherited_positional`]) it keeps only those its
     /// mark draws ([`Mark::inherited_positional`]), so a mark never carries a
-    /// positional binding it never draws.
+    /// positional binding it never draws. A color its mark takes only when it
+    /// binds it ([`Mark::draws_inherited`]: a text's) is dropped unless the
+    /// layer owns it, so no reader counts the layer as drawing it; such a
+    /// layer groups by its own `group` key instead.
     pub(crate) fn completed_encoding(&self, parent: &Encoding) -> Encoding {
         let mut encoding = self.encoding.clone();
         if self.data_source.is_some() {
             encoding.inherit_non_positional(parent);
         } else {
             encoding.inherit_from(parent);
+        }
+        if !self.mark.draws_inherited(InheritedChannel::Color) && !self.owns(InheritedChannel::Color) {
+            encoding.color = None;
         }
         let own = self.own_positional();
         let offered: Vec<PositionalChannel> = PositionalChannel::ALL
@@ -724,13 +738,15 @@ mod tests {
             stroke_dash: spec(),
             angle: spec(),
             fill_opacity: spec(),
+            group: spec(),
         };
+        // `group` is a grouping key, not a channel: never inherited.
         let encoding_keys: std::collections::BTreeSet<String> = serde_json::to_value(&every_channel)
             .unwrap()
             .as_object()
             .unwrap()
             .keys()
-            .filter(|k| !["x", "y", "x2", "y2"].contains(&k.as_str()))
+            .filter(|k| !["x", "y", "x2", "y2", "group"].contains(&k.as_str()))
             .cloned()
             .collect();
         let channel_names: std::collections::BTreeSet<String> = [

@@ -205,7 +205,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 /// radius, with no overlap at r=0.
 fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
-    use crate::render::marks::arc::{polar_geom, radius_to_pixel, wedge_path};
+    use crate::render::marks::arc::{band_wedges, polar_geom, radius_to_pixel, wedge_path};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let theta_ch = match &ctx.spec.coord {
@@ -236,37 +236,9 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Stacking base (segment bottoms). Absent when unstacked → base = 0.
     let bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
 
-    // Distinct angular categories in first-appearance order.
-    let mut cat_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut cat_order: Vec<&str> = Vec::new();
-    for s in angle_strs.iter().flatten() {
-        if !cat_index.contains_key(s.as_str()) {
-            cat_index.insert(s.as_str(), cat_order.len());
-            cat_order.push(s.as_str());
-        }
-    }
-    // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
-    // categories. Deliberately untouched by the F-L04-03 band-geometry work
-    // (spec §3 non-goals): this is an angular model with no pixel range, no
-    // `padding_inner`/`padding_outer`/`align`, and no resolved ordinal scale
-    // behind it — `theta` is remapped in Python and never resolves a
-    // `ScaleKind::Ordinal`, so there is no `bandwidth()` to ask. Padding here
-    // is `pad_angle`, a separate radial-chart concept.
-    let n_cats = cat_order.len().max(1);
-    let tau = std::f64::consts::TAU;
-    let band = tau / n_cats as f64;
-    // A single angular category would span the full circle. SVG cannot draw a
-    // 360° arc in one command (start==end is degenerate), so `wedge_path`
-    // splits it into two semicircle arcs. Leave a hairline gap when no explicit
-    // pad is set so each ring renders as a single arc (coxcomb convention) and
-    // concentric stacked rings stay individually identifiable.
-    let pad_angle = if geom.pad_angle > 0.0 {
-        geom.pad_angle
-    } else if n_cats == 1 {
-        1e-3
-    } else {
-        0.0
-    };
+    // Each distinct angular category (first-appearance order) gets an equal
+    // angular band, the arc mark's own nominal-theta bands.
+    let wedges = band_wedges(&angle_strs, geom.start_angle, geom.pad_angle);
 
     let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -291,15 +263,10 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // over its emitted `PathCmd`s alone.
     let mut spans: Vec<(f64, f64)> = Vec::with_capacity(angle_strs.len());
 
-    for i in 0..angle_strs.len() {
-        let cat = match &angle_strs[i] { Some(s) => s.as_str(), None => continue };
+    for (i, wedge) in wedges.iter().enumerate() {
+        let Some((angle_start, angle_end)) = *wedge else { continue };
         let top = match tops[i] { Some(v) if v.is_finite() => v, _ => continue };
         let base = bases.as_ref().and_then(|v| v[i]).filter(|v| v.is_finite()).unwrap_or(0.0);
-
-        let k = *cat_index.get(cat).unwrap_or(&0);
-        let angle_start = geom.start_angle + k as f64 * band + pad_angle / 2.0;
-        let angle_end = geom.start_angle + (k as f64 + 1.0) * band - pad_angle / 2.0;
-        if angle_end <= angle_start { continue; }
 
         let inner_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, base);
         let outer_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, top);
@@ -334,6 +301,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
         .with_polar_spans(spans)
+        .placed_in_polar()
 }
 
 fn empty_result() -> crate::render::draw::MarkBuildResult {

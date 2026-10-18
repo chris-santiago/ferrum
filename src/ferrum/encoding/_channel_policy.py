@@ -143,7 +143,7 @@ _ALIAS_CHANNELS = frozenset(("fill", "stroke", "detail"))
 # top-level encoding channel" (only valid inside Tooltip(*fields)).
 _WARN_CHANNELS = frozenset(("x_error", "y_error", "x_error2", "y_error2", "tooltip_field"))
 # POLAR: theta/radius/theta2/radius2 remap to x/y (untouched) when CoordPolar
-# is set -- _resolve_polar_remapping pops them from `enc` before the safety
+# is set -- _with_polar_channels_lowered moves them before the safety
 # net below ever sees them. Without CoordPolar they are never remapped, stay
 # in `enc`, and fall through to the safety net's warn_once (dropped the
 # unconditional whitelist 2026-08-27 -- previously silent regardless of

@@ -98,6 +98,142 @@ pub(crate) fn radius_to_pixel(
     inner_radius + t * (outer_radius - inner_radius)
 }
 
+/// Whether the coord's theta channel is a category: declared nominal or
+/// ordinal in `encoding`, or resolved to an ordinal scale in `scales` (an
+/// untyped string column). Each category then takes an equal angular band
+/// ([`band_wedges`]) instead of a share of a pie sweep ([`pie_wedges`]),
+/// which only a quantity can take.
+pub(crate) fn theta_is_categorical(
+    encoding: &crate::spec::encoding::Encoding,
+    scales: &crate::render::scale_resolve::ResolvedScales,
+    theta_ch: PolarThetaChannel,
+) -> bool {
+    let (theta_enc, theta_scale) = match theta_ch {
+        PolarThetaChannel::X => (encoding.x.as_ref(), &scales.x),
+        PolarThetaChannel::Y => (encoding.y.as_ref(), &scales.y),
+    };
+    matches!(theta_scale, crate::render::scale_resolve::ScaleKind::Ordinal(_))
+        || theta_enc.is_some_and(|e| {
+            matches!(e.type_, Some(SpecDataType::Nominal) | Some(SpecDataType::Ordinal))
+        })
+}
+
+/// The theta field an arc under `coord` stacks into a pie: a polar coord, a
+/// theta binding that is no declared category, and neither `theta2` nor
+/// `radius2` (which draw annular wedges from their own extents instead).
+/// `None` for an arc that draws no pie. An untyped string theta resolves an
+/// ordinal scale and draws bands; this reads the declaration only, so a
+/// caller holding the panel's scales also asks [`theta_is_categorical`].
+pub(crate) fn pie_theta_field<'a>(
+    encoding: &'a crate::spec::encoding::Encoding,
+    coord: Option<&SpecCoord>,
+) -> Option<&'a str> {
+    let Some(SpecCoord::Polar { theta, .. }) = coord else { return None };
+    let (theta_enc, theta2, radius2) = match theta {
+        PolarThetaChannel::X => (encoding.x.as_ref(), &encoding.x2, &encoding.y2),
+        PolarThetaChannel::Y => (encoding.y.as_ref(), &encoding.y2, &encoding.x2),
+    };
+    let theta_enc = theta_enc?;
+    let declared_category = matches!(theta_enc.type_, Some(SpecDataType::Nominal) | Some(SpecDataType::Ordinal));
+    (theta2.is_none() && radius2.is_none() && !declared_category).then_some(theta_enc.field.as_str())
+}
+
+/// The pie's wedges, one per row: `(angle_start, angle_end)` swept
+/// cumulatively from `start_angle` in row order, each row taking its share of
+/// the positive total, with `pad_angle` trimmed evenly off both edges.
+///
+/// A row draws no wedge (`None`) when its value is null, non-finite or not
+/// positive, which also leaves the sweep where it was, or when the padding
+/// consumes its sweep, which does not. The whole result is `None` when no row
+/// has a positive value, so there is no pie to sweep.
+///
+/// The one pie sweep: the arc mark draws these wedges and a polar text mark
+/// labels them, so a label's mid-angle is its wedge's by construction.
+pub(crate) fn pie_wedges(
+    values: &[Option<f64>],
+    start_angle: f64,
+    pad_angle: f64,
+) -> Option<Vec<Option<(f64, f64)>>> {
+    let total: f64 = values.iter()
+        .filter_map(|v| *v)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let tau = std::f64::consts::TAU;
+    let mut cum_angle = start_angle;
+    Some(values.iter().map(|v_opt| {
+        let v = match v_opt {
+            Some(v) if v.is_finite() && *v > 0.0 => *v,
+            _ => return None,
+        };
+        let sweep = (v / total) * tau;
+        let angle_start = cum_angle + pad_angle / 2.0;
+        let angle_end = cum_angle + sweep - pad_angle / 2.0;
+        cum_angle += sweep;
+        // A slice the padding collapses to zero or negative sweep draws nothing.
+        (angle_end > angle_start).then_some((angle_start, angle_end))
+    }).collect())
+}
+
+/// The equal-band wedges of a categorical theta, one per row:
+/// `(angle_start, angle_end)` of the band its category takes.
+///
+/// Each distinct category, in first-appearance order, takes `tau / n` of the
+/// circle from `start_angle`. Padding is `pad_angle`, or a hairline when the
+/// coord sets none and there is a single category, since a lone category
+/// would otherwise span the full circle. A row draws no wedge (`None`) when
+/// its category is null or the padding consumes its band.
+///
+/// Shared by the arc mark's nominal-theta wedges, `bar::build_polar`'s
+/// wedges and a polar text mark's labels on either, as [`pie_wedges`] is for
+/// the pie.
+pub(crate) fn band_wedges(
+    categories: &[Option<String>],
+    start_angle: f64,
+    pad_angle: f64,
+) -> Vec<Option<(f64, f64)>> {
+    // Build category index in first-appearance order.
+    let mut cat_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut cat_order: Vec<&str> = Vec::new();
+    for s in categories.iter().flatten() {
+        if !cat_index.contains_key(s.as_str()) {
+            cat_index.insert(s.as_str(), cat_order.len());
+            cat_order.push(s.as_str());
+        }
+    }
+    // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
+    // categories, and untouched by the F-L04-03 band-geometry work (spec §3
+    // non-goals): the band is an angle, not read off the theta axis's resolved
+    // scale (which spans the plot width, not the circle), so there is no pixel
+    // range, no `padding_inner`/`padding_outer`/`align` and no `bandwidth()` to
+    // ask. Padding here is `pad_angle`, a separate radial-chart concept.
+    let n_cats = cat_order.len().max(1);
+    let tau = std::f64::consts::TAU;
+    let band = tau / n_cats as f64;
+
+    // A single category would span the full circle, which SVG cannot draw in
+    // one arc command (start == end is degenerate), so `wedge_path` splits it
+    // into two semicircles. A hairline gap when no pad is set keeps each ring
+    // one arc (the coxcomb convention) and concentric stacked rings apart.
+    let pad_angle = if pad_angle > 0.0 {
+        pad_angle
+    } else if n_cats == 1 {
+        1e-3
+    } else {
+        0.0
+    };
+
+    categories.iter().map(|cat_opt| {
+        let cat = cat_opt.as_deref()?;
+        let k = *cat_index.get(cat).unwrap_or(&0);
+        let angle_start = start_angle + k as f64 * band + pad_angle / 2.0;
+        let angle_end = start_angle + (k as f64 + 1.0) * band - pad_angle / 2.0;
+        (angle_end > angle_start).then_some((angle_start, angle_end))
+    }).collect()
+}
+
 /// One slice's paint: the per-row fill resolved from the color scale over the
 /// constant fill slot's own provenance, composed with the row's opacity, plus the
 /// constant stroke slot.
@@ -194,14 +330,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     // gets an equal angular slice and the radius channel sets the outer radius.
     // This handles `mark_arc(theta:N, radius:Q)` — the Nightingale coxcomb via
     // the arc mark rather than mark_bar + CoordPolar.
-    let theta_enc = match theta_ch {
-        PolarThetaChannel::X => ctx.spec.encoding.x.as_ref(),
-        PolarThetaChannel::Y => ctx.spec.encoding.y.as_ref(),
-    };
-    let theta_is_categorical = theta_enc.is_some_and(|e| {
-        matches!(e.type_, Some(SpecDataType::Nominal) | Some(SpecDataType::Ordinal))
-    });
-    if theta_is_categorical {
+    if theta_is_categorical(&ctx.spec.encoding, ctx.scales, theta_ch) {
         return Ok(build_nominal_theta(ctx, &geom, field, radius_field, radius_scale));
     }
 
@@ -209,17 +338,9 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
     };
 
-    let (cx, cy, inner_radius, outer_radius, start_angle, pad_angle) = (
-        geom.cx, geom.cy, geom.inner_radius, geom.outer_radius, geom.start_angle, geom.pad_angle,
-    );
-
-    let total: f64 = values.iter()
-        .filter_map(|v| *v)
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .sum();
-    if total <= 0.0 {
+    let Some(wedges) = pie_wedges(&values, geom.start_angle, geom.pad_angle) else {
         return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
-    }
+    };
 
     // Per-slice color: read color encoding field and look up in the color scale.
     let (color_str, color_f64) = color_column_loader(ctx);
@@ -241,25 +362,14 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     // back into this value (a rounded or zero-thickness wedge's endpoints
     // don't determine it uniquely).
     let mut spans: Vec<(f64, f64)> = Vec::with_capacity(values.len());
-    let mut cum_angle = start_angle;
-    let tau = std::f64::consts::TAU;
 
-    for (i, v_opt) in values.iter().enumerate() {
-        let v = match v_opt {
-            Some(v) if v.is_finite() && *v > 0.0 => *v,
-            _ => continue,
-        };
-        let sweep = (v / total) * tau;
-        let angle_start = cum_angle + pad_angle / 2.0;
-        let angle_end = cum_angle + sweep - pad_angle / 2.0;
-        cum_angle += sweep;
-        // Skip degenerate slices that collapse to zero or negative sweep after padding.
-        if angle_end <= angle_start { continue; }
+    for (i, wedge) in wedges.iter().enumerate() {
+        let Some((angle_start, angle_end)) = *wedge else { continue };
 
         let style = slice_paint(ctx, &color_str, &color_f64, &opacity_values, i);
 
         let commands = wedge_path(
-            cx, cy, inner_radius, outer_radius, angle_start, angle_end,
+            geom.cx, geom.cy, geom.inner_radius, geom.outer_radius, angle_start, angle_end,
             ctx.mark_style.paint.corner_radius,
         );
         acc.push(SceneNode::Path {
@@ -279,7 +389,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let (nodes, data_indices) = acc.finalize();
 
     Ok(MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
-        .with_polar_spans(spans))
+        .with_polar_spans(spans)
+        .placed_in_polar())
 }
 
 /// Build arc wedges for a nominal/ordinal theta channel.
@@ -307,33 +418,7 @@ fn build_nominal_theta(
     let radii: Option<Vec<Option<f64>>> = radius_field
         .and_then(|f| col_as_f64(ctx.batch, f).ok());
 
-    // Build category index in first-appearance order.
-    let mut cat_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut cat_order: Vec<&str> = Vec::new();
-    for s in angle_strs.iter().flatten() {
-        if !cat_index.contains_key(s.as_str()) {
-            cat_index.insert(s.as_str(), cat_order.len());
-            cat_order.push(s.as_str());
-        }
-    }
-    // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
-    // categories — the same model `bar::build_polar` uses, and untouched by the
-    // F-L04-03 band-geometry work for the same reason (spec §3 non-goals):
-    // there is no pixel range, no `padding_inner`/`padding_outer`/`align`, and
-    // no resolved ordinal scale behind `theta` (it is remapped in Python and
-    // never resolves a `ScaleKind::Ordinal`), so there is no `bandwidth()` to
-    // ask. Padding here is `pad_angle`, a separate radial-chart concept.
-    let n_cats = cat_order.len().max(1);
-    let tau = std::f64::consts::TAU;
-    let band = tau / n_cats as f64;
-
-    let pad_angle = if geom.pad_angle > 0.0 {
-        geom.pad_angle
-    } else if n_cats == 1 {
-        1e-3
-    } else {
-        0.0
-    };
+    let wedges = band_wedges(&angle_strs, geom.start_angle, geom.pad_angle);
 
     // Per-row color columns.
     let (color_str, color_f64) = color_column_loader(ctx);
@@ -351,15 +436,8 @@ fn build_nominal_theta(
     // `PathCmd`s alone — the reason this value must be carried, not inferred.
     let mut spans: Vec<(f64, f64)> = Vec::with_capacity(angle_strs.len());
 
-    for (i, cat_opt) in angle_strs.iter().enumerate() {
-        let cat = match cat_opt { Some(s) => s.as_str(), None => continue };
-        let k = *cat_index.get(cat).unwrap_or(&0);
-
-        let angle_start = geom.start_angle + k as f64 * band + pad_angle / 2.0;
-        let angle_end = geom.start_angle + (k as f64 + 1.0) * band - pad_angle / 2.0;
-        if angle_end <= angle_start {
-            continue;
-        }
+    for (i, wedge) in wedges.iter().enumerate() {
+        let Some((angle_start, angle_end)) = *wedge else { continue };
 
         // Outer radius: from the radius channel (data value) if present, else
         // full coord outer radius (wedge reaches the edge).
@@ -394,6 +472,7 @@ fn build_nominal_theta(
 
     MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
         .with_polar_spans(spans)
+        .placed_in_polar()
 }
 
 /// Build annular-wedge nodes from per-row angular and radial extents.
@@ -491,6 +570,7 @@ fn build_annular(
 
     MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
         .with_polar_spans(spans)
+        .placed_in_polar()
 }
 
 /// SVG path commands for an arc wedge from `angle_start` to `angle_end`.

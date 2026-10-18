@@ -313,6 +313,9 @@ pub struct TextStyle {
     pub angle: Option<f64>,
     /// S7: max label length before truncation (text).
     pub limit: Option<usize>,
+    /// Pixel distance from the polar center of a polar text label, when no
+    /// radius encoding places it (text).
+    pub radius: Option<f64>,
     /// S11: draw a leader line from label to its anchor (label).
     pub leader_line: Option<bool>,
 }
@@ -590,6 +593,7 @@ pub(crate) fn style_need_met(need: crate::spec::mark::StyleNeed, ctx: &DrawCtx<'
         StyleNeed::UrlChannel => encoding.url.is_some(),
         StyleNeed::RasterData => encoding.url.is_none(),
         StyleNeed::LayeredChart => ctx.spec.layers.is_some(),
+        StyleNeed::PolarLabel => super::marks::text::polar_label_placement(ctx).is_some_and(|p| p.radius_field.is_none()),
     }
 }
 
@@ -757,6 +761,12 @@ pub fn resolve_mark_style(
     if let Some(ref sh) = o.shape { style.point.shape = Some(sh.clone()); }
     // S7: limit
     if let Some(l) = o.limit { style.text.limit = Some(l); }
+    if let Some(r) = o.radius {
+        if !(r.is_finite() && r >= 0.0) {
+            return Err(RenderError::MarkStylePixelOutOfRange { mark: *mark, field: "radius", value: r });
+        }
+        style.text.radius = Some(r);
+    }
     // S8: band_size
     if let Some(bs) = o.band_size { style.misc.band_size = Some(bs); }
     // S9: line border on area
@@ -1018,6 +1028,13 @@ pub struct MarkBuildResult {
     /// `MarkBuildResult`'s emptiness becomes a `RenderWarning` — see
     /// `RenderWarning::MarkBuildEmpty`.
     pub empty_reason: Option<EmptyReason>,
+    /// Whether `nodes` already sit in the panel's polar pixel space: a
+    /// builder that lays its own geometry out around the polar center (arc
+    /// wedges, polar bars, self-placed polar text labels) sets it through
+    /// [`placed_in_polar`](Self::placed_in_polar), and the panel's polar
+    /// projection of Cartesian nodes then leaves the batch alone. `false`
+    /// for every other result.
+    pub polar_placed: bool,
 }
 
 /// A ready-to-surface sentence fragment naming why a mark builder produced
@@ -1063,13 +1080,20 @@ impl MarkBuildResult {
         self
     }
 
+    /// Marks `nodes` as already laid out in polar pixel space (see
+    /// [`polar_placed`](Self::polar_placed)).
+    pub fn placed_in_polar(mut self) -> Self {
+        self.polar_placed = true;
+        self
+    }
+
     pub fn with_empty_reason(mut self, reason: Option<EmptyReason>) -> Self {
         self.empty_reason = reason;
         self
     }
 
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, vertex_rows: None, empty_reason: None }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, vertex_rows: None, empty_reason: None, polar_placed: false }
     }
 
     /// Like [`empty`](Self::empty), but names why — for a builder that
@@ -2970,6 +2994,7 @@ mod tests {
             encoding: Encoding,
             style: serde_json::Value,
             layered: bool,
+            polar: bool,
             met: bool,
         }
         fn channel(field: &str, type_: SDT) -> Option<EncodingSpec> {
@@ -2985,7 +3010,7 @@ mod tests {
             let band_range_flipped = Encoding { y: o("c"), x: q("q"), x2: q("q2"), ..Default::default() };
             let quant_range = Encoding { x: q("q"), x2: q("q2"), y: q("q"), y2: q("q2"), ..Default::default() };
             let text = |e: &Encoding| Encoding { text: n("t"), ..e.clone() };
-            let cell = |label, mark, encoding, style, met| Cell { label, mark, encoding, style, layered: false, met };
+            let cell = |label, mark, encoding, style, met| Cell { label, mark, encoding, style, layered: false, polar: false, met };
             match need {
                 StyleNeed::Stroke => vec![
                     cell("stroke color", Mark::Point, xy.clone(), json!({"stroke": "#123456"}), true),
@@ -3032,6 +3057,18 @@ mod tests {
                     Cell { layered: true, ..cell("layered", Mark::Bar, band_range.clone(), json!({}), true) },
                     cell("single", Mark::Bar, band_range, json!({}), false),
                 ],
+                StyleNeed::PolarLabel => {
+                    let theta = text(&Encoding { x: q("q"), ..Default::default() });
+                    let nominal_theta = text(&Encoding { x: n("c"), ..Default::default() });
+                    let nominal_with_radius = text(&Encoding { x: n("c"), y: q("q2"), ..Default::default() });
+                    vec![
+                        Cell { polar: true, ..cell("theta only", Mark::Text, theta, json!({}), true) },
+                        Cell { polar: true, ..cell("nominal theta only", Mark::Text, nominal_theta, json!({}), true) },
+                        Cell { polar: true, ..cell("radius bound", Mark::Text, text(&xy), json!({}), false) },
+                        Cell { polar: true, ..cell("nominal theta and radius", Mark::Text, nominal_with_radius, json!({}), false) },
+                        cell("cartesian", Mark::Text, text(&xy), json!({}), false),
+                    ]
+                }
             }
         }
 
@@ -3043,7 +3080,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(needs.len(), 9, "every need some table names: {needs:?}");
+        assert_eq!(needs.len(), 10, "every need some table names: {needs:?}");
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("q", DataType::Float64, false),
@@ -3067,6 +3104,16 @@ mod tests {
             let (mut met, mut unmet) = (0, 0);
             for cell in cells(need) {
                 let mut spec = ChartSpec { mark: cell.mark, encoding: cell.encoding, ..Default::default() };
+                if cell.polar {
+                    spec.coord = Some(crate::spec::coord::CoordKind::Polar {
+                        theta: crate::spec::coord::PolarThetaChannel::X,
+                        start_angle: 0.0,
+                        direction: ferrum_scene::PolarDirection::Clockwise,
+                        inner_radius: 0.0,
+                        outer_radius: None,
+                        pad_angle: 0.0,
+                    });
+                }
                 let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme)
                     .unwrap_or_else(|e| panic!("{need:?} {}: {e}", cell.label));
                 if cell.layered {

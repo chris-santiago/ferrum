@@ -1630,6 +1630,26 @@ fn build_panel_mark_batches(
     let &PanelResolveCtx { spec, prep, theme, .. } = ctx;
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
+    // Labels drawn at their own theta values beside a pie of that theta:
+    // warned once per text layer, however many panels draw it.
+    let drawn: Vec<crate::spec::encoding::Encoding> = prep.layers.iter().map(|l| l.drawn_encoding()).collect();
+    let panel_layers: Vec<crate::render::marks::text::PanelLayer<'_>> = prep
+        .layers
+        .iter()
+        .zip(&drawn)
+        .map(|(l, encoding)| crate::render::marks::text::PanelLayer { mark: l.mark, coord: l.coord.as_ref(), encoding, scales })
+        .collect();
+    for (ti, _) in crate::render::marks::text::labels_off_a_pie(&panel_layers) {
+        let mark = prep.layers[ti].mark;
+        let unstacked = RenderWarning::PolarLabelsUnstacked {
+            layer: public_layer(spec, ti, mark),
+            entry: layer_entry(spec, ti, mark),
+        };
+        if !warnings.contains(&unstacked) {
+            warnings.push(unstacked);
+        }
+    }
+
     for (li, layer) in prep.layers.iter().enumerate() {
         let layer_batch = &layer_batches[li];
         if layer_batch.num_rows() == 0 {
@@ -1734,7 +1754,7 @@ fn build_panel_mark_batches(
             layer_batch,
             layer.position.as_ref(),
             scales,
-            &layer.encoding,
+            &position::position_encoding(layer.mark, layer_coord.as_ref(), &layer.encoding),
             layer_flipped,
             warnings,
         )
@@ -1841,24 +1861,21 @@ fn build_panel_mark_batches(
         }
 
         // For CoordPolar, transform all mark nodes from Cartesian pixel
-        // space to polar pixel space. Arc marks (Mark::Arc) handle their
-        // own polar geometry and must not be transformed again.  Bars under
-        // CoordPolar route through `build_polar`, which also generates
-        // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
-        // must likewise be excluded from the transform, or the wedge
-        // coordinates are corrupted by a second polar projection.
+        // space to polar pixel space. A builder that lays its own geometry
+        // out around the polar center (arc wedges, `bar::build_polar`'s
+        // wedges, self-placed polar text labels) says so on its result
+        // (`MarkBuildResult::polar_placed`), and its nodes must not be
+        // transformed again, or a second polar projection corrupts them.
         //
         // Asked of THIS layer's coord (`#172`(1)), the same one its builder just
         // drew through: projecting a Cartesian layer because a SIBLING declared
         // polar would place its marks in a coordinate system nothing resolved
         // them for, and leaving a polar layer unprojected because the CHART is
         // Cartesian is how a per-layer `CoordPolar` would half-apply.
-        let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
         if matches!(
             &layer_spec.coord,
             Some(crate::spec::coord::CoordKind::Polar { .. })
-        ) && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
-            && !is_arc_geometry
+        ) && !result.polar_placed
         {
             apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
         }
@@ -2374,6 +2391,23 @@ fn polar_outer_radius(plot_area: &crate::layout::Rect) -> f64 {
     plot_area.w.min(plot_area.h) / 2.0
 }
 
+/// The fraction of a turn, clockwise from north, at which the panel's polar
+/// projection draws a Cartesian pixel position on the theta axis: that axis's
+/// pixel span across the plot area is one turn. [`apply_polar_node_transform`]
+/// reads it off x, left to right; a theta on y reads bottom to top, as its
+/// scale runs. A polar text label that sits on its own theta value takes its
+/// angle here, so it lands where a point with that value does.
+pub(crate) fn polar_projection_turn(
+    theta_channel: crate::spec::coord::PolarThetaChannel,
+    pixel: f64,
+    plot_area: &crate::layout::Rect,
+) -> f64 {
+    match theta_channel {
+        crate::spec::coord::PolarThetaChannel::X => (pixel - plot_area.x) / plot_area.w,
+        crate::spec::coord::PolarThetaChannel::Y => (plot_area.y + plot_area.h - pixel) / plot_area.h,
+    }
+}
+
 /// Transform SceneNodes from Cartesian pixel coordinates to polar pixel
 /// coordinates. Used for all mark types under CoordPolar.
 ///
@@ -2417,7 +2451,8 @@ fn apply_polar_node_transform(nodes: &mut Vec<SceneNode>, plot_area: &crate::lay
         outer_r: f64,
         tau: f64,
     ) -> (f64, f64) {
-        let theta = (px - plot_x) / plot_w * tau;
+        let area = crate::layout::Rect { x: plot_x, y: plot_y, w: plot_w, h: plot_h };
+        let theta = polar_projection_turn(crate::spec::coord::PolarThetaChannel::X, px, &area) * tau;
         let r = (plot_y + plot_h - py) / plot_h * outer_r;
         (center_x + r * theta.sin(), center_y - r * theta.cos())
     }
@@ -4666,10 +4701,12 @@ mod tests {
     /// Two-layer (bar + text) spec/batch. `bar_fill`/`text_fill` map to each
     /// layer's own `mark_style.fill=`. `bar_own_color_field`/
     /// `text_own_color_field` each bind that layer's OWN `encoding.color`.
-    /// `chart_color_field` sets the CHART-level `encoding.color` (inherited by
-    /// whichever layer declares no color of its own, under normal
-    /// `inherit_from` rules — mirrors `heatmap(annot=True)`'s colored-cells +
-    /// colorless-annotation-labels shape). The chart-level `mark_style` is
+    /// `chart_color_field` sets the CHART-level `encoding.color`, the parent
+    /// every layer binding no color of its own completes from — except a
+    /// text, which draws only a color it binds itself
+    /// (`Mark::draws_inherited`, applied by `Layer::completed_encoding`): the
+    /// `heatmap(annot=True)` colored-cells + colorless-labels shape. The
+    /// chart-level `mark_style` is
     /// always `None`: a layered chart is styled per layer
     /// (`layered_chart_level_mark_style_is_refused`).
     ///
@@ -4878,14 +4915,10 @@ mod tests {
     /// `encode(color=...)` up to the chart level too (see
     /// `bar_text_layered_spec`'s doc comment), so the chart-level channel is
     /// always present alongside the text layer's own declaration in
-    /// practice. This guards the current exemption seam
-    /// (`build_panel_mark_batches`, scene_build.rs:~1203-1206): the text
-    /// layer's own `color` declaration means `LayerPrepared.color_is_own` is
-    /// `true`, so the `!layer.color_is_own` branch that clears `color` on
-    /// the DrawCtx-local encoding copy must NOT fire here — the per-row color
-    /// read has to see the field and resolve it normally, not fall back to
-    /// theme font color the way an over-eager exemption (one that fired
-    /// regardless of `color_is_own`) would.
+    /// practice. A text owns this color (`Layer::owns`), so its completed
+    /// encoding keeps it (`Layer::completed_encoding` drops only a color a
+    /// text does not own): the per-row color read sees the field and
+    /// resolves it through the color scale, not the theme font color.
     #[test]
     fn layered_text_own_color_encoding_is_honored() {
         let (spec, batch) = bar_text_layered_spec(None, None, None, Some("cat"), Some("cat"));
@@ -5377,9 +5410,14 @@ mod tests {
             position: Some(position.clone()),
             ..Default::default()
         };
+        // No own color: the text holds the inherited color as its grouping
+        // key, the wire shape Python writes for it.
         let text_layer = Layer {
             mark: Mark::Text,
-            encoding: xy_ordinal_encoding(), // no own color
+            encoding: Encoding {
+                group: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..xy_ordinal_encoding()
+            },
             transforms: Vec::new(),
             position: Some(position),
             ..Default::default()
@@ -5415,15 +5453,13 @@ mod tests {
 
     /// `mark_bar(position=Dodge()).encode(color="g") +
     /// mark_text(position=Dodge())`: each label must sit at its OWN bar's
-    /// dodged x position, not the undodged group center. `apply_dodge`'s
-    /// grouping resolver (`resolve_group_channel`, `position.rs`) falls back
-    /// to `encoding.color.field` when no explicit `by=` is given — an
-    /// earlier revision's exemption deleted `color` from the text layer's
-    /// PREPARED encoding whenever it was inherited-only, so the text layer's
-    /// own dodge call saw no grouping channel at all and every label
-    /// collapsed to the undodged band center (verified live by the
-    /// quality-reviewer: labels at x=191.089/191.089 instead of
-    /// 133.163/249.015, matching the bars).
+    /// dodged x position, not the undodged group center. A text draws no
+    /// inherited color, so its completed encoding has none; `apply_dodge`'s
+    /// grouping resolver (`resolve_group_channel`, `position.rs`) reads its
+    /// `group` key instead (`by`, else color, else group), and the slots
+    /// follow the color domain's order as the bars' do (`dodge_slot_domain`
+    /// reads `color.or(group)`). Without the key every label collapses to the
+    /// band center.
     #[test]
     fn layered_dodged_text_over_colored_bar_tracks_bar_position() {
         use crate::spec::position::PositionAdjust;
@@ -5477,13 +5513,84 @@ mod tests {
         }
     }
 
+    /// A binned inherited color: the bars draw their color from a bin
+    /// output's `bin_start` (a float column), and the text, reading its own
+    /// bin output, groups its dodge by the same column through its `group`
+    /// key. Each label sits on its own bar.
+    #[test]
+    fn a_dodged_text_grouped_by_a_binned_color_tracks_its_bar() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let bin = |name: &str| serde_json::json!({"type": "bin", "field": "v", "nice": true, "cumulative": false,
+                                                   "shared_extent": true, "groupby": ["cat", "y"], "name": name});
+        let dodge = serde_json::json!({"type": "dodge"});
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "encoding": {"x": {"field": "cat"}, "y": {"field": "y"}, "color": {"field": "v"}},
+            "transforms": [bin("_layer_bin_0"), bin("_layer_bin_1")],
+            "layers": [
+                {"mark": "bar", "encoding": {"x": {"field": "cat"}, "y": {"field": "y"}, "color": {"field": "bin_start", "title": "v"}},
+                 "data_source": "_layer_bin_0", "position": dodge},
+                {"mark": "text", "encoding": {"x": {"field": "cat"}, "y": {"field": "y"}, "text": {"field": "y"}, "group": {"field": "bin_start"}},
+                 "data_source": "_layer_bin_1", "position": dodge},
+            ],
+        }));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "B", "B"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 9.0, 1.0, 9.0])),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = scene.unwrap();
+        assert!(
+            !warnings.iter().any(|w| matches!(w, RenderWarning::PositionAdjustSkipped { .. })),
+            "the group column is in the text's rows: {warnings:?}"
+        );
+        let panel = &scene.panels[0];
+        let bar_centers: Vec<f64> = panel.marks[0]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Rect { x, w, .. } => Some(x + w / 2.0),
+                _ => None,
+            })
+            .collect();
+        let text_xs: Vec<f64> = panel.marks[1]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        // One row per (cat, y) group per bin in both outputs, in one order.
+        assert!(!bar_centers.is_empty());
+        assert_eq!(text_xs.len(), bar_centers.len());
+        let mut slots = text_xs.clone();
+        slots.sort_by(f64::total_cmp);
+        slots.dedup();
+        assert!(slots.len() > 2, "the bins dodge apart within each category: {text_xs:?}");
+        for (bar, text) in bar_centers.iter().zip(&text_xs) {
+            assert!((bar - text).abs() < 1e-9, "label at {text}, its bar at {bar}: {bar_centers:?} vs {text_xs:?}");
+        }
+    }
+
     /// `mark_bar(position=Stack()).encode(color="g") +
     /// mark_text(position=Stack())`: each label must land at its OWN bar
     /// segment's stacked y position, not an unstacked/collapsed value.
-    /// `apply_stack` has the identical `encoding.color.field` grouping
-    /// fallback as dodge, and the identical S3 regression: an inherited-only
-    /// `color` deleted from the text layer's prepared encoding meant its own
-    /// stack call saw no grouping channel and every label used its raw
+    /// `apply_stack` groups as dodge does (`by`, else color, else the text's
+    /// `group` key); without a grouping key every label would use its raw
     /// (unstacked) y instead of the cumulative segment position.
     /// `StackAnchor::Top` for both layers so the resolved `y` column value
     /// (the segment TOP) is identical for the bar's rect and the text node —
@@ -9598,40 +9705,57 @@ mod tests {
         }
     }
 
-    /// Own-color rule 1: a `Mark::Text` layer whose `color` is purely
-    /// inherited (`!color_is_own`) loses it, regardless of literal paint —
-    /// the `heatmap(annot=True)` colorless-labels shape.
+    /// A text layer whose color is purely inherited has none once completed:
+    /// a text draws only a color it binds itself, so no reader, the drawing
+    /// included, sees the parent's color on it.
     #[test]
-    fn own_color_exemption_clears_inherited_color_on_text() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(false, false));
-        assert!(out.color.is_none(), "an inherited color must not reach a Text layer's own read");
+    fn a_text_layer_completes_without_an_inherited_color_and_keeps_its_own() {
+        use crate::spec::layer::{InheritedChannel, Layer};
+        let color = |field: &str| Some(EncodingSpec { field: field.into(), ..Default::default() });
+        let parent = xy_encoding();
+        let inherited = Layer { mark: Mark::Text, ..Default::default() };
+        assert!(inherited.completed_encoding(&parent).color.is_none(), "an inherited color never reaches a text");
+        let listed = Layer {
+            mark: Mark::Text,
+            encoding: crate::spec::encoding::Encoding { color: color("c0"), ..Default::default() },
+            inherited_channels: vec![InheritedChannel::Color],
+            ..Default::default()
+        };
+        assert!(listed.completed_encoding(&parent).color.is_none(), "a color Python wrote from the parent is inherited");
+        let own = Layer {
+            mark: Mark::Text,
+            encoding: crate::spec::encoding::Encoding { color: color("k"), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(own.completed_encoding(&parent).color, color("k"), "a text's own color draws");
+        let point = Layer { mark: Mark::Point, ..Default::default() };
+        assert_eq!(point.completed_encoding(&parent).color, color("c0"), "control: a point inherits the color whole");
     }
 
-    /// Own-color rule 2: a non-Text layer with an inherited `color` ALSO
-    /// loses it when the layer carries its own literal `stroke=`/`fill=`
-    /// override — the `roc_chart` chance-diagonal shape.
+    /// Own paint outranks an inherited color: a layer with an inherited
+    /// `color` and its own literal `stroke=`/`fill=` loses the color from
+    /// its drawing (the `roc_chart` chance-diagonal shape).
     #[test]
     fn own_color_exemption_clears_inherited_color_on_a_literal_stroke_layer() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(false, true));
+        let out = layer_geometry_encoding(xy_encoding(), geometry_flags(false, true));
         assert!(out.color.is_none(), "a literal-stroke layer must not read an inherited color");
     }
 
-    /// Vacuity control for both own-color rules: a layer that declared its
-    /// own `color` (`color_is_own`) keeps it, even on `Mark::Text` with a
-    /// literal paint override — the exemption only ever strips an INHERITED
-    /// color.
+    /// Vacuity control: a layer that binds its own `color` (`color_is_own`)
+    /// keeps it even with a literal paint override; the exemption only ever
+    /// strips an INHERITED color.
     #[test]
     fn own_color_exemption_leaves_an_own_declared_color_alone() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(true, true));
+        let out = layer_geometry_encoding(xy_encoding(), geometry_flags(true, true));
         assert!(out.color.is_some(), "a layer's OWN color must never be stripped");
     }
 
-    /// Own-color negative: a non-Text layer with an inherited `color` and NO
-    /// literal paint override keeps it — the `catplot(kind="box", hue=x)` IQR
-    /// shape, which relies on the inherited color to group its own rows.
+    /// A layer with an inherited `color` and NO literal paint override keeps
+    /// it: the `catplot(kind="box", hue=x)` IQR shape, which relies on the
+    /// inherited color to group its own rows.
     #[test]
     fn own_color_exemption_leaves_inherited_color_alone_with_no_literal_paint() {
-        let out = layer_geometry_encoding(xy_encoding(), Mark::Rect, geometry_flags(false, false));
+        let out = layer_geometry_encoding(xy_encoding(), geometry_flags(false, false));
         assert!(out.color.is_some(), "no literal override means the inherited color still drives grouping");
     }
 

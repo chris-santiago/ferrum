@@ -2,7 +2,7 @@
 
 ``SpecBuildMixin`` holds the cohesive cluster of spec-*building* helper methods
 that ``Chart.to_spec`` orchestrates: layer-list / encoding-spec / facet-dict
-assembly, the polar-channel remap, the pending-aggregate / pending-bin
+assembly, the polar-channel lowering, the pending-aggregate / pending-bin
 resolvers, the reactive-parameter collection + validation, and the tooltip
 injection helpers (cohesion finding CHART/MOD-03).
 
@@ -36,7 +36,15 @@ from ferrum._shorthand import parse_shorthand
 from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._encode_lowering import _bin_groupby, _chart_agg_groupby, _lower_bin_encoding
+from ferrum._encode_lowering import (
+    GROUPING_KEY,
+    _aggregate_ops,
+    _bin_groupby,
+    _chart_agg_groupby,
+    _lower_bin_encoding,
+    _polar_channel_targets,
+    _theta_axis,
+)
 from ferrum._layer import layer_mark
 from ferrum._layer_transforms import _POSITIONAL
 from ferrum._override_apply import OverridePayload
@@ -372,12 +380,11 @@ def _warn_unbucketed_channels(enc: dict) -> None:
     This is what actually produces the ``warn_once`` for the WARN bucket
     (``x_error``/``y_error``/``x_error2``/``y_error2``/``tooltip_field``)
     and for POLAR channels left in *enc* because no ``CoordPolar`` coord
-    remapped them away. Both passes pop them first when a ``CoordPolar`` IS
-    set -- chart-level through ``_resolve_polar_remapping``, per-layer through
-    :func:`_remap_polar_channels` against that layer's OWN coord (`#172`(1)) --
-    so this sees a polar channel only where no polar coord claims it, which is
-    exactly when it would never render. See the bucket partition in
-    ``chart.py``.
+    remapped them away. :meth:`SpecBuildMixin._with_polar_channels_lowered`
+    moves them onto x/y first wherever a ``CoordPolar`` applies (the chart's
+    own, and each layer's effective coord), so this sees a polar channel only
+    where no polar coord claims it, which is exactly when it would never
+    render. See the bucket partition in ``chart.py``.
 
     *enc* values may be either a ``ChannelBase`` instance or a plain string
     (the layered path's legitimate shorthand).
@@ -393,53 +400,38 @@ def _warn_unbucketed_channels(enc: dict) -> None:
 
 
 def _remap_polar_channels(coord, enc: dict) -> dict:
-    """Remap ``theta``/``radius`` channel keys onto x/y for a ``CoordPolar`` *coord*.
+    """Move ``theta``/``radius`` channel keys of *enc* onto x/y for a ``CoordPolar`` *coord*.
 
-    Rust's encoding layer only knows x/y; the spec-side coord conversion in
-    ``scene_build.rs`` handles the polar->Cartesian pixel transformation. When
-    the coord is a ``CoordPolar``, ``theta`` (the angular variable) maps to
-    whichever Cartesian axis the coord declares and ``radius`` to the other,
-    with the second-extent channels mirroring the primary assignment. Any other
-    coord (including ``None``) returns *enc* untouched.
-
-    Two callers, one mapping (`#172`(1)). The chart-level pass
-    (:meth:`SpecBuildMixin._resolve_polar_remapping`) has always run this; the
-    per-layer pass in :meth:`SpecBuildMixin._build_layers_list` is new, and
-    needed the moment a LAYER could carry its own ``CoordPolar``: a member chart
-    written the documented way -- ``mark_arc().encode(theta=...)`` -- lowers its
-    ``theta`` into a layer encoding, and with no per-layer remap that channel
-    reached ``_warn_unbucketed_channels`` instead, was warned about, and was
-    dropped. The layer would then carry its coord to Rust and draw nothing with
-    it. Sharing the mapping rather than restating it is what keeps the two
-    passes from disagreeing about which axis theta lands on.
-
-    The per-layer caller passes the layer's EFFECTIVE coord (its own, else the
-    chart's), which also closes the inherited case the layered path never
-    handled: a polar chart's own layers carrying ``theta=`` had their angular
-    channel dropped regardless of any merge.
-
-    *enc* is modified in place and returned (both callers pass a shallow copy).
+    See :func:`_polar_channel_targets` for the mapping. Any other coord
+    (including ``None``) returns *enc* untouched. *enc* is modified in place
+    and returned (callers pass a copy).
     """
-    from ferrum.coord import CoordPolar
-
-    if not isinstance(coord, CoordPolar):
-        return enc
-
-    theta_ch = coord.theta  # "x" or "y"
-    radius_ch = "y" if theta_ch == "x" else "x"
-    # Second-extent channels mirror the primary axis assignment:
-    # theta2 -> x2 when theta->x, else y2; radius2 -> y2 when radius->y, else x2.
-    theta2_ch = f"{theta_ch}2"
-    radius2_ch = f"{radius_ch}2"
-    if "theta" in enc:
-        enc[theta_ch] = enc.pop("theta")
-    if "theta2" in enc:
-        enc[theta2_ch] = enc.pop("theta2")
-    if "radius" in enc:
-        enc[radius_ch] = enc.pop("radius")
-    if "radius2" in enc:
-        enc[radius2_ch] = enc.pop("radius2")
+    for polar, cartesian in _polar_channel_targets(coord):
+        if polar in enc:
+            enc[cartesian] = enc.pop(polar)
     return enc
+
+
+def _polar_lowered_layer(layer, coord):
+    """*layer* with its polar channels moved onto x/y for its effective *coord*.
+
+    A layer's effective coord is its own, else the chart's, the fallback
+    Rust resolves through ``Layer::effective_coord``. The provenance of a
+    moved channel moves with it: a polar binding the layer inherited becomes
+    an inherited positional one, since on the wire it is an x/y binding.
+    """
+    from dataclasses import replace
+
+    targets = dict(_polar_channel_targets(coord))
+    if not any(channel in layer.encoding for channel in targets):
+        return layer
+    moved = tuple(targets[c] for c in layer.inherited_channels if c in targets)
+    return replace(
+        layer,
+        encoding=_remap_polar_channels(coord, dict(layer.encoding)),
+        inherited_channels=tuple(c for c in layer.inherited_channels if c not in targets),
+        inherited_positional=layer.inherited_positional + moved,
+    )
 
 
 def _layer_drawn_encoding(layer: dict, encoding: dict) -> dict:
@@ -476,32 +468,46 @@ class SpecBuildMixin:
     without change.
     """
 
-    def _resolve_polar_remapping(self, resolved, enc: dict) -> dict:
-        """Remap theta/radius channel keys to x/y for this chart's ``CoordPolar``.
+    def _with_polar_channels_lowered(self):
+        """This chart with every polar binding moved onto the x/y channel it draws as.
 
-        The chart-level caller of :func:`_remap_polar_channels`; see that function
-        for the mapping and why it exists.
-
-        Parameters
-        ----------
-        resolved :
-            The resolved ``Chart`` whose ``_coord`` is inspected.
-        enc :
-            Shallow copy of the encoding dict (already alias-remapped).  Modified
-            in place and returned.
-
-        Returns
-        -------
-        dict
-            The remapped encoding dict.
+        Runs once, before any statistic is lowered, on the chart's encoding
+        and its written record (``_written_positional``, under its own coord)
+        and on each layer's (under the layer's effective coord,
+        :func:`_polar_lowered_layer`). An aggregate on ``theta`` or
+        ``radius`` is then the aggregate on the channel the remap produces,
+        grouped by the remapped channel set, and an inherited polar binding
+        follows the positional inheritance rules: a layer reading a named
+        output (its own statistic's) takes it from the chart's encoding as it
+        takes x/y. Returns *self* when no coord is polar, otherwise a clone,
+        so the caller's chart is never mutated.
         """
-        return _remap_polar_channels(resolved._coord, enc)
+        layers = self._layers or []
+        lowered_layers = [
+            _polar_lowered_layer(layer, layer.coord if layer.coord is not None else self._coord)
+            for layer in layers
+        ]
+        written = self._written_positional or {}
+        moves_chart = any(
+            polar in self._encoding or polar in written
+            for polar, _ in _polar_channel_targets(self._coord)
+        )
+        if not moves_chart and all(a is b for a, b in zip(lowered_layers, layers)):
+            return self
+        new = self._clone()
+        new._encoding = _remap_polar_channels(self._coord, dict(self._encoding))
+        if self._written_positional is not None:
+            new._written_positional = _remap_polar_channels(
+                self._coord, dict(self._written_positional)
+            )
+        if self._layers is not None:
+            new._layers = lowered_layers
+        return new
 
     def _build_encoding_specs(
         self,
         resolved,
         enc: dict,
-        agg_field_remap: dict,
         override: OverridePayload | None = None,
         *,
         mark_zero: bool,
@@ -519,10 +525,8 @@ class SpecBuildMixin:
             The resolved ``Chart`` whose ``_mark`` is inspected for bar-chart
             zero-anchor injection.
         enc :
-            Encoding dict after alias remapping and polar remapping.
-        agg_field_remap :
-            Map from original field name → output column name for any
-            ``_PendingAggregate`` transforms already present.
+            Encoding dict after alias remapping, polar remapping and statistic
+            lowering: an aggregated channel already names its output column.
         override :
             The resolved ``Chart.override`` payload, or ``None``. Its
             ``encoding``/``encoding_paths`` fields are applied FIRST per
@@ -557,6 +561,7 @@ class SpecBuildMixin:
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw: dict = {}
         bar_value_on_x = _bar_value_on_x(enc, resolved._data)
+        theta_axis = _theta_axis(resolved._coord)
         for axis in _RENDERER_HONORED_CHANNELS:
             if axis not in enc:
                 continue
@@ -578,14 +583,7 @@ class SpecBuildMixin:
                             tf_list.append(entry)
                     if tf_list:
                         kw["tooltip_fields"] = json.dumps(tf_list)
-                    continue
-                # Aggregate shorthands like count() have field=None but the
-                # transform emits an output column (e.g. "count_all").  If there
-                # is a remap entry for "" (the sentinel for no-source-field), fall
-                # through to the EncodingSpec-building code below so the encoding
-                # points at the correct output column.
-                if "" not in agg_field_remap:
-                    continue
+                continue
             # Phase 9: skip channels whose field is an unresolved Repeat
             # placeholder. RepeatChart.expand() materializes concrete charts
             # before render; the bare template's spec just omits placeholder
@@ -620,21 +618,15 @@ class SpecBuildMixin:
                 enc=enc,
             )
             # D5b: strip ``stack=`` on marks that cannot honor stacking and emit
-            # a one-time UserWarning.  Only ``bar`` and ``area`` consume the
-            # ``__stack_y_base__`` column emitted by ``apply_stack``; every other
-            # mark type silently drops marks when the stacking path executes.
-            # Apply the guard only on the positional value channel (``y`` for
-            # normal orientation, ``x`` when coord-flipped).
-            _strip_unstackable(d, resolved._mark)
+            # a one-time UserWarning (see ``_strip_unstackable``). Only a flat
+            # chart's own mark draws this encoding: a layered chart's
+            # chart-level encoding is its layers' parent, judged on each
+            # layer that inherits it (``_layers_over_parent``).
+            if not resolved._layers:
+                _strip_unstackable(d, resolved._mark, polar_theta=axis == theta_axis)
             # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
             # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
             field = d.pop("field")
-            # Remap aggregate fields: if this channel's field was aggregated by a
-            # _PendingAggregate transform, point the encoding at the output column.
-            # Use "" as the lookup key for count() (field=None) since _PendingAggregate
-            # stores field="" for count-style aggregates with no source column.
-            _remap_key = field if field is not None else ""
-            field = agg_field_remap.get(_remap_key, field)
             kw[axis] = _EncodingSpec(field, **d)
         return kw
 
@@ -687,36 +679,21 @@ class SpecBuildMixin:
             # set e.g. `mark_kwargs={"detail": ...}` directly is not
             # clobbered (`alias_detail_channel` uses `setdefault`).
             layer_enc = dict(layer.encoding)
+            # The grouping-only key is no channel: it skips the alias and
+            # bucket passes and reaches the wire as the layer's `group`.
+            grouping = layer_enc.pop(GROUPING_KEY, None)
             if inherited_detail is not None:
                 layer_enc.setdefault("detail", inherited_detail)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
             layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
-            # Per-layer polar remap (`#172`(1)): a layer under a CoordPolar gets
-            # the same theta/radius -> x/y mapping the chart-level pass applies,
-            # through the same function. Without it a member chart written the
-            # documented way (`mark_arc().encode(theta=...)`) lost its angular
-            # channel to `_warn_unbucketed_channels` below and drew nothing,
-            # while carrying a polar coord to Rust -- the coord honored and the
-            # data dropped.
-            #
-            # Against the layer's EFFECTIVE coord (its own, else the chart's) --
-            # the same fallback Rust resolves through `Layer::effective_coord`,
-            # spelled here because this is the other side of the same seam. Its
-            # own alone would leave the inherited case broken: two polar arc
-            # members merge to layers where only the SECOND carries a coord (the
-            # first's is the chart's), so the first's theta would still be
-            # dropped while its sibling's rendered.
-            layer_enc = _remap_polar_channels(
-                layer.coord if layer.coord is not None else self._coord, layer_enc
-            )
 
             # Bucket-partition safety net (single enforcement point, see
             # _warn_unbucketed_channels; mirrors _build_encoding_specs's
             # chart-level call exactly). Catches per-layer x_error*/
-            # tooltip_field, and any theta/radius/theta2/radius2 the remap above
-            # did NOT claim -- i.e. a polar channel on a layer whose effective
-            # coord is not polar, which is exactly the case where it could never
-            # render.
+            # tooltip_field, and any theta/radius/theta2/radius2 that
+            # `_with_polar_channels_lowered` did NOT claim -- i.e. a polar
+            # channel on a layer whose effective coord is not polar, which is
+            # exactly the case where it could never render.
             _warn_unbucketed_channels(layer_enc)
 
             encoding_dict: dict = {}
@@ -725,6 +702,7 @@ class SpecBuildMixin:
             # y scale, so a bar there takes the bar zero anchor from the same
             # producer a flat bar does; a layer on the shared axes is anchored by
             # Rust's layered rule instead.
+            layer_theta_axis = _theta_axis(layer.coord if layer.coord is not None else self._coord)
             anchor_bar_value = layer.independent_y and layer_mark(layer.mark) == "bar"
             layer_value_on_x = anchor_bar_value and _bar_value_on_x(layer_enc, self._data)
             for axis in _RENDERER_HONORED_CHANNELS:
@@ -770,7 +748,9 @@ class SpecBuildMixin:
                     # D5b (layered path): strip ``stack=`` on marks that cannot
                     # honor stacking and warn. Shares ``_strip_unstackable`` with
                     # the single-chart path in ``_build_encoding_specs``.
-                    _strip_unstackable(d, layer_mark(layer.mark))
+                    _strip_unstackable(
+                        d, layer_mark(layer.mark), polar_theta=axis == layer_theta_axis
+                    )
                     # Presence, not truthiness: each key's own handler in
                     # ``_SPEC_DICT_HANDLERS`` already decides whether the key
                     # belongs in `d` (e.g. `_emit_axis`/`_emit_format` only add
@@ -850,6 +830,11 @@ class SpecBuildMixin:
                         if scale is not None:
                             d = {**d, "scale": scale}
                     encoding_dict[axis] = d
+            # Rust's position grouping reads `group` (dodge and stack slots by
+            # the field the parent draws as color); no other reader sees it.
+            group_field = grouping.wire_field() if grouping is not None else None
+            if isinstance(group_field, str):
+                encoding_dict[GROUPING_KEY] = {"field": group_field}
             layer_dict: dict = {
                 "mark": layer_mark(layer.mark),
                 "encoding": encoding_dict,
@@ -962,21 +947,17 @@ class SpecBuildMixin:
         if not any(isinstance(t, _PendingAggregate) for t in effective_transforms):
             return effective_transforms
 
-        from ferrum import Aggregate, AggregateOp
+        from ferrum import Aggregate
 
         # Fields of channels that carry no aggregate, plus facet fields (each
         # layer's own statistic reads the same rule).
         non_agg_fields = _chart_agg_groupby(resolved._encoding, resolved._facet)
         # One Aggregate holds every op, as a layer's per-layer step does: the
         # chart is one layer, and a second sequential Aggregate would read the
-        # first one's output, where its source column is gone. Ops are
-        # deduplicated by output column; the step sits where the first
-        # sentinel was.
-        ops: dict[str, AggregateOp] = {}
-        for t in effective_transforms:
-            if isinstance(t, _PendingAggregate) and t.output_col not in ops:
-                ops[t.output_col] = AggregateOp(t.field, t.agg, t.output_col)
-        aggregate = Aggregate(list(ops.values()), groupby=non_agg_fields)
+        # first one's output, where its source column is gone. The step sits
+        # where the first sentinel was.
+        pending = [t for t in effective_transforms if isinstance(t, _PendingAggregate)]
+        aggregate = Aggregate(_aggregate_ops(pending), groupby=non_agg_fields)
         resolved_transforms: list = []
         for t in effective_transforms:
             if not isinstance(t, _PendingAggregate):

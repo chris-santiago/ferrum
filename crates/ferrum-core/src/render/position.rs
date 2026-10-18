@@ -258,6 +258,38 @@ fn find_stack_for_x<'a>(spec: &'a ChartSpec, x_field: &str) -> Option<StackForAx
     None
 }
 
+/// The encoding a layer's position adjustment reads. Under `CoordPolar` a
+/// mark that stacks its theta itself ([`Mark::stacks_polar_theta`]: the arc
+/// sweeps it into a pie, a text stacks its labels into that sweep) reads its
+/// theta channel's `stack` there, never as a value axis to stack, so that
+/// `stack` is left out of what [`apply_position`]'s stack shorthand sees:
+/// with `CoordPolar(theta="y")` it sits on the channel the shorthand reads.
+/// Every other layer's encoding, unchanged.
+///
+/// [`Mark::stacks_polar_theta`]: crate::spec::mark::Mark::stacks_polar_theta
+pub(crate) fn position_encoding<'a>(
+    mark: crate::spec::mark::Mark,
+    coord: Option<&crate::spec::coord::CoordKind>,
+    encoding: &'a crate::spec::encoding::Encoding,
+) -> Cow<'a, crate::spec::encoding::Encoding> {
+    use crate::spec::coord::{CoordKind, PolarThetaChannel};
+    let Some(CoordKind::Polar { theta, .. }) = coord else {
+        return Cow::Borrowed(encoding);
+    };
+    if !mark.stacks_polar_theta() || !crate::render::marks::text::theta_stacked(encoding, *theta) {
+        return Cow::Borrowed(encoding);
+    }
+    let mut unstacked = encoding.clone();
+    let channel = match theta {
+        PolarThetaChannel::X => unstacked.x.as_mut(),
+        PolarThetaChannel::Y => unstacked.y.as_mut(),
+    };
+    if let Some(channel) = channel {
+        channel.stack = None;
+    }
+    Cow::Owned(unstacked)
+}
+
 /// Apply a position adjustment to a layer batch, returning a new batch with
 /// rewritten coordinate columns (or, for ordinal-x Dodge / Jitter into bands,
 /// with two synthetic `__pos_x_offset__` / `__pos_y_offset__` Float64 columns
@@ -277,25 +309,14 @@ pub(crate) fn apply_position(
     // lives in encoding.x (prepare.rs swapped x/y), so look there instead.
     let enc_stack: Option<PositionAdjust>;
     let effective_position: Option<&PositionAdjust> = if position.is_none() {
-        let stack_source = if coord_flipped {
-            encoding.x.as_ref().and_then(|e| e.stack.as_deref())
-        } else {
-            encoding.y.as_ref().and_then(|e| e.stack.as_deref())
-        };
-        enc_stack = stack_source.and_then(|s| {
-            let offset = match s {
-                "zero" => StackOffset::Zero,
-                "normalize" => StackOffset::Normalize,
-                "center" => StackOffset::Center,
-                "false" | "null" | "none" => return None,
-                _ => return None,
-            };
+        let stack_source = if coord_flipped { encoding.x.as_ref() } else { encoding.y.as_ref() };
+        enc_stack = stack_source.and_then(|e| e.stack_offset()).map(|offset| {
             // No explicit `value_axis`: this synthetic Stack comes from the
             // `encoding.{x,y}.stack` shorthand, whose axis is already
             // selected by `coord_flipped` above via `stack_source` — not a
             // composite-mark desugar bypass, so `apply_stack`'s
             // `coord_flipped` fallback is the correct (and only) signal here.
-            Some(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top, value_axis: None })
+            PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top, value_axis: None }
         });
         enc_stack.as_ref()
     } else {
@@ -330,7 +351,9 @@ pub(crate) fn apply_position(
 /// (`"dodge"` / `"stack"`); the four-case policy and the null→`""` mapping are
 /// identical for both.
 ///
-/// The resolution target is `by_field`, else `encoding.color.field`, else none.
+/// The resolution target is `by_field`, else `encoding.color.field`, else
+/// `encoding.group.field` (the grouping key of a color the layer inherits but
+/// does not draw, a text's), else none.
 /// The four outcomes:
 ///
 /// 1. **No grouping channel at all** (no `by` *and* no color) → `None`, **no
@@ -359,10 +382,11 @@ fn resolve_group_channel(
     adjustment_label: &str,
     warnings: &mut Vec<RenderWarning>,
 ) -> Option<Vec<String>> {
-    // Case 1: resolution target = by_field, else color, else nothing requested.
+    // Case 1: resolution target = by_field, else color, else group, else
+    // nothing requested.
     let by_col_name = match by_field {
         Some(s) => s.to_string(),
-        None => encoding.color.as_ref()?.field.clone(),
+        None => encoding.color.as_ref().or(encoding.group.as_ref())?.field.clone(),
     };
 
     // Case 2: named target absent from the batch.
@@ -449,14 +473,17 @@ fn ordered_dodge_groups(by_cats: &[String], domain_order: Option<&[String]>) -> 
 /// Returns `Some(domain)` only when the dodge grouping field is the color field
 /// (either `by_field` is `None`, so the group field *is* the color field, or
 /// `by_field` names the same column as `encoding.color`) AND the resolved color
-/// scale is categorical. In every other case returns `None`, which
-/// `ordered_dodge_groups` treats as "keep first-appearance order".
+/// scale is categorical. A layer grouping by its `group` key (an inherited
+/// color it does not draw) reads that key as its color field here, so its
+/// slots follow the legend's order as the colored marks beside it do. In
+/// every other case returns `None`, which `ordered_dodge_groups` treats as
+/// "keep first-appearance order".
 fn dodge_slot_domain<'a>(
     by_field: Option<&str>,
     scales: &'a ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
 ) -> Option<&'a [String]> {
-    let color_enc = encoding.color.as_ref()?;
+    let color_enc = encoding.color.as_ref().or(encoding.group.as_ref())?;
     let group_is_color = by_field.is_none_or(|bf| bf == color_enc.field);
     if !group_is_color {
         return None;
@@ -2506,6 +2533,22 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("model"));
         let s = scales_ordinal_x_with_color(&["base", "alt"]);
         let pos = PositionAdjust::Dodge { by: Some("model".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        // row0 = "alt" → slot 1 → +12.5; row1 = "base" → slot 0 → -12.5.
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![12.5, -12.5]);
+    }
+
+    /// A layer that draws no inherited color (a text) holds it as its
+    /// `group` key: with no `by` and no color it dodges by that key, and its
+    /// slots follow the color domain (legend order) as the colored bars
+    /// beside it do, not the rows' encounter order.
+    #[test]
+    fn dodge_by_the_group_key_follows_the_color_domain() {
+        let b = batch_cat_val_model_sorted();
+        let mut enc = enc_xy("cat", "val", None);
+        enc.group = Some(EncodingSpec { field: "model".into(), ..Default::default() });
+        let s = scales_ordinal_x_with_color(&["base", "alt"]);
+        let pos = PositionAdjust::Dodge { by: None, padding: 0.0 };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         // row0 = "alt" → slot 1 → +12.5; row1 = "base" → slot 0 → -12.5.
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![12.5, -12.5]);

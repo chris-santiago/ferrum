@@ -1063,6 +1063,14 @@ def marks_drawing_constant_size() -> list[str]: ...
 # no span takes no other. An unknown mark or channel raises ``ValueError``.
 def mark_inherited_positional(mark: str, own: list[str], offered: list[str]) -> list[str]: ...
 
+# Whether a layer of primitive ``mark`` takes an inherited binding of the
+# non-positional wire channel ``channel`` as a binding it draws: from Rust's
+# one per-mark table (``Mark::draws_inherited``). False only for a text's
+# ``color``, which a text draws only when it binds it; an inherited color
+# reaches a text only as its grouping key. An unknown mark or channel raises
+# ``ValueError``.
+def mark_draws_inherited(mark: str, channel: str) -> bool: ...
+
 # The non-positional wire channels primitive ``mark`` draws when bound to a
 # field, in ``Encoding`` declaration order: from Rust's one per-mark table
 # (``Mark::draws_channel``). A binding on any other channel is never read by

@@ -36,6 +36,44 @@ from ferrum._validate import validate_choice
 # before forwarding to Rust (``chart.py::_strip_unstackable``).
 _STACKABLE_MARKS = frozenset(["bar", "area"])
 
+# Marks that honor ``stack=`` on the channel a ``CoordPolar`` theta draws as:
+# an arc always sweeps its theta into a pie, and a text stacks its theta into
+# that sweep and sits at its wedge's mid-angle
+# (``crates/ferrum-core/src/render/marks/text.rs``); Rust's
+# ``Mark::stacks_polar_theta`` names the same two. Without ``stack=`` a polar
+# text sits on its own theta value.
+_THETA_STACKABLE_MARKS = frozenset(["arc", "text"])
+
+
+def stack_honored(mark: str | None, *, polar_theta: bool) -> bool:
+    """Whether *mark* honors a ``stack=`` on a channel it draws.
+
+    ``bar`` and ``area`` honor it on any channel; ``arc`` and ``text`` on
+    the channel a ``CoordPolar`` theta draws as (*polar_theta*).
+    """
+    return mark in _STACKABLE_MARKS or (polar_theta and mark in _THETA_STACKABLE_MARKS)
+
+
+def warn_stack_ignored(stack_val: object, mark: str | None) -> None:
+    """Warn once that *mark* ignored a ``stack=`` of *stack_val* it cannot honor.
+
+    Uses the fixed kwarg ``"stack"`` as the warn_once key; the message
+    interpolates the mark and value, so each mark's warning reaches the user
+    on its own.
+    """
+    from ferrum._warn import warn_once
+
+    mark_label = f"mark_{mark}" if mark else "this mark"
+    warn_once(
+        "encoding",
+        "stack",
+        message=(
+            f"stack={stack_val!r} is not supported by {mark_label} and was ignored. "
+            "Stacking is honored by mark_bar and mark_area, and by mark_arc and "
+            "mark_text on the theta channel of a CoordPolar."
+        ),
+    )
+
 
 # ---- Eligibility matrix ------------------------------------------------------
 

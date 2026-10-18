@@ -8221,3 +8221,32 @@ fn an_unlayered_overlay_member_binding_an_absent_column_refuses() {
     assert_eq!(refusal.channel, "color");
     assert_eq!(refusal.source, RenderError::UnknownColumn { name: "w".to_string() });
 }
+
+/// A text mark under `CoordPolar` that binds the coord's theta channel is
+/// single-axis eligible on that channel, as an arc is: a labelled pie's text
+/// layer binds theta and no radius. Its radius channel alone is not enough,
+/// and outside a polar coord a text mark still needs both axes.
+#[test]
+fn polar_text_is_single_axis_eligible_on_its_theta_channel() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    let polar = |theta| CoordKind::Polar {
+        theta,
+        start_angle: 0.0,
+        direction: PolarDirection::Clockwise,
+        inner_radius: 0.0,
+        outer_radius: None,
+        pad_angle: 0.0,
+    };
+    let on_x = polar(PolarThetaChannel::X);
+    let on_y = polar(PolarThetaChannel::Y);
+    for mark in [Mark::Arc, Mark::Text] {
+        assert!(super::mark_single_axis_eligible(mark, Some(&on_x), true, false), "{mark}: theta on x");
+        assert!(super::mark_single_axis_eligible(mark, Some(&on_y), false, true), "{mark}: theta on y");
+        assert!(!super::mark_single_axis_eligible(mark, Some(&on_x), false, true), "{mark}: radius alone");
+        assert!(!super::mark_single_axis_eligible(mark, None, true, false), "{mark}: no polar coord");
+    }
+    assert!(!super::mark_single_axis_eligible(Mark::Point, Some(&on_x), true, false), "control: a point needs both");
+}

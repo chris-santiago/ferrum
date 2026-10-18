@@ -10,12 +10,78 @@ through the one implementation here so the two cannot drift apart (spec §6.6).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 
 if TYPE_CHECKING:
     from ferrum._core import Bin as _Bin
+
+
+#: The encoding key of a layer's grouping-only bindings (:class:`_GroupingOnly`),
+#: written to the wire as the layer's ``group`` field.
+GROUPING_KEY = "group"
+
+
+@dataclass(frozen=True)
+class _GroupingOnly:
+    """Inherited bindings a layer groups its statistic by but does not draw.
+
+    Not a channel: no reader takes it for a binding. The two groupby readers
+    (:func:`_infer_agg_groupby`, :func:`_bin_groupby`) expand it into its
+    members in place, so each member groups exactly as the raw binding would.
+    *bindings* holds ``(channel, binding)`` pairs in the parent's order.
+    """
+
+    bindings: tuple[tuple[str, Any], ...]
+
+    def wire_field(self) -> Any:
+        """The field the parent draws as color, under the color alias rules (``_ENCODING_ALIASES``)."""
+        from ferrum.encoding._aliases import _channel_field, resolve_channel_alias
+
+        return _channel_field(resolve_channel_alias(dict(self.bindings), "color"))
+
+
+def _expand_grouping(encoding: dict) -> dict:
+    """*encoding* with a :class:`_GroupingOnly` replaced in place by its member bindings."""
+    if not any(isinstance(value, _GroupingOnly) for value in encoding.values()):
+        return encoding
+    out: dict = {}
+    for channel, value in encoding.items():
+        if isinstance(value, _GroupingOnly):
+            for member, binding in value.bindings:
+                out.setdefault(member, binding)
+        else:
+            out[channel] = value
+    return out
+
+
+def _grouping_of(encoding: dict) -> "_GroupingOnly | None":
+    """*encoding*'s grouping-only key, or ``None`` when it holds none."""
+    value = encoding.get(GROUPING_KEY)
+    return value if isinstance(value, _GroupingOnly) else None
+
+
+def _regroup(encoding: dict, grouping: "_GroupingOnly | None") -> dict:
+    """Fold the members of *grouping*, as *encoding* now binds them, back into one key.
+
+    The inverse of :func:`_expand_grouping` after a lowering re-pointed a
+    member (a binned color re-pointed at the Bin's start column): the key
+    sits at the first member's place and keeps the members' order.
+    """
+    if grouping is None:
+        return encoding
+    names = [member for member, _ in grouping.bindings]
+    out: dict = {}
+    for channel, value in encoding.items():
+        if channel not in names:
+            out[channel] = value
+        elif GROUPING_KEY not in out:
+            out[GROUPING_KEY] = _GroupingOnly(
+                tuple((name, encoding[name]) for name in names if name in encoding)
+            )
+    return out
 
 
 def _infer_agg_groupby(encoding: dict) -> list[str]:
@@ -29,11 +95,12 @@ def _infer_agg_groupby(encoding: dict) -> list[str]:
 
     Shared by the single-chart path (``_resolve_pending_aggregates``, which also
     folds in facet dimensions) and the per-layer path (``_resolve_layer_aggregates``).
+    A :class:`_GroupingOnly` contributes its members' fields.
     """
     from ferrum.repeat import _RepeatPlaceholder as _RPH
 
     fields: list[str] = []
-    for ch in encoding.values():
+    for ch in _expand_grouping(encoding).values():
         if isinstance(ch, ChannelBase):
             if ch._kwargs.get("aggregate"):
                 continue
@@ -64,6 +131,78 @@ def _chart_agg_groupby(encoding: dict, facet) -> list[str]:
     return fields
 
 
+def _polar_channel_targets(coord) -> tuple[tuple[str, str], ...]:
+    """The ``(polar, cartesian)`` channel pairs *coord* draws, or ``()`` when not polar.
+
+    Rust's encoding layer only knows x/y; the spec-side coord conversion in
+    ``scene_build.rs`` handles the polar->Cartesian pixel transformation. Under
+    a ``CoordPolar``, ``theta`` (the angular variable) maps to whichever
+    Cartesian axis the coord declares and ``radius`` to the other, with the
+    second-extent channels mirroring the primary assignment. Pairs rather
+    than a channel-keyed dict: the values are channel names, not columns.
+    """
+    from ferrum.coord import CoordPolar
+
+    if not isinstance(coord, CoordPolar):
+        return ()
+    theta_ch = coord.theta  # "x" or "y"
+    radius_ch = "y" if theta_ch == "x" else "x"
+    return (
+        ("theta", theta_ch),
+        ("theta2", f"{theta_ch}2"),
+        ("radius", radius_ch),
+        ("radius2", f"{radius_ch}2"),
+    )
+
+
+def _theta_axis(coord) -> str | None:
+    """The Cartesian channel *coord*'s theta draws as, or ``None`` when it is not polar."""
+    return dict(_polar_channel_targets(coord)).get("theta")
+
+
+def _aggregate_ops(pending: list[_PendingAggregate]) -> list:
+    """The ``AggregateOp`` list of one ``Aggregate`` computing every sentinel in *pending*.
+
+    One op per distinct output column, in first-seen order: two channels
+    asking for the same (field, op) read the one column it computes.
+    """
+    from ferrum import AggregateOp
+
+    ops: dict = {}
+    for p in pending:
+        if p.output_col not in ops:
+            ops[p.output_col] = AggregateOp(p.field, p.agg, p.output_col)
+    return list(ops.values())
+
+
+def _aggregated_encoding(encoding: dict) -> dict:
+    """Return *encoding* with each channel carrying ``aggregate=`` pointed at that aggregate's output.
+
+    Each channel is re-pointed by its own (field, op), at the output column its
+    ``_PendingAggregate`` names, so two channels aggregating one field with
+    different ops (``x="min(v)", x2="max(v)"``) draw different columns, and a
+    channel binding the same field raw (``x="v", x2="max(v)"``) keeps drawing
+    it as a group key. The rebuilt channel drops its now-resolved ``aggregate``
+    kwarg. A channel over an unresolved ``Repeat`` placeholder is left as is.
+    """
+    from ferrum.repeat import _RepeatPlaceholder
+
+    out: dict = {}
+    for channel, ch in encoding.items():
+        pending = None
+        if isinstance(ch, ChannelBase) and not isinstance(ch.field, _RepeatPlaceholder):
+            pending = next(
+                (t for t in ch.to_implicit_transforms() if isinstance(t, _PendingAggregate)),
+                None,
+            )
+        if pending is None:
+            out[channel] = ch
+            continue
+        kwargs = {k: v for k, v in ch._kwargs.items() if k != "aggregate"}
+        out[channel] = ch.__class__(pending.output_col, **kwargs)
+    return out
+
+
 def _bin_groupby(encoding: dict, facet) -> list[str]:
     """The groupby of a ``Bin`` lowered from *encoding*: its grouping channels' fields, plus facet.
 
@@ -78,6 +217,7 @@ def _bin_groupby(encoding: dict, facet) -> list[str]:
     outputs = registry_output_columns(
         "bin", ["bin_start", "bin_end", "count", "density", "agg_value"]
     ).values()
+    encoding = _expand_grouping(encoding)
     binned = {
         ch.field
         for ch in encoding.values()

@@ -20,28 +20,254 @@
 //! fallible for exactly this reason — every other reader here is unaffected).
 //! A batch that does carry the column, or a chart with no `text` channel at
 //! all, is byte-identical.
+//!
+//! # Polar labels
+//!
+//! Under `CoordPolar`, a text mark binding theta and no radius sits on its own
+//! theta value, as a point there would, on a ring: its `radius=` style value,
+//! else mid-ring ([`polar_label_placement`]). With `Theta(stack=...)` it stacks
+//! theta the way the arc does instead and sits at its wedge's angular
+//! midpoint, from the arc's own pie sweep ([`arc::pie_wedges`]) or nominal
+//! bands ([`arc::band_wedges`]), so a pie's labels land inside their slices
+//! by construction; its radius binding, else the ring, places it there. An
+//! unstacked text with a radius binding is placed as a point is, by the
+//! panel's polar projection of its Cartesian position.
 
 use crate::layout::TextAnchor;
+use crate::render::arrow_cast::col_as_ordinal_category_str;
 use crate::render::draw::{
     col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
     ClearablePaint, DrawCtx,
 };
 use crate::render::format::{format_numeric, format_value_with_spec, Temporality};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::arc;
 use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
-use crate::render::RenderError;
+use crate::render::{scene_build, RenderError};
+use crate::spec::coord::PolarThetaChannel;
 
-pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
-    use ferrum_scene::{MarkBatchKind, SceneNode};
+/// How a text mark under `CoordPolar` places its labels when the panel's
+/// polar projection of its Cartesian position does not: the fields it reads
+/// and how its theta becomes an angle.
+pub(crate) struct PolarLabels<'a> {
+    theta_channel: PolarThetaChannel,
+    theta_field: &'a str,
+    angle: LabelAngle,
+    pub(crate) radius_field: Option<&'a str>,
+    radius_scale: &'a ScaleKind,
+}
 
-    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Text));
+/// How a polar label's theta becomes its angle.
+enum LabelAngle {
+    /// The label's own theta value on the theta axis, the angle a point with
+    /// that value draws at.
+    Value,
+    /// The mid-angle of the wedge `Theta(stack=...)` stacks the label into:
+    /// the arc's equal band for a categorical theta, else its pie sweep.
+    Wedge { categorical: bool },
+}
 
-    let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b), _ => return empty(),
+/// Whether `encoding` stacks the coord's theta channel (`Theta(stack=...)`).
+pub(crate) fn theta_stacked(
+    encoding: &crate::spec::encoding::Encoding,
+    theta_channel: PolarThetaChannel,
+) -> bool {
+    let theta = match theta_channel {
+        PolarThetaChannel::X => encoding.x.as_ref(),
+        PolarThetaChannel::Y => encoding.y.as_ref(),
     };
+    theta.and_then(|e| e.stack_offset()).is_some()
+}
+
+/// The text mark's own polar placement, or `None` when the panel's polar
+/// projection of its Cartesian position places it, as it places a point:
+/// outside `CoordPolar`, with no theta binding, or with an unstacked theta
+/// and a radius binding.
+///
+/// The rule the single-axis exemption relies on: a polar text binding theta
+/// and no radius always places itself, so it never needs the radius axis
+/// that exemption leaves unresolved.
+pub(crate) fn polar_label_placement<'a>(ctx: &'a DrawCtx<'_>) -> Option<PolarLabels<'a>> {
+    let Some(crate::spec::coord::CoordKind::Polar { theta, .. }) = &ctx.spec.coord else {
+        return None;
+    };
+    let channels = crate::render::marks::channels::polar_channel_resolver(*theta, &ctx.spec.encoding, ctx.scales);
+    let theta_field = channels.theta_field?;
+    let angle = if theta_stacked(&ctx.spec.encoding, *theta) {
+        LabelAngle::Wedge { categorical: arc::theta_is_categorical(&ctx.spec.encoding, ctx.scales, *theta) }
+    } else if channels.radius_field.is_none() {
+        LabelAngle::Value
+    } else {
+        return None;
+    };
+    Some(PolarLabels {
+        theta_channel: *theta,
+        theta_field,
+        angle,
+        radius_field: channels.radius_field,
+        radius_scale: channels.radius_scale,
+    })
+}
+
+/// The theta field a polar text draws at its own values when that field is a
+/// quantity: a `CoordPolar` text binding theta without `Theta(stack=...)`.
+fn unstacked_quantity_theta<'a>(
+    encoding: &'a crate::spec::encoding::Encoding,
+    coord: Option<&crate::spec::coord::CoordKind>,
+    scales: &crate::render::scale_resolve::ResolvedScales,
+) -> Option<&'a str> {
+    let Some(crate::spec::coord::CoordKind::Polar { theta, .. }) = coord else {
+        return None;
+    };
+    let field = match theta {
+        PolarThetaChannel::X => encoding.x.as_ref(),
+        PolarThetaChannel::Y => encoding.y.as_ref(),
+    }?
+    .field
+    .as_str();
+    (!theta_stacked(encoding, *theta) && !arc::theta_is_categorical(encoding, scales, *theta)).then_some(field)
+}
+
+/// One drawn layer of a panel, as [`labels_off_a_pie`] reads it: its mark,
+/// its own coord, the encoding it draws and the scales it draws through.
+pub(crate) struct PanelLayer<'a> {
+    pub(crate) mark: crate::spec::mark::Mark,
+    pub(crate) coord: Option<&'a crate::spec::coord::CoordKind>,
+    pub(crate) encoding: &'a crate::spec::encoding::Encoding,
+    pub(crate) scales: &'a crate::render::scale_resolve::ResolvedScales,
+}
+
+/// Every pairing, among one panel's `layers`, of a polar text drawing its
+/// labels at their own theta values and an arc stacking that theta field
+/// into a pie ([`arc::pie_theta_field`]): the labels then sit off the
+/// wedges they name, which `Theta(stack=True)` on the text fixes. Each
+/// entry is `(text layer, arc layer)`, as indices into `layers`.
+pub(crate) fn labels_off_a_pie(layers: &[PanelLayer<'_>]) -> Vec<(usize, usize)> {
+    use crate::spec::mark::Mark;
+    let pies: Vec<(usize, &str)> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.mark == Mark::Arc)
+        .filter_map(|(i, l)| Some((i, arc::pie_theta_field(l.encoding, l.coord)?)))
+        .collect();
+    let mut pairs = Vec::new();
+    for (ti, text) in layers.iter().enumerate().filter(|(_, l)| l.mark == Mark::Text) {
+        let Some(field) = unstacked_quantity_theta(text.encoding, text.coord, text.scales) else { continue };
+        pairs.extend(pies.iter().filter(|(_, pie)| *pie == field).map(|&(ai, _)| (ti, ai)));
+    }
+    pairs
+}
+
+/// Each row's label position, `None` for a row that draws no label, and the
+/// label a row shows when no `text` channel is bound: its value on the
+/// channel that places it (y on Cartesian axes, theta on a polar wedge).
+struct LabelAnchors {
+    anchors: Vec<Option<(f64, f64)>>,
+    fallback_labels: Vec<Option<String>>,
+}
+
+/// [`format_numeric`] of each finite value, `None` elsewhere.
+fn numeric_labels(values: &[Option<f64>]) -> Vec<Option<String>> {
+    values.iter().map(|v| v.filter(|v| v.is_finite()).map(format_numeric)).collect()
+}
+
+/// Each row's polar label angle (`None` for a row with none) and the label it
+/// shows without a `text` channel, its theta value.
+struct RowAngles {
+    angles: Vec<Option<f64>>,
+    fallback_labels: Vec<Option<String>>,
+}
+
+/// Each row's angle and its theta-derived fallback label, for a label that
+/// sits on its own theta value: the angle a point with that value draws at,
+/// read through the theta axis's scale ([`scene_build::polar_projection_turn`]).
+fn value_angles(ctx: &DrawCtx<'_>, placement: &PolarLabels<'_>) -> Option<RowAngles> {
+    let channel = placement.theta_channel;
+    let area = ctx.panel.plot_area;
+    let scale = match channel {
+        PolarThetaChannel::X => &ctx.scales.x,
+        PolarThetaChannel::Y => &ctx.scales.y,
+    };
+    let turn = |pixel: f64| scene_build::polar_projection_turn(channel, pixel, &area) * std::f64::consts::TAU;
+    if matches!(scale, ScaleKind::Ordinal(_)) {
+        let categories = col_as_positional_category_str(ctx.batch, placement.theta_field).ok()?;
+        let angles = categories.iter().map(|c| scale.to_pixel_str(c.as_deref()?).map(&turn)).collect();
+        Some(RowAngles { angles, fallback_labels: categories })
+    } else {
+        let values = col_as_f64(ctx.batch, placement.theta_field).ok()?;
+        let angles = values
+            .iter()
+            .map(|v| scale.to_pixel_f64(v.filter(|v| v.is_finite())?).map(&turn))
+            .collect();
+        Some(RowAngles { angles, fallback_labels: numeric_labels(&values) })
+    }
+}
+
+/// Each row's wedge mid-angle and theta-derived fallback label, for a label
+/// `Theta(stack=...)` stacks the way the arc does: the arc's own bands or pie
+/// sweep, so the label's angle is its wedge's. A row whose wedge the arc
+/// would not draw has none.
+fn wedge_angles(
+    ctx: &DrawCtx<'_>,
+    placement: &PolarLabels<'_>,
+    geom: &arc::PolarGeom,
+    categorical: bool,
+) -> Option<RowAngles> {
+    let mid = |wedge: &Option<(f64, f64)>| wedge.map(|(start, end)| (start + end) / 2.0);
+    if categorical {
+        // The arc's own category reader, so both marks key the same bands.
+        let categories = col_as_ordinal_category_str(ctx.batch, placement.theta_field).ok()?;
+        let wedges = arc::band_wedges(&categories, geom.start_angle, geom.pad_angle);
+        Some(RowAngles { angles: wedges.iter().map(mid).collect(), fallback_labels: categories })
+    } else {
+        let values = col_as_f64(ctx.batch, placement.theta_field).ok()?;
+        let wedges = arc::pie_wedges(&values, geom.start_angle, geom.pad_angle)
+            .unwrap_or_else(|| vec![None; values.len()]);
+        Some(RowAngles { angles: wedges.iter().map(mid).collect(), fallback_labels: numeric_labels(&values) })
+    }
+}
+
+/// Label positions for a text mark that places itself under `CoordPolar`
+/// (see the module doc's "Polar labels"), in the panel's polar pixel space:
+/// each row's angle at its radius binding, else the `radius=` style value,
+/// else mid-ring. A row with no angle or no usable radius value draws no
+/// label.
+fn polar_anchors(ctx: &DrawCtx<'_>, placement: &PolarLabels<'_>) -> Option<LabelAnchors> {
+    let geom = arc::polar_geom(ctx)?;
+    let RowAngles { angles, fallback_labels } = match placement.angle {
+        LabelAngle::Value => value_angles(ctx, placement)?,
+        LabelAngle::Wedge { categorical } => wedge_angles(ctx, placement, &geom, categorical)?,
+    };
+    let radii = match placement.radius_field {
+        Some(field) => Some(col_as_f64(ctx.batch, field).ok()?),
+        None => None,
+    };
+    let ring = ctx.mark_style.text.radius.unwrap_or((geom.inner_radius + geom.outer_radius) / 2.0);
+    let anchors = angles
+        .iter()
+        .enumerate()
+        .map(|(i, angle)| {
+            let angle = (*angle)?;
+            let r = match &radii {
+                Some(radii) => {
+                    let v = radii[i].filter(|v| v.is_finite())?;
+                    arc::radius_to_pixel(placement.radius_scale, geom.inner_radius, geom.outer_radius, v)
+                }
+                None => ring,
+            };
+            Some((geom.cx + r * angle.sin(), geom.cy - r * angle.cos()))
+        })
+        .collect();
+    Some(LabelAnchors { anchors, fallback_labels })
+}
+
+/// Label positions on the panel's x/y scales (ordinal or continuous on each
+/// axis), plus the per-row position offsets a dodge writes. `None` when
+/// either axis is unbound or unreadable.
+fn cartesian_anchors(ctx: &DrawCtx<'_>) -> Option<LabelAnchors> {
+    let spec = ctx.spec;
+    let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
 
     // GH #42: text is the value-label layer for dodged bars (e.g.
     // importance_chart's `show_values=True`). Every other positional mark
@@ -74,14 +300,53 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let n_x = match (&xs_f, &xs_s) {
         (Some(v), _) => v.len(),
         (_, Some(v)) => v.len(),
-        _ => return empty(),
+        _ => return None,
     };
     let n_y = match (&ys_f, &ys_s) {
         (Some(v), _) => v.len(),
         (_, Some(v)) => v.len(),
-        _ => return empty(),
+        _ => return None,
     };
-    if n_x != n_y { return empty(); }
+    if n_x != n_y { return None; }
+
+    let anchors = (0..n_x)
+        .map(|i| {
+            let px = if let Some(xs) = &xs_f {
+                ctx.scales.x.to_pixel_f64(xs[i].filter(|v| v.is_finite())?)?
+            } else {
+                ctx.scales.x.to_pixel_str(xs_s.as_ref()?[i].as_deref()?)?
+            };
+            let py = if let Some(ys) = &ys_f {
+                ctx.scales.y.to_pixel_f64(ys[i].filter(|v| v.is_finite())?)?
+            } else {
+                ctx.scales.y.to_pixel_str(ys_s.as_ref()?[i].as_deref()?)?
+            };
+            Some((px + x_offsets[i], py + y_offsets[i]))
+        })
+        .collect();
+    let fallback_labels = match &ys_f {
+        Some(ys) => numeric_labels(ys),
+        None => vec![None; n_x],
+    };
+    Some(LabelAnchors { anchors, fallback_labels })
+}
+
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
+    use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Text));
+
+    let spec = ctx.spec;
+    let placement = polar_label_placement(ctx);
+    let positions = match &placement {
+        Some(placement) => polar_anchors(ctx, placement),
+        None => cartesian_anchors(ctx),
+    };
+    let Some(LabelAnchors { anchors: row_anchors, fallback_labels }) = positions else {
+        return empty();
+    };
+    let n_rows = row_anchors.len();
 
     // Explicit text channel (same resolution as draw()).
     let text_enc = spec.encoding.text.as_ref();
@@ -159,19 +424,17 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    // Per-row fill color (NF-A2 / spec §4.4, 2026-08-28 T4 amendment): color
-    // channel via `ctx.scales.color` when bound on the text layer's OWN
-    // encoding (never an inherited chart-level channel — see
-    // `scene_build.rs::build_panel_mark_batches`'s per-layer `DrawCtx`
-    // construction, which clears `ctx.spec.encoding.color` for a Text layer
-    // whose color was purely inherited, on a copy local to this draw call
-    // only; `LayerPrepared.encoding.color` itself — read by the legend and
-    // dodge/stack position grouping — stays fully inherited), else
-    // `mark_style.paint.fill` when the user set it explicitly,
-    // else the theme's font color — mirroring `label.rs`'s constant-fill
-    // precedence but defaulting to `font_color` (not `mark_color`) since
-    // text's baseline theme style carries no mark-aware fill override (see
-    // `resolve_mark_style`'s `Mark::Text` arm).
+    // Per-row fill color. A text layer does not inherit color: it draws a
+    // color only when it binds one itself, so labels stay legible on the
+    // marks they annotate. Its completed encoding carries no other color
+    // (`Layer::completed_encoding`, by `Mark::draws_inherited`); an inherited
+    // color groups its dodge and stack through its `group` key instead. The
+    // color channel maps through `ctx.scales.color` when bound,
+    // else `mark_style.paint.fill` when the user set it explicitly, else the
+    // theme's font color — `label.rs`'s constant-fill precedence, defaulting
+    // to `font_color` (not `mark_color`) since text's baseline theme style
+    // carries no mark-aware fill override (see `resolve_mark_style`'s
+    // `Mark::Text` arm).
     //
     // The "fill set by user" gate reads `ctx.mark_style.paint.fill_source`
     // — the *layer-resolved* provenance — rather than `ctx.spec.mark_style` (the raw
@@ -200,48 +463,16 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
-    let mut acc = MarkNodes::with_capacity(n_x);
+    let mut acc = MarkNodes::with_capacity(n_rows);
     // #230-3: one exact `(px, py)` data anchor per emitted node — the
     // scale-mapped position BEFORE `dx`/`dy` is baked into the node's own
     // `x`/`y` below. A break's glyph remap needs this anchor, not the node's
     // own (already-offset) coordinate, so `dx`/`dy` translates rigidly with
     // the glyph instead of being read back as if it were the data position.
-    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(n_x);
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(n_rows);
 
-    for i in 0..n_x {
-        let px = if let Some(xs) = &xs_f {
-            match xs[i] {
-                Some(v) if v.is_finite() => match ctx.scales.x.to_pixel_f64(v) {
-                    Some(p) => p, None => continue,
-                },
-                _ => continue,
-            }
-        } else if let Some(xs) = &xs_s {
-            match xs[i].as_deref() {
-                Some(s) => match ctx.scales.x.to_pixel_str(s) {
-                    Some(p) => p, None => continue,
-                },
-                None => continue,
-            }
-        } else { continue };
-        let px = px + x_offsets[i];
-
-        let py = if let Some(ys) = &ys_f {
-            match ys[i] {
-                Some(v) if v.is_finite() => match ctx.scales.y.to_pixel_f64(v) {
-                    Some(p) => p, None => continue,
-                },
-                _ => continue,
-            }
-        } else if let Some(ys) = &ys_s {
-            match ys[i].as_deref() {
-                Some(s) => match ctx.scales.y.to_pixel_str(s) {
-                    Some(p) => p, None => continue,
-                },
-                None => continue,
-            }
-        } else { continue };
-        let py = py + y_offsets[i];
+    for (i, position) in row_anchors.into_iter().enumerate() {
+        let Some((px, py)) = position else { continue };
 
         let raw_label: String = if let Some(t) = &texts {
             match &t[i] {
@@ -249,11 +480,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                 None => continue,
             }
         } else {
-            match &ys_f {
-                Some(ys) => match ys[i] {
-                    Some(v) if v.is_finite() => format_numeric(v),
-                    _ => continue,
-                },
+            match &fallback_labels[i] {
+                Some(s) => s.clone(),
                 None => continue,
             }
         };
@@ -324,12 +552,13 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
 
     let (nodes, data_indices) = acc.finalize();
 
-    Ok(MarkBuildResult::populated(MarkBatchKind::Text, nodes, data_indices, &meta)
-        .with_glyph_anchors(anchors))
+    let result = MarkBuildResult::populated(MarkBatchKind::Text, nodes, data_indices, &meta)
+        .with_glyph_anchors(anchors);
+    Ok(if placement.is_some() { result.placed_in_polar() } else { result })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::layout::{PanelLayout, Rect, ThemeInputs};
     use crate::render::draw::resolve_mark_style;
@@ -1168,5 +1397,531 @@ mod tests {
             result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(),
             2
         );
+    }
+
+    /// Text under `CoordPolar`: a label sits on its own theta value as a point
+    /// there does, and with `Theta(stack=...)` at the angular midpoint of the
+    /// wedge an arc over the same rows draws; on the ring's mid radius unless
+    /// a radius binding or a `radius=` style places it. Every case runs the
+    /// whole pipeline on the spec shape Python's lowering emits for it, with
+    /// the text's theta carrying the wire `stack` Python forwards for
+    /// `Theta(stack=True)`.
+    pub(crate) mod polar_placement {
+        use crate::render::RenderWarning;
+        use crate::render::RenderError;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use ferrum_scene::{SceneGraph, SceneNode};
+        use serde_json::{json, Value};
+        use std::f64::consts::TAU;
+        use std::sync::Arc;
+
+        const G: [&str; 5] = ["a", "b", "a", "b", "c"];
+        const Z: [f64; 5] = [1.0, 2.0, 3.0, 4.0, 5.0];
+        const R: [f64; 5] = [2.0, 4.0, 6.0, 8.0, 10.0];
+
+        fn batch() -> RecordBatch {
+            let schema = Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("z", DataType::Float64, false),
+                Field::new("r", DataType::Float64, false),
+            ]);
+            RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(StringArray::from(G.to_vec())),
+                    Arc::new(Float64Array::from(Z.to_vec())),
+                    Arc::new(Float64Array::from(R.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
+
+        fn polar(inner_radius: f64) -> Value {
+            json!({"kind": "polar", "theta": "x", "start_angle": 0.0, "direction": "clockwise",
+                   "inner_radius": inner_radius, "pad_angle": 0.0})
+        }
+
+        fn spec(mut json: Value, inner_radius: f64) -> crate::spec::chart::ChartSpec {
+            json["data"] = json!({"kind": "named", "name": "default"});
+            json["coord"] = polar(inner_radius);
+            serde_json::from_value(json).unwrap()
+        }
+
+        /// A theta binding of `field`, stacked as `Theta(field, stack=True)`
+        /// puts it on the wire when `stacked`.
+        fn theta(field: &str, stacked: bool) -> Value {
+            if stacked { json!({"field": field, "stack": "zero"}) } else { json!({"field": field}) }
+        }
+
+        /// `arc(theta="z", color="g") + text(theta=Theta("z", stack=True), text="g")`.
+        fn plus_wire_with(stacked: bool) -> Value {
+            json!({"mark": "arc", "encoding": {"x": {"field": "z"}}, "layers": [
+                {"mark": "arc", "encoding": {"x": {"field": "z"}, "color": {"field": "g"}}},
+                {"mark": "text", "encoding": {"x": theta("z", stacked), "text": {"field": "g"}}}]})
+        }
+
+        fn plus_wire() -> Value {
+            plus_wire_with(true)
+        }
+
+        /// `arc(theta="z", color="g").layer(Layer(mark="text",
+        /// encoding={"theta": Theta("z", stack=True), "text": "g"}))`.
+        fn layer_wire() -> Value {
+            json!({"mark": "arc", "encoding": {"x": {"field": "z"}, "color": {"field": "g"}}, "layers": [
+                {"mark": "arc", "encoding": {"x": {"field": "z"}, "color": {"field": "g"}}},
+                {"mark": "text", "encoding": {"x": theta("z", true), "text": {"field": "g"}}}]})
+        }
+
+        /// `arc(theta="sum(z)", color="g") + text(theta=Theta("sum(z)",
+        /// stack=True), text="g")`: each layer reads its own aggregate.
+        fn summed_wire_with(stacked: bool) -> Value {
+            let agg = |name: &str| json!({"type": "aggregate", "ops": [{"field": "z", "fn": "sum", "as": "sum_z"}],
+                                          "groupby": ["g"], "name": name});
+            json!({"mark": "arc", "encoding": {"x": {"field": "z"}},
+                   "transforms": [agg("_layer_agg_0"), agg("_layer_agg_1")], "layers": [
+                {"mark": "arc", "encoding": {"x": {"field": "sum_z"}, "color": {"field": "g"}}, "data_source": "_layer_agg_0"},
+                {"mark": "text", "encoding": {"x": theta("sum_z", stacked), "text": {"field": "g"}}, "data_source": "_layer_agg_1"}]})
+        }
+
+        fn summed_wire() -> Value {
+            summed_wire_with(true)
+        }
+
+        fn scene(spec: &crate::spec::chart::ChartSpec) -> Result<SceneGraph, RenderError> {
+            let (json, _, _) = crate::render::render_scene_json(
+                spec,
+                &batch(),
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width: 400.0, height: 300.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )?;
+            Ok(serde_json::from_str(&json).unwrap())
+        }
+
+        fn svg(spec: &crate::spec::chart::ChartSpec) -> Result<(String, Vec<RenderWarning>), RenderError> {
+            crate::render::render_svg(
+                spec,
+                &batch(),
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width: 400.0, height: 300.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )
+            .map(|out| (out.bytes, out.warnings))
+        }
+
+        /// The panel's polar center and outer radius.
+        fn frame(scene: &SceneGraph) -> (f64, f64, f64) {
+            let area = &scene.panels[0].plot_area;
+            (area.x + area.w / 2.0, area.y + area.h / 2.0, area.w.min(area.h) / 2.0)
+        }
+
+        /// Each text node of batch `b`: its source row, content, angle
+        /// (clockwise from north, in `[0, TAU)`) and distance from the center.
+        fn labels(scene: &SceneGraph, b: usize) -> Vec<(usize, String, f64, f64)> {
+            let (cx, cy, _) = frame(scene);
+            let batch = &scene.panels[0].marks[b];
+            let rows = batch.data_indices.clone().unwrap();
+            batch
+                .nodes
+                .iter()
+                .zip(rows)
+                .map(|(node, row)| match node {
+                    SceneNode::Text { x, y, content, .. } => {
+                        let (dx, dy) = (x - cx, cy - y);
+                        (row, content.clone(), dx.atan2(dy).rem_euclid(TAU), dx.hypot(dy))
+                    }
+                    other => panic!("batch {b} draws a non-text node: {other:?}"),
+                })
+                .collect()
+        }
+
+        /// Each wedge of arc batch `b`: its source row and mid-angle.
+        fn wedge_mids(scene: &SceneGraph, b: usize) -> Vec<(usize, f64)> {
+            let batch = &scene.panels[0].marks[b];
+            let spans = batch.polar_spans.clone().expect("an arc batch carries its spans");
+            batch
+                .data_indices
+                .clone()
+                .unwrap()
+                .into_iter()
+                .zip(spans)
+                .map(|(row, (a0, a1))| (row, ((a0 + a1) / 2.0).rem_euclid(TAU)))
+                .collect()
+        }
+
+        /// The cumulative pie mid-angle of each row of `values`, computed
+        /// independently of the renderer.
+        fn pie_mids(values: &[f64]) -> Vec<f64> {
+            let total: f64 = values.iter().sum();
+            let mut start = 0.0;
+            values
+                .iter()
+                .map(|v| {
+                    let sweep = v / total * TAU;
+                    let mid = start + sweep / 2.0;
+                    start += sweep;
+                    mid
+                })
+                .collect()
+        }
+
+        fn close(a: f64, b: f64) -> bool {
+            (a - b).abs() < 1e-9
+        }
+
+        #[test]
+        fn a_labelled_pie_puts_each_label_inside_its_own_wedge_on_every_wire() {
+            for (wire, json) in [("+", plus_wire()), ("layer", layer_wire()), ("sum", summed_wire())] {
+                let scene = scene(&spec(json, 0.0)).unwrap_or_else(|e| panic!("{wire}: {e}"));
+                let (_, _, outer) = frame(&scene);
+                let wedges = wedge_mids(&scene, 0);
+                let labels = labels(&scene, 1);
+                assert!(!wedges.is_empty(), "{wire}: the arc layer draws wedges");
+                assert_eq!(labels.len(), wedges.len(), "{wire}: one label per wedge");
+                for ((row, content, angle, radius), (wedge_row, mid)) in labels.iter().zip(&wedges) {
+                    assert_eq!(row, wedge_row, "{wire}: label and wedge read the same row");
+                    assert!(close(*angle, *mid), "{wire}: row {row} ({content}) at {angle}, its wedge's mid-angle is {mid}");
+                    assert!(close(*radius, outer / 2.0), "{wire}: row {row} at radius {radius}, half the outer radius is {}", outer / 2.0);
+                }
+            }
+        }
+
+        #[test]
+        fn a_summed_labelled_pie_draws_one_label_per_group() {
+            let scene = scene(&spec(summed_wire(), 0.0)).unwrap();
+            let contents: Vec<String> = labels(&scene, 1).into_iter().map(|l| l.1).collect();
+            assert_eq!(contents, ["a", "b", "c"]);
+            let angles: Vec<f64> = labels(&scene, 1).into_iter().map(|l| l.2).collect();
+            let expected = pie_mids(&[4.0, 6.0, 5.0]);
+            assert!(angles.iter().zip(&expected).all(|(a, e)| close(*a, *e)), "{angles:?} vs {expected:?}");
+        }
+
+        #[test]
+        fn a_labelled_pie_renders_static() {
+            // Each label once per row it draws, plus once in the color legend.
+            for (wire, json, drawn) in [
+                ("+", plus_wire(), [2, 2, 1]),
+                ("layer", layer_wire(), [2, 2, 1]),
+                ("sum", summed_wire(), [1, 1, 1]),
+            ] {
+                let (svg, _) = svg(&spec(json, 0.0)).unwrap_or_else(|e| panic!("{wire}: {e}"));
+                for (label, rows) in ["a", "b", "c"].into_iter().zip(drawn) {
+                    let count = svg.matches(&format!(">{label}</text>")).count();
+                    assert_eq!(count, rows + 1, "{wire}: label {label}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_stacked_text_only_polar_chart_stacks_its_theta_like_a_pie() {
+            let json = json!({"mark": "text", "encoding": {"x": theta("z", true), "text": {"field": "g"}}});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let (_, _, outer) = frame(&scene);
+            let labels = labels(&scene, 0);
+            assert_eq!(labels.len(), Z.len());
+            for ((row, content, angle, radius), mid) in labels.iter().zip(pie_mids(&Z)) {
+                assert_eq!(content, G[*row]);
+                assert!(close(*angle, mid), "row {row} at {angle}, expected {mid}");
+                assert!(close(*radius, outer / 2.0), "row {row} at radius {radius}");
+            }
+        }
+
+        #[test]
+        fn a_stacked_polar_label_sits_at_its_radius_binding() {
+            let json = json!({"mark": "text", "encoding": {
+                "x": theta("z", true), "y": {"field": "r"}, "text": {"field": "g"}}});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let (_, _, outer) = frame(&scene);
+            let labels = labels(&scene, 0);
+            assert_eq!(labels.len(), Z.len());
+            for ((row, _, angle, radius), mid) in labels.iter().zip(pie_mids(&Z)) {
+                assert!(close(*angle, mid), "row {row} at {angle}, expected {mid}");
+                let expected = R[*row] / 10.0 * outer;
+                assert!(close(*radius, expected), "row {row} at radius {radius}, expected {expected}");
+            }
+        }
+
+        #[test]
+        fn a_polar_label_sits_at_its_radius_style_value() {
+            let json = json!({"mark": "text", "encoding": {"x": {"field": "z"}, "text": {"field": "g"}},
+                              "mark_style": {"radius": 30.0}});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            for (row, _, _, radius) in labels(&scene, 0) {
+                assert!(close(radius, 30.0), "row {row} at radius {radius}");
+            }
+        }
+
+        #[test]
+        fn a_donut_label_sits_mid_ring() {
+            let scene = scene(&spec(plus_wire(), 40.0)).unwrap();
+            let (_, _, outer) = frame(&scene);
+            for (row, _, _, radius) in labels(&scene, 1) {
+                assert!(close(radius, (40.0 + outer) / 2.0), "row {row} at radius {radius}");
+            }
+        }
+
+        #[test]
+        fn a_nominal_theta_label_sits_at_its_band_mid_angle() {
+            // Stacked, the label takes the arc's own band; unstacked, its own
+            // value on the band axis, which is that band's centre.
+            for stacked in [true, false] {
+                let mut text_theta = theta("g", stacked);
+                text_theta["type"] = json!("nominal");
+                let json = json!({"mark": "arc", "encoding": {"x": {"field": "g", "type": "nominal"}}, "layers": [
+                    {"mark": "arc", "encoding": {"x": {"field": "g", "type": "nominal"}, "color": {"field": "g"}}},
+                    {"mark": "text", "encoding": {"x": text_theta, "text": {"field": "g"}}}]});
+                let scene = scene(&spec(json, 0.0)).unwrap();
+                let wedges = wedge_mids(&scene, 0);
+                let labels = labels(&scene, 1);
+                assert_eq!(labels.len(), wedges.len(), "stacked={stacked}");
+                for ((row, _, angle, _), (wedge_row, mid)) in labels.iter().zip(&wedges) {
+                    assert_eq!(row, wedge_row);
+                    assert!(close(*angle, *mid), "stacked={stacked}: row {row} at {angle}, its band's mid-angle is {mid}");
+                }
+            }
+        }
+
+        /// An untyped string theta resolves an ordinal scale and is a
+        /// category on both marks: the arc draws its bands and the label sits
+        /// on each, rather than both reading the strings as a pie's numbers
+        /// and drawing nothing.
+        #[test]
+        fn an_untyped_string_theta_labels_its_bands() {
+            let json = json!({"mark": "arc", "encoding": {"x": {"field": "g"}}, "layers": [
+                {"mark": "arc", "encoding": {"x": {"field": "g"}, "color": {"field": "g"}}},
+                {"mark": "text", "encoding": {"x": {"field": "g"}, "text": {"field": "g"}}}]});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let wedges = wedge_mids(&scene, 0);
+            let labels = labels(&scene, 1);
+            assert_eq!(wedges.len(), G.len(), "the arc draws one band wedge per row");
+            assert_eq!(labels.len(), wedges.len());
+            for ((row, _, angle, _), (wedge_row, mid)) in labels.iter().zip(&wedges) {
+                assert_eq!(row, wedge_row);
+                assert!(close(*angle, *mid), "row {row} at {angle}, its band's mid-angle is {mid}");
+            }
+        }
+
+        /// A theta-only label beside a polar bar sits on the bar's band:
+        /// `bar(theta="g", radius="z") + text(theta="g", text="g")`.
+        #[test]
+        fn a_theta_only_label_sits_on_its_polar_bar() {
+            let json = json!({"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "z"}}, "layers": [
+                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "z"}}},
+                {"mark": "text", "encoding": {"x": {"field": "g"}, "text": {"field": "g"}}}]});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let bands = wedge_mids(&scene, 0);
+            let labels = labels(&scene, 1);
+            assert_eq!(labels.len(), G.len());
+            for (row, _, angle, _) in &labels {
+                let (_, mid) = bands.iter().find(|(r, _)| r == row).expect("the bar draws every row");
+                assert!(close(*angle, *mid), "row {row} at {angle}, its bar's mid-angle is {mid}");
+            }
+        }
+
+        /// An unstacked theta-only label sits on its own theta value: at the
+        /// angle a point with that value draws at, on the mid ring.
+        #[test]
+        fn an_unstacked_polar_label_sits_on_its_own_theta_value() {
+            let json = json!({"mark": "point", "encoding": {"x": {"field": "z"}}, "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "z"}, "y": {"field": "r"}}},
+                {"mark": "text", "encoding": {"x": {"field": "z"}, "text": {"field": "g"}}}]});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let (cx, cy, outer) = frame(&scene);
+            let point_angles: Vec<f64> = scene.panels[0].marks[0]
+                .nodes
+                .iter()
+                .map(|n| match n {
+                    SceneNode::Circle { cx: x, cy: y, .. } => (x - cx).atan2(cy - y).rem_euclid(TAU),
+                    other => panic!("a point draws circles: {other:?}"),
+                })
+                .collect();
+            let labels = labels(&scene, 1);
+            assert_eq!(labels.len(), Z.len());
+            for (row, _, angle, radius) in labels {
+                let expected = point_angles[row];
+                assert!(close(angle, expected), "row {row} at {angle}, its point's angle is {expected}");
+                assert!(close(radius, outer / 2.0), "row {row} at radius {radius}");
+            }
+        }
+
+        /// Polar scatter labels: `point(theta="z", radius="r") +
+        /// text(theta="z", radius="r", text="g")` puts each label exactly on
+        /// its point.
+        #[test]
+        fn a_polar_scatter_label_sits_on_its_point() {
+            let json = json!({"mark": "point", "encoding": {"x": {"field": "z"}, "y": {"field": "r"}}, "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "z"}, "y": {"field": "r"}}},
+                {"mark": "text", "encoding": {"x": {"field": "z"}, "y": {"field": "r"}, "text": {"field": "g"}}}]});
+            let scene = scene(&spec(json, 0.0)).unwrap();
+            let points: Vec<(f64, f64)> = scene.panels[0].marks[0]
+                .nodes
+                .iter()
+                .map(|n| match n {
+                    SceneNode::Circle { cx, cy, .. } => (*cx, *cy),
+                    other => panic!("a point draws circles: {other:?}"),
+                })
+                .collect();
+            let texts: Vec<(f64, f64)> = scene.panels[0].marks[1]
+                .nodes
+                .iter()
+                .map(|n| match n {
+                    SceneNode::Text { x, y, .. } => (*x, *y),
+                    other => panic!("a text draws text: {other:?}"),
+                })
+                .collect();
+            assert_eq!(points.len(), Z.len());
+            assert_eq!(texts, points, "each label sits on its point");
+        }
+
+        /// The text a text layer at index 1 placed by `mark_text` warns with
+        /// when its labels sit off an arc's pie.
+        pub(crate) const UNSTACKED_WARNING: &str = "layer 1: mark_text: these labels sit at their own theta values, \
+            but an arc in the same panel stacks that theta into a pie, so they sit off its wedges; write \
+            stack=True on the text's theta (Theta(..., stack=True), on the text or on the theta it inherits) \
+            to place each label in its wedge";
+
+        /// Unstacked labels beside a pie of the same theta warn, naming
+        /// `Theta(stack=True)`, once; stacked ones, or labels beside no
+        /// arc, do not.
+        #[test]
+        fn unstacked_labels_beside_a_pie_of_their_theta_warn() {
+            let unstacked = |warnings: &[RenderWarning]| -> Vec<String> {
+                warnings.iter().map(|w| w.to_string()).filter(|w| w.contains("stack=True")).collect()
+            };
+            let (_, warnings) = svg(&spec(plus_wire_with(false), 0.0)).unwrap();
+            assert_eq!(unstacked(&warnings), [UNSTACKED_WARNING], "{warnings:?}");
+
+            // An aggregate's internal output column is no remedy the user can
+            // write, so the warning names no column.
+            let (_, warnings) = svg(&spec(summed_wire_with(false), 0.0)).unwrap();
+            let warned = unstacked(&warnings);
+            assert_eq!(warned, [UNSTACKED_WARNING], "{warnings:?}");
+            assert!(!warned[0].contains("sum_z"), "{}", warned[0]);
+
+            for (case, json) in [
+                ("stacked", plus_wire()),
+                ("no arc", json!({"mark": "text", "encoding": {"x": {"field": "z"}, "text": {"field": "g"}}})),
+            ] {
+                let (_, warnings) = svg(&spec(json, 0.0)).unwrap();
+                assert!(unstacked(&warnings).is_empty(), "{case}: {warnings:?}");
+            }
+        }
+
+        /// `radius=` keeps the pixel contract: below 0 refuses, 0 puts each
+        /// label on the center.
+        #[test]
+        fn a_negative_radius_style_refuses_and_zero_sits_on_the_center() {
+            let with = |radius: f64| {
+                spec(json!({"mark": "text", "encoding": {"x": {"field": "z"}, "text": {"field": "g"}},
+                            "mark_style": {"radius": radius}}), 0.0)
+            };
+            let err = svg(&with(-10.0)).unwrap_err().to_string();
+            assert!(err.contains("mark_text(radius=...) must be non-negative; received -10"), "{err}");
+            let scene = scene(&with(0.0)).unwrap();
+            for (row, _, _, radius) in labels(&scene, 0) {
+                assert!(close(radius, 0.0), "row {row} at radius {radius}");
+            }
+        }
+
+        /// A polar text layer that no theta reaches refuses with the
+        /// positional remedy instead of drawing nothing, though a sibling arc
+        /// binds theta: here the text reads its own statistic's rows, which
+        /// inherit no positional channel.
+        #[test]
+        fn a_polar_text_layer_no_theta_reaches_refuses() {
+            let mut json = summed_wire();
+            json["layers"][1]["encoding"] = json!({"text": {"field": "g"}});
+            let err = svg(&spec(json, 0.0)).unwrap_err().to_string();
+            assert!(err.contains("layer 1: mark_text needs both positional channels"), "{err}");
+        }
+
+        /// With theta on y, a stacked label's `stack` sits on the channel
+        /// the value-axis stack shorthand reads; it still places the label in
+        /// its wedge, and stacks no value axis.
+        #[test]
+        fn a_stacked_label_with_theta_on_y_sits_in_its_wedge() {
+            let mut sp = spec(json!({"mark": "arc", "encoding": {"y": {"field": "z"}}, "layers": [
+                {"mark": "arc", "encoding": {"y": {"field": "z"}, "color": {"field": "g"}}},
+                {"mark": "text", "encoding": {"y": theta("z", true), "text": {"field": "g"}, "color": {"field": "g"}}}]}), 0.0);
+            if let Some(crate::spec::coord::CoordKind::Polar { theta, .. }) = sp.coord.as_mut() {
+                *theta = crate::spec::coord::PolarThetaChannel::Y;
+            }
+            let scene = scene(&sp).unwrap();
+            let wedges = wedge_mids(&scene, 0);
+            let labels = labels(&scene, 1);
+            assert_eq!(labels.len(), wedges.len());
+            for ((row, _, angle, _), (wedge_row, mid)) in labels.iter().zip(&wedges) {
+                assert_eq!(row, wedge_row);
+                assert!(close(*angle, *mid), "row {row} at {angle}, its wedge's mid-angle is {mid}");
+            }
+        }
+
+        /// An arc stacks its theta into its pie whatever its `stack` says, so
+        /// a stack on its theta under `CoordPolar(theta="y")` (the channel
+        /// the value-axis stack shorthand reads) draws the same pie as none.
+        #[test]
+        fn an_arcs_theta_stack_on_y_draws_the_same_pie() {
+            let with = |stacked: bool| {
+                let mut sp = spec(json!({"mark": "arc", "encoding": {"y": theta("z", stacked), "color": {"field": "g"}}}), 0.0);
+                if let Some(crate::spec::coord::CoordKind::Polar { theta, .. }) = sp.coord.as_mut() {
+                    *theta = crate::spec::coord::PolarThetaChannel::Y;
+                }
+                svg(&sp).map(|(svg, _)| svg)
+            };
+            assert_eq!(with(true).unwrap(), with(false).unwrap());
+        }
+
+        /// With theta on y, an unstacked theta-only label's angle is its
+        /// value's position on the y scale, bottom to top as one turn.
+        #[test]
+        fn an_unstacked_label_with_theta_on_y_sits_at_its_value_on_the_y_scale() {
+            let mut sp = spec(json!({"mark": "text", "encoding": {"y": {"field": "z"}, "text": {"field": "g"}}}), 0.0);
+            if let Some(crate::spec::coord::CoordKind::Polar { theta, .. }) = sp.coord.as_mut() {
+                *theta = crate::spec::coord::PolarThetaChannel::Y;
+            }
+            let scene = scene(&sp).unwrap();
+            let area = &scene.panels[0].plot_area;
+            let (scales, _) = crate::render::scale_resolve::resolve_scales(
+                &sp,
+                &batch(),
+                (area.x, area.x + area.w),
+                (area.y, area.y + area.h),
+                &crate::layout::ThemeInputs::default(),
+            )
+            .unwrap();
+            let labels = labels(&scene, 0);
+            assert_eq!(labels.len(), Z.len());
+            for (row, _, angle, _) in labels {
+                let py = scales.y.to_pixel_f64(Z[row]).unwrap();
+                let expected = ((area.y + area.h - py) / area.h * TAU).rem_euclid(TAU);
+                assert!(close(angle, expected), "row {row} at {angle}, its y value's angle is {expected}");
+            }
+        }
+
+        #[test]
+        fn a_radius_style_without_a_ring_placement_warns_inert() {
+            let inert = |warnings: &[RenderWarning]| {
+                warnings.iter().any(|w| matches!(w, RenderWarning::MarkStyleInert { field, .. } if field == "radius"))
+            };
+            let bound = json!({"mark": "text", "encoding": {
+                "x": {"field": "z"}, "y": {"field": "r"}, "text": {"field": "g"}}, "mark_style": {"radius": 30.0}});
+            let (_, warnings) = svg(&spec(bound, 0.0)).unwrap();
+            assert!(inert(&warnings), "a radius binding places the label: {warnings:?}");
+
+            let mut cartesian = spec(json!({"mark": "text", "encoding": {
+                "x": {"field": "z"}, "y": {"field": "r"}, "text": {"field": "g"}}, "mark_style": {"radius": 30.0}}), 0.0);
+            cartesian.coord = None;
+            let (_, warnings) = svg(&cartesian).unwrap();
+            assert!(inert(&warnings), "a Cartesian label has no wedge: {warnings:?}");
+
+            let placed = json!({"mark": "text", "encoding": {"x": {"field": "z"}, "text": {"field": "g"}},
+                                "mark_style": {"radius": 30.0}});
+            let (_, warnings) = svg(&spec(placed, 0.0)).unwrap();
+            assert!(!inert(&warnings), "control: a theta-only polar label draws its radius: {warnings:?}");
+        }
     }
 }

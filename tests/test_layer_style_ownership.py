@@ -167,6 +167,9 @@ _UNPROBED = {
     "cmap": "an image draws it only over raster data, which only mark_raster produces",
     "width": "an image draws it only over a url encoding, which needs fetchable images",
     "height": "an image draws it only over a url encoding, which needs fetchable images",
+    "radius": "a text draws it only when its stacked theta places it on a CoordPolar wedge, "
+    "which the independent-y and SecondaryY paths (Cartesian only) cannot carry; its "
+    "scoping on + and LayerChart is pinned in test_layer_encoding_model.py",
 }
 
 PRIMITIVE_REACHABLE_FIELDS = _primitive_reachable_fields() - set(_UNPROBED)

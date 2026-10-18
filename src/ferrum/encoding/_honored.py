@@ -108,11 +108,14 @@ PRIMARY_POSITIONAL = frozenset(
 
 #: Secondary-extent positional channels (X2, Y2, X/Y error pairs, Theta2,
 #: Radius2). These carry no scale of their own — they reuse the primary
-#: channel's scale — so only the data type is honored.
+#: channel's scale — so only the data type is honored. The span ends (X2, Y2,
+#: Theta2, Radius2) also compose ``AGGREGATE`` in their module: they draw the
+#: value they are bound to. The error channels do not.
 SECONDARY_EXTENT = frozenset({"type"})
 
 #: Primary polar value channels (Theta, Radius): data type plus stacking
-#: (wind-rose / coxcomb / pie accumulation).
+#: (wind-rose / coxcomb / pie accumulation). Both also compose ``AGGREGATE``
+#: in their module.
 POLAR_PRIMARY = frozenset({"type", "stack"})
 
 
@@ -138,12 +141,12 @@ SORT = frozenset({"sort"})
 SCHEME = frozenset({"scheme"})
 
 #: The ``aggregate=`` kwarg on a channel whose mark draws the aggregated
-#: value (a label's text, a color, a size, an opacity, ...). Consumed through
-#: ``to_implicit_transforms``, never serialized: the chart's (or each layer's)
-#: aggregate step computes the value and the channel is re-pointed at its
-#: output column. Composed onto those channels' own sets in their modules, so
-#: channels where an aggregate draws nothing (Detail, Shape, the facet and
-#: secondary positional channels, ...) keep warning that it is ignored.
+#: value (a span end, a polar angle or radius, a label's text, a color, a
+#: size, an opacity, ...). Consumed through ``to_implicit_transforms``, never
+#: serialized: the chart's (or each layer's) aggregate step computes the value
+#: and the channel is re-pointed at its output column. Composed onto those
+#: channels' own sets in their modules, so channels where an aggregate draws
+#: nothing (Detail, Shape, the facet and error channels, ...) refuse it.
 AGGREGATE = frozenset({"aggregate"})
 
 #: Adds an explicit scale override. (Size, Opacity, FillOpacity,

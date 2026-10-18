@@ -81,40 +81,20 @@ pub struct LayerPrepared {
     /// one question on every route; a missing column gets a chart-data
     /// remedy only on such a layer.
     pub reads_chart_data: bool,
-    /// Whether THIS layer's own (pre-merge) encoding declared a `color`
-    /// channel, as opposed to `encoding.color` (above) having been filled in
-    /// purely by [`Encoding::inherit_from`](crate::spec::encoding::Encoding::inherit_from)
-    /// from the chart level (spec §4.4, 2026-08-28 T4 amendment, cycle-4
-    /// finding). `encoding.color` itself is ALWAYS fully inherited — never
-    /// stripped — so every consumer that reads it directly (the legend,
-    /// `resolve_legend_color_scale`; dodge/stack grouping,
-    /// `position::resolve_group_channel`) sees exactly what `main` sees.
-    /// This flag exists only so `scene_build.rs`'s per-mark dispatch can
-    /// decide whether a per-row color READ is honoring the layer's own
-    /// declaration or would otherwise silently paint that layer's marks from
-    /// an inherited legend channel that isn't theirs. Originally scoped to
-    /// `Mark::Text` only, unconditionally; widened batch-A T5d, 2026-08-28 to
-    /// any OTHER mark, but — load-bearing — **only when that layer also
-    /// carries its own literal `stroke=`/`fill=` override**
-    /// (`mark_style.paint.{stroke,fill}_is_user_set`). A layer with no color
-    /// of its own AND no literal paint override (e.g. `catplot(kind="box",
-    /// hue=x)`'s IQR-rect/tick-cap/outlier-point layers, which rely on a
-    /// genuinely shared chart-level `color` to vary their OWN per-row/group
-    /// fill) must keep inheriting — see the comment at that call site in
-    /// `build_panel_mark_batches` for the full precedent and the regression
-    /// an earlier, unconditional-for-every-mark version of this exemption
-    /// caused. For `from_chart_only` (a chart with no
-    /// `layers`) there is no parent to inherit from, so "own" and "declared
-    /// at all" coincide: the flag is simply whether the chart-level encoding
-    /// has a `color` channel (`spec.encoding.color.is_some()`) — `false`,
-    /// not `true`, when it doesn't, matching `encoding.color` being `None`
-    /// there too (the exemption is a no-op on an already-absent channel
-    /// either way).
-    ///
-    /// A `color` listed in
-    /// [`Layer::inherited_channels`](crate::spec::layer::Layer::inherited_channels)
-    /// is inherited even though it sits on the layer's own encoding: Python
-    /// wrote the parent's binding there and recorded that it did.
+    /// Whether THIS layer binds `color` itself
+    /// ([`Layer::owns`](crate::spec::layer::Layer::owns)): bound on its own
+    /// encoding and not written there by Python from a parent (a `color`
+    /// listed in [`Layer::inherited_channels`](crate::spec::layer::Layer::inherited_channels)
+    /// is inherited). `encoding.color` above is the completed one, inherited
+    /// whole on every mark that takes an inherited color
+    /// ([`Mark::draws_inherited`](crate::spec::mark::Mark::draws_inherited)),
+    /// so the legend and dodge/stack grouping read it. This flag decides only
+    /// whether a layer's per-row color read takes an inherited color: a layer
+    /// carrying its own literal `stroke=`/`fill=` override draws that paint,
+    /// not the inherited color ([`layer_geometry_encoding`]), while a layer
+    /// with neither keeps the shared color, which varies its own rows (the
+    /// `catplot(kind="box", hue=x)` layers). For `from_chart_only` there is
+    /// no parent, so the flag is whether the chart's encoding binds `color`.
     pub color_is_own: bool,
     /// Whether THIS layer's own encoding declared `size` / `stroke_width`,
     /// captured before the merge the way [`color_is_own`] is. A line's width
@@ -181,32 +161,18 @@ impl LayerPrepared {
         }
     }
 
-    /// Build a layer by inheriting unset encoding channels from chart-level.
-    /// See [`crate::spec::encoding::Encoding::inherit_from`] for the policy —
-    /// this is the plain (mark-agnostic) merge; `encoding.color` on the
-    /// result is always fully inherited (see `color_is_own`'s doc comment on
-    /// [`LayerPrepared`] for why the own-color exemption does NOT live here).
+    /// Build a layer by completing its encoding from the chart level
+    /// ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding)).
     pub(crate) fn from_chart_and_layer(
         spec: &crate::spec::chart::ChartSpec,
         layer: &crate::spec::layer::Layer,
     ) -> Self {
-        // Captured BEFORE the merge below: whether THIS layer declared its
-        // own `color` channel, independent of whatever `inherit_from`/
-        // `inherit_non_positional` then does to `encoding.color` (spec §4.4,
-        // 2026-08-28 T4 amendment, cycle-4 finding — see `color_is_own`'s doc
-        // comment on [`LayerPrepared`]).
-        //
-        // `inherited_channels` is the non-positional counterpart of
-        // `inherited_positional` (read by `completed_encoding`): a channel Python wrote onto the
-        // layer's own encoding from its parent is present there but was never
-        // declared by this layer, so it draws as an inherited one.
-        let inherits = |channel| layer.inherited_channels.contains(&channel);
-        let color_is_own =
-            layer.encoding.color.is_some() && !inherits(crate::spec::layer::InheritedChannel::Color);
-        let size_is_own =
-            layer.encoding.size.is_some() && !inherits(crate::spec::layer::InheritedChannel::Size);
-        let stroke_width_is_own = layer.encoding.stroke_width.is_some()
-            && !inherits(crate::spec::layer::InheritedChannel::StrokeWidth);
+        // Which width and color bindings this layer owns, asked of its own
+        // encoding before completion fills the rest from the chart.
+        use crate::spec::layer::InheritedChannel;
+        let color_is_own = layer.owns(InheritedChannel::Color);
+        let size_is_own = layer.owns(InheritedChannel::Size);
+        let stroke_width_is_own = layer.owns(InheritedChannel::StrokeWidth);
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the
         // chart level. Inheriting x/y would inject the primary batch's field
@@ -392,7 +358,6 @@ impl LayerPrepared {
     pub(in crate::render) fn drawn_encoding(&self) -> crate::spec::encoding::Encoding {
         let mut encoding = layer_geometry_encoding(
             self.encoding.clone(),
-            self.mark,
             LayerGeometryFlags {
                 color_is_own: self.color_is_own,
                 has_own_literal_paint: self.has_own_literal_paint(),
@@ -472,34 +437,18 @@ pub(in crate::render) struct LayerGeometryFlags {
 /// encoding unchanged, while the geometry sees only the shape THIS layer
 /// actually declared.
 ///
-/// **Own-color exemption** (spec §4.4): a layer whose `color` channel came
-/// purely from chart-level inheritance (`!flags.color_is_own`) must not have
-/// it reach the mark builder's per-row color read when doing so would
-/// override that layer's own declared paint — only the layer's OWN declared
-/// `color=` may drive per-row/per-group color variation. Applies
-/// unconditionally to `Mark::Text` (the `heatmap(annot=True)` colored-cells +
-/// colorless-labels shape, where an un-colored label must NEVER borrow the
-/// cells' hue), and to any OTHER mark only when that layer ALSO carries its
-/// own literal `stroke=`/`fill=` override that names a real
-/// color (`flags.has_own_literal_paint` — a *cleared* paint like
-/// `fill="none"`/`stroke="transparent"` does NOT count, because
-/// `desugar_ribbon`/`desugar_errorband` always pass `stroke="none"`, and
-/// reading that as "own paint" would strip the color channel those layers
-/// group their bands by) — a chart-level `color` set
-/// for one layer's legend (e.g. a diagnostic chart's per-class curve)
-/// silently repainted a sibling layer's own literal stroke override with the
-/// categorical palette's first color whenever that sibling declared no color
-/// of its own (`fm.roc_chart`'s grey dashed chance-diagonal `reference` line
-/// flipping to the first class's blue, fanning out into one duplicate
-/// polyline per class). The literal-override gate is deliberately narrower
-/// than "any non-owning mark": a layer with NO literal paint override that
-/// relies on a genuinely shared chart-level `color` to vary ITS OWN
-/// per-row/per-group fill — e.g. `catplot(kind="box", hue=x)`'s IQR
-/// `rect`/tick-cap/outlier-`point` layers, none of which declare their own
-/// `color=` because the desugar treats the shared x-axis category as the hue
-/// and lets every layer inherit it — must keep inheriting; an unconditional
-/// strip (mirroring the Text rule) would flatten every box to the first
-/// category's color instead of one color per box.
+/// **Own paint outranks an inherited color.** A layer whose `color` came
+/// from its parent (`!flags.color_is_own`) and that carries its own literal
+/// `stroke=`/`fill=` naming a real color (`flags.has_own_literal_paint`) draws
+/// that paint, so the inherited color does not reach its per-row read (the
+/// `roc_chart` chance diagonal stays grey under a per-class color). A
+/// *cleared* paint (`fill="none"`, `stroke="transparent"`) is no own paint:
+/// `desugar_ribbon`/`desugar_errorband` always pass `stroke="none"` and group
+/// their bands by the inherited color. A layer with neither keeps the shared
+/// color, which varies its own rows (`catplot(kind="box", hue=x)`'s IQR
+/// rects, tick caps and outlier points). A text never reaches here with an
+/// inherited color: its completed encoding holds only a color it owns
+/// ([`crate::spec::layer::Layer::completed_encoding`]).
 ///
 /// For a GROUPING mark (line/area/ribbon — `marks/line.rs`'s
 /// `build_color_detail_groups`), the cleared channel is not just a paint
@@ -516,13 +465,10 @@ pub(in crate::render) struct LayerGeometryFlags {
 /// it, and the size legend asks the same precedence which layers draw it.
 pub(in crate::render) fn layer_geometry_encoding(
     merged: crate::spec::encoding::Encoding,
-    mark: crate::spec::mark::Mark,
     flags: LayerGeometryFlags,
 ) -> crate::spec::encoding::Encoding {
     let mut encoding = merged;
-    if !flags.color_is_own
-        && (mark == crate::spec::mark::Mark::Text || flags.has_own_literal_paint)
-    {
+    if !flags.color_is_own && flags.has_own_literal_paint {
         encoding.color = None;
     }
     if flags.yielded_widths.size {
@@ -1910,6 +1856,25 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
     }
 }
 
+/// Refuse a `group` grouping key where nothing reads it
+/// ([`RenderError::GroupKeyMisplaced`]): on the chart-level encoding, or on a
+/// layer whose mark draws the color it inherits
+/// ([`crate::spec::mark::Mark::draws_inherited`]). The key is a text's, for a
+/// color it inherits but does not draw.
+fn refuse_misplaced_group_keys(spec: &ChartSpec) -> Result<(), RenderError> {
+    use crate::spec::layer::InheritedChannel;
+    if spec.encoding.group.is_some() {
+        return Err(RenderError::GroupKeyMisplaced { layer: None, mark: spec.mark });
+    }
+    let misplaced = spec.layers.iter().flatten().enumerate().find(|(_, layer)| {
+        layer.encoding.group.is_some() && layer.mark.draws_inherited(InheritedChannel::Color)
+    });
+    match misplaced {
+        Some((layer, l)) => Err(RenderError::GroupKeyMisplaced { layer: Some(layer), mark: l.mark }),
+        None => Ok(()),
+    }
+}
+
 /// Build the per-layer prepared inputs, applying [`LayerPrepared::flip_coords`]
 /// to every layer whose OWN effective coord flips (SPINE-12) — the whole
 /// coordinate-space group (channels AND their provenance flags) swaps together.
@@ -1932,11 +1897,13 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// empty `layers` list ([`RenderError::LayeredChartNoLayers`]): nothing would
 /// draw, and the rendering encoding is layer 0's. So is a
 /// layer with its own non-empty `transforms`
-/// ([`RenderError::LayerTransformsUnsupported`]): no layer runs them.
+/// ([`RenderError::LayerTransformsUnsupported`]): no layer runs them. So is
+/// a misplaced `group` key ([`refuse_misplaced_group_keys`]).
 fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
     if spec.layers.as_ref().is_some_and(Vec::is_empty) {
         return Err(RenderError::LayeredChartNoLayers);
     }
+    refuse_misplaced_group_keys(spec)?;
     let layer_count = spec.layers.as_ref().map_or(1, Vec::len);
     for (index, cond) in spec.conditionals.iter().enumerate() {
         if let Some(&layer) = cond.layers.iter().flatten().find(|&&l| l >= layer_count) {
@@ -2057,7 +2024,9 @@ fn establishing_binding(
 }
 
 /// One [`RenderWarning::ChannelNotDrawn`] per auxiliary-scale channel some
-/// layer binds but no binding layer's mark draws
+/// layer binds but no binding layer's mark draws (a color a layer inherits
+/// but its mark does not take, [`crate::spec::mark::Mark::draws_inherited`],
+/// counts as bound and not drawn)
 /// ([`crate::spec::mark::Mark::draws_channel`]; a raster image draws only a
 /// `color` naming the field its cells hold,
 /// [`crate::render::marks::image::image_draws_color`]): the channel builds no scale and
@@ -2067,16 +2036,31 @@ fn establishing_binding(
 fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<RenderWarning> {
     let mut warnings = Vec::new();
     for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
-        let mut binding = layers
-            .iter()
-            .enumerate()
-            .filter_map(|(i, layer)| channel.binding(&layer.encoding).as_ref().map(|enc| (i, layer, enc)));
-        let Some((first, layer, enc)) = binding.next() else { continue };
-        let drawn = |layer: &LayerPrepared| match layer.raster_value_field.is_some() && channel.name == "color" {
-            true => layer.draws_raster_color(),
-            false => layer.mark.draws_channel(channel.drawn_as()),
+        // Each layer's binding of the channel, and whether it is one the
+        // layer's mark declined: a color it inherits but does not draw
+        // (`Mark::draws_inherited`), held as its `group` key or left on the
+        // chart, which its completed encoding no longer carries.
+        let mut binding = layers.iter().enumerate().filter_map(|(i, layer)| {
+            if let Some(enc) = channel.binding(&layer.encoding).as_ref() {
+                return Some((i, layer, enc, false));
+            }
+            let declined = channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
+                && spec.layers.is_some()
+                && !layer.mark.draws_inherited(channel.drawn_as());
+            declined
+                .then(|| layer.encoding.group.as_ref().or(spec.encoding.color.as_ref()))
+                .flatten()
+                .map(|enc| (i, layer, enc, true))
+        });
+        let Some((first, layer, enc, declined)) = binding.next() else { continue };
+        let drawn = |layer: &LayerPrepared, declined: bool| {
+            !declined
+                && match layer.raster_value_field.is_some() && channel.name == "color" {
+                    true => layer.draws_raster_color(),
+                    false => layer.mark.draws_channel(channel.drawn_as()),
+                }
         };
-        if drawn(layer) || binding.any(|(_, layer, _)| drawn(layer)) {
+        if drawn(layer, declined) || binding.any(|(_, layer, _, declined)| drawn(layer, declined)) {
             continue;
         }
         warnings.push(RenderWarning::ChannelNotDrawn {
@@ -2194,13 +2178,22 @@ pub(in crate::render) fn layer_entry(spec: &ChartSpec, li: usize, mark: crate::s
 }
 
 /// The index a layer-voiced message names layer `li` by: `Some(li)` on a
-/// layered spec when the layer's entry is its own mark's primitive (a layer
-/// the caller placed, whose index locates it), else `None`. A layer a
-/// desugaring call built carries that call as its entry ([`layer_entry`]),
-/// and its index counts the call's internal sub-layers, which the caller
-/// never wrote; the entry alone already names the call they did write.
+/// layered spec when [`voiced_layer`] voices it, else `None`.
 pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::spec::mark::Mark) -> Option<usize> {
-    (spec.layers.is_some() && layer_entry(spec, li, mark) == format!("mark_{}", mark.as_str())).then_some(li)
+    spec.layers.as_ref().and_then(|_| voiced_layer(li, &layer_entry(spec, li, mark), mark))
+}
+
+/// The index a layer-voiced message names a layer by, given its `index` in
+/// the numbering the message counts and its `entry`: `Some(index)` when the
+/// entry is its own mark's primitive (a layer the caller placed, whose index
+/// locates it), else `None`. A layer a desugaring call built carries that
+/// call as its entry ([`layer_entry`]), and its index counts the call's
+/// internal sub-layers, which the caller never wrote; the entry alone already
+/// names the call they did write. The one rule every layer-voiced producer
+/// applies: [`public_layer`] on a layered spec, and the composite overlay on
+/// its group's member-order numbering.
+pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::spec::mark::Mark) -> Option<usize> {
+    (entry == format!("mark_{}", mark.as_str())).then_some(index)
 }
 
 /// Refuse a layer of a layered spec that names a column absent from that

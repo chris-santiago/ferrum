@@ -37,6 +37,7 @@ from ferrum._validate import (
     coerce_bool,
     coerce_finite_real,
     coerce_non_negative_int,
+    coerce_pixel_value,
     is_none_color_sentinel,
     is_real_number,
     validate_choice,
@@ -252,6 +253,26 @@ _INTEGER_MARK_KWARGS: frozenset[str] = frozenset(mark_integer_kwargs())
 #: or ``Decimal`` reaches the wire as a builtin number and a non-number or
 #: non-finite value refuses at the door.
 _REAL_MARK_KWARGS: frozenset[str] = frozenset(mark_numeric_kwargs()) - _INTEGER_MARK_KWARGS
+
+#: The real-number style kwargs that are a distance in pixels and so refuse a
+#: negative value at the door (:func:`ferrum._validate.coerce_pixel_value`):
+#: ``mark_text(radius=)``, a polar label's distance from the center, which a
+#: negative value would mirror through the center. Rust refuses it with the
+#: same text at render.
+_PIXEL_MARK_KWARGS: frozenset[str] = frozenset({"radius"})
+
+
+def _coerce_pixel_real(label: str, value: Any) -> Any:
+    """*value* stored as :func:`ferrum._validate.coerce_finite_real` stores it, refusing a negative.
+
+    The refusal is :func:`ferrum._validate.coerce_pixel_value`'s, so the door
+    and Rust's render-time check voice one text; the stored value keeps the
+    real-number fields' contract (``np.int64(2)`` is stored as ``2``).
+    """
+    stored = coerce_finite_real(label, value)
+    coerce_pixel_value(label, stored)
+    return stored
+
 
 #: The style kwargs whose wire field is a truth value: the names Rust
 #: publishes as ``MarkKwargsSpec``'s ``bool`` fields. Each is stored as
@@ -636,6 +657,8 @@ def _resolve_style(
             v = _voiced(entry, lambda voice: _normalize_stroke_dash(v, context=f"{voice}: {k}"))
         elif canonical in _INTEGER_MARK_KWARGS:
             v = _voiced(entry, lambda voice: coerce_non_negative_int(f"{voice}({k}=...)", v))
+        elif canonical in _PIXEL_MARK_KWARGS:
+            v = _voiced(entry, lambda voice: _coerce_pixel_real(f"{voice}({k}=...)", v))
         elif canonical in _REAL_MARK_KWARGS:
             v = _voiced(entry, lambda voice: coerce_finite_real(f"{voice}({k}=...)", v))
         # ``None`` is the unset value of every optional field, as it is for

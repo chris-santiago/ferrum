@@ -27,14 +27,28 @@ import json
 from dataclasses import dataclass, replace
 
 from ferrum._encode_lowering import (
+    GROUPING_KEY,
+    _GroupingOnly,
+    _aggregate_ops,
+    _expand_grouping,
+    _grouping_of,
+    _regroup,
+    _aggregated_encoding,
     _bin_groupby,
     _chart_agg_groupby,
     _lower_bin_encoding,
+    _theta_axis,
 )
 from ferrum.encoding._aliases import layered_chart_detail, resolved_channel
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, _POLAR_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._layer import _Layer, inherited_positional_taken
+from ferrum._layer import (
+    _Layer,
+    draws_inherited_color,
+    inherited_positional_taken,
+    layer_mark,
+)
+from ferrum.position import stack_honored, warn_stack_ignored
 
 
 class _NamedTransform:
@@ -326,7 +340,7 @@ def _resolve_layer_aggregates(layers: list, chart) -> tuple[list, list]:
         ``named_transforms`` is the list of ``_NamedTransform`` objects to add to
         the chart-level pipeline (empty when no layer aggregates).
     """
-    from ferrum import Aggregate, AggregateOp
+    from ferrum import Aggregate
 
     new_layers: list = []
     named_transforms: list = []
@@ -338,34 +352,13 @@ def _resolve_layer_aggregates(layers: list, chart) -> tuple[list, list]:
             continue
 
         groupby = _chart_agg_groupby(effective, chart._facet)
-        ops = [AggregateOp(p.field, p.agg, p.output_col) for p in pending]
         agg_name = f"_layer_agg_{i}"
-        named_transforms.append(_layer_step(layer, Aggregate(ops, groupby=groupby), agg_name))
-        carried = _carried_bindings(
-            layer, chart._encoding, _aggregated_encoding(effective, pending)
-        )
+        aggregate = Aggregate(_aggregate_ops(pending), groupby=groupby)
+        named_transforms.append(_layer_step(layer, aggregate, agg_name))
+        carried = _carried_bindings(layer, chart._encoding, _aggregated_encoding(effective))
         new_layers.append(replace(_with_carried(layer, carried), data_source=agg_name))
 
     return new_layers, named_transforms
-
-
-def _aggregated_encoding(encoding: dict, pending: list[_PendingAggregate]) -> dict:
-    """Return *encoding* with each aggregated channel pointing at its aggregate's output column.
-
-    ``count()`` shorthands carry ``field=""`` (no source column) and are keyed
-    on ``""``. The rebuilt channel drops its now-resolved ``aggregate`` kwarg.
-    """
-    field_remap = {p.field if p.field else "": p.output_col for p in pending}
-    out: dict = {}
-    for axis, ch in encoding.items():
-        if isinstance(ch, ChannelBase):
-            remap_key = ch.field if ch.field is not None else ""
-            if remap_key in field_remap and ch._kwargs.get("aggregate"):
-                kwargs = {k: v for k, v in ch._kwargs.items() if k != "aggregate"}
-                out[axis] = ch.__class__(field_remap[remap_key], **kwargs)
-                continue
-        out[axis] = ch
-    return out
 
 
 def _resolve_layer_bins(layers: list, chart) -> tuple[list, list]:
@@ -426,8 +419,10 @@ def _resolve_layer_bins(layers: list, chart) -> tuple[list, list]:
         # `build_bin` is needed here, not `filter_transforms` (which the
         # single-chart caller uses, since ITS sentinels DO sit on the chart's
         # transform list).
+        # A binned member of the grouping-only key bins the layer as the raw
+        # binding does; the key then names the Bin's column the bars read.
         lowering = _lower_bin_encoding(
-            effective,
+            _expand_grouping(effective),
             pending,
             aggregates,
             tuple(_bin_groupby(effective, chart._facet)),
@@ -440,7 +435,8 @@ def _resolve_layer_bins(layers: list, chart) -> tuple[list, list]:
         )
         named_transforms.append(_layer_step(layer, bin_xform, bin_name))
 
-        carried = _carried_bindings(layer, chart._encoding, lowering.encoding)
+        drawn = _regroup(lowering.encoding, _grouping_of(effective))
+        carried = _carried_bindings(layer, chart._encoding, drawn)
         new_layers.append(replace(_with_carried(layer, carried), data_source=bin_name))
 
     return new_layers, named_transforms
@@ -499,7 +495,35 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
         for channel, value in inherited.items()
         if channel not in offered or channel in taken
     }
+    if not draws_inherited_color(layer.mark) and "color" not in own:
+        inherited = _color_as_grouping(inherited)
     return {**inherited, **bound}
+
+
+def _color_as_grouping(inherited: dict) -> dict:
+    """*inherited* with its color bindings replaced by one grouping-only key.
+
+    A layer whose mark draws only a color it binds itself still computes its
+    statistic per group of every inherited color spelling, so its labels
+    stay one per colored mark. The non-aggregated spellings become one
+    :class:`~ferrum._encode_lowering._GroupingOnly` at the place of the first
+    of them, in the parent's order; an aggregated color is a value, not a
+    group, and joins none. No member, no key. Called only when the layer
+    binds no color under any spelling, so none of them is shadowed.
+    """
+    members = tuple(
+        (channel, value)
+        for channel, value in inherited.items()
+        if resolved_channel(channel) == "color"
+        and not (isinstance(value, ChannelBase) and value.option("aggregate"))
+    )
+    out: dict = {}
+    for channel, value in inherited.items():
+        if resolved_channel(channel) != "color":
+            out[channel] = value
+        elif members and GROUPING_KEY not in out:
+            out[GROUPING_KEY] = _GroupingOnly(members)
+    return out
 
 
 def _bound(encoding: dict) -> dict:
@@ -527,7 +551,9 @@ def _with_carried(layer: _Layer, encoding: dict) -> _Layer:
     layer declared, and one rewritten from it, stays the layer's own.
     """
     own = set(_own_channels(layer))
-    carried = [c for c in encoding if c not in own and c not in _POSITIONAL]
+    # The grouping key is never inherited on the wire: Rust has no binding to
+    # complete it from.
+    carried = [c for c in encoding if c not in own and c not in _POSITIONAL and c != GROUPING_KEY]
     listed = tuple(dict.fromkeys([*layer.inherited_channels, *carried]))
     if encoding == layer.encoding and listed == layer.inherited_channels:
         return layer
@@ -581,7 +607,8 @@ def _carried_bindings(layer: _Layer, parent: dict, drawn: dict) -> dict:
     Rust completes each layer from the chart-level encoding, *parent*, so an
     inherited binding *drawn* takes unchanged from *parent* stays there. The
     layer carries the rest: its own bindings, and each inherited one its
-    statistic lowered, which the chart-level copy does not name.
+    statistic lowered or whose ``stack=`` its mark cannot honor removed,
+    which the chart-level copy does not name.
     """
     bound = _bound(layer.encoding)
     return {
@@ -591,21 +618,33 @@ def _carried_bindings(layer: _Layer, parent: dict, drawn: dict) -> dict:
     }
 
 
-def _layers_over_parent(layers: list, parent: dict) -> list:
+def _layers_over_parent(layers: list, parent: dict, coord: object = None) -> list:
     """Prepare each of *layers* to draw its effective encoding over *parent*.
 
     Each layer carries only its own bindings (:func:`_carried_bindings`); the
-    rest it inherits from *parent* on the wire. A layer reading the chart's
-    tail whose effective encoding computes a statistic will read that
-    statistic's named output, where Rust passes it none of the chart's positional channels, so
-    it takes them from the chart's encoding (``positional_source="encoding"``,
-    filled by ``ferrum.chart._fill_chart_positional``, which lists each copy
-    in ``inherited_positional``).
+    rest it inherits from *parent* on the wire. An inherited ``stack=`` is
+    judged by the mark of each layer that draws it (:func:`_stack_judged`), as
+    *parent* is no layer's drawn encoding. A layer reading the chart's tail
+    whose effective encoding computes a statistic will read that statistic's
+    named output, where Rust passes it none of the chart's positional
+    channels, so it takes them from the chart's encoding
+    (``positional_source="encoding"``, filled by
+    ``ferrum.chart._fill_chart_positional``, which lists each copy in
+    ``inherited_positional``). *coord* is the chart's, the fallback of each
+    layer's own.
     """
     out = []
     for layer in layers:
-        effective = _effective_encoding(layer, parent)
+        effective, unstacked = _stack_judged(
+            layer, _effective_encoding(layer, parent), layer.coord if layer.coord else coord
+        )
         layer = _with_carried(layer, _carried_bindings(layer, parent, effective))
+        # A stack-less copy of an inherited x/y/x2/y2 stays inherited on the
+        # wire, as the parent's binding it replaces would be.
+        positional = [channel for channel in unstacked if channel in _POSITIONAL]
+        if positional:
+            listed = tuple(dict.fromkeys([*layer.inherited_positional, *positional]))
+            layer = replace(layer, inherited_positional=listed)
         if (
             layer.data_source is None
             and layer.positional_source is None
@@ -616,11 +655,40 @@ def _layers_over_parent(layers: list, parent: dict) -> list:
     return out
 
 
+def _stack_judged(layer: _Layer, effective: dict, coord: object) -> tuple[dict, list[str]]:
+    """*effective* with each inherited ``stack=`` *layer*'s mark cannot honor removed, and warned.
+
+    A binding the layer draws from its parent arrives whole when its mark
+    honors the stack (:func:`ferrum.position.stack_honored`: bar and area on
+    any channel, arc and text on the channel a ``CoordPolar`` theta draws
+    as), and as a stack-less copy otherwise, so a point or line under a
+    stacked parent binding draws every row. The layer's own bindings are
+    judged where its wire is built. Returns the judged encoding and the
+    channels whose stack was removed.
+    """
+    mark = layer_mark(layer.mark)
+    theta_axis = _theta_axis(coord)
+    bound = _bound(layer.encoding)
+    out = dict(effective)
+    for channel, ch in effective.items():
+        if channel in bound or not isinstance(ch, ChannelBase) or not ch.option("stack"):
+            continue
+        if stack_honored(mark, polar_theta=channel == theta_axis):
+            continue
+        warn_stack_ignored(ch.option("stack"), mark)
+        out[channel] = ch._with_options(stack=None)
+    return out, [channel for channel in out if out[channel] is not effective[channel]]
+
+
 def _encoding_statistics(encoding: dict) -> tuple[list, list]:
-    """The ``(_PendingAggregate, _PendingBin)`` sentinels the channels of *encoding* carry."""
+    """The ``(_PendingAggregate, _PendingBin)`` sentinels the channels of *encoding* carry.
+
+    A grouping-only key's members count as the raw bindings they stand for,
+    so a binned inherited color bins the layer as it bins its parent.
+    """
     aggregates: list = []
     bins: list = []
-    for ch in encoding.values():
+    for ch in _expand_grouping(encoding).values():
         if isinstance(ch, ChannelBase):
             for t in ch.to_implicit_transforms():
                 if isinstance(t, _PendingAggregate):
@@ -632,6 +700,7 @@ def _encoding_statistics(encoding: dict) -> tuple[list, list]:
 
 def _statistic_columns(encoding: dict) -> set:
     """The output columns of the aggregates and bins *encoding*'s channels compute."""
+    encoding = _expand_grouping(encoding)
     aggregates, bins = _encoding_statistics(encoding)
     columns = {a.output_col for a in aggregates}
     if bins:
@@ -729,7 +798,8 @@ def _refuse_missing_statistic_inputs(layers: list, chart) -> None:
         else:
             inputs |= set(_chart_agg_groupby(encoding, chart._facet))
         missing = inputs - set(columns)
-        for channel, value in encoding.items():
+        # A grouping-only color is refused under the spelling it was bound as.
+        for channel, value in _expand_grouping(encoding).items():
             field = value.field if isinstance(value, ChannelBase) else value
             if field in missing:
                 remedy = "statistic" if field in statistics else "plain"

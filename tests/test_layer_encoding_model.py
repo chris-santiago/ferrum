@@ -265,6 +265,7 @@ _SCENE_GEOMETRY = frozenset(
         "points",
         "d",
         "path",
+        "commands",
     )
 )
 
@@ -2151,6 +2152,1202 @@ _NET: dict[str, Case] = {
 @pytest.mark.parametrize("case", sorted(_NET))
 def test_regression_net(case):
     check_rendering(_NET[case])
+
+
+# ---------------------------------------------------------------------------
+# S2, P2: an aggregate on a span end or a polar channel, per layer
+# ---------------------------------------------------------------------------
+
+
+def _ranged_bar() -> fm.Chart:
+    """One bar per ``g`` from its min ``v`` to its max ``v``."""
+    return mk("bar", y="g", x="min(v)", x2="max(v)")
+
+
+def _polar(mark: str, data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
+    return mk(mark, data, **encoding).coord(fm.CoordPolar())
+
+
+def _radial_bar() -> fm.Chart:
+    """One radial bar per ``g``, its radius the group's summed ``z``."""
+    return _polar("bar", theta="g", radius="sum(z)")
+
+
+def _radial_label() -> fm.Chart:
+    return _polar("text", theta="g", radius="sum(z)", text="g")
+
+
+_SPAN_POLAR: dict[str, Case] = {
+    "S2/F": Case(_ranged_bar, marks={"rect": 2}),
+    "S2/F-objects": Case(
+        lambda: mk("bar", y="g", x=fm.X("v", aggregate="min"), x2=fm.X2("v", aggregate="max")),
+        marks={"rect": 2},
+    ),
+    "S2/F-rule": Case(lambda: mk("rule", x="g", y="min(y)", y2="max(y)"), marks={"line": 2}),
+    # A raw `v` beside `max(v)` is a group key: one bar per distinct (g, v).
+    "S2/F-raw-x": Case(lambda: mk("bar", y="g", x="v", x2="max(v)"), marks={"rect": 8}),
+    "S2/L-inherits": Case(
+        lambda: _ranged_bar().layer(layer("rule")),
+        (_ranged_bar, lambda: mk("rule", y="g", x="min(v)", x2="max(v)")),
+        chart_level=None,
+    ),
+    "S2/L-own-objects": Case(
+        lambda: P(y="g").layer(
+            layer("bar", x=fm.X("v", aggregate="min"), x2=fm.X2("v", aggregate="max"))
+        ),
+        (lambda: P(y="g"), _ranged_bar),
+        chart_level=None,
+    ),
+    **_cases("S2", plus_doors(_ranged_bar, lambda: mk("point", y="g", x="mean(v)"))),
+    "P2/F": Case(lambda: _polar("arc", theta="sum(z)", color="g"), marks={"path": 2}),
+    "P2/F-object": Case(
+        lambda: _polar("arc", theta=fm.Theta("z", aggregate="sum"), color="g"), marks={"path": 2}
+    ),
+    "P2/F-radius": Case(
+        lambda: _polar("arc", theta="sum(z)", radius="mean(z)", color="g"), marks={"path": 2}
+    ),
+    "P2/F-no-color": Case(lambda: _polar("arc", theta="sum(z)"), marks={"path": 1}),
+    "P2/F-count": Case(lambda: _polar("arc", theta="count()", color="g"), marks={"path": 2}),
+    "P2/F-span-ends": Case(
+        lambda: _polar(
+            "arc", theta="min(z)", theta2="max(z)", radius="min(r)", radius2="max(r)", color="g"
+        ),
+        marks={"path": 2},
+    ),
+    "P2/L-inherits": Case(
+        lambda: _radial_bar().layer(layer("text", text="g")),
+        (_radial_bar, _radial_label),
+        chart_level=None,
+    ),
+    "P2/L-raw-host": Case(
+        lambda: _polar("bar", theta="g", radius="z").layer(
+            layer("text", radius="sum(z)", text="g")
+        ),
+        (lambda: _polar("bar", theta="g", radius="z"), _radial_label),
+        chart_level=None,
+    ),
+    **_cases("P2", plus_doors(_radial_bar, _radial_label)),
+    # Layer(data=): the label takes the host's written theta and radius,
+    # aggregating its own rows by them.
+    "P2/LD-same-data": Case(
+        lambda: _radial_bar().layer(fm.Layer(data=df, mark="text", encoding={"text": "g"})),
+        (_radial_bar, _radial_label),
+        chart_level=None,
+    ),
+    "P2/LD-other-data": Case(
+        lambda: _radial_bar().layer(fm.Layer(data=df2, mark="text", encoding={"text": "g"})),
+        (_radial_bar, lambda: _polar("text", df2, theta="g", radius="sum(z)", text="g")),
+        chart_level=None,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SPAN_POLAR))
+def test_S2_P2_a_span_or_polar_aggregate_is_computed_per_layer(case):
+    """S2/P2: ``aggregate=`` on x2/y2 and theta/radius/theta2/radius2 renders on every door.
+
+    Rejects refusing it as drawing no value, the field-keyed output remap
+    that pointed ``x`` and ``x2`` at one column when both aggregate ``v``,
+    and a layer reading its own statistic's output without the polar
+    binding it inherits from its host.
+    """
+    check_rendering(_SPAN_POLAR[case])
+    check_wire_seam(_SPAN_POLAR[case])
+
+
+def _via_transform(
+    mark: str, ops: list[tuple[str, str]], groupby: list[str], **encoding: Any
+) -> fm.Chart:
+    """*mark* over a ``transform_aggregate`` naming each output ``<op>_<field>``, as an encoding aggregate does."""
+    step = fm.transform_aggregate(
+        *[{"field": field, "fn": op, "as": f"{op}_{field}"} for field, op in ops], groupby=groupby
+    )
+    return getattr(fm.Chart(df).transform(step), f"mark_{mark}")().encode(**encoding)
+
+
+_TRANSFORM_ORACLES: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+    "S2/F": (
+        _ranged_bar,
+        lambda: _via_transform(
+            "bar", [("v", "min"), ("v", "max")], ["g"], y="g", x="min_v", x2="max_v"
+        ),
+    ),
+    "S2/F-rule": (
+        lambda: mk("rule", x="g", y="min(y)", y2="max(y)"),
+        lambda: _via_transform(
+            "rule", [("y", "min"), ("y", "max")], ["g"], x="g", y="min_y", y2="max_y"
+        ),
+    ),
+    "S2/F-raw-x": (
+        lambda: mk("bar", y="g", x="v", x2="max(v)"),
+        lambda: _via_transform("bar", [("v", "max")], ["g", "v"], y="g", x="v", x2="max_v"),
+    ),
+    "P2/F": (
+        lambda: _polar("arc", theta="sum(z)", color="g"),
+        lambda: _via_transform("arc", [("z", "sum")], ["g"], theta="sum_z", color="g").coord(
+            fm.CoordPolar()
+        ),
+    ),
+    "P2/F-radius": (
+        lambda: _polar("arc", theta="sum(z)", radius="mean(z)", color="g"),
+        lambda: _via_transform(
+            "arc", [("z", "sum"), ("z", "mean")], ["g"], theta="sum_z", radius="mean_z", color="g"
+        ).coord(fm.CoordPolar()),
+    ),
+    "P2/F-span-ends": (
+        lambda: _polar(
+            "arc", theta="min(z)", theta2="max(z)", radius="min(r)", radius2="max(r)", color="g"
+        ),
+        lambda: _via_transform(
+            "arc",
+            [("z", "min"), ("z", "max"), ("r", "min"), ("r", "max")],
+            ["g"],
+            theta="min_z",
+            theta2="max_z",
+            radius="min_r",
+            radius2="max_r",
+            color="g",
+        ).coord(fm.CoordPolar()),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TRANSFORM_ORACLES))
+def test_S2_P2_an_encoding_aggregate_draws_what_the_same_transform_draws(case):
+    """S2/P2: each span end and polar channel draws its own (field, op) output.
+
+    The oracle is the chart spelled with ``transform_aggregate`` computing
+    the same outputs, so the bars span min to max and the arcs sweep each
+    group's sum. Rejects zero-width bars from both ends reading the last
+    op's column, and a raw ``x="v"`` moved onto ``max_v``.
+    """
+    encoded, transformed = _TRANSFORM_ORACLES[case]
+    assert _quiet(encoded).to_svg() == _quiet(transformed).to_svg()
+
+
+def _aggregate_steps(chart: Any) -> list[dict]:
+    steps = _wire(chart).get("transforms") or []
+    return [step for step in steps if step["type"] == "aggregate"]
+
+
+def test_S2_one_aggregate_computes_both_ends_of_the_span():
+    """S2: one Aggregate per layer holds both ops, grouped like x/y, and each end reads its own."""
+    ops = [
+        {"field": "v", "fn": "min", "as": "min_v"},
+        {"field": "v", "fn": "max", "as": "max_v"},
+    ]
+    flat = _wire(_ranged_bar())
+    assert [(s["ops"], s["groupby"]) for s in _aggregate_steps(_ranged_bar())] == [(ops, ["g"])]
+    assert (flat["encoding"]["x"]["field"], flat["encoding"]["x2"]["field"]) == ("min_v", "max_v")
+    layered = _ranged_bar().layer(layer("rule"))
+    steps = _aggregate_steps(layered)
+    assert [(s["ops"], s["groupby"]) for s in steps] == [(ops, ["g"])] * 2
+    for wire_layer in _wire(layered)["layers"]:
+        ends = (wire_layer["encoding"]["x"]["field"], wire_layer["encoding"]["x2"]["field"])
+        assert ends == ("min_v", "max_v")
+
+
+def test_a_raw_binding_of_an_aggregated_field_stays_a_group_key_on_a_flat_chart():
+    """P3 on F: a channel naming ``y`` raw beside ``size="mean(y)"`` draws ``y``, as a layer does.
+
+    Rejects re-pointing every channel whose field an aggregate reads at that
+    aggregate's output, which drew the flat chart's y axis from ``mean_y``
+    and titled it so, while the same binding on a layer drew ``y``.
+    """
+    flat = _wire(mk("point", x="g", y="y", size="mean(y)"))
+    assert (flat["encoding"]["y"]["field"], flat["encoding"]["size"]["field"]) == ("y", "mean_y")
+    assert "mean_y" not in axis_titles(_quiet(mk("point", x="g", y="y", size="mean(y)").to_svg))
+
+
+def test_P2_a_polar_aggregate_is_lowered_onto_the_channel_the_remap_produces():
+    """P2: the remap runs first, so the aggregate is x's and a layer reading its own output keeps its angle.
+
+    The text layer's own statistic moves it onto a named output, where Rust
+    passes no chart positional channel: its inherited ``theta`` reaches it as
+    the chart's ``x``, listed as an inherited positional binding, as an
+    inherited ``x`` would.
+    """
+    flat = _wire(_polar("arc", theta="sum(z)", color="g"))
+    assert flat["encoding"]["x"]["field"] == "sum_z"
+    assert "theta" not in flat["encoding"]
+    layered = _wire(_polar("bar", theta="g", radius="z").layer(layer("text", text="sum(z)")))
+    label = layered["layers"][1]
+    assert label["encoding"]["x"] == {"field": "g"}
+    assert label["inherited_positional"] == ["x", "y"]
+    assert label["encoding"]["text"]["field"] == "sum_z"
+
+
+# ---------------------------------------------------------------------------
+# P4: the labelled pie, every route, static and interactive
+# ---------------------------------------------------------------------------
+
+
+def _pie(theta: str = "z", **coord: Any) -> fm.Chart:
+    return mk("arc", theta=theta, color="g").coord(fm.CoordPolar(**coord))
+
+
+def _stacked(theta: str) -> fm.Theta:
+    """``Theta(stack=True)`` over *theta*'s field, keeping a shorthand aggregate."""
+    field, aggregate = (theta[4:-1], "sum") if theta.startswith("sum(") else (theta, None)
+    return fm.Theta(field, aggregate=aggregate, stack=True)
+
+
+def _pie_labels(theta: str = "z", data: pl.DataFrame = df, **coord: Any) -> fm.Chart:
+    """Labels stacked into the pie the arc draws over *theta*, one per wedge."""
+    return mk("text", data, theta=_stacked(theta), text="g").coord(fm.CoordPolar(**coord))
+
+
+def _labelled_pie_doors(theta: str) -> dict[str, Case]:
+    """The arc beside its stacked labels on every route that composes two charts."""
+    arc, text = (lambda: _pie(theta)), (lambda: _pie_labels(theta))
+    counts = (8, 8) if theta == "z" else (2, 2)
+    return {
+        **plus_doors(arc, text),
+        # The attached text inherits no color (it draws only its own), while
+        # the chart-level color the seam helper completes it from is the
+        # host's, so its marks are pinned by count.
+        "L": Case(
+            lambda: arc().layer(layer("text", theta=_stacked(theta), text="g")),
+            marks={"path": counts[0], "text": counts[1]},
+            chart_level=None,
+        ),
+        # Layer(data=) over the host's rows, computing its own statistic.
+        "LD-same-data": Case(
+            lambda: arc().layer(
+                fm.Layer(data=df, mark="text", encoding={"theta": _stacked(theta), "text": "g"})
+            ),
+            marks={"path": counts[0], "text": counts[1]},
+            chart_level=None,
+        ),
+    }
+
+
+_LABELLED_PIE: dict[str, Case] = {
+    **_cases("P4", _labelled_pie_doors("z")),
+    **_cases("P4/sum", _labelled_pie_doors("sum(z)")),
+    "P4/F-text": Case(_pie_labels, marks={"text": 8}),
+    "P4/F-band": Case(lambda: _pie("g"), marks={"path": 8}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LABELLED_PIE))
+def test_P4_a_labelled_pie_renders_its_wedges_and_labels_on_every_route(case):
+    """P4: ``arc + text`` over one theta draws each layer as it draws alone.
+
+    Rejects refusing a theta-only text under ``CoordPolar`` (``encoding 'y'
+    expected EncodingSpec, got None``) and a text aggregating at its
+    sibling's grain on the ``sum(z)`` variant.
+    """
+    check_rendering(_LABELLED_PIE[case])
+    check_wire_seam(_LABELLED_PIE[case])
+
+
+def _pie_mid_angles(values: Any) -> np.ndarray:
+    """Each wedge's mid-angle in radians, clockwise from the top: an independent cumulative sum."""
+    v = np.asarray(values, dtype=float)
+    return np.cumsum(v) / v.sum() * 2 * np.pi - v / v.sum() * np.pi
+
+
+def _polar_point(x: float, y: float, cx: float, cy: float) -> tuple[float, float]:
+    """``(angle, radius)`` of a pixel about the center, angle clockwise from the top."""
+    return float(np.arctan2(x - cx, cy - y) % (2 * np.pi)), float(np.hypot(x - cx, y - cy))
+
+
+_LABEL = re.compile(
+    r'<text x="([-\d.]+)" y="([-\d.]+)" fill="([^"]*)" font-family="Inter" font-size="11" '
+    r'text-anchor="middle">([^<]*)</text>'
+)
+
+
+def _static_labels(chart: Any) -> tuple[list[tuple[str, float, float]], float]:
+    """The data labels inside the plot, as ``(content, angle, radius)``, and the outer radius."""
+    svg = _quiet(chart.to_svg)
+    x0, y0, x1, y1 = next(iter(_clip_rects(_svg_root(svg)).values()))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    labels = [
+        (text, *_polar_point(float(x), float(y), cx, cy))
+        for x, y, fill, text in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT and x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+    ]
+    return labels, min(x1 - x0, y1 - y0) / 2
+
+
+def _interactive_labels(chart: Any) -> tuple[list[tuple[str, float, float]], float]:
+    panel = _quiet(lambda: _scene(chart))["panels"][0]
+    area = panel["plot_area"]
+    cx, cy = area["x"] + area["w"] / 2, area["y"] + area["h"] / 2
+    labels = [
+        (node["content"], *_polar_point(node["x"], node["y"], cx, cy))
+        for batch in panel["marks"]
+        if batch["kind"] == "text"
+        for node in batch["nodes"]
+    ]
+    return labels, panel["coord"]["outer_radius"]
+
+
+def _assert_labels(got: list, expected: list) -> None:
+    got, expected = sorted(got), sorted(expected)
+    assert [g[0] for g in got] == [e[0] for e in expected]
+    flat = [float(v) for label in got for v in label[1:]]
+    assert flat == pytest.approx([float(v) for label in expected for v in label[1:]], abs=1e-3)
+
+
+_SUMS = df.group_by("g", maintain_order=True).agg(pl.col("z").sum())
+
+#: Per route and variant: the chart, and each label's (content, mid-angle,
+#: radius as a function of the outer radius). The default label radius is
+#: mid-ring, half the outer radius on a pie.
+_LABEL_ORACLES: dict[str, tuple[Callable[[], Any], Callable[[float], list]]] = {}
+for _variant, _theta, _contents, _values in (
+    ("z", "z", df["g"].to_list(), df["z"].to_numpy()),
+    ("sum", "sum(z)", _SUMS["g"].to_list(), _SUMS["z"].to_numpy()),
+):
+    for _door, _case in _labelled_pie_doors(_theta).items():
+        _LABEL_ORACLES[f"P4/{_variant}/{_door}"] = (
+            _case.build,
+            lambda outer, c=_contents, v=_values: [
+                (t, a, outer / 2) for t, a in zip(c, _pie_mid_angles(v))
+            ],
+        )
+_LABEL_ORACLES["P4/z/F-text"] = (
+    _pie_labels,
+    lambda outer: [(t, a, outer / 2) for t, a in zip(df["g"], _pie_mid_angles(df["z"]))],
+)
+# Layer(data=) over other rows: the labels stack their own rows' pie.
+_SUMS2 = df2.group_by("g", maintain_order=True).agg(pl.col("z").sum())
+for _variant, _theta, _contents, _values in (
+    ("z", "z", df2["g"].to_list(), df2["z"].to_numpy()),
+    ("sum", "sum(z)", _SUMS2["g"].to_list(), _SUMS2["z"].to_numpy()),
+):
+    _LABEL_ORACLES[f"P4/{_variant}/LD-other-data"] = (
+        lambda t=_theta: _pie(t).layer(
+            fm.Layer(data=df2, mark="text", encoding={"theta": _stacked(t), "text": "g"})
+        ),
+        lambda outer, c=_contents, v=_values: [
+            (t, a, outer / 2) for t, a in zip(c, _pie_mid_angles(v))
+        ],
+    )
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_LABEL_ORACLES))
+def test_P4_each_label_sits_at_its_wedges_mid_angle_at_mid_ring(case, kind):
+    """P4: a ``Theta(stack=True)`` label's angle is its wedge's mid-angle from a cumulative sum.
+
+    Rejects placing a stacked label by the linear theta projection (off its
+    wedge) and a ``sum(z)`` label summing rows its wedge does not.
+    """
+    build, expected = _LABEL_ORACLES[case]
+    chart = _quiet(build)
+    if kind == "static" and case.endswith("/LCx"):
+        pytest.skip("LCx renders only interactively")
+    labels, outer = (_static_labels if kind == "static" else _interactive_labels)(chart)
+    _assert_labels(labels, expected(outer))
+
+
+_r = df["r"].to_numpy()
+_g = df["g"].to_list()
+_mid = _pie_mid_angles(df["z"])
+_bands = {"a": 0.5 * np.pi, "b": 1.5 * np.pi}
+
+#: Each label's radius off the default: a donut's mid-ring, a radius
+#: binding, a radius= style value; and an untyped string theta's bands.
+_LABEL_EXTRAS: dict[str, tuple[Callable[[], Any], Callable[[float], list]]] = {
+    "donut": (
+        lambda: _pie(inner_radius=50) + _pie_labels(inner_radius=50),
+        lambda outer: [(t, a, (50 + outer) / 2) for t, a in zip(_g, _mid)],
+    ),
+    "radius-binding": (
+        lambda: mk("text", theta=_stacked("z"), radius="r", text="g").coord(fm.CoordPolar()),
+        lambda outer: [(t, a, r / _r.max() * outer) for t, a, r in zip(_g, _mid, _r)],
+    ),
+    "radius-style": (
+        lambda: (
+            fm.Chart(df)
+            .mark_text(radius=60)
+            .encode(theta=_stacked("z"), text="g")
+            .coord(fm.CoordPolar())
+        ),
+        lambda outer: [(t, a, 60.0) for t, a in zip(_g, _mid)],
+    ),
+    "untyped-band": (
+        lambda: _pie("g") + _pie_labels("g"),
+        lambda outer: [(t, _bands[t], outer / 2) for t in _g],
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_LABEL_EXTRAS))
+def test_P4_a_label_sits_at_its_radius_binding_style_or_mid_ring(case, kind):
+    """P4: the label radius is its radius binding, else ``radius=``, else mid-ring.
+
+    The untyped string theta (``theta="g"``, no declared type) draws one
+    band per category, and a label at each band's mid-angle; it drew no
+    wedge before, reading the strings as pie numbers.
+    """
+    build, expected = _LABEL_EXTRAS[case]
+    chart = _quiet(build)
+    labels, outer = (_static_labels if kind == "static" else _interactive_labels)(chart)
+    _assert_labels(labels, expected(outer))
+
+
+def _polar_points() -> fm.Chart:
+    return _polar("point", theta="v", radius="r")
+
+
+def _point_labels() -> fm.Chart:
+    """Unstacked labels: each sits on its own theta value, where its point draws."""
+    return _polar("text", theta="v", radius="r", text="k")
+
+
+_SCATTER_LABELS: dict[str, Callable[[], Any]] = {
+    "+": lambda: _polar_points() + _point_labels(),
+    "+rev": lambda: _point_labels() + _polar_points(),
+    "L": lambda: _polar_points().layer(layer("text", text="k")),
+    "LD-same-data": lambda: _polar_points().layer(
+        fm.Layer(data=df, mark="text", encoding={"text": "k"})
+    ),
+    "LCm": lambda: fm.LayerChart(_polar_points(), _point_labels())._build_merged(),
+    "LCs": lambda: fm.LayerChart(_polar_points(), _point_labels()),
+    "LCx": lambda: fm.LayerChart(_polar_points(), _point_labels()),
+}
+
+_CIRCLE = re.compile(r'<circle cx="([-\d.]+)" cy="([-\d.]+)"')
+
+
+def _static_points_and_labels(chart: Any) -> tuple[list, list]:
+    svg = _quiet(chart.to_svg)
+    x0, y0, x1, y1 = next(iter(_clip_rects(_svg_root(svg)).values()))
+    points = [
+        (float(x), float(y))
+        for x, y in _CIRCLE.findall(svg)
+        if x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+    ]
+    labels = [
+        (float(x), float(y))
+        for x, y, fill, _ in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT and x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+    ]
+    return points, labels
+
+
+def _interactive_points_and_labels(chart: Any) -> tuple[list, list]:
+    marks = _quiet(lambda: _scene(chart))["panels"][0]["marks"]
+    points = [(n["cx"], n["cy"]) for b in marks if b["kind"] == "point" for n in b["nodes"]]
+    labels = [(n["x"], n["y"]) for b in marks if b["kind"] == "text" for n in b["nodes"]]
+    return points, labels
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("route", sorted(_SCATTER_LABELS))
+def test_P4_an_unstacked_polar_label_sits_on_its_point(route, kind):
+    """P4: without ``Theta(stack=True)`` a polar text sits on its own theta value.
+
+    Each label of a polar scatter draws where its point draws, on every
+    route, ``Layer(data=)`` included (it takes the host's written theta and
+    radius). Rejects stacking every polar text into a pie, which moved the
+    labels to pie mid-angles off their points.
+    """
+    if kind == "static" and route == "LCx":
+        pytest.skip("LCx renders only interactively")
+    chart = _quiet(_SCATTER_LABELS[route])
+    read = _static_points_and_labels if kind == "static" else _interactive_points_and_labels
+    points, labels = read(chart)
+    assert len(points) == len(labels) == df.height
+    assert sorted(labels) == pytest.approx(sorted(points), abs=1e-2)
+
+
+def _polar_label_warnings(render: Callable[[], Any]) -> set[str]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        render()
+    return {str(w.message) for w in caught if "sit off its wedges" in str(w.message)}
+
+
+_UNSTACKED_LABEL_WARNING = (
+    "layer 1: mark_text: these labels sit at their own theta values, but an arc in the same "
+    "panel stacks that theta into a pie, so they sit off its wedges; write stack=True on the "
+    "text's theta (Theta(..., stack=True), on the text or on the theta it inherits) to place "
+    "each label in its wedge"
+)
+
+
+def _unstacked_labels(field: str = "z") -> fm.Chart:
+    return mk("text", theta=field, text="g").coord(fm.CoordPolar())
+
+
+_UNSTACKED_BESIDE_A_PIE: dict[str, Callable[[], Any]] = {
+    "+": lambda: (_pie() + _unstacked_labels()).to_svg(),
+    "L": lambda: _pie().layer(layer("text", text="g")).to_svg(),
+    "LCs": lambda: fm.LayerChart(_pie(), _unstacked_labels()).to_svg(),
+    "I+": lambda: (_pie() + _unstacked_labels()).interactive().to_html(),
+    "LCx": lambda: fm.LayerChart(_pie(), _unstacked_labels()).interactive().to_html(),
+    # The warning names no lowered column (``sum_z``) the user never wrote.
+    "+sum": lambda: (_pie("sum(z)") + _unstacked_labels("sum(z)")).to_svg(),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_UNSTACKED_BESIDE_A_PIE))
+def test_P4_an_unstacked_label_beside_a_pie_on_its_field_warns(route):
+    """P4: a text on the field an arc stacks, itself unstacked, warns its labels sit off the wedges."""
+    assert _polar_label_warnings(_UNSTACKED_BESIDE_A_PIE[route]) == {_UNSTACKED_LABEL_WARNING}
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _pie() + _pie_labels(),
+        lambda: _pie() + _unstacked_labels("r"),
+        _unstacked_labels,
+    ],
+    ids=["stacked", "other-field", "no-arc"],
+)
+def test_P4_a_stacked_label_or_one_off_the_pies_field_does_not_warn(build):
+    assert _polar_label_warnings(lambda: build().to_svg()) == set()
+
+
+def test_P4_theta_stack_on_a_polar_text_reaches_the_wire_and_is_not_warned():
+    """P4: ``Theta(stack=True)`` on a polar text is honored, on its own and on an attached layer.
+
+    Rejects stripping it with the warning that stacking is honored by bar
+    and area only; a Cartesian text's ``stack=`` is still stripped and warned.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        flat = json.loads(_pie_labels().to_spec().to_json())
+        stacked = layer("text", theta=_stacked("z"), text="g")
+        attached = json.loads(_pie().layer(stacked).to_spec().to_json())
+    assert flat["encoding"]["x"] == {"field": "z", "stack": "zero"}
+    assert attached["layers"][1]["encoding"]["x"] == {"field": "z", "stack": "zero"}
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    with pytest.warns(UserWarning) as caught:
+        spec = mk("text", x="g", y=fm.Y("z", stack=True), text="g").to_spec()
+    cartesian = json.loads(spec.to_json())
+    assert "stack" not in cartesian["encoding"]["y"]
+    assert [str(w.message) for w in caught] == [
+        "stack='zero' is not supported by mark_text and was ignored. Stacking is honored by "
+        "mark_bar and mark_area, and by mark_arc and mark_text on the theta channel of a "
+        "CoordPolar."
+    ]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: fm.Chart(df).mark_text(radius=-10),
+        lambda: fm.Layer(mark="text", mark_kwargs={"radius": -10}),
+    ],
+    ids=["mark_text", "Layer"],
+)
+def test_P4_a_negative_label_radius_is_refused_at_construction(build):
+    """P4: a negative ``radius=`` would mirror each label through the center, so it refuses."""
+    with pytest.raises(ValueError, match=r"\(radius=\.\.\.\) must be non-negative; received -10$"):
+        build()
+
+
+def test_P4_a_zero_label_radius_places_every_label_at_the_center():
+    chart = fm.Chart(df).mark_text(radius=0).encode(theta=_stacked("z"), text="g")
+    labels, _ = _static_labels(chart.coord(fm.CoordPolar()))
+    assert [radius for _, _, radius in labels] == pytest.approx([0.0] * df.height, abs=1e-3)
+
+
+def _radius_style_labels() -> fm.Chart:
+    return (
+        fm.Chart(df)
+        .mark_text(radius=60)
+        .encode(theta=_stacked("z"), text="k")
+        .coord(fm.CoordPolar())
+    )
+
+
+_RADIUS_OWNERSHIP: dict[str, Callable[[], Any]] = {
+    # The attached text inherits the host's stacked theta but not its style.
+    "L": lambda: _radius_style_labels().layer(layer("text", text="g")),
+    "+": lambda: _radius_style_labels() + _pie_labels(),
+    "+rev": lambda: _pie_labels() + _radius_style_labels(),
+    "LCm": lambda: fm.LayerChart(_radius_style_labels(), _pie_labels())._build_merged(),
+    "LCs": lambda: fm.LayerChart(_radius_style_labels(), _pie_labels()),
+    "LCx": lambda: fm.LayerChart(_radius_style_labels(), _pie_labels()),
+}
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("route", sorted(_RADIUS_OWNERSHIP))
+def test_P4_a_radius_style_stays_on_its_own_text_layer(route, kind):
+    """P4: one operand's ``mark_text(radius=60)`` never moves a sibling text's labels.
+
+    The ``k`` labels sit at 60 px, the ``g`` labels at mid-ring.
+    """
+    if kind == "static" and route == "LCx":
+        pytest.skip("LCx renders only interactively")
+    chart = _quiet(_RADIUS_OWNERSHIP[route])
+    labels, outer = (_static_labels if kind == "static" else _interactive_labels)(chart)
+    expected = [(k, a, 60.0) for k, a in zip(df["k"], _mid)] + [
+        (g, a, outer / 2) for g, a in zip(_g, _mid)
+    ]
+    _assert_labels(labels, expected)
+
+
+# A stack written once on a shared theta places both the arc and its labels.
+
+
+def _shared_stacked_theta(data: pl.DataFrame = df) -> fm.Chart:
+    return fm.Chart(data).encode(theta=fm.Theta("z", stack=True), color="g")
+
+
+def _stacked_pie() -> fm.Chart:
+    return _shared_stacked_theta().mark_arc().coord(fm.CoordPolar())
+
+
+def _stacked_pie_text() -> fm.Chart:
+    return _shared_stacked_theta().mark_text().encode(text="g").coord(fm.CoordPolar())
+
+
+_SHARED_STACK: dict[str, Callable[[], Any]] = {
+    "L": lambda: _stacked_pie().layer(layer("text", text="g")),
+    "LD": lambda: _stacked_pie().layer(fm.Layer(data=df, mark="text", encoding={"text": "g"})),
+    "+": lambda: _stacked_pie() + _stacked_pie_text(),
+    "LCs": lambda: fm.LayerChart(_stacked_pie(), _stacked_pie_text()),
+    "LCx": lambda: fm.LayerChart(_stacked_pie(), _stacked_pie_text()),
+}
+
+
+def _all_warnings(render: Callable[[], Any]) -> list[str]:
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        render()
+    return [str(w.message) for w in caught]
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("route", sorted(_SHARED_STACK))
+def test_P4_a_stack_written_once_on_the_shared_theta_labels_the_pie(route, kind):
+    """P4: ``Theta('z', stack=True)`` on the base places the arc's wedges and the text's labels.
+
+    Each label sits at its wedge's mid-angle, and nothing warns. Rejects
+    judging the chart-level binding by the host mark, which stripped the
+    stack the text inherits and warned that the arc ignored it.
+    """
+    if kind == "static" and route == "LCx":
+        pytest.skip("LCx renders only interactively")
+    chart = _quiet(_SHARED_STACK[route])
+    render = chart.to_svg if kind == "static" else lambda: chart.interactive().to_html()
+    assert _all_warnings(render) == []
+    labels, outer = (_static_labels if kind == "static" else _interactive_labels)(chart)
+    _assert_labels(labels, [(t, a, outer / 2) for t, a in zip(_g, _mid)])
+
+
+def test_P4_an_arcs_theta_stack_is_honored_without_a_warning():
+    """P4: an arc always sweeps its theta into a pie, so ``Theta(stack=True)`` draws the same pie."""
+    stacked = _stacked_pie()
+    assert _all_warnings(stacked.to_svg) == []
+    assert stacked.to_svg() == _quiet(lambda: _pie().to_svg())
+    assert json.loads(stacked.to_spec().to_json())["encoding"]["x"]["stack"] == "zero"
+
+
+def test_P4_a_point_host_warns_and_its_attached_text_keeps_the_stack():
+    """P4: a polar point cannot stack its theta, so it warns; the text drawing the same binding stacks it."""
+    host = _polar("point", theta=fm.Theta("z", stack=True), radius="r")
+    chart = host.layer(layer("text", text="g"))
+    messages = _all_warnings(chart.to_svg)
+    labels, outer = _static_labels(chart)
+    _assert_labels(labels, [(t, a, r / _r.max() * outer) for t, a, r in zip(_g, _mid, _r)])
+    assert messages == [
+        "stack='zero' is not supported by mark_point and was ignored. Stacking is honored by "
+        "mark_bar and mark_area, and by mark_arc and mark_text on the theta channel of a "
+        "CoordPolar."
+    ]
+
+
+_STACK_ROWS = pl.DataFrame(
+    {"g": ["a", "a", "b", "b"], "c": ["p", "q", "p", "q"], "v": [1.0, 2, 3, 4]}
+)
+
+
+def _stacked_y(mark: str) -> fm.Chart:
+    chart = getattr(fm.Chart(_STACK_ROWS), f"mark_{mark}")()
+    return chart.encode(x="g", y=fm.Y("v", stack=True), color="c")
+
+
+def _stacked_segments(svg: str) -> bool:
+    """Whether each x drawing two bars draws them end to end, one on top of the other."""
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    columns: dict[str, list[tuple[float, float]]] = {}
+    for r in data_bar_rects(mark_layer(svg)):
+        columns.setdefault(r["x"], []).append((float(r["y"]), float(r["height"])))
+    pairs = [sorted(column) for column in columns.values() if len(column) == 2]
+    return bool(pairs) and all(abs(c[0][0] + c[0][1] - c[1][0]) < 1e-2 for c in pairs)
+
+
+def test_a_bar_attached_to_a_point_host_keeps_the_stack_the_point_ignores():
+    """A stacked y the point host cannot honor still stacks the bars that inherit it.
+
+    Each x's two bars sit one on top of the other, and the point warns once.
+    Rejects stripping the chart-level stack by the host mark.
+    """
+    chart = _stacked_y("point").layer(layer("bar"))
+    messages = _all_warnings(chart.to_svg)
+    assert _stacked_segments(chart.to_svg())
+    assert messages == [
+        "stack='zero' is not supported by mark_point and was ignored. Stacking is honored by "
+        "mark_bar and mark_area, and by mark_arc and mark_text on the theta channel of a "
+        "CoordPolar."
+    ]
+
+
+def test_a_point_attached_to_a_bar_host_draws_every_row_unstacked():
+    """A point inheriting a stacked y it cannot honor draws a stack-less copy, every row, and warns.
+
+    Rejects handing it the stack: Rust's value-axis stack then drew 3 of the
+    point's 4 rows with no warning.
+    """
+    chart = _stacked_y("bar").layer(layer("point"))
+    messages = _all_warnings(chart.to_svg)
+    from tests._svg_rects import mark_layer
+
+    assert mark_layer(chart.to_svg()).count("<circle") == _STACK_ROWS.height
+    point = _wire(chart)["layers"][1]
+    assert point["encoding"]["y"] == {"field": "v"}
+    assert point["inherited_positional"] == ["y"]
+    assert messages == [
+        "stack='zero' is not supported by mark_point and was ignored. Stacking is honored by "
+        "mark_bar and mark_area, and by mark_arc and mark_text on the theta channel of a "
+        "CoordPolar."
+    ]
+
+
+# A text draws a color only when it binds one: an inherited color groups its
+# statistic, as detail does, and stays off its wire.
+
+
+def _colored_mean_bars() -> fm.Chart:
+    return mk("bar", x="g", y="mean(y)", color="c")
+
+
+def _mean_label(**encoding: Any) -> dict:
+    return {"text": fm.Text("y", aggregate="mean"), **encoding}
+
+
+_TEXT_COLOR_DOORS: dict[str, Callable[..., Any]] = {
+    "L": lambda **own: _colored_mean_bars().layer(layer("text", **_mean_label(**own))),
+    "LD": lambda **own: _colored_mean_bars().layer(
+        fm.Layer(data=df, mark="text", encoding=_mean_label(**own))
+    ),
+    "+e": lambda **own: (
+        mk("bar", x="g", y="mean(y)") + mk("text", x="g", y="mean(y)", **_mean_label(**own))
+    ).encode(color="c"),
+}
+
+
+def _label_fills_and_values(svg: str) -> list[tuple[str, float]]:
+    x0, y0, x1, y1 = next(iter(_clip_rects(_svg_root(svg)).values()))
+    return sorted(
+        (fill, float(text))
+        for x, y, fill, text in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT and x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+    )
+
+
+@pytest.mark.parametrize("door", sorted(_TEXT_COLOR_DOORS))
+def test_a_text_groups_by_an_inherited_color_without_drawing_or_carrying_it(door):
+    """A text under a colored parent draws one label per colored bar, in its own color.
+
+    The inherited color groups the label's mean as a grouping-only key, the
+    wire's ``group``; it is neither the text layer's color nor drawn, and
+    nothing warns.
+    """
+    chart = _TEXT_COLOR_DOORS[door]()
+    assert _all_warnings(chart.to_svg) == []
+    text = next(layer_ for layer_ in _wire(chart)["layers"] if layer_["mark"] == "text")
+    assert "color" not in text["encoding"]
+    assert "color" not in text.get("inherited_channels", [])
+    assert "detail" not in (text.get("mark_style") or {})
+    assert text["encoding"]["group"] == {"field": "c"}
+    means = df.group_by(["g", "c"]).agg(pl.col("y").mean())["y"].to_list()
+    labels = _label_fills_and_values(chart.to_svg())
+    assert sorted(value for _, value in labels) == pytest.approx(sorted(means))
+    assert {fill for fill, _ in labels} == {"#1f2937"}
+
+
+@pytest.mark.parametrize("door", sorted(_TEXT_COLOR_DOORS))
+def test_a_text_binding_its_own_color_draws_it(door):
+    """A color the text binds itself still draws on its labels."""
+    chart = _TEXT_COLOR_DOORS[door](color="c")
+    labels = _label_fills_and_values(_quiet(chart.to_svg))
+    assert len(labels) == 4
+    assert "#1f2937" not in {fill for fill, _ in labels}
+
+
+# Every door a text inherits a color through: the inherited color spellings
+# group the text's statistic at the bars' grain, and a text's own color
+# spelling shadows them all.
+
+#: Two rows per (g, c, f) group, so each group's mean is its own.
+_GROUP_ROWS = pl.DataFrame(
+    {
+        "g": ["a"] * 8 + ["b"] * 8,
+        "c": (["p"] * 4 + ["q"] * 4) * 2,
+        "f": (["u"] * 2 + ["v"] * 2) * 4,
+        "y": [float(i) for i in range(1, 17)],
+        "v": [1.1, 1.6, 2.2, 2.7, 3.1, 3.8, 4.4, 4.9] * 2,
+    }
+)
+#: Unit bins over [1, 5], so each row's bin is the floor of its ``v``.
+_UNIT_BINS = {"bin_width": 1.0, "extent": (1.0, 5.0), "nice": False}
+_GROUP_ROWS_BINNED = _GROUP_ROWS.with_columns(pl.col("v").floor().alias("v_bin"))
+
+
+def _binned_color() -> fm.Color:
+    return fm.Color("v", bin=_UNIT_BINS)
+
+
+def _group_bars(**parent: Any) -> fm.Chart:
+    return mk("bar", _GROUP_ROWS, x="g", y="mean(y)", **parent)
+
+
+def _group_label(**own: Any) -> fm.Chart:
+    return mk("text", _GROUP_ROWS, x="g", y="mean(y)", **_mean_label(**own))
+
+
+def _group_rule() -> fm.Chart:
+    return mk("rule", _GROUP_ROWS, y="y")
+
+
+_GROUP_DOORS: dict[str, Callable[[dict, dict], Any]] = {
+    "L": lambda parent, own: _group_bars(**parent).layer(layer("text", **_mean_label(**own))),
+    "LD": lambda parent, own: _group_bars(**parent).layer(
+        fm.Layer(data=_GROUP_ROWS, mark="text", encoding=_mean_label(**own))
+    ),
+    "+e": lambda parent, own: (_group_bars() + _group_label(**own)).encode(**parent),
+    "+L": lambda parent, own: (
+        _group_bars(**parent).layer(layer("text", **_mean_label(**own))) + _group_rule()
+    ),
+    "+e+": lambda parent, own: (
+        (_group_bars() + _group_label(**own)).encode(**parent) + _group_rule()
+    ),
+    "LC": lambda parent, own: fm.LayerChart(
+        _group_bars(**parent).layer(layer("text", **_mean_label(**own))), _group_rule()
+    ),
+}
+
+#: Per binding shape: the parent's bindings, the text's own, and the fields
+#: the label's mean groups by (the bars' grain, or the text's own color).
+_GROUP_SHAPES: dict[str, tuple[dict, dict, list[str]]] = {
+    "color+detail": ({"color": "c", "detail": "f"}, {}, ["g", "c", "f"]),
+    "own-detail": ({"color": "c"}, {"detail": "f"}, ["g", "c", "f"]),
+    "parent-fill": ({"fill": "c"}, {}, ["g", "c"]),
+    "parent-stroke": ({"stroke": "c"}, {}, ["g", "c"]),
+    "two-spellings": ({"color": "c", "fill": "f"}, {}, ["g", "c", "f"]),
+    "own-color": ({"color": "c"}, {"color": "f"}, ["g", "f"]),
+    "own-fill": ({"color": "c"}, {"fill": "f"}, ["g", "f"]),
+    "own-stroke": ({"color": "c"}, {"stroke": "f"}, ["g", "f"]),
+    "aggregated-color": ({"color": fm.Color("y", aggregate="sum")}, {}, ["g"]),
+    "binned-color": ({"color": _binned_color()}, {}, ["g", "v_bin"]),
+}
+
+#: The doors where the parent is a ``+`` operand's own encoding (and the
+#: merged, interactive LayerChart).
+_OPERAND_DOORS = frozenset({"+L", "+e+"})
+
+
+def _operand_detail(shape: str, door: str, kind: str) -> bool:
+    operand = door in _OPERAND_DOORS or (door == "LC" and kind == "interactive")
+    return operand and "detail" in _GROUP_SHAPES[shape][0]
+
+
+_GROUP_CASES = [
+    pytest.param(
+        shape,
+        door,
+        kind,
+        id=f"{shape}/{door}/{kind}",
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason=(
+                "a + operand's detail reaches only the layers whose mark draws it, so a "
+                "text under it groups coarser than its bars"
+            ),
+        )
+        if _operand_detail(shape, door, kind)
+        else (),
+    )
+    for shape in _GROUP_SHAPES
+    for door in _GROUP_DOORS
+    for kind in ("static", "interactive")
+]
+
+
+def _interactive_label_values(chart: Any) -> list[float]:
+    marks = _quiet(lambda: _scene(chart))["panels"][0]["marks"]
+    return [float(n["content"]) for b in marks if b["kind"] == "text" for n in b["nodes"]]
+
+
+def _label_values(chart: Any, kind: str) -> list[float]:
+    if kind == "interactive":
+        return sorted(_interactive_label_values(chart))
+    return sorted(value for _, value in _label_fills_and_values(_quiet(chart.to_svg)))
+
+
+@pytest.mark.parametrize(("shape", "door", "kind"), _GROUP_CASES)
+def test_a_text_label_groups_by_every_inherited_color_spelling_its_own_color_shadows(
+    shape, door, kind
+):
+    """A text's mean groups by each inherited color spelling and detail, at the bars' grain.
+
+    A text's own color, fill or stroke shadows the parent's under any
+    spelling, an aggregated color groups nothing, and a binned color groups
+    by its bins, as the bars do. Rejects lowering the inherited color onto
+    the one ``detail`` slot, which dropped the color beside a detail, kept
+    only the first of two spellings, and grouped an own ``color`` by the
+    parent's too; and grouping a binned color by its raw values.
+    """
+    parent, own, grain = _GROUP_SHAPES[shape]
+    chart = _quiet(lambda: _GROUP_DOORS[door](parent, own))
+    if kind == "interactive":
+        chart = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
+    groups = _GROUP_ROWS_BINNED.group_by(grain).agg(pl.col("y").mean())["y"].to_list()
+    assert _label_values(chart, kind) == pytest.approx(sorted(groups))
+
+
+@pytest.mark.parametrize("door", sorted(_GROUP_DOORS))
+def test_the_text_wire_carries_its_grouping_key_and_no_color(door):
+    """The text layer's wire names the parent's color field as ``group`` and binds no color.
+
+    Two spellings carry the one the parent draws as color (``color`` over
+    ``fill``); an aggregated color carries no ``group``.
+    """
+
+    def text_layer(parent: dict) -> dict:
+        chart = _quiet(lambda: _GROUP_DOORS[door](parent, {}))
+        return next(lay for lay in _wire(chart)["layers"] if lay["mark"] == "text")
+
+    two = text_layer({"color": "c", "fill": "f"})
+    assert two["encoding"]["group"] == {"field": "c"}
+    assert "color" not in two["encoding"]
+    assert "group" not in two.get("inherited_channels", [])
+    assert text_layer({"fill": "c"})["encoding"]["group"] == {"field": "c"}
+    assert "group" not in text_layer({"color": fm.Color("y", aggregate="sum")})["encoding"]
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("own_text", ["mean(y)", "g"])
+@pytest.mark.parametrize("door", sorted(_GROUP_DOORS))
+def test_a_text_under_a_binned_color_draws_one_label_per_binned_bar(door, own_text, kind):
+    """A text under a binned color bins with it, with or without its own aggregate.
+
+    One label per binned bar, and its wire ``group`` names the Bin's column
+    the bars read. Rejects grouping by the raw field, which drew one label
+    per distinct value over fewer bars.
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    own = {} if own_text == "mean(y)" else {"text": own_text}
+    chart = _quiet(lambda: _GROUP_DOORS[door]({"color": _binned_color()}, own))
+    bars = _GROUP_ROWS_BINNED.select(["g", "v_bin"]).n_unique()
+    if kind == "static":
+        svg = _quiet(chart.to_svg)
+        assert len(data_bar_rects(mark_layer(svg))) == bars
+        x0, y0, x1, y1 = next(iter(_clip_rects(_svg_root(svg)).values()))
+        labels = [
+            text
+            for x, y, fill, text in _LABEL.findall(svg)
+            if fill != _CHROME_TEXT and x0 <= float(x) <= x1 and y0 <= float(y) <= y1
+        ]
+    else:
+        merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
+        panel_marks = _quiet(lambda: _scene(merged))["panels"][0]["marks"]
+        labels = [n for b in panel_marks if b["kind"] == "text" for n in b["nodes"]]
+    assert len(labels) == bars
+    merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
+    text = next(lay for lay in _wire(merged)["layers"] if lay["mark"] == "text")
+    assert text["encoding"]["group"] == {"field": "bin_start"}
+
+
+# Dodged and stacked labels sit on their bars: Rust's position grouping
+# reads the text's grouping key.
+
+_DODGE_ROWS = pl.DataFrame(
+    {"g": ["a", "a", "b", "b"], "c": ["q", "p", "q", "p"], "y": [1.0, 2, 3, 4]}
+)
+
+
+def _dodged_bars(**encoding: Any) -> fm.Chart:
+    chart = fm.Chart(_DODGE_ROWS).mark_bar(position=fm.Dodge())
+    return chart.encode(x="g", y="y", **encoding)
+
+
+def _dodged_labels() -> fm.Chart:
+    return fm.Chart(_DODGE_ROWS).mark_text(position=fm.Dodge()).encode(x="g", y="y", text="y")
+
+
+_DODGE_ROUTES: dict[str, Callable[[], Any]] = {
+    "+e": lambda: (_dodged_bars() + _dodged_labels()).encode(color="c"),
+    "L-host-dodge": lambda: _dodged_bars(color="c").layer(layer("text", text="y")),
+    "+e+rule": lambda: (
+        (_dodged_bars() + _dodged_labels()).encode(color="c")
+        + fm.Chart(_DODGE_ROWS).mark_rule().encode(y="y")
+    ),
+}
+
+
+def _bar_centers_and_labels(svg: str) -> tuple[list[float], list[float]]:
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    marks = mark_layer(svg)
+    centers = sorted(round(float(r["x"]) + float(r["width"]) / 2, 1) for r in data_bar_rects(marks))
+    labels = sorted(
+        round(float(x), 1) for x, _, fill, _ in _LABEL.findall(svg) if fill != _CHROME_TEXT
+    )
+    return centers, labels
+
+
+@pytest.mark.parametrize("route", sorted(_DODGE_ROUTES))
+def test_a_dodged_label_sits_on_its_own_bar(route):
+    """Each dodged label sits at its bar's center, on every route.
+
+    Rejects the nested ``+`` route dropping the text's grouping, which put
+    both labels of a band at its center.
+    """
+    centers, labels = _bar_centers_and_labels(_quiet(lambda: _DODGE_ROUTES[route]().to_svg()))
+    assert len(labels) == _DODGE_ROWS.height
+    assert labels == centers
+
+
+def test_a_stacked_label_sits_on_its_own_segment():
+    """A label attached to a stacked bar stacks with the bars, one per segment, centered on it."""
+    chart = (
+        fm.Chart(_DODGE_ROWS)
+        .mark_bar(position=fm.Stack())
+        .encode(x="g", y="y", color="c")
+        .layer(layer("text", text="y"))
+    )
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    svg = _quiet(chart.to_svg)
+    segments = sorted(
+        (round(float(r["x"]) + float(r["width"]) / 2, 1), float(r["y"]), float(r["height"]))
+        for r in data_bar_rects(mark_layer(svg))
+    )
+    labels = sorted(
+        (round(float(x), 1), float(y))
+        for x, y, fill, _ in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    )
+    assert len(labels) == len(segments) == _DODGE_ROWS.height
+    for (lx, ly), (sx, sy, sh) in zip(labels, segments, strict=True):
+        assert lx == sx
+        assert sy <= ly <= sy + sh
+
+
+def _binned_mark(mark: str, position: Any, **encoding: Any) -> fm.Chart:
+    chart = getattr(fm.Chart(_GROUP_ROWS), f"mark_{mark}")(position=position)
+    return chart.encode(x="g", y="mean(y)", **encoding)
+
+
+_BINNED_DODGE_ROUTES: dict[str, Callable[[], Any]] = {
+    "+e": lambda: (
+        _binned_mark("bar", fm.Dodge())
+        + _binned_mark("text", fm.Dodge(), text=fm.Text("y", aggregate="mean"))
+    ).encode(color=_binned_color()),
+    "L-host-dodge": lambda: _binned_mark("bar", fm.Dodge(), color=_binned_color()).layer(
+        layer("text", text=fm.Text("y", aggregate="mean"))
+    ),
+    "+e+rule": lambda: (
+        (
+            _binned_mark("bar", fm.Dodge())
+            + _binned_mark("text", fm.Dodge(), text=fm.Text("y", aggregate="mean"))
+        ).encode(color=_binned_color())
+        + _group_rule()
+    ),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_BINNED_DODGE_ROUTES))
+def test_a_dodged_label_under_a_binned_color_sits_on_its_bar(route):
+    """Each label dodges by the bars' bins and sits at its own bar's center."""
+    centers, labels = _bar_centers_and_labels(
+        _quiet(lambda: _BINNED_DODGE_ROUTES[route]().to_svg())
+    )
+    assert len(labels) == _GROUP_ROWS_BINNED.select(["g", "v_bin"]).n_unique()
+    assert labels == centers
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "a bar stacked by a binned color does not draw one segment per (x, bin), with or "
+        "without an attached label, so no label can sit on its segment"
+    ),
+)
+def test_a_stacked_label_under_a_binned_color_sits_on_its_segment():
+    """A label attached to a bar stacked by a binned color stacks with it, one per segment."""
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    chart = _binned_mark("bar", fm.Stack(), color=_binned_color()).layer(
+        layer("text", text=fm.Text("y", aggregate="mean"))
+    )
+    svg = _quiet(chart.to_svg)
+    segments = sorted(
+        (round(float(r["x"]) + float(r["width"]) / 2, 1), float(r["y"]), float(r["height"]))
+        for r in data_bar_rects(mark_layer(svg))
+    )
+    labels = sorted(
+        (round(float(x), 1), float(y))
+        for x, y, fill, _ in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    )
+    assert len(labels) == len(segments) == _GROUP_ROWS_BINNED.select(["g", "v_bin"]).n_unique()
+    for (lx, ly), (sx, sy, sh) in zip(labels, segments, strict=True):
+        assert lx == sx
+        assert sy <= ly <= sy + sh
+
+
+def test_a_text_from_other_rows_adds_no_legend_entry_it_does_not_draw():
+    """A text under a colored host draws no color, so its rows' values join no legend."""
+    other = pl.DataFrame({"g": ["a", "b"], "c": ["zz", "zz"], "y": [5.0, 6.0]})
+    chart = (
+        fm.Chart(_DODGE_ROWS)
+        .mark_point()
+        .encode(x="g", y="y", color="c")
+        .layer(fm.Layer(data=other, mark="text", encoding={"text": "y"}))
+    )
+    assert sorted(_quiet(lambda: legend_set(chart.to_svg()))["c"]) == ["p", "q"]
+
+
+def _text_only(color_route: str) -> fm.Chart:
+    def text(field: str) -> fm.Chart:
+        return fm.Chart(_DODGE_ROWS).mark_text().encode(x="g", y="y", text=field)
+
+    composed = (text("y") + text("c")).encode(color="c")
+    if color_route == "nested":
+        return composed + fm.Chart(_DODGE_ROWS).mark_rule().encode(y="y")
+    return composed
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("color_route", ["+e", "nested"])
+def test_a_color_only_texts_inherit_draws_no_legend_and_warns(color_route, kind):
+    """A composition color no layer draws builds no scale or legend, and says so.
+
+    Interactive output emits each render warning twice (a logged route-wide
+    follow-up), so the distinct messages are compared.
+    """
+    chart = _text_only(color_route)
+    render = chart.to_svg if kind == "static" else lambda: chart.interactive().to_html()
+    assert set(_all_warnings(render)) == {
+        "layer 0: mark_text: color 'c' has no effect: no layer's mark draws color (a text "
+        "mark draws only a color it binds itself), so it gets no scale and no legend; it "
+        "was ignored"
+    }
+    if kind == "static":
+        assert legend_set(_quiet(chart.to_svg)) == {}
 
 
 def test_X3_naming_another_layers_statistic_is_refused_with_the_statistic_remedy():
@@ -4904,6 +6101,23 @@ _CONTROLS: dict[str, Callable[[], Any]] = {
     "+/neither": lambda: P() + line(df2),
     "+/both-size": lambda: P(size="z") + line(size="z"),
     "LCs/neither": lambda: fm.LayerChart(P(), line(df2)),
+    # Polar charts and aggregates with no span or polar aggregate: the
+    # polar remap moved ahead of the statistics, and each channel reads its
+    # own (field, op) output, without changing what these draw.
+    "F/arc-theta": lambda: _polar("arc", theta="z", color="g"),
+    "F/arc-theta-on-y": lambda: mk("arc", theta="z", color="g").coord(fm.CoordPolar(theta="y")),
+    "F/radial-stack": lambda: _polar(
+        "bar", theta="g", radius=fm.Radius("z", stack=True), color="c"
+    ),
+    "L/polar-bar-text": lambda: _polar("bar", theta="g", radius="z").layer(layer("text", text="g")),
+    "+/polar-bar-text": lambda: (
+        _polar("bar", theta="g", radius="z") + _polar("text", theta="g", radius="z", text="g")
+    ),
+    "LCs/polar-arcs": lambda: fm.LayerChart(
+        _polar("arc", theta="z", color="g"), _polar("arc", theta="z", color="g")
+    ),
+    "F/count-bar": lambda: mk("bar", x="g", y="count()"),
+    "F/two-ops": lambda: mk("point", x="g", y="mean(y)", size="sum(z)"),
 }
 
 # The SVG each control renders on the tree before the one-parent model.
@@ -4917,6 +6131,14 @@ _CONTROL_DIGESTS = {
     "+/neither": "ab618fcb0f56aa5dc88e8f28c6c11214824166ef199be81771863ad707e4f386",
     "+/both-size": "356a7ea8ac422ec1379f30507987f35540a7f3933ec32ba8140799c0c2a6496e",
     "LCs/neither": "7d0f2c91ecb949cb1b20bb61543b06c1f7223390b381e767977fb5b53293bc24",
+    "F/arc-theta": "5c5f1b01e3cdbac1ec0e6f2e3e86d88ab69f3534ff6b01d75b58b23066344d1b",
+    "F/arc-theta-on-y": "6d975afe613277131bb547c5fa48984d4de13e97e56115175a88b6fe1c6bfc20",
+    "F/radial-stack": "3d8e9b8abf7f93f0685890ee0014db05bdcc3991d606f1e8d6dda02a17c0eac8",
+    "L/polar-bar-text": "bd839ed9c6026b660bcbdd15192e73016a45e26af9ee0935de00452c29faccbd",
+    "+/polar-bar-text": "bd839ed9c6026b660bcbdd15192e73016a45e26af9ee0935de00452c29faccbd",
+    "LCs/polar-arcs": "614ffef7c51cfb8411810444014f4d4fe0fefa02453ca316b819f637640214aa",
+    "F/count-bar": "d3c75436aa0a8e9be82406d7348cb12ba2eeb4a4aed69235643ed5275395ad39",
+    "F/two-ops": "4dee40d473c7c339798b04dd2f1e31f0eba3e75841ce4df370c6ea8e72fcdf67",
 }
 
 
@@ -4960,7 +6182,7 @@ def _composed_label() -> fm.Chart:
 
 
 def _lowered_label() -> fm.Chart:
-    """A host whose aggregated color its attached text inherits and lowers."""
+    """A host with an aggregated color, beside an attached text that inherits no color."""
     return bar_mean(color=mean(fm.Color)).layer(layer("text", text=fm.Text("y", aggregate="mean")))
 
 
@@ -5261,15 +6483,17 @@ _PROVENANCE: dict[str, tuple[Callable[[], Any], list[list[str]]]] = {
         lambda: (P() + line()).encode(color="c"),
         [[], []],
     ),
-    "host-label-left": (lambda: _host_label() + _rule(), [[], ["color"], []]),
-    "host-label-right": (lambda: _rule() + _host_label(), [[], [], ["color"]]),
+    # A text inherits no color: the host's or composition's color reaches
+    # its statistic as a grouping only, never its wire.
+    "host-label-left": (lambda: _host_label() + _rule(), [[], [], []]),
+    "host-label-right": (lambda: _rule() + _host_label(), [[], [], []]),
     "composed-label-in-a-later-plus": (
         lambda: _composed_label() + _rule(),
-        [["color"], ["color"], []],
+        [["color"], [], []],
     ),
     # The data layer reads its own rows, so the host color names its own `g` from the chart level.
     "LD-color-by-name": (_LD["text-color-by-name"][0], [[], []]),
-    "L-lowered-color": (_lowered_label, [[], ["color"]]),
+    "L-lowered-color": (_lowered_label, [[], []]),
     "own-color-beside-a-host-color": (
         lambda: P(color="c").layer(layer("line", color="g")) + _rule(),
         [[], [], []],

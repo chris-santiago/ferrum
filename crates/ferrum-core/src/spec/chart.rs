@@ -324,7 +324,10 @@ impl ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
-                stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity },
+                stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity,
+                // A grouping key is a layer's, written on a layer's wire; the
+                // chart-level encoding never carries one.
+                group: None },
             transforms,
             facet,
             layers,
