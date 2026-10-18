@@ -4435,7 +4435,7 @@ def _expand_layers(c) -> tuple[list, list]:
     ``Y("v", aggregate="mean")``) are left out of the returned top-level
     transforms: an encoding statistic is per layer, so each layer computes
     its own over the rows it reads, grouped by its own effective encoding
-    (``_resolve_layer_aggregates`` / ``_resolve_layer_bins`` at
+    (``_resolve_layer_statistics`` at
     ``Chart.to_spec``). Left at the top level, it would become a chart-level
     step every layer's own statistic then ran over again.
     """

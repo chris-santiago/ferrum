@@ -3,7 +3,7 @@
 Flexibility-audit silent-wrong-output bug: a layer built with
 ``encode(y=Y("v", aggregate="mean"))`` was silently ignored when layered with
 another chart. The single-chart path resolves the encoding aggregate into a
-top-level ``Aggregate`` transform (via ``_resolve_pending_aggregates``) and
+top-level ``Aggregate`` transform (via ``_resolve_statistic``) and
 remaps the encoding field to the aggregated output column; the layered path
 dropped the aggregate entirely, so the renderer plotted the raw zig-zag through
 every row instead of the aggregated mean.

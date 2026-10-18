@@ -23,20 +23,14 @@ level (that would create an import cycle).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 
 from ferrum._encode_lowering import (
     GROUPING_KEY,
     _GroupingOnly,
-    _aggregate_ops,
+    _encoding_statistics,
     _expand_grouping,
-    _grouping_of,
-    _regroup,
-    _aggregated_encoding,
-    _bin_groupby,
-    _chart_agg_groupby,
-    _lower_bin_encoding,
+    _statistic_plan,
     _theta_axis,
 )
 from ferrum.encoding._aliases import layered_chart_detail, resolved_channel
@@ -295,36 +289,30 @@ def _layer_step(layer: _Layer, transform: object, name: str) -> "_NamedTransform
     return _Branch(name, layer.data_source, [transform])
 
 
-def _resolve_layer_aggregates(layers: list, chart) -> tuple[list, list]:
-    """Resolve each layer's encoding aggregates into named chart-level transforms.
+def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
+    """Resolve each layer's encoding statistic into a named chart-level transform.
 
-    Mirrors ``Chart._resolve_pending_aggregates`` for the layered path, but
-    respects the render architecture: per-layer ``transforms`` are never executed
-    on their own; a layer reads its input batch from a *named* chart-level
-    transform via ``data_source``.  So for every layer whose effective encoding
+    The renderer never executes per-layer transforms on their own; a layer
+    reads its input batch from a *named* chart-level transform via
+    ``data_source``. So for every layer whose effective encoding
     (:func:`_effective_encoding` over *chart*'s encoding) carries an
-    ``aggregate=`` kwarg (e.g. ``Y("v", aggregate="mean")`` or the ``count()``
-    shorthand), its own or one it inherits whole from its parent, this builds a
-    named ``Aggregate`` transform grouped by the effective encoding's other
-    fields plus *chart*'s facet fields, points the layer's ``data_source`` at
-    it, and draws each aggregated channel from the transform's output column.
+    ``aggregate=`` or a ``bin=``, its own or one it inherits whole from its
+    parent, this builds the layer's statistic plan
+    (:func:`~ferrum._encode_lowering._statistic_plan`, grouped by that
+    encoding plus *chart*'s facet fields), adds the plan's one ``Aggregate``
+    or ``Bin`` as a named step, points the layer's ``data_source`` at it and
+    draws each re-pointed channel from the step's output columns.
 
-    Each aggregating layer gets its OWN named transform, so two aggregating
-    layers aggregate independently, each at the grain its own effective
-    encoding gives it.
+    Each computing layer gets its OWN named step, so two layers compute
+    their statistics independently, each at the grain its own effective
+    encoding gives it. A binning layer's aggregates fold into its ``Bin``.
 
     A layer that already carries a ``data_source`` (a ``+`` operand routed to
-    its own chain or to the source) aggregates that named output: its step is
-    a ``_Branch`` over ``data_source`` (see :func:`_layer_step`), and
-    re-pointing the layer's ``data_source`` to the aggregate keeps the
-    ``inherit_non_positional`` routing.  Layers routed to an explicit
-    ``data_source`` *with no pending aggregate* (e.g. composite-mark desugar
-    layers) pass through unchanged.
-
-    A layer that ALSO bins is skipped here and left to
-    :func:`_resolve_layer_bins`, which folds the aggregate into that layer's own
-    ``Bin`` (spec §6.6).  Building a separate named ``Aggregate`` for it first
-    would strand the layer between two named transforms it cannot chain.
+    its own chain or to the source) computes over that named output: its
+    step is a ``_Branch`` over ``data_source`` (see :func:`_layer_step`), and
+    re-pointing the layer's ``data_source`` keeps the
+    ``inherit_non_positional`` routing. Layers computing nothing pass
+    through unchanged.
 
     Parameters
     ----------
@@ -336,110 +324,33 @@ def _resolve_layer_aggregates(layers: list, chart) -> tuple[list, list]:
     Returns
     -------
     (new_layers, named_transforms)
-        ``new_layers`` is the layer list with aggregating layers rewritten;
-        ``named_transforms`` is the list of ``_NamedTransform`` objects to add to
-        the chart-level pipeline (empty when no layer aggregates).
-    """
-    from ferrum import Aggregate
-
-    new_layers: list = []
-    named_transforms: list = []
-    for i, layer in enumerate(layers):
-        effective = _effective_encoding(layer, chart._encoding)
-        pending, bins = _encoding_statistics(effective)
-        if not pending or bins:
-            new_layers.append(layer)
-            continue
-
-        groupby = _chart_agg_groupby(effective, chart._facet)
-        agg_name = f"_layer_agg_{i}"
-        aggregate = Aggregate(_aggregate_ops(pending), groupby=groupby)
-        named_transforms.append(_layer_step(layer, aggregate, agg_name))
-        carried = _carried_bindings(layer, chart._encoding, _aggregated_encoding(effective))
-        new_layers.append(replace(_with_carried(layer, carried), data_source=agg_name))
-
-    return new_layers, named_transforms
-
-
-def _resolve_layer_bins(layers: list, chart) -> tuple[list, list]:
-    """Resolve each layer's encoding bin sentinels into named chart-level transforms.
-
-    Mirrors ``_resolve_layer_aggregates`` for the bin case.  The renderer never
-    executes per-layer transforms standalone; a layer reads its input batch from
-    a *named* chart-level transform via ``data_source``.  So for every layer
-    whose effective encoding (:func:`_effective_encoding` over *chart*'s
-    encoding) carries a ``bin=`` kwarg this builds a named ``Bin`` transform --
-    reads the layer's input (the chain tail, or the layer's own named output)
-    without advancing the unnamed chain -- points the layer's ``data_source``
-    at it, and re-points the layer's bindings at the Bin's own output columns
-    via the shared :func:`_lower_bin_encoding`.
-
-    Each binning layer gets its OWN named transform so two binning layers bin
-    independently. Its Bin is grouped by the grouping channels of its
-    effective encoding, plus *chart*'s facet fields (:func:`_bin_groupby`).
-
-    A layer that carries ``aggregate=`` alongside ``bin=`` is handled here too,
-    not refused: ``_resolve_layer_aggregates`` skipped it, and the aggregate is
-    folded into this layer's own ``Bin`` (``agg_field``/``agg``), so no
-    named→named chaining is needed.
-
-    A layer that already carries a ``data_source`` bins that named output
-    (a ``_Branch`` over it, see :func:`_layer_step`) and its ``data_source``
-    is updated to the named bin.  Layers with a pre-set ``data_source`` but no
-    pending bin pass through unchanged.
-
-    Parameters
-    ----------
-    layers :
-        The chart's resolved ``_Layer`` list, already processed by
-        ``_resolve_layer_aggregates`` (aggregate routing is preserved).
-    chart :
-        The chart the layers belong to, whose encoding is their parent.
-
-    Returns
-    -------
-    (new_layers, named_transforms)
-        ``new_layers`` is the layer list with binning layers rewritten;
-        ``named_transforms`` is the list of ``_NamedTransform`` objects to add
-        to the chart-level pipeline (empty when no layer bins).
+        ``new_layers`` is the layer list with computing layers rewritten;
+        ``named_transforms`` the steps to add to the chart-level pipeline,
+        every ``Aggregate`` before every ``Bin`` (empty when no layer
+        computes).
     """
     new_layers: list = []
-    named_transforms: list = []
+    aggregate_steps: list = []
+    bin_steps: list = []
     for i, layer in enumerate(layers):
         effective = _effective_encoding(layer, chart._encoding)
-        aggregates, pending = _encoding_statistics(effective)
-        if not pending:
+        plan = _statistic_plan(effective, chart._facet)
+        if plan.bin is not None:
+            name = f"_layer_bin_{i}"
+            # Inside a branch the Bin must stay unnamed, so it advances the
+            # branch's own chain and its output is what the branch publishes.
+            step = plan.step(name=name if layer.data_source is None else None)
+            bin_steps.append(_layer_step(layer, step, name))
+        elif plan.aggregates:
+            name = f"_layer_agg_{i}"
+            aggregate_steps.append(_layer_step(layer, plan.step(), name))
+        else:
             new_layers.append(layer)
             continue
+        carried = _carried_bindings(layer, chart._encoding, plan.encoding)
+        new_layers.append(replace(_with_carried(layer, carried), data_source=name))
 
-        # _lower_bin_encoding refuses an encoding that declares more than one
-        # bin, so exactly one sentinel survives to build the transform from.
-        # A binning layer's aggregate sentinels never became transforms
-        # (_resolve_layer_aggregates skips any layer that also bins), so only
-        # `build_bin` is needed here, not `filter_transforms` (which the
-        # single-chart caller uses, since ITS sentinels DO sit on the chart's
-        # transform list).
-        # A binned member of the grouping-only key bins the layer as the raw
-        # binding does; the key then names the Bin's column the bars read.
-        lowering = _lower_bin_encoding(
-            _expand_grouping(effective),
-            pending,
-            aggregates,
-            tuple(_bin_groupby(effective, chart._facet)),
-        )
-        bin_name = f"_layer_bin_{i}"
-        # Inside a branch the Bin must stay unnamed, so it advances the
-        # branch's own chain and its output is what the branch publishes.
-        bin_xform = lowering.build_bin(
-            pending[0], name=bin_name if layer.data_source is None else None
-        )
-        named_transforms.append(_layer_step(layer, bin_xform, bin_name))
-
-        drawn = _regroup(lowering.encoding, _grouping_of(effective))
-        carried = _carried_bindings(layer, chart._encoding, drawn)
-        new_layers.append(replace(_with_carried(layer, carried), data_source=bin_name))
-
-    return new_layers, named_transforms
+    return new_layers, aggregate_steps + bin_steps
 
 
 _POSITIONAL = ("x", "y", "x2", "y2")
@@ -680,31 +591,13 @@ def _stack_judged(layer: _Layer, effective: dict, coord: object) -> tuple[dict, 
     return out, [channel for channel in out if out[channel] is not effective[channel]]
 
 
-def _encoding_statistics(encoding: dict) -> tuple[list, list]:
-    """The ``(_PendingAggregate, _PendingBin)`` sentinels the channels of *encoding* carry.
-
-    A grouping-only key's members count as the raw bindings they stand for,
-    so a binned inherited color bins the layer as it bins its parent.
-    """
-    aggregates: list = []
-    bins: list = []
-    for ch in _expand_grouping(encoding).values():
-        if isinstance(ch, ChannelBase):
-            for t in ch.to_implicit_transforms():
-                if isinstance(t, _PendingAggregate):
-                    aggregates.append(t)
-                elif isinstance(t, _PendingBin):
-                    bins.append(t)
-    return aggregates, bins
-
-
 def _statistic_columns(encoding: dict) -> set:
     """The output columns of the aggregates and bins *encoding*'s channels compute."""
     encoding = _expand_grouping(encoding)
     aggregates, bins = _encoding_statistics(encoding)
     columns = {a.output_col for a in aggregates}
     if bins:
-        lowered = _lower_bin_encoding(encoding, bins, aggregates).encoding
+        lowered = _statistic_plan(encoding, None).encoding
         columns |= {ch.field for ch in lowered.values() if isinstance(ch, ChannelBase)}
         columns -= {ch.field for ch in encoding.values() if isinstance(ch, ChannelBase)}
     return columns
@@ -793,10 +686,7 @@ def _refuse_missing_statistic_inputs(layers: list, chart) -> None:
         if columns is None:
             continue
         inputs = {a.field for a in aggregates if a.field} | {b.field for b in bins}
-        if bins:
-            inputs |= set(_bin_groupby(encoding, chart._facet))
-        else:
-            inputs |= set(_chart_agg_groupby(encoding, chart._facet))
+        inputs |= set(_statistic_plan(encoding, chart._facet).groupby)
         missing = inputs - set(columns)
         # A grouping-only color is refused under the spelling it was bound as.
         for channel, value in _expand_grouping(encoding).items():
@@ -835,7 +725,7 @@ def _transforms_to_json_list_named(transforms: list) -> list:
     """
     if not transforms:
         return []
-    from ferrum import ChartSpec
+    from ferrum._registry import transform_wires
 
     result: list = []
     # Runs of PyO3 objects are batch-serialized through one ChartSpec.
@@ -844,13 +734,9 @@ def _transforms_to_json_list_named(transforms: list) -> list:
     def flush() -> None:
         if not pyo3_batch:
             return
-        dummy = ChartSpec(
-            mark="point",
-            x="__x__",
-            y="__y__",
-            transforms=[t.transform if isinstance(t, _NamedTransform) else t for t in pyo3_batch],
+        serialized = transform_wires(
+            [t.transform if isinstance(t, _NamedTransform) else t for t in pyo3_batch]
         )
-        serialized = json.loads(dummy.to_json()).get("transforms", [])
         for j, original in enumerate(pyo3_batch):
             entry = serialized[j] if j < len(serialized) else {}
             if isinstance(original, _NamedTransform):

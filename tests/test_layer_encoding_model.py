@@ -42,7 +42,7 @@ import re
 import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -6829,3 +6829,682 @@ def test_a_figure_composed_with_plus_renders_its_pinned_bytes(case):
 
     svg = _quiet(lambda: _FIGURES[case]().to_svg())
     assert hashlib.sha256(svg.encode()).hexdigest() == _FIGURE_DIGESTS[case]
+
+
+# ---------------------------------------------------------------------------
+# X5-X8: one statistic plan per layer over a positional bin (spec §4.2, §6.4)
+# ---------------------------------------------------------------------------
+
+
+def _row_bins(data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
+    """``x=bin(v)`` beside a raw ``y``: no aggregate, so each row is placed at its bin."""
+    return mk("point", data, **{"x": fm.X("v", bin=True), "y": "y", **encoding})
+
+
+def _two_means(mark: str = "bar", **encoding: Any) -> fm.Chart:
+    """``x=bin(v)`` beside two distinct aggregates: one mark per bin carrying both."""
+    return mk(
+        mark,
+        **{"x": fm.X("v", bin=True), "y": "mean(y)", "color": mean(fm.Color), **encoding},
+    )
+
+
+_X5: dict[str, Case] = {
+    "F": Case(_row_bins, marks={"circle": 8}),
+    "F-y": Case(lambda: mk("point", x="v", y=fm.Y("y", bin=True)), marks={"circle": 8}),
+    "F-color": Case(lambda: _row_bins(color="c"), marks={"circle": 8}, legends={"c": ("p", "q")}),
+    "L-inherits-the-bin": Case(
+        lambda: _row_bins().layer(layer("tick")),
+        (_row_bins, lambda: mk("tick", x=fm.X("v", bin=True), y="y")),
+        marks={"circle": 8, "line": 8},
+        chart_level=None,
+    ),
+    "L-own-bin": Case(
+        lambda: P().layer(layer("point", x=fm.X("v", bin=True))),
+        (P, _row_bins),
+        marks={"circle": 16},
+        chart_level=None,
+    ),
+    # Every row of both operands: the oracle alone would pass a count bin
+    # grouped by the raw `y` on both sides.
+    **{
+        door: replace(case, marks={"circle": 16})
+        for door, case in _cases("+s", plus_doors(_row_bins, P)).items()
+    },
+    "Fc": Case(lambda: _row_bins().facet("c"), marks={"circle": 8}),
+}
+
+_X8: dict[str, Case] = {
+    "F": Case(_two_means, marks={"rect": 4}, legends=None),
+    "L": Case(
+        lambda: _two_means().layer(layer("point")),
+        (_two_means, lambda: _two_means("point")),
+        chart_level=None,
+    ),
+    "+s": Case(lambda: _two_means() + P(), (_two_means, P)),
+    "+s-rev": Case(lambda: P() + _two_means(), (P, _two_means)),
+}
+
+
+def _binned_count(data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
+    return _binned(data, **encoding)
+
+
+_X6: dict[str, Case] = {
+    "F": Case(_binned_count, marks={"rect": 4}),
+    "F-grouped-by-color": Case(
+        lambda: _binned_count(color="c"), marks={"rect": 8}, legends={"c": ("p", "q")}
+    ),
+    "L-inherits": Case(
+        lambda: _binned_count().layer(layer("point")),
+        (_binned_count, lambda: mk("point", x=fm.X("v", bin=True), y="count()")),
+        chart_level=None,
+    ),
+    "L-label": Case(
+        lambda: _binned_count().layer(layer("text", text="count")),
+        (_binned_count, lambda: mk("text", x=fm.X("v", bin=True), y="count()", text="count")),
+        chart_level=None,
+    ),
+    "+s": Case(lambda: _binned_count() + P(), (_binned_count, P)),
+    "+d": Case(lambda: _binned_count() + P(df2), (_binned_count, lambda: P(df2))),
+    "+r": Case(lambda: P() + _binned_count(), (P, _binned_count)),
+    **_cases("LC", plus_doors(_binned_count, P)),
+    "Fc": Case(lambda: _binned_count().facet("c"), marks={"rect": 6}),
+}
+
+_X7: dict[str, Case] = {
+    "F-tooltip": Case(lambda: _binned_count(tooltip=mean(fm.Tooltip)), marks={"rect": 4}),
+    "L-text": Case(
+        lambda: _binned_count().layer(layer("text", text=mean(fm.Text))),
+        (
+            _binned_count,
+            lambda: mk("text", x=fm.X("v", bin=True), y="count()", text=mean(fm.Text)),
+        ),
+        chart_level=None,
+    ),
+}
+
+_BIN_CELLS = {
+    **_cases("X5", _X5),
+    **_cases("X6", _X6),
+    **_cases("X7", _X7),
+    **_cases("X8", _X8),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BIN_CELLS))
+def test_X5_X8_a_binned_layer_computes_its_own_statistic_on_every_door(case):
+    """Each layer bins at its own grain: per row without an aggregate, per bin with them.
+
+    Rejects a count bin grouped by the raw fields (a raw ``y`` collapsed into
+    counts) and the refusal of a second aggregating channel: each layer draws
+    what it draws alone, on every door.
+    """
+    check_rendering(_BIN_CELLS[case])
+    check_wire_seam(_BIN_CELLS[case])
+
+
+def _svg_and_titles(chart: Any) -> tuple[str, list[str]]:
+    svg = _quiet(chart.to_svg)
+    return svg, axis_titles(svg)
+
+
+@pytest.mark.parametrize(
+    ("encoded", "transformed"),
+    [
+        pytest.param(
+            _row_bins,
+            lambda: (
+                fm.Chart(df)
+                .transform(fm.Bin("v", per_row=True))
+                .mark_point()
+                .encode(x=fm.X("bin_start", title="v"), x2=fm.X2("bin_end", type="Q"), y="y")
+            ),
+            id="x",
+        ),
+        pytest.param(
+            lambda: mk("point", x="v", y=fm.Y("y", bin=True), color="c"),
+            lambda: (
+                fm.Chart(df)
+                .transform(fm.Bin("y", per_row=True))
+                .mark_point()
+                .encode(
+                    x="v", y=fm.Y("bin_start", title="y"), y2=fm.Y2("bin_end", type="Q"), color="c"
+                )
+            ),
+            id="y-colored",
+        ),
+    ],
+)
+def test_X5_a_positional_bin_without_an_aggregate_places_each_row_at_its_bin(encoded, transformed):
+    """X5: every row is kept and drawn at its bin's start, with ``x2`` at the bin's end.
+
+    The encoding route renders the bytes the explicit per-row ``fm.Bin``
+    renders, so the edges are the bin transform's own. Rejects an implicit
+    count per bin, a count grouped by the raw fields and edges computed
+    outside the bin transform.
+    """
+    svg, titles = _svg_and_titles(encoded())
+    assert svg == _quiet(transformed().to_svg)
+    assert tag_counts(svg)["circle"] == df.height
+    assert "bin_start" not in titles and "bin_end" not in titles
+
+
+def test_X5_a_row_binned_layer_keeps_its_raw_rows_unchanged():
+    """X5: the per-row bin moves no row on its unbinned axis: the points sit at the raw ``y``."""
+    cy = re.compile(r'<circle [^>]*cy="([-\d.]+)"')
+    assert sorted(cy.findall(_quiet(_row_bins().to_svg))) == sorted(cy.findall(_quiet(P().to_svg)))
+
+
+def test_X5_a_pre_bound_span_channel_is_kept():
+    encoding = _wire(mk("bar", x=fm.X("v", bin=True), x2="r", y="y"))["encoding"]
+    assert encoding["x"]["field"] == "bin_start"
+    assert encoding["x2"]["field"] == "r"
+
+
+def _bin_steps(chart: Any) -> list[dict]:
+    """Every Bin step on the wire, including a layer's named or branched one."""
+    steps = []
+    for step in _wire(chart).get("transforms") or []:
+        steps += [step] if step["type"] == "bin" else step.get("transforms", [])
+    return [step for step in steps if step["type"] == "bin"]
+
+
+def test_X8_two_aggregates_beside_a_bin_draw_what_the_explicit_bin_draws():
+    """X8: ``bar(x=bin(v), y=mean(y), color=mean(z))`` is one Bin computing both, per bin.
+
+    Rejects the refusal of a second aggregating channel: the encoding route
+    renders the bytes ``fm.Bin(aggregates=...)`` renders, titled by the
+    source field and the aggregates' output names.
+    """
+    transformed = (
+        fm.Chart(df)
+        .transform(
+            fm.Bin(
+                "v",
+                aggregates=[
+                    fm.AggregateOp("y", "mean", "mean_y"),
+                    fm.AggregateOp("z", "mean", "mean_z"),
+                ],
+            )
+        )
+        .mark_bar()
+        .encode(
+            x=fm.X("bin_start", title="v"),
+            x2=fm.X2("bin_end", type="Q"),
+            y="mean_y",
+            color="mean_z",
+        )
+    )
+    svg, titles = _svg_and_titles(_two_means())
+    assert svg == _quiet(transformed.to_svg)
+    assert sorted(titles) == ["mean_y", "v"]
+    assert list(legend_set(svg)) == ["mean_z"]
+
+
+#: Two bins over [0, 8): v < 4 holds rows 0-3, v >= 4 rows 4-7.
+_HALVES = {"bin_count": 2, "extent": (0.0, 8.0), "nice": False}
+
+
+def test_X8_each_bin_carries_both_of_its_own_means():
+    """X8: each bin's label reads its own mean ``z`` beside its mean ``y`` and ``r``."""
+    chart = mk(
+        "text",
+        x=fm.X("v", bin=_HALVES),
+        y="mean(y)",
+        text=mean(fm.Text),
+        tooltip=mean(fm.Tooltip, "r"),
+    )
+    halves = [df.filter(pl.col("v") < 4.0), df.filter(pl.col("v") >= 4.0)]
+    texts = [
+        "".join(e.itertext()).strip()
+        for e in _svg_root(_quiet(chart.to_svg)).iter()
+        if _tag(e) == "text" and e.get("fill") != _CHROME_TEXT and e.get("font-weight") is None
+    ]
+    assert texts[-2:] == [f"{half['z'].mean():g}" for half in halves]
+    (step,) = _bin_steps(chart)
+    assert step["aggregates"] == [
+        {"field": "y", "fn": "mean", "as": "mean_y"},
+        {"field": "z", "fn": "mean", "as": "mean_z"},
+        {"field": "r", "fn": "mean", "as": "mean_r"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("build", "aggregates"),
+    [
+        pytest.param(
+            lambda: _two_means(tooltip=mean(fm.Tooltip, "r")),
+            [("y", "mean", "mean_y"), ("z", "mean", "mean_z"), ("r", "mean", "mean_r")],
+            id="F-tooltip-third",
+        ),
+        pytest.param(
+            lambda: _two_means(tooltip=mean(fm.Tooltip, "y")),
+            [("y", "mean", "mean_y"), ("z", "mean", "mean_z")],
+            id="F-same-op-twice",
+        ),
+        pytest.param(
+            lambda: _two_means().layer(layer("point", tooltip=mean(fm.Tooltip, "r"))),
+            [("y", "mean", "mean_y"), ("z", "mean", "mean_z")],
+            id="L-host",
+        ),
+        pytest.param(
+            lambda: P() + _two_means(tooltip=mean(fm.Tooltip, "r")),
+            [("y", "mean", "mean_y"), ("z", "mean", "mean_z"), ("r", "mean", "mean_r")],
+            id="+s",
+        ),
+    ],
+)
+def test_X8_a_bin_computes_one_op_per_distinct_field_and_op(build, aggregates):
+    """X8: every distinct (field, op) beside the bin is one ``aggregates`` entry; a repeat is one op."""
+    steps = _bin_steps(_quiet(build))
+    assert [
+        (entry["field"], entry["fn"], entry["as"]) for entry in steps[0]["aggregates"]
+    ] == aggregates
+    assert all("agg_field" not in step and "agg" not in step for step in steps)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: mk("bar", x=fm.X("v", bin=True), y="mean(y)"), id="F"),
+        pytest.param(
+            lambda: mk("bar", x=fm.X("v", bin=True), y="mean(y)", tooltip=mean(fm.Tooltip, "y")),
+            id="F-same-op-twice",
+        ),
+        pytest.param(
+            lambda: P() + mk("bar", x=fm.X("v", bin=True), y="mean(y)"),
+            id="+s",
+        ),
+    ],
+)
+def test_X6_one_aggregate_beside_a_bin_keeps_the_agg_field_wire(build):
+    """X6: one distinct aggregate folds through ``agg_field``/``agg`` and draws ``agg_value``."""
+    (step,) = _bin_steps(_quiet(build))
+    assert (step["agg_field"], step["agg"]) == ("y", "mean")
+    assert "aggregates" not in step and "per_row" not in step
+
+
+def test_X8_an_aggregate_beside_a_bin_is_titled_by_its_output_name():
+    """V11 on the positional axis: the aggregate's axis reads ``mean_y``, the bin's ``v``."""
+    _, titles = _svg_and_titles(mk("bar", x=fm.X("v", bin=True), y="mean(y)"))
+    assert sorted(titles) == ["mean_y", "v"]
+
+
+def test_X6_a_grouped_bin_counts_each_group_into_the_pooled_edges():
+    """X6: a color beside a counting bin groups it, over one set of edges (``shared_extent``)."""
+    transformed = (
+        fm.Chart(df)
+        .transform(fm.Bin("v", groupby=["c"], shared_extent=True))
+        .mark_bar()
+        .encode(x=fm.X("bin_start", title="v"), x2=fm.X2("bin_end", type="Q"), y="count", color="c")
+    )
+    assert _quiet(_binned_count(color="c").to_svg) == _quiet(transformed.to_svg)
+
+
+# The SVG bytes each bin chart the statistic plan leaves unchanged renders: a
+# counting bin, a grouped counting bin and a title-less value-channel fold.
+_BIN_CONTROLS: dict[str, Callable[[], Any]] = {
+    "F/count": _binned_count,
+    "F/count-grouped": lambda: _binned_count(color="c"),
+    "F/count-faceted": lambda: _binned_count().facet("c"),
+    "F/tooltip-fold": lambda: _binned_count(tooltip=mean(fm.Tooltip)),
+    "L/count-point": lambda: _binned_count().layer(layer("point")),
+    "+s/count": lambda: _binned_count() + P(),
+}
+
+_BIN_CONTROL_DIGESTS = {
+    "F/count": "b4913a77287da34ca2337f02819e0440b9eaa47957020fd20585a48a5a1250fb",
+    "F/count-grouped": "523e831ec8872260fa2420632fd3a0dbd5d0bf4fb350da0a3af9be04722fbd54",
+    "F/count-faceted": "40d4b34dc2cddc98a409ce0384ad1ae26291acdc0649a479d2c2422bf9c629fb",
+    "F/tooltip-fold": "cf8d948f33f7343eb922c8ca7b775152ed8bdb4dc2c3302b0868bd7e04a92027",
+    "L/count-point": "4e9f129c631c217484d9ecd0c0bbdd67c499495ff8340ab8e87b7beb4cd6a5b4",
+    "+s/count": "c38f6416ccde1da922f83fd900f08a044b104a05017b34cc0801752162d06edc",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BIN_CONTROLS))
+def test_X6_X7_a_counting_bin_renders_its_pinned_bytes(case):
+    import hashlib
+
+    svg = _quiet(lambda: _BIN_CONTROLS[case]().to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _BIN_CONTROL_DIGESTS[case]
+
+
+# ---------------------------------------------------------------------------
+# X5/X6: a Bin's own statistic parameters, on both spellings and every door
+# ---------------------------------------------------------------------------
+
+#: Each statistic parameter a Bin can carry itself, with the output column a
+#: channel draws to read it.
+_BIN_STATISTICS: dict[str, tuple[Callable[[], dict], str, str]] = {
+    "groupby": (lambda: {"groupby": ["c"]}, "count", "groupby"),
+    "cumulative": (lambda: {"cumulative": True}, "count", "cumulative"),
+    "agg_field/agg": (lambda: {"agg_field": "z", "agg": "mean"}, "agg_value", "agg_field/agg"),
+    "aggregates": (
+        lambda: {"aggregates": [fm.AggregateOp("z", "mean", "mean_z")]},
+        "mean_z",
+        "aggregates",
+    ),
+}
+_SPELLINGS = {"pre-built": "bin=Bin(...)", "dict": "bin={...}"}
+
+
+def _declared_bin(param: str, spelling: str) -> Any:
+    kwargs = _BIN_STATISTICS[param][0]()
+    return fm.Bin("v", **kwargs) if spelling == "pre-built" else kwargs
+
+
+def _bin_of(param: str, spelling: str, mark: str, **encoding: Any) -> Callable[[], fm.Chart]:
+    return lambda: mk(mark, **{"x": fm.X("v", bin=_declared_bin(param, spelling)), **encoding})
+
+
+def _declared_doors(
+    build: Callable[[], fm.Chart], partner: Callable[[], fm.Chart] = P
+) -> dict[str, Callable[[], Any]]:
+    """Every door a binned chart is written on: flat, attached, composed, overlaid, faceted."""
+    return {
+        "F": build,
+        "L": lambda: build().layer(layer("point")),
+        "+s": lambda: build() + partner(),
+        "+rev": lambda: partner() + build(),
+        "LCs": lambda: fm.LayerChart(build(), partner()),
+        "LCm": lambda: fm.LayerChart(build(), partner())._build_merged(),
+        "LCi": lambda: fm.LayerChart(build(), partner(), resolve={"y": "independent"}),
+        "LCx": lambda: fm.LayerChart(build(), partner()).interactive(),
+        "Fc": lambda: build().facet("c"),
+    }
+
+
+def _render(chart: Any) -> str:
+    return chart.to_svg() if hasattr(chart, "to_svg") else chart.to_html()
+
+
+def _undrawn_statistic(param: str, spelling: str) -> str:
+    # The columns this Bin computes: `agg_value` only under agg_field/agg,
+    # each `aggregates` entry's name under aggregates.
+    outputs = sorted(
+        ["count", "density"]
+        + (["agg_value"] if param == "agg_field/agg" else [])
+        + (["mean_z"] if param == "aggregates" else [])
+    )
+    written = _SPELLINGS[spelling]
+    return (
+        f"x=X('v', {written}) declares {param}, but no channel draws the Bin's statistic: "
+        f"'y' draws raw rows, so each row would be placed at its bin and {param} dropped. "
+        f"Bind a channel to one of the Bin's output columns "
+        f"({', '.join(repr(name) for name in outputs)}), or remove {param} from {written} "
+        "to place each row at its bin."
+    )
+
+
+_UNDRAWN = {
+    f"{param}/{spelling}/{door}": (param, spelling, build)
+    for param in _BIN_STATISTICS
+    for spelling in _SPELLINGS
+    for door, build in _declared_doors(_bin_of(param, spelling, "point", y="y")).items()
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNDRAWN))
+def test_X5_a_bin_statistic_no_channel_draws_is_refused_naming_the_parameter(case):
+    """X5: beside raw rows a Bin's own statistic would be dropped, so it is refused on every door.
+
+    The message names the user's spelling, the parameter, the channel drawing
+    raw rows and the columns to bind. Rejects letting the per-row placement
+    reach Rust's refusal of a parameter the user never wrote, and rejects
+    grouping the raw ``y`` into a statistic nothing draws.
+    """
+    param, spelling, build = _UNDRAWN[case]
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(build()))
+    assert str(exc.value) == _undrawn_statistic(param, spelling)
+
+
+#: Rects the flat chart draws: (output drawn, output plus a raw color).
+_DECLARED_RECTS = {
+    "groupby": (6, 32),
+    "cumulative": (4, 28),
+    "agg_field/agg": (4, 8),
+    "aggregates": (4, 8),
+}
+
+
+def _drawn_cases() -> dict[str, Case]:
+    out: dict[str, Case] = {}
+    for param, (_, column, _) in _BIN_STATISTICS.items():
+        for shape, extra in (("output", {}), ("output+color", {"color": "y"})):
+            for spelling in _SPELLINGS:
+                # Titled, since a drawn `agg_value` would otherwise title its axis.
+                y = fm.Y(column, title="per bin")
+                build = _bin_of(param, spelling, "bar", y=y, **extra)
+                rects = _DECLARED_RECTS[param][bool(extra)]
+                doors = {
+                    "F": Case(build, marks={"rect": rects}),
+                    "L": Case(
+                        lambda build=build: build().layer(layer("point")),
+                        (build, _bin_of(param, spelling, "point", y=y, **extra)),
+                        chart_level=None,
+                    ),
+                    **plus_doors(build, P),
+                    "Fc": Case(lambda build=build: build().facet("c")),
+                }
+                out.update(_cases(f"{param}/{shape}/{spelling}", doors))
+    return out
+
+
+_DECLARED_DRAWN = _drawn_cases()
+
+
+@pytest.mark.parametrize("case", sorted(_DECLARED_DRAWN))
+def test_X6_a_bin_statistic_a_channel_draws_renders_on_every_door(case):
+    """X6: a channel drawing the Bin's declared output makes the Bin aggregate, on every door.
+
+    An ``aggregates`` entry's output name is a declared column like
+    ``count``, never a group key, and a raw color groups the Bin after its
+    own groupby. Rejects reading only the registry's counting columns.
+    """
+    check_rendering(_DECLARED_DRAWN[case])
+    check_wire_seam(_DECLARED_DRAWN[case])
+
+
+@pytest.mark.parametrize("param", sorted(_BIN_STATISTICS))
+@pytest.mark.parametrize("color", [False, True], ids=["output", "output+color"])
+def test_X6_a_pre_built_bin_draws_what_the_same_dict_draws(param, color):
+    """Both spellings of one Bin are read alike: the same bytes, the same groupby."""
+    column = _BIN_STATISTICS[param][1]
+    extra = {"color": "y"} if color else {}
+    pre, spelled = (_bin_of(param, s, "bar", y=column, **extra)() for s in _SPELLINGS)
+    assert _quiet(pre.to_svg) == _quiet(spelled.to_svg)
+    expected = (["c"] if param == "groupby" else []) + (["y"] if color else [])
+    for chart in (pre, spelled):
+        (step,) = _bin_steps(chart)
+        assert step.get("groupby", []) == expected
+        assert step["shared_extent"] is color
+
+
+_OWN_AND_CHANNEL = {
+    f"{param}/{door}": (param, build)
+    for param in ("agg_field/agg", "aggregates")
+    for door, build in _declared_doors(
+        _bin_of(param, "dict", "bar", y=fm.Y("y", aggregate="sum"))
+    ).items()
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OWN_AND_CHANNEL))
+def test_X8_a_bins_own_aggregate_beside_a_channel_aggregate_is_refused(case):
+    """X8: the per-bin statistic is declared once, on the channels or on the Bin.
+
+    Rejects replacing the Bin's own aggregate with the channel's silently.
+    """
+    param, build = _OWN_AND_CHANNEL[case]
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(build()))
+    assert str(exc.value) == (
+        f"x=X('v', bin={{...}}) declares its own {param} and channel 'y' carries "
+        f"aggregate='sum': declare the per-bin statistic in one place. Drop {param} from "
+        "bin={...} to compute the channel's aggregate per bin, or drop aggregate= and bind "
+        "'y' to the Bin's output column."
+    )
+
+
+@pytest.mark.parametrize(
+    ("bin_", "y", "groupby"),
+    [
+        pytest.param({"agg_field": "z", "agg": "mean"}, "count()", [], id="own-agg-beside-count"),
+        pytest.param({"groupby": ["c"]}, "mean(y)", ["c"], id="own-groupby-beside-mean"),
+        pytest.param({"cumulative": True}, "mean(y)", [], id="own-cumulative-beside-mean"),
+    ],
+)
+def test_X6_a_bins_own_parameter_beside_a_channel_count_or_aggregate_is_kept(bin_, y, groupby):
+    """X6: a count() reads the Bin's count beside its own aggregate; own groupby stays beside a mean."""
+    chart = mk("bar", x=fm.X("v", bin=bin_), y=y)
+    (step,) = _bin_steps(chart)
+    assert step.get("groupby", []) == groupby
+    assert all(step.get(k) == v for k, v in bin_.items() if k != "groupby")
+    assert tag_counts(_quiet(chart.to_svg))["rect"] > 0
+
+
+_UNREAD_AGG_VALUE = {
+    f"{param}/{spelling}/{door}": (param, spelling, build)
+    for param in ("groupby", "cumulative", "aggregates")
+    for spelling in _SPELLINGS
+    for door, build in _declared_doors(_bin_of(param, spelling, "bar", y="agg_value")).items()
+    if door in ("F", "L")
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNREAD_AGG_VALUE))
+def test_X5_agg_value_beside_a_bin_computing_none_is_refused_as_an_undrawn_statistic(case):
+    """X5: a Bin without agg_field/agg computes no ``agg_value``, so ``y="agg_value"`` reads raw rows.
+
+    The refusal lists only the columns this Bin computes. Rejects reading a
+    Bin's columns from its kind's table, which lists ``agg_value`` for every
+    Bin and sends the user to a column the Bin never emits.
+    """
+    param, spelling, build = _UNREAD_AGG_VALUE[case]
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(build()))
+    assert str(exc.value) == _undrawn_statistic(param, spelling)
+
+
+def _named_bin(spelling: str, name: str = "foo") -> Any:
+    return fm.Bin("v", name=name) if spelling == "pre-built" else {"name": name}
+
+
+_NAMED_ROUTES: dict[str, dict[str, Any]] = {
+    "count": {"y": "count"},
+    "count+color": {"y": "count", "color": "c"},
+    "raw-y": {"y": "y"},
+}
+
+_NAMED = {
+    f"{spelling}/{route}/{door}": (spelling, build)
+    for spelling in _SPELLINGS
+    for route, encoding in _NAMED_ROUTES.items()
+    for door, build in _declared_doors(
+        lambda spelling=spelling, encoding=encoding: mk(
+            "bar", x=fm.X("v", bin=_named_bin(spelling)), **encoding
+        )
+    ).items()
+}
+# An empty name is a name too: refused alike, on every route.
+_NAMED |= {
+    f"{spelling}/empty-name/{door}": (spelling, build)
+    for spelling in _SPELLINGS
+    for door, build in _declared_doors(
+        lambda spelling=spelling: mk("bar", x=fm.X("v", bin=_named_bin(spelling, "")), y="count")
+    ).items()
+}
+
+
+def _named_refusal(written: str, spelling: str, name: str = "foo") -> str:
+    return (
+        f"{written} names its Bin {name!r}, but an encoding bin is computed for its own layer "
+        "and published to no other layer, so name= would be ignored. "
+        f"Remove name= from {spelling}; to publish the binned rows under a name another "
+        f"layer reads, compute them with Chart.transform(fm.Bin('v', name={name!r}))."
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_NAMED))
+def test_X5_a_named_encoding_bin_is_refused_on_every_route(case):
+    """An encoding bin belongs to its layer, so a ``name=`` publishing its rows is refused.
+
+    Rejects dropping the name silently, or refusing only when an unrelated
+    channel happens to send the Bin through the chain.
+    """
+    spelling, build = _NAMED[case]
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(build()))
+    written = _SPELLINGS[spelling]
+    name = "" if "/empty-name/" in case else "foo"
+    assert str(exc.value) == _named_refusal(f"x=X('v', {written})", written, name)
+
+
+@pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
+def test_a_named_color_bin_is_refused(spelling):
+    chart = mk("bar", x="g", y="count()", color=fm.Color("v", bin=_named_bin(spelling)))
+    with pytest.raises(ValueError) as exc:
+        _quiet(chart.to_svg)
+    written = _SPELLINGS[spelling]
+    assert str(exc.value) == _named_refusal(f"color=Color('v', {written})", written)
+
+
+#: Explicit edges, so an independent oracle knows them: 0, 8/3, 16/3, 8.
+_COLOR_BIN_EDGES = {"bin_count": 3, "extent": (0.0, 8.0), "nice": False}
+
+
+def _color_own_groupby(spelling: str) -> fm.Chart:
+    own = (
+        fm.Bin("v", groupby=["c"], **_COLOR_BIN_EDGES)
+        if spelling == "pre-built"
+        else {"groupby": ["c"], **_COLOR_BIN_EDGES}
+    )
+    return mk("bar", x="g", y="count", color=fm.Color("v", bin=own))
+
+
+@pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
+@pytest.mark.parametrize("door", ["F", "L"])
+def test_X6_a_color_bin_groups_by_its_own_groupby_then_the_drawn_fields(spelling, door):
+    """X6, a non-positional bin with its own groupby: own ``c`` first, then the drawn ``g``.
+
+    A color bin with its own Bin parameters is the cell the color family's
+    parameter refusal replaces once a color bin computes no rows.
+    """
+    chart = _color_own_groupby(spelling)
+    if door == "L":
+        chart = chart.layer(layer("point"))
+    steps = _bin_steps(_quiet(lambda: chart))
+    assert steps
+    for step in steps:
+        assert step["groupby"] == ["c", "g"]
+        assert step["shared_extent"] is True
+        assert "per_row" not in step
+
+
+@pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
+@pytest.mark.parametrize("door", sorted(_declared_doors(P)))
+def test_X6_a_color_bin_with_its_own_groupby_draws_a_bar_per_bin_and_group(spelling, door):
+    """One bar per (bin, group): every bin of the shared edges, for each (c, g) group.
+
+    The oracle is numpy's histogram over the same explicit edges, per group,
+    and it counts each group's bins, empty ones included, as a grouped Bin
+    emits them. A faceted panel holds the groups of its own ``c``, so the
+    total is the same.
+    """
+    edges = np.linspace(*_COLOR_BIN_EDGES["extent"], _COLOR_BIN_EDGES["bin_count"] + 1)
+    expected = sum(
+        len(np.histogram(group["v"].to_numpy(), bins=edges)[0])
+        for _, group in df.group_by(["c", "g"])
+    )
+    doors = _declared_doors(lambda: _color_own_groupby(spelling), lambda: mk("point", x="g", y="y"))
+    if door == "LCx":
+        # The LCx door is the overlay's interactive scene: read its bar nodes.
+        overlay = _quiet(doors["LCs"])
+        census_ = _quiet(lambda: interactive_census(overlay))
+        bars = sum(n for (kind, _), n in census_.items() if kind == "bar")
+    else:
+        bars = tag_counts(_quiet(_quiet(doors[door]).to_svg))["rect"]
+    assert bars == expected

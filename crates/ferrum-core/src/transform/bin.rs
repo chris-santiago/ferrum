@@ -182,6 +182,46 @@ pub(crate) struct BinSpec {
     pub name: Option<String>,
 }
 
+impl BinSpec {
+    /// The names of this `Bin`'s per-bin aggregate columns, in output order:
+    /// `agg_value` when `agg_field`/`agg` is set, else each `aggregates`
+    /// entry's `as_`, else none. The one naming decision the batch builders,
+    /// the `groupby` collision guard and [`Self::computed_columns`] read.
+    pub(crate) fn aggregate_column_names(&self) -> Vec<&str> {
+        if self.agg_field.is_some() && self.agg.is_some() {
+            return vec!["agg_value"];
+        }
+        self.aggregates.iter().flatten().map(|op| op.as_.as_str()).collect()
+    }
+
+    /// The columns this `Bin` computes, in output order: under `per_row`, the
+    /// two edge columns it appends to the input rows; otherwise
+    /// `bin_start`/`bin_end`/`count`/`density` followed by
+    /// [`Self::aggregate_column_names`]. The caller's own columns (the input
+    /// rows under `per_row`, the `groupby` keys otherwise) are not computed
+    /// and are not listed.
+    pub(crate) fn computed_columns(&self) -> Vec<String> {
+        if self.per_row {
+            return PER_ROW_COLUMNS.map(String::from).to_vec();
+        }
+        bin_output_field_names(&self.aggregate_column_names())
+    }
+}
+
+/// `ferrum._core.bin_output_columns(bin)`: the columns one `Bin` computes
+/// ([`BinSpec::computed_columns`]), so Python lists exactly the columns an
+/// encoding can bind beside this `Bin` rather than keeping a naming rule of
+/// its own. Registered in `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn bin_output_columns(bin: pyo3::PyRef<'_, PyBin>) -> PyResult<Vec<String>> {
+    match &bin.0 {
+        TransformSpec::Bin(spec) => Ok(spec.computed_columns()),
+        other => Err(PyValueError::new_err(format!(
+            "bin_output_columns: expected a Bin transform, got {other:?}"
+        ))),
+    }
+}
+
 /// Flat serde projection of [`BinSpec`] preserving the legacy wire shape.
 ///
 /// `BinSpec` serializes/deserializes through this struct so the wire keeps the
@@ -493,9 +533,9 @@ impl BinAggregate {
     }
 }
 
-/// Resolve `spec`'s per-bin aggregate columns, in output order: the one
-/// `agg_value` column of `agg_field`/`agg`, each `aggregates`
-/// entry, or none. A field is resolved via [`AggColumn::resolve`], the same
+/// Resolve `spec`'s per-bin aggregate columns, in output order and named by
+/// [`BinSpec::aggregate_column_names`]: the one column of `agg_field`/`agg`,
+/// each `aggregates` entry, or none. A field is resolved via [`AggColumn::resolve`], the same
 /// numeric-widening/null-drop policy `stat_aggregate` uses, so each column
 /// matches what `Aggregate` would compute over the same rows.
 fn resolve_bin_aggregates(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Vec<BinAggregate>> {
@@ -505,24 +545,27 @@ fn resolve_bin_aggregates(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Vec<B
         })?;
         Ok(BinAggregateSource::Field(AggColumn::resolve(batch.column(idx), field, fn_, "stat_bin")?))
     };
-    if let (Some(field), Some(fn_)) = (&spec.agg_field, spec.agg) {
-        return Ok(vec![BinAggregate {
-            name: "agg_value".into(),
-            source: field_column("agg_field", field, fn_)?,
-        }]);
-    }
-    spec.aggregates
-        .iter()
-        .flatten()
-        .map(|op| {
-            let source = if op.is_count_star() {
-                BinAggregateSource::Rows
-            } else {
-                field_column("aggregates field", &op.field, op.fn_)?
-            };
-            Ok(BinAggregate { name: op.as_.clone(), source })
-        })
-        .collect()
+    let sources: Vec<BinAggregateSource> = if let (Some(field), Some(fn_)) = (&spec.agg_field, spec.agg) {
+        vec![field_column("agg_field", field, fn_)?]
+    } else {
+        spec.aggregates
+            .iter()
+            .flatten()
+            .map(|op| {
+                if op.is_count_star() {
+                    Ok(BinAggregateSource::Rows)
+                } else {
+                    field_column("aggregates field", &op.field, op.fn_)
+                }
+            })
+            .collect::<PyResult<_>>()?
+    };
+    Ok(spec
+        .aggregate_column_names()
+        .into_iter()
+        .zip(sources)
+        .map(|(name, source)| BinAggregate { name: name.to_string(), source })
+        .collect())
 }
 
 /// `Bin`'s field requirement: `agg_field` and `agg` are set together or not
@@ -807,7 +850,7 @@ fn apply_grouped(
 ) -> PyResult<RecordBatch> {
     // Multi-column partition via the shared helper (first-appearance order,
     // null-key skip, dtype-preservation — same policy as single-column path).
-    refuse_groupby_output_collision("stat_bin", group_cols, &bin_output_field_names(aggs))?;
+    refuse_groupby_output_collision("stat_bin", group_cols, &spec.computed_columns())?;
     let partition =
         group_partition_multi(batch, group_cols, "stat_bin", NullKeyPolicy::Skip, warn_ctx)?;
 
@@ -866,9 +909,9 @@ struct BinColumns {
 impl BinColumns {
     /// The `bin_start`/`bin_end`/`count`/`density` fields/arrays every bin
     /// output batch carries, plus one field/array per aggregate, named by
-    /// `aggs`. Shared by both builders below so the column list is decided in
-    /// exactly one place.
-    fn into_fields_and_cols(self, aggs: &[BinAggregate]) -> (Vec<Field>, Vec<ArrayRef>) {
+    /// `agg_names`. Shared by both builders below so the column list is
+    /// decided in exactly one place.
+    fn into_fields_and_cols(self, agg_names: &[&str]) -> (Vec<Field>, Vec<ArrayRef>) {
         let mut fields = vec![
             Field::new("bin_start", DataType::Float64, false),
             Field::new("bin_end",   DataType::Float64, false),
@@ -881,8 +924,8 @@ impl BinColumns {
             Arc::new(UInt64Array::from(self.counts)),
             Arc::new(Float64Array::from(self.densities)),
         ];
-        for (agg, values) in aggs.iter().zip(self.agg_values) {
-            fields.push(Field::new(&agg.name, DataType::Float64, true));
+        for (name, values) in agg_names.iter().zip(self.agg_values) {
+            fields.push(Field::new(*name, DataType::Float64, true));
             cols.push(Arc::new(Float64Array::from(values)));
         }
         (fields, cols)
@@ -894,13 +937,18 @@ impl BinColumns {
 /// [`refuse_groupby_output_collision`]. Derived from
 /// [`BinColumns::into_fields_and_cols`] itself rather than re-spelled, so the
 /// collision guard cannot fall behind the column decision.
-fn bin_output_field_names(aggs: &[BinAggregate]) -> Vec<String> {
-    let (fields, _) = empty_bin_columns(aggs.len()).into_fields_and_cols(aggs);
+fn bin_output_field_names(agg_names: &[&str]) -> Vec<String> {
+    let (fields, _) = empty_bin_columns(agg_names.len()).into_fields_and_cols(agg_names);
     fields.into_iter().map(|f| f.name().clone()).collect()
 }
 
+/// The output names of resolved aggregates, for the batch builders.
+fn agg_names(aggs: &[BinAggregate]) -> Vec<&str> {
+    aggs.iter().map(|a| a.name.as_str()).collect()
+}
+
 fn build_bin_batch(cols: BinColumns, aggs: &[BinAggregate]) -> PyResult<RecordBatch> {
-    let (fields, cols) = cols.into_fields_and_cols(aggs);
+    let (fields, cols) = cols.into_fields_and_cols(&agg_names(aggs));
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
@@ -916,7 +964,7 @@ fn build_bin_batch_grouped(
     group_col_names: &[String],
     group_dtypes: &[DataType],
 ) -> PyResult<RecordBatch> {
-    let (mut fields, mut cols) = cols.into_fields_and_cols(aggs);
+    let (mut fields, mut cols) = cols.into_fields_and_cols(&agg_names(aggs));
     // FA-7: preserve original groupby dtypes (nullable for FA-9 null keys,
     // though null keys are skipped upstream for stat_bin).
     for (name, dtype) in group_col_names.iter().zip(group_dtypes.iter()) {
@@ -3613,6 +3661,77 @@ mod tests {
                 refused(build(false, None, Some(&tuple_entry))),
                 "Bin: aggregates[1] must be an AggregateOp"
             );
+        });
+    }
+
+    // ── computed columns: the one reader of the columns a Bin computes ──────
+
+    /// For every statistic shape, the columns `computed_columns` names are
+    /// exactly the columns the applied batch carries beyond the caller's own
+    /// (the input columns, which include the `groupby` keys), in order.
+    #[test]
+    fn computed_columns_match_the_applied_schema() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 9.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            ],
+        )
+        .unwrap();
+        let inputs = ["x", "g", "w"];
+        for (params, expected) in [
+            ("", vec!["bin_start", "bin_end", "count", "density"]),
+            (r#","agg_field":"w","agg":"mean""#, vec!["bin_start", "bin_end", "count", "density", "agg_value"]),
+            (
+                r#","aggregates":[{"field":"w","fn":"mean","as":"mean_w"},{"field":"*","fn":"count","as":"rows"}]"#,
+                vec!["bin_start", "bin_end", "count", "density", "mean_w", "rows"],
+            ),
+            (r#","groupby":["g"]"#, vec!["bin_start", "bin_end", "count", "density"]),
+            (r#","cumulative":true"#, vec!["bin_start", "bin_end", "count", "density"]),
+            (
+                r#","groupby":["g"],"agg_field":"w","agg":"max""#,
+                vec!["bin_start", "bin_end", "count", "density", "agg_value"],
+            ),
+            (
+                r#","groupby":["g"],"shared_extent":true,"aggregates":[{"field":"w","fn":"sum","as":"s"},{"field":"w","fn":"min","as":"lo"}]"#,
+                vec!["bin_start", "bin_end", "count", "density", "s", "lo"],
+            ),
+            (r#","per_row":true"#, vec!["bin_start", "bin_end"]),
+        ] {
+            let spec = bin_json(&format!(r#"{{"field":"x"{params}}}"#));
+            let out = apply(&spec, &batch).unwrap();
+            let computed: Vec<String> =
+                field_names(&out).into_iter().filter(|n| !inputs.contains(&n.as_str())).collect();
+            assert_eq!(spec.computed_columns(), computed, "{params}: reader matches the applied schema");
+            assert_eq!(spec.computed_columns(), expected, "{params}");
+        }
+    }
+
+    /// The pyfunction returns the reader's list for a `Bin` built by its
+    /// constructor.
+    #[test]
+    fn bin_output_columns_pyfunction_reads_the_constructed_bin() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let columns = |bin: PyBin| bin_output_columns(pyo3::Py::new(py, bin).unwrap().borrow(py)).unwrap();
+            let plain = PyBin::new("x", None, None, None, None, true, false, false, None, None, None, false, None, None);
+            assert_eq!(columns(plain.unwrap()), ["bin_start", "bin_end", "count", "density"]);
+            let agg = PyBin::new(
+                "x", None, None, None, None, true, false, false, None,
+                Some("w".into()), Some("mean".into()), false, None, None,
+            );
+            assert_eq!(columns(agg.unwrap()), ["bin_start", "bin_end", "count", "density", "agg_value"]);
+            let per_row = PyBin::new("x", None, None, None, None, true, false, false, None, None, None, true, None, None);
+            assert_eq!(columns(per_row.unwrap()), ["bin_start", "bin_end"]);
         });
     }
 }

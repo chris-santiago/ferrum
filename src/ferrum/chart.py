@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
-from ferrum._encode_lowering import _aggregated_encoding
 from ferrum._layer import _Layer, _PendingMark, inherited_positional_taken
 from ferrum._layer_transforms import (
     ChartRows,
@@ -38,9 +37,8 @@ from ferrum._layer_transforms import (
     _advances_chain,
     _layer_pending_aggregates,
     _layer_pending_bins,
-    _resolve_layer_aggregates,
+    _resolve_layer_statistics,
     _same_step,
-    _resolve_layer_bins,
     _scoped_to_layers,
     _transforms_to_json_list_named,
 )
@@ -2972,7 +2970,7 @@ class Chart(
         rhs_layers = _carry_layer_coord(rhs_layers, lhs._coord, rhs._coord)
         # Adopt the LHS's *filtered* top-level transforms (``_expand_layers``
         # strips encoding-implicit ``_PendingAggregate`` sentinels — each layer
-        # aggregates its own data via ``_resolve_layer_aggregates``).  The clone
+        # aggregates its own data via ``_resolve_layer_statistics``).  The clone
         # above copied ``lhs._transforms`` verbatim, which would re-introduce a
         # spurious chart-level aggregate over the merged batch.
         new._transforms = lhs_top_xforms
@@ -3973,30 +3971,18 @@ class Chart(
             chart_detail = enc.pop("detail", None)
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
-        # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
-        # Runs BEFORE the encoding specs are built and before the aggregate
-        # resolution: a Bin replaces the batch schema with its own columns, so
-        # the binned channel, its span channel and any opposing aggregate= must
-        # be re-pointed at those columns first — and an opposing aggregate of a
-        # real column is FOLDED INTO the Bin (spec §6.6), which means it must be
-        # taken off the transform list before _resolve_pending_aggregates would
-        # turn it into a second, unsatisfiable Aggregate.
+        # --- The chart's own encoding statistic (single-chart) ---
+        # Runs BEFORE the encoding specs are built: the statistic's one step
+        # (an Aggregate, or a Bin that replaces the batch schema with its own
+        # columns or appends its bin columns per row) decides which column
+        # each channel draws.
         # A layered chart's encoding statistics are per layer (resolved below,
         # each over the rows its layer reads), never a chart-level step, so
-        # its sentinels leave the chain and these calls are no-ops there.
+        # its sentinels leave the chain and this call is a no-op there.
         effective_transforms = list(resolved._transforms) if resolved._transforms else []
         if resolved._layers is not None:
             effective_transforms = list(_chain_steps(effective_transforms))
-        effective_transforms, enc = self._resolve_pending_bins(effective_transforms, enc)
-
-        # --- Aggregated channels draw their aggregate's output column ---
-        # The chart's one Aggregate (resolved below) emits each (field, op) under
-        # its own output column (e.g. "mean_val"), so every channel carrying
-        # aggregate= is re-pointed there. Read off the post-bin-lowering list:
-        # a channel whose aggregate the Bin absorbed was already re-pointed at
-        # the Bin's columns.
-        if any(isinstance(t, _PendingAggregate) for t in effective_transforms):
-            enc = _aggregated_encoding(enc)
+        effective_transforms, enc = self._resolve_statistic(resolved, effective_transforms, enc)
 
         # Mark style: apply mark_* override last so it beats the chart's mark style.
         # A layered chart (multiple marks) has no single primary mark — apply_mark_style
@@ -4022,17 +4008,14 @@ class Chart(
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
         kw.update(self._build_encoding_specs(resolved, enc, _override_payload, mark_zero=mark_zero))
 
-        # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
-        effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
-
-        # --- Resolve per-layer encoding aggregates (layered charts) ---
-        # Each aggregating layer becomes a NAMED chart-level Aggregate transform
-        # whose output the layer reads via ``data_source`` (per-layer transforms
-        # are never executed standalone by the renderer).  Two aggregating layers
-        # therefore aggregate independently.  No-op when no layer aggregates.
-        # ``resolved`` may be ``self`` (no pending desugar), so the resolved
-        # layers are threaded through ``_build_layers_list`` rather than mutated
-        # onto the chart.
+        # --- Resolve per-layer encoding statistics (layered charts) ---
+        # Each layer that aggregates or bins gets its own NAMED chart-level
+        # Aggregate or Bin whose output the layer reads via ``data_source``
+        # (per-layer transforms are never executed standalone by the
+        # renderer), so two layers compute their statistics independently.
+        # No-op when no layer computes one. ``resolved`` may be ``self`` (no
+        # pending desugar), so the resolved layers are threaded through
+        # ``_build_layers_list`` rather than mutated onto the chart.
         serialized_layers = resolved._layers
         if resolved._layers:
             # A layer attached to this chart reads the chart's data; one that
@@ -4056,24 +4039,10 @@ class Chart(
                 _layers_over_parent(settled_layers, resolved._encoding, resolved._coord), resolved
             )
             _refuse_missing_statistic_inputs(settled_layers, resolved)
-            serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(
+            serialized_layers, layer_statistics = _resolve_layer_statistics(
                 settled_layers, resolved
             )
-            if layer_agg_transforms:
-                effective_transforms = effective_transforms + layer_agg_transforms
-
-        # --- Resolve per-layer encoding bins (layered charts) ---
-        # Each binning layer becomes a NAMED chart-level Bin transform whose
-        # output the layer reads via ``data_source`` (fan-out: does not advance
-        # the unnamed chain, so the shared batch is not corrupted for other
-        # layers or for named aggregate transforms).  Run after aggregate
-        # resolution so the layer list processes the aggregate-resolved layers.
-        if resolved._layers:
-            serialized_layers, layer_bin_transforms = _resolve_layer_bins(
-                serialized_layers, resolved
-            )
-            if layer_bin_transforms:
-                effective_transforms = effective_transforms + layer_bin_transforms
+            effective_transforms = effective_transforms + layer_statistics
 
         # --- Transform serialization ---
         if effective_transforms:

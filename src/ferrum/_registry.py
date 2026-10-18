@@ -103,6 +103,24 @@ def registry_output_columns(kind: str, names: Sequence[str]) -> dict[str, str]:
     )
 
 
+def transform_wires(transforms: Sequence[object]) -> list[dict]:
+    """The wire form (``TransformSpec`` JSON) of each PyO3 transform in *transforms*.
+
+    The PyO3 transforms expose no readable parameters; their serde shape is
+    reached by serializing them through one ``ChartSpec``. The one reader of
+    a transform's own parameters, shared by the transform-list serializer
+    and the encode lowering that reads a user's ``Bin``.
+    """
+    import json
+
+    from ferrum._core import ChartSpec
+
+    if not transforms:
+        return []
+    spec = ChartSpec(mark="point", x="__x__", y="__y__", transforms=list(transforms))
+    return json.loads(spec.to_json()).get("transforms", [])
+
+
 def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dict[str, str]:
     """The :func:`registry_output_columns` discipline for a SECONDARY batch.
 

@@ -1079,6 +1079,13 @@ def mark_draws_inherited(mark: str, channel: str) -> bool: ...
 # the mark's builder. An unknown mark raises ``ValueError``.
 def mark_drawn_channels(mark: str) -> list[str]: ...
 
+# The columns ``bin`` computes, from Rust's one Bin column builder:
+# ``bin_start``, ``bin_end``, ``count``, ``density``, then ``agg_value`` when
+# ``agg_field``/``agg`` is set, else each ``aggregates`` entry's ``as`` in
+# entry order; under ``per_row`` only ``bin_start``, ``bin_end``. Groupby
+# columns are never listed. A non-``Bin`` argument raises ``TypeError``.
+def bin_output_columns(bin: Bin) -> list[str]: ...
+
 # The columns a layer of primitive ``mark`` draws for its binding ``field`` on
 # ``channel``: a raster image's extent columns on ``x``/``y`` and its value
 # column on ``color``, else ``[field]``. ``has_url`` says whether an image

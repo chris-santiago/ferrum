@@ -10,14 +10,13 @@ through the one implementation here so the two cannot drift apart (spec §6.6).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 
 if TYPE_CHECKING:
-    from ferrum._core import Bin as _Bin
-
+    from ferrum._core import Aggregate, Bin
 
 #: The encoding key of a layer's grouping-only bindings (:class:`_GroupingOnly`),
 #: written to the wire as the layer's ``group`` field.
@@ -28,9 +27,10 @@ GROUPING_KEY = "group"
 class _GroupingOnly:
     """Inherited bindings a layer groups its statistic by but does not draw.
 
-    Not a channel: no reader takes it for a binding. The two groupby readers
-    (:func:`_infer_agg_groupby`, :func:`_bin_groupby`) expand it into its
-    members in place, so each member groups exactly as the raw binding would.
+    Not a channel: no reader takes it for a binding. The statistic plan
+    (:func:`_statistic_groupby`, :func:`_lower_bin_encoding`) expands it into
+    its members in place, so each member groups exactly as the raw binding
+    would.
     *bindings* holds ``(channel, binding)`` pairs in the parent's order.
     """
 
@@ -84,49 +84,150 @@ def _regroup(encoding: dict, grouping: "_GroupingOnly | None") -> dict:
     return out
 
 
-def _infer_agg_groupby(encoding: dict) -> list[str]:
-    """Collect groupby fields for an encoding-level aggregate (Altair auto-groupby).
+#: The ``Bin`` parameters that make it aggregate, group or accumulate its rows,
+#: in the order a message names them. Rust refuses each beside ``per_row``.
+_BIN_STATISTIC_PARAMETERS = ("groupby", "cumulative", "agg_field/agg", "aggregates")
 
-    Returns the fields of every channel that carries *no* ``aggregate`` kwarg,
-    in first-seen order with duplicates removed.  Plain string-valued channels
-    (e.g. ``encode(x="t")``) and ``ChannelBase`` channels without an aggregate
-    both contribute their field; channels with an ``aggregate`` kwarg are the
-    measures being summarised and are excluded.
 
-    Shared by the single-chart path (``_resolve_pending_aggregates``, which also
-    folds in facet dimensions) and the per-layer path (``_resolve_layer_aggregates``).
-    A :class:`_GroupingOnly` contributes its members' fields.
+@dataclass(frozen=True)
+class _BinDeclaration:
+    """What the ``Bin`` a ``bin=`` channel names declares, read off its wire.
+
+    Attributes
+    ----------
+    spelling : str
+        How the user wrote it: ``"bin=True"``, ``"bin={...}"`` or
+        ``"bin=Bin(...)"``.
+    written : str
+        The binned channel as the user wrote it, e.g. ``x=X('v', bin={...})``,
+        the subject of every refusal about this Bin.
+    groupby : tuple of str
+        The Bin's own groupby columns.
+    statistics : tuple of str
+        The statistic parameters the user wrote, out of
+        :data:`_BIN_STATISTIC_PARAMETERS`.
+    outputs : frozenset of str
+        The columns this Bin computes, from Rust
+        (``ferrum._core.bin_output_columns``).
+    wire : dict or None
+        A pre-built Bin's wire form, the only way its parameters can be
+        extended; ``None`` for the other spellings.
     """
-    from ferrum.repeat import _RepeatPlaceholder as _RPH
 
+    spelling: str
+    written: str
+    groupby: tuple[str, ...]
+    statistics: tuple[str, ...]
+    outputs: frozenset[str]
+    wire: dict | None = None
+
+
+def _bin_declaration(channel: str, ch: ChannelBase) -> _BinDeclaration:
+    """The declaration of the ``Bin`` *ch*'s ``bin=`` names, read from its wire on both spellings.
+
+    ``bin={...}`` is read through ``Bin(field, **kwargs)``, which also keeps
+    the constructor's own refusal of a malformed parameter; ``bin=True``
+    through ``Bin(field)``.
+
+    Raises
+    ------
+    ValueError
+        If the Bin carries a ``name``: an encoding bin is computed for its
+        own layer and published to no other, so the name would be ignored.
+    """
+    from ferrum import Bin
+    from ferrum._core import bin_output_columns
+    from ferrum._registry import transform_wires
+
+    pending = _own_bin(ch)
+    if pending.bin_obj is not None:
+        spelling, built = "bin=Bin(...)", pending.bin_obj
+    elif pending.bin_kwargs:
+        spelling, built = "bin={...}", Bin(pending.field, **dict(pending.bin_kwargs))
+    else:
+        spelling, built = "bin=True", Bin(pending.field)
+    written = f"{channel}={type(ch).__name__}({ch.field!r}, {spelling})"
+    (wire,) = transform_wires([built])
+    if wire.get("name") is not None:
+        raise ValueError(
+            f"{written} names its Bin {wire['name']!r}, but an encoding bin is computed for "
+            "its own layer and published to no other layer, so name= would be ignored. "
+            f"Remove name= from {spelling}; to publish the binned rows under a name another "
+            f"layer reads, compute them with Chart.transform(fm.Bin({pending.field!r}, "
+            f"name={wire['name']!r}))."
+        )
+    present = {
+        "groupby": bool(wire.get("groupby")),
+        "cumulative": bool(wire.get("cumulative")),
+        "agg_field/agg": "agg_field" in wire or "agg" in wire,
+        "aggregates": "aggregates" in wire,
+    }
+    return _BinDeclaration(
+        spelling,
+        written,
+        tuple(wire.get("groupby") or ()),
+        tuple(name for name in _BIN_STATISTIC_PARAMETERS if present[name]),
+        frozenset(bin_output_columns(built)),
+        wire if pending.bin_obj is not None else None,
+    )
+
+
+def _binned_channels(encoding: dict) -> list[tuple[str, ChannelBase]]:
+    """The ``(channel, binding)`` pairs of *encoding* that carry ``bin=``."""
+    return [
+        (channel, ch)
+        for channel, ch in encoding.items()
+        if isinstance(ch, ChannelBase) and ch._kwargs.get("bin")
+    ]
+
+
+def _own_bin(ch: ChannelBase) -> _PendingBin:
+    """The ``_PendingBin`` sentinel *ch*'s own ``bin=`` emits."""
+    return next(t for t in ch.to_implicit_transforms() if isinstance(t, _PendingBin))
+
+
+def _statistic_groupby(encoding: dict, facet) -> list[str]:
+    """The fields one layer's statistic groups by (spec §6.4), in channel order.
+
+    Every field the encoding draws that its statistic neither aggregates nor
+    bins, plus the facet fields, so a faceted layer computes its statistic
+    within each panel. Plain string bindings count as fields; a field over an
+    unresolved ``Repeat`` placeholder does not. A :class:`_GroupingOnly`
+    contributes its members' fields, in its place.
+
+    Under a ``bin=`` the binned field and every column the ``Bin`` declares
+    (:func:`_bin_declaration`) are no group keys: ``y="count"`` draws the
+    Bin's count and ``y="mean_w"`` an ``aggregates`` entry, neither groups,
+    and a ``tooltip="v"`` beside ``x=bin(v)`` reads the binned rows.
+
+    The one groupby rule of every encoding statistic: the flat chart's and
+    each layer's aggregate and bin read it alike.
+    """
+    from ferrum.repeat import _RepeatPlaceholder
+
+    encoding = _expand_grouping(encoding)
+    excluded: set = set()
+    for channel, ch in _binned_channels(encoding):
+        excluded |= _bin_declaration(channel, ch).outputs
+        if isinstance(ch.field, str):
+            excluded.add(ch.field)
     fields: list[str] = []
-    for ch in _expand_grouping(encoding).values():
+    for ch in encoding.values():
         if isinstance(ch, ChannelBase):
-            if ch._kwargs.get("aggregate"):
+            if ch._kwargs.get("aggregate") or ch._kwargs.get("bin"):
                 continue
-            f = ch.field
+            column = ch.field
         elif isinstance(ch, str):
-            f = ch
+            column = ch
         else:
             continue
-        if f is None or isinstance(f, _RPH):
+        if column is None or isinstance(column, _RepeatPlaceholder):
             continue
-        if f not in fields:
-            fields.append(f)
-    return fields
-
-
-def _chart_agg_groupby(encoding: dict, facet) -> list[str]:
-    """The groupby of a chart's own encoding aggregate: :func:`_infer_agg_groupby` plus facet fields.
-
-    A faceted chart aggregates within each panel, so its row/column fields
-    join the groupby. Shared by the flat chart's lowering and the per-layer
-    reuse test, so the two read one rule.
-    """
-    fields = _infer_agg_groupby(encoding)
+        if column not in excluded and column not in fields:
+            fields.append(column)
     if facet is not None:
         for name in (facet.col, facet.row, facet.field):
-            if name and name not in fields:
+            if name and name not in excluded and name not in fields:
                 fields.append(name)
     return fields
 
@@ -203,214 +304,255 @@ def _aggregated_encoding(encoding: dict) -> dict:
     return out
 
 
-def _bin_groupby(encoding: dict, facet) -> list[str]:
-    """The groupby of a ``Bin`` lowered from *encoding*: its grouping channels' fields, plus facet.
+def _encoding_statistics(encoding: dict) -> tuple[list, list]:
+    """The ``(_PendingAggregate, _PendingBin)`` sentinels the channels of *encoding* carry.
 
-    :func:`_chart_agg_groupby` over the channels that carry neither ``bin=``
-    nor ``aggregate=``, without the binned channel's own field and without a
-    field naming one of the Bin's own output columns (``y="count"`` draws
-    the Bin's count, it does not group by it): the rows are binned per
-    group, as a grouped ``mark_histogram`` bins them.
+    A grouping-only key's members count as the raw bindings they stand for,
+    so a binned inherited color bins the layer as it bins its parent. A
+    channel bound under two names (``fill`` aliased onto ``color``) counts
+    once.
     """
-    from ferrum._registry import registry_output_columns
-
-    outputs = registry_output_columns(
-        "bin", ["bin_start", "bin_end", "count", "density", "agg_value"]
-    ).values()
-    encoding = _expand_grouping(encoding)
-    binned = {
-        ch.field
-        for ch in encoding.values()
-        if isinstance(ch, ChannelBase) and ch._kwargs.get("bin") and isinstance(ch.field, str)
-    } | set(outputs)
-    grouping = {
-        channel: ch
-        for channel, ch in encoding.items()
-        if not (
-            isinstance(ch, ChannelBase) and (ch._kwargs.get("bin") or ch._kwargs.get("aggregate"))
-        )
-    }
-    return [f for f in _chart_agg_groupby(grouping, facet) if f not in binned]
+    aggregates: list = []
+    bins: list = []
+    seen: set[int] = set()
+    for ch in _expand_grouping(encoding).values():
+        if isinstance(ch, ChannelBase) and id(ch) not in seen:
+            seen.add(id(ch))
+            for t in ch.to_implicit_transforms():
+                if isinstance(t, _PendingAggregate):
+                    aggregates.append(t)
+                elif isinstance(t, _PendingBin):
+                    bins.append(t)
+    return aggregates, bins
 
 
-class _BinEncodingLowering(NamedTuple):
-    """What lowering one encoding's ``bin=`` channel produced (spec §6.6).
+@dataclass(frozen=True)
+class _StatisticPlan:
+    """One layer's statistic, read off its effective encoding (spec §6.4).
+
+    The flat chart and every layer build theirs with :func:`_statistic_plan`
+    and run its :meth:`step`, so the two paths compute one statistic per
+    layer by one rule.
 
     Attributes
     ----------
     encoding : dict
-        The rewritten channel dict.  The binned channel points at the ``Bin``
-        transform's start column, its span channel (``x2``/``y2``) at the end
-        column, and an opposing ``aggregate=`` channel at either the Bin's own
-        count column (the ``count()`` idiom) or the aggregate column produced
-        by folding that aggregate into the same Bin.
-    agg_kwargs : dict of str to str
-        Extra ``Bin(...)`` keyword arguments (``agg_field``/``agg``) that fold
-        the opposing aggregate into the Bin, or ``{}`` when nothing folded.
+        What the layer draws once the statistic has run: each aggregated
+        channel at its output column, a binned channel at the ``Bin``'s start
+        column and its span at the end column. The input encoding itself when
+        the layer computes nothing.
     groupby : tuple of str
-        The columns the ``Bin`` partitions its rows by (:func:`_bin_groupby`);
-        empty for an ungrouped Bin.
-    absorbed : tuple of _PendingAggregate
-        The ``_PendingAggregate`` sentinels this lowering consumed.  The Bin
-        computes those values now, so a surviving ``Aggregate`` would run
-        against a schema the Bin has already replaced -- :meth:`filter_transforms`
-        is the structural enforcement of that "a caller that put them on a
-        transform list MUST drop them" contract; callers should route through
-        it rather than filtering this field by hand.
+        The columns the statistic partitions its rows by
+        (:func:`_statistic_groupby`); empty for a per-row ``Bin``. A ``Bin``
+        groups by its own declared groupby first, then these.
+    aggregates : tuple of _PendingAggregate
+        The ops of the layer's one ``Aggregate``; empty when the layer bins
+        (its ops fold into the ``Bin``) or computes nothing.
+    bin : _PendingBin or None
+        The binned channel's sentinel, ``None`` when the layer bins nothing.
+    declaration : _BinDeclaration or None
+        What that Bin declares itself (:func:`_bin_declaration`).
+    bin_kwargs : dict
+        The ``Bin`` keyword arguments the plan adds: ``per_row=True`` for a
+        positional bin with no aggregate, ``agg_field``/``agg`` for one folded
+        aggregate, ``aggregates`` for two or more.
     """
 
     encoding: dict
-    agg_kwargs: dict[str, str]
-    absorbed: tuple[_PendingAggregate, ...]
     groupby: tuple[str, ...] = ()
+    aggregates: tuple[_PendingAggregate, ...] = ()
+    bin: _PendingBin | None = None
+    declaration: _BinDeclaration | None = None
+    bin_kwargs: dict = field(default_factory=dict)
 
-    def build_bin(self, pending_bin: "_PendingBin", *, name: str | None = None) -> "_Bin":
-        """Build this lowering's concrete ``Bin`` from *pending_bin* and its
-        folded ``agg_kwargs``.
+    @property
+    def computes(self) -> bool:
+        """Whether the layer computes a statistic: it bins or aggregates."""
+        return self.bin is not None or bool(self.aggregates)
 
-        The one implementation of "how a lowering becomes a real ``Bin``",
-        called directly by the layered caller (:func:`~ferrum._layer_transforms._resolve_layer_bins`,
-        which has no transform list of its own to filter -- see
-        :meth:`filter_transforms`) and by the single-chart caller
-        (``SpecBuildMixin._resolve_pending_bins``) before it calls
-        :meth:`filter_transforms`.
+    def step(self, *, name: str | None = None) -> "Aggregate | Bin | dict":
+        """The one transform this plan computes.
+
+        An ``Aggregate`` holding every op, or the ``Bin``
+        (:func:`_build_bin_transform`; *name* is set on the layered path's
+        named fan-out ``Bin``). The Bin is the ``Bin`` object, except a
+        pre-built Bin the plan extends, which is its wire dict with the
+        plan's parameters added: the PyO3 ``Bin`` can be extended no other
+        way.
+
+        Raises
+        ------
+        ValueError
+            If the plan computes nothing (:attr:`computes`); its caller
+            branches on that first.
         """
-        return _build_bin_transform(pending_bin, self.agg_kwargs, self.groupby, name=name)
-
-    def filter_transforms(self, effective_transforms: list, bin_xform: "_Bin") -> list:
-        """Return a copy of *effective_transforms* with its ``_PendingBin``
-        sentinel replaced by *bin_xform* and every absorbed
-        ``_PendingAggregate`` dropped.
-
-        The single-chart caller (``SpecBuildMixin._resolve_pending_bins``)
-        routes the absorbed-aggregate drop through here, so the "a caller
-        that put them on a transform list MUST drop them" contract
-        documented on ``absorbed`` is enforced by this one function instead
-        of narrated at the call site. The layered caller never calls this --
-        a layer's aggregate sentinels never become transforms in the first
-        place (``_resolve_layer_aggregates`` skips any layer that also
-        bins), so it has no transform list of its own to filter and calls
-        only :meth:`build_bin`.
-
-        *effective_transforms* MUST contain the exact ``_PendingBin``
-        sentinel *bin_xform* was built from. Silently returning a list that
-        lacks the just-built Bin -- because no ``_PendingBin`` was found to
-        replace -- is exactly the silent-drop shape this project's
-        no-silent-fallback constraint forbids, so a list with no
-        ``_PendingBin`` at all raises rather than quietly omitting the Bin.
-        """
-        absorbed_ids = {id(pa) for pa in self.absorbed}
-        resolved: list = []
-        replaced = False
-        for t in effective_transforms:
-            if isinstance(t, _PendingBin):
-                resolved.append(bin_xform)
-                replaced = True
-            elif id(t) not in absorbed_ids:
-                resolved.append(t)
-        if not replaced:
-            raise ValueError(
-                "_BinEncodingLowering.filter_transforms: effective_transforms "
-                "contains no _PendingBin sentinel to replace with the built "
-                "Bin -- the caller's transform list and this lowering have "
-                "gone out of sync (returning a filtered list here would "
-                "silently drop the Bin from the output)."
+        if self.bin is not None and self.declaration is not None:
+            return _build_bin_transform(
+                self.bin, self.declaration, self.bin_kwargs, self.groupby, name=name
             )
-        return resolved
+        if self.aggregates:
+            from ferrum import Aggregate
+
+            return Aggregate(_aggregate_ops(list(self.aggregates)), groupby=list(self.groupby))
+        raise ValueError("_StatisticPlan.step: the plan computes no statistic, so it has no step")
+
+
+def _statistic_plan(encoding: dict, facet) -> _StatisticPlan:
+    """The statistic plan of a layer drawing *encoding* under *facet* (spec §6.4).
+
+    A ``bin=`` channel makes the plan a ``Bin`` (:func:`_lower_bin_encoding`);
+    otherwise any ``aggregate=`` channel makes it one ``Aggregate``, grouped by
+    :func:`_statistic_groupby`, with each aggregated channel drawing its
+    (field, op)'s output column. An encoding carrying neither computes nothing.
+    """
+    aggregates, bins = _encoding_statistics(encoding)
+    if bins:
+        return _lower_bin_encoding(encoding, bins, aggregates, facet)
+    if aggregates:
+        return _StatisticPlan(
+            _aggregated_encoding(encoding),
+            tuple(_statistic_groupby(encoding, facet)),
+            tuple(aggregates),
+        )
+    return _StatisticPlan(encoding)
 
 
 def _build_bin_transform(
     pending: _PendingBin,
-    agg_kwargs: dict[str, str],
+    declaration: _BinDeclaration,
+    plan_kwargs: dict,
     groupby: tuple[str, ...] = (),
     *,
     name: str | None = None,
-) -> "_Bin":
+) -> "Bin | dict":
     """Build the concrete ``Bin`` that one ``_PendingBin`` sentinel stands for.
 
     Shared by both encode paths: *name* is set on the layered path (a named
     fan-out transform the layer reads via ``data_source``) and left ``None`` on
     the single-chart path (an unnamed transform that advances the chain).
 
-    A pre-built ``bin=Bin(...)`` instance comes back as-is -- the PyO3 type
-    exposes no readable parameters, so it cannot be rebuilt, which is why
-    :func:`_lower_bin_encoding` refuses to fold an aggregate into one rather
-    than dropping the aggregate silently.  The layered serialiser
-    (``_transforms_to_json_list_named``) injects the name from
-    ``_NamedTransform.name``, so such an instance need not carry one.
-
-    A non-empty *groupby* bins each group's rows over one set of edges
-    (``shared_extent``), as a grouped ``mark_histogram`` does.
+    The Bin groups by its own declared groupby, then *groupby* (the plan's);
+    when the plan adds a group, every group is counted over one set of edges
+    (``shared_extent``), as a grouped ``mark_histogram`` does. A pre-built
+    ``bin=Bin(...)`` comes back as the object itself when the plan adds
+    nothing, else as its wire dict with ``per_row``, ``groupby`` and
+    ``shared_extent`` added; the layered serialiser
+    (``_transforms_to_json_list_named``) injects a name from
+    ``_NamedTransform.name`` into either form.
     """
     from ferrum import Bin
 
-    if pending.bin_obj is not None:
-        return pending.bin_obj
+    additions = dict(plan_kwargs)
+    if groupby:
+        additions["groupby"] = list(dict.fromkeys((*declaration.groupby, *groupby)))
+        additions["shared_extent"] = True
+    if declaration.wire is not None:
+        if not additions:
+            return pending.bin_obj
+        return {**declaration.wire, **additions}
     bin_kwargs = dict(pending.bin_kwargs)
-    bin_kwargs.pop("name", None)  # never inherit a name from the Bin kwargs
     if name is not None:
         bin_kwargs["name"] = name
-    # The folded aggregate wins over an agg_field/agg passed through bin={...}:
-    # it is the one the encoding's own aggregate= channel names, so it keeps the
-    # rewritten axis honest.
-    if groupby:
-        bin_kwargs["groupby"] = list(groupby)
-        bin_kwargs["shared_extent"] = True
-    return Bin(pending.field, **{**bin_kwargs, **agg_kwargs})
+    return Bin(pending.field, **{**bin_kwargs, **additions})
 
 
-def _rebind_channel(ch: ChannelBase, column: str) -> ChannelBase:
+def _rebind_channel(ch: ChannelBase, column: str, title: str | None = None) -> ChannelBase:
     """Rebuild *ch* pointing at *column*, keeping the user's other kwargs.
 
     Drops the now-resolved ``bin=``/``aggregate=`` kwargs (both are consumed by
-    the transform, never serialized) and recovers the user-facing column name as
-    the axis ``title`` — the one re-pointing rule :func:`ferrum._desugar._apply_remap`
-    also uses, so a binned axis reads ``"tip"`` rather than ``"bin_start"``.  An
-    explicit ``title=`` always wins; a non-``str`` field (an unresolved Repeat
+    the transform, never serialized) and titles the channel *title*, by
+    default its own field, when that differs from *column*: a binned axis
+    reads ``"tip"`` and a folded aggregate ``"mean_tip"``, never
+    ``"bin_start"`` or ``"agg_value"``. The one re-pointing rule
+    :func:`ferrum._desugar._apply_remap` also uses. An explicit ``title=``
+    always wins; a non-``str`` field (none, or an unresolved Repeat
     placeholder) recovers nothing, and neither does a channel that does not
     honor ``title=`` (a tooltip, a text label), which keeps no title.
     """
+    if title is None:
+        title = ch.field
     kwargs = {k: v for k, v in ch._kwargs.items() if k not in ("bin", "aggregate")}
     if (
-        isinstance(ch.field, str)
-        and ch.field != column
+        isinstance(title, str)
+        and title != column
         and "title" not in kwargs
         and "title" in type(ch)._honored_kwargs
     ):
-        kwargs["title"] = ch.field
+        kwargs["title"] = title
     return ch.__class__(column, **kwargs)
+
+
+def _count_axes(encoding: dict, agg_axes: list[str]) -> list[str]:
+    """The channels of *agg_axes* asking for a fieldless ``count()``: they read the Bin's count."""
+    return [
+        axis
+        for axis in agg_axes
+        if encoding[axis].field in (None, "") and encoding[axis]._kwargs["aggregate"] == "count"
+    ]
+
+
+def _undrawn_bin_statistic(bin_axis: str, encoding: dict, declaration: _BinDeclaration) -> str:
+    """The refusal of a ``Bin`` statistic no channel draws beside a positional bin.
+
+    With no channel drawing an aggregate or one of the Bin's columns, each
+    row is placed at its bin, so the statistic the user's Bin declares would
+    be dropped.
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    params = " and ".join(declaration.statistics)
+    raw = [
+        axis
+        for axis, ch in encoding.items()
+        if axis != bin_axis and isinstance(_channel_field(ch), str)
+    ]
+    drawn = (
+        f"{' and '.join(repr(axis) for axis in raw)} "
+        f"{'draws' if len(raw) == 1 else 'draw'} raw rows"
+        if raw
+        else "no channel draws a value"
+    )
+    outputs = sorted(declaration.outputs - {"bin_start", "bin_end"})
+    return (
+        f"{declaration.written} declares {params}, but no channel draws the Bin's "
+        f"statistic: {drawn}, so each row would be placed at its bin and {params} "
+        "dropped. Bind a channel to one of the Bin's output columns "
+        f"({', '.join(repr(name) for name in outputs)}), or remove {params} from "
+        f"{declaration.spelling} to place each row at its bin."
+    )
+
+
+def _own_aggregate(ch: ChannelBase) -> _PendingAggregate:
+    """The ``_PendingAggregate`` sentinel *ch*'s own ``aggregate=`` emits."""
+    return next(t for t in ch.to_implicit_transforms() if isinstance(t, _PendingAggregate))
 
 
 def _lower_bin_encoding(
     encoding: dict,
     pending_bins: list[_PendingBin],
     pending_aggregates: list[_PendingAggregate],
-    groupby: tuple[str, ...] = (),
-) -> _BinEncodingLowering:
-    """Rewrite *encoding* around its ``bin=`` channel (spec §6.6).
+    facet,
+) -> _StatisticPlan:
+    """The statistic plan of an encoding with a ``bin=`` channel (spec §4.2, §6.6).
 
-    A ``Bin`` transform replaces its input batch's schema outright with its own
-    columns, so every channel of the encoding it feeds has to be re-pointed at
-    those columns before serialization.  This is the single implementation of
-    that rewrite, shared by the single-chart path
-    (``SpecBuildMixin._resolve_pending_bins``) and the layered path
-    (:func:`~ferrum._layer_transforms._resolve_layer_bins`) so the two cannot
-    drift apart again — the layered path having the remap and the single-chart path not having it is
-    exactly what made every standalone ``bin=True`` idiom fail (F-L01-01).
+    A ``Bin`` replaces its input batch's schema with its own columns (or, per
+    row, appends its start and end columns), so every channel it feeds is
+    re-pointed at those columns:
 
-    Four idioms are lowered:
+    * the binned channel → the Bin's start column, titled by its source field,
+      plus its span channel (``x2``/``y2``) → the end column, unless the
+      span is bound already;
+    * a fieldless ``count()`` → the Bin's own count column;
+    * each distinct (field, op) aggregate on any channel → computed per bin:
+      one folds in through ``agg_field``/``agg`` (its channels drawing the
+      Bin's aggregate column), two or more through ``aggregates`` (each
+      drawing its own ``<op>_<field>`` column), titled by that output name.
 
-    * the binned channel itself → the Bin's start column, plus its span
-      channel (``x2``/``y2``) → the Bin's end column, so binned bars span
-      their bin rather than collapsing to a default width;
-    * ``y="count"`` / ``y="density"`` — a plain field reference to a column the
-      Bin really emits, so nothing to do beyond the above;
-    * ``y="count():Q"`` — the fieldless ``count`` aggregate, whose answer *is*
-      the Bin's count column: the channel is re-pointed there and the pending
-      aggregate absorbed;
-    * ``y=Y("w", aggregate="mean")`` — an aggregate of a real column on the
-      opposing channel, folded into the same Bin via ``agg_field``/``agg`` and
-      re-pointed at the Bin's aggregate column.
+    The Bin aggregates when any channel aggregates or names one of its own
+    output columns (``y="count"``), grouped by :func:`_statistic_groupby`.
+    A positional bin with neither bins each row in place (``per_row``): every
+    row is kept and placed at its bin. A bin on a non-positional channel with
+    neither still counts its rows.
 
     Column names come from the transform registry, never from literals, so a
     Rust-side rename raises here naming the stale column (spec §4.6 / M6a).
@@ -418,33 +560,29 @@ def _lower_bin_encoding(
     Parameters
     ----------
     encoding : dict
-        The channel dict to rewrite (never mutated; a copy is returned).
+        The channel dict to rewrite (never mutated). A grouping-only key's
+        members are lowered as the raw bindings they stand for and folded
+        back into the key after.
     pending_bins : list of _PendingBin
         The bin sentinels this encoding produced.
     pending_aggregates : list of _PendingAggregate
-        The aggregate sentinels available to fold.
-    groupby : tuple of str
-        The columns the Bin partitions its rows by: :func:`_bin_groupby` of the
-        encoding the binned layer draws with (its own channels over the ones
-        it inherits). Empty for an ungrouped Bin.
-
-    Returns
-    -------
-    _BinEncodingLowering
+        The aggregate sentinels this encoding produced.
+    facet :
+        The chart's facet, whose fields join an aggregating Bin's groupby.
 
     Raises
     ------
     ValueError
         If the encoding declares more than one bin, if one channel carries both
-        ``bin=`` and ``aggregate=``, if more than one channel aggregates, if a
-        pre-built ``bin=Bin(...)`` would have to absorb an aggregate, or if a
-        fieldless non-``count`` aggregate is asked for per bin.
+        ``bin=`` and ``aggregate=``, if a pre-built ``bin=Bin(...)`` would have
+        to absorb an aggregate, or if a fieldless non-``count`` aggregate is
+        asked for per bin.
     """
+    from ferrum import AggregateOp
     from ferrum._registry import registry_output_columns
     from ferrum.encoding import X2, Y2
+    from ferrum.encoding._aliases import _channel_field
 
-    if not pending_bins:
-        return _BinEncodingLowering(encoding, {}, ())
     if len(pending_bins) > 1:
         raise ValueError(
             "an encoding declares more than one bin=; a Bin transform replaces the "
@@ -452,31 +590,17 @@ def _lower_bin_encoding(
             "first one's output. Bin a single channel, or use mark_hex() / "
             "Chart.transform(fm.Bin2D(x=..., y=...)) for two-dimensional binning."
         )
-
-    bin_axes = [
+    grouping = _grouping_of(encoding)
+    encoding = _expand_grouping(encoding)
+    bin_axis = next(
         axis
         for axis, ch in encoding.items()
         if isinstance(ch, ChannelBase) and ch._kwargs.get("bin")
-    ]
-    if not bin_axes:
-        # A stale sentinel: a later .encode() replaced the channel that carried
-        # bin=. Nothing to re-point; the Bin still resolves as it always did.
-        return _BinEncodingLowering(encoding, {}, ())
-    bin_axis = bin_axes[0]
+    )
 
     # Only channels that HONOR aggregate= are scanned. ChannelBase's contract
-    # (encoding/base.py, "Honored-kwarg contract") is that an unhonored kwarg is
-    # warned once and dropped, so a Detail/Shape aggregate= must not reach in
-    # and set the Bin's agg_field/agg or get re-pointed at agg_value -- that
-    # would let a kwarg the library says it drops silently steer the pipeline.
-    #
-    # The bin= scan above is deliberately NOT gated the same way, and the
-    # asymmetry is real rather than an oversight: `to_implicit_transforms` emits
-    # the _PendingBin from the raw kwargs either way, so by the time this runs
-    # the Bin is already on the transform list and the batch schema is already
-    # replaced. Declining to re-point an unhonored bin= channel would not restore
-    # the honored contract, only leave the chart pointed at a deleted column.
-    # Gating aggregate= restores the contract; gating bin= would not.
+    # (encoding/base.py, "Honored-kwarg contract") is that an unhonored kwarg
+    # never steers the pipeline, so it must not fold into the Bin.
     agg_axes = [
         axis
         for axis, ch in encoding.items()
@@ -484,25 +608,6 @@ def _lower_bin_encoding(
         and "aggregate" in type(ch)._honored_kwargs
         and ch._kwargs.get("aggregate")
     ]
-    # The Bin has one aggregate column. A fieldless count() reads the Bin's own
-    # count column and takes no slot; channels aggregating the same (field, op)
-    # share the one slot. Checked before the same-channel refusal below:
-    # refusing the count first names the condition the user has to fix before
-    # either channel can work.
-    slot_axes = [
-        axis
-        for axis in agg_axes
-        if not (
-            encoding[axis].field in (None, "") and encoding[axis]._kwargs["aggregate"] == "count"
-        )
-    ]
-    slots = {(encoding[axis].field, encoding[axis]._kwargs["aggregate"]) for axis in slot_axes}
-    if len(slots) > 1:
-        raise ValueError(
-            "a binned encoding aggregates on more than one channel "
-            f"({', '.join(sorted(slot_axes))}); a Bin computes one aggregate column "
-            "per bin. Keep a single aggregate= channel."
-        )
     if bin_axis in agg_axes:
         raise ValueError(
             f"encoding channel {bin_axis!r} carries both bin= and aggregate=; one "
@@ -510,11 +615,9 @@ def _lower_bin_encoding(
             "Put the aggregate on the opposing positional channel."
         )
 
-    groupby = tuple(groupby)
     cols = registry_output_columns("bin", ["bin_start", "bin_end", "count", "agg_value"])
     new_encoding = dict(encoding)
     new_encoding[bin_axis] = _rebind_channel(encoding[bin_axis], cols["bin_start"])
-
     # Span channel: bin= is honored only on the primary positional channels
     # (X, Y -- see encoding/_honored.PRIMARY_POSITIONAL), so x2/y2 are the only
     # spans a bin lowering can add. An explicitly bound span is left alone.
@@ -527,35 +630,91 @@ def _lower_bin_encoding(
     elif bin_axis == "y" and "y2" not in new_encoding:
         new_encoding["y2"] = Y2(cols["bin_end"], type="Q")
 
-    absorbed: list = []
+    declaration = _bin_declaration(bin_axis, encoding[bin_axis])
+
+    def plan(groupby: tuple[str, ...], kwargs: dict) -> _StatisticPlan:
+        return _StatisticPlan(
+            _regroup(new_encoding, grouping),
+            groupby,
+            bin=pending_bins[0],
+            declaration=declaration,
+            bin_kwargs=kwargs,
+        )
+
+    draws_bin_output = any(
+        _channel_field(ch) in declaration.outputs
+        for axis, ch in encoding.items()
+        if axis != bin_axis
+    )
+    if not agg_axes and not draws_bin_output and bin_axis in ("x", "y"):
+        if declaration.statistics:
+            raise ValueError(_undrawn_bin_statistic(bin_axis, encoding, declaration))
+        return plan((), {"per_row": True})
+
+    groupby = tuple(_statistic_groupby(encoding, facet))
+    # A fieldless count() reads the Bin's own count column. Every other
+    # aggregate is one (field, op) slot, in channel order; channels asking
+    # for the same (field, op) read the one column it computes.
+    slots: dict[tuple[Any, str], _PendingAggregate] = {}
+    counts = _count_axes(encoding, agg_axes)
     for axis in agg_axes:
         ch = encoding[axis]
-        if axis in slot_axes:
-            continue
-        # count() over a binned batch IS the Bin's own count column.
-        new_encoding[axis] = _rebind_channel(ch, cols["count"])
-        absorbed += [pa for pa in pending_aggregates if not pa.field and pa.agg == "count"]
+        if axis in counts:
+            new_encoding[axis] = _rebind_channel(ch, cols["count"])
+        else:
+            slots.setdefault((ch.field, ch._kwargs["aggregate"]), _own_aggregate(ch))
     if not slots:
-        return _BinEncodingLowering(new_encoding, {}, tuple(absorbed), groupby)
-
-    ((source_field, method),) = slots
-    if not isinstance(source_field, str) or not source_field:
+        return plan(groupby, {})
+    own_aggregate = [
+        name for name in declaration.statistics if name in ("agg_field/agg", "aggregates")
+    ]
+    if own_aggregate and declaration.wire is None:
+        slot_axis = next(axis for axis in agg_axes if axis not in _count_axes(encoding, agg_axes))
         raise ValueError(
-            f"aggregate={method!r} has no source column, so it cannot be computed "
-            "per bin; only count() is field-less. Name the column to aggregate, "
-            f"e.g. Y('value', aggregate={method!r})."
+            f"{declaration.written} declares its own {own_aggregate[0]} and channel "
+            f"{slot_axis!r} carries aggregate={encoding[slot_axis]._kwargs['aggregate']!r}: "
+            "declare the per-bin statistic in one place. Drop "
+            f"{own_aggregate[0]} from {declaration.spelling} to compute the channel's "
+            f"aggregate per bin, or drop aggregate= and bind {slot_axis!r} to the Bin's "
+            "output column."
         )
+
+    for source_field, method in slots:
+        if not isinstance(source_field, str) or not source_field:
+            raise ValueError(
+                f"aggregate={method!r} has no source column, so it cannot be computed "
+                "per bin; only count() is field-less. Name the column to aggregate, "
+                f"e.g. Y('value', aggregate={method!r})."
+            )
     if pending_bins[0].bin_obj is not None:
+        (source_field, method), *_ = slots
+        slot_axis = next(axis for axis in agg_axes if encoding[axis].field == source_field)
         raise ValueError(
             f"bin=Bin(...) on {bin_axis!r} cannot absorb the aggregate= on "
-            f"{slot_axes[0]!r}: a pre-built Bin exposes no readable parameters, so it "
-            "cannot be rebuilt with the aggregate folded in. Declare it on the Bin "
+            f"{slot_axis!r}: a pre-built Bin computes the statistics it was built "
+            "with, and an encoding aggregate is not folded into it. Declare it on the Bin "
             f"itself -- Bin({pending_bins[0].field!r}, agg_field={source_field!r}, "
             f"agg={method!r}) -- and bind the channel to {cols['agg_value']!r}."
         )
-    for axis in slot_axes:
-        new_encoding[axis] = _rebind_channel(encoding[axis], cols["agg_value"])
-    absorbed += [pa for pa in pending_aggregates if pa.field == source_field and pa.agg == method]
-    return _BinEncodingLowering(
-        new_encoding, {"agg_field": source_field, "agg": method}, tuple(absorbed), groupby
-    )
+
+    if len(slots) == 1:
+        ((source_field, method),) = slots
+        columns = {(source_field, method): cols["agg_value"]}
+        kwargs: dict = {"agg_field": source_field, "agg": method}
+    else:
+        columns = {key: pending.output_col for key, pending in slots.items()}
+        kwargs = {
+            "aggregates": [
+                AggregateOp(pending.field, pending.agg, pending.output_col)
+                for pending in slots.values()
+            ]
+        }
+    for axis in agg_axes:
+        ch = encoding[axis]
+        key = (ch.field, ch._kwargs["aggregate"])
+        if key in slots:
+            new_encoding[axis] = _rebind_channel(ch, columns[key], slots[key].output_col)
+    # The folded aggregates are this plan's columns too: a channel drawing one
+    # (`text="agg_value"` beside `y=mean(w)`) reads it, it does not group by it.
+    folded = set(columns.values())
+    return plan(tuple(f for f in groupby if f not in folded), kwargs)

@@ -221,8 +221,9 @@ def test_bin_with_aggregate_lowers_to_exactly_one_bin_and_no_aggregate():
     assert bins[0]["agg"] == "mean"
     assert not _transforms(spec, "aggregate")
     assert spec["encoding"]["y"]["field"] == "agg_value"
-    # Title recovery on the aggregated axis too: it reads "w", not "agg_value".
-    assert spec["encoding"]["y"]["title"] == "w"
+    # The aggregated axis is titled by the aggregate's output name, as an
+    # unbinned aggregate's is: "mean_w", never "agg_value".
+    assert spec["encoding"]["y"]["title"] == "mean_w"
 
 
 def test_fieldless_count_and_named_count_diverge_on_nulls():
@@ -406,18 +407,14 @@ def test_the_multi_bin_refusals_named_remedy_is_a_real_api():
     assert chart.to_svg().lstrip().startswith("<")
 
 
-def test_two_aggregating_channels_on_a_binned_encoding_refuse():
-    """Two different aggregates need two aggregate columns; a Bin has one.
-
-    This arm is checked before the same-channel refusal so it stays reachable
-    when one of the two channels is the binned one.
-    """
+def test_a_binned_channel_carrying_an_aggregate_refuses_beside_a_second_aggregate():
+    """The binned channel is the bin position, never an aggregated value, whatever aggregates beside it."""
     chart = (
         fm.Chart(_df())
         .mark_bar()
         .encode(x=fm.X("v", bin=True, aggregate="mean"), y=fm.Y("w", aggregate="sum"))
     )
-    with pytest.raises(ValueError, match=r"aggregates on more than one channel \(x, y\)"):
+    with pytest.raises(ValueError, match=r"channel 'x' carries both bin= and aggregate="):
         chart.to_spec()
 
 
@@ -479,18 +476,31 @@ def test_two_channels_aggregating_the_same_field_share_the_bins_aggregate():
     assert texts[-2:] == [f"{m:g}" for m in _per_bin_means()]
 
 
-def test_two_different_aggregates_beside_a_bin_refuse():
+def test_two_different_aggregates_beside_a_bin_are_both_computed_per_bin():
+    """Two distinct aggregates fold into the one Bin through ``aggregates``, each drawn from its own column."""
     chart = (
         fm.Chart(_df())
-        .mark_bar()
+        .mark_text()
         .encode(
-            x=fm.X("v", bin=True),
+            x=fm.X("v", bin=_TWO_BINS),
             y=fm.Y("w", aggregate="mean"),
-            color=fm.Color("w", aggregate="sum"),
+            text=fm.Text("w", aggregate="sum"),
         )
     )
-    with pytest.raises(ValueError, match=r"aggregates on more than one channel \(color, y\)"):
-        chart.to_spec()
+    spec = _spec(chart)
+    (bin_xform,) = _transforms(spec, "bin")
+    assert bin_xform["aggregates"] == [
+        {"field": "w", "fn": "mean", "as": "mean_w"},
+        {"field": "w", "fn": "sum", "as": "sum_w"},
+    ]
+    assert "agg_field" not in bin_xform
+    assert (spec["encoding"]["y"]["field"], spec["encoding"]["text"]["field"]) == (
+        "mean_w",
+        "sum_w",
+    )
+    frame = _df()
+    sums = [frame.filter(pl.col("v") < 6.0)["w"].sum(), frame.filter(pl.col("v") >= 6.0)["w"].sum()]
+    assert _texts(chart.to_svg())[-2:] == [f"{s:g}" for s in sums]
 
 
 def test_a_grouped_bin_folds_its_aggregate_per_bin_and_group():
@@ -511,7 +521,7 @@ def test_unhonored_bin_on_color_fails_with_unknown_column():
     emits a ``_PendingBin`` for ANY channel's ``bin=``, honored or not, so an
     unhonored ``Color(bin=True)`` still puts a Bin transform on the chart's
     pipeline and re-points the color channel at the Bin's own output column
-    (``_encode_lowering._lower_bin_encoding``'s ``bin_axes`` scan is
+    (``_encode_lowering._lower_bin_encoding``'s binned-channel scan is
     deliberately not honored-gated either -- see its docstring). The Bin then
     replaces the WHOLE batch schema with its own columns, dropping the column
     ``y`` reads, so the failure names ``w`` as "unknown" rather than
@@ -600,3 +610,119 @@ def test_plain_aggregate_without_bin_still_builds_an_aggregate_transform():
     assert len(_transforms(spec, "aggregate")) == 1
     assert not _transforms(spec, "bin")
     assert spec["encoding"]["y"]["field"] == "mean_w"
+
+
+# ---------------------------------------------------------------------------
+# A positional bin with no aggregate bins each row in place
+# ---------------------------------------------------------------------------
+
+
+def test_a_prebuilt_bin_without_an_aggregate_places_each_row_at_its_bin():
+    """A pre-built ``bin=Bin(...)`` keeps its parameters and bins each row, as ``bin={...}`` does."""
+    from ferrum._core import Bin as RustBin
+
+    prebuilt = (
+        fm.Chart(_df()).mark_point().encode(x=fm.X("v", bin=RustBin("v", bin_count=2)), y="w")
+    )
+    spelled = fm.Chart(_df()).mark_point().encode(x=fm.X("v", bin={"bin_count": 2}), y="w")
+    (bin_xform,) = _transforms(_spec(prebuilt), "bin")
+    assert (bin_xform["bin_count"], bin_xform["per_row"]) == (2, True)
+    svg = prebuilt.to_svg()
+    assert svg == spelled.to_svg()
+    assert svg.count("<circle") == _df().height
+
+
+def test_a_bin_a_later_encode_replaced_computes_nothing():
+    """The encoding decides the statistic: a ``bin=`` channel a later ``encode()`` replaced bins nothing."""
+    replaced = fm.Chart(_df()).mark_point().encode(x=fm.X("v", bin=True), y="w").encode(x="v")
+    assert not _transforms(_spec(replaced), "bin")
+    assert replaced.to_svg() == fm.Chart(_df()).mark_point().encode(x="v", y="w").to_svg()
+
+
+def test_an_aggregate_a_later_encode_replaced_computes_nothing():
+    replaced = fm.Chart(_df()).mark_point().encode(x="v", y="mean(w)").encode(y="w")
+    assert not _transforms(_spec(replaced), "aggregate")
+    assert replaced.to_svg() == fm.Chart(_df()).mark_point().encode(x="v", y="w").to_svg()
+
+
+# ---------------------------------------------------------------------------
+# The statistic plan's step, and the one reader of a transform's wire
+# ---------------------------------------------------------------------------
+
+
+def test_a_plan_computing_nothing_has_no_step():
+    from ferrum._encode_lowering import _statistic_plan
+
+    plan = _statistic_plan({"x": fm.X("v"), "y": fm.Y("w")}, None)
+    assert not plan.computes
+    with pytest.raises(ValueError, match="computes no statistic"):
+        plan.step()
+
+
+def test_a_pre_built_bin_the_plan_does_not_extend_is_sent_as_built():
+    """The Bin object itself reaches the transform list when the plan adds no parameter."""
+    from ferrum._core import Bin as RustBin
+    from ferrum._encode_lowering import _statistic_plan
+
+    prebuilt = RustBin("v", bin_count=2)
+    plan = _statistic_plan({"x": fm.X("v", bin=prebuilt), "y": fm.Y("count")}, None)
+    assert plan.step() is prebuilt
+
+
+def test_a_pre_built_bin_the_plan_groups_is_sent_as_its_wire_with_the_groups_added():
+    from ferrum._core import Bin as RustBin
+    from ferrum._encode_lowering import _statistic_plan
+    from ferrum._registry import transform_wires
+
+    prebuilt = RustBin("v", bin_count=2, groupby=["g"])
+    plan = _statistic_plan({"x": fm.X("v", bin=prebuilt), "y": "count", "color": "h"}, None)
+    (wire,) = transform_wires([prebuilt])
+    assert plan.step() == {**wire, "groupby": ["g", "h"], "shared_extent": True}
+
+
+def test_the_transform_wire_reader_reads_a_bins_own_parameters():
+    from ferrum._registry import transform_wires
+
+    (wire,) = transform_wires(
+        [fm.Bin("v", bin_count=3, aggregates=[fm.AggregateOp("w", "mean", "mean_w")])]
+    )
+    assert wire["bin_count"] == 3
+    assert wire["aggregates"] == [{"field": "w", "fn": "mean", "as": "mean_w"}]
+
+
+@pytest.mark.parametrize(
+    "bin_",
+    [
+        True,
+        {"groupby": ["g"]},
+        {"agg_field": "w", "agg": "mean"},
+        {"aggregates": [fm.AggregateOp("w", "mean", "mean_w")]},
+        "pre-built",
+    ],
+    ids=["true", "dict-groupby", "dict-agg", "dict-aggregates", "pre-built"],
+)
+def test_a_bins_declared_outputs_are_the_columns_rust_says_it_computes(bin_):
+    """One output set, Rust's, drives the refusal text, the per-row test and the groupby."""
+    from ferrum._core import Bin as RustBin
+    from ferrum._core import bin_output_columns
+    from ferrum._encode_lowering import _bin_declaration
+
+    if bin_ == "pre-built":
+        bin_ = RustBin("v", aggregates=[fm.AggregateOp("w", "sum", "sum_w")])
+        built = bin_
+    elif bin_ is True:
+        built = RustBin("v")
+    else:
+        built = RustBin("v", **bin_)
+    declaration = _bin_declaration("x", fm.X("v", bin=bin_))
+    assert declaration.outputs == frozenset(bin_output_columns(built))
+
+
+def test_a_raw_column_named_like_an_aggregate_a_bin_does_not_compute_groups_the_bin():
+    """A counting Bin computes no ``agg_value``, so a data column of that name is a group key."""
+    frame = _df().with_columns(pl.Series("agg_value", ["a", "b"] * 5))
+    chart = (
+        fm.Chart(frame).mark_bar().encode(x=fm.X("v", bin=_TWO_BINS), y="count", color="agg_value")
+    )
+    (bin_xform,) = _transforms(_spec(chart), "bin")
+    assert bin_xform["groupby"] == ["agg_value"]

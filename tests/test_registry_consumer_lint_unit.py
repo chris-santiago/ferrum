@@ -91,7 +91,7 @@ def name_bound_to_a_channel_object(cat_sort):
     return _Layer(mark="bar", encoding={"x": group_enc_x}, data_source="lv_outliers")
 
 def replace_built_layer(layer, ch):
-    """_layer_transforms.py _resolve_layer_bins."""
+    """_layer_transforms.py _resolve_layer_statistics."""
     return replace(layer, encoding={"x": ch.__class__("bin_start")}, data_source=ch.name)
 
 def chart_level_encode(chart):

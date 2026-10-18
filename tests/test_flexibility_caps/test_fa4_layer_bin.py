@@ -352,8 +352,8 @@ def test_bin_and_aggregate_on_same_layer_folds_into_one_named_bin():
     """Disclosed change (2026-09-06, spec §6.6): the same-layer refusal lifts.
 
     The refusal this replaced was a consequence of a Bin that could not
-    aggregate: ``_resolve_layer_aggregates`` built a named Aggregate, then
-    ``_resolve_layer_bins`` overwrote the layer's ``data_source`` with the named
+    aggregate: the layer's named Aggregate was built first, then its named
+    Bin overwrote the layer's ``data_source`` with the named
     Bin, leaving encoding y pointed at an aggregate column the Bin's output
     never held.  Now the aggregate folds INTO the layer's own Bin
     (``agg_field``/``agg``), so there is one named transform, no named->named
@@ -373,7 +373,7 @@ def test_bin_and_aggregate_on_same_layer_folds_into_one_named_bin():
     # Exactly one named transform for that layer: no separate Aggregate.
     assert not [t for t in (d.get("transforms") or []) if t.get("type") == "aggregate"]
     assert layer["encoding"]["y"]["field"] == "agg_value"
-    assert layer["encoding"]["y"]["title"] == "v"
+    assert layer["encoding"]["y"]["title"] == "mean_v"
     assert (raw + binned_agg).to_svg().lstrip().startswith("<")
 
 

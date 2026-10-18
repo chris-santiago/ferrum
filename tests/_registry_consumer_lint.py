@@ -156,7 +156,7 @@ def _channel_vocabulary() -> tuple[frozenset[str], frozenset[str]]:
 
 
 #: ``ch.__class__(col, **kwargs)`` is the rebuild-the-same-channel-type idiom
-#: (``_layer_transforms._resolve_layer_bins``); its first positional argument
+#: (``_encode_lowering._rebind_channel``); its first positional argument
 #: is a column name by construction, exactly as ``X(col)``'s is.
 def _channel_callees() -> frozenset[str]:
     classes, _names = _channel_vocabulary()

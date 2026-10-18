@@ -270,12 +270,12 @@ class _PendingBin:
     (single-chart path) or a named fan-out transform (layered path) is deferred
     until ``chart.to_spec()`` knows the chart structure:
 
-    - Single-chart: ``_resolve_pending_bins`` converts these to unnamed ``Bin``
-      objects — byte-identical to the pre-FA4 behaviour.  When ``bin_obj`` is
-      present, it is used directly (already a ``Bin``).  When ``bin_kwargs`` is
-      set, a new ``Bin`` is constructed from ``field`` + those kwargs.
-    - Layered: ``_resolve_layer_bins`` builds one named ``Bin`` per layer and
-      points the layer's ``data_source`` at it.  When ``bin_obj`` is present,
+    - Single-chart: ``_resolve_statistic`` converts these to an unnamed
+      ``Bin`` that advances the chain.  When ``bin_obj`` is present, it is
+      used directly (already a ``Bin``).  When ``bin_kwargs`` is set, a new
+      ``Bin`` is constructed from ``field`` + those kwargs.
+    - Layered: ``_resolve_layer_statistics`` builds one named ``Bin`` per
+      layer and points the layer's ``data_source`` at it.  When ``bin_obj`` is present,
       it is wrapped directly inside a ``_NamedTransform`` (the serialiser injects
       the name field); when ``bin_kwargs`` is set, a ``Bin`` is constructed with
       ``name=bin_name``.

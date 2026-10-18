@@ -154,6 +154,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spec::mark::mark_inherited_positional, m)?)?;
     m.add_function(wrap_pyfunction!(spec::mark::mark_draws_inherited, m)?)?;
     m.add_function(wrap_pyfunction!(spec::mark::mark_drawn_channels, m)?)?;
+    // The columns one Bin computes (`BinSpec::computed_columns`), read by
+    // Python's bin declaration instead of a naming rule of its own.
+    m.add_function(wrap_pyfunction!(transform::bin::bin_output_columns, m)?)?;
     m.add_function(wrap_pyfunction!(render::marks::image::drawn_positional_columns_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::blend_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::stroke_cap_accepted_values, m)?)?;

@@ -38,11 +38,8 @@ from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KN
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._encode_lowering import (
     GROUPING_KEY,
-    _aggregate_ops,
-    _bin_groupby,
-    _chart_agg_groupby,
-    _lower_bin_encoding,
     _polar_channel_targets,
+    _statistic_plan,
     _theta_axis,
 )
 from ferrum._layer import layer_mark
@@ -54,12 +51,11 @@ from ferrum._override_consume import (
 )
 
 
-class _ResolvedBins(NamedTuple):
-    """``SpecBuildMixin._resolve_pending_bins``'s two coupled outputs.
+class _ResolvedStatistic(NamedTuple):
+    """``SpecBuildMixin._resolve_statistic``'s two coupled outputs.
 
-    The transform list and the encoding are resolved together, not one after
-    the other: which channels point at which ``Bin`` output column depends on
-    which aggregate the Bin absorbed, and vice versa.
+    The transform list and the encoding are resolved together: which column
+    each channel draws depends on the step the statistic computes.
     """
 
     transforms: list
@@ -919,106 +915,51 @@ class SpecBuildMixin:
         """
         return _infer_facet_cardinality_fn(self._data, col_name)
 
-    def _resolve_pending_aggregates(self, resolved, effective_transforms: list) -> list:
-        """Resolve ``_PendingAggregate`` sentinels to concrete ``Aggregate`` objects.
+    @staticmethod
+    def _resolve_statistic(resolved, effective_transforms: list, enc: dict) -> _ResolvedStatistic:
+        """Run a single chart's encoding statistic: its one ``Aggregate`` or ``Bin`` (spec §6.4).
 
-        Any Aggregate shorthand like ``encode(y="mean(val):Q")`` defers groupby
-        assignment until all sibling encoding fields are visible.  This method
-        infers groupby from non-aggregate encoding fields (mirrors Altair behaviour)
-        and replaces the sentinels with one concrete ``Aggregate`` transform
-        holding every op.
+        The chart is one layer, so its statistic is the plan
+        :func:`~ferrum._encode_lowering._statistic_plan` reads off *enc*,
+        grouped like every layer's, never a sequence of steps: a second
+        ``Aggregate`` would read the first one's output, where its source
+        column is gone, and a ``Bin`` replaces the batch schema with its own
+        columns. The ``aggregate=``/``bin=`` sentinels ``encode()`` put on the
+        transform list mark where the step runs: at the bin's sentinel when
+        the chart bins, else at the first aggregate's. Every other sentinel
+        is dropped; the plan computes what the encoding asks for, and a
+        sentinel a later ``encode()`` left behind asks for nothing.
 
         Parameters
         ----------
         resolved :
-            The resolved ``Chart`` whose ``_encoding`` and ``_facet`` are used
-            to collect non-aggregate groupby fields.
+            The resolved ``Chart``, whose facet fields join the groupby.
         effective_transforms :
-            The current list of transforms, which may contain
-            ``_PendingAggregate`` sentinels.
-
-        Returns
-        -------
-        list
-            A new list with the ``_PendingAggregate`` sentinels replaced by one
-            concrete ``Aggregate``.  If no sentinels are present,
-            the input list is returned unchanged.
-        """
-        if not any(isinstance(t, _PendingAggregate) for t in effective_transforms):
-            return effective_transforms
-
-        from ferrum import Aggregate
-
-        # Fields of channels that carry no aggregate, plus facet fields (each
-        # layer's own statistic reads the same rule).
-        non_agg_fields = _chart_agg_groupby(resolved._encoding, resolved._facet)
-        # One Aggregate holds every op, as a layer's per-layer step does: the
-        # chart is one layer, and a second sequential Aggregate would read the
-        # first one's output, where its source column is gone. The step sits
-        # where the first sentinel was.
-        pending = [t for t in effective_transforms if isinstance(t, _PendingAggregate)]
-        aggregate = Aggregate(_aggregate_ops(pending), groupby=non_agg_fields)
-        resolved_transforms: list = []
-        for t in effective_transforms:
-            if not isinstance(t, _PendingAggregate):
-                resolved_transforms.append(t)
-            elif aggregate is not None:
-                resolved_transforms.append(aggregate)
-                aggregate = None
-        return resolved_transforms
-
-    def _resolve_pending_bins(self, effective_transforms: list, enc: dict) -> _ResolvedBins:
-        """Resolve ``_PendingBin`` sentinels and re-point the encoding at the Bin.
-
-        Used by the single-chart path (``to_spec``).  Named transforms (used
-        by the layered path via ``_resolve_layer_bins``) are NOT produced here;
-        the single-chart path keeps the Bin unnamed so it chains through the
-        pipeline as before.
-
-        The encoding rewrite is the shared :func:`~ferrum._encode_lowering.
-        _lower_bin_encoding` the layered path uses (spec §6.6): a ``Bin``
-        replaces its input batch's schema with its own columns, so the binned
-        channel, its span channel and any opposing ``aggregate=`` channel must
-        all be re-pointed at those columns — and an aggregate of a real column
-        folds INTO the Bin rather than becoming a second transform reading a
-        schema that no longer holds its source. Leaving the encoding untouched
-        here is what made every standalone ``bin=True`` idiom fail (F-L01-01).
-
-        Parameters
-        ----------
-        effective_transforms :
-            The current list of transforms, which may contain ``_PendingBin``
-            and ``_PendingAggregate`` sentinels.
+            The current transform list, which may hold the sentinels.
         enc :
-            The chart's encoding dict, after alias and polar remapping.  Never
-            mutated; the rewritten copy comes back on the result.
+            The chart's encoding dict, after alias and polar remapping. Never
+            mutated; the encoding the chart draws comes back on the result.
 
         Returns
         -------
-        _ResolvedBins
-            The transform list with every ``_PendingBin`` replaced by a concrete
-            unnamed ``Bin`` and every absorbed ``_PendingAggregate`` dropped,
-            plus the rewritten encoding.  Both come back unchanged when the
-            chart declares no bin.
+        _ResolvedStatistic
+            Both inputs unchanged when the list holds no sentinel.
         """
-        pending_bins = [t for t in effective_transforms if isinstance(t, _PendingBin)]
-        if not pending_bins:
-            return _ResolvedBins(effective_transforms, enc)
-
-        lowering = _lower_bin_encoding(
-            enc,
-            pending_bins,
-            [t for t in effective_transforms if isinstance(t, _PendingAggregate)],
-            tuple(_bin_groupby(enc, self._facet)),
-        )
-        # name=None: single-chart bins are always unnamed, so the Bin advances
-        # the pipeline's chain instead of fanning out. `filter_transforms`
-        # drops every absorbed `_PendingAggregate` from `effective_transforms`
-        # -- see its docstring for why this is the structural enforcement of
-        # the "MUST drop them" contract.
-        bin_xform = lowering.build_bin(pending_bins[0])
-        resolved_transforms = lowering.filter_transforms(effective_transforms, bin_xform)
-        return _ResolvedBins(resolved_transforms, lowering.encoding)
+        sentinels = [
+            t for t in effective_transforms if isinstance(t, (_PendingAggregate, _PendingBin))
+        ]
+        if not sentinels:
+            return _ResolvedStatistic(effective_transforms, enc)
+        plan = _statistic_plan(enc, resolved._facet)
+        kind = _PendingAggregate if plan.bin is None else _PendingBin
+        site = next((t for t in sentinels if isinstance(t, kind)), sentinels[0])
+        transforms: list = []
+        for t in effective_transforms:
+            if t is site and plan.computes:
+                transforms.append(plan.step())
+            elif not isinstance(t, (_PendingAggregate, _PendingBin)):
+                transforms.append(t)
+        return _ResolvedStatistic(transforms, plan.encoding)
 
     @staticmethod
     def _collect_params(resolved, enc: dict) -> list:
