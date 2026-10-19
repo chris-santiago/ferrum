@@ -595,7 +595,7 @@ pub(crate) fn group_partition_multi(
     null_keys: NullKeyPolicy,
     warn_ctx: &TransformContext,
 ) -> PyResult<GroupPartition> {
-    let resolved = validate_groupby_columns(batch, group_cols, label)?;
+    let reader = GroupKeyReader::new(batch, group_cols, label, warn_ctx)?;
 
     let n_rows = batch.num_rows();
     let mut index_of: std::collections::BTreeMap<Vec<KeyValue>, usize> =
@@ -610,9 +610,8 @@ pub(crate) fn group_partition_multi(
         let mut key: Vec<KeyValue> = Vec::with_capacity(group_cols.len());
         let mut has_null = false;
         let mut non_null_dims = 0_usize;
-        for (col_idx, dtype) in &resolved {
-            let arr = batch.column(*col_idx);
-            let kv = groupby_key_at(arr.as_ref(), dtype, row).ok_or_else(|| {
+        for column in 0..reader.len() {
+            let kv = reader.key_at(column, row).ok_or_else(|| {
                 PyValueError::new_err(format!(
                     "{label}: internal error extracting groupby key at row {row}"
                 ))
@@ -659,8 +658,78 @@ pub(crate) fn group_partition_multi(
 
     Ok(GroupPartition {
         groups,
-        dtypes: resolved.into_iter().map(|(_, dt)| dt).collect(),
+        dtypes: reader.dtypes(),
     })
+}
+
+/// How one step reads its groupby keys: each column's [`groupby_key_at`]
+/// key, except a column the step groups by a binned color's bins
+/// ([`TransformContext::color_bins`]), whose finite values key by their
+/// bin's start (materialized as `Float64`). A null keeps the `Null` key and
+/// a non-finite value its raw key, as raw grouping keys them, so the step's
+/// null policy and its own non-finite groups are unchanged. Every message
+/// the step raises names the column as written.
+pub(crate) struct GroupKeyReader<'b> {
+    columns: Vec<KeyColumn<'b>>,
+}
+
+enum KeyColumn<'b> {
+    Raw(&'b dyn Array, DataType),
+    Binned(Float64Array, Vec<Option<f64>>),
+}
+
+impl<'b> GroupKeyReader<'b> {
+    /// The reader of `group_cols` in `batch`, validated as
+    /// [`validate_groupby_columns`] validates them (voiced by `label`).
+    pub(crate) fn new(batch: &'b RecordBatch, group_cols: &[String], label: &str, ctx: &TransformContext) -> PyResult<Self> {
+        let resolved = validate_groupby_columns(batch, group_cols, label)?;
+        let columns = group_cols
+            .iter()
+            .zip(resolved)
+            .map(|(name, (index, dtype))| {
+                let column = batch.column(index);
+                let bins = ctx.color_bins.as_deref().filter(|bins| bins.bins(name));
+                match bins.filter(|_| crate::transform::numeric_util::is_numeric_dtype(&dtype)) {
+                    Some(bins) => {
+                        let values = crate::transform::numeric_util::coerce_to_float64(column, label, name)?;
+                        let starts = values.iter().map(|v| v.and_then(|v| bins.bin_start(name, v))).collect();
+                        Ok(KeyColumn::Binned(values, starts))
+                    }
+                    None => Ok(KeyColumn::Raw(column.as_ref(), dtype)),
+                }
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(Self { columns })
+    }
+
+    /// The number of key columns.
+    pub(crate) fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Row `row`'s key in key column `column`.
+    pub(crate) fn key_at(&self, column: usize, row: usize) -> Option<KeyValue> {
+        match self.columns.get(column)? {
+            KeyColumn::Raw(array, dtype) => groupby_key_at(*array, dtype, row),
+            KeyColumn::Binned(values, starts) => Some(match (values.is_null(row), starts[row]) {
+                (true, _) => KeyValue::Null,
+                (false, Some(start)) => KeyValue::Float(start.to_bits()),
+                (false, None) => KeyValue::Float(values.value(row).to_bits()),
+            }),
+        }
+    }
+
+    /// Each key column's materialized dtype: `Float64` for a binned column,
+    /// the column's own otherwise.
+    pub(crate) fn dtypes(&self) -> Vec<DataType> {
+        self.columns
+            .iter()
+            .map(|column| match column {
+                KeyColumn::Raw(_, dtype) => dtype.clone(),
+                KeyColumn::Binned(..) => DataType::Float64,
+            })
+            .collect()
+    }
 }
 
 /// How many of a batch's rows carried a null in their groupby key, counted

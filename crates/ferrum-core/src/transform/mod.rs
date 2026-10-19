@@ -8,6 +8,7 @@ pub(crate) mod registry;
 pub(crate) mod concat;
 pub(crate) mod group_key;
 pub(crate) mod bin;
+pub(crate) mod color_bin_group;
 pub(crate) mod bin_2d;
 pub(crate) mod bin_mode;
 pub(crate) mod context;

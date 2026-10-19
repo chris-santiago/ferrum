@@ -398,6 +398,18 @@ pub struct TransformContext {
     /// boundary inherits the same "read `ctx.warnings` back after calling"
     /// contract rather than needing to invent one.
     pub warnings: Rc<RefCell<Vec<TransformWarning>>>,
+    /// The binned-color grouping of this pipeline run
+    /// ([`crate::transform::color_bin_group`]): which steps group which
+    /// columns by bin, and the edges. Set only by
+    /// `render::prepare::run_transforms_with_facet`; `None` (the default)
+    /// runs every step as written.
+    pub(crate) color_bin_plan: Option<Rc<crate::transform::color_bin_group::ColorBinPlan>>,
+    /// The binned columns the step this context is handed to groups by bin,
+    /// set per step by the pipeline runner from [`Self::color_bin_plan`] and
+    /// read by the shared partitioner
+    /// ([`crate::transform::group_key::GroupKeyReader`]). `None` keys every
+    /// groupby column by its raw values.
+    pub(crate) color_bins: Option<Rc<crate::transform::color_bin_group::StepBins>>,
 }
 
 impl TransformContext {

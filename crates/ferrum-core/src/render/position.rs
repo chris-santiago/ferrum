@@ -434,11 +434,13 @@ struct GroupKeys {
 
 /// The groups a dodge or a stack partitions rows into
 /// ([`resolve_group_channel`]'s policy and warnings). Grouped by a binned
-/// color (`Color(bin=...)`), the rows group by the bin its scale assigns
+/// color (`Color(bin=...)`), or by a text's grouping-only `group` key over
+/// one, the rows group by the bin its scale assigns
 /// ([`crate::render::draw::binned_color_rows`]), keyed by bin index, in bin
-/// order: one dodge slot or one stack layer per bin, low bin first. A row
-/// with no bin keys to `""`, after every bin. `color` is the resolved color
-/// scale, `None` where none is resolved yet.
+/// order: one dodge slot or one stack layer per bin, low bin first, so a
+/// label sits on the bar or segment of its bin. A row with no bin keys to
+/// `""`, after every bin. `color` is the resolved color scale, `None` where
+/// none is resolved yet.
 fn group_keys(
     batch: &RecordBatch,
     by_field: Option<&str>,
@@ -448,7 +450,7 @@ fn group_keys(
     warnings: &mut Vec<RenderWarning>,
 ) -> Option<GroupKeys> {
     let cats = resolve_group_channel(batch, by_field, encoding, adjustment_label, warnings)?;
-    let binding = encoding.color.as_ref().filter(|color| by_field.is_none_or(|by| by == color.field));
+    let binding = encoding.color.as_ref().or(encoding.group.as_ref()).filter(|color| by_field.is_none_or(|by| by == color.field));
     let Some(bins) = crate::render::draw::binned_color_rows(binding, color, batch) else {
         return Some(GroupKeys { cats, order: None });
     };

@@ -1033,6 +1033,7 @@ fn resolve_panel_scales(
         &spec.encoding,
         panel_batch,
         &prep.transform_outputs,
+        &prep.transform_origins,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         theme,
@@ -2196,7 +2197,9 @@ pub(crate) fn resolve_legend_color_scale(
             &spec.encoding,
             prep.final_batch(),
             &prep.transform_outputs,
+            &prep.transform_origins,
             theme,
+            None,
         )?
     } else {
         None

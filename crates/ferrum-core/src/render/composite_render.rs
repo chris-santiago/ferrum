@@ -415,6 +415,7 @@ pub(crate) fn render_composite_scene(
             encoding: prep.rendering_encoding(),
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
+            transform_origins: &prep.transform_origins,
         })
         .collect();
     // `warnings` opens with the resolve pass, the first stage that can produce
@@ -7901,6 +7902,144 @@ mod tests {
             assert_eq!(count(&independent, edge), 1, "each panel's own edges, {edge}: {independent:?}");
         }
         assert_eq!(count(&independent, "5"), 0, "no shared edge: {independent:?}");
+    }
+
+    /// Concat panels sharing a binned color group their statistics by the
+    /// shared edges: a mean grouped by `v` makes one point per shared bin
+    /// (panel a's 0..3 all fall in 0..5; panel b's 10, 12 and 15, 20 in two
+    /// bins), each drawn in that bin's step. Rejects statistics grouped by
+    /// the raw value (four points each) or by each panel's own edges.
+    #[test]
+    fn concat_panels_sharing_a_binned_color_group_their_statistics_by_the_shared_edges() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let mean_hold = |vs: &[f64]| {
+            let mut hold = binned_color_hold(scale.clone(), vs);
+            hold.spec.transforms = serde_json::from_value(serde_json::json!([
+                {"type": "identity", "statistics": true},
+                {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["v"]},
+            ]))
+            .unwrap();
+            hold.spec.encoding.x = Some(EncodingSpec { field: "mean_y".into(), ..Default::default() });
+            hold.spec.encoding.y = Some(EncodingSpec { field: "mean_y".into(), ..Default::default() });
+            hold
+        };
+        let holds = [mean_hold(&[0.0, 1.0, 2.0, 3.0]), mean_hold(&[10.0, 12.0, 15.0, 20.0])];
+        let node = holds_node(CompositeLayout::Hconcat, &holds, 0, None);
+        let scene = render_holds(&node, &holds.iter().collect::<Vec<_>>()).unwrap();
+        let fills = panel_point_fills(&scene);
+        assert_eq!(fills.iter().map(Vec::len).collect::<Vec<_>>(), [1, 2], "one point per shared bin: {fills:?}");
+        assert_ne!(fills[1][0], fills[1][1], "panel b's two bins draw two steps");
+        let labels = legend_labels(&scene);
+        for edge in ["0", "5", "10", "15", "20"] {
+            assert_eq!(count(&labels, edge), 1, "one legend of the shared edges, {edge}: {labels:?}");
+        }
+    }
+
+    /// On a static `LayerChart`, a member whose statistic groups by `v` for
+    /// its own `detail` keeps its standalone grain (16 points) beside a
+    /// member binning `v`, as on `+`, and the binned member draws one bar per
+    /// (g, bin). Rejects any member's grain moving with another's binned
+    /// color.
+    #[test]
+    fn a_layerchart_member_keeps_its_grain_beside_a_binned_member() {
+        let vs = [1.1, 1.6, 2.2, 2.7, 3.1, 3.8, 4.4, 4.9];
+        let (g, v): (Vec<&str>, Vec<f64>) = ["a", "b"].iter().flat_map(|g| vs.iter().map(move |v| (*g, *v))).unzip();
+        let n = g.len();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(arrow::array::StringArray::from(g)),
+                Arc::new(Float64Array::from((1..=n).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(v)),
+            ],
+        )
+        .unwrap();
+        let member = |mark: &str, extra: serde_json::Value| -> ChartSpec {
+            let mut encoding = serde_json::json!({"x": {"field": "g"}, "y": {"field": "mean_y"}});
+            for (key, value) in extra.as_object().unwrap() {
+                encoding[key] = value.clone();
+            }
+            serde_json::from_value(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": mark,
+                "transforms": [{"type": "identity", "statistics": true},
+                    {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["g", "v"]}],
+                "encoding": encoding,
+            }))
+            .unwrap()
+        };
+        let binned = serde_json::json!({"color": {"field": "v", "scale": {"type": "bin-ordinal", "bin": {"bin_width": 1.0, "extent": [1.0, 5.0], "nice": false}}}});
+        let holds = [
+            color_hold_with(member("bar", binned), batch.clone(), ThemeInputs::default()),
+            color_hold_with(member("point", serde_json::json!({"detail": {"field": "v"}})), batch, ThemeInputs::default()),
+        ];
+        let node = holds_node(CompositeLayout::Overlay, &holds, 0, None);
+        let scene = render_holds(&node, &holds.iter().collect::<Vec<_>>()).unwrap();
+        let count = |circles: bool| {
+            scene
+                .panels
+                .iter()
+                .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+                .filter(|node| matches!((node, circles), (SceneNode::Circle { .. }, true) | (SceneNode::Rect { .. }, false)))
+                .count()
+        };
+        assert_eq!((count(false), count(true)), (8, 16), "8 binned bars and the point member's 16 points");
+    }
+
+    /// A static `LayerChart` whose members are all statistics under one
+    /// binned color cuts its legend from the rows each member's statistic
+    /// consumed: 16 rows over 0..20 (each value twice), five Sturges bins
+    /// (0, 4, 8, 12, 16, 20). Rejects sampling the members' grouped outputs,
+    /// whose 8 distinct values cut four bins (0, 5, 10, 15, 20).
+    #[test]
+    fn a_layerchart_of_binned_statistics_cuts_its_legend_from_the_rows_they_consumed() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"nice": false}});
+        let mean_hold = |vs: &[f64]| {
+            let mut hold = binned_color_hold(scale.clone(), vs);
+            hold.spec.mark = Mark::Bar;
+            hold.spec.transforms = serde_json::from_value(serde_json::json!([
+                {"type": "identity", "statistics": true},
+                {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["v"]},
+            ]))
+            .unwrap();
+            hold.spec.encoding.x = Some(EncodingSpec { field: "v".into(), ..Default::default() });
+            hold.spec.encoding.y = Some(EncodingSpec { field: "mean_y".into(), ..Default::default() });
+            hold
+        };
+        let holds = [
+            mean_hold(&[0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
+            mean_hold(&[10.0, 10.0, 12.0, 12.0, 15.0, 15.0, 20.0, 20.0]),
+        ];
+        let node = holds_node(CompositeLayout::Overlay, &holds, 0, None);
+        let labels = legend_labels(&render_holds(&node, &holds.iter().collect::<Vec<_>>()).unwrap());
+        for edge in ["0", "4", "8", "12", "16", "20"] {
+            assert_eq!(count(&labels, edge), 1, "one legend of the consumed rows' edges, {edge}: {labels:?}");
+        }
+    }
+
+    /// Concat panels over the same frame sharing a binned color with derived
+    /// edges cut the edges that frame cuts alone: Sturges over its 8 values
+    /// (0..7) gives 4 bins (0, 1.75, 3.5, 5.25, 7). Pooling the frame once per
+    /// panel (16 values) would give 5 bins (0, 1.4, 2.8, 4.2, 5.6, 7).
+    #[test]
+    fn concat_panels_over_one_frame_cut_that_frames_edges() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"nice": false}});
+        let values = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let alone = binned_color_hold(scale.clone(), &values);
+        let alone_labels = legend_labels(&render_holds(&holds_node(CompositeLayout::Hconcat, std::slice::from_ref(&alone), 0, None), &[&alone]).unwrap());
+        for edge in ["0", "1.75", "3.5", "5.25", "7"] {
+            assert_eq!(count(&alone_labels, edge), 1, "the frame alone, {edge}: {alone_labels:?}");
+        }
+        let holds = [binned_color_hold(scale.clone(), &values), binned_color_hold(scale, &values)];
+        let shared = binned_hconcat_legend_labels(&holds, None);
+        for edge in ["0", "1.75", "3.5", "5.25", "7"] {
+            assert_eq!(count(&shared, edge), 1, "the shared legend, {edge}: {shared:?}");
+        }
+        assert_eq!(count(&shared, "1.4"), 0, "no edge of the frame pooled twice: {shared:?}");
     }
 
     /// Explicit `bins=` keep per-panel behavior: two legends titled `v`, each

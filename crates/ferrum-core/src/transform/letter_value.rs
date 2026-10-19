@@ -50,7 +50,7 @@ use crate::transform::context::{describe_group_keys, TransformContext, Transform
 use crate::transform::group_key::{
     batch_with_groupby_columns, deserialize_groupby_vec, group_partition_multi, groupby_key_at,
     materialize_groupby_col, refuse_groupby_output_collision, refuse_repeated_groupby_names,
-    validate_groupby_columns, warn_null_groupby_rows_dropped, KeyValue, NullKeyPolicy,
+    warn_null_groupby_rows_dropped, GroupKeyReader, KeyValue, NullKeyPolicy,
 };
 
 /// Maximum depth for per-depth named outputs.
@@ -306,34 +306,32 @@ struct DepthRow {
 /// Extract `(combination key, value)` pairs in input row order (dropping
 /// null/NaN values).
 ///
-/// The key columns ([`KeyColumns`]) are resolved and dtype-checked through
-/// the shared [`validate_groupby_columns`] (the same request-level validator
-/// `group_partition_multi` itself calls, and every groupby-taking sibling
-/// transform uses), and every row's key is read through the shared
-/// [`groupby_key_at`] extractor, so a null `group` VALUE maps to
+/// The key columns ([`KeyColumns`]) are resolved, dtype-checked and read
+/// through the shared [`GroupKeyReader`] (the reader `group_partition_multi`
+/// itself keys rows with, under the same `ctx`, so a binned color's bins key
+/// these rows as they keyed the partition), so a null `group` VALUE maps to
 /// `KeyValue::Null` and pools with the other null-`group` rows, exactly as
 /// [`compute_depths`]' `Pool` partition does, while a row with a null on a
 /// [`KeyColumns::dropping_fields`] dimension is dropped, as
 /// [`compute_depths`] drops it. With no `group` and no `groupby`, every row's
 /// key is `(Null, [])`.
-fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(ComboKey, f64)>> {
+fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<Vec<(ComboKey, f64)>> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
         .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
     let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
 
     let key_columns = KeyColumns::of(spec);
-    let resolved = validate_groupby_columns(batch, &key_columns.columns, "stat_letter_value")?;
+    let reader = GroupKeyReader::new(batch, &key_columns.columns, "stat_letter_value", ctx)?;
 
     let mut out = Vec::with_capacity(varr.len());
     for i in 0..varr.len() {
         if varr.is_null(i) { continue; }
         let v = varr.value(i);
         if v.is_nan() { continue; }
-        let key = resolved
-            .iter()
-            .map(|(gi, dt)| {
-                groupby_key_at(batch.column(*gi).as_ref(), dt, i).ok_or_else(|| {
+        let key = (0..reader.len())
+            .map(|column| {
+                reader.key_at(column, i).ok_or_else(|| {
                     PyValueError::new_err(format!(
                         "stat_letter_value: internal error extracting group key at row {i}"
                     ))
@@ -719,14 +717,28 @@ pub(crate) fn depth_key(k: usize) -> String {
     format!("depth_{k}")
 }
 
+/// Every key [`secondary_outputs`] publishes for `spec`: its outliers and
+/// each named depth, each under its name.
+pub(crate) fn secondary_keys(spec: &LetterValueSpec) -> Vec<String> {
+    std::iter::once(OUTLIERS_KEY.to_string())
+        .chain((1..=K_MAX_NAMED).map(depth_key))
+        .map(|key| crate::transform::registry::secondary_key(spec.name.as_deref(), &key))
+        .collect()
+}
+
 /// Compute the secondary named outputs: outliers + depth_1..depth_12.
 ///
 /// Reads the combinations back off `primary_batch`: its `group` column and
 /// one column per `groupby` field, each at its own dtype.
+///
+/// `ctx` is the step's context, so the input rows key their combinations as
+/// the primary's partition keyed them (a binned color's bins,
+/// [`crate::transform::group_key::GroupKeyReader`]).
 pub(crate) fn secondary_outputs(
     spec: &LetterValueSpec,
     input_batch: &RecordBatch,
     primary_batch: &RecordBatch,
+    ctx: &TransformContext,
 ) -> PyResult<Vec<(String, RecordBatch)>> {
     let primary_schema = primary_batch.schema();
     let group_dtype = primary_schema.field(0).data_type().clone();
@@ -788,7 +800,7 @@ pub(crate) fn secondary_outputs(
     // survives as a column but is always `true` on the rows that reach it) —
     // the batch is a filtered outlier list, not a flagged copy of every input
     // row, so a boxen chart's outlier layer draws only the points it names.
-    let input_pairs = extract_values(spec, input_batch)?;
+    let input_pairs = extract_values(spec, input_batch, ctx)?;
     let mut o_groups: Vec<Vec<KeyValue>> = Vec::new();
     let mut o_by: Vec<Vec<KeyValue>> = Vec::new();
     let mut o_vals: Vec<f64> = Vec::new();
@@ -1316,7 +1328,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         let sch = outliers.1.schema();
         assert_eq!(sch.field(0).name(), "group");
@@ -1356,7 +1368,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         assert_eq!(
             outliers.1.num_rows(),
@@ -1389,7 +1401,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         assert_eq!(secs.len(), K_MAX_NAMED + 1, "expected outliers + depth_1..depth_{K_MAX_NAMED}");
         for k in 1..=K_MAX_NAMED {
             let key = format!("depth_{k}");
@@ -1426,7 +1438,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
 
         let depth_9 = secs.iter().find(|(k, _)| k == "depth_9")
             .unwrap_or_else(|| panic!("depth_9 output missing — K_MAX_NAMED not raised"));
@@ -1456,7 +1468,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         assert_eq!(outliers.1.num_rows(), 0, "no input value falls outside the fence; the batch must be empty");
     }
@@ -1474,7 +1486,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         assert!(secs.iter().any(|(name, _)| name == "lv_outliers"));
         for k in 1..=K_MAX_NAMED {
             let key = format!("lv_depth_{k}");
@@ -1707,7 +1719,7 @@ mod tests {
             name: None,
             sort: None,
         };
-        let err = extract_values(&spec, &batch).expect_err("a Date32 group column must refuse");
+        let err = extract_values(&spec, &batch, &TransformContext::default()).expect_err("a Date32 group column must refuse");
         assert_eq!(
             err.to_string(),
             "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
@@ -1738,7 +1750,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
 
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         assert_eq!(outliers.1.schema().field(0).data_type(), &DataType::Int64);
@@ -1926,7 +1938,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         let sch = outliers.1.schema();
         assert_eq!(sch.field(0).name(), "group");
@@ -1964,7 +1976,7 @@ mod tests {
             sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
         assert_eq!(
             outliers.1.num_rows(), 0,
@@ -2083,8 +2095,8 @@ mod tests {
         let names: Vec<String> = e.schema().fields().iter().map(|f| f.name().clone()).collect();
         assert_eq!(names, ["group", "depth", "lower", "upper", "level"]);
         assert_eq!(
-            secondary_outputs(&absent, &batch, &a).unwrap(),
-            secondary_outputs(&empty, &batch, &e).unwrap(),
+            secondary_outputs(&absent, &batch, &a, &TransformContext::default()).unwrap(),
+            secondary_outputs(&empty, &batch, &e, &TransformContext::default()).unwrap(),
         );
     }
 
@@ -2104,7 +2116,7 @@ mod tests {
             "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
         let primary = apply(&spec, &batch).unwrap();
-        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secondary(&outs, OUTLIERS_KEY);
         assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
         assert_eq!(strs(outliers, "h"), some(&["x", "x", "y", "y"]));
@@ -2171,7 +2183,7 @@ mod tests {
              fill or filter the nulls in 'h'"
         );
 
-        let outs = secondary_outputs(&spec, &batch, &out).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &out, &TransformContext::default()).unwrap();
         let outliers = secondary(&outs, OUTLIERS_KEY);
         assert_eq!(floats(outliers, "value"), vec![1.0, 3.0]);
         assert_eq!(strs(outliers, "h"), some(&["x", "x"]));
@@ -2281,7 +2293,7 @@ mod tests {
             "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
         }));
         let primary = apply(&spec, &batch).unwrap();
-        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secondary(&outs, OUTLIERS_KEY);
         assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
         assert_eq!(strs(outliers, "g"), some(&["a", "a", "b", "b"]));
@@ -2303,7 +2315,7 @@ mod tests {
             "value": "v", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
         let primary = apply(&spec, &batch).unwrap();
-        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         let outliers = secondary(&outs, OUTLIERS_KEY);
         assert_eq!(floats(outliers, "value"), vec![1.0, 5.0, 10.0, 50.0]);
         assert_eq!(strs(outliers, "h"), some(&["x", "x", "y", "y"]));
@@ -2329,7 +2341,7 @@ mod tests {
             "value": "v", "groupby": ["k"], "k_depth": {"type": "full"},
         }));
         let primary = apply(&spec, &batch).unwrap();
-        let outs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
         for (name, b) in std::iter::once(("primary", &primary)).chain(outs.iter().map(|(k, b)| (k.as_str(), b))) {
             let field = b.schema().field_with_name("k").unwrap_or_else(|_| panic!("{name} lacks 'k'")).clone();
             assert_eq!(field.data_type(), &DataType::Int64, "{name}");

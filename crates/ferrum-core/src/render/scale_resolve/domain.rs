@@ -11,6 +11,7 @@ use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
+use crate::transform::color_bin_group::BinnedOrigins;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// Result of looking up a field across the primary batch and named
@@ -276,6 +277,11 @@ pub struct AuxRead<'a> {
     source: LayerSource<'a>,
     field: &'a str,
     kind: AuxReadKind<'a>,
+    /// The rows an overlay member's bin-grouped statistic consumed for this
+    /// read (`BinnedOrigin`), resolved against the member's own origins
+    /// before its batch is carried as [`LayerSource::Batch`]; `None` for
+    /// every other read, which looks its origin up by its source key.
+    origin: Option<&'a RecordBatch>,
 }
 
 /// What an [`AuxRead`] holds: a column of its batch, bound by `binding`; or
@@ -409,6 +415,48 @@ impl<'a> AuxRead<'a> {
         batch.column_by_name(self.field).map(|_| batch)
     }
 
+    /// The rows a bin-grouped statistic consumed for this read: the origin
+    /// its run published for the read's field in the output it draws
+    /// (`transform_origins`, keyed like the outputs; the chart rows for a
+    /// layer with no `data_source`), or an overlay member's, resolved before
+    /// its batch was carried. `None` when no bin-grouped step that grouped
+    /// the read's field produced what the read draws.
+    fn published_origin<'b>(&self, transform_origins: &'b BinnedOrigins) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
+        let key = match self.source {
+            LayerSource::Chart => FINAL_OUTPUT_KEY,
+            LayerSource::Output(key) => key,
+            LayerSource::Batch(_) => return self.origin,
+        };
+        transform_origins.get(key)?.rows_of(self.field)
+    }
+
+    /// The batch a binned color's edges read this column read's values from:
+    /// the rows its bin-grouped statistic consumed ([`Self::published_origin`]),
+    /// which are the same before and after the statistic groups by the edges,
+    /// else the batch it draws ([`Self::column_batch`]), which no bin-grouped
+    /// step produced. `None` for a raster image's cells and when that batch
+    /// lacks the field.
+    fn binned_sample_batch<'b>(
+        &self,
+        primary_batch: &'b RecordBatch,
+        transform_outputs: &'b HashMap<String, RecordBatch>,
+        transform_origins: &'b BinnedOrigins,
+        facet_shared: bool,
+    ) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
+        if self.is_raster_cells() {
+            return None;
+        }
+        self.published_origin(transform_origins)
+            .filter(|origin| origin.column_by_name(self.field).is_some())
+            .or_else(|| self.column_batch(primary_batch, transform_outputs, facet_shared))
+    }
+
     /// Whether this read's values read as categories: a column by its
     /// binding's declared type or its dtype ([`column_reads_categorical`]);
     /// a raster image's cells never, they are numbers.
@@ -515,14 +563,14 @@ pub(in crate::render) fn aux_reads<'a>(
         if channel.drawn_as() == crate::spec::layer::InheritedChannel::Color {
             if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, primary_batch, transform_outputs) {
                 let kind = AuxReadKind::RasterCells { cmap, entry: layer.entry.as_deref() };
-                reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind });
+                reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind, origin: None });
                 continue;
             }
         }
         if !layer.mark.draws_channel(channel.drawn_as()) || source.locate(field, primary_batch, transform_outputs).is_none() {
             continue;
         }
-        reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding } });
+        reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding }, origin: None });
     }
     reads
 }
@@ -582,7 +630,7 @@ pub(in crate::render) fn raster_cell_reads<'a>(
             return None;
         }
         let cmap = style.and_then(|style| style.cmap.as_deref());
-        Some(AuxRead { layer: index, mark, source, field, kind: AuxReadKind::RasterCells { cmap, entry } })
+        Some(AuxRead { layer: index, mark, source, field, kind: AuxReadKind::RasterCells { cmap, entry }, origin: None })
     };
     match spec.layers.as_deref() {
         Some(layers) => layers
@@ -622,7 +670,8 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
             Some(layers) => {
                 for read in aux_reads(layers, &input.spec.encoding, channel, final_batch, transform_outputs) {
                     let Some(batch) = read.source.batch(final_batch, transform_outputs) else { continue };
-                    reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), ..read });
+                    let origin = read.published_origin(input.transform_origins);
+                    reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), origin, ..read });
                 }
                 first_layer += layers.len();
             }
@@ -638,6 +687,7 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
                     source: LayerSource::Batch(located.batch),
                     field,
                     kind: AuxReadKind::Column { binding },
+                    origin: input.transform_origins.get(FINAL_OUTPUT_KEY).and_then(|origin| origin.rows_of(field)),
                 });
             }
         }
@@ -844,6 +894,64 @@ pub(in crate::render) fn aux_numeric_values(
         }
     }
     values.retain(|v| v.is_finite());
+    values
+}
+
+/// The values a binned color's edges are cut from, one entry per distinct
+/// source ([`binned_color_sources`]), pooled.
+pub(in crate::render) fn binned_color_values<'a: 'b, 'b>(
+    reads: &[AuxRead<'a>],
+    primary_batch: &'b RecordBatch,
+    transform_outputs: &'b HashMap<String, RecordBatch>,
+    transform_origins: &'b BinnedOrigins,
+    facet_shared: bool,
+) -> Vec<f64> {
+    binned_color_sources(reads, primary_batch, transform_outputs, transform_origins, facet_shared).into_iter().flatten().collect()
+}
+
+/// The distinct sources of the values a binned color's edges are cut from:
+/// [`aux_numeric_values`] with each column read's values taken from the rows
+/// its bin-grouped statistic consumes ([`AuxRead::binned_sample_batch`]), the
+/// same on the run that groups by the edges as on the run that cuts them.
+/// Each source is its finite values, sorted. Reads whose values are the same
+/// multiset (a composite mark's sub-layers over one input, siblings or
+/// overlay members over the same rows, and so two frames whose column holds
+/// the same values) are one source ([`add_distinct_source`]), so the edges
+/// are the `Bin` transform's over the data however many layers read it. A
+/// raster image's cells are its own source and always count.
+pub(in crate::render) fn binned_color_sources<'a: 'b, 'b>(
+    reads: &[AuxRead<'a>],
+    primary_batch: &'b RecordBatch,
+    transform_outputs: &'b HashMap<String, RecordBatch>,
+    transform_origins: &'b BinnedOrigins,
+    facet_shared: bool,
+) -> Vec<Vec<f64>> {
+    let mut sources: Vec<Vec<f64>> = Vec::new();
+    for read in reads {
+        if let Some(raster) = read.raster_batch(primary_batch, transform_outputs) {
+            sources.push(finite_sorted(crate::render::marks::image::raster_cell_values(raster)));
+            continue;
+        }
+        let Some(batch) = read.binned_sample_batch(primary_batch, transform_outputs, transform_origins, facet_shared) else { continue };
+        let values = crate::render::arrow_cast::col_as_f64(batch, read.field).unwrap_or_default().into_iter().flatten();
+        add_distinct_source(&mut sources, finite_sorted(values));
+    }
+    sources
+}
+
+/// Add `source` (finite values, sorted) to `sources` unless an equal one is
+/// already there: one rule for counting each source of a binned color's
+/// values once, within a chart and across a composite's leaves.
+pub(in crate::render) fn add_distinct_source(sources: &mut Vec<Vec<f64>>, source: Vec<f64>) {
+    if !sources.contains(&source) {
+        sources.push(source);
+    }
+}
+
+/// `values`' finite values, sorted.
+pub(in crate::render) fn finite_sorted(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
+    let mut values: Vec<f64> = values.into_iter().filter(|v| v.is_finite()).collect();
+    values.sort_by(f64::total_cmp);
     values
 }
 

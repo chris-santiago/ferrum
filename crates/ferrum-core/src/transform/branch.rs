@@ -155,7 +155,7 @@ mod tests {
             branch("b", None, vec![keep(0.0, None)]),
             keep(0.0, Some("plain")),
         ];
-        let (outputs, _) = run(&specs).unwrap();
+        let (outputs, _, _) = run(&specs).unwrap();
         assert_eq!(values(&outputs["b"]), [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(values(&outputs["plain"]), [3.0, 4.0]);
         assert_eq!(values(&outputs[FINAL_OUTPUT_KEY]), [3.0, 4.0]);
@@ -171,7 +171,7 @@ mod tests {
             name: None,
         });
         let specs = vec![keep(1.0, None), keep(3.0, Some("high")), branch("b", Some("high"), vec![double])];
-        let (outputs, _) = run(&specs).unwrap();
+        let (outputs, _, _) = run(&specs).unwrap();
         let out = &outputs["b"];
         assert_eq!(values(out), [4.0]);
         let w = out.column(out.schema().index_of("w").unwrap());
@@ -200,7 +200,7 @@ mod tests {
                 ],
             ),
         ];
-        let (outputs, _) = run(&specs).unwrap();
+        let (outputs, _, _) = run(&specs).unwrap();
         let scoped = |key: &str| crate::transform::registry::secondary_key(Some("outer"), key);
         assert_eq!(values(&outputs["outer"]), [2.0, 3.0, 4.0]);
         assert_eq!(values(&outputs[&scoped("inner")]), [3.0, 4.0]);
@@ -220,7 +220,7 @@ mod tests {
             branch("b1", None, vec![keep(1.0, Some("x"))]),
             branch("b2", None, vec![keep(2.0, Some("x"))]),
         ];
-        let (outputs, _) = run(&specs).unwrap();
+        let (outputs, _, _) = run(&specs).unwrap();
         let x1 = crate::transform::registry::secondary_key(Some("b1"), "x");
         let x2 = crate::transform::registry::secondary_key(Some("b2"), "x");
         assert_ne!(x1, x2);
@@ -237,7 +237,7 @@ mod tests {
         let qq: TransformSpec =
             serde_json::from_value(serde_json::json!({"type": "qq", "field": "v"})).unwrap();
         let specs = vec![branch("b1", None, vec![branch("b2", None, vec![qq])])];
-        let (outputs, _) = run(&specs).unwrap();
+        let (outputs, _, _) = run(&specs).unwrap();
         // b2's own tail, inserted bare into b1's child by run_chain's Branch
         // arm, then rescoped once (by b1) on the way to the top level.
         let b1_b2 = crate::transform::registry::secondary_key(Some("b1"), "b2");
@@ -297,7 +297,7 @@ mod tests {
         let specs = vec![branch("clustered", None, vec![linkage, reorder])];
 
         pyo3::Python::initialize();
-        let (outputs, _) =
+        let (outputs, _, _) =
             apply_transforms_named(&specs, &clustered_batch, &TransformContext::default()).unwrap();
         // The real assertion is that this ran at all: `Reorder::apply_with_outputs`
         // raises a typed "from=... not found in named outputs" error (not a
@@ -327,7 +327,7 @@ mod tests {
     fn inner_secondary_outputs_are_published_under_their_own_keys() {
         let qq: TransformSpec =
             serde_json::from_value(serde_json::json!({"type": "qq", "field": "v"})).unwrap();
-        let (outputs, _) = run(&[branch("b", None, vec![qq])]).unwrap();
+        let (outputs, _, _) = run(&[branch("b", None, vec![qq])]).unwrap();
         assert!(outputs.contains_key("b"));
         let scoped = crate::transform::registry::secondary_key(Some("b"), crate::transform::qq::QQ_LINE_KEY);
         assert!(outputs.contains_key(&scoped), "got keys: {:?}", outputs.keys().collect::<Vec<_>>());
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn an_inner_step_named_like_the_branch_publishes_under_its_scoped_key_and_the_tail_under_the_bare_name() {
         let specs = vec![branch("b", None, vec![swarm(Some("b")), keep(3.0, None)])];
-        let (outputs, swarms) = run(&specs).unwrap();
+        let (outputs, swarms, _) = run(&specs).unwrap();
         assert_eq!(values(&outputs["b"]), [4.0], "the tail, under the bare name");
         assert!(!swarms.contains_key("b"), "the tail descends from no Swarm");
         let scoped = crate::transform::registry::secondary_key(Some("b"), "b");
@@ -362,7 +362,7 @@ mod tests {
             branch("from_sw", Some("sw"), vec![keep(0.0, None)]),
             keep(0.0, None),
         ];
-        let (_, swarms) = run(&specs).unwrap();
+        let (_, swarms, _) = run(&specs).unwrap();
         assert!(swarms.contains_key("after_swarm"));
         assert!(swarms.contains_key("from_sw"));
         assert!(swarms.contains_key("sw"));

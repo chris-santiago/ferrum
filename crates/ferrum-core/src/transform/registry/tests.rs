@@ -929,7 +929,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             tol: 1e-8, output: SmoothOutput::Fitted, inject_zero_ref: false, inject_metrics: false,
             groupby: vec![], name: None, x_range: None,
         })),
-        ("identity", Identity(IdentitySpec { name: None })),
+        ("identity", Identity(IdentitySpec { name: None, statistics: false })),
         ("filter", Filter(FilterSpec { predicate: "x > 0".into(), name: None, param: None })),
         ("calculate", Calculate(CalculateSpec { as_field: "z".into(), expr: "x + y".into(), name: None })),
         ("project", Project(crate::transform::project::ProjectSpec { fields: vec!["x".into()], name: None })),
@@ -2079,7 +2079,7 @@ fn assert_secondary_outputs_match(
 ) {
     let primary = spec.apply(input).unwrap_or_else(|e| panic!("{kind}: apply failed: {e}"));
     let actual = spec
-        .secondary_outputs(input, &primary)
+        .secondary_outputs(input, &primary, &crate::transform::context::TransformContext::default())
         .unwrap_or_else(|e| panic!("{kind}: secondary_outputs failed: {e}"));
     let declared = entry_for_kind(kind).unwrap().secondary_outputs;
 
@@ -2097,6 +2097,29 @@ fn assert_secondary_outputs_match(
             &[],
             &format!("{kind} secondary output '{key}'"),
         );
+    }
+    assert_secondary_keys_name_every_published_key(kind, &spec, input);
+}
+
+/// The keys a step says it can publish ([`TransformSpec::secondary_keys`],
+/// what a binned color's demand resolves a reader's `data_source` against
+/// before the run) are exactly the keys its real `secondary_outputs`
+/// publishes, unnamed (bare) and named.
+fn assert_secondary_keys_name_every_published_key(kind: &str, spec: &TransformSpec, input: &RecordBatch) {
+    let mut wire = serde_json::to_value(spec).unwrap();
+    let mut named_wire = wire.clone();
+    wire.as_object_mut().unwrap().remove("name");
+    named_wire["name"] = serde_json::json!("s");
+    for wire in [wire, named_wire] {
+        let spec: TransformSpec = serde_json::from_value(wire).unwrap();
+        let primary = spec.apply(input).unwrap_or_else(|e| panic!("{kind}: apply failed: {e}"));
+        let published: Vec<String> = spec
+            .secondary_outputs(input, &primary, &crate::transform::context::TransformContext::default())
+            .unwrap_or_else(|e| panic!("{kind}: secondary_outputs failed: {e}"))
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(spec.secondary_keys(), published, "{kind} named {:?}: secondary_keys drifted from the published keys", crate::transform::core::spec_name(&spec));
     }
 }
 
@@ -2187,7 +2210,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
         });
         let primary = spec.apply(&batch).unwrap();
         let actual: Vec<String> = spec
-            .secondary_outputs(&batch, &primary)
+            .secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default())
             .unwrap()
             .into_iter()
             .map(|(k, _)| k)
@@ -2216,7 +2239,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
         });
         let primary = spec.apply(&batch).unwrap();
         let actual: Vec<String> = spec
-            .secondary_outputs(&batch, &primary)
+            .secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default())
             .unwrap()
             .into_iter()
             .map(|(k, _)| k)
@@ -2248,7 +2271,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
         });
         let primary = spec.apply(&batch).unwrap();
         let actual: Vec<String> = spec
-            .secondary_outputs(&batch, &primary)
+            .secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default())
             .unwrap()
             .into_iter()
             .map(|(k, _)| k)
@@ -2289,7 +2312,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = unnamed.apply(&batch).unwrap();
         let keys: Vec<String> =
-            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            unnamed.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, vec!["qq_line".to_string()], "qq, name=None");
 
         let named = TransformSpec::Qq(QQSpec {
@@ -2303,7 +2326,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = named.apply(&batch).unwrap();
         let keys: Vec<String> =
-            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            named.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, vec!["pinned_qq_line".to_string()], "qq, name=Some");
     }
 
@@ -2325,7 +2348,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = unnamed.apply(&batch).unwrap();
         let keys: Vec<String> =
-            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            unnamed.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         let mut expected = vec!["outliers".to_string()];
         expected.extend((1..=12).map(|k| format!("depth_{k}")));
         assert_eq!(keys, expected, "letter_value, name=None");
@@ -2341,7 +2364,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = named.apply(&batch).unwrap();
         let keys: Vec<String> =
-            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            named.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         let mut expected = vec!["pinned_outliers".to_string()];
         expected.extend((1..=12).map(|k| format!("pinned_depth_{k}")));
         assert_eq!(keys, expected, "letter_value, name=Some");
@@ -2361,7 +2384,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = unnamed.apply(&batch).unwrap();
         let keys: Vec<String> =
-            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            unnamed.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
             vec!["linkage".to_string(), "order".to_string(), "coords".to_string(), "segments".to_string()],
@@ -2378,7 +2401,7 @@ fn pinned_secondary_keys_captured_from_head() {
         });
         let primary = named.apply(&batch).unwrap();
         let keys: Vec<String> =
-            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            named.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
             vec![
@@ -2423,7 +2446,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
             });
             let primary = spec.apply(&batch).unwrap();
             let actual: Vec<String> =
-                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+                spec.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
             assert_eq!(actual, vec![secondary_key(name, QQ_LINE_KEY)], "qq name={name:?}");
         }
 
@@ -2445,7 +2468,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
             });
             let primary = spec.apply(&batch).unwrap();
             let actual: Vec<String> =
-                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+                spec.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
             let mut expected = vec![secondary_key(name, OUTLIERS_KEY)];
             expected.extend((1..=K_MAX_NAMED).map(|k| secondary_key(name, &depth_key(k))));
             assert_eq!(actual, expected, "letter_value name={name:?}");
@@ -2468,7 +2491,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
             });
             let primary = spec.apply(&batch).unwrap();
             let actual: Vec<String> =
-                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+                spec.secondary_outputs(&batch, &primary, &crate::transform::context::TransformContext::default()).unwrap().into_iter().map(|(k, _)| k).collect();
             let expected = vec![
                 secondary_key(name, LINKAGE_KEY),
                 secondary_key(name, ORDER_KEY),

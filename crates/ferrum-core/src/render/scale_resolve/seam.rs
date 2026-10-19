@@ -58,6 +58,9 @@ pub(crate) struct LeafResolveInput<'a> {
     pub(crate) encoding: &'a crate::spec::encoding::Encoding,
     pub(crate) final_batch: &'a arrow::record_batch::RecordBatch,
     pub(crate) transform_outputs: &'a std::collections::HashMap<String, arrow::record_batch::RecordBatch>,
+    /// The leaf's binned-color origins, keyed like `transform_outputs`
+    /// (`PreparedInputs::transform_origins`).
+    pub(crate) transform_origins: &'a crate::transform::color_bin_group::BinnedOrigins,
 }
 
 /// The auxiliary channels an overlay group leaves to its members: those an
@@ -249,11 +252,12 @@ pub(crate) enum SharedDomain {
     Ordinal(Vec<String>),
     /// A binned color with derived edges (`Color(bin=...)`, a `bin-ordinal`
     /// scale carrying `bin` and no `bins`): the field it bins, its bin
-    /// parameters, and the pooled finite values it cuts its edges from. A
-    /// group shares one only when every leaf bins the same field with the
-    /// same parameters, so each leaf's scale computes the one edge set and
-    /// draws the one legend.
-    Samples { field: String, bin: crate::spec::encoding::ScaleBin, values: Vec<f64> },
+    /// parameters, and the distinct sources of the finite values it cuts its
+    /// edges from (`domain::binned_color_sources`), each counted once
+    /// however many leaves read it. A group shares one only when every leaf
+    /// bins the same field with the same parameters, so each leaf's scale
+    /// computes the one edge set and draws the one legend.
+    Samples { field: String, bin: crate::spec::encoding::ScaleBin, sources: Vec<Vec<f64>> },
     /// A binned color with an explicit `bins` list on `field`. The leaf keeps
     /// its own scale; the variant lets a shared group check it merges into
     /// one scale with the others, and is never assigned to a leaf.

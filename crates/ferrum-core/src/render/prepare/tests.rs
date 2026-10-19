@@ -1613,7 +1613,7 @@ fn raster_screen_resolution_scales_with_viewport() {
             width: 300.0,
             height: 200.0,
         },
-        &crate::layout::ThemeInputs::default(),
+        &crate::layout::ThemeInputs::default(), None,
     )
     .unwrap()
     .0;
@@ -1624,7 +1624,7 @@ fn raster_screen_resolution_scales_with_viewport() {
             width: 1200.0,
             height: 900.0,
         },
-        &crate::layout::ThemeInputs::default(),
+        &crate::layout::ThemeInputs::default(), None,
     )
     .unwrap()
     .0;
@@ -1659,7 +1659,7 @@ fn raster_explicit_resolution_unaffected_by_viewport() {
             width: 300.0,
             height: 200.0,
         },
-        &crate::layout::ThemeInputs::default(),
+        &crate::layout::ThemeInputs::default(), None,
     )
     .unwrap()
     .0;
@@ -1670,7 +1670,7 @@ fn raster_explicit_resolution_unaffected_by_viewport() {
             width: 1200.0,
             height: 900.0,
         },
-        &crate::layout::ThemeInputs::default(),
+        &crate::layout::ThemeInputs::default(), None,
     )
     .unwrap()
     .0;
@@ -1692,7 +1692,7 @@ fn raster_screen_resolution_facet_grid_divides_estimate() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme)
+    let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme, None)
         .unwrap()
         .0;
     let (w0, h0) = raster_grid_dims(&unfaceted);
@@ -1710,7 +1710,7 @@ fn raster_screen_resolution_facet_grid_divides_estimate() {
         spacing: None,
         resolve: crate::layout::FacetResolve::default(),
     });
-    let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme)
+    let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme, None)
         .unwrap()
         .0;
     let (w1, h1) = raster_grid_dims(&faceted);
@@ -1738,7 +1738,7 @@ fn non_pixel_dependent_transform_byte_identical_across_viewports() {
             width: 300.0,
             height: 200.0,
         },
-        &theme,
+        &theme, None,
     )
     .unwrap()
     .0;
@@ -1749,7 +1749,7 @@ fn non_pixel_dependent_transform_byte_identical_across_viewports() {
             width: 1200.0,
             height: 900.0,
         },
-        &theme,
+        &theme, None,
     )
     .unwrap()
     .0;
@@ -1784,7 +1784,7 @@ fn raster_screen_resolution_survives_degenerate_viewport_without_panicking() {
         height: 30.0,
     };
     let theme = crate::layout::ThemeInputs::default();
-    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect("must not panic or error on a degenerate viewport")
         .0;
     assert_eq!(
@@ -1921,7 +1921,7 @@ fn smooth_facet_panel_rank_deficient_degrades_instead_of_refusing() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let (outputs, warnings, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect("a facet panel too sparse for degree=3 must degrade, not fail the chart");
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
     // #162: the sparse 'few' panel's degenerate fit must warn.
@@ -1980,7 +1980,7 @@ fn smooth_groupby_rank_deficient_degrades_symmetrically_with_facet() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let (outputs, warnings, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect("a groupby group too sparse for degree=3 must degrade, not fail the chart");
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
     assert!(
@@ -2044,7 +2044,7 @@ fn smooth_whole_frame_rank_deficient_still_refuses() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect_err("a true whole-frame rank-deficient degree=3 fit must still refuse");
     let msg = err.to_string();
     assert!(
@@ -2228,7 +2228,7 @@ fn smooth_facet_groupby_int64_column_widens_instead_of_erroring() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect("Int64 groupby column divergence across facet panels must widen, not error")
         .0;
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
@@ -2283,7 +2283,7 @@ fn smooth_facet_groupby_boolean_column_widens_instead_of_erroring() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
         .expect("Boolean groupby column divergence across facet panels must widen, not error")
         .0;
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
@@ -8086,7 +8086,7 @@ fn rows_whose_frame_lacks_the_facet_field_repeat_in_every_panel() {
     let spec = facet_repeat_spec(r#","repeat":[{"marker":"m","fields":["c"]}]"#);
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+    let (outputs, warnings, _, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme, None)
         .expect("a declared repeat renders");
     let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
     assert_eq!(float_col(out, "v"), [10.0, 20.0, 10.0, 20.0]);
@@ -8109,7 +8109,7 @@ fn null_facet_values_without_a_repeat_are_dropped_with_a_count() {
     let spec = facet_repeat_spec("");
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let (_, warnings, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+    let (_, warnings, _, _) = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme, None)
         .expect("null facet values drop, they do not fail the chart");
     assert_eq!(
         warnings,
@@ -8125,11 +8125,11 @@ fn a_malformed_facet_repeat_is_refused() {
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
     let not_a_facet = facet_repeat_spec(r#","repeat":[{"marker":"m","fields":["v"]}]"#);
-    let err = run_transforms_with_facet(&not_a_facet, &facet_repeat_batch(), viewport, &theme)
+    let err = run_transforms_with_facet(&not_a_facet, &facet_repeat_batch(), viewport, &theme, None)
         .expect_err("v is not a facet field");
     assert!(err.to_string().contains("names 'v', which is not a facet field"), "{err}");
     let no_marker = facet_repeat_spec(r#","repeat":[{"marker":"absent","fields":["c"]}]"#);
-    let err = run_transforms_with_facet(&no_marker, &facet_repeat_batch(), viewport, &theme)
+    let err = run_transforms_with_facet(&no_marker, &facet_repeat_batch(), viewport, &theme, None)
         .expect_err("the marker column is absent");
     assert!(matches!(err, RenderError::UnknownColumn { ref name } if name == "absent"), "{err}");
 }
@@ -8155,7 +8155,7 @@ fn a_facet_with_no_values_is_refused() {
     .expect("schema and columns agree");
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme).expect_err("no panel exists");
+    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect_err("no panel exists");
     assert_eq!(err.to_string(), "facet: no usable values found for field 'c'");
 }
 
@@ -8211,7 +8211,7 @@ fn a_non_boolean_facet_repeat_marker_is_refused() {
     let spec = facet_repeat_spec(r#","repeat":[{"marker":"v","fields":["c"]}]"#);
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let err = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme)
+    let err = run_transforms_with_facet(&spec, &facet_repeat_batch(), viewport, &theme, None)
         .expect_err("v is Float64, not a Boolean marker");
     assert_eq!(err.to_string(), RenderError::ScaleResolutionFailed("facet repeat marker 'v' must be Boolean".into()).to_string());
 }
@@ -8244,8 +8244,8 @@ fn a_grid_facet_warns_per_field_for_its_null_rows() {
     .expect("schema and columns agree");
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let (outputs, warnings, _) =
-        run_transforms_with_facet(&spec, &batch, viewport, &theme).expect("null facet rows drop, they do not fail");
+    let (outputs, warnings, _, _) =
+        run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect("null facet rows drop, they do not fail");
     use crate::transform::context::{NullKeyScope::Facet, TransformWarning::NullKeyRowsDropped};
     assert_eq!(
         warnings,
@@ -9952,7 +9952,7 @@ fn null_key_facet_run(
     .expect("schema and columns agree");
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
 }
 
 const NULL_KEY_TRANSFORMS: [(&str, &str); 2] = [
@@ -9966,7 +9966,7 @@ const NULL_KEY_TRANSFORMS: [(&str, &str); 2] = [
 #[test]
 fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
     for (name, transform) in NULL_KEY_TRANSFORMS {
-        let (outputs, warnings, _) = null_key_facet_run(
+        let (outputs, warnings, _, _) = null_key_facet_run(
             transform,
             vec!["p", "p", "p", "q", "q"],
             vec![Some("x"), Some("x"), Some("x"), None, None],
@@ -9993,7 +9993,7 @@ fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
 #[test]
 fn the_null_key_drop_count_sums_across_facet_panels() {
     for (name, transform) in NULL_KEY_TRANSFORMS {
-        let (_, warnings, _) = null_key_facet_run(
+        let (_, warnings, _, _) = null_key_facet_run(
             transform,
             vec!["p", "p", "p", "q", "q", "q"],
             vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
@@ -10009,4 +10009,697 @@ fn the_null_key_drop_count_sums_across_facet_panels() {
             "{name}"
         );
     }
+}
+
+/// Rows whose binned color `v` puts two distinct values in each of four
+/// unit bins (1..5) for each `g`, every (g, v) twice: 32 rows, 16 distinct
+/// (g, v) pairs, 8 (g, bin) pairs. `y` is the row number from 1, `x` from 0.
+fn binned_stat_rows() -> RecordBatch {
+    let vs = [1.1, 1.6, 2.2, 2.7, 3.1, 3.8, 4.4, 4.9];
+    let mut g = Vec::new();
+    let mut v = Vec::new();
+    for group in ["a", "b"] {
+        for value in vs {
+            for _ in 0..2 {
+                g.push(group);
+                v.push(value);
+            }
+        }
+    }
+    let n = g.len();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(g)),
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((1..=n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(v)),
+        ],
+    )
+    .unwrap()
+}
+
+/// The marker that ends a chain's user steps: the steps after it were
+/// lowered from layers' encodings and marks.
+fn statistics_marker() -> serde_json::Value {
+    serde_json::json!({"type": "identity", "statistics": true})
+}
+
+/// The binned color over `v` with four unit bins, 1..5.
+fn unit_binned_v() -> serde_json::Value {
+    serde_json::json!({"field": "v", "scale": {"type": "bin-ordinal", "bin": {"bin_width": 1.0, "extent": [1.0, 5.0], "nice": false}}})
+}
+
+/// The distinct values of `name` in `batch`, ascending.
+fn distinct_f64(batch: &RecordBatch, name: &str) -> Vec<f64> {
+    let mut values = float_col(batch, name);
+    values.sort_by(f64::total_cmp);
+    values.dedup();
+    values
+}
+
+/// `bar(x='g', y='mean(y)', color=binned v)` as the flat wire lowers it,
+/// under `position` (`None` for none).
+fn binned_mean_bar_spec(position: Option<&str>) -> ChartSpec {
+    let mut spec = serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["g", "v"]}],
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()},
+    });
+    if let Some(position) = position {
+        spec["position"] = serde_json::json!({"type": position});
+    }
+    serde_json::from_value(spec).expect("the binned mean bar deserializes")
+}
+
+/// Every bar a scene draws: `(x, y, w, h, fill)`.
+fn scene_bars(scene: &ferrum_scene::SceneGraph) -> Vec<(f64, f64, f64, f64, (u8, u8, u8))> {
+    scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Rect { x, y, w, h, style, .. } => style.fill.map(|c| (*x, *y, *w, *h, (c.r, c.g, c.b))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The fill a binned scale draws its bin `bin` in.
+fn bin_fill(buckets: &crate::render::scale_resolve::DiscretizedColors, bin: usize) -> (u8, u8, u8) {
+    let step = crate::render::draw::to_scene_color(buckets.colors()[bin]);
+    (step.r, step.g, step.b)
+}
+
+/// An encoding aggregate grouped by a binned color groups by its bins: one
+/// row per (g, bin), carrying the bin start, its mean over the bin's four
+/// rows. Rejects grouping by the raw value (16 rows, two per bin).
+#[test]
+fn an_encoding_aggregate_under_a_binned_color_groups_by_bin() {
+    let p = prep(&binned_mean_bar_spec(None), &binned_stat_rows());
+    let out = &p.transform_outputs[FINAL_OUTPUT_KEY];
+    assert_eq!(out.num_rows(), 8, "one row per (g, bin)");
+    assert_eq!(distinct_f64(out, "v"), [1.0, 2.0, 3.0, 4.0]);
+    let means: Vec<(f64, f64)> = float_col(out, "v").into_iter().zip(float_col(out, "mean_y")).collect();
+    assert_eq!(&means[..4], [(1.0, 2.5), (2.0, 6.5), (3.0, 10.5), (4.0, 14.5)], "group a's bin means");
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    assert_eq!(buckets.bounds(), [1.0, 2.0, 3.0, 4.0, 5.0]);
+}
+
+/// A stacked mean bar under a binned color draws one segment per (g, bin),
+/// low bin at the bottom, each segment its bin's step; a dodged one draws
+/// one slot per bin in each band with no two bars sharing a slot. Rejects
+/// the 16 bars, two per bin, that grouping by the raw value drew (stacked
+/// as separate segments, dodged two to a slot).
+#[test]
+fn a_stacked_or_dodged_mean_bar_under_a_binned_color_draws_one_bar_per_bin() {
+    let rows = binned_stat_rows();
+    for position in ["stack", "dodge"] {
+        let spec = binned_mean_bar_spec(Some(position));
+        let p = prep(&spec, &rows);
+        let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+        let scene = gate_render(&spec, &rows).0.expect("renders");
+        let mut bars = scene_bars(&scene);
+        assert_eq!(bars.len(), 8, "{position}: one bar per (g, bin)");
+        bars.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
+        let fills: Vec<(u8, u8, u8)> = bars.iter().map(|bar| bar.4).collect();
+        let in_bin_order: Vec<(u8, u8, u8)> = (0..2).flat_map(|_| (0..4).map(|bin| bin_fill(buckets, bin))).collect();
+        assert_eq!(fills, in_bin_order, "{position}: each band draws its bins low to high");
+        let mut slots: Vec<f64> = bars.iter().map(|bar| bar.0).collect();
+        slots.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(slots.len(), if position == "stack" { 2 } else { 8 }, "{position}: {slots:?}");
+    }
+}
+
+/// Every statistic that groups by a binned color makes one group per bin:
+/// an aggregating positional bin, a density, a boxplot's statistics, a
+/// violin and a smooth, each read by a layer that draws the binned color.
+/// Rejects one statistic per raw value (eight distinct `v`).
+#[test]
+fn every_statistic_grouped_by_a_binned_color_makes_one_group_per_bin() {
+    let cases = [
+        (serde_json::json!({"type": "bin", "field": "x", "bin_count": 4, "nice": false, "groupby": ["v"]}), "bin_start", "count"),
+        (serde_json::json!({"type": "kde", "field": "y", "bandwidth": {"kind": "scott"}, "n": 5, "groupby": ["v"]}), "value", "density"),
+        (serde_json::json!({"type": "box_stats", "field": "y", "groupby": ["g", "v"]}), "median", "q1"),
+        (serde_json::json!({"type": "violin", "field": "y", "groupby": ["v"]}), "violin_x", "violin_y"),
+        (serde_json::json!({"type": "smooth", "x": "x", "y": "y", "method": "lm", "bandwidth": 0.75, "degree": 1, "n": 5, "groupby": ["v"]}), "x", "y"),
+    ];
+    let rows = binned_stat_rows();
+    for (mut statistic, x, y) in cases {
+        let kind = statistic["type"].clone();
+        statistic["name"] = serde_json::json!("stat");
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "transforms": [statistics_marker(), statistic],
+            "encoding": {},
+            "layers": [{"mark": "point", "data_source": "stat", "encoding": {"x": {"field": x}, "y": {"field": y}, "color": unit_binned_v()}}],
+        }))
+        .expect("the statistic spec deserializes");
+        let p = prep(&spec, &rows);
+        assert_eq!(distinct_f64(&p.transform_outputs["stat"], "v"), [1.0, 2.0, 3.0, 4.0], "{kind}: one group per bin");
+    }
+}
+
+/// A histogram colored by a binned field draws one histogram per bin, each
+/// counting its bin's rows (8 each, 32 in all). Rejects one histogram per
+/// raw value.
+#[test]
+fn a_histogram_under_a_binned_color_draws_one_histogram_per_bin() {
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), {"type": "bin", "field": "x", "bin_count": 4, "nice": false, "groupby": ["v"]}],
+        "encoding": {"x": {"field": "bin_start"}, "x2": {"field": "bin_end"}, "y": {"field": "count"}, "color": unit_binned_v()},
+    }))
+    .expect("the histogram deserializes");
+    let p = prep(&spec, &binned_stat_rows());
+    let out = &p.transform_outputs[FINAL_OUTPUT_KEY];
+    assert_eq!(distinct_f64(out, "v"), [1.0, 2.0, 3.0, 4.0]);
+    for bin in [1.0, 2.0, 3.0, 4.0] {
+        let count: f64 = float_col(out, "v").iter().zip(crate::render::arrow_cast::col_as_f64(out, "count").unwrap()).filter(|(v, _)| **v == bin).map(|(_, c)| c.unwrap_or(0.0)).sum();
+        assert_eq!(count, 8.0, "bin {bin} counts its 8 rows");
+    }
+}
+
+/// A binned color's edges are cut from the rows its statistic consumes (the
+/// 32 chart rows), not from the statistic's output (16 grouped values):
+/// with derived bins the two give different edge counts. Rejects edges cut
+/// after the statistic ran.
+#[test]
+fn a_binned_colors_edges_come_from_the_rows_its_statistic_consumes() {
+    let bin = serde_json::json!({"nice": false});
+    let mut spec = binned_mean_bar_spec(None);
+    spec.encoding.color = Some(serde_json::from_value(serde_json::json!({"field": "v", "scale": {"type": "bin-ordinal", "bin": bin}})).unwrap());
+    let rows = binned_stat_rows();
+    let raw = float_col(&rows, "v");
+    let mut grouped = raw.clone();
+    grouped.dedup();
+    let edges = |values: &[f64]| {
+        crate::transform::bin::scale_bin_edges(&serde_json::from_value(bin.clone()).unwrap(), values).unwrap().unwrap()
+    };
+    assert_ne!(edges(&raw), edges(&grouped), "the fixture discriminates");
+    let p = prep(&spec, &rows);
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    assert_eq!(buckets.bounds(), edges(&raw).as_slice());
+    let out = &p.transform_outputs[FINAL_OUTPUT_KEY];
+    let starts = &edges(&raw)[..edges(&raw).len() - 1];
+    assert!(float_col(out, "v").iter().all(|v| starts.contains(v)), "the statistic grouped by those edges");
+}
+
+/// Facet panels share one binned color's edges and group by them: panel a
+/// holds `v` over 1..3 and panel b over 3..9, so two bins over all rows cut
+/// at 5, and panel a's statistic makes one group. Rejects each panel cutting
+/// its own edges (panel a's would cut at 2).
+#[test]
+fn faceted_statistics_group_by_one_binned_edge_set() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("f", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 3.0, 6.0, 9.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 2}},
+        "transforms": [statistics_marker(), {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["v"]}],
+        "encoding": {"x": {"field": "v"}, "y": {"field": "mean_y"}, "color": {"field": "v", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}}},
+    }))
+    .expect("the faceted spec deserializes");
+    let p = prep(&spec, &rows);
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    assert_eq!(buckets.bounds(), [1.0, 5.0, 9.0]);
+    let out = &p.transform_outputs[FINAL_OUTPUT_KEY];
+    let panels = crate::render::arrow_cast::col_as_ordinal_category_str(out, "f").unwrap();
+    let groups: Vec<(String, f64, f64)> = panels
+        .into_iter()
+        .zip(float_col(out, "v"))
+        .zip(float_col(out, "mean_y"))
+        .map(|((f, v), m)| (f.unwrap_or_default(), v, m))
+        .collect();
+    assert_eq!(groups, [("a".to_string(), 1.0, 2.0), ("b".to_string(), 1.0, 4.0), ("b".to_string(), 5.0, 5.5)]);
+}
+
+/// A text's grouping-only `group` key over a binned color dodges the label
+/// by the color's bins, so each label sits over its own bar: one label per
+/// bar, each bar holding exactly one. Rejects a group key read by raw value,
+/// which slotted the labels in row order (here high bin first) while the
+/// bars take bin order.
+#[test]
+fn a_texts_binned_group_key_dodges_its_label_onto_its_bar() {
+    let mean = |name: &str| serde_json::json!({"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["g", "v"], "name": name});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), mean("bars"), mean("labels")],
+        "encoding": {},
+        "layers": [
+            {"mark": "bar", "data_source": "bars", "position": {"type": "dodge"},
+             "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()}},
+            {"mark": "text", "data_source": "labels", "position": {"type": "dodge"},
+             "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "text": {"field": "mean_y"}, "group": unit_binned_v()}},
+        ],
+    }))
+    .expect("the labelled dodge deserializes");
+    let rows = binned_stat_rows();
+    let high_bin_first = arrow::array::UInt32Array::from((0..rows.num_rows() as u32).rev().collect::<Vec<_>>());
+    let rows = arrow::compute::take_record_batch(&rows, &high_bin_first).unwrap();
+    let scene = gate_render(&spec, &rows).0.expect("renders");
+    let bars = scene_bars(&scene);
+    let labels: Vec<(f64, f64)> = scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Text { x, y, .. } => Some((*x, *y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((bars.len(), labels.len()), (8, 8), "one bar and one label per (g, bin)");
+    for bar in &bars {
+        let held: Vec<&(f64, f64)> = labels.iter().filter(|(x, _)| bar.0 < *x && *x < bar.0 + bar.2).collect();
+        assert_eq!(held.len(), 1, "bar at {} holds one label: {labels:?}", bar.0);
+        assert!((held[0].1 - bar.1).abs() < 1e-6, "the label over a bar sits at its top: {bar:?} {labels:?}");
+    }
+}
+
+/// A binned color over a non-numeric column keeps its typed refusal when a
+/// statistic groups by it.
+#[test]
+fn a_statistic_grouped_by_a_non_numeric_binned_color_is_refused() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["p", "q"])),
+        ],
+    )
+    .unwrap();
+    let err = gate_render(&binned_mean_bar_spec(None), &rows).0.expect_err("refused");
+    assert_eq!(err.to_string(), "color(bin=...) bins numbers, but column 'v' is Utf8. Bind a numeric column, or drop bin=");
+}
+
+/// A spec without a binned color, a binned color no statistic groups by, and
+/// a binned color over an all-null column each run the pipeline once, as
+/// written: no statistic regroups and no pre-statistic rows are published.
+#[test]
+fn a_chart_no_statistic_groups_by_a_binned_color_runs_its_pipeline_as_written() {
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let rows = binned_stat_rows();
+    let mut unbinned = binned_mean_bar_spec(None);
+    unbinned.encoding.color = Some(serde_json::from_value(serde_json::json!({"field": "v"})).unwrap());
+    let ungrouped: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": unit_binned_v()},
+    }))
+    .unwrap();
+    for spec in [unbinned, ungrouped] {
+        let (outputs, _, _, origins) = run_pipeline(&spec, &rows, viewport, &theme, None).expect("runs");
+        let (as_written, _, _, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+        assert!(origins.is_empty());
+        assert_eq!(outputs, as_written);
+    }
+    let nulls = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![None::<f64>, None])),
+        ],
+    )
+    .unwrap();
+    let spec = binned_mean_bar_spec(None);
+    let (outputs, _, _, _) = run_pipeline(&spec, &nulls, viewport, &theme, None).expect("runs");
+    let (as_written, _, _, _) = run_transforms_with_facet(&spec, &nulls, viewport, &theme, None).expect("runs");
+    assert_eq!(outputs[FINAL_OUTPUT_KEY], as_written[FINAL_OUTPUT_KEY], "an all-null binned color groups as written");
+}
+
+/// The mean of `y` by `[g, v]`, named `name` (unnamed when `None`).
+fn mean_by_g_v(name: Option<&str>) -> serde_json::Value {
+    let mut step = serde_json::json!({"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}], "groupby": ["g", "v"]});
+    if let Some(name) = name {
+        step["name"] = serde_json::json!(name);
+    }
+    step
+}
+
+/// A flat mean bar under the binned `v` over `transforms`.
+fn flat_binned_bar(transforms: serde_json::Value) -> ChartSpec {
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": transforms,
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()},
+    }))
+    .expect("the flat bar deserializes")
+}
+
+/// Only the steps after a chain's statistics marker group a binned color by
+/// bin: the user's own aggregate before the marker keeps its 16 raw (g, v)
+/// groups, the lowered one after it makes 8 (g, bin) groups, and a chain
+/// with no marker is all user steps, so nothing bins. Rejects grouping a
+/// user's step by bin, and treating an unmarked chain as lowered.
+#[test]
+fn only_steps_after_the_statistics_marker_group_by_bin() {
+    let rows = binned_stat_rows();
+    for (transforms, rows_out, label) in [
+        (serde_json::json!([mean_by_g_v(None), statistics_marker()]), 16, "a user step before the marker"),
+        (serde_json::json!([mean_by_g_v(None)]), 16, "a chain with no marker"),
+        (serde_json::json!([statistics_marker(), mean_by_g_v(None)]), 8, "a lowered step after the marker"),
+    ] {
+        let p = prep(&flat_binned_bar(transforms), &rows);
+        assert_eq!(p.transform_outputs[FINAL_OUTPUT_KEY].num_rows(), rows_out, "{label}");
+    }
+}
+
+/// A sibling whose statistic groups by `v` for its own `detail` keeps its
+/// standalone grain beside a bar binning `v`, whether its statistic is a
+/// named fork (`+` over one frame, `Chart.layer`) or a `Branch` (`+` over
+/// its own rows): 16 points, as alone. The bar beside it draws one bar per
+/// (g, bin). Rejects grouping a sibling's statistic by bin because it
+/// groups by a column another layer bins.
+#[test]
+fn a_siblings_statistic_keeps_its_own_grain_beside_a_binned_color() {
+    let rows = binned_stat_rows();
+    let point_layer = |source: &str| serde_json::json!({"mark": "point", "data_source": source,
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "detail": {"field": "v"}}});
+    let bar_layer = serde_json::json!({"mark": "bar", "data_source": "bars",
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()}});
+    let alone: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [statistics_marker(), mean_by_g_v(None)],
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "detail": {"field": "v"}},
+    }))
+    .unwrap();
+    let points = |p: &PreparedInputs, key: &str| p.transform_outputs[key].num_rows();
+    assert_eq!(points(&prep(&alone, &rows), FINAL_OUTPUT_KEY), 16, "the point alone");
+    let forked: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), mean_by_g_v(Some("bars")), mean_by_g_v(Some("points"))],
+        "encoding": {},
+        "layers": [bar_layer.clone(), point_layer("points")],
+    }))
+    .unwrap();
+    let p = prep(&forked, &rows);
+    assert_eq!((points(&p, "bars"), points(&p, "points")), (8, 16), "named forks");
+    let branched: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), mean_by_g_v(Some("bars")),
+            {"type": "branch", "name": "points", "transforms": [statistics_marker(), mean_by_g_v(None)]}],
+        "encoding": {},
+        "layers": [bar_layer, point_layer("points")],
+    }))
+    .unwrap();
+    let p = prep(&branched, &rows);
+    assert_eq!((points(&p, "bars"), points(&p, "points")), (8, 16), "a branch statistic");
+}
+
+/// The derived edges `bin={"nice": false}` cuts over `values`.
+fn sturges_edges(values: &[f64]) -> Vec<f64> {
+    crate::transform::bin::scale_bin_edges(&serde_json::from_value(serde_json::json!({"nice": false})).unwrap(), values)
+        .unwrap()
+        .expect("values to bin")
+}
+
+/// The binned `v` with derived (Sturges) edges.
+fn sturges_binned_v() -> serde_json::Value {
+    serde_json::json!({"field": "v", "scale": {"type": "bin-ordinal", "bin": {"nice": false}}})
+}
+
+/// The bounds of `p`'s binned color scale.
+fn binned_bounds(p: &PreparedInputs) -> Vec<f64> {
+    match &p.provisional_scales.color {
+        Some(ColorScale::Discretizing(buckets)) => buckets.bounds().to_vec(),
+        other => panic!("binned color scale, got {other:?}"),
+    }
+}
+
+/// A binned color's derived edges are the `Bin` transform's over the data,
+/// alone and with a second layer reading the same rows: the rows count once
+/// however many layers read them. Rejects pooling the rows once per reading
+/// layer, which raised the derived bin count.
+#[test]
+fn a_binned_colors_edges_equal_the_bins_over_the_data_with_a_second_reading_layer() {
+    let rows = binned_stat_rows();
+    let expected = sturges_edges(&float_col(&rows, "v"));
+    let mut alone = flat_binned_bar(serde_json::json!([statistics_marker(), mean_by_g_v(None)]));
+    alone.encoding.color = Some(serde_json::from_value(sturges_binned_v()).unwrap());
+    assert_eq!(binned_bounds(&prep(&alone, &rows)), expected, "alone");
+    let layered: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), mean_by_g_v(Some("bars"))],
+        "encoding": {},
+        "layers": [
+            {"mark": "bar", "data_source": "bars", "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": sturges_binned_v()}},
+            {"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}, "color": sturges_binned_v()}},
+        ],
+    }))
+    .unwrap();
+    let p = prep(&layered, &rows);
+    assert_eq!(binned_bounds(&p), expected, "with a point over the same rows");
+    assert_eq!(p.transform_outputs["bars"].num_rows(), prep(&alone, &rows).transform_outputs[FINAL_OUTPUT_KEY].num_rows(), "the bar's grain is unchanged");
+}
+
+/// A boxplot's six sub-layers over one input cut the same edges as a
+/// histogram of the same rows, both the `Bin` transform's over the data.
+/// Rejects counting the rows once per sub-layer.
+#[test]
+fn a_binned_boxplot_cuts_the_same_edges_as_a_histogram() {
+    let rows = binned_stat_rows();
+    let expected = sturges_edges(&float_col(&rows, "v"));
+    let colored = |encoding: serde_json::Value| {
+        let mut encoding = encoding;
+        encoding["color"] = sturges_binned_v();
+        encoding
+    };
+    let boxplot: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [statistics_marker(),
+            {"type": "box_stats", "field": "y", "groupby": ["g", "v"], "name": "box"},
+            {"type": "outliers", "field": "y", "groupby": ["g", "v"], "extent": 1.5, "name": "outliers"}],
+        "encoding": {},
+        "layers": [
+            {"mark": "rule", "data_source": "box", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "lower_whisker"}, "y2": {"field": "upper_whisker"}}))},
+            {"mark": "tick", "data_source": "box", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "lower_whisker"}}))},
+            {"mark": "tick", "data_source": "box", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "upper_whisker"}}))},
+            {"mark": "rect", "data_source": "box", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "q1"}, "y2": {"field": "q3"}}))},
+            {"mark": "tick", "data_source": "box", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "median"}}))},
+            {"mark": "point", "data_source": "outliers", "encoding": colored(serde_json::json!({"x": {"field": "g"}, "y": {"field": "y"}}))},
+        ],
+    }))
+    .unwrap();
+    let histogram: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), {"type": "bin", "field": "x", "bin_count": 4, "nice": false, "groupby": ["v"]}],
+        "encoding": {"x": {"field": "bin_start"}, "x2": {"field": "bin_end"}, "y": {"field": "count"}, "color": sturges_binned_v()},
+    }))
+    .unwrap();
+    assert_eq!(binned_bounds(&prep(&histogram, &rows)), expected, "histogram");
+    assert_eq!(binned_bounds(&prep(&boxplot, &rows)), expected, "boxplot");
+}
+
+/// `binned_stat_rows` with three more rows for group `a`: `v` NaN, +inf and
+/// -inf, `y` 100.
+fn binned_rows_with_non_finite() -> RecordBatch {
+    let rows = binned_stat_rows();
+    let extra = RecordBatch::try_new(
+        rows.schema(),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a"])),
+            Arc::new(Float64Array::from(vec![90.0, 91.0, 92.0])),
+            Arc::new(Float64Array::from(vec![100.0, 100.0, 100.0])),
+            Arc::new(Float64Array::from(vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY])),
+        ],
+    )
+    .unwrap();
+    arrow::compute::concat_batches(&rows.schema(), &[rows, extra]).unwrap()
+}
+
+/// A NaN or infinite binned value keeps its row as its own bar: the mean bar
+/// draws the 8 (g, bin) bars and one bar each for NaN, +inf and -inf, as
+/// grouping by the raw value drew them. Rejects dropping those rows.
+#[test]
+fn non_finite_binned_values_keep_their_own_bars() {
+    let out = &prep(&flat_binned_bar(serde_json::json!([statistics_marker(), mean_by_g_v(None)])), &binned_rows_with_non_finite())
+        .transform_outputs[FINAL_OUTPUT_KEY]
+        .clone();
+    assert_eq!(out.num_rows(), 11, "8 binned bars and 3 non-finite ones");
+    let v = float_col(out, "v");
+    assert!(v.iter().any(|v| v.is_nan()) && v.contains(&f64::INFINITY) && v.contains(&f64::NEG_INFINITY), "{v:?}");
+    let means: Vec<f64> = v.iter().zip(float_col(out, "mean_y")).filter(|(v, _)| !v.is_finite()).map(|(_, m)| m).collect();
+    assert_eq!(means, [100.0, 100.0, 100.0]);
+}
+
+/// A statistic inside a `Branch` (a `+` operand's) groups by the edges its
+/// legend draws: the edges are cut from the rows the branch's statistic
+/// read, so every bar's bin start is one of the legend's edges and the
+/// legend's edges are the `Bin` transform's over those rows. Rejects
+/// sampling the branch's output, whose bin starts gave a legend other than
+/// the edges the bars grouped by.
+#[test]
+fn a_branch_statistics_legend_matches_its_bars() {
+    let rows = binned_stat_rows();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [{"type": "branch", "name": "operand", "transforms": [statistics_marker(), mean_by_g_v(None)]}],
+        "encoding": {},
+        "layers": [{"mark": "bar", "data_source": "operand",
+            "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": sturges_binned_v()}}],
+    }))
+    .unwrap();
+    let p = prep(&spec, &rows);
+    let expected = sturges_edges(&float_col(&rows, "v"));
+    assert_eq!(binned_bounds(&p), expected, "the legend's edges");
+    let starts = &expected[..expected.len() - 1];
+    let bars = float_col(&p.transform_outputs["operand"], "v");
+    assert!(bars.iter().all(|v| starts.contains(v)), "every bar sits in a legend bin: {bars:?} {starts:?}");
+}
+
+/// The origins a run publishes are the same on the run that groups by the
+/// edges as on the run that cuts them, so the final scale's edges are the
+/// edges the statistics grouped by; and with no demanded step nothing is
+/// published.
+#[test]
+fn origins_are_the_same_on_both_runs() {
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let rows = binned_stat_rows();
+    let mut spec = flat_binned_bar(serde_json::json!([statistics_marker(), mean_by_g_v(None)]));
+    spec.encoding.color = Some(serde_json::from_value(sturges_binned_v()).unwrap());
+    let demand = binned_color_demand(&spec).expect("the lowered aggregate is demanded");
+    let mut plan = crate::transform::color_bin_group::ColorBinPlan { demand, edges: None };
+    let (first, _, _, first_origins) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
+    let edges = binned_color_edges(&spec, &first, &first_origins, &theme, None).expect("edges");
+    plan.edges = Some(std::rc::Rc::from(edges.clone()));
+    let (second, _, _, second_origins) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
+    assert!(!first_origins.is_empty(), "the demanded step records its origin");
+    assert_eq!(first_origins, second_origins);
+    assert_eq!(binned_bounds(&prep(&spec, &rows)), edges, "the final scale cuts the grouping edges");
+    let starts = &edges[..edges.len() - 1];
+    assert!(float_col(&second[FINAL_OUTPUT_KEY], "v").iter().all(|v| starts.contains(v)));
+}
+
+/// A layer reading a statistic that groups by the binned `z` adds the `z`
+/// that statistic consumed (the chart rows, 5 and 6), while a layer binning
+/// `m`, a column its statistic computes, adds the `m` it draws (0 and 2),
+/// never the chart rows' same-named `m` (40 and 50).
+#[test]
+fn a_binned_statistic_adds_the_rows_it_consumed_and_a_computed_column_adds_what_it_draws() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("m", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0])),
+            Arc::new(Float64Array::from(vec![5.0, 6.0])),
+            Arc::new(Float64Array::from(vec![40.0, 50.0])),
+        ],
+    )
+    .unwrap();
+    let binned = |field: &str| serde_json::json!({"field": field, "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}});
+    let layered = |field: &str, groupby: serde_json::Value| -> ChartSpec {
+        serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "transforms": [statistics_marker(), {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "m"}], "groupby": groupby, "name": "s"}],
+            "encoding": {},
+            "layers": [{"mark": "point", "data_source": "s", "encoding": {"x": {"field": "g"}, "y": {"field": "m"}, "color": binned(field)}}],
+        }))
+        .unwrap()
+    };
+    assert_eq!(binned_bounds(&prep(&layered("z", serde_json::json!(["g", "z"])), &rows)), [5.0, 5.5, 6.0], "z from the rows the statistic consumed");
+    let computed = prep(&layered("m", serde_json::json!(["g"])), &rows);
+    assert_eq!(binned_bounds(&computed), [0.0, 1.0, 2.0], "m as the statistic computes it");
+}
+
+/// A binned-color layer whose `data_source` names a key no step publishes
+/// is refused with the unknown-`data_source` error, not drawn unbinned; so is
+/// one naming the spelling under which a binned sibling's consumed rows were
+/// once published among the outputs, which are no output a layer reads.
+#[test]
+fn a_binned_layer_reading_an_unpublished_key_is_refused() {
+    let rows = binned_stat_rows();
+    for source in ["nope", "__binned_origin__\u{1f}v\u{1f}bars"] {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "transforms": [statistics_marker(), mean_by_g_v(Some("bars"))],
+            "encoding": {},
+            "layers": [
+                {"mark": "bar", "data_source": "bars", "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()}},
+                {"mark": "point", "data_source": source, "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()}},
+            ],
+        }))
+        .unwrap();
+        let err = prepare_render_inputs(
+            &spec,
+            &rows,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect_err("an unpublished data_source is refused");
+        let text = err.to_string();
+        assert!(text.contains(&format!("data_source '{source}' not found")), "{text}");
+        assert!(text.contains("available keys: [__final__, bars]"), "the binned rows are no output: {text}");
+    }
+}
+
+/// The rows a binned statistic consumed are recorded beside the outputs,
+/// never among them, so no reader of the outputs (a positional domain's
+/// fallback over every output holding a field, a `data_source`, a
+/// `Reorder(from=)`) can take them: the outputs are exactly what the steps
+/// published, and the consumed rows sit under the output they belong to.
+#[test]
+fn a_binned_statistics_consumed_rows_sit_beside_the_outputs() {
+    let rows = binned_stat_rows();
+    let spec = flat_binned_bar(serde_json::json!([
+        {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "w"}], "groupby": ["g"], "name": "means"},
+        statistics_marker(),
+        mean_by_g_v(None),
+    ]));
+    let p = prep(&spec, &rows);
+    let mut outputs: Vec<&str> = p.transform_outputs.keys().map(String::as_str).collect();
+    outputs.sort_unstable();
+    assert_eq!(outputs, ["__final__", "means"]);
+    let origins: Vec<&str> = p.transform_origins.keys().map(String::as_str).collect();
+    assert_eq!(origins, ["__final__"], "the tail's lineage grouped v by bin");
+    assert_eq!(p.transform_origins["__final__"].rows_of("v").expect("v was grouped").num_rows(), rows.num_rows());
 }

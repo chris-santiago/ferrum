@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct IdentitySpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// Marks the end of the user's own steps in its chain: the steps after
+    /// it were lowered from layers' encodings and marks, and only those
+    /// group a binned color by its bins
+    /// ([`crate::transform::color_bin_group`]). Wire
+    /// `{"type": "identity", "statistics": true}`; omitted when false, so
+    /// every other identity serializes as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub statistics: bool,
 }
 
 pub(crate) fn apply(_spec: &IdentitySpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -43,6 +51,7 @@ impl PyIdentity {
     fn new(name: String) -> Self {
         PyIdentity(super::core::TransformSpec::Identity(IdentitySpec {
             name: Some(name),
+            statistics: false,
         }))
     }
 

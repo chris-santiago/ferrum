@@ -55,7 +55,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    admitted_aux_reads, admitted_binned_reads, aux_numeric_values, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
+    add_distinct_source, admitted_aux_reads, admitted_binned_reads, binned_color_sources, finite_sorted, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
@@ -788,15 +788,7 @@ impl DiscretizedColors {
     /// The index of the bucket `value` falls in, low to high, or `None` when
     /// `value` is not finite.
     pub(crate) fn bucket(&self, value: f64) -> Option<usize> {
-        if !value.is_finite() {
-            return None;
-        }
-        // Interior boundaries only: `partition_point` counts how many
-        // thresholds `value` has passed, which is exactly its bucket index
-        // (d3's `scaleThreshold` convention — a boundary belongs to the bucket
-        // above it).
-        let interior = &self.bounds[1..self.bounds.len() - 1];
-        Some(interior.partition_point(|b| *b <= value))
+        crate::transform::bin::edge_bucket(&self.bounds, value)
     }
 
     /// One color per bucket, low → high.
@@ -1674,11 +1666,13 @@ pub(in crate::render) struct AuxiliaryScales {
 /// the domain reads it ([`domain::aux_reads`]). `spec.encoding` carries each
 /// channel's establishing binding (`prepare`'s `establishing_encoding`), the
 /// one its kind and its legend come from.
+#[allow(clippy::too_many_arguments)]
 fn build_auxiliary_scales(
     spec: &ChartSpec,
     chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     theme: &ThemeInputs,
     leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
@@ -1692,6 +1686,7 @@ fn build_auxiliary_scales(
             spec,
             primary_batch,
             transform_outputs,
+            transform_origins,
             theme,
             composite,
             |channel| {
@@ -1768,6 +1763,7 @@ pub(in crate::render) fn build_overlay_auxiliary_scales(
         &spec,
         lead.final_batch,
         lead.transform_outputs,
+        lead.transform_origins,
         theme,
         CompositeAuxDomains::default(),
         |channel| member_reads.get(channel.name).cloned(),
@@ -1804,6 +1800,7 @@ fn resolve_auxiliary_scales<'r>(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     theme: &ThemeInputs,
     composite: CompositeAuxDomains<'_>,
     reads: impl Fn(crate::spec::encoding::AuxiliaryScaleChannel) -> Option<Vec<domain::AuxRead<'r>>>,
@@ -1837,7 +1834,7 @@ fn resolve_auxiliary_scales<'r>(
     // every layer that draws it, each reading the field it draws from the
     // batch it draws, as the positional axes do (`aux_reads`).
     let refused = |channel: &'static str| move |source: RenderError| AuxScaleRefusal { channel, source };
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, grouping_area, aux_shared, composite.color, coord_flipped, reads("color"))
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, transform_origins, theme, grouping_area, aux_shared, composite.color, coord_flipped, reads("color"))
         .map_err(refused("color"))?;
     warnings.extend(color_warns);
     let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, reads("size"))
@@ -1864,14 +1861,14 @@ fn resolve_auxiliary_scales<'r>(
     let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, reads("stroke_width"))
         .map_err(refused("stroke_width"))?;
     warnings.extend(width_warns);
-    let raster_cells = color::raster_cell_scale(None, &cell_reads, None, theme, primary_batch, transform_outputs, warnings)
+    let raster_cells = color::raster_cell_scale(None, &cell_reads, None, theme, primary_batch, transform_outputs, transform_origins, warnings)
         .map_err(refused("color"))?;
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width, raster_cells })
 }
 
 /// The chart's color scale alone: the `color` [`resolve_scales_with_leaf_context`]
-/// returns, built by the same [`build_auxiliary_scales`] with no composite leaf
-/// context, without resolving either positional axis. A geoshape chart
+/// returns, built by the same [`build_auxiliary_scales`] under the composite
+/// leaf context `leaf_scales`, without resolving either positional axis. A geoshape chart
 /// resolves no scales there, and so no color here. Warnings are the full
 /// resolver's to report.
 ///
@@ -1885,13 +1882,15 @@ pub(in crate::render) fn resolve_color_scale(
     chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<Option<ColorScale>, RenderError> {
     if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
         return Ok(None);
     }
     let mut warnings = Vec::new();
-    Ok(build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, None, &mut warnings)?.color)
+    Ok(build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?.color)
 }
 
 /// `ferrum._core.validate_numeric_aux_scale(channel, scale)`: the
@@ -2004,6 +2003,7 @@ pub fn resolve_scales_with_outputs(
         &spec.encoding,
         primary_batch,
         transform_outputs,
+        &crate::transform::color_bin_group::BinnedOrigins::new(),
         x_pixel_range,
         y_pixel_range,
         theme,
@@ -2132,6 +2132,9 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
         &layer_spec.encoding,
         layer_batch,
         transform_outputs,
+        // Only this layer's y scale is kept; the auxiliary scales resolved
+        // beside it are discarded, so no binned color's origins are read.
+        &crate::transform::color_bin_group::BinnedOrigins::new(),
         x_pixel_range,
         y_pixel_range,
         theme,
@@ -2528,6 +2531,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
@@ -2637,7 +2641,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
                 let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
                     dummy_unit_scale(y_pixel_range, false),
@@ -2648,7 +2652,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
                 let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
                     y,
@@ -2745,7 +2749,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // that draws it, each read from the batch it draws; an unlayered spec
     // reads the chart-level batch. FA-5 (force_cat), T3 (aux_shared) and that
     // per-layer reading live in `build_auxiliary_scales`.
-    let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+    let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?;
 
     Ok((
         ResolvedScales {

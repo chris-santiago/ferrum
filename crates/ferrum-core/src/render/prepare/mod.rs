@@ -18,6 +18,7 @@ use crate::layout::{
     TickProjection,
 };
 use crate::spec::chart::ChartSpec;
+use crate::transform::color_bin_group::{BinnedOrigin, BinnedOrigins, ChainDemand, ColorBinPlan};
 use crate::transform::context::TransformContext;
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 use crate::transform::swarm::SwarmSpec;
@@ -573,6 +574,15 @@ fn normalize_transform_outputs(
         .collect()
 }
 
+/// [`normalize_transform_outputs`] for each output's binned-color origin
+/// rows, which scale resolution reads as it reads the outputs.
+fn normalize_transform_origins(origins: BinnedOrigins) -> Result<BinnedOrigins, RenderError> {
+    origins
+        .into_iter()
+        .map(|(key, origin)| Ok((key, BinnedOrigin { rows: normalize_string_views(&origin.rows)?, fields: origin.fields })))
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct PreparedInputs {
     /// All chart-level transform outputs, keyed by their `name` (when present)
@@ -586,6 +596,12 @@ pub struct PreparedInputs {
     /// ([`crate::transform::core::apply_transforms_named`]). A layer reading
     /// such a key has its dots placed at render time by that `Swarm`.
     pub(in crate::render) transform_swarms: HashMap<String, SwarmSpec>,
+    /// Per `transform_outputs` key whose lineage grouped a binned color by
+    /// bin, the rows that lineage read before its first bin-grouped step
+    /// ([`crate::transform::color_bin_group::BinnedOrigin`]), as the
+    /// transform routing recorded it: what a binned color cuts its edges
+    /// from. Empty for every chart no binned color groups.
+    pub(in crate::render) transform_origins: BinnedOrigins,
     /// Scales resolved once during prepare **for tick-label generation only**.
     /// Their pixel ranges are not panel-specific, so the final per-panel scales —
     /// whose ranges differ per panel — are resolved fresh by
@@ -1259,8 +1275,8 @@ pub fn prepare_render_inputs(
     // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
     // here, above `scale_warnings`' construction below, so both land in the
     // one `PreparedInputs.warnings` vec this function returns.
-    let (transform_outputs, transform_warnings, transform_swarms) =
-        run_transforms_with_facet(spec, &normalized, viewport, theme)?;
+    let (transform_outputs, transform_warnings, transform_swarms, transform_origins) =
+        run_pipeline(spec, &normalized, viewport, theme, leaf_scales)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -1428,6 +1444,7 @@ pub fn prepare_render_inputs(
             &spec.encoding,
             &transformed,
             &transform_outputs,
+            &transform_origins,
             (0.0, 1.0),
             (0.0, 1.0),
             theme,
@@ -1596,6 +1613,7 @@ pub fn prepare_render_inputs(
     Ok(PreparedInputs {
         transform_outputs,
         transform_swarms,
+        transform_origins,
         provisional_scales,
         axes,
         facet_groups,
@@ -1616,13 +1634,97 @@ pub fn prepare_render_inputs(
     })
 }
 
+/// The pipeline run a render draws from ([`run_transforms_with_facet`]).
+///
+/// A layer whose drawn color, or whose text grouping-only `group` key,
+/// carries a `bin` rule demands that the lowered statistic producing its
+/// rows groups that column by the color's bins
+/// ([`crate::transform::color_bin_group`]), cut by the edges the chart's
+/// color scale draws, so the scale, the grouping and the legend share one
+/// edge set. Those edges are cut from the rows the binned statistics
+/// consume, so a chart with such a step runs twice: the first run publishes
+/// those rows (the origins) and groups by raw values, the color scale
+/// resolves its edges over them ([`binned_color_edges`]), and the second run
+/// groups by them. A chart whose color scale has no edges (an empty or
+/// all-null column, a scale another kind establishes) keeps the first run.
+/// Every other chart runs once, as written.
+fn run_pipeline(
+    spec: &ChartSpec,
+    normalized: &RecordBatch,
+    viewport: crate::layout::Viewport,
+    theme: &crate::layout::ThemeInputs,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
+) -> Result<TransformRun, RenderError> {
+    let Some(demand) = binned_color_demand(spec) else {
+        return run_transforms_with_facet(spec, normalized, viewport, theme, None);
+    };
+    let mut plan = ColorBinPlan { demand, edges: None };
+    let first = run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))?;
+    let Some(edges) = binned_color_edges(spec, &first.0, &first.3, theme, leaf_scales) else {
+        return Ok(first);
+    };
+    plan.edges = Some(std::rc::Rc::from(edges));
+    run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))
+}
+
+/// The steps that group a binned color by bin: for each layer (the chart
+/// itself on an unlayered spec) whose drawn color, or whose grouping-only
+/// `group` key, carries a `bin` rule, the lowered step producing the rows
+/// it draws ([`ChainDemand::of`]). `None` when no step is demanded. A spec
+/// whose layers cannot be built is left to the render's own refusal.
+fn binned_color_demand(spec: &ChartSpec) -> Option<ChainDemand> {
+    let layers = build_layers(spec).ok()?;
+    let mut demands: Vec<(Option<&str>, String)> = Vec::new();
+    for layer in &layers {
+        let drawn = layer.drawn_encoding();
+        for binding in [drawn.color.as_ref(), layer.encoding.group.as_ref()].into_iter().flatten() {
+            if binding.color_bin().is_some() {
+                demands.push((layer.data_source.as_deref(), binding.field.clone()));
+            }
+        }
+    }
+    let pairs: Vec<(Option<&str>, &str)> = demands.iter().map(|(source, field)| (*source, field.as_str())).collect();
+    let demand = ChainDemand::of(&spec.transforms, &pairs);
+    demand.any().then_some(demand)
+}
+
+/// The edges the chart's color scale cuts when it is a binned color's,
+/// resolved over a first pipeline run's `outputs` as the render resolves it
+/// (its establishing binding, a composite's shared values or an overlay
+/// group's scale), from the rows each drawing layer's statistic consumes.
+/// `None` when the color scale is another kind or has no edges. A scale
+/// that cannot resolve gives `None` too: the render's own scale pass reads
+/// the same rows and raises that refusal in its place among the render's
+/// checks.
+fn binned_color_edges(
+    spec: &ChartSpec,
+    outputs: &HashMap<String, RecordBatch>,
+    origins: &BinnedOrigins,
+    theme: &crate::layout::ThemeInputs,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
+) -> Option<Vec<f64>> {
+    let transformed = outputs.get(FINAL_OUTPUT_KEY)?;
+    let layers = build_layers(spec).ok()?;
+    let encoding = establishing_encoding(spec, &layers, transformed, outputs, leaf_scales).ok()?;
+    encoding.color.as_ref()?.color_bin()?;
+    let mut rendering = ChartSpec { encoding, ..spec.clone() };
+    crate::render::scale_resolve::resolve_param_domains(&mut rendering);
+    let scale = crate::render::scale_resolve::resolve_color_scale(&rendering, &spec.encoding, transformed, outputs, origins, theme, leaf_scales);
+    match scale.ok()?? {
+        crate::render::scale_resolve::ColorScale::Discretizing(buckets) => Some(buckets.bounds().to_vec()),
+        _ => None,
+    }
+}
+
 /// What [`run_transforms_with_facet`] produces: every published output batch,
-/// the transform warnings drained from the run, and the `Swarm` each output
-/// descends from ([`PreparedInputs::transform_swarms`]).
+/// the transform warnings drained from the run, the `Swarm` each output
+/// descends from ([`PreparedInputs::transform_swarms`]), and each output's
+/// binned-color origin ([`PreparedInputs::transform_origins`]).
 type TransformRun = (
     HashMap<String, RecordBatch>,
     Vec<crate::transform::context::TransformWarning>,
     HashMap<String, SwarmSpec>,
+    BinnedOrigins,
 );
 
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
@@ -1655,7 +1757,9 @@ fn run_transforms_with_facet(
     normalized: &RecordBatch,
     viewport: crate::layout::Viewport,
     theme: &crate::layout::ThemeInputs,
+    color_bin_plan: Option<&ColorBinPlan>,
 ) -> Result<TransformRun, RenderError> {
+    let color_bin_plan = color_bin_plan.map(|plan| std::rc::Rc::new(plan.clone()));
     let Some(fspec) = &spec.facet else {
         // No facet: unchanged pipeline (single partition = full batch); one
         // panel occupies the whole estimated viewport.
@@ -1665,9 +1769,10 @@ fn run_transforms_with_facet(
                 theme,
                 (1, 1),
             )),
+            color_bin_plan: color_bin_plan.clone(),
             ..TransformContext::default()
         };
-        let (mut outputs, swarms) = apply_transforms_named(&spec.transforms, normalized, &ctx)
+        let (mut outputs, swarms, origins) = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
         // #162: drain whatever this run's (possibly per-step-cloned, but
@@ -1675,7 +1780,7 @@ fn run_transforms_with_facet(
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
         // `ctx.clone()` in `apply_transforms_named`.
         let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-        return Ok((normalize_transform_outputs(outputs)?, warnings, swarms));
+        return Ok((normalize_transform_outputs(outputs)?, warnings, swarms, normalize_transform_origins(origins)?));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1744,6 +1849,7 @@ fn run_transforms_with_facet(
         // whole chart the way an actual whole-frame rank-deficient fit does).
         is_partition: true,
         facet_fields: std::iter::once(&fspec.field).chain(&fspec.row).cloned().collect(),
+        color_bin_plan,
         ..TransformContext::default()
     };
     for (field, rows) in dropped_nulls {
@@ -1771,11 +1877,27 @@ fn run_transforms_with_facet(
     // Every partition runs the same transforms, so each routes the same
     // `Swarm` to the same key.
     let mut swarms: HashMap<String, SwarmSpec> = HashMap::new();
+    // Each key's origin rows across the panels, and the columns any panel
+    // grouped there, merged as the outputs are.
+    let mut merged_origins: HashMap<String, (Vec<RecordBatch>, Vec<String>)> = HashMap::new();
     for ((col_value, row_value), partition_batch) in &partitions {
-        let (mut panel_outputs, panel_swarms) =
+        let (mut panel_outputs, panel_swarms, panel_origins) =
             apply_transforms_named(&effective_transforms, partition_batch, &ctx)
                 .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         swarms.extend(panel_swarms);
+        for (key, origin) in panel_origins {
+            let mut rows = inject_facet_column(&origin.rows, &fspec.field, col_value);
+            if let (Some(row_field), Some(row_val)) = (&fspec.row, row_value) {
+                rows = inject_facet_column(&rows, row_field, row_val);
+            }
+            let (batches, fields) = merged_origins.entry(key).or_default();
+            batches.push(rows);
+            for field in origin.fields {
+                if !fields.contains(&field) {
+                    fields.push(field);
+                }
+            }
+        }
         // D10: per-panel imputation.
         apply_impute_to_final(&mut panel_outputs, spec);
         // Re-inject the col field (and row field when in grid mode) into every
@@ -1818,7 +1940,12 @@ fn run_transforms_with_facet(
     let warnings = crate::transform::context::merge_partition_null_key_counts(
         ctx.warnings.borrow_mut().drain(..).collect(),
     );
-    Ok((normalize_transform_outputs(combined)?, warnings, swarms))
+    let mut origins = BinnedOrigins::new();
+    for (key, (batches, fields)) in merged_origins {
+        let rows = concat_batches_by_name(&key, batches)?;
+        origins.insert(key, BinnedOrigin { rows, fields });
+    }
+    Ok((normalize_transform_outputs(combined)?, warnings, swarms, normalize_transform_origins(origins)?))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
@@ -2440,7 +2567,11 @@ pub(in crate::render) fn user_row_outputs(transforms: &[crate::transform::core::
             _ => {}
         }
     }
-    if transforms.iter().all(|t| matches!(t, TransformSpec::Branch(_)) || spec_name(t).is_some()) {
+    // A statistics marker passes its rows through, so it advances nothing.
+    let advances = |t: &TransformSpec| {
+        !matches!(t, TransformSpec::Branch(_)) && spec_name(t).is_none() && !crate::transform::color_bin_group::is_statistics_marker(t)
+    };
+    if !transforms.iter().any(advances) {
         keys.push(FINAL_OUTPUT_KEY.to_string());
     }
     keys

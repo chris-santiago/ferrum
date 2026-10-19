@@ -44,7 +44,7 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    admitted_aux_reads, admitted_binned_reads, aux_numeric_values, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
+    add_distinct_source, admitted_aux_reads, admitted_binned_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
     SortContext, SortRows,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
@@ -55,6 +55,7 @@ use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::DataType as SpecDataType;
 use crate::layout::facet::ResolveMode;
+use crate::transform::core::FINAL_OUTPUT_KEY;
 
 use std::fmt;
 
@@ -590,16 +591,16 @@ fn assign_union(
         SharedDomain::Ordinal(cats)
     } else if let (true, Some((_, SharedDomain::Samples { field, bin, .. }))) = (all_samples, domains.first()) {
         // One binned setting (checked above): the panels pool their values,
-        // so every leaf cuts one edge set.
-        let values = domains
-            .iter()
-            .flat_map(|(_, d)| match d {
-                SharedDomain::Samples { values, .. } => values.as_slice(),
-                _ => &[],
-            })
-            .copied()
-            .collect();
-        SharedDomain::Samples { field: field.clone(), bin: bin.clone(), values }
+        // each distinct source once, so every leaf cuts one edge set.
+        let mut sources = Vec::new();
+        for (_, domain) in domains {
+            if let SharedDomain::Samples { sources: leaf, .. } = domain {
+                for source in leaf {
+                    add_distinct_source(&mut sources, source.clone());
+                }
+            }
+        }
+        SharedDomain::Samples { field: field.clone(), bin: bin.clone(), sources }
     } else {
         // One explicit `bins` list (each leaf already draws it), or a
         // positional group mixing numeric and ordinal: nothing to assign.
@@ -1416,9 +1417,11 @@ fn leaf_aux_column<'a>(
 
 /// A leaf's binned color with derived edges as a [`SharedDomain::Samples`]:
 /// its field, its bin parameters, and the values it cuts its edges from, the
-/// finite values of every drawing layer its binned scale admits on a layered
-/// leaf, the column's otherwise. Both read the leaf's final batch, which
-/// for a faceted leaf is its whole frame across panels, so a faceted leaf
+/// leaf's own render's: the finite values every drawing layer its binned
+/// scale admits reads where its bin-grouped statistic consumes them on a
+/// layered leaf ([`binned_color_values`]), the column's otherwise, in the
+/// rows the leaf's chart-row statistic consumes when one groups by bin
+/// (its `transform_origins`). Both read across the leaf's panels, so a faceted leaf
 /// adds every row's value. A column that holds no numbers contributes none;
 /// the leaf's own render refuses it.
 fn leaf_binned_samples(
@@ -1427,18 +1430,21 @@ fn leaf_binned_samples(
     bin: &crate::spec::encoding::ScaleBin,
     reads: Option<&[AuxRead<'_>]>,
 ) -> SharedDomain {
-    let values = match reads {
+    let sources = match reads {
         Some(reads) => admitted_binned_reads(reads, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
-            .map(|admitted| aux_numeric_values(&admitted, leaf.final_batch, leaf.transform_outputs, false))
+            .map(|admitted| binned_color_sources(&admitted, leaf.final_batch, leaf.transform_outputs, leaf.transform_origins, false))
             .unwrap_or_default(),
-        None => crate::render::arrow_cast::col_as_f64(leaf.final_batch, &enc.field)
-            .unwrap_or_default()
-            .into_iter()
-            .flatten()
-            .filter(|v| v.is_finite())
-            .collect(),
+        None => {
+            let rows = leaf
+                .transform_origins
+                .get(FINAL_OUTPUT_KEY)
+                .and_then(|origin| origin.rows_of(&enc.field))
+                .unwrap_or(leaf.final_batch);
+            let values = crate::render::arrow_cast::col_as_f64(rows, &enc.field).unwrap_or_default();
+            vec![finite_sorted(values.into_iter().flatten())]
+        }
     };
-    SharedDomain::Samples { field: enc.field.clone(), bin: bin.clone(), values }
+    SharedDomain::Samples { field: enc.field.clone(), bin: bin.clone(), sources }
 }
 
 /// The tree a composite resolves its color under: `tree` itself, or a copy
@@ -1626,6 +1632,10 @@ mod tests {
         outputs: HashMap<String, RecordBatch>,
     }
 
+    /// The origins of a leaf no binned color groups.
+    static NO_ORIGINS: std::sync::LazyLock<crate::transform::color_bin_group::BinnedOrigins> =
+        std::sync::LazyLock::new(Default::default);
+
     fn owned(spec: ChartSpec, batch: RecordBatch) -> LeafOwned {
         let encoding = spec.encoding.clone();
         let outputs = outputs(&batch);
@@ -1638,6 +1648,7 @@ mod tests {
             encoding: &o.encoding,
             final_batch: &o.batch,
             transform_outputs: &o.outputs,
+            transform_origins: &NO_ORIGINS,
         }
     }
 
@@ -3162,7 +3173,7 @@ mod tests {
                 let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
                 let y_domain = |o: &LeafOwned, c: &LeafScaleContext| {
                     let (scales, _) = resolve_scales_with_leaf_context(
-                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, pr, pr, &theme, Some(c),
+                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_ORIGINS, pr, pr, &theme, Some(c),
                     )
                     .unwrap();
                     scales.y.data_domain()
@@ -3384,7 +3395,7 @@ mod tests {
                     .zip(&ctx)
                     .map(|(o, c)| {
                         let (scales, _) =
-                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, pr, pr, &theme, Some(c))?;
+                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_ORIGINS, pr, pr, &theme, Some(c))?;
                         let adopted = match channel {
                             Channel::X => c.x_scale.is_some(),
                             _ => c.y_scale.is_some(),
@@ -3665,7 +3676,7 @@ mod tests {
             .expect("fm.layer resolves");
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, pr, pr, &theme, Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, &NO_ORIGINS, pr, pr, &theme, Some(&ctx[0]))
                 .expect("fm.layer panel resolves");
         assert_eq!(band_categories(&scales.x), ["a", "b"], "fm.layer panel x");
         assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
@@ -3899,7 +3910,7 @@ mod tests {
         let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, &NO_ORIGINS, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
                 .unwrap();
         assert_eq!(scales.y.data_domain(), Some((1.0, 80.0)));
     }

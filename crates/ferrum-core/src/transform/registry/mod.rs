@@ -613,7 +613,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "identity" => TransformRegistryEntry {
             outputs: vec![],
             secondary_outputs: vec![],
-            params: vec!["name"],
+            params: vec!["name", "statistics"],
             ..Default::default()
         },
         "filter" => TransformRegistryEntry {

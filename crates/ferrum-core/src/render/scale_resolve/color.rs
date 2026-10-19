@@ -12,7 +12,8 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{admitted_aux_reads, admitted_binned_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_numeric_values, locate_field, AuxRead, SortContext};
+use super::domain::{admitted_aux_reads, admitted_binned_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, SortContext};
+use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
@@ -122,6 +123,7 @@ pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     theme: &ThemeInputs,
     grouping_area: Option<usize>,
     facet_shared: bool,
@@ -165,7 +167,7 @@ pub fn build_color_scale(
             admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?
         };
         refuse_unbinnable_reads(c_enc, &reads, primary_batch, transform_outputs)?;
-        let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, &mut warnings)?;
+        let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, transform_origins, &mut warnings)?;
         return Ok((scale, warnings));
     }
     // The column that decides the kind: the establishing layer's, read from
@@ -259,14 +261,23 @@ pub fn build_color_scale(
         // panel quantiles would paint the same value differently in each panel
         // while the colorbar stayed global.
         //
-        // A binned color's edges and a quantile color's cut-points are taken
-        // from the values every admitted layer draws, as the extent above is.
+        // A quantile color's cut-points are taken from the values every
+        // admitted layer draws, as the extent above is. A binned color's
+        // edges are taken from the rows its bin-grouped statistics consume
+        // ([`binned_color_values`]; on an unlayered spec, the origin its run
+        // published for the chart rows), the same before and after they
+        // group by the edges.
         let sample = || match (composite_samples(composite_domain), layer_reads) {
             (Some(shared), _) => shared,
             (None, []) => column_sample(
-                shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared),
+                transform_origins
+                    .get(FINAL_OUTPUT_KEY)
+                    .and_then(|origin| origin.rows_of(&c_enc.field))
+                    .filter(|_| binned)
+                    .unwrap_or_else(|| shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared)),
                 &c_enc.field,
             ),
+            (None, reads) if binned => binned_color_values(reads, primary_batch, transform_outputs, transform_origins, facet_shared),
             (None, reads) => aux_numeric_values(reads, primary_batch, transform_outputs, facet_shared),
         };
         if let Some((buckets, warnings)) =
@@ -623,7 +634,9 @@ fn area_establishes(
 /// encoded column (its caller picks the batch via
 /// [`shared_categorical_batch`], so faceted panels agree), or, on a layered
 /// spec, the values of every admitted layer, raster cells included
-/// ([`aux_numeric_values`]).
+/// ([`aux_numeric_values`]). A binned color reads each column where its
+/// statistics consume it ([`binned_color_values`]), since they group by the
+/// edges it cuts.
 fn build_discretizing_color_scale(
     enc: &crate::spec::encoding::EncodingSpec,
     sample: impl FnOnce() -> Vec<f64>,
@@ -959,7 +972,7 @@ fn composite_numeric_extent(domain: Option<&SharedDomain>) -> Option<(f64, f64)>
 /// `None` otherwise.
 fn composite_samples(domain: Option<&SharedDomain>) -> Option<Vec<f64>> {
     match domain? {
-        SharedDomain::Samples { values, .. } => Some(values.clone()),
+        SharedDomain::Samples { sources, .. } => Some(sources.iter().flatten().copied().collect()),
         SharedDomain::FixedBins { .. } => None,
         SharedDomain::Numeric { .. } | SharedDomain::Ordinal(_) => None,
     }
@@ -1119,6 +1132,7 @@ fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Ve
 /// bar.
 ///
 /// `None` when no read holds a finite value (an empty raster).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn raster_cell_scale(
     binding: Option<&crate::spec::encoding::EncodingSpec>,
     reads: &[AuxRead<'_>],
@@ -1126,6 +1140,7 @@ pub(in crate::render) fn raster_cell_scale(
     theme: &ThemeInputs,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<Option<ColorScale>, RenderError> {
     let numeric = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
@@ -1141,8 +1156,10 @@ pub(in crate::render) fn raster_cell_scale(
     // stepped bar.
     if let Some(enc) = binding {
         let sample = || {
-            composite_samples(composite_domain)
-                .unwrap_or_else(|| aux_numeric_values(reads, primary_batch, transform_outputs, false))
+            composite_samples(composite_domain).unwrap_or_else(|| match enc.color_bin() {
+                Some(_) => binned_color_values(reads, primary_batch, transform_outputs, transform_origins, false),
+                None => aux_numeric_values(reads, primary_batch, transform_outputs, false),
+            })
         };
         if let Some((buckets, bucket_warnings)) = build_discretizing_color_scale(enc, sample, data_domain, theme)? {
             warnings.extend(bucket_warnings);

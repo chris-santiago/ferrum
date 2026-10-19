@@ -686,6 +686,20 @@ pub(crate) fn scale_bin_edges(
     Ok(Some(group_edges(&spec, values, None)?.edges()))
 }
 
+/// The index of the bin of ascending `edges` that `value` falls in, low to
+/// high, by the bin-ordinal color scale's rule: an interior edge belongs to
+/// the bin above it (d3's `scaleThreshold` convention), and a value beyond
+/// the outer edges falls in the end bin on its side. `None` for a value that
+/// is not finite. The one bucket rule a binned color's scale maps by and its
+/// statistics group by.
+pub(crate) fn edge_bucket(edges: &[f64], value: f64) -> Option<usize> {
+    if !value.is_finite() {
+        return None;
+    }
+    let interior = edges.get(1..edges.len().saturating_sub(1)).unwrap_or_default();
+    Some(interior.partition_point(|edge| *edge <= value))
+}
+
 /// The single unit bin `[v - 0.5, v + 0.5]` an all-equal group bins into, so
 /// a set with no spread still draws one bar of unit width.
 fn single_unit_bin(v: f64) -> (f64, f64) {
