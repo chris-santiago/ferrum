@@ -627,7 +627,7 @@ fn scale_spec_bin_ordinal_round_trip() {
     let json = r#"{"type":"bin-ordinal","bins":[0,10,20,30],"scheme":"blues"}"#;
     let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
     match &parsed {
-        ScaleSpec::BinOrdinal { bins, scheme } => {
+        ScaleSpec::BinOrdinal { bins, scheme, .. } => {
             assert_eq!(bins.as_ref().unwrap(), &vec![0.0, 10.0, 20.0, 30.0]);
             assert_eq!(scheme.as_deref(), Some("blues"));
         }
@@ -636,6 +636,28 @@ fn scale_spec_bin_ordinal_round_trip() {
     // Verify serialization uses "bin-ordinal" as the type tag
     let re = serde_json::to_string(&parsed).unwrap();
     assert!(re.contains(r#""type":"bin-ordinal""#), "json: {re}");
+}
+
+/// A binned color's `bin` parameters ride the `bin-ordinal` wire and round-trip
+/// byte for byte, `nice` defaulting to the `Bin` transform's `true`; a scale
+/// without `bin` writes no `bin` key, so its bytes are what they were. A
+/// misspelled parameter is refused rather than dropped. Rejects a `bin` the
+/// wire gate refused as an unknown key, and one serialized as `"bin":null`.
+#[test]
+fn scale_spec_bin_ordinal_bin_round_trips_and_is_absent_when_unset() {
+    let json = r#"{"type":"bin-ordinal","scheme":"blues","bin":{"bin_count":4,"extent":[0.0,10.0],"nice":false}}"#;
+    let parsed: ScaleSpec = serde_json::from_str(json).expect("a bin-ordinal scale with bin parses");
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+
+    let defaulted: ScaleSpec = serde_json::from_str(r#"{"type":"bin-ordinal","bin":{"bin_width":2.5}}"#).unwrap();
+    assert_eq!(serde_json::to_string(&defaulted).unwrap(), r#"{"type":"bin-ordinal","bin":{"bin_width":2.5,"nice":true}}"#);
+
+    let explicit = r#"{"type":"bin-ordinal","bins":[0.0,10.0],"scheme":"blues"}"#;
+    let parsed: ScaleSpec = serde_json::from_str(explicit).unwrap();
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), explicit);
+
+    let misspelled = serde_json::from_str::<ScaleSpec>(r#"{"type":"bin-ordinal","bin":{"bins":4}}"#);
+    assert!(misspelled.is_err(), "an unknown bin parameter is refused: {misspelled:?}");
 }
 
 #[test]

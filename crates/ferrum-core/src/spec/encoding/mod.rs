@@ -465,7 +465,36 @@ pub enum ScaleSpec {
         bins: Option<Vec<f64>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scheme: Option<String>,
+        /// A binned color's bin parameters (`Color(bin=...)`). With no
+        /// `bins`, the edges are the ones the `Bin` transform computes with
+        /// these parameters over the values every drawing layer draws;
+        /// explicit `bins` win. Absent from the wire when unset, so a scale
+        /// without it serializes as it always has.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bin: Option<ScaleBin>,
     },
+}
+
+/// The bin parameters of a binned color scale, spelled and defaulted as the
+/// `Bin` transform's own (`bin_count`, `bin_width`, `extent`, `nice`), so the
+/// same parameters cut the same values into the same edges
+/// ([`crate::transform::bin::scale_bin_edges`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ScaleBin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<(f64, f64)>,
+    #[serde(default = "scale_bin_nice_default")]
+    pub nice: bool,
+}
+
+/// `ScaleBin::nice`'s default, the `Bin` transform's.
+fn scale_bin_nice_default() -> bool {
+    true
 }
 
 impl ScaleSpec {
@@ -808,6 +837,26 @@ impl EncodingSpec {
             "center" => Some(StackOffset::Center),
             _ => None,
         }
+    }
+
+    /// The bin parameters of a binned color (`Color(bin=...)`): this
+    /// channel's `bin-ordinal` scale carrying `bin`. A binned color maps
+    /// through its bins whatever the mark, so an area groups and stacks by
+    /// the bin rather than by the raw value.
+    pub(crate) fn color_bin(&self) -> Option<&ScaleBin> {
+        match self.scale.as_ref()? {
+            ScaleSpec::BinOrdinal { bin, .. } => bin.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Whether this channel is a binned color whose edges the data decides:
+    /// [`Self::color_bin`] with no explicit `bins` (explicit `bins` win).
+    pub(crate) fn derives_color_bins(&self) -> bool {
+        matches!(
+            self.scale.as_ref(),
+            Some(ScaleSpec::BinOrdinal { bin: Some(_), bins, .. }) if bins.as_ref().is_none_or(Vec::is_empty)
+        )
     }
 }
 

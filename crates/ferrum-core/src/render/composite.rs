@@ -44,7 +44,7 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    admitted_aux_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
+    admitted_aux_reads, admitted_binned_reads, aux_numeric_values, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
     SortContext, SortRows,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
@@ -525,16 +525,35 @@ fn resolve_group(
             domains.push((idx, d));
         }
     }
-    assign_union(&domains, channel, out);
-    Ok(())
+    assign_union(&domains, channel, leaves, out)
 }
 
 /// Union `domains` and assign the result to each leaf that contributed one.
-/// A group mixing numeric and ordinal domains, or contributing none, assigns
-/// nothing.
-fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [LeafScaleContext]) {
+/// A group contributing none assigns nothing.
+///
+/// A shared `color` must merge into one scale: every panel continuous, every
+/// panel categorical, or every panel binned on one field with one setting
+/// (one set of derived-edge parameters, or one explicit `bins` list). A group
+/// that cannot merge is refused ([`RenderError::SharedColorScalesDiffer`],
+/// [`refuse_unmergeable_color`]). The default never shares such a group
+/// ([`binned_color_shared_by_default`] shares only one binned setting), so the
+/// refusal answers an explicit `resolve={"color": "shared"}` only.
+///
+/// A positional group mixing numeric and ordinal domains has no meaningful
+/// union and assigns nothing: each member keeps its own physical panel. An
+/// `Overlay` group, whose members share ONE panel, is refused by
+/// [`refuse_unplaceable_overlay_members`] instead.
+fn assign_union(
+    domains: &[(usize, SharedDomain)],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+) -> Result<(), CompositeResolveError> {
     if domains.is_empty() {
-        return;
+        return Ok(());
+    }
+    if channel == Channel::Color {
+        refuse_unmergeable_color(domains, leaves)?;
     }
 
     let all_numeric = domains
@@ -543,6 +562,9 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
     let all_ordinal = domains
         .iter()
         .all(|(_, d)| matches!(d, SharedDomain::Ordinal(_)));
+    let all_samples = domains
+        .iter()
+        .all(|(_, d)| matches!(d, SharedDomain::Samples { .. }));
 
     let unified = if all_numeric {
         let mut lo = f64::INFINITY;
@@ -566,39 +588,90 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
             }
         }
         SharedDomain::Ordinal(cats)
+    } else if let (true, Some((_, SharedDomain::Samples { field, bin, .. }))) = (all_samples, domains.first()) {
+        // One binned setting (checked above): the panels pool their values,
+        // so every leaf cuts one edge set.
+        let values = domains
+            .iter()
+            .flat_map(|(_, d)| match d {
+                SharedDomain::Samples { values, .. } => values.as_slice(),
+                _ => &[],
+            })
+            .copied()
+            .collect();
+        SharedDomain::Samples { field: field.clone(), bin: bin.clone(), values }
     } else {
-        // A shared group mixing a Numeric and an Ordinal domain (e.g. one
-        // sibling's shared channel is quantitative, another's is
-        // categorical) has no meaningful union. Spec §6's "Resolve
-        // semantics" only spells out the skip for a *non-congruent* tree
-        // shape ("non-congruent → skip that channel for the group"), but the
-        // same skip-not-error philosophy applies here for a Hconcat/Vconcat/
-        // Grid/Wrap group: there is no semantically right domain for
-        // mismatched types any more than there is for mismatched tree
-        // shapes, and erroring would reject a hand-built heterogeneous
-        // concat that renders fine standalone — each sibling keeps its own
-        // physical panel either way.
-        //
-        // An `Overlay` group is different: every member draws
-        // onto the ONE panel the group shares, so a member that cannot serve
-        // the axis type the group establishes has nowhere else to draw. That
-        // refusal is asked by [`refuse_unplaceable_overlay_members`], from
-        // `resolve_channel` — positional-only and layout-aware, unlike this
-        // function, which stays generic over every layout and both the
-        // positional and non-positional channels it serves.
-        //
-        // Skip sharing for this group; each participating leaf falls back to
-        // its own standalone resolution (rendering is otherwise normal).
-        // Reachable only via a hand-built tree with heterogeneous leaf dtypes
-        // on the same shared channel — `compare=` producers always emit
-        // uniform dtypes, so this is a defensive fallback, not a documented
-        // user-facing feature.
-        return;
+        // One explicit `bins` list (each leaf already draws it), or a
+        // positional group mixing numeric and ordinal: nothing to assign.
+        return Ok(());
     };
 
     for (idx, _) in domains {
         out[*idx].set(channel, unified.clone());
     }
+    Ok(())
+}
+
+/// The color scale one shared panel draws, as the merge rule compares it.
+#[derive(PartialEq)]
+enum ColorScaleKind<'a> {
+    Continuous,
+    Categorical,
+    Binned(&'a str, &'a crate::spec::encoding::ScaleBin),
+    FixedBins(&'a str, &'a [f64]),
+}
+
+impl<'a> ColorScaleKind<'a> {
+    fn of(domain: &'a SharedDomain) -> Self {
+        match domain {
+            SharedDomain::Numeric { .. } => Self::Continuous,
+            SharedDomain::Ordinal(_) => Self::Categorical,
+            SharedDomain::Samples { field, bin, .. } => Self::Binned(field, bin),
+            SharedDomain::FixedBins { field, bins } => Self::FixedBins(field, bins),
+        }
+    }
+
+    /// How a refusal names this panel's color: its field and its scale.
+    fn describe(&self, leaf: &LeafResolveInput<'_>) -> String {
+        let field = leaf.encoding.color.as_ref().map_or("", |enc| enc.field.as_str());
+        match self {
+            Self::Continuous => format!("'{field}' as a continuous color"),
+            Self::Categorical => format!("'{field}' as a categorical color"),
+            Self::Binned(field, bin) => {
+                format!("'{field}' binned with bin={}", serde_json::to_string(bin).unwrap_or_default())
+            }
+            Self::FixedBins(field, bins) => format!("'{field}' binned with bins={bins:?}"),
+        }
+    }
+}
+
+/// [`assign_union`]'s one merge rule for a shared `color`: every panel draws
+/// the same kind of scale ([`ColorScaleKind`]), so the group has one scale
+/// and one legend. The first panel that differs from the first is refused,
+/// naming both and the remedy.
+fn refuse_unmergeable_color(
+    domains: &[(usize, SharedDomain)],
+    leaves: &[LeafResolveInput<'_>],
+) -> Result<(), CompositeResolveError> {
+    let Some((first_idx, first)) = domains.first() else { return Ok(()) };
+    let first_kind = ColorScaleKind::of(first);
+    let Some((other_idx, other_kind)) = domains
+        .iter()
+        .map(|(idx, d)| (*idx, ColorScaleKind::of(d)))
+        .find(|(_, kind)| *kind != first_kind)
+    else {
+        return Ok(());
+    };
+    let first_leaf = &leaves[*first_idx];
+    Err(CompositeResolveError::DomainResolve {
+        channel: Channel::Color.as_str(),
+        field: first_leaf.encoding.color.as_ref().map_or_else(String::new, |enc| enc.field.clone()),
+        source: RenderError::SharedColorScalesDiffer {
+            first: first_kind.describe(first_leaf),
+            other: other_kind.describe(&leaves[other_idx]),
+        },
+        coord_flipped: false,
+    })
 }
 
 /// The members of an `Overlay` group's axis on `channel`: each member that
@@ -833,7 +906,7 @@ fn resolve_caller_scale_group(
                 domains.push((idx, d));
             }
         }
-        assign_union(&domains, channel, out);
+        assign_union(&domains, channel, leaves, out)?;
         domains.into_iter().map(|(idx, _)| idx).collect()
     };
     for idx in members {
@@ -923,7 +996,8 @@ fn refuse_unplaceable_overlay_members<'a>(
             match leaf_channel_domain(&leaves[group[position]], channel)? {
                 Some(SharedDomain::Numeric { .. }) => (position, PanelAxisKind::Continuous),
                 Some(SharedDomain::Ordinal(_)) => (position, PanelAxisKind::Categorical),
-                None => return Ok(()),
+                // `Samples` and `FixedBins` are binned colors' domains, never an axis's.
+                Some(SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. }) | None => return Ok(()),
             }
         }
     };
@@ -1182,9 +1256,13 @@ fn leaf_positional_domain(
 /// matches the scale the leaf render will build:
 /// - continuous (`Quantitative`/`Temporal`, unless the mark forces categorical)
 ///   → [`SharedDomain::Numeric`] extent of the color column;
-/// - categorical → [`SharedDomain::Ordinal`] first-appearance category vector.
+/// - categorical → [`SharedDomain::Ordinal`] first-appearance category vector;
+/// - a binned color with derived edges → [`SharedDomain::Samples`], its field,
+///   bin parameters and values;
+/// - a `bin-ordinal` scale with explicit `bins` → [`SharedDomain::FixedBins`],
+///   which only lets a shared group check it merges and is never assigned.
 ///
-/// Returns `None` when color is unencoded or carries an explicit user
+/// Returns `None` when color is unencoded or carries any other explicit user
 /// `enc.scale` (user scale wins — the leaf render short-circuits on it, so the
 /// resolve pass must exclude it to stay consistent). Color has no independent
 /// facet option (`FacetResolve` only covers x/y), so faceted leaves participate.
@@ -1196,11 +1274,21 @@ fn leaf_color_domain(
     leaf: &LeafResolveInput<'_>,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     let Some(enc) = leaf.encoding.color.as_ref() else { return Ok(None) };
+    let reads = leaf_aux_reads(leaf, "color");
+    if let Some(bin) = enc.color_bin().filter(|_| enc.derives_color_bins()) {
+        return Ok(Some(leaf_binned_samples(leaf, enc, bin, reads.as_deref())));
+    }
+    // An explicit `bins` list keeps the leaf's own scale, but it still counts
+    // in a shared group, which must merge into one scale.
+    if let Some(crate::spec::encoding::ScaleSpec::BinOrdinal { bins: Some(bins), .. }) = enc.scale.as_ref() {
+        if !bins.is_empty() {
+            return Ok(Some(SharedDomain::FixedBins { field: enc.field.clone(), bins: bins.clone() }));
+        }
+    }
     if enc.scale.is_some() {
         return Ok(None);
     }
     let channel = Channel::Color;
-    let reads = leaf_aux_reads(leaf, "color");
     let resolve_error = |source| CompositeResolveError::DomainResolve {
         channel: channel.as_str(),
         field: enc.field.clone(),
@@ -1324,6 +1412,95 @@ fn leaf_aux_column<'a>(
         // touches it: `user_facing_channel` is identity regardless.
         coord_flipped: false,
     })
+}
+
+/// A leaf's binned color with derived edges as a [`SharedDomain::Samples`]:
+/// its field, its bin parameters, and the values it cuts its edges from, the
+/// finite values of every drawing layer its binned scale admits on a layered
+/// leaf, the column's otherwise. Both read the leaf's final batch, which
+/// for a faceted leaf is its whole frame across panels, so a faceted leaf
+/// adds every row's value. A column that holds no numbers contributes none;
+/// the leaf's own render refuses it.
+fn leaf_binned_samples(
+    leaf: &LeafResolveInput<'_>,
+    enc: &crate::spec::encoding::EncodingSpec,
+    bin: &crate::spec::encoding::ScaleBin,
+    reads: Option<&[AuxRead<'_>]>,
+) -> SharedDomain {
+    let values = match reads {
+        Some(reads) => admitted_binned_reads(reads, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+            .map(|admitted| aux_numeric_values(&admitted, leaf.final_batch, leaf.transform_outputs, false))
+            .unwrap_or_default(),
+        None => crate::render::arrow_cast::col_as_f64(leaf.final_batch, &enc.field)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .filter(|v| v.is_finite())
+            .collect(),
+    };
+    SharedDomain::Samples { field: enc.field.clone(), bin: bin.clone(), values }
+}
+
+/// The tree a composite resolves its color under: `tree` itself, or a copy
+/// in which every concat or repeat node (any layout but `Overlay`) that
+/// leaves `color` unset shares color when every leaf beneath it that draws
+/// color draws a binned color with derived edges, all binning one field with
+/// one set of bin parameters. Those panels then cut one edge set from every
+/// panel's values and draw one legend of it. The default is decided at each
+/// node, so `vconcat(hconcat(a, b), c)` shares `a` and `b` when they agree
+/// even though `c` draws another color. An explicit `resolve={"color": ...}`
+/// on a node, explicit `bins` or an unbinned color on any leaf beneath it,
+/// or two binned settings that differ, leave that node as written. `None`
+/// means `tree` as written.
+pub(crate) fn binned_color_shared_by_default(
+    tree: &CompositeNode,
+    leaves: &[LeafResolveInput<'_>],
+) -> Option<CompositeNode> {
+    let mut shared = tree.clone();
+    let span: Vec<usize> = (0..leaves.len()).collect();
+    share_binned_color_nodes(&mut shared, &span, leaves).then_some(shared)
+}
+
+/// [`binned_color_shared_by_default`]'s walk over `node`, whose leaves are
+/// `span` (global indices into `leaves`, pre-order); `true` when it set any
+/// node to share. A node's check reads the leaves that would join its
+/// union ([`collect_shared_leaves`]): a sub-composite that resolves color
+/// independent is its own and does not stop its parent sharing. Every node
+/// is visited, so a node beneath one that shares, or beneath an independent
+/// one, is decided too.
+fn share_binned_color_nodes(node: &mut CompositeNode, span: &[usize], leaves: &[LeafResolveInput<'_>]) -> bool {
+    let mut changed = false;
+    if let CompositeNode::Composite { layout, resolve, .. } = node {
+        if *layout != CompositeLayout::Overlay && resolve.color.is_none() {
+            let mut members = Vec::new();
+            collect_shared_leaves(node, span, Channel::Color, ResolveMode::Shared, &mut members);
+            if one_binned_color_setting(members.iter().map(|&idx| &leaves[idx])) {
+                if let CompositeNode::Composite { resolve, .. } = node {
+                    resolve.color = Some(ResolveMode::Shared);
+                }
+                changed = true;
+            }
+        }
+    }
+    if let CompositeNode::Composite { children, .. } = node {
+        let mut cursor = 0;
+        for child in children {
+            let lc = leaf_count(child);
+            changed |= share_binned_color_nodes(child, &span[cursor..cursor + lc], leaves);
+            cursor += lc;
+        }
+    }
+    changed
+}
+
+/// Whether `leaves` draw color, and every one that does draws a binned color
+/// with derived edges binning one field with one set of bin parameters.
+fn one_binned_color_setting<'l, 'a: 'l>(leaves: impl Iterator<Item = &'l LeafResolveInput<'a>>) -> bool {
+    let mut settings = leaves.filter_map(|leaf| leaf.encoding.color.as_ref()).map(|enc| {
+        enc.color_bin().filter(|_| enc.derives_color_bins()).map(|bin| (enc.field.as_str(), bin))
+    });
+    let Some(Some(first)) = settings.next() else { return false };
+    settings.all(|setting| setting == Some(first))
 }
 
 /// A [`SharedDomain::Numeric`] over a located Arrow column's finite extent.
@@ -2044,10 +2221,11 @@ mod tests {
         assert_eq!(ctx[1].color, None);
     }
 
+    /// An explicit shared color over a numeric (continuous) leaf and a
+    /// categorical sibling has no one scale to share, so it is refused,
+    /// naming both colors.
     #[test]
-    fn shared_color_mixed_continuous_categorical_group_skips() {
-        // One leaf's color is numeric (continuous), the sibling's is categorical:
-        // no meaningful union — the group's color sharing is skipped, both stay None.
+    fn shared_color_mixed_continuous_categorical_group_is_refused() {
         let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
         let l1 = owned(spec_with_color("c"), cat_batch("c", &["a", "b"]));
         let tree = composite(
@@ -2056,9 +2234,13 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
-        assert_eq!(ctx[0].color, None);
-        assert_eq!(ctx[1].color, None);
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap_err();
+        let CompositeResolveError::DomainResolve { source: RenderError::SharedColorScalesDiffer { first, other }, .. } = err
+        else {
+            panic!("expected the shared-color refusal, got {err:?}")
+        };
+        assert_eq!(first, "'c' as a continuous color");
+        assert_eq!(other, "'c' as a categorical color");
     }
 
     // -- box-transform (stat-extent union via layer fields) -------------------

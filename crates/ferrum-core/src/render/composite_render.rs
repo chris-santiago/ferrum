@@ -421,6 +421,11 @@ pub(crate) fn render_composite_scene(
     // one (an overlay member a caller's scale leaves out of the group's
     // axis); leaf warnings follow in leaf pre-order after the pre-passes.
     let mut warnings: Vec<RenderWarning> = Vec::new();
+    // A concat or repeat of binned colors with derived edges shares color
+    // unless the composition says otherwise; every pass below reads this one
+    // tree, so the shared union and the figure legend band agree.
+    let binned_shared = super::composite::binned_color_shared_by_default(tree, &resolve_inputs);
+    let tree = binned_shared.as_ref().unwrap_or(tree);
     let mut contexts = resolve_composite_scales(tree, &resolve_inputs, &mut warnings)?;
     // An overlay group's members are one layered chart: one auxiliary scale
     // per channel over every member, one legend per channel drawn by the
@@ -7772,6 +7777,408 @@ mod tests {
              got {entry_fs:?} — a default overrides bundle falls back to the theme's {}",
             theme.typography.label_font_size
         );
+    }
+
+    /// A point leaf colored by `v` through a `bin-ordinal` scale `scale`.
+    fn binned_color_hold(scale: serde_json::Value, vs: &[f64]) -> LeafHold {
+        binned_color_hold_on("v", scale, vs)
+    }
+
+    /// A point leaf colored by `field` through the `bin-ordinal` scale
+    /// `scale`, over one row per value of `vs`.
+    fn binned_color_hold_on(field: &str, scale: serde_json::Value, vs: &[f64]) -> LeafHold {
+        let mut spec = scatter_spec();
+        spec.encoding.color = Some(EncodingSpec {
+            field: field.into(),
+            scale: Some(serde_json::from_value(scale).expect("a bin-ordinal scale")),
+            ..Default::default()
+        });
+        let n = vs.len();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new(field, DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(vs.to_vec())),
+            ],
+        )
+        .unwrap();
+        color_hold_with(spec, batch, ThemeInputs::default())
+    }
+
+    /// An `layout` node over `holds`, one leaf each, with `color` its color
+    /// resolve (`None` unset).
+    fn holds_node(layout: CompositeLayout, holds: &[LeafHold], first_data: usize, color: Option<RM>) -> CompositeNode {
+        let mut node = composite(
+            layout,
+            holds
+                .iter()
+                .enumerate()
+                .map(|(i, h)| CompositeNode::Leaf { spec: Box::new(h.spec.clone()), data: first_data + i, label: None })
+                .collect(),
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut node {
+            resolve.color = color;
+        }
+        node
+    }
+
+    /// The scene `node` renders over `holds` (in leaf order).
+    fn render_holds(node: &CompositeNode, holds: &[&LeafHold]) -> Result<SceneGraph, CompositeRenderError> {
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        render_composite_scene(node, &leaves, &ThemeInputs::default()).map(|(scene, _)| scene)
+    }
+
+    /// Every text label of `scene`'s legends.
+    fn legend_labels(scene: &SceneGraph) -> Vec<String> {
+        scene
+            .legend
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The legend labels an hconcat of `holds` draws, with `color` its root's
+    /// color resolve (`None` unset).
+    fn binned_hconcat_legend_labels(holds: &[LeafHold], color: Option<RM>) -> Vec<String> {
+        let node = holds_node(CompositeLayout::Hconcat, holds, 0, color);
+        legend_labels(&render_holds(&node, &holds.iter().collect::<Vec<_>>()).unwrap())
+    }
+
+    /// Each panel's point fills, in panel order.
+    fn panel_point_fills(scene: &SceneGraph) -> Vec<Vec<(u8, u8, u8)>> {
+        scene
+            .panels
+            .iter()
+            .map(|panel| {
+                panel
+                    .marks
+                    .iter()
+                    .flat_map(|batch| batch.nodes.iter())
+                    .filter_map(|node| match node {
+                        SceneNode::Circle { style, .. } => style.fill.map(|c| (c.r, c.g, c.b)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn count(labels: &[String], label: &str) -> usize {
+        labels.iter().filter(|l| *l == label).count()
+    }
+
+    /// A binned color with derived edges shares by default across concat
+    /// panels: one edge set cut from both panels' values (0..3 and 10..20,
+    /// four bins: 0, 5, 10, 15, 20) and one legend of it. An explicit
+    /// `Resolve(scale={"color": "independent"})` keeps each panel's own edges
+    /// and legend. Rejects per-panel edges for panels that bin one field
+    /// with one setting under no explicit resolve.
+    #[test]
+    fn a_binned_color_shares_one_edge_set_and_legend_across_concat_panels_by_default() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let holds = [
+            binned_color_hold(scale.clone(), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold(scale, &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let shared = binned_hconcat_legend_labels(&holds, None);
+        assert_eq!(count(&shared, "v"), 1, "one legend titled v: {shared:?}");
+        for edge in ["0", "5", "10", "15", "20"] {
+            assert_eq!(count(&shared, edge), 1, "one legend of the shared edges, {edge}: {shared:?}");
+        }
+        assert_eq!(count(&shared, "0.75"), 0, "no per-panel edges: {shared:?}");
+
+        let independent = binned_hconcat_legend_labels(&holds, Some(RM::Independent));
+        assert_eq!(count(&independent, "v"), 2, "a legend per panel: {independent:?}");
+        for edge in ["0.75", "2.25", "12.5", "17.5"] {
+            assert_eq!(count(&independent, edge), 1, "each panel's own edges, {edge}: {independent:?}");
+        }
+        assert_eq!(count(&independent, "5"), 0, "no shared edge: {independent:?}");
+    }
+
+    /// Explicit `bins=` keep per-panel behavior: two legends titled `v`, each
+    /// labelling its own panel's extent around the declared boundary.
+    #[test]
+    fn explicit_bins_keep_per_panel_color_across_concat_panels() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bins": [11.0]});
+        let holds = [
+            binned_color_hold(scale.clone(), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold(scale, &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let labels = binned_hconcat_legend_labels(&holds, None);
+        assert_eq!(count(&labels, "v"), 2, "two per-panel legends: {labels:?}");
+        assert_eq!((count(&labels, "0"), count(&labels, "20")), (1, 1), "each panel's own extent: {labels:?}");
+    }
+
+    /// Panels binning one field with different bin parameters share
+    /// nothing by default: each keeps its own edges (panel a 4 bins over
+    /// 0..3, panel b 2 bins over 10..20) and its own legend, and each
+    /// panel's points draw the steps of the legend beside it, exactly as
+    /// with an explicit independent resolve. Rejects one legend over
+    /// pooled values while each panel cut its own edges.
+    #[test]
+    fn binned_colors_with_different_bin_params_keep_per_panel_edges_and_legends() {
+        let holds = [
+            binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}), &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let refs: Vec<&LeafHold> = holds.iter().collect();
+        let default = render_holds(&holds_node(CompositeLayout::Hconcat, &holds, 0, None), &refs).unwrap();
+        let independent = render_holds(&holds_node(CompositeLayout::Hconcat, &holds, 0, Some(RM::Independent)), &refs).unwrap();
+        let labels = legend_labels(&default);
+        assert_eq!(count(&labels, "v"), 2, "a legend per panel: {labels:?}");
+        for edge in ["0.75", "2.25", "10", "15", "20"] {
+            assert_eq!(count(&labels, edge), 1, "each panel's own edges, {edge}: {labels:?}");
+        }
+        assert_eq!(panel_point_fills(&default), panel_point_fills(&independent), "each panel draws its own legend's steps");
+        assert_eq!(legend_labels(&default), legend_labels(&independent));
+    }
+
+    /// Panels binning two different fields share nothing by default: a
+    /// legend titled `v` and one titled `w`, each over its own edges.
+    #[test]
+    fn binned_colors_on_different_fields_keep_per_panel_legends() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let holds = [
+            binned_color_hold_on("v", scale.clone(), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold_on("w", scale, &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let labels = binned_hconcat_legend_labels(&holds, None);
+        assert_eq!((count(&labels, "v"), count(&labels, "w")), (1, 1), "one legend per field: {labels:?}");
+        assert_eq!((count(&labels, "0.75"), count(&labels, "12.5")), (1, 1), "each panel's own edges: {labels:?}");
+    }
+
+    /// An explicit shared color over panels whose bin settings differ is
+    /// refused, naming both settings and the remedy.
+    #[test]
+    fn an_explicit_shared_color_over_differing_bin_settings_is_refused() {
+        let holds = [
+            binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}), &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let refs: Vec<&LeafHold> = holds.iter().collect();
+        let err = render_holds(&holds_node(CompositeLayout::Hconcat, &holds, 0, Some(RM::Shared)), &refs).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            shared_color_refusal("'v' binned with bin={\"bin_count\":4,\"nice\":false}", "'v' binned with bin={\"bin_count\":2,\"nice\":false}")
+        );
+    }
+
+    /// The text an explicit shared color over two panels that cannot merge
+    /// refuses with, the first panel's color `first` and the other's `other`.
+    fn shared_color_refusal(first: &str, other: &str) -> String {
+        format!(
+            "composite scale resolution failed: failed to resolve shared color domain for field 'v': a shared color \
+             needs one color scale on every panel, but one panel colors by {first} and another by {other}. Make the \
+             panels' colors match, or resolve color independently with Resolve(scale={{'color': 'independent'}})"
+        )
+    }
+
+    /// An explicit shared color whose panels cannot merge into one scale is
+    /// refused, naming both colors: a binned next to an unbinned numeric
+    /// color, derived edges next to explicit `bins=` (whose leaf keeps its
+    /// own scale but counts in the merge check), and a continuous next to a
+    /// categorical color. Unrequested, the same panels keep their own scales
+    /// and legends. Rejects the explicit request dropped without a word.
+    #[test]
+    fn an_explicit_shared_color_over_panels_that_cannot_merge_is_refused() {
+        let derived = binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}), &[0.0, 1.0, 2.0, 3.0]);
+        let mut unbinned = binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bins": [1.0]}), &[10.0, 20.0]);
+        unbinned.spec.encoding.color = Some(EncodingSpec { field: "v".into(), ..Default::default() });
+        let fixed = binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bins": [5.0, 15.0]}), &[10.0, 20.0]);
+        let categorical = color_hold_with(
+            {
+                let mut spec = cat_color_spec();
+                spec.encoding.color.as_mut().unwrap().field = "g".into();
+                spec
+            },
+            xyg_batch(&[1.0, 2.0], &[1.0, 2.0], &["a", "b"]),
+            ThemeInputs::default(),
+        );
+        let refusal = |a: &LeafHold, b: &LeafHold| {
+            let leaf = |h: &LeafHold, data: usize| CompositeNode::Leaf { spec: Box::new(h.spec.clone()), data, label: None };
+            let mut node = composite(CompositeLayout::Hconcat, vec![leaf(a, 0), leaf(b, 1)]);
+            let unrequested = render_holds(&node, &[a, b]).map(|scene| legend_labels(&scene));
+            if let CompositeNode::Composite { resolve, .. } = &mut node {
+                resolve.color = Some(RM::Shared);
+            }
+            (render_holds(&node, &[a, b]).unwrap_err().to_string(), unrequested)
+        };
+        let binned_text = "'v' binned with bin={\"bin_count\":4,\"nice\":false}";
+        for (other, other_text) in [
+            (&unbinned, "'v' as a continuous color".to_string()),
+            (&fixed, "'v' binned with bins=[5.0, 15.0]".to_string()),
+        ] {
+            let (err, unrequested) = refusal(&derived, other);
+            assert_eq!(err, shared_color_refusal(binned_text, &other_text));
+            let labels = unrequested.expect("unrequested, the panels render");
+            assert_eq!(count(&labels, "v"), 2, "each panel keeps its own legend: {labels:?}");
+        }
+        let (err, unrequested) = refusal(&unbinned, &categorical);
+        assert_eq!(
+            err,
+            shared_color_refusal("'v' as a continuous color", "'g' as a categorical color"),
+        );
+        assert!(unrequested.is_ok(), "unrequested, a continuous and a categorical panel render");
+    }
+
+    /// A sub-composite resolving color independent is its own: in
+    /// `hconcat(a, d, vconcat[independent](b))` the agreeing `a` and `d`
+    /// (four bins) share one edge set (0, 5, ..., 20) and one legend, while
+    /// `b` (ten bins over 100..200) keeps its own. Rejects `b`'s differing
+    /// setting stopping `a` and `d` sharing.
+    #[test]
+    fn an_independent_sub_composite_does_not_stop_its_siblings_sharing() {
+        let four = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let a = binned_color_hold(four.clone(), &[0.0, 1.0, 2.0, 3.0]);
+        let d = binned_color_hold(four, &[10.0, 12.0, 15.0, 20.0]);
+        let b = binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 10, "nice": false}}), &[100.0, 200.0]);
+        let leaf = |h: &LeafHold, data: usize| CompositeNode::Leaf { spec: Box::new(h.spec.clone()), data, label: None };
+        let mut independent = composite(CompositeLayout::Vconcat, vec![leaf(&b, 2)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut independent {
+            resolve.color = Some(RM::Independent);
+        }
+        let node = composite(CompositeLayout::Hconcat, vec![leaf(&a, 0), leaf(&d, 1), independent]);
+        let labels = legend_labels(&render_holds(&node, &[&a, &d, &b]).unwrap());
+        for edge in ["0", "5", "15"] {
+            assert_eq!(count(&labels, edge), 1, "a and d share one legend, {edge}: {labels:?}");
+        }
+        assert_eq!(count(&labels, "0.75"), 0, "a keeps no edges of its own: {labels:?}");
+        assert_eq!(count(&labels, "v"), 2, "the shared legend and b's own: {labels:?}");
+        assert!(labels.iter().any(|l| l == "110"), "b's own ten bins: {labels:?}");
+    }
+
+    /// The default is decided at each node: in `vconcat(hconcat(a, b), c)`
+    /// with `c` colored by the unbinned `v`, the inner `a` and `b` agree and
+    /// share one edge set (0, 5, ..., 20) and one legend, while `c` keeps its
+    /// own continuous legend (100..200).
+    #[test]
+    fn a_nested_concat_of_agreeing_binned_colors_shares_by_default() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let a = binned_color_hold(scale.clone(), &[0.0, 1.0, 2.0, 3.0]);
+        let b = binned_color_hold(scale, &[10.0, 12.0, 15.0, 20.0]);
+        let mut c = binned_color_hold(serde_json::json!({"type": "bin-ordinal", "bins": [1.0]}), &[100.0, 200.0]);
+        c.spec.encoding.color = Some(EncodingSpec { field: "v".into(), ..Default::default() });
+        let leaf = |h: &LeafHold, data: usize| CompositeNode::Leaf { spec: Box::new(h.spec.clone()), data, label: None };
+        let inner = composite(CompositeLayout::Hconcat, vec![leaf(&a, 0), leaf(&b, 1)]);
+        let outer = composite(
+            CompositeLayout::Vconcat,
+            vec![inner, leaf(&c, 2)],
+        );
+        let labels = legend_labels(&render_holds(&outer, &[&a, &b, &c]).unwrap());
+        for edge in ["0", "5", "15"] {
+            assert_eq!(count(&labels, edge), 1, "one shared legend of the inner panels, {edge}: {labels:?}");
+        }
+        assert_eq!(count(&labels, "0.75"), 0, "no per-panel edges: {labels:?}");
+        assert_eq!(count(&labels, "v"), 2, "the inner shared legend and c's own: {labels:?}");
+        assert!(labels.iter().any(|l| l == "200"), "c keeps its own legend: {labels:?}");
+    }
+
+    /// A layered leaf shares the values of every layer its binned scale
+    /// admits: layer 0 colors by `v` (0, 1) and layer 1 by `w` (20, 30), so
+    /// with the other panel's `v` (10, 12) the shared three bins are cut over
+    /// 0..30. Rejects a layered leaf adding only its establishing column
+    /// (edges over 0..12).
+    #[test]
+    fn a_layered_leaf_shares_every_drawing_layers_binned_values() {
+        let bin = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 3, "nice": false}});
+        let layered: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "v", "scale": bin.clone()}}},
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "w", "scale": bin.clone()}}},
+            ],
+        }))
+        .expect("the layered spec deserializes");
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("w", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        let a = color_hold_with(layered, batch, ThemeInputs::default());
+        let b = binned_color_hold(bin, &[10.0, 12.0]);
+        let node = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf { spec: Box::new(a.spec.clone()), data: 0, label: None },
+                CompositeNode::Leaf { spec: Box::new(b.spec.clone()), data: 1, label: None },
+            ],
+        );
+        let labels = legend_labels(&render_holds(&node, &[&a, &b]).unwrap());
+        for edge in ["0", "10", "20", "30"] {
+            assert_eq!(count(&labels, edge), 1, "one legend over 0..30, {edge}: {labels:?}");
+        }
+    }
+
+    /// A repeat root (the grid layout `RepeatChart` lowers to) shares an
+    /// agreeing binned color by default, as a concat does.
+    #[test]
+    fn a_repeat_grid_shares_an_agreeing_binned_color_by_default() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let holds = [
+            binned_color_hold(scale.clone(), &[0.0, 1.0, 2.0, 3.0]),
+            binned_color_hold(scale, &[10.0, 12.0, 15.0, 20.0]),
+        ];
+        let mut node = holds_node(CompositeLayout::Grid, &holds, 0, None);
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut node {
+            *nrows = Some(1);
+            *ncols = Some(2);
+        }
+        let labels = legend_labels(&render_holds(&node, &holds.iter().collect::<Vec<_>>()).unwrap());
+        assert_eq!(count(&labels, "v"), 1, "one legend: {labels:?}");
+        for edge in ["0", "5", "10", "15", "20"] {
+            assert_eq!(count(&labels, edge), 1, "the shared edges, {edge}: {labels:?}");
+        }
+    }
+
+    /// A faceted leaf in a shared concat adds its whole frame's values, every
+    /// facet panel's rows: panel p holds 0 and 1, panel q 30 and 40, and the
+    /// other leaf 10 and 20, so the four shared bins span 0..40. Rejects a
+    /// faceted leaf adding one facet panel's rows (edges over 0..20).
+    #[test]
+    fn a_faceted_leaf_adds_its_whole_frame_to_a_shared_binned_color() {
+        let scale = serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}});
+        let mut faceted = binned_color_hold(scale.clone(), &[0.0, 1.0, 30.0, 40.0]);
+        let mut columns = faceted.batch.columns().to_vec();
+        let mut fields: Vec<Field> = faceted.batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        columns.push(Arc::new(arrow::array::StringArray::from(vec!["p", "p", "q", "q"])));
+        fields.push(Field::new("f", DataType::Utf8, false));
+        faceted.batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        faceted.spec.facet = Some(
+            serde_json::from_value(serde_json::json!({"field": "f", "mode": {"kind": "wrap", "ncols": 2}})).expect("a facet"),
+        );
+        let other = binned_color_hold(scale, &[10.0, 20.0]);
+        let node = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf { spec: Box::new(faceted.spec.clone()), data: 0, label: None },
+                CompositeNode::Leaf { spec: Box::new(other.spec.clone()), data: 1, label: None },
+            ],
+        );
+        let labels = legend_labels(&render_holds(&node, &[&faceted, &other]).unwrap());
+        for edge in ["0", "10", "20", "30", "40"] {
+            assert_eq!(count(&labels, edge), 1, "one legend over 0..40, {edge}: {labels:?}");
+        }
+        assert_eq!(count(&labels, "5"), 0, "not one facet panel's rows: {labels:?}");
     }
 
     #[test]

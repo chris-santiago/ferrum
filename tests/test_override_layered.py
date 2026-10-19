@@ -108,6 +108,7 @@ _EXCLUDED: dict[str, str] = {
     "domainMid": "diverging-color-only",
     "domain_mid": "diverging-color-only",
     "bins": "bin-ordinal-color-only",
+    "bin": "bin-ordinal-color-only",
 }
 
 # A value per rendered leaf that moves a linear value axis visibly.

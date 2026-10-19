@@ -929,6 +929,7 @@ _SCALE_LEAF_RENDER_CASES: dict[str, tuple[str, str, str | None, object]] = {
     "domainMid": ("color", "val", "diverging", 15.0),
     "domain_mid": ("color", "val", "diverging", 15.0),
     "bins": ("color", "val", "bin-ordinal", [0.0, 10.0, 20.0, 30.0]),
+    "bin": ("color", "val", "bin-ordinal", {"bin_count": 3}),
 }
 
 
@@ -1343,6 +1344,17 @@ _SCALE_LEAF_NONE_NOOP_PROBES: dict[str, tuple["fm.Chart", str, object]] = {
         ),
         "color",
         [0.0, 5.0, 15.0, 25.0, 35.0],
+    ),
+    "bin": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(
+            x="cat",
+            y="val",
+            color=fm.Color("val", scale={"type": "bin-ordinal", "bin": {"bin_count": 3}}),
+        ),
+        "color",
+        {"bin_count": 5},
     ),
 }
 

@@ -55,7 +55,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    admitted_aux_reads, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
+    admitted_aux_reads, admitted_binned_reads, aux_numeric_values, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
@@ -782,6 +782,12 @@ impl DiscretizedColors {
 
     /// The bucket color for `value`, or `None` when `value` is not finite.
     pub fn lookup(&self, value: f64) -> Option<Color> {
+        self.colors.get(self.bucket(value)?).copied()
+    }
+
+    /// The index of the bucket `value` falls in, low to high, or `None` when
+    /// `value` is not finite.
+    pub(crate) fn bucket(&self, value: f64) -> Option<usize> {
         if !value.is_finite() {
             return None;
         }
@@ -790,8 +796,7 @@ impl DiscretizedColors {
         // (d3's `scaleThreshold` convention — a boundary belongs to the bucket
         // above it).
         let interior = &self.bounds[1..self.bounds.len() - 1];
-        let idx = interior.partition_point(|b| *b <= value);
-        self.colors.get(idx).copied()
+        Some(interior.partition_point(|b| *b <= value))
     }
 
     /// One color per bucket, low → high.

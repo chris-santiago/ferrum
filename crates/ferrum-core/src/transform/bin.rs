@@ -640,6 +640,50 @@ impl GroupEdges {
             GroupEdges::SingleUnit(u) => Some(single_unit_bin(u)),
         }
     }
+
+    /// Every edge, ascending: `n_bins + 1` of them, or the single unit bin's
+    /// two.
+    fn edges(&self) -> Vec<f64> {
+        match *self {
+            GroupEdges::Binned { lo, hi, n_bins } => (0..=n_bins).map(|i| Self::edge(lo, hi, n_bins, i)).collect(),
+            GroupEdges::SingleUnit(u) => {
+                let (start, end) = single_unit_bin(u);
+                vec![start, end]
+            }
+        }
+    }
+}
+
+/// The edges `[e_0, ..., e_n]` a binned color scale cuts `values` into: the
+/// edges an ungrouped `Bin` with the same `bin_count`, `bin_width`, `extent`
+/// and `nice` counts the same values into ([`group_edges`]). `values` are
+/// the clean values of every layer drawing the channel, pooled; `Ok(None)`
+/// when there are none.
+pub(crate) fn scale_bin_edges(
+    bin: &crate::spec::encoding::ScaleBin,
+    values: &[f64],
+) -> PyResult<Option<Vec<f64>>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let spec = BinSpec::try_from(BinWire {
+        field: String::new(),
+        bin_count: bin.bin_count,
+        bin_width: bin.bin_width,
+        bin_rule: None,
+        extent: bin.extent,
+        nice: bin.nice,
+        cumulative: false,
+        shared_extent: false,
+        groupby: Vec::new(),
+        agg_field: None,
+        agg: None,
+        per_row: false,
+        aggregates: None,
+        name: None,
+    })
+    .map_err(PyValueError::new_err)?;
+    Ok(Some(group_edges(&spec, values, None)?.edges()))
 }
 
 /// The single unit bin `[v - 0.5, v + 0.5]` an all-equal group bins into, so

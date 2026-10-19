@@ -2416,6 +2416,36 @@ fn color_size_shape_together_produce_two_aux_blocks_plus_color() {
     );
 }
 
+/// A binned color draws one legend: the stepped bar of its bins, labelled at
+/// each bin edge so each band reads as its bin's range, and titled by the
+/// field, or by the binding's own `title=`. Rejects a categorical legend of
+/// the raw values and a gradient colorbar of the continuous ramp.
+#[test]
+fn a_binned_color_draws_one_legend_of_its_bin_ranges_titled_by_its_field() {
+    for (title, expected_title) in [(None, "pop"), (Some("Population"), "Population")] {
+        let mut spec = base_spec();
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            title: title.map(String::from),
+            scale: Some(
+                serde_json::from_value(serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 3, "nice": false}}))
+                    .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch_pop());
+        assert!(p.legend_entries.is_empty(), "no categorical legend: {:?}", p.legend_entries);
+        assert!(p.aux_legends.is_empty(), "no second legend");
+        let colorbar = p.colorbar.as_ref().expect("the binned legend");
+        assert_eq!(colorbar.tick_labels, vec!["10", "40", "70", "100"], "one label per bin edge");
+        assert_eq!(colorbar.stops.len(), 6, "three flat bands, two stops each");
+        for pair in colorbar.stops.chunks_exact(2) {
+            assert_eq!(pair[0].1, pair[1].1, "each band is one flat swatch");
+        }
+        assert_eq!(p.legend_title.as_deref(), Some(expected_title));
+    }
+}
+
 #[test]
 fn color_and_size_on_same_field_merge_into_one_block() {
     // color (continuous) AND size both on "pop" → a single combined block:
@@ -9522,18 +9552,22 @@ fn drawn(cells: &[[u8; 4]]) -> Vec<[u8; 4]> {
 }
 
 /// A raster count colored through a discretizing scale (`Quantize`,
-/// `Threshold`, a binned color's `BinOrdinal`, `Quantile`) steps its cells
-/// through that one scale, over the cells' zero-anchored domain: the cells
+/// `Threshold`, `BinOrdinal` with explicit `bins`, a binned color's
+/// `BinOrdinal` with `bin`, `Quantile`) steps its cells through that one
+/// scale, over the cells' zero-anchored domain (a quantile's cut-points and
+/// a binned color's edges are taken from the cells' values): the cells
 /// holding 3 and 7 draw distinct bucket colors, empty cells stay
 /// transparent, and the legend is the scale's stepped bar (two stops per
 /// swatch at its band edges, one label per bound). Rejects the continuous
-/// ramp the cells drew under any binding, and a quantile cut from no sample.
+/// ramp the cells drew under any binding, a quantile cut from no sample, and
+/// a binned color that read no cell.
 #[test]
 fn a_discretizing_color_steps_a_rasters_cells_and_draws_its_stepped_legend() {
     let cases = [
         (serde_json::json!({"type": "quantize", "range": ["#ff0000", "#00ff00", "#0000ff"]}), vec![0.0, 7.0 / 3.0, 14.0 / 3.0, 7.0]),
         (serde_json::json!({"type": "threshold", "domain": [4.0]}), vec![0.0, 4.0, 7.0]),
         (serde_json::json!({"type": "bin-ordinal", "bins": [2.0, 5.0]}), vec![0.0, 2.0, 5.0, 7.0]),
+        (serde_json::json!({"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}), vec![3.0, 5.0, 7.0]),
         (serde_json::json!({"type": "quantile", "range": [0.0, 1.0]}), vec![3.0, 5.0, 7.0]),
     ];
     for (scale, bounds) in cases {
@@ -9579,6 +9613,196 @@ fn faceted_rasters_share_a_discretizing_scales_steps() {
     assert_eq!(drawn(m), sorted(vec![rgba(stepped, 2.0), rgba(stepped, 5.0)]));
     assert_eq!(drawn(n), sorted(vec![rgba(stepped, 1.0), rgba(stepped, 2.0)]));
     assert_eq!(rgba(stepped, 2.0), [0, 255, 0, 255], "a 2 is the middle swatch in both panels");
+}
+
+/// Faceted rasters share one binned color's edges, cut from every panel's
+/// cells (1..5 over panels m and n), so a cell holding 2 draws the same bin
+/// color in both panels. Rejects edges cut from each panel's own cells.
+#[test]
+fn faceted_rasters_share_a_binned_colors_edges() {
+    let color = serde_json::json!({"field": "count", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}});
+    let (prep, panels) = raster_panel_cells(&raster_spec(count_raster(false), Some(color), serde_json::json!([]), Some("f")));
+    let Some(stepped @ ColorScale::Discretizing(buckets)) = &prep.provisional_scales.color else { panic!("discretizing") };
+    assert_eq!(buckets.bounds(), [1.0, 3.0, 5.0]);
+    let [m, n] = panels.as_slice() else { panic!("two panels, got {}", panels.len()) };
+    let sorted = |mut v: Vec<[u8; 4]>| {
+        v.sort();
+        v
+    };
+    assert_eq!(drawn(m), sorted(vec![rgba(stepped, 2.0), rgba(stepped, 5.0)]));
+    assert_eq!(drawn(n), sorted(vec![rgba(stepped, 1.0), rgba(stepped, 2.0)]));
+}
+
+/// Rows for a binned-color area: `x` 0..2 for each of two bins of `z`
+/// (`bin_count` 2 without nicing over 1..9 cuts at 5). The high bin's rows
+/// come first and every `z` is distinct, so first-appearance grouping, raw
+/// category grouping and bin grouping all differ. `y` is 1 in the high bin
+/// and 2 in the low one.
+fn binned_area_rows() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0])),
+            Arc::new(Float64Array::from(vec![8.0, 9.0, 8.5, 1.0, 2.0, 1.5])),
+        ],
+    )
+    .unwrap()
+}
+
+/// An area chart whose color is the binned `z`, stacked when `stack`.
+fn binned_area_spec(stack: bool) -> ChartSpec {
+    let mut spec = serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "area",
+        "encoding": {
+            "x": {"field": "x"},
+            "y": {"field": "y"},
+            "color": {"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}},
+        },
+    });
+    if stack {
+        spec["position"] = serde_json::json!({"type": "stack"});
+    }
+    serde_json::from_value(spec).expect("the area spec deserializes")
+}
+
+/// Each closed area band the scene draws: its fill and its vertices.
+fn area_bands(scene: &ferrum_scene::SceneGraph) -> Vec<(ferrum_scene::Color, Vec<(f64, f64)>)> {
+    scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Path { commands, style, closed: true, .. } => {
+                let points = commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                Some((style.fill.expect("a filled band"), points))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A binned color on an area groups the area by bin: one band per bin (two,
+/// where the six distinct `z` values made six one-point groups that drew
+/// nothing), drawn low bin first, each band filled with its bin's step of
+/// the binned scale, under one legend of the bin ranges. Rejects the
+/// categorical scale an area forced on its color, and first-appearance
+/// band order (the high bin's rows come first).
+#[test]
+fn a_binned_color_on_an_area_draws_one_band_per_bin_in_bin_order() {
+    let spec = binned_area_spec(false);
+    let p = prep(&spec, &binned_area_rows());
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else {
+        panic!("expected the binned scale, got {:?}", p.provisional_scales.color)
+    };
+    assert_eq!(buckets.bounds(), [1.0, 5.0, 9.0]);
+    assert!(p.legend_entries.is_empty(), "no categorical legend: {:?}", p.legend_entries);
+    assert_eq!(p.colorbar.as_ref().expect("the bin legend").tick_labels, vec!["1", "5", "9"]);
+
+    let scene = gate_render(&spec, &binned_area_rows()).0.expect("renders");
+    let bands = area_bands(&scene);
+    assert_eq!(bands.len(), 2, "one band per bin");
+    for (bin, (fill, _)) in bands.iter().enumerate() {
+        let step = crate::render::draw::to_scene_color(buckets.colors()[bin]);
+        assert_eq!((fill.r, fill.g, fill.b), (step.r, step.g, step.b), "band {bin} takes bin {bin}'s step");
+    }
+    // The low bin's band (y 2) reaches higher on the panel than the high
+    // bin's (y 1): its top vertex has the smaller pixel y.
+    let top = |points: &[(f64, f64)]| points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    assert!(top(&bands[0].1) < top(&bands[1].1), "the first band drawn is the low bin's");
+}
+
+/// A stacked area under a binned color stacks one layer per bin, low bin at
+/// the bottom: the high bin's band sits on the low bin's top, each filled
+/// with its bin's step. Rejects the first-appearance stack, which put the
+/// high bin (whose rows come first) at the bottom.
+#[test]
+fn a_stacked_area_under_a_binned_color_stacks_one_layer_per_bin_low_bin_first() {
+    let spec = binned_area_spec(true);
+    let scene = gate_render(&spec, &binned_area_rows()).0.expect("renders");
+    let bands = area_bands(&scene);
+    assert_eq!(bands.len(), 2, "one stacked layer per bin");
+    let p = prep(&spec, &binned_area_rows());
+    // (bottom, top) pixel rows of a band; pixel y grows downward.
+    let span = |points: &[(f64, f64)]| {
+        let bottom = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let top = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        (bottom, top)
+    };
+    let (low, high) = (span(&bands[0].1), span(&bands[1].1));
+    assert!((low.1 - high.0).abs() < 1e-6, "the high bin sits on the low bin's top: {low:?} {high:?}");
+    assert!(low.0 > high.0, "the low bin is the bottom layer: {low:?} {high:?}");
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    for (bin, (fill, _)) in bands.iter().enumerate() {
+        let step = crate::render::draw::to_scene_color(buckets.colors()[bin]);
+        assert_eq!((fill.r, fill.g, fill.b), (step.r, step.g, step.b), "layer {bin} takes bin {bin}'s step");
+    }
+}
+
+/// A dodged bar under a binned color takes one slot per bin, low bin on the
+/// left: 8 distinct `z` values over 2 bins (`bin_count` 2 without nicing over
+/// 1..14 cuts at 7.5) put each band's 4 bars in 2 slots, the left one filled
+/// with the low bin's step. Rejects one slot per raw value (4 per band).
+#[test]
+fn a_dodge_under_a_binned_color_takes_one_slot_per_bin_in_bin_order() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b", "b", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![11.0, 1.0, 12.0, 2.0, 13.0, 3.0, 14.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "position": {"type": "dodge"},
+        "encoding": {
+            "x": {"field": "g"},
+            "y": {"field": "y"},
+            "color": {"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}},
+        },
+    }))
+    .expect("the dodged spec deserializes");
+    let p = prep(&spec, &batch);
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    assert_eq!(buckets.bounds(), [1.0, 7.5, 14.0]);
+    let scene = gate_render(&spec, &batch).0.expect("renders");
+    let mut bars: Vec<(f64, ferrum_scene::Color)> = scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Rect { x, style, .. } => style.fill.map(|fill| (*x, fill)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars.len(), 8, "every bar draws");
+    bars.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut slots: Vec<f64> = bars.iter().map(|bar| bar.0).collect();
+    slots.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert_eq!(slots.len(), 4, "two slots in each of two bands: {slots:?}");
+    for (slot, bin) in [(0, 0), (1, 1), (2, 0), (3, 1)] {
+        let step = crate::render::draw::to_scene_color(buckets.colors()[bin]);
+        let fills: Vec<_> = bars.iter().filter(|bar| (bar.0 - slots[slot]).abs() < 1e-6).map(|bar| (bar.1.r, bar.1.g, bar.1.b)).collect();
+        assert_eq!(fills, vec![(step.r, step.g, step.b); 2], "slot {slot} holds bin {bin}'s two bars");
+    }
 }
 
 /// `raster_rows` with a numeric `count` column a sibling can color by.

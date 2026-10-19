@@ -121,9 +121,11 @@ pub(crate) fn axis_batch_for_y<'a>(
     // with the panel's live warnings sink. Any `PositionAdjustSkipped` warning
     // resolve_group_channel would push here is therefore emitted exactly once
     // by that draw pass — so we discard this preview's warnings to avoid a
-    // duplicate.
+    // duplicate. It stacks in first-appearance order (no group ranks): the
+    // order moves segments within a bin, never a bin's positive or negative
+    // total, so the domain it widens to is the drawn one.
     let mut discard_warnings = Vec::new();
-    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
+    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, None, coord_flipped, &mut discard_warnings) {
         Ok(b) => StackedAxisBatch::stacked(b),
         Err(_) => StackedAxisBatch::unstacked(primary_batch),
     }
@@ -174,7 +176,7 @@ pub(crate) fn axis_batch_for_x<'a>(
         return StackedAxisBatch::unstacked(primary_batch);
     }
     let mut discard_warnings = Vec::new();
-    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
+    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, None, coord_flipped, &mut discard_warnings) {
         Ok(b) => StackedAxisBatch::stacked(b),
         Err(_) => StackedAxisBatch::unstacked(primary_batch),
     }
@@ -333,7 +335,7 @@ pub(crate) fn apply_position(
             apply_jitter(batch, axis, *width, *seed, scales, encoding, warnings)
         }
         PositionAdjust::Stack { by, offset, anchor, value_axis } => {
-            apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, coord_flipped, warnings)
+            apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, scales.color.as_ref(), coord_flipped, warnings)
         }
     }
 }
@@ -421,6 +423,52 @@ fn resolve_group_channel(
             None
         }
     }
+}
+
+/// A dodge's or stack's per-row group keys and, when they have one, the
+/// order its groups take.
+struct GroupKeys {
+    cats: Vec<String>,
+    order: Option<Vec<String>>,
+}
+
+/// The groups a dodge or a stack partitions rows into
+/// ([`resolve_group_channel`]'s policy and warnings). Grouped by a binned
+/// color (`Color(bin=...)`), the rows group by the bin its scale assigns
+/// ([`crate::render::draw::binned_color_rows`]), keyed by bin index, in bin
+/// order: one dodge slot or one stack layer per bin, low bin first. A row
+/// with no bin keys to `""`, after every bin. `color` is the resolved color
+/// scale, `None` where none is resolved yet.
+fn group_keys(
+    batch: &RecordBatch,
+    by_field: Option<&str>,
+    encoding: &crate::spec::encoding::Encoding,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
+    adjustment_label: &str,
+    warnings: &mut Vec<RenderWarning>,
+) -> Option<GroupKeys> {
+    let cats = resolve_group_channel(batch, by_field, encoding, adjustment_label, warnings)?;
+    let binding = encoding.color.as_ref().filter(|color| by_field.is_none_or(|by| by == color.field));
+    let Some(bins) = crate::render::draw::binned_color_rows(binding, color, batch) else {
+        return Some(GroupKeys { cats, order: None });
+    };
+    let n_bins = match color {
+        Some(crate::render::scale_resolve::ColorScale::Discretizing(buckets)) => buckets.colors().len(),
+        _ => 0,
+    };
+    Some(GroupKeys {
+        cats: bins.into_iter().map(|bin| bin.map_or_else(String::new, |i| i.to_string())).collect(),
+        order: Some((0..n_bins).map(|i| i.to_string()).collect()),
+    })
+}
+
+/// Each key's group rank under `order`: the groups `order` lists first, in
+/// its order, then the rest in first-appearance order
+/// ([`ordered_dodge_groups`]).
+fn ranks_in_order(cats: &[String], order: &[String]) -> Vec<usize> {
+    let rank: HashMap<String, usize> =
+        ordered_dodge_groups(cats, Some(order)).into_iter().enumerate().map(|(i, g)| (g, i)).collect();
+    cats.iter().map(|c| rank.get(c).copied().unwrap_or(usize::MAX)).collect()
 }
 
 /// Order the distinct dodge groups present in `by_cats` into left→right
@@ -551,15 +599,18 @@ fn apply_dodge(
     // Resolve the `by` grouping channel to per-row category strings under the
     // single uniform policy. `None` = no-op the dodge (warning already pushed
     // when appropriate); return the batch unchanged.
-    let Some(by_cats) = resolve_group_channel(batch, by_field, encoding, "dodge", warnings) else {
+    let Some(GroupKeys { cats: by_cats, order }) =
+        group_keys(batch, by_field, encoding, scales.color.as_ref(), "dodge", warnings)
+    else {
         return Ok(batch.clone());
     };
 
-    // Sub-band slot order: match the legend when the dodge grouping field is the
-    // color field and the color scale is categorical; otherwise first-appearance
-    // order (the pre-fix behavior). Resolved once and threaded through both the
-    // continuous-band and ordinal-band paths.
-    let slot_domain = dodge_slot_domain(by_field, scales, encoding);
+    // Sub-band slot order: bin order under a binned color; the legend's when
+    // the dodge grouping field is the color field and the color scale is
+    // categorical; otherwise first-appearance order.
+    // Resolved once and threaded through both the continuous-band and
+    // ordinal-band paths.
+    let slot_domain = order.as_deref().or_else(|| dodge_slot_domain(by_field, scales, encoding));
 
     // Dodge offsets marks along the categorical BAND axis. The band axis is
     // whichever positional channel actually resolved to an Ordinal scale —
@@ -1431,6 +1482,7 @@ pub(crate) fn apply_stack(
     anchor: &crate::spec::position::StackAnchor,
     value_axis: Option<crate::spec::position::StackValueAxis>,
     encoding: &crate::spec::encoding::Encoding,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
     coord_flipped: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
@@ -1446,7 +1498,7 @@ pub(crate) fn apply_stack(
     // dtype while the same column would dodge fine — the sibling drift this
     // fix eliminates. Existing Utf8 stack goldens stay byte-identical because
     // the resolver's null→"" mapping reproduces the old `StringArray::value`.
-    let Some(by_cats) = resolve_group_channel(batch, by_field, encoding, "stack", warnings) else {
+    let Some(GroupKeys { cats: by_cats, order }) = group_keys(batch, by_field, encoding, color, "stack", warnings) else {
         return Ok(batch.clone());
     };
 
@@ -1629,7 +1681,10 @@ pub(crate) fn apply_stack(
     // groups: both are "which distinct value did this row's string first
     // appear as", so both read it off the same helper.
     let x_bins = first_appearance_indices(&x_cats);
-    let group_idx = first_appearance_indices(&by_cats);
+    let group_idx = match order {
+        Some(order) => ranks_in_order(&by_cats, &order),
+        None => first_appearance_indices(&by_cats),
+    };
 
     // bins: x_bin → Vec<(group_idx, row_idx, y)>
     let mut bins: BTreeMap<usize, Vec<(usize, usize, f64)>> = BTreeMap::new();
@@ -2791,6 +2846,7 @@ mod tests {
             &StackAnchor::Top,
             None,
             &spec.encoding,
+            None,
             false,
             &mut Vec::new(),
         );

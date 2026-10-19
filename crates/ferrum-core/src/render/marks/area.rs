@@ -15,13 +15,16 @@
 //! - Color encoding only: one area per color category. Nominal (Utf8) and
 //!   non-nominal (Int*, Float*, Bool) color columns are both supported via
 //!   `col_as_ordinal_category_str`. Color drives the fill color legend.
+//!   A binned color (`Color(bin=...)`) groups by bin instead: one area per
+//!   bin, low bin first, filled with that bin's step of the binned scale.
 //! - `mark_style.group.detail` only: one area per detail value, theme-default fill.
 //!   Areas are not legendable via detail.
 //! - Both color and detail: one area per (color, detail) pair.
 //! - Neither: single area over all rows.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{binned_color_rows, col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::scale_resolve::ColorScale;
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::build_color_detail_groups;
 use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
@@ -220,12 +223,21 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
     // split into groups just like Utf8 columns do. col_as_str returns Err for
     // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
-    let color_values = cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    //
+    // A binned color groups by bin instead: one band per bin, keyed by a value
+    // its bin's color resolves from (the bin's lower edge), in bin order.
+    let bins = binned_color_rows(spec.encoding.color.as_ref(), ctx.scales.color.as_ref(), ctx.batch);
+    let color_values = match (&bins, ctx.scales.color.as_ref()) {
+        (Some(bins), Some(ColorScale::Discretizing(buckets))) => {
+            Some(bins.iter().map(|bin| bin.map(|i| buckets.bounds()[i].to_string())).collect())
+        }
+        _ => cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok()),
+    };
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let n_rows = xs.len();
-    let groups = build_color_detail_groups(
+    let mut groups = build_color_detail_groups(
         color_values.as_ref(),
         detail_values.as_ref(),
         // area does not consume the `stroke_dash` channel (T12 scope: line,
@@ -234,6 +246,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         ctx.scales.color.is_some(),
         n_rows,
     );
+    if let Some(bins) = &bins {
+        // Low bin first, so the bands draw (and a stack layers) in bin order;
+        // a row with no bin trails. Stable, so detail splits keep their order.
+        groups.sort_by_key(|(_, rows)| rows.first().and_then(|&row| bins[row]).unwrap_or(usize::MAX));
+    }
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);

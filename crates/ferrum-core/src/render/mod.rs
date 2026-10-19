@@ -441,6 +441,24 @@ pub enum RenderError {
         channel: String,
         reason: String,
     },
+    /// A binned color (`Color(bin=...)`, a `bin-ordinal` scale carrying
+    /// `bin`) over a column the `Bin` transform cannot read as numbers.
+    /// `channel` is the wire name (`color`), never positional; `field` the
+    /// column; `dtype` its Arrow dtype, pre-formatted.
+    BinnedColorNotNumeric {
+        channel: &'static str,
+        field: String,
+        dtype: String,
+    },
+    /// A composite shared color (`resolve={"color": "shared"}`) across
+    /// panels whose color scales cannot merge into one: a continuous next to
+    /// a categorical color, a binned next to an unbinned one, or binned
+    /// colors on different fields or with different bin settings. `first`
+    /// and `other` name two of the differing panels' colors.
+    SharedColorScalesDiffer {
+        first: String,
+        other: String,
+    },
     /// A band scale's `padding`/`paddingInner`/`paddingOuter` outside d3's
     /// bounds. The `BandScale` constructor refuses the same values at the
     /// call; this is the refusal for a scale dict (or an override type
@@ -1144,6 +1162,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::MarkStyleNotDrawn { .. }
         | RenderError::MarkRequiresCoord { .. }
         | RenderError::AuxiliaryScaleUnsupported { .. }
+        | RenderError::BinnedColorNotNumeric { .. }
+        | RenderError::SharedColorScalesDiffer { .. }
         // Carries a `coord_flipped` field, patched at its own single
         // construction site (`prepare::validate_layer_columns`,
         // which has `PreparedInputs::coord_flipped` in hand) — same discipline
@@ -1350,6 +1370,17 @@ impl std::fmt::Display for RenderError {
             Self::AuxiliaryScaleUnsupported { channel, reason } => write!(
                 f,
                 "{channel} scale: {reason}; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+            ),
+            Self::SharedColorScalesDiffer { first, other } => write!(
+                f,
+                "a shared color needs one color scale on every panel, but one panel colors by {first} \
+                 and another by {other}. Make the panels' colors match, or resolve color independently \
+                 with Resolve(scale={{'color': 'independent'}})"
+            ),
+            Self::BinnedColorNotNumeric { channel, field, dtype } => write!(
+                f,
+                "{channel}(bin=...) bins numbers, but column '{field}' is {dtype}. Bind a numeric column, \
+                 or drop bin="
             ),
             Self::InvalidScaleDomainConfig { channel, reason, surface, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);

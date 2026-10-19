@@ -247,6 +247,17 @@ pub(crate) enum SharedDomain {
     Numeric { lo: f64, hi: f64 },
     /// Ordinal/nominal domain in first-appearance order across the group.
     Ordinal(Vec<String>),
+    /// A binned color with derived edges (`Color(bin=...)`, a `bin-ordinal`
+    /// scale carrying `bin` and no `bins`): the field it bins, its bin
+    /// parameters, and the pooled finite values it cuts its edges from. A
+    /// group shares one only when every leaf bins the same field with the
+    /// same parameters, so each leaf's scale computes the one edge set and
+    /// draws the one legend.
+    Samples { field: String, bin: crate::spec::encoding::ScaleBin, values: Vec<f64> },
+    /// A binned color with an explicit `bins` list on `field`. The leaf keeps
+    /// its own scale; the variant lets a shared group check it merges into
+    /// one scale with the others, and is never assigned to a leaf.
+    FixedBins { field: String, bins: Vec<f64> },
 }
 
 /// Everything a composite parent imposes on ONE leaf: the resolved shared

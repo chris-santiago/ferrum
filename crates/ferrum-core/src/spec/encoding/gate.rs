@@ -158,7 +158,7 @@ fn accepted_keys_for_scale_type(scale_type: &str) -> Option<Vec<&'static str>> {
         "quantize" => vec!["domain", "range"],
         "quantile" => vec!["domain", "range"],
         "threshold" => vec!["domain", "range"],
-        "bin-ordinal" => vec!["bins", "scheme"],
+        "bin-ordinal" => vec!["bins", "scheme", "bin"],
         _ => return None,
     };
     Some(keys)
@@ -730,6 +730,12 @@ mod tests {
             ScaleSpec::BinOrdinal {
                 bins: Some(vec![0.0, 1.0]),
                 scheme: Some("blues".to_string()),
+                bin: Some(crate::spec::encoding::ScaleBin {
+                    bin_count: Some(4),
+                    bin_width: Some(1.0),
+                    extent: Some((0.0, 1.0)),
+                    nice: false,
+                }),
             },
         ]
     }

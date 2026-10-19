@@ -488,7 +488,10 @@ pub(in crate::render) fn imposed_axis_scale(
         Some(SharedDomain::Numeric { lo, hi }) => {
             (arrow::datatypes::DataType::Float64, std::sync::Arc::new(arrow::array::Float64Array::from(vec![*lo, *hi])))
         }
-        None => (arrow::datatypes::DataType::Float64, std::sync::Arc::new(arrow::array::Float64Array::from(Vec::<f64>::new()))),
+        // `Samples` and `FixedBins` are binned colors' domains, never an axis's.
+        Some(SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. }) | None => {
+            (arrow::datatypes::DataType::Float64, std::sync::Arc::new(arrow::array::Float64Array::from(Vec::<f64>::new())))
+        }
     };
     let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
         binding.field.as_str(),

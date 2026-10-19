@@ -4852,7 +4852,7 @@ mod positional_extent_classification {
 
     #[test]
     fn bin_ordinal_is_always_none() {
-        let spec = ScaleSpec::BinOrdinal { bins: Some(vec![0.0, 1.0, 2.0]), scheme: None };
+        let spec = ScaleSpec::BinOrdinal { bins: Some(vec![0.0, 1.0, 2.0]), scheme: None, bin: None };
         assert_eq!(spec.positional_extent(), None);
     }
 
@@ -5393,6 +5393,245 @@ fn discretizing_spec_without_a_bucket_count_falls_back_to_continuous() {
             matches!(scale, ColorScale::Continuous { .. }),
             "{json} should resolve to Continuous, got {scale:?}"
         );
+    }
+}
+
+// ── Binned color: a `bin-ordinal` scale carrying `bin` and no `bins` ──
+
+/// The edges the `Bin` transform computes over `values` with the wire
+/// parameters `params` (`bin_count`, `bin_width`, `extent`, `nice`): each
+/// bin's start, then the last bin's end. The oracle every binned color's
+/// bounds are checked against.
+fn bin_transform_edges(params: &serde_json::Value, values: &[f64]) -> Vec<f64> {
+    let mut wire = params.clone();
+    wire["field"] = serde_json::json!("v");
+    let spec: crate::transform::bin::BinSpec = serde_json::from_value(wire).expect("a Bin wire");
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v", ArrowDataType::Float64, true)])),
+        vec![Arc::new(Float64Array::from(values.to_vec()))],
+    )
+    .unwrap();
+    let out = crate::transform::bin::apply(&spec, &batch).expect("the Bin transform bins");
+    let column = |name: &str| -> Vec<f64> {
+        out.column_by_name(name).unwrap().as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec()
+    };
+    let mut edges = column("bin_start");
+    edges.push(*column("bin_end").last().expect("at least one bin"));
+    edges
+}
+
+/// A binned color's scale: `bin-ordinal` carrying `bin` = `params` and no
+/// `bins`.
+fn binned_color_spec(params: serde_json::Value) -> ChartSpec {
+    spec_with_color_scale_json(serde_json::json!({"type": "bin-ordinal", "bin": params}))
+}
+
+const BINNED_VALUES: [f64; 8] = [1.3, 2.7, 4.1, 5.5, 8.9, 9.2, 12.4, 3.3];
+
+/// With no explicit `bins`, a binned color's buckets are the bins the `Bin`
+/// transform cuts the same values into with the same parameters: Sturges
+/// with nicing by default, `bin_count`, `bin_count` without nicing,
+/// `bin_width`, and an explicit `extent`. One swatch per bin, and each value
+/// paints its own bin's swatch. Rejects a second edge rule (uniform buckets
+/// over the raw extent, as `Quantize` makes) and the continuous ramp a
+/// `bin-ordinal` scale with no `bins` fell back to.
+#[test]
+fn a_binned_color_takes_the_bin_transforms_edges_for_the_same_parameters() {
+    pyo3::Python::initialize();
+    let batch = batch_with_numeric_color(BINNED_VALUES.to_vec());
+    for params in [
+        serde_json::json!({}),
+        serde_json::json!({"bin_count": 3}),
+        serde_json::json!({"bin_count": 4, "nice": false}),
+        serde_json::json!({"bin_width": 2.5}),
+        serde_json::json!({"bin_count": 5, "extent": [0.0, 20.0]}),
+    ] {
+        let expected = bin_transform_edges(&params, &BINNED_VALUES);
+        let (scale, _) = resolve_color(&binned_color_spec(params.clone()), &batch);
+        let buckets = buckets_of(&scale);
+        assert_eq!(buckets.bounds(), expected.as_slice(), "{params}");
+        assert_eq!(buckets.colors().len(), expected.len() - 1, "{params}: one swatch per bin");
+        let swatches: Vec<_> = BINNED_VALUES.iter().map(|v| rgb(scale.lookup_f64(*v).unwrap())).collect();
+        for (v, swatch) in BINNED_VALUES.iter().zip(&swatches) {
+            let bin = expected.windows(2).position(|w| *v >= w[0] && *v < w[1]).unwrap_or(expected.len() - 2);
+            assert_eq!(*swatch, rgb(buckets.colors()[bin]), "{params}: {v} paints bin {bin}");
+        }
+    }
+}
+
+/// Explicit `bins` win over `bin`: the buckets are the declared boundaries,
+/// exactly as the same scale without `bin` resolves them.
+#[test]
+fn explicit_bins_win_over_a_binned_colors_parameters() {
+    pyo3::Python::initialize();
+    let batch = batch_with_numeric_color(BINNED_VALUES.to_vec());
+    let both = spec_with_color_scale_json(serde_json::json!({
+        "type": "bin-ordinal", "bins": [3.0, 6.0], "bin": {"bin_count": 10},
+    }));
+    let declared = spec_with_color_scale_json(serde_json::json!({"type": "bin-ordinal", "bins": [3.0, 6.0]}));
+    let (both, _) = resolve_color(&both, &batch);
+    let (declared, _) = resolve_color(&declared, &batch);
+    assert_eq!(buckets_of(&both).bounds(), &[1.3, 3.0, 6.0, 12.4]);
+    assert_eq!(format!("{both:?}"), format!("{declared:?}"));
+}
+
+/// One distinct value is one bin: the `Bin` transform's unit bin around it.
+#[test]
+fn a_binned_color_over_one_distinct_value_has_one_bin() {
+    pyo3::Python::initialize();
+    let (scale, _) = resolve_color(&binned_color_spec(serde_json::json!({})), &batch_with_numeric_color(vec![4.0, 4.0, 4.0]));
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.bounds(), &[3.5, 4.5]);
+    assert_eq!(buckets.colors().len(), 1);
+    assert_eq!(bin_transform_edges(&serde_json::json!({}), &[4.0, 4.0, 4.0]), vec![3.5, 4.5]);
+}
+
+/// A field with no finite value resolves exactly as the same empty field
+/// does under a plain continuous color: no bin exists to step through.
+#[test]
+fn a_binned_color_with_no_finite_value_resolves_as_an_empty_continuous_color() {
+    pyo3::Python::initialize();
+    let batch = batch_with_numeric_color(vec![f64::NAN, f64::NAN]);
+    let (binned, _) = resolve_color(&binned_color_spec(serde_json::json!({"bin_count": 4})), &batch);
+    let (continuous, _) = resolve_color(&spec_with_color_scale_json(serde_json::json!({"type": "linear"})), &batch);
+    assert!(matches!(binned, ColorScale::Continuous { .. }), "{binned:?}");
+    assert_eq!(format!("{binned:?}"), format!("{continuous:?}"));
+}
+
+/// `scheme` names the colormap a binned color's swatches are sampled from.
+#[test]
+fn a_binned_colors_scheme_is_honored() {
+    pyo3::Python::initialize();
+    let batch = batch_with_numeric_color(BINNED_VALUES.to_vec());
+    let scheme = |name: &str| {
+        spec_with_color_scale_json(serde_json::json!({"type": "bin-ordinal", "scheme": name, "bin": {"bin_count": 3}}))
+    };
+    let (blues, _) = resolve_color(&scheme("blues"), &batch);
+    let (reds, _) = resolve_color(&scheme("reds"), &batch);
+    assert_eq!(buckets_of(&blues).bounds(), buckets_of(&reds).bounds());
+    let blue = crate::render::color::ContinuousScheme::Named(crate::render::color::NamedContinuous::from_name("blues").unwrap());
+    assert_eq!(rgb(buckets_of(&blues).colors()[0]), rgb(blue.sample(0.0)));
+    assert_ne!(rgb(blues.lookup_f64(1.3).unwrap()), rgb(reds.lookup_f64(1.3).unwrap()));
+}
+
+/// A binned color over a column the `Bin` transform cannot read as numbers
+/// is refused, naming the channel and the column, whatever type the binding
+/// declares: a string column, and a timestamp one. Rejects the categorical
+/// scale a string column drew, silently dropping the bins.
+#[test]
+fn a_binned_color_over_a_non_numeric_column_is_refused_naming_it() {
+    use crate::spec::encoding::{DataType as SDT, ScaleSpec};
+    pyo3::Python::initialize();
+    let rows = |column: Arc<dyn arrow::array::Array>| {
+        let dtype = column.data_type().clone();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", ArrowDataType::Utf8, false),
+                Field::new("y", ArrowDataType::Utf8, false),
+                Field::new("v", dtype, true),
+            ])),
+            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(StringArray::from(vec!["a", "b"])), column],
+        )
+        .unwrap()
+    };
+    let strings = rows(Arc::new(StringArray::from(vec!["lo", "hi"])));
+    let stamps = rows(Arc::new(arrow::array::TimestampMillisecondArray::from(vec![0_i64, 1_000])));
+    for (batch, declared, dtype) in [
+        (&strings, None, "Utf8"),
+        (&strings, Some(SDT::Ordinal), "Utf8"),
+        (&stamps, None, "Timestamp(Millisecond, None)"),
+    ] {
+        let mut spec = binned_color_spec(serde_json::json!({}));
+        let color = spec.encoding.color.as_mut().unwrap();
+        color.type_ = declared;
+        assert!(matches!(color.scale, Some(ScaleSpec::BinOrdinal { .. })));
+        let err = resolve_color_err(&spec, batch);
+        assert_eq!(
+            err.to_string(),
+            format!("color(bin=...) bins numbers, but column 'v' is {dtype}. Bind a numeric column, or drop bin="),
+        );
+    }
+}
+
+/// A layered binned color's edges are cut from every drawing layer's values
+/// (layer 0's `mean_z` over 0..2, layer 1's over 10..20), so the layers share
+/// one set of bins. Rejects edges cut from the establishing layer alone.
+#[test]
+fn a_layered_binned_colors_edges_come_from_every_drawing_layers_values() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}});
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), Some(own)]);
+    let color = resolve_aux_layered(&spec, &chart_encoding).color.expect("a color scale");
+    assert_eq!(buckets_of(&color).bounds(), bin_transform_edges(&serde_json::json!({"bin_count": 4, "nice": false}), &[0.0, 2.0, 10.0, 20.0]).as_slice());
+    assert_eq!(buckets_of(&color).bounds(), &[0.0, 5.0, 10.0, 15.0, 20.0]);
+}
+
+/// A binned color bins numbers whatever type a binding declares, so a later
+/// layer binding the field `ordinal` (Vega-Lite's binned ordinal legend)
+/// adds its values to the edges, with no `LayerScaleExcluded`. Rejects the
+/// declared-type exclusion that cut the edges from layer 0 alone.
+#[test]
+fn a_binned_colors_ordinal_declared_layer_adds_to_the_edges() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "type": "ordinal", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}});
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), Some(own)]);
+    let (scales, warnings) = resolve_aux_layered_warned(&spec, &chart_encoding);
+    assert_eq!(buckets_of(&scales.color.expect("a color scale")).bounds(), &[0.0, 5.0, 10.0, 15.0, 20.0]);
+    assert_eq!(layer_scale_exclusions(warnings), vec![], "no layer excluded");
+}
+
+/// A layered quantile color cuts its quantiles from the values every drawing
+/// layer draws, the sample a binned color's edges come from. Rejects
+/// cut-points taken from the establishing layer's rows alone.
+#[test]
+fn a_layered_quantile_colors_cut_points_come_from_every_drawing_layers_values() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "scale": {"type": "quantile", "range": [0.0, 1.0]}});
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), Some(own)]);
+    let color = resolve_aux_layered(&spec, &chart_encoding).color.expect("a color scale");
+    assert_eq!(buckets_of(&color).bounds(), &[0.0, 6.0, 20.0]);
+}
+
+/// A text layer's inherited color only groups it, so its rows never widen
+/// a binned color's edges; a point layer inheriting the same field does.
+/// Layer 1's batch carries the chart's `z` over 10..20.
+#[test]
+fn a_texts_inherited_color_does_not_widen_a_binned_colors_edges() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": false}}});
+    let (primary, mut outputs) = aux_layered_batches();
+    let agg1 = &outputs["agg1"];
+    let renamed = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", ArrowDataType::Utf8, false),
+            Field::new("m", ArrowDataType::Float64, false),
+            Field::new("z", ArrowDataType::Float64, false),
+            Field::new("c", ArrowDataType::Utf8, false),
+        ])),
+        agg1.columns().to_vec(),
+    )
+    .unwrap();
+    outputs.insert("agg1".to_string(), renamed);
+    for (mark, bounds) in [
+        (crate::spec::mark::Mark::Text, vec![0.0, 0.5, 1.0, 1.5, 2.0]),
+        (crate::spec::mark::Mark::Point, vec![0.0, 5.0, 10.0, 15.0, 20.0]),
+    ] {
+        let (mut spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), None]);
+        spec.layers.as_mut().unwrap()[1].mark = mark;
+        let scales = resolve_scales_with_leaf_context(
+            &spec,
+            &chart_encoding,
+            &primary,
+            &outputs,
+            (0.0, 100.0),
+            (0.0, 80.0),
+            &ThemeInputs::default(),
+            None,
+        )
+        .expect("resolves")
+        .0;
+        let color = scales.color.expect("a color scale");
+        assert_eq!(buckets_of(&color).bounds(), bounds.as_slice(), "{mark:?}");
     }
 }
 

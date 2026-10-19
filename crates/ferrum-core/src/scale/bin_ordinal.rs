@@ -64,6 +64,7 @@ impl BinOrdinalScale {
                 Some(self.0.bins.clone())
             },
             scheme: self.0.scheme.as_ref().filter(|s| !s.is_empty()).cloned(),
+            bin: None,
         }
     }
 }

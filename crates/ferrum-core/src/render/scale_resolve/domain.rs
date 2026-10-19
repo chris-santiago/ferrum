@@ -383,6 +383,32 @@ impl<'a> AuxRead<'a> {
         }
     }
 
+    /// The batch a column read's values are read from for a domain: the
+    /// batch its layer draws, or, for a read of the chart's data on a
+    /// faceted chart, the all-panels batch
+    /// ([`super::shared_categorical_batch`]). `None` for a raster image's
+    /// cells and when that batch lacks the field.
+    fn column_batch<'b>(
+        &self,
+        primary_batch: &'b RecordBatch,
+        transform_outputs: &'b HashMap<String, RecordBatch>,
+        facet_shared: bool,
+    ) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
+        if self.is_raster_cells() {
+            return None;
+        }
+        let batch = match self.source {
+            LayerSource::Chart => {
+                super::shared_categorical_batch(primary_batch, self.field, transform_outputs, facet_shared)
+            }
+            LayerSource::Output(_) | LayerSource::Batch(_) => self.source.batch(primary_batch, transform_outputs)?,
+        };
+        batch.column_by_name(self.field).map(|_| batch)
+    }
+
     /// Whether this read's values read as categories: a column by its
     /// binding's declared type or its dtype ([`column_reads_categorical`]);
     /// a raster image's cells never, they are numbers.
@@ -669,10 +695,46 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
+    let reads_categorical = |read: &AuxRead<'_>| read.reads_categorical(primary_batch, transform_outputs);
+    admit_reads(reads, channel, scale_reads_categorical, reads_categorical, primary_batch, transform_outputs, warnings)
+}
+
+/// The reads a binned color's scale admits into the values its edges are cut
+/// from: [`admitted_aux_reads`]' rule for a numeric scale, with each read
+/// classified by its column's dtype alone ([`dtype_reads_categorical`]). A
+/// binned color bins numbers whatever type a binding declares, so a layer
+/// binding the field `ordinal` (Vega-Lite's binned ordinal legend) adds its
+/// values; a layer whose column holds no numbers is excluded, with one
+/// `LayerScaleExcluded`.
+pub(in crate::render) fn admitted_binned_reads<'a>(
+    reads: &[AuxRead<'a>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Vec<AuxRead<'a>>, RenderError> {
+    let reads_categorical = |read: &AuxRead<'_>| {
+        read.locate(primary_batch, transform_outputs)
+            .is_some_and(|located| dtype_reads_categorical(located.col.data_type()))
+    };
+    admit_reads(reads, "color", false, reads_categorical, primary_batch, transform_outputs, warnings)
+}
+
+/// The admission rule [`admitted_aux_reads`] and [`admitted_binned_reads`]
+/// share: the lead always, then each read `reads_categorical` classifies as
+/// the scale reads.
+fn admit_reads<'a>(
+    reads: &[AuxRead<'a>],
+    channel: &str,
+    scale_reads_categorical: bool,
+    reads_categorical: impl Fn(&AuxRead<'a>) -> bool,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Vec<AuxRead<'a>>, RenderError> {
     let Some((lead, rest)) = reads.split_first() else { return Ok(Vec::new()) };
     let mut admitted = vec![*lead];
     for read in rest {
-        let conflicts = read.reads_categorical(primary_batch, transform_outputs) != scale_reads_categorical
+        let conflicts = reads_categorical(read) != scale_reads_categorical
             && (read.is_raster_cells() || read.locate(primary_batch, transform_outputs).is_some());
         if conflicts && scale_reads_categorical {
             let reason = crate::render::RasterColorReason::CategoricalScale { layer: lead.layer, field: lead.field.to_string() };
@@ -748,19 +810,8 @@ pub(in crate::render) fn aux_category_union<'b>(
 ) -> Result<Option<(Vec<String>, &'b RecordBatch)>, RenderError> {
     let mut union: Option<(Vec<String>, &'b RecordBatch)> = None;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for read in reads.iter().filter(|read| !read.is_raster_cells()) {
-        let batch = match read.source {
-            LayerSource::Chart => {
-                super::shared_categorical_batch(primary_batch, read.field, transform_outputs, facet_shared)
-            }
-            LayerSource::Output(_) | LayerSource::Batch(_) => {
-                let Some(batch) = read.source.batch(primary_batch, transform_outputs) else { continue };
-                batch
-            }
-        };
-        if batch.column_by_name(read.field).is_none() {
-            continue;
-        }
+    for read in reads {
+        let Some(batch) = read.column_batch(primary_batch, transform_outputs, facet_shared) else { continue };
         let values = super::distinct_values_in_order(batch, read.field)?;
         let (domain, _) = union.get_or_insert_with(|| (Vec::new(), batch));
         for value in values {
@@ -770,6 +821,30 @@ pub(in crate::render) fn aux_category_union<'b>(
         }
     }
     Ok(union)
+}
+
+/// The values a layered spec's numeric `color` domain spans, pooled over
+/// `reads` in layer order: each column read's values in the batch it draws
+/// (on a faceted chart, a read of the chart's data reads the all-panels
+/// batch, as [`aux_category_union`] does), and each raster image's cells.
+/// Only finite values: a binned color's edges and a quantile color's
+/// cut-points are taken from them.
+pub(in crate::render) fn aux_numeric_values(
+    reads: &[AuxRead<'_>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    facet_shared: bool,
+) -> Vec<f64> {
+    let mut values = Vec::new();
+    for read in reads {
+        if let Some(raster) = read.raster_batch(primary_batch, transform_outputs) {
+            values.extend(crate::render::marks::image::raster_cell_values(raster));
+        } else if let Some(batch) = read.column_batch(primary_batch, transform_outputs, facet_shared) {
+            values.extend(crate::render::arrow_cast::col_as_f64(batch, read.field).unwrap_or_default().into_iter().flatten());
+        }
+    }
+    values.retain(|v| v.is_finite());
+    values
 }
 
 /// The positional bindings of one encoding for the post-flip `channel`: the

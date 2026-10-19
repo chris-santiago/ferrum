@@ -986,6 +986,22 @@ pub fn color_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpe
     spec.encoding.color.as_ref().map(|e| e.field.as_str())
 }
 
+/// Each row's bin under a binned color (`Color(bin=...)`): the index, low to
+/// high, of the bucket `scale` assigns the row's `binding` value, `None` for
+/// a row with no finite value. `None` unless `binding` is a binned color
+/// resolved to its discretizing scale and `batch` holds its column. The one
+/// reading of a row's bin, shared by the area's bands and the stack's order.
+pub(crate) fn binned_color_rows(
+    binding: Option<&crate::spec::encoding::EncodingSpec>,
+    scale: Option<&ColorScale>,
+    batch: &RecordBatch,
+) -> Option<Vec<Option<usize>>> {
+    let binding = binding.filter(|binding| binding.color_bin().is_some())?;
+    let Some(ColorScale::Discretizing(buckets)) = scale else { return None };
+    let values = super::arrow_cast::col_as_f64(batch, &binding.field).ok()?;
+    Some(values.into_iter().map(|v| v.and_then(|v| buckets.bucket(v))).collect())
+}
+
 // ── Scene-graph path (11a) ──────────────────────────────────────────
 
 pub struct MarkBuildResult {

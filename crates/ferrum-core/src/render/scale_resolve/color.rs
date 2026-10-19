@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{admitted_aux_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, locate_field, AuxRead, SortContext};
+use super::domain::{admitted_aux_reads, admitted_binned_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_numeric_values, locate_field, AuxRead, SortContext};
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
@@ -68,6 +68,10 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 /// Without this flag a Float64/Int64 color column would produce a `Continuous`
 /// scale (gradient colorbar legend) while the area fills sampled discrete points
 /// on that ramp — legend ≠ fill (the FA-5 bug).
+///
+/// A binned color (`Color(bin=...)`) is the exception: the area groups its
+/// rows by the bin the binned scale assigns, one band per bin, so fills and
+/// legend already agree on the bins and `grouping_area` is ignored.
 ///
 /// # T3 — `facet_shared` for continuous color in faceted charts
 ///
@@ -132,12 +136,17 @@ pub fn build_color_scale(
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
     };
+    // A binned color bins numbers whatever type its binding declares, and an
+    // area that draws it groups by its bins rather than by category, so the
+    // grouping area's categorical rule does not apply to it.
+    let binned = c_enc.color_bin().is_some();
+    let grouping_area = grouping_area.filter(|_| !binned);
     let force_categorical = grouping_area.is_some();
     // A raster image's cells establish the scale: they are numbers, so a
     // nominal or ordinal binding (or a mark that groups color) has no color
     // for them, and the image would draw nothing.
     if let Some(lead) = layer_reads.first().filter(|lead| lead.is_raster_cells()) {
-        let declared = match c_enc.type_ {
+        let declared = match c_enc.type_.filter(|_| !binned) {
             Some(SpecDataType::Nominal) => Some("nominal"),
             Some(SpecDataType::Ordinal) => Some("ordinal"),
             _ => None,
@@ -150,7 +159,12 @@ pub fn build_color_scale(
             return Err(refusal);
         }
         let mut warnings = Vec::new();
-        let reads = admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?;
+        let reads = if binned {
+            admitted_binned_reads(layer_reads, primary_batch, transform_outputs, &mut warnings)?
+        } else {
+            admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?
+        };
+        refuse_unbinnable_reads(c_enc, &reads, primary_batch, transform_outputs)?;
         let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, &mut warnings)?;
         return Ok((scale, warnings));
     }
@@ -164,15 +178,19 @@ pub fn build_color_scale(
     .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
     let inferred = infer_spec_type(c_enc, located.col.data_type());
+    // A binned color's establishing column must be one the `Bin` transform
+    // reads.
+    if binned {
+        let field = layer_reads.first().map_or(c_enc.field.as_str(), AuxRead::field);
+        require_binnable(field, located.col)?;
+    }
     // FA-5: When force_categorical is set (mark_area), treat any quantitative/temporal
     // color field as categorical.  Area always groups by distinct color values
     // (col_as_ordinal_category_str), so both the fills and the legend must agree on
     // a categorical palette rather than diverging: fills from a continuous ramp vs.
     // legend showing a gradient colorbar.
-    let is_continuous_color = !force_categorical && matches!(
-        inferred,
-        SpecDataType::Quantitative | SpecDataType::Temporal,
-    );
+    let is_continuous_color = !force_categorical
+        && (binned || matches!(inferred, SpecDataType::Quantitative | SpecDataType::Temporal));
     let mut exclusions: Vec<crate::render::RenderWarning> = Vec::new();
     let layer_reads = if force_categorical {
         // A mark that groups color reads every column as categories; a
@@ -192,10 +210,15 @@ pub fn build_color_scale(
         }
         layer_reads.to_vec()
     } else {
-        admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)?
+        if binned {
+            admitted_binned_reads(layer_reads, primary_batch, transform_outputs, &mut exclusions)?
+        } else {
+            admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)?
+        }
     };
     let layer_reads = layer_reads.as_slice();
     if is_continuous_color {
+        refuse_unbinnable_reads(c_enc, layer_reads, primary_batch, transform_outputs)?;
         let continuous_extent = |col: &dyn arrow::array::Array, _: &str| {
             if !crate::render::arrow_cast::is_numeric(col.data_type()) {
                 return Err(RenderError::EncodingTypeMismatch {
@@ -235,9 +258,17 @@ pub fn build_color_scale(
         // facet sharing for the same reason the extent above is unioned — per-
         // panel quantiles would paint the same value differently in each panel
         // while the colorbar stayed global.
-        let sample_batch =
-            shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared);
-        let sample = || column_sample(sample_batch, &c_enc.field);
+        //
+        // A binned color's edges and a quantile color's cut-points are taken
+        // from the values every admitted layer draws, as the extent above is.
+        let sample = || match (composite_samples(composite_domain), layer_reads) {
+            (Some(shared), _) => shared,
+            (None, []) => column_sample(
+                shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared),
+                &c_enc.field,
+            ),
+            (None, reads) => aux_numeric_values(reads, primary_batch, transform_outputs, facet_shared),
+        };
         if let Some((buckets, warnings)) =
             build_discretizing_color_scale(c_enc, sample, data_extent, theme)?
         {
@@ -579,16 +610,20 @@ fn area_establishes(
 /// byte-identically to the pre-discretizing behavior — for every
 /// non-discretizing scale spec and for a discretizing spec that declares no
 /// bucket count at all (a `Quantize` or `Quantile` with no `range`, a
-/// `Threshold` with no `domain`, a `BinOrdinal` with no `bins`). The Python
-/// constructors make all four mandatory, so those are hand-written-JSON shapes.
+/// `Threshold` with no `domain`, a `BinOrdinal` with neither `bins` nor
+/// `bin`). The Python constructors make all four mandatory, so those are
+/// hand-written-JSON shapes. A binned color (`BinOrdinal` with `bin` and no
+/// `bins`) whose `sample` holds no finite value also returns `Ok(None)`.
 ///
 /// Returns `Err` for a `Threshold`/`BinOrdinal` boundary list that is neither
 /// ascending nor descending — see [`declared_boundaries`].
 ///
 /// `sample` yields the values a `Quantile` spec takes its cut-points from when
-/// it declares no explicit sample: the encoded column (its caller picks the
-/// batch via [`shared_categorical_batch`], so faceted panels agree), or every
-/// raster's cells.
+/// it declares no explicit sample, and a binned color its edges from: the
+/// encoded column (its caller picks the batch via
+/// [`shared_categorical_batch`], so faceted panels agree), or, on a layered
+/// spec, the values of every admitted layer, raster cells included
+/// ([`aux_numeric_values`]).
 fn build_discretizing_color_scale(
     enc: &crate::spec::encoding::EncodingSpec,
     sample: impl FnOnce() -> Vec<f64>,
@@ -660,12 +695,71 @@ fn bucket_partition(
             let Some(declared) = non_empty(domain.as_deref()) else { return Ok(None) };
             declared_boundaries(declared, "threshold", "domain", data_extent).map(Some)
         }
-        ScaleSpec::BinOrdinal { bins, .. } => {
-            let Some(declared) = non_empty(bins.as_deref()) else { return Ok(None) };
-            declared_boundaries(declared, "bin-ordinal", "bins", data_extent).map(Some)
-        }
+        // Explicit edges win; otherwise a binned color's `bin` parameters cut
+        // the encoded values into the `Bin` transform's edges.
+        ScaleSpec::BinOrdinal { bins, bin, .. } => match (non_empty(bins.as_deref()), bin) {
+            (Some(declared), _) => declared_boundaries(declared, "bin-ordinal", "bins", data_extent).map(Some),
+            (None, Some(bin)) => {
+                let finite: Vec<f64> = sample().into_iter().filter(|v| v.is_finite()).collect();
+                derived_bin_partition(bin, &finite)
+            }
+            (None, None) => Ok(None),
+        },
         _ => Ok(None),
     }
+}
+
+/// The partition a binned color's `bin` parameters make of the finite
+/// `values`: one bucket per bin of the edges the `Bin` transform computes
+/// over them ([`crate::transform::bin::scale_bin_edges`]), its interior
+/// edges the thresholds and its outer edges the extent. `Ok(None)` when
+/// there is no value, leaving the caller on the continuous path as an empty
+/// domain leaves any continuous color. A `bin` the edge rule refuses (a zero
+/// `bin_count`, a non-positive `bin_width`, an extent with `lo >= hi`) is
+/// refused with its text.
+fn derived_bin_partition(
+    bin: &crate::spec::encoding::ScaleBin,
+    values: &[f64],
+) -> Result<Option<BucketPartition>, RenderError> {
+    let edges = crate::transform::bin::scale_bin_edges(bin, values)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("color scale of type 'bin-ordinal': {e}")))?;
+    Ok(edges.and_then(|edges| match edges.as_slice() {
+        [lo, interior @ .., hi] => {
+            Some(BucketPartition { thresholds: interior.to_vec(), extent: (*lo, *hi), descending: false })
+        }
+        _ => None,
+    }))
+}
+
+/// A binned color bins its column with the `Bin` transform's edge rule,
+/// which reads only numbers: any other column `field` holds is refused,
+/// naming it.
+fn require_binnable(field: &str, col: &dyn arrow::array::Array) -> Result<(), RenderError> {
+    if crate::transform::numeric_util::is_numeric_dtype(col.data_type()) {
+        return Ok(());
+    }
+    Err(RenderError::BinnedColorNotNumeric {
+        channel: "color",
+        field: field.to_string(),
+        dtype: format!("{:?}", col.data_type()),
+    })
+}
+
+/// [`require_binnable`] over every column read in `reads`, for a binned
+/// color: each admitted layer's column joins the edges' values.
+fn refuse_unbinnable_reads(
+    enc: &crate::spec::encoding::EncodingSpec,
+    reads: &[AuxRead<'_>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> Result<(), RenderError> {
+    if enc.color_bin().is_none() {
+        return Ok(());
+    }
+    reads
+        .iter()
+        .filter_map(|read| read.locate(primary_batch, transform_outputs).map(|located| (read.field(), located)))
+        .try_for_each(|(field, located)| require_binnable(field, located.col))
 }
 
 /// Turn a `Quantize` spec's declared `domain` into an ascending `(lo, hi)`
@@ -856,7 +950,18 @@ fn bucket_colors(
 fn composite_numeric_extent(domain: Option<&SharedDomain>) -> Option<(f64, f64)> {
     match domain? {
         SharedDomain::Numeric { lo, hi } => Some((*lo, *hi)),
-        SharedDomain::Ordinal(_) => None,
+        SharedDomain::Ordinal(_) | SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. } => None,
+    }
+}
+
+/// The pooled values of a composite-shared binned color
+/// ([`SharedDomain::Samples`]), its edges' sample in place of the leaf's own.
+/// `None` otherwise.
+fn composite_samples(domain: Option<&SharedDomain>) -> Option<Vec<f64>> {
+    match domain? {
+        SharedDomain::Samples { values, .. } => Some(values.clone()),
+        SharedDomain::FixedBins { .. } => None,
+        SharedDomain::Numeric { .. } | SharedDomain::Ordinal(_) => None,
     }
 }
 
@@ -865,7 +970,7 @@ fn composite_numeric_extent(domain: Option<&SharedDomain>) -> Option<(f64, f64)>
 fn composite_categorical_domain(domain: Option<&SharedDomain>) -> Option<Vec<String>> {
     match domain? {
         SharedDomain::Ordinal(cats) => Some(cats.clone()),
-        SharedDomain::Numeric { .. } => None,
+        SharedDomain::Numeric { .. } | SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. } => None,
     }
 }
 
@@ -1036,11 +1141,8 @@ pub(in crate::render) fn raster_cell_scale(
     // stepped bar.
     if let Some(enc) = binding {
         let sample = || {
-            reads
-                .iter()
-                .filter_map(|read| read.raster_batch(primary_batch, transform_outputs))
-                .flat_map(crate::render::marks::image::raster_cell_values)
-                .collect()
+            composite_samples(composite_domain)
+                .unwrap_or_else(|| aux_numeric_values(reads, primary_batch, transform_outputs, false))
         };
         if let Some((buckets, bucket_warnings)) = build_discretizing_color_scale(enc, sample, data_domain, theme)? {
             warnings.extend(bucket_warnings);

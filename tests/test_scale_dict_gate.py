@@ -152,7 +152,7 @@ ACCEPTED_KEYS: dict[str, list[str]] = {
     "quantize": ["domain", "range"],
     "quantile": ["domain", "range"],
     "threshold": ["domain", "range"],
-    "bin-ordinal": ["bins", "scheme"],
+    "bin-ordinal": ["bin", "bins", "scheme"],
 }
 
 # One raw dict per type with EVERY accepted key populated (the valid-keys
@@ -276,7 +276,12 @@ VALID_DICTS: dict[str, dict[str, object]] = {
     "quantize": {"type": "quantize", "domain": [0, 100], "range": ["low", "mid", "high"]},
     "quantile": {"type": "quantile", "domain": [1.0, 2.0, 3.0, 4.0], "range": [0.0, 0.5, 1.0]},
     "threshold": {"type": "threshold", "domain": [0.5, 1.0], "range": [0.0, 0.5, 1.0]},
-    "bin-ordinal": {"type": "bin-ordinal", "bins": [0, 10, 20, 30], "scheme": "blues"},
+    "bin-ordinal": {
+        "type": "bin-ordinal",
+        "bins": [0, 10, 20, 30],
+        "scheme": "blues",
+        "bin": {"bin_count": 4},
+    },
 }
 
 # Types that resolve positionally (attach to x); the rest are color-channel
