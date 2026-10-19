@@ -37,7 +37,7 @@
 //! helper existed to make no longer has a caller.
 
 use crate::render::color::Color;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, DrawCtx};
+use crate::render::draw::{binned_color_rows, binned_color_scale, col_as_f64, col_as_ordinal_category_str, color_field, DrawCtx};
 use ferrum_scene::numeric_index_dash;
 use crate::render::scale_resolve::{dtype_reads_categorical, ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
 use crate::render::RenderError;
@@ -473,6 +473,42 @@ fn subdivide_by_dash(
         out.extend(sub.into_iter().map(|(_, sub_rows)| (key.clone(), sub_rows)));
     }
     out
+}
+
+/// The series a binned color (`Color(bin=...)`) splits a mark into: each
+/// row's bin ([`binned_color_rows`]) and the key its series groups by, the
+/// bin's lower edge, a value that bin's color resolves from through
+/// [`ColorScale::lookup`]. The area, the line and the ribbon draw one series
+/// per bin through it, so each series takes its bin's color and the bin
+/// legend describes what is drawn.
+pub(crate) struct BinnedColorSeries {
+    bins: Vec<Option<usize>>,
+    keys: Vec<Option<String>>,
+}
+
+impl BinnedColorSeries {
+    /// `None` unless the mark's color is a binned color under the scale its
+    /// bin rule cut ([`binned_color_scale`]), over a column the batch holds. A row with no finite
+    /// value has no bin and no key.
+    pub(crate) fn of(ctx: &DrawCtx) -> Option<Self> {
+        let (binding, scale) = (ctx.spec.encoding.color.as_ref(), ctx.scales.color.as_ref());
+        let buckets = binned_color_scale(binding, scale)?;
+        let bins = binned_color_rows(binding, scale, ctx.batch)?;
+        let keys = bins.iter().map(|bin| bin.map(|i| buckets.bounds()[i].to_string())).collect();
+        Some(Self { bins, keys })
+    }
+
+    /// Each row's series key, for [`build_color_detail_groups`]'s color values.
+    pub(crate) fn keys(&self) -> &Vec<Option<String>> {
+        &self.keys
+    }
+
+    /// Orders `groups` low bin first, so the series draw (and a stack layers)
+    /// in bin order; a series with no bin trails. Stable, so a detail or
+    /// stroke-dash split keeps its order within a bin.
+    pub(crate) fn order(&self, groups: &mut [(Option<String>, Vec<usize>)]) {
+        groups.sort_by_key(|(_, rows)| rows.first().and_then(|&row| self.bins[row]).unwrap_or(usize::MAX));
+    }
 }
 
 #[cfg(test)]

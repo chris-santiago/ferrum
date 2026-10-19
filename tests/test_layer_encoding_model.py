@@ -8681,14 +8681,6 @@ _LINE_UNDER_BINNED: dict[str, Callable[[], fm.Chart]] = {
 }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "a line, trail or ribbon under a binned color is drawn as one series with no "
-        "per-mark color and a suppressed legend; it should draw one series per bin, "
-        "each in its bin's step"
-    ),
-)
 @pytest.mark.parametrize("mark", sorted(_LINE_UNDER_BINNED))
 def test_a_line_under_a_binned_color_draws_one_series_per_bin(mark):
     """Two bins of ``z``: two series, each in its own bin's color, and a legend of bin ranges."""

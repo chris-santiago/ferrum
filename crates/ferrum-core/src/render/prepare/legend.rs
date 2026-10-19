@@ -1376,6 +1376,11 @@ fn categorical_aux_fate(
 /// - at least one color-consuming layer's mark is something other than
 ///   line/ribbon (e.g. `point`) — that layer genuinely renders the mapping,
 ///   so the colorbar stays truthful and the caller must not warn.
+/// - a line or ribbon consumer draws under its binned color scale (a
+///   `Color(bin=...)` binding under the scale its bin rule cut): it draws one
+///   series per bin, so it renders the mapping too ([`draws_numeric_color`]).
+///   Under a continuous, quantize, quantile or threshold scale there is no
+///   such series split, whatever the binding says, and the line stays inert.
 ///
 /// A "consumer" is any layer whose `encoding.color` resolved to `Some` AND
 /// binds the SAME field the resolved `scales.color` scale was built from —
@@ -1435,27 +1440,35 @@ fn inert_numeric_color_on_line_or_ribbon_only(
     // `None`), so this is unreachable as `None` in practice but handled
     // rather than unwrapped.
     let resolved_field = layers.iter().find_map(|l| l.encoding.color.as_ref()).map(|e| e.field.as_str())?;
-    let consumers = channel_consumer_marks(layers, resolved_field, |e| e.color.as_ref());
-    if !consumers.is_empty() && consumers.iter().all(|m| matches!(m, Mark::Line | Mark::Ribbon)) {
-        Some(consumers)
-    } else {
+    let consumers: Vec<(Mark, &EncodingSpec)> = layers
+        .iter()
+        .filter_map(|l| l.encoding.color.as_ref().filter(|e| e.field == resolved_field).map(|e| (l.mark, e)))
+        .collect();
+    let scale = scales.color.as_ref();
+    if consumers.is_empty() || consumers.iter().any(|&(mark, binding)| draws_numeric_color(mark, binding, scale)) {
         None
+    } else {
+        Some(consumers.into_iter().map(|(mark, _)| mark).collect())
     }
 }
 
-/// The mark of every layer whose (post-inheritance) encoding binds `field`
-/// on the channel `channel` reads — the layers consuming the scale built
-/// from that field, inherited bindings included, in layer order.
-fn channel_consumer_marks(
-    layers: &[super::LayerPrepared],
-    field: &str,
-    channel: fn(&crate::spec::encoding::Encoding) -> Option<&crate::spec::encoding::EncodingSpec>,
-) -> Vec<crate::spec::mark::Mark> {
-    layers
-        .iter()
-        .filter(|l| channel(&l.encoding).map(|e| e.field.as_str()) == Some(field))
-        .map(|l| l.mark)
-        .collect()
+/// Whether a `mark` drawing the numeric (continuous or discretizing) color
+/// `binding` through `scale` paints each mark by its value. Every mark does
+/// except a line or a ribbon, which paint one color per series: under its
+/// binned color scale (a binned `binding` under the scale its bin rule cut,
+/// [`crate::render::draw::binned_color_scale`]) their series split by bin,
+/// each in its bin's color
+/// ([`crate::render::marks::channels::BinnedColorSeries`]), so they draw it
+/// too; under any other numeric scale they draw one series and the color has
+/// no per-mark effect. Read by the flat inert-color check and the composite
+/// overlay group's exemption, so both judge a line as the series split does.
+pub(in crate::render) fn draws_numeric_color(
+    mark: crate::spec::mark::Mark,
+    binding: &EncodingSpec,
+    scale: Option<&super::super::scale_resolve::ColorScale>,
+) -> bool {
+    use crate::spec::mark::Mark;
+    !matches!(mark, Mark::Line | Mark::Ribbon) || crate::render::draw::binned_color_scale(Some(binding), scale).is_some()
 }
 
 /// The marks that draw the size channel bound to `field`: every layer whose
@@ -2207,6 +2220,41 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
                 assert!(*suppressed, "a colorbar existed here and was suppressed");
             }
             other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// A line or ribbon draws a numeric color only when it is binned (one
+    /// series per bin); every other mark draws any numeric color. The flat
+    /// check and the composite overlay exemption both read this.
+    #[test]
+    fn only_a_binned_color_is_drawn_by_a_line_or_ribbon() {
+        use crate::render::color::from_rgba;
+        use crate::render::scale_resolve::DiscretizedColors;
+        let plain = crate::spec::encoding::EncodingSpec { field: "z".into(), ..Default::default() };
+        let binned: crate::spec::encoding::EncodingSpec = serde_json::from_value(serde_json::json!(
+            {"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}}
+        ))
+        .unwrap();
+        let buckets = || {
+            DiscretizedColors::new(vec![0.0, 10.0, 20.0], vec![from_rgba(255, 0, 0, 255), from_rgba(0, 0, 255, 255)]).unwrap()
+        };
+        let bin_cut = ColorScale::Discretizing(buckets().cut_by_bin(true));
+        let quantize = ColorScale::Discretizing(buckets());
+        let continuous = ColorScale::Continuous {
+            domain: (0.0, 20.0),
+            scheme: crate::render::color::ContinuousScheme::Named(crate::render::color::NamedContinuous::Viridis),
+            midpoint: None,
+            transform: crate::render::scale_resolve::ColorTransform::Linear,
+        };
+        for mark in [Mark::Line, Mark::Ribbon] {
+            assert!(draws_numeric_color(mark, &binned, Some(&bin_cut)), "{mark:?} draws a binned color under its bin-cut scale");
+            assert!(!draws_numeric_color(mark, &binned, Some(&quantize)), "{mark:?}: a binned binding under a quantize scale");
+            assert!(!draws_numeric_color(mark, &binned, Some(&continuous)), "{mark:?}: a binned binding under a continuous scale");
+            assert!(!draws_numeric_color(mark, &plain, Some(&bin_cut)), "{mark:?}: an unbinned binding under a bin-cut scale");
+        }
+        for scale in [&bin_cut, &quantize, &continuous] {
+            assert!(draws_numeric_color(Mark::Point, &plain, Some(scale)));
+            assert!(draws_numeric_color(Mark::Point, &binned, Some(scale)));
         }
     }
 

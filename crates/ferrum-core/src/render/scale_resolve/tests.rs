@@ -5460,7 +5460,9 @@ fn a_binned_color_takes_the_bin_transforms_edges_for_the_same_parameters() {
 }
 
 /// Explicit `bins` win over `bin`: the buckets are the declared boundaries,
-/// exactly as the same scale without `bin` resolves them.
+/// exactly as the same scale without `bin` resolves them. The binding's bin
+/// rule still marks the scale as a binned color's; the scale without one is
+/// not.
 #[test]
 fn explicit_bins_win_over_a_binned_colors_parameters() {
     pyo3::Python::initialize();
@@ -5472,7 +5474,10 @@ fn explicit_bins_win_over_a_binned_colors_parameters() {
     let (both, _) = resolve_color(&both, &batch);
     let (declared, _) = resolve_color(&declared, &batch);
     assert_eq!(buckets_of(&both).bounds(), &[1.3, 3.0, 6.0, 12.4]);
-    assert_eq!(format!("{both:?}"), format!("{declared:?}"));
+    assert_eq!(buckets_of(&both).bounds(), buckets_of(&declared).bounds());
+    assert_eq!(buckets_of(&both).colors(), buckets_of(&declared).colors());
+    assert!(buckets_of(&both).is_cut_by_bin());
+    assert!(!buckets_of(&declared).is_cut_by_bin());
 }
 
 /// One distinct value is one bin: the `Bin` transform's unit bin around it.

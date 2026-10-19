@@ -18,6 +18,10 @@
 //! - Both: one polyline per (color, detail) pair — color determines stroke,
 //!   detail subdivides each color group. Used by parallel_coordinates so
 //!   multiple samples within a class each get their own polyline.
+//! - A binned color (`Color(bin=...)`): one polyline per bin, in its bin's
+//!   color, low bin first; detail and a categorical `stroke_dash` subdivide
+//!   each bin's series as they do a color category's
+//!   ([`BinnedColorSeries`]). Any other numeric color draws one series.
 //! - Otherwise: one polyline over all rows in batch order.
 //!
 //! Width: a `size` field tapers each series along its length, every vertex
@@ -34,7 +38,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
+use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
 use crate::render::marks::curve::{StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
@@ -192,13 +196,19 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // domain built by the dtype-wide distinct_values_in_order — `col_as_str`
     // returns `Err` for non-Utf8, which previously collapsed every category
     // into one merged polyline.
+    //
+    // A binned color is the one numeric color these marks draw: it splits the
+    // series by bin instead, one series per bin in its bin's color, in bin
+    // order, as the area's bands do.
+    let binned = BinnedColorSeries::of(ctx);
     let color_input = ctx.scales.color.as_ref().map(|s| s.input());
-    let color_values = cf.and_then(|f| {
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
         match color_input {
             Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
             Some(ColorInput::Numeric) => None,
         }
     });
+    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
@@ -210,13 +220,16 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // skips subdivision entirely — byte-identical grouping.
     let dash_cols = stroke_dash_column_loader(ctx);
 
-    let groups = build_color_detail_groups(
-        color_values.as_ref(),
+    let mut groups = build_color_detail_groups(
+        color_values,
         detail_values.as_ref(),
         dash_cols.categorical.as_ref(),
         ctx.scales.color.is_some(),
         n_rows,
     );
+    if let Some(binned) = &binned {
+        binned.order(&mut groups);
+    }
 
     let interpolate = ctx.mark_style.line.interpolate.unwrap_or_default();
     // A straight series stays a `Polyline` (`StrokeStyle`-shaped); anything

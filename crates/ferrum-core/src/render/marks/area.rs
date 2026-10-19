@@ -23,10 +23,9 @@
 //! - Neither: single area over all rows.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{binned_color_rows, col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
-use crate::render::scale_resolve::ColorScale;
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::build_color_detail_groups;
+use crate::render::marks::channels::{build_color_detail_groups, BinnedColorSeries};
 use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
@@ -226,19 +225,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     //
     // A binned color groups by bin instead: one band per bin, keyed by a value
     // its bin's color resolves from (the bin's lower edge), in bin order.
-    let bins = binned_color_rows(spec.encoding.color.as_ref(), ctx.scales.color.as_ref(), ctx.batch);
-    let color_values = match (&bins, ctx.scales.color.as_ref()) {
-        (Some(bins), Some(ColorScale::Discretizing(buckets))) => {
-            Some(bins.iter().map(|bin| bin.map(|i| buckets.bounds()[i].to_string())).collect())
-        }
-        _ => cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok()),
-    };
+    let binned = BinnedColorSeries::of(ctx);
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let n_rows = xs.len();
     let mut groups = build_color_detail_groups(
-        color_values.as_ref(),
+        color_values,
         detail_values.as_ref(),
         // area does not consume the `stroke_dash` channel (T12 scope: line,
         // rule, point, bar, rect only) — grouping stays byte-identical.
@@ -246,10 +241,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         ctx.scales.color.is_some(),
         n_rows,
     );
-    if let Some(bins) = &bins {
-        // Low bin first, so the bands draw (and a stack layers) in bin order;
-        // a row with no bin trails. Stable, so detail splits keep their order.
-        groups.sort_by_key(|(_, rows)| rows.first().and_then(|&row| bins[row]).unwrap_or(usize::MAX));
+    if let Some(binned) = &binned {
+        binned.order(&mut groups);
     }
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).

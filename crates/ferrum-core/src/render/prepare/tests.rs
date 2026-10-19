@@ -11005,3 +11005,481 @@ fn a_text_inheriting_a_binned_color_over_strings_is_not_refused() {
     .unwrap();
     gate_render(&spec, &mixed_dtype_rows()).0.expect("the text renders");
 }
+
+// ── a line-family mark under a binned color ─────────────────────────────────
+
+/// Rows for a line-family mark under a binned color: `x` 0..7 ascending and
+/// `z` alternating between the low bin and the high one of `bin_count` 2
+/// over 1..9 (cut at 5), so the two bins interleave along `x` and one
+/// polyline over every row zigzags between them. `d` pairs rows p, p, q, q;
+/// `y_hi` is `y` + 1; `s` holds strings; `f` puts the first four rows in
+/// panel m and the last four in n.
+fn binned_line_rows(z: [f64; 8]) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y_hi", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("d", DataType::Utf8, false),
+            Field::new("s", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])),
+            Arc::new(Float64Array::from(vec![2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0])),
+            Arc::new(Float64Array::from(vec![3.0, 2.0, 3.0, 2.0, 3.0, 2.0, 3.0, 2.0])),
+            Arc::new(Float64Array::from(z.to_vec())),
+            Arc::new(StringArray::from(vec!["p", "p", "q", "q", "p", "p", "q", "q"])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a", "b", "a", "b"])),
+            Arc::new(StringArray::from(vec!["m", "m", "m", "m", "n", "n", "n", "n"])),
+        ],
+    )
+    .unwrap()
+}
+
+/// `z` interleaving the low bin (rows 0, 2, 4, 6) and the high bin.
+const INTERLEAVED_Z: [f64; 8] = [1.0, 9.0, 2.0, 8.0, 1.5, 8.5, 1.2, 8.8];
+
+/// A binned `z` color: two bins, edges cut from the data without nicing.
+fn binned_z() -> serde_json::Value {
+    serde_json::json!({"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}})
+}
+
+/// A flat `mark` over `x`/`y` (and `y2` = `y_hi` for a ribbon) whose color is
+/// `color`, with `extra` merged into the spec's top level.
+fn line_family_spec(mark: &str, color: serde_json::Value, extra: serde_json::Value) -> ChartSpec {
+    let mut encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}, "color": color});
+    if mark == "ribbon" {
+        encoding["y2"] = serde_json::json!({"field": "y_hi"});
+    }
+    let mut spec = serde_json::json!({"data": {"kind": "named", "name": "default"}, "mark": mark, "encoding": encoding});
+    for (key, value) in extra.as_object().expect("extra is an object") {
+        spec[key] = value.clone();
+    }
+    serde_json::from_value(spec).expect("the line-family spec deserializes")
+}
+
+/// Every open series a panel draws (polyline, or path under a width or a
+/// non-linear interpolation): its stroke and vertices, in draw order.
+fn open_series(panel: &ferrum_scene::Panel) -> Vec<(ferrum_scene::Color, Vec<(f64, f64)>)> {
+    panel
+        .marks
+        .iter()
+        .flat_map(|batch| batch.nodes.iter())
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Polyline { points, style, .. } => {
+                Some((style.color.expect("a stroked series"), points.clone()))
+            }
+            ferrum_scene::SceneNode::Path { commands, style, closed: false, .. } => {
+                let points = commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                Some((style.stroke.expect("a stroked series"), points))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The binned scale's step for bin `bin`, as the scene paints it.
+fn bin_step(p: &PreparedInputs, bin: usize) -> (u8, u8, u8) {
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else {
+        panic!("expected the binned scale, got {:?}", p.provisional_scales.color)
+    };
+    let step = crate::render::draw::to_scene_color(buckets.colors()[bin]);
+    (step.r, step.g, step.b)
+}
+
+/// Asserts `series` is one series per bin, low bin first, each stroked with
+/// its bin's step and running left to right, and that the series hold
+/// `points_per_series` vertices each.
+fn assert_one_series_per_bin(p: &PreparedInputs, series: &[(ferrum_scene::Color, Vec<(f64, f64)>)], points_per_series: usize) {
+    assert_eq!(series.len(), 2, "one series per bin: {series:?}");
+    for (bin, (stroke, points)) in series.iter().enumerate() {
+        assert_eq!((stroke.r, stroke.g, stroke.b), bin_step(p, bin), "series {bin} takes bin {bin}'s step");
+        assert_eq!(points.len(), points_per_series, "series {bin}: {points:?}");
+        assert!(points.windows(2).all(|w| w[0].0 < w[1].0), "series {bin} runs along x: {points:?}");
+    }
+}
+
+/// A line under a binned color draws one series per bin, low bin first,
+/// each in its bin's step and ordered along x, under the bin legend, with
+/// no warning. Rejects the one polyline that zigzagged across the bins
+/// under a suppressed legend and an `UnsupportedColorScaleOnMark` warning.
+#[test]
+fn a_line_under_a_binned_color_draws_one_series_per_bin() {
+    let spec = line_family_spec("line", binned_z(), serde_json::json!({}));
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let p = prep(&spec, &rows);
+    assert_eq!(p.colorbar.as_ref().expect("the bin legend").tick_labels, vec!["1", "5", "9"]);
+    let (scene, warnings) = gate_render(&spec, &rows);
+    let scene = scene.expect("renders");
+    assert_eq!(warnings, Vec::new());
+    let series = open_series(&scene.panels[0]);
+    assert_one_series_per_bin(&p, &series, 4);
+    // The low bin (y 2) sits above the high bin (y 1): smaller pixel y.
+    assert!(series[0].1[0].1 < series[1].1[0].1, "the first series drawn is the low bin's");
+}
+
+/// A sized line (a trail, its width following `y` along each series) and a
+/// stepped line (a path) each still split by bin, in their bins' steps.
+#[test]
+fn a_sized_or_curved_line_under_a_binned_color_draws_one_series_per_bin() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let sized = || {
+        let mut spec = line_family_spec("line", binned_z(), serde_json::json!({}));
+        spec.encoding.size = Some(EncodingSpec { field: "y".into(), ..Default::default() });
+        spec
+    };
+    let stepped = || line_family_spec("line", binned_z(), serde_json::json!({"mark_style": {"interpolate": "step"}}));
+    for (label, spec) in [("sized", sized()), ("step", stepped())] {
+        let p = prep(&spec, &rows);
+        let (scene, warnings) = gate_render(&spec, &rows);
+        let series = open_series(&scene.expect(label).panels[0]);
+        assert_eq!(warnings, Vec::new(), "{label}");
+        assert_eq!(series.len(), 2, "{label}: one series per bin");
+        for (bin, (stroke, _)) in series.iter().enumerate() {
+            assert_eq!((stroke.r, stroke.g, stroke.b), bin_step(&p, bin), "{label}: series {bin}");
+        }
+    }
+}
+
+/// A ribbon under a binned color draws one closed band per bin, low bin
+/// first, each filled with its bin's step, under the bin legend and with no
+/// warning. Rejects the one band over every row, filled with the constant
+/// fill.
+#[test]
+fn a_ribbon_under_a_binned_color_draws_one_band_per_bin() {
+    let spec = line_family_spec("ribbon", binned_z(), serde_json::json!({}));
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let p = prep(&spec, &rows);
+    assert!(p.colorbar.is_some(), "the bin legend");
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(warnings, Vec::new());
+    let bands = area_bands(&scene.expect("renders"));
+    assert_eq!(bands.len(), 2, "one band per bin");
+    for (bin, (fill, points)) in bands.iter().enumerate() {
+        assert_eq!((fill.r, fill.g, fill.b), bin_step(&p, bin), "band {bin} takes bin {bin}'s step");
+        assert_eq!(points.len(), 8, "band {bin} rings its bin's four rows: {points:?}");
+    }
+}
+
+/// A detail or a categorical stroke dash subdivides each bin's series: four
+/// series over two bins and two `d` values, each in its bin's step and
+/// along x, low bin first. Rejects splitting by the detail alone (two
+/// series zigzagging across the bins) and by the bin alone.
+#[test]
+fn a_detail_or_stroke_dash_splits_a_binned_lines_series_by_key_and_bin() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let detail = line_family_spec("line", binned_z(), serde_json::json!({"mark_style": {"detail": "d"}}));
+    let mut dashed = line_family_spec("line", binned_z(), serde_json::json!({}));
+    dashed.encoding.stroke_dash = Some(EncodingSpec { field: "d".into(), ..Default::default() });
+    for (label, spec) in [("detail", detail), ("stroke_dash", dashed)] {
+        let p = prep(&spec, &rows);
+        let series = open_series(&gate_render(&spec, &rows).0.expect(label).panels[0]);
+        assert_eq!(series.len(), 4, "{label}: one series per (bin, d): {series:?}");
+        for (i, (stroke, points)) in series.iter().enumerate() {
+            assert_eq!((stroke.r, stroke.g, stroke.b), bin_step(&p, i / 2), "{label}: series {i}");
+            assert_eq!(points.len(), 2, "{label}: series {i}");
+            assert!(points[0].0 < points[1].0, "{label}: series {i} runs along x");
+        }
+    }
+}
+
+/// A quantize color on a line has no series split: the line draws one
+/// polyline, its legend is suppressed and `UnsupportedColorScaleOnMark`
+/// still warns. Only a binned color splits a line's series.
+#[test]
+fn a_quantize_color_on_a_line_stays_one_series_and_warns() {
+    let quantize = serde_json::json!({"field": "z", "scale": {"type": "quantize", "range": ["#ff0000", "#0000ff"]}});
+    let spec = line_family_spec("line", quantize, serde_json::json!({}));
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(open_series(&scene.expect("renders").panels[0]).len(), 1);
+    assert!(prep(&spec, &rows).colorbar.is_none(), "the legend is suppressed");
+    assert!(
+        warnings.iter().any(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { scale_kind, .. } if scale_kind == "discretizing")),
+        "{warnings:?}"
+    );
+}
+
+/// Faceted lines under a binned color cut one edge set from every panel's
+/// rows (1..9, cut at 5): panel n's `z` (3..4.5) all falls in the low bin,
+/// so it draws one low-bin series while panel m draws one per bin. Rejects
+/// edges cut from each panel's own rows, under which n split at 3.75.
+#[test]
+fn faceted_lines_under_a_binned_color_share_one_edge_set() {
+    let rows = binned_line_rows([1.0, 9.0, 2.0, 8.0, 3.0, 4.0, 3.5, 4.5]);
+    let spec = line_family_spec(
+        "line",
+        binned_z(),
+        serde_json::json!({"facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 2}}}),
+    );
+    let p = prep(&spec, &rows);
+    let scene = gate_render(&spec, &rows).0.expect("renders");
+    let [m, n] = scene.panels.as_slice() else { panic!("two panels, got {}", scene.panels.len()) };
+    let (m, n) = (open_series(m), open_series(n));
+    assert_eq!(m.len(), 2, "panel m draws both bins: {m:?}");
+    assert_eq!(n.len(), 1, "panel n draws only the low bin: {n:?}");
+    assert_eq!((n[0].0.r, n[0].0.g, n[0].0.b), bin_step(&p, 0));
+    assert_eq!(n[0].1.len(), 4);
+}
+
+/// A binned line drawn as a layer, and as an independent-y layer (the
+/// SecondaryY route), splits by bin beside a point layer that draws the same
+/// binned color. Rejects the single zigzag on the layered routes.
+#[test]
+fn a_binned_line_layer_splits_by_bin_on_the_layered_and_independent_y_routes() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    for independent_y in [false, true] {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_z()}},
+                {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y_hi"}, "color": binned_z()},
+                    "independent_y": independent_y},
+            ],
+        }))
+        .unwrap();
+        let p = prep(&spec, &rows);
+        let (scene, warnings) = gate_render(&spec, &rows);
+        assert_eq!(warnings, Vec::new(), "independent_y={independent_y}");
+        let series = open_series(&scene.expect("renders").panels[0]);
+        assert_one_series_per_bin(&p, &series, 4);
+    }
+}
+
+/// A line whose binned color reads a string column keeps the typed refusal.
+#[test]
+fn a_line_under_a_binned_color_over_strings_is_refused() {
+    let color = serde_json::json!({"field": "s", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}});
+    let spec = line_family_spec("line", color, serde_json::json!({}));
+    let err = gate_render(&spec, &binned_line_rows(INTERLEAVED_Z)).0.expect_err("refused");
+    assert_eq!(err.to_string(), not_numeric("Color", "s", "Utf8"));
+}
+
+// ── a binned layer under a color scale its bin rule did not cut ─────────────
+
+/// A chart of two layers over `binned_line_rows`, each a `(mark, color)`
+/// pair drawing `x`/`y` (a ribbon draws to `y_hi`, an area its own band).
+fn two_colored_layers(first: (&str, serde_json::Value), second: (&str, serde_json::Value)) -> ChartSpec {
+    let layer = |(mark, color): (&str, serde_json::Value)| {
+        serde_json::json!({"mark": mark, "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": color}})
+    };
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "layers": [layer(first), layer(second)],
+    }))
+    .unwrap()
+}
+
+/// `z` under a binned color of `bin_count` bins, without nicing.
+fn binned_z_of(bin_count: usize) -> serde_json::Value {
+    serde_json::json!({"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": bin_count, "nice": false}}})
+}
+
+/// `z` under a two-bucket quantize scale.
+fn quantized_z() -> serde_json::Value {
+    serde_json::json!({"field": "z", "scale": {"type": "quantize", "range": ["#ff0000", "#0000ff"]}})
+}
+
+/// The one `LayerScaleExcluded` of layer 1 off layer 0's color scale.
+fn color_excluded_layer_one() -> Vec<RenderWarning> {
+    vec![RenderWarning::LayerScaleExcluded {
+        layer: 1,
+        establishing: 0,
+        channel: "color".to_string(),
+        placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+    }]
+}
+
+fn exclusions(warnings: &[RenderWarning]) -> Vec<RenderWarning> {
+    warnings.iter().filter(|w| matches!(w, RenderWarning::LayerScaleExcluded { .. })).cloned().collect()
+}
+
+fn inert_color(warnings: &[RenderWarning]) -> Vec<RenderWarning> {
+    warnings.iter().filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })).cloned().collect()
+}
+
+/// A plain `z` line beside a binned `z` line, and a quantize `z` line beside
+/// one: the first layer establishes a scale no bin rule cut, so the binned
+/// layer is excluded with one `LayerScaleExcluded`, both lines draw one
+/// series, `z` is inert on them (`UnsupportedColorScaleOnMark`) and no
+/// colorbar is drawn. Rejects the binned line judged as drawing the scale
+/// (an orphan colorbar and no warning) and, under quantize, split by the
+/// quantize buckets its statistics do not group by.
+#[test]
+fn a_binned_line_under_a_scale_no_bin_rule_cut_is_excluded_and_inert() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    for (label, establishing, scale_kind) in [
+        ("continuous", serde_json::json!({"field": "z"}), "continuous"),
+        ("quantize", quantized_z(), "discretizing"),
+    ] {
+        let spec = two_colored_layers(("line", establishing), ("line", binned_z()));
+        let (scene, warnings) = gate_render(&spec, &rows);
+        assert_eq!(open_series(&scene.expect(label).panels[0]).len(), 2, "{label}: one series per line");
+        assert_eq!(exclusions(&warnings), color_excluded_layer_one(), "{label}");
+        let inert = vec![RenderWarning::UnsupportedColorScaleOnMark {
+            marks: vec!["line".to_string()],
+            scale_kind: scale_kind.to_string(),
+            suppressed: true,
+        }];
+        assert_eq!(inert_color(&warnings), inert, "{label}");
+        assert!(prep(&spec, &rows).colorbar.is_none(), "{label}: the colorbar is suppressed");
+    }
+}
+
+/// A plain `z` point beside a binned `z` point: the binned point's bin rule
+/// takes no effect under the continuous scale, so it is excluded with one
+/// `LayerScaleExcluded` and draws through that scale. Rejects dropping the
+/// bin rule silently.
+#[test]
+fn a_binned_point_under_a_continuous_color_is_excluded() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let spec = two_colored_layers(("point", serde_json::json!({"field": "z"})), ("point", binned_z()));
+    let (scene, warnings) = gate_render(&spec, &rows);
+    scene.expect("renders");
+    assert_eq!(exclusions(&warnings), color_excluded_layer_one());
+    assert_eq!(inert_color(&warnings), Vec::new());
+    let p = prep(&spec, &rows);
+    assert!(matches!(p.provisional_scales.color, Some(ColorScale::Continuous { .. })), "{:?}", p.provisional_scales.color);
+}
+
+/// A binned `z` line beside a plain `z` line: the binned layer establishes
+/// the binned scale, the plain line has no bin rule, so it joins without a
+/// warning and draws one series, while the binned line splits by bin.
+#[test]
+fn a_plain_line_beside_an_establishing_binned_line_joins_without_a_warning() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let spec = two_colored_layers(("line", binned_z()), ("line", serde_json::json!({"field": "z"})));
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(warnings, Vec::new());
+    assert_eq!(open_series(&scene.expect("renders").panels[0]).len(), 3, "two bins plus one plain series");
+}
+
+/// Two binned `z` lines with different bin counts: the first layer's rule
+/// (three bins over 1..9; the middle one empty) cuts the scale, the second
+/// is excluded with one `LayerScaleExcluded` and still draws through that
+/// binned scale: each line splits into the low and high bins' series, in
+/// those bins' steps. Rejects the second layer's five bins taking effect.
+#[test]
+fn a_binned_layer_with_another_bin_rule_is_excluded_and_draws_through_the_first() {
+    let rows = binned_line_rows(INTERLEAVED_Z);
+    let spec = two_colored_layers(("line", binned_z_of(3)), ("line", binned_z_of(5)));
+    let p = prep(&spec, &rows);
+    let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
+    assert_eq!(buckets.colors().len(), 3, "the first layer's three bins");
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(exclusions(&warnings), color_excluded_layer_one());
+    assert_eq!(inert_color(&warnings), Vec::new());
+    let series = open_series(&scene.expect("renders").panels[0]);
+    let steps: Vec<(u8, u8, u8)> = series.iter().map(|(stroke, _)| (stroke.r, stroke.g, stroke.b)).collect();
+    let (low, high) = (bin_step(&p, 0), bin_step(&p, 2));
+    assert_eq!(steps, vec![low, high, low, high], "each line splits by the first layer's bins");
+}
+
+/// A plain `z` point beside a binned `z` area: the area forces a categorical
+/// scale over `z`, which no bin rule cut, so the area is excluded with one
+/// `LayerScaleExcluded` and draws one band per raw value (two, 1 and 9), each
+/// in its category's palette color, as before.
+#[test]
+fn a_binned_area_under_a_categorical_color_is_excluded() {
+    let rows = binned_line_rows([1.0, 9.0, 1.0, 9.0, 1.0, 9.0, 1.0, 9.0]);
+    let spec = two_colored_layers(("point", serde_json::json!({"field": "z"})), ("area", binned_z()));
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(exclusions(&warnings), color_excluded_layer_one());
+    let p = prep(&spec, &rows);
+    let Some(categorical @ ColorScale::Categorical { .. }) = &p.provisional_scales.color else {
+        panic!("expected the area's categorical scale, got {:?}", p.provisional_scales.color)
+    };
+    let fills: Vec<(u8, u8, u8)> = area_bands(&scene.expect("renders")).iter().map(|(fill, _)| (fill.r, fill.g, fill.b)).collect();
+    let palette = |value: &str| {
+        let color = crate::render::draw::to_scene_color(categorical.lookup(value).expect("a category"));
+        (color.r, color.g, color.b)
+    };
+    assert_eq!(fills, vec![palette("1"), palette("9")], "one band per raw value");
+}
+
+/// A dodged bar binned on `z` under an establishing quantize or continuous
+/// `z` point: no bin rule cut the scale, so the bars dodge by raw value
+/// (four slots per band) and the bar layer is excluded with one
+/// `LayerScaleExcluded`. Rejects dodging by the quantize buckets (two slots
+/// per band).
+#[test]
+fn a_dodged_binned_bar_under_a_scale_no_bin_rule_cut_dodges_by_value() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b", "b", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![11.0, 1.0, 12.0, 2.0, 13.0, 3.0, 14.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    for (label, establishing) in [("quantize", quantized_z()), ("continuous", serde_json::json!({"field": "z"}))] {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "g"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}, "color": establishing}},
+                {"mark": "bar", "position": {"type": "dodge"}, "encoding": {"x": {"field": "g"}, "y": {"field": "y"}, "color": binned_z()}},
+            ],
+        }))
+        .unwrap();
+        let (scene, warnings) = gate_render(&spec, &batch);
+        let mut slots: Vec<f64> = scene
+            .expect(label)
+            .panels
+            .iter()
+            .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+            .filter_map(|node| match node {
+                ferrum_scene::SceneNode::Rect { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(slots.len(), 8, "{label}: every bar draws");
+        slots.sort_by(f64::total_cmp);
+        slots.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(slots.len(), 8, "{label}: one slot per raw value: {slots:?}");
+        assert_eq!(exclusions(&warnings), color_excluded_layer_one(), "{label}");
+    }
+}
+
+/// A raster's cells establish a continuous color; a later point binned on
+/// `z` is excluded with one `LayerScaleExcluded`. The cells still draw
+/// through the continuous scale and the point draws every row.
+#[test]
+fn a_binned_point_beside_raster_cells_is_excluded() {
+    let point = serde_json::json!([
+        {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_z()}},
+    ]);
+    let spec = raster_spec(count_raster(false), Some(serde_json::json!({"field": "count"})), point, None);
+    let (scene, warnings) = gate_render(&spec, &raster_rows());
+    assert_eq!(exclusions(&warnings), color_excluded_layer_one());
+    let scene = scene.expect("renders");
+    let points = scene
+        .panels
+        .iter()
+        .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+        .filter(|node| matches!(node, ferrum_scene::SceneNode::Circle { .. }))
+        .count();
+    assert_eq!(points, raster_rows().num_rows(), "the point draws every row");
+    let (p, panels) = raster_panel_cells(&spec);
+    assert!(matches!(p.provisional_scales.color, Some(ColorScale::Continuous { .. })), "{:?}", p.provisional_scales.color);
+    let [cells] = panels.as_slice() else { panic!("one image, got {}", panels.len()) };
+    assert!(!drawn(cells).is_empty(), "the cells draw");
+}

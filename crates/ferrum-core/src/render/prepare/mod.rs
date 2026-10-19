@@ -51,6 +51,10 @@ pub(crate) use legend::aux_legend_channels;
 // same size-consumer rule the size legend's swatch choice is built from.
 pub(in crate::render) use legend::size_drawing_marks;
 
+// `pub(in crate::render)` so the compositor's overlay color exemption judges
+// a line or ribbon by the same rule the flat inert-color check reads.
+pub(in crate::render) use legend::draws_numeric_color;
+
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
 /// `None` row value = wrap mode (single-field facet).
 type FacetPartitionKey = (String, Option<String>);

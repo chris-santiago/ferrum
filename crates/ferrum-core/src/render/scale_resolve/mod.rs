@@ -56,7 +56,7 @@ pub(in crate::render) use self::color::require_binnable;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    add_distinct_source, admitted_aux_reads, admitted_binned_reads, binned_color_sources, finite_sorted, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, LocatedColumn, SortRows,
+    add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
@@ -763,6 +763,10 @@ impl ScaleKind {
 pub struct DiscretizedColors {
     bounds: Vec<f64>,
     colors: Vec<Color>,
+    /// A binned color's bin rule (`Color(bin=...)`) cut these buckets, so
+    /// a mark under them can split, group and dodge by bin. `false` for a
+    /// quantize, quantile or threshold scale, or explicit `bins` alone.
+    cut_by_bin: bool,
 }
 
 impl DiscretizedColors {
@@ -778,7 +782,20 @@ impl DiscretizedColors {
         if colors.is_empty() || bounds.len() != colors.len() + 1 {
             return None;
         }
-        Some(Self { bounds, colors })
+        Some(Self { bounds, colors, cut_by_bin: false })
+    }
+
+    /// These buckets, recorded as cut by a binned color's bin rule when
+    /// `cut_by_bin`.
+    pub(super) fn cut_by_bin(self, cut_by_bin: bool) -> Self {
+        Self { cut_by_bin, ..self }
+    }
+
+    /// Whether a binned color's bin rule cut these buckets: the one fact
+    /// that makes this scale a binned color's
+    /// ([`crate::render::draw::binned_color_scale`]).
+    pub(crate) fn is_cut_by_bin(&self) -> bool {
+        self.cut_by_bin
     }
 
     /// The bucket color for `value`, or `None` when `value` is not finite.

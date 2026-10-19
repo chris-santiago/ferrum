@@ -16,7 +16,9 @@
 //! above become step or cubic commands when a non-linear method is set (spec
 //! §6.1); the shape shown is the `linear` case. When a color encoding is bound,
 //! rows are first partitioned by color category and each group emits its own
-//! closed polygon (mirroring `line.rs`); otherwise all rows form one polygon.
+//! closed polygon (mirroring `line.rs`); a binned color (`Color(bin=...)`)
+//! partitions them by bin instead, one band per bin in its bin's color
+//! ([`BinnedColorSeries`]); otherwise all rows form one polygon.
 //! Without per-color grouping, multi-series CI bands (e.g. train vs test
 //! learning curves) collapse into a single zigzag polygon stitching across
 //! categories.
@@ -26,7 +28,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
+use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
 use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
@@ -179,13 +181,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // matching the legend domain built by the dtype-wide
     // distinct_values_in_order — `col_as_str` returns `Err` for non-Utf8,
     // which previously collapsed every category into one merged polygon.
+    //
+    // A binned color is the one numeric color these marks draw: it splits the
+    // series by bin instead, one series per bin in its bin's color, in bin
+    // order, as the area's bands do.
+    let binned = BinnedColorSeries::of(ctx);
     let color_input = ctx.scales.color.as_ref().map(|s| s.input());
-    let color_values = cf.and_then(|f| {
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
         match color_input {
             Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
             Some(ColorInput::Numeric) => None,
         }
     });
+    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
     // T12 fix round (spec §4.3, amended 2026-09-01): a categorical `stroke_dash`
     // field extends ribbon's series partition key from (color) to (color,
     // stroke_dash-field) — mirrors line.rs's `dash_cols.categorical` wiring
@@ -199,13 +207,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // this round authorizes).
     let dash_cols = stroke_dash_column_loader(ctx);
 
-    let groups = build_color_detail_groups(
-        color_values.as_ref(),
+    let mut groups = build_color_detail_groups(
+        color_values,
         None,
         dash_cols.categorical.as_ref(),
         ctx.scales.color.is_some(),
         n,
     );
+    if let Some(binned) = &binned {
+        binned.order(&mut groups);
+    }
 
     // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);

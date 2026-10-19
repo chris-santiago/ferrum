@@ -986,19 +986,37 @@ pub fn color_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpe
     spec.encoding.color.as_ref().map(|e| e.field.as_str())
 }
 
+/// The buckets a mark under `binding` splits, groups and dodges by: `scale`'s,
+/// when `binding` carries a binned color's bin rule (`Color(bin=...)`) and
+/// `scale` is the discretizing scale such a rule cut
+/// ([`crate::render::scale_resolve::DiscretizedColors::is_cut_by_bin`]).
+/// `None` under any other scale (continuous, quantize, quantile, threshold,
+/// explicit `bins` alone) or binding. The one answer to whether a layer's bin rule
+/// takes effect, read by the series split, the dodge and stack keys, and the
+/// line and ribbon inert-color checks.
+pub(crate) fn binned_color_scale<'s>(
+    binding: Option<&crate::spec::encoding::EncodingSpec>,
+    scale: Option<&'s ColorScale>,
+) -> Option<&'s crate::render::scale_resolve::DiscretizedColors> {
+    binding?.color_bin()?;
+    match scale? {
+        ColorScale::Discretizing(buckets) if buckets.is_cut_by_bin() => Some(buckets),
+        _ => None,
+    }
+}
+
 /// Each row's bin under a binned color (`Color(bin=...)`): the index, low to
 /// high, of the bucket `scale` assigns the row's `binding` value, `None` for
-/// a row with no finite value. `None` unless `binding` is a binned color
-/// resolved to its discretizing scale and `batch` holds its column. The one
-/// reading of a row's bin, shared by the area's bands and the stack's order.
+/// a row with no finite value. `None` unless [`binned_color_scale`] answers
+/// for `binding` and `scale` and `batch` holds its column. The one reading of
+/// a row's bin, shared by the line family's series and the stack's order.
 pub(crate) fn binned_color_rows(
     binding: Option<&crate::spec::encoding::EncodingSpec>,
     scale: Option<&ColorScale>,
     batch: &RecordBatch,
 ) -> Option<Vec<Option<usize>>> {
-    let binding = binding.filter(|binding| binding.color_bin().is_some())?;
-    let Some(ColorScale::Discretizing(buckets)) = scale else { return None };
-    let values = super::arrow_cast::col_as_f64(batch, &binding.field).ok()?;
+    let buckets = binned_color_scale(binding, scale)?;
+    let values = super::arrow_cast::col_as_f64(batch, &binding?.field).ok()?;
     Some(values.into_iter().map(|v| v.and_then(|v| buckets.bucket(v))).collect())
 }
 

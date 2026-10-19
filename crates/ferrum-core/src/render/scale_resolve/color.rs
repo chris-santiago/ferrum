@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{admitted_aux_reads, admitted_binned_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, SortContext};
+use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, SortContext};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
@@ -161,11 +161,8 @@ pub fn build_color_scale(
             return Err(refusal);
         }
         let mut warnings = Vec::new();
-        let reads = if binned {
-            admitted_binned_reads(layer_reads, primary_batch, transform_outputs, &mut warnings)?
-        } else {
-            admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?
-        };
+        let kind = if binned { ColorReads::Binned } else { ColorReads::Kind { categorical: false } };
+        let reads = admitted_color_reads(layer_reads, c_enc, kind, primary_batch, transform_outputs, &mut warnings)?;
         let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, transform_origins, &mut warnings)?;
         return Ok((scale, warnings));
     }
@@ -203,13 +200,10 @@ pub fn build_color_scale(
                 return Err(refusal);
             }
         }
-        layer_reads.to_vec()
+        admitted_color_reads(layer_reads, c_enc, ColorReads::Grouped, primary_batch, transform_outputs, &mut exclusions)?
     } else {
-        if binned {
-            admitted_binned_reads(layer_reads, primary_batch, transform_outputs, &mut exclusions)?
-        } else {
-            admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)?
-        }
+        let kind = if binned { ColorReads::Binned } else { ColorReads::Kind { categorical: !is_continuous_color } };
+        admitted_color_reads(layer_reads, c_enc, kind, primary_batch, transform_outputs, &mut exclusions)?
     };
     let layer_reads = layer_reads.as_slice();
     if is_continuous_color {
@@ -649,7 +643,8 @@ fn build_discretizing_color_scale(
     bounds.push(lo);
     bounds.extend_from_slice(&partition.thresholds);
     bounds.push(hi);
-    Ok(DiscretizedColors::new(bounds, colors).map(|scale| (scale, warnings)))
+    let cut_by_bin = enc.color_bin().is_some();
+    Ok(DiscretizedColors::new(bounds, colors).map(|scale| (scale.cut_by_bin(cut_by_bin), warnings)))
 }
 
 /// Extract the bucket partition from a discretizing scale spec. See

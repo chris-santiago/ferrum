@@ -749,7 +749,7 @@ pub(in crate::render) fn color_grouping_area(chart_mark: Mark, reads: &[AuxRead<
 /// through the shared scale ([`crate::render::ExcludedLayerPlacement::SharedAxis`]).
 /// A raster image's cells under a categorical scale would draw nothing, so
 /// they are refused ([`RenderError::RasterColorNotQuantitative`]) rather
-/// than left out.
+/// than left out. The color scale admits through [`admitted_color_reads`].
 pub(in crate::render) fn admitted_aux_reads<'a>(
     reads: &[AuxRead<'a>],
     channel: &str,
@@ -758,42 +758,81 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let reads_categorical = |read: &AuxRead<'_>| read.reads_categorical(primary_batch, transform_outputs);
-    admit_reads(reads, channel, scale_reads_categorical, reads_categorical, primary_batch, transform_outputs, warnings)
+    let reads_categorical = |read: &AuxRead<'a>| read.reads_categorical(primary_batch, transform_outputs);
+    let reads_kind = ReadsKind { scale_reads_categorical, reads_categorical: &reads_categorical };
+    admit_reads(reads, channel, reads_kind, None, primary_batch, transform_outputs, warnings)
 }
 
-/// The reads a binned color's scale admits into the values its edges are cut
-/// from: [`admitted_aux_reads`]' rule for a numeric scale, with each read
-/// classified by its column's dtype alone ([`dtype_reads_categorical`]). A
-/// binned color bins numbers whatever type a binding declares, so a layer
-/// binding the field `ordinal` (Vega-Lite's binned ordinal legend) adds its
-/// values; a layer whose column holds no numbers is excluded, with one
-/// `LayerScaleExcluded`.
-pub(in crate::render) fn admitted_binned_reads<'a>(
+/// How a color scale classifies the reads it admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::render) enum ColorReads {
+    /// A binned color's scale: it bins numbers whatever type a binding
+    /// declares, so each read is classified by its column's dtype alone
+    /// ([`dtype_reads_categorical`]). A layer binding the field `ordinal`
+    /// (Vega-Lite's binned ordinal legend) adds its values; a layer whose
+    /// column holds no numbers is excluded.
+    Binned,
+    /// A mark that groups color (an area) reads every column as categories,
+    /// so no read conflicts with the scale's kind.
+    Grouped,
+    /// [`admitted_aux_reads`]' rule: each read classified by
+    /// [`column_reads_categorical`] against the scale's kind.
+    Kind {
+        /// The scale reads its columns as categories.
+        categorical: bool,
+    },
+}
+
+/// The reads the color scale `establishing` decides admits, by `kind`
+/// ([`ColorReads`]), under [`admitted_aux_reads`]' establishing-scale rule.
+/// The color scale also carries its establishing binding's bin rule: a later
+/// read whose own binding is binned ([`AuxRead::binned_binding`]) with a scale
+/// other than `establishing`'s is excluded too, with the same one
+/// [`RenderWarning::LayerScaleExcluded`], decided in the same pass so a read
+/// warns at most once. Its marks still draw through the panel's scale; a
+/// read with no bin rule joins as before.
+pub(in crate::render) fn admitted_color_reads<'a>(
     reads: &[AuxRead<'a>],
+    establishing: &crate::spec::encoding::EncodingSpec,
+    kind: ColorReads,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let reads_categorical = |read: &AuxRead<'_>| {
+    let column_kind = |read: &AuxRead<'a>| read.reads_categorical(primary_batch, transform_outputs);
+    let dtype_kind = |read: &AuxRead<'a>| {
         read.locate(primary_batch, transform_outputs)
             .is_some_and(|located| dtype_reads_categorical(located.col.data_type()))
     };
-    admit_reads(reads, "color", false, reads_categorical, primary_batch, transform_outputs, warnings)
+    let every_read_categorical = |_: &AuxRead<'a>| true;
+    let reads_kind = match kind {
+        ColorReads::Binned => ReadsKind { scale_reads_categorical: false, reads_categorical: &dtype_kind },
+        ColorReads::Grouped => ReadsKind { scale_reads_categorical: true, reads_categorical: &every_read_categorical },
+        ColorReads::Kind { categorical } => ReadsKind { scale_reads_categorical: categorical, reads_categorical: &column_kind },
+    };
+    admit_reads(reads, "color", reads_kind, Some(establishing), primary_batch, transform_outputs, warnings)
 }
 
-/// The admission rule [`admitted_aux_reads`] and [`admitted_binned_reads`]
-/// share: the lead always, then each read `reads_categorical` classifies as
-/// the scale reads.
+/// The kind a scale reads its columns as, and how a read is classified.
+struct ReadsKind<'r, 'a> {
+    scale_reads_categorical: bool,
+    reads_categorical: &'r dyn Fn(&AuxRead<'a>) -> bool,
+}
+
+/// The admission rule [`admitted_aux_reads`] and [`admitted_color_reads`]
+/// share: the lead always, then each read `reads_kind` classifies as the
+/// scale reads and, under a color scale's `bin_rule` binding, whose own bin
+/// rule (if any) is that binding's.
 fn admit_reads<'a>(
     reads: &[AuxRead<'a>],
     channel: &str,
-    scale_reads_categorical: bool,
-    reads_categorical: impl Fn(&AuxRead<'a>) -> bool,
+    reads_kind: ReadsKind<'_, 'a>,
+    bin_rule: Option<&crate::spec::encoding::EncodingSpec>,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
+    let ReadsKind { scale_reads_categorical, reads_categorical } = reads_kind;
     let Some((lead, rest)) = reads.split_first() else { return Ok(Vec::new()) };
     let mut admitted = vec![*lead];
     for read in rest {
@@ -805,7 +844,10 @@ fn admit_reads<'a>(
                 return Err(refusal);
             }
         }
-        if conflicts {
+        let other_bin_rule = bin_rule.is_some_and(|establishing| {
+            read.binned_binding().is_some_and(|binding| binding.scale != establishing.scale)
+        });
+        if conflicts || other_bin_rule {
             warnings.push(RenderWarning::LayerScaleExcluded {
                 layer: read.layer,
                 establishing: lead.layer,

@@ -1249,7 +1249,7 @@ fn plan_overlay_auxiliary(
 /// One color-consuming layer inside an Overlay group, for
 /// [`plan_line_ribbon_color_group_exemptions`]'s field/scale-keyed check.
 ///
-/// `mark` and `field` come from [`prepare::LayerPrepared`] — the SAME
+/// `draws` and `field` come from [`prepare::LayerPrepared`] — the SAME
 /// authority `render/prepare/legend.rs`'s local (non-composite) inert-color
 /// check reads — never straight off `ChartSpec.mark`/`encoding.color`,
 /// which for a desugared mark (`mark_ribbon` chief among them) name a
@@ -1271,7 +1271,10 @@ struct ColorConsumer {
     /// Index of this leaf within the group (0-based, group-local).
     member: usize,
     field: String,
-    mark: crate::spec::mark::Mark,
+    /// The layer's mark draws this numeric color through its member's own
+    /// color scale ([`prepare::draws_numeric_color`]): any mark but a line
+    /// or ribbon, or a line or ribbon under its binned color scale.
+    draws: bool,
     /// This leaf's OWN resolved color scale is `ColorInput::Numeric`
     /// (`Continuous`/`Discretizing`) — from `prepared[i].provisional_scales.color`,
     /// the same per-leaf resolution `render/prepare/legend.rs` itself reads.
@@ -1282,7 +1285,9 @@ struct ColorConsumer {
 /// same #89A group shape [`plan_overlay_groups`] names — `LayerChart`'s
 /// actual shape) whose own resolved color scale is Numeric-keyed AND which
 /// has a sibling leaf in the SAME group binding the SAME color field to a
-/// mark other than line/ribbon via ALSO a Numeric-keyed scale,
+/// mark that draws it ([`prepare::draws_numeric_color`]: a mark other than
+/// line/ribbon, or a line/ribbon under its binned color scale) via ALSO a
+/// Numeric-keyed scale,
 /// [`LeafScaleContext::color_scale_has_non_line_ribbon_sibling`] `= true`
 /// (T5b static-composite fix, spec §4.0's second bullet, spec-review cycle-2
 /// corrections). Field- and scale-keyed per spec §4.0's own justification
@@ -1326,7 +1331,6 @@ fn plan_line_ribbon_color_group_walk(
     leaf_cursor: &mut usize,
     contexts: &mut [LeafScaleContext],
 ) {
-    use crate::spec::mark::Mark;
     use super::scale_resolve::{ColorInput, ColorScale};
 
     match node {
@@ -1352,25 +1356,26 @@ fn plan_line_ribbon_color_group_walk(
                             consumers.push(ColorConsumer {
                                 member,
                                 field: enc.field.clone(),
-                                mark: layer.mark,
+                                draws: prepare::draws_numeric_color(layer.mark, enc, prep.provisional_scales.color.as_ref()),
                                 is_numeric,
                             });
                         }
                     }
                 }
 
-                // Exempt exactly the line/ribbon consumers with a same-field,
-                // Numeric-keyed, non-line/ribbon sibling — never the whole
-                // group indiscriminately.
+                // Exempt exactly the consumers that cannot draw the color
+                // (a line or ribbon not under its binned color scale) with a
+                // same-field, Numeric-keyed sibling that draws it — never the
+                // whole group indiscriminately.
                 for c in &consumers {
-                    if !matches!(c.mark, Mark::Line | Mark::Ribbon) || !c.is_numeric {
+                    if c.draws || !c.is_numeric {
                         continue;
                     }
                     let exempted = consumers.iter().any(|other| {
                         other.member != c.member
                             && other.field == c.field
                             && other.is_numeric
-                            && !matches!(other.mark, Mark::Line | Mark::Ribbon)
+                            && other.draws
                     });
                     if exempted {
                         contexts[group_start + c.member].color_scale_has_non_line_ribbon_sibling = true;
@@ -10516,6 +10521,88 @@ mod tests {
             let tree = composite(layout, vec![leaf_node_with(holds[0].spec.clone(), 0), leaf_node_with(holds[1].spec.clone(), 1)]);
             let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
             assert_eq!(legend_texts(&scene).iter().filter(|t| *t == "g").count(), 2, "{layout:?}");
+        }
+    }
+
+    /// Rows for a binned-color overlay: `z` over 1..9 in two interleaved
+    /// halves, so a binned line would split into two series.
+    fn binned_overlay_batch() -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("z", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![2.0, 1.0, 2.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 9.0, 2.0, 8.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A `mark` member over `x`/`y` colored by `z`, binned when `binned`.
+    fn z_member(mark: &str, binned: bool) -> ChartSpec {
+        let color = match binned {
+            true => serde_json::json!({"field": "z", "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}}),
+            false => serde_json::json!({"field": "z"}),
+        };
+        serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": mark,
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": color},
+        }))
+        .unwrap()
+    }
+
+    /// `LayerChart(line(color=z), line(Color(z, bin=True)))` and the same
+    /// with points: the first member's continuous `z` establishes the color
+    /// scale, so the second member's bin rule takes no effect and it is
+    /// excluded with one `LayerScaleExcluded`, as the same layers merged into
+    /// one chart are. The lines each draw one series, so `z` is inert on them:
+    /// `UnsupportedColorScaleOnMark` warns and no colorbar is drawn. Rejects
+    /// the binned line judged as drawing the continuous color, which left an
+    /// orphan colorbar and no warning.
+    #[test]
+    fn an_overlay_binned_member_under_a_continuous_color_is_excluded() {
+        let batch = binned_overlay_batch();
+        for mark in ["line", "point"] {
+            let members = [z_member(mark, false), z_member(mark, true)];
+            let (overlay, warnings) = overlay_route(&[(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())]);
+            let (merged, merged_warnings) = merged_route(&members, &batch);
+            let excluded = [&RenderWarning::LayerScaleExcluded {
+                layer: 1,
+                establishing: 0,
+                channel: "color".to_string(),
+                placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+            }];
+            assert_eq!(layer_exclusions(&warnings), excluded, "{mark}: {warnings:?}");
+            assert_eq!(layer_exclusions(&merged_warnings), excluded, "{mark}: {merged_warnings:?}");
+            let inert = |w: &[RenderWarning]| -> Vec<RenderWarning> {
+                w.iter().filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })).cloned().collect()
+            };
+            assert_eq!(inert(&warnings), inert(&merged_warnings), "{mark}");
+            if mark == "line" {
+                let lines_inert = RenderWarning::UnsupportedColorScaleOnMark {
+                    marks: vec!["line".to_string()],
+                    scale_kind: "continuous".to_string(),
+                    suppressed: true,
+                };
+                assert_eq!(inert(&warnings), [lines_inert], "{warnings:?}");
+                assert!(legend_texts(&overlay).is_empty(), "no colorbar: {:?}", legend_texts(&overlay));
+                let polylines = overlay
+                    .panels
+                    .iter()
+                    .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+                    .filter(|node| matches!(node, SceneNode::Polyline { .. }))
+                    .count();
+                assert_eq!(polylines, 2, "one series per line");
+            } else {
+                assert_eq!(inert(&warnings), [], "{warnings:?}");
+            }
+            assert_eq!(overlay.legend, merged.legend, "{mark}");
+            assert_eq!(mark_nodes(&overlay), mark_nodes(&merged), "{mark}");
         }
     }
 }

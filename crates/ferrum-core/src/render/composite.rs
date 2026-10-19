@@ -44,7 +44,7 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    add_distinct_source, admitted_aux_reads, admitted_binned_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead,
+    add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead, ColorReads,
     SortContext, SortRows,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
@@ -1306,7 +1306,7 @@ fn leaf_color_domain(
     // the leaf's own render refuses it.
     if let Some(reads) = reads.as_deref().filter(|reads| reads.first().is_some_and(AuxRead::is_raster_cells)) {
         let categorical = force_categorical || matches!(enc.type_, Some(SpecDataType::Nominal | SpecDataType::Ordinal));
-        let Ok(reads) = admitted_aux_reads(reads, "color", false, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+        let Ok(reads) = admitted_color_reads(reads, enc, ColorReads::Kind { categorical: false }, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
         else {
             return Ok(None);
         };
@@ -1328,8 +1328,11 @@ fn leaf_color_domain(
     // scale are the leaf render's refusal, so they share nothing here.
     let reads = match reads.map(|reads| match force_categorical {
         true if reads.iter().any(AuxRead::is_raster_cells) => None,
-        true => Some(reads),
-        false => admitted_aux_reads(&reads, "color", !is_continuous, leaf.final_batch, leaf.transform_outputs, &mut Vec::new()).ok(),
+        true => admitted_color_reads(&reads, enc, ColorReads::Grouped, leaf.final_batch, leaf.transform_outputs, &mut Vec::new()).ok(),
+        false => {
+            let kind = ColorReads::Kind { categorical: !is_continuous };
+            admitted_color_reads(&reads, enc, kind, leaf.final_batch, leaf.transform_outputs, &mut Vec::new()).ok()
+        }
     }) {
         Some(None) => return Ok(None),
         Some(Some(reads)) => Some(reads),
@@ -1431,7 +1434,7 @@ fn leaf_binned_samples(
     reads: Option<&[AuxRead<'_>]>,
 ) -> SharedDomain {
     let sources = match reads {
-        Some(reads) => admitted_binned_reads(reads, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+        Some(reads) => admitted_color_reads(reads, enc, ColorReads::Binned, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
             .map(|admitted| binned_color_sources(&admitted, leaf.final_batch, leaf.transform_outputs, leaf.transform_origins, false))
             .unwrap_or_default(),
         None => {
