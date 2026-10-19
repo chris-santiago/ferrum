@@ -60,6 +60,10 @@ class EncodingSpec:
     scheme: Optional[str]
     format: Optional[str]
     format_type: Optional[str]
+    #: The class a binned color was written with ("Color", "Fill" or "Stroke").
+    #: Accepted only beside a binned color scale (a ``bin-ordinal`` scale with
+    #: ``bin``); without one it is refused, at construction and at render.
+    bin_channel: Optional[str]
     def __init__(
         self,
         field: str,
@@ -76,6 +80,7 @@ class EncodingSpec:
         scheme: Optional[str] = None,
         format: Optional[str] = None,
         format_type: Optional[str] = None,
+        bin_channel: Optional[Literal["Color", "Fill", "Stroke"]] = None,
     ) -> None: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...

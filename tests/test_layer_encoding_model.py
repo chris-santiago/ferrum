@@ -3002,6 +3002,11 @@ _GROUP_ROWS = pl.DataFrame(
 #: Unit bins over [1, 5], so each row's bin is the floor of its ``v``.
 _UNIT_BINS = {"bin_width": 1.0, "extent": (1.0, 5.0), "nice": False}
 _GROUP_ROWS_BINNED = _GROUP_ROWS.with_columns(pl.col("v").floor().alias("v_bin"))
+#: The wire scale ``Color("v", bin=_UNIT_BINS)`` draws through.
+_UNIT_BIN_SCALE = {
+    "type": "bin-ordinal",
+    "bin": {"bin_width": 1.0, "extent": [1.0, 5.0], "nice": False},
+}
 
 
 def _binned_color() -> fm.Color:
@@ -3142,9 +3147,10 @@ def test_the_text_wire_carries_its_grouping_key_and_no_color(door):
 def test_a_text_under_a_binned_color_draws_one_label_per_binned_bar(door, own_text, kind):
     """A text under a binned color bins with it, with or without its own aggregate.
 
-    One label per binned bar, and its wire ``group`` names the Bin's column
-    the bars read. Rejects grouping by the raw field, which drew one label
-    per distinct value over fewer bars.
+    One label per binned bar, and its wire ``group`` carries the bars' binned
+    color scale, so Rust groups its statistic, dodge and stack by those bins.
+    Rejects grouping by the raw field, which drew one label per distinct value
+    over fewer bars.
     """
     from tests._svg_rects import data_bar_rects, mark_layer
 
@@ -3167,7 +3173,7 @@ def test_a_text_under_a_binned_color_draws_one_label_per_binned_bar(door, own_te
     assert len(labels) == bars
     merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
     text = next(lay for lay in _wire(merged)["layers"] if lay["mark"] == "text")
-    assert text["encoding"]["group"] == {"field": "bin_start"}
+    assert text["encoding"]["group"] == {"field": "v", "scale": _UNIT_BIN_SCALE}
 
 
 # Dodged and stacked labels sit on their bars: Rust's position grouping
@@ -3279,11 +3285,35 @@ def test_a_dodged_label_under_a_binned_color_sits_on_its_bar(route):
     assert labels == centers
 
 
+def test_a_bar_stacked_by_a_binned_color_draws_one_segment_per_x_and_bin():
+    """A mean bar stacked by a binned color: one segment per (x, bin), each its bin's mean.
+
+    Each bar's segments split its height as that x's bin means split their
+    total. Rejects grouping by the raw field, which stacked two segments per
+    bin.
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    svg = _quiet(_binned_mark("bar", fm.Stack(), color=_binned_color()).to_svg)
+    bars: dict[float, list[float]] = {}
+    for r in data_bar_rects(mark_layer(svg)):
+        bars.setdefault(round(float(r["x"]), 1), []).append(float(r["height"]))
+    means = _GROUP_ROWS_BINNED.group_by(["g", "v_bin"]).agg(pl.col("y").mean())
+    expected = [sorted(means.filter(pl.col("g") == g)["y"].to_list()) for g in ("a", "b")]
+    drawn = [sorted(bars[x]) for x in sorted(bars)]
+    assert [len(h) for h in drawn] == [len(m) for m in expected] == [4, 4]
+    for heights, bin_means in zip(drawn, expected, strict=True):
+        assert [h / sum(heights) for h in heights] == pytest.approx(
+            [m / sum(bin_means) for m in bin_means], abs=1e-3
+        )
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "a bar stacked by a binned color does not draw one segment per (x, bin), with or "
-        "without an attached label, so no label can sit on its segment"
+        "the stacked y-domain preview does not widen over a stacking layer that reads a "
+        "statistic's named output (a layered text label's bar), so segments above the "
+        "unstacked maximum are culled, for any color"
     ),
 )
 def test_a_stacked_label_under_a_binned_color_sits_on_its_segment():
@@ -7445,66 +7475,1224 @@ def test_X5_a_named_encoding_bin_is_refused_on_every_route(case):
 
 @pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
 def test_a_named_color_bin_is_refused(spelling):
-    chart = mk("bar", x="g", y="count()", color=fm.Color("v", bin=_named_bin(spelling)))
+    """A binned color publishes no rows, so its Bin's name is refused when the channel is built."""
     with pytest.raises(ValueError) as exc:
-        _quiet(chart.to_svg)
+        fm.Color("v", bin=_named_bin(spelling))
     written = _SPELLINGS[spelling]
     assert str(exc.value) == _named_refusal(f"color=Color('v', {written})", written)
 
 
-#: Explicit edges, so an independent oracle knows them: 0, 8/3, 16/3, 8.
-_COLOR_BIN_EDGES = {"bin_count": 3, "extent": (0.0, 8.0), "nice": False}
+# ---------------------------------------------------------------------------
+# V7, V11: bin= on the color family is a binned color scale (spec §4.4, §6.5, §6.7)
+# ---------------------------------------------------------------------------
+#
+# ``Color/Fill/Stroke(field, bin=...)`` keeps the rows and draws the field
+# through a ``bin-ordinal`` scale whose edges Rust cuts with the Bin
+# transform's rule. A statistic grouped by the color groups by its bins, and
+# only a statistic lowered from an encoding or a mark does: it sits after its
+# chain's statistics marker. Rejects the row-replacing ``Bin`` the color
+# family used to lower to: 32 circles from 8 rows, titled ``bin_start``.
+
+_COLOR_CLASSES = {"color": fm.Color, "fill": fm.Fill, "stroke": fm.Stroke}
+_STATISTICS_MARKER = {"type": "identity", "statistics": True}
 
 
-def _color_own_groupby(spelling: str) -> fm.Chart:
-    own = (
-        fm.Bin("v", groupby=["c"], **_COLOR_BIN_EDGES)
-        if spelling == "pre-built"
-        else {"groupby": ["c"], **_COLOR_BIN_EDGES}
+def _binned_z(cls: type = fm.Color, data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
+    """``P`` colored by ``z``'s bins through *cls*."""
+    channel = cls.__name__.lower()
+    return P(data, **{channel: cls("z", bin=True)}, **encoding)
+
+
+def _V7_doors(cls: type) -> dict[str, Case]:
+    def binned(data: pl.DataFrame = df) -> fm.Chart:
+        return _binned_z(cls, data)
+
+    color = lambda: {cls.__name__.lower(): cls("z", bin=True)}  # noqa: E731
+    return {
+        "F": Case(binned, marks={"circle": 8}),
+        "L": Case(
+            lambda: P().layer(layer("point", y="r", **color())),
+            (P, lambda: P(y="r", **color())),
+            chart_level=None,
+        ),
+        "LD": Case(
+            lambda: P().layer(fm.Layer(data=df2, mark="point", encoding=color())),
+            (P, lambda: binned(df2)),
+            chart_level=None,
+        ),
+        "+s": Case(lambda: binned() + line(), (binned, line)),
+        "+d": Case(lambda: binned() + P(df2), (binned, lambda: P(df2))),
+        **plus_doors(binned, line),
+        "Fc": Case(lambda: binned().facet("c"), (lambda: binned().facet("c"),), faceted=True),
+    }
+
+
+_V7_CASES = {
+    f"V7/{name}/{door}": case
+    for name, cls in _COLOR_CLASSES.items()
+    for door, case in _V7_doors(cls).items()
+}
+
+
+def _wire_layers_and_steps(chart: Any) -> list[dict]:
+    """Every transform on *chart*'s wire, a branch's inner steps included."""
+    merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
+    steps = []
+    for step in _wire(merged).get("transforms") or []:
+        steps += [step, *step.get("transforms", [])]
+    return steps
+
+
+@pytest.mark.parametrize("case", sorted(_V7_CASES))
+def test_V7_V11_a_binned_color_keeps_its_rows_and_draws_a_legend_of_bins_titled_by_its_field(
+    case,
+):
+    """V7/V11: one mark per row, a legend of bin ranges titled ``z``, and no ``Bin`` step.
+
+    Each layer draws what it draws alone (the oracle census) on every door,
+    and the legend's title is the field on every door, never ``bin_start``.
+    """
+    c = _V7_CASES[case]
+    check_rendering(c)
+    chart = _quiet(c.build)
+    assert not [s for s in _wire_layers_and_steps(chart) if s["type"] == "bin"]
+    if c.static:
+        svg = _quiet(chart.to_svg)
+        assert list(legend_set(svg)) == ["z"]
+        assert _legend_title_count(svg, "z") == 1
+
+
+@pytest.mark.parametrize("cls", sorted(_COLOR_CLASSES.values(), key=lambda c: c.__name__))
+def test_V7_a_secondary_y_inheriting_a_binned_color_keeps_the_hosts_rows_and_legend(cls):
+    """SY: the host's 8 points stay 8 under the binned color its secondary layer inherits."""
+    chart = _quiet(lambda: _binned_z(cls) + SY("r"))
+    svg = _quiet(chart.to_svg)
+    assert tag_counts(svg)["circle"] == 8
+    assert legend_set(svg) == legend_set(_quiet(_binned_z(cls).to_svg))
+    assert legend_set(svg) == {"z": _bin_range_labels(df["z"])}
+    assert not [s for s in _wire_layers_and_steps(chart) if s["type"] == "bin"]
+
+
+def _bin_range_labels(values: pl.Series) -> tuple[str, ...]:
+    """The bin-range labels ``Color("z", bin=True)`` draws over *values* on one flat chart.
+
+    A flat chart's binned color cuts the ``Bin`` transform's own edges over its
+    rows, so this is the edge set every door must draw over the same values.
+    """
+    frame = pl.DataFrame({"v": range(len(values)), "y": range(len(values)), "z": values})
+    chart = fm.Chart(frame).mark_point().encode(x="v", y="y", color=fm.Color("z", bin=True))
+    return legend_set(_quiet(chart.to_svg))["z"]
+
+
+# Inherited binned color (brief: an attached layer inheriting a binned color
+# shares the host's scale): one legend over both layers' rows, no Bin step.
+_INHERIT_ROWS = df.select("v", "r", "z").with_columns((pl.col("z") + 12.5).alias("z"))
+
+
+def _inherit_door(door: str, color: Any) -> Callable[[], fm.Chart]:
+    def build() -> fm.Chart:
+        host = P(color=color)
+        if door == "L":
+            return host.layer(layer("point", y="r"))
+        return host.layer(fm.Layer(data=_INHERIT_ROWS, mark="point", encoding={"y": "r"}))
+
+    return build
+
+
+@pytest.mark.parametrize("door", ["L", "LD"])
+def test_V7_an_attached_layer_inheriting_a_binned_color_shares_the_hosts_scale(door):
+    """Host ``Color("z", bin=True)`` inherited by an attached point layer: one legend of bins.
+
+    The legend's edges are ``fm.Bin``'s over both layers' ``z``, each layer
+    draws one mark per row, and no Bin step is on the wire. Rejects a layer
+    that drops the inherited bin rule and colors continuously, and edges cut
+    from the host's rows alone.
+    """
+    chart = _quiet(_inherit_door(door, fm.Color("z", bin=True)))
+    svg = _quiet(chart.to_svg)
+    other = df["z"] if door == "L" else _INHERIT_ROWS["z"]
+    assert tag_counts(svg)["circle"] == df.height + other.len()
+    # One source counts once: the L layer reads the host's own rows.
+    union = df["z"] if door == "L" else pl.concat([df["z"], other])
+    assert legend_set(svg) == {"z": _bin_range_labels(union)}
+    # The attached layer draws the host's binding whole, bin rule included: a
+    # layer's own binding replaces an inherited one entirely.
+    wire = _wire(chart)
+    drawn = wire["layers"][1]["encoding"].get("color") or wire["encoding"]["color"]
+    assert drawn["scale"]["type"] == "bin-ordinal" and "bin" in drawn["scale"]
+    assert not [s for s in _wire_layers_and_steps(chart) if s["type"] == "bin"]
+
+
+@pytest.mark.parametrize("door", ["L", "LD"])
+def test_V7_an_attached_layer_under_an_unbinned_host_color_draws_its_continuous_legend(door):
+    """Control: the same chart with an unbinned ``z`` draws a continuous colorbar, not bins."""
+    binned = legend_set(_quiet(_quiet(_inherit_door(door, fm.Color("z", bin=True))).to_svg))
+    plain = legend_set(_quiet(_quiet(_inherit_door(door, fm.Color("z"))).to_svg))
+    assert plain != binned
+
+
+#: Each ``bin=`` spelling and the ``bin`` rule its scale carries on the wire.
+_BIN_RULES: dict[str, tuple[Callable[[], Any], dict]] = {
+    "True": (lambda: True, {"nice": True}),
+    "Bin-count": (lambda: fm.Bin("z", bin_count=4), {"bin_count": 4, "nice": True}),
+    "dict-width": (lambda: {"bin_width": 5.0}, {"bin_width": 5.0, "nice": True}),
+    "dict-extent": (
+        lambda: {"extent": (0.0, 60.0), "bin_count": 3, "nice": False},
+        {"bin_count": 3, "extent": [0.0, 60.0], "nice": False},
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+@pytest.mark.parametrize("rule", sorted(_BIN_RULES))
+def test_V7_a_bins_parameters_map_to_the_binned_scales_bin_rule(rule, name):
+    """``bin_count``, ``bin_width``, ``extent`` and ``nice`` reach the scale's ``bin`` rule."""
+    value, expected = _BIN_RULES[rule]
+    chart = P(**{name: _COLOR_CLASSES[name]("z", bin=value())})
+    color = _wire(chart)["encoding"]["color"]
+    assert color == {
+        "field": "z",
+        "scale": {"type": "bin-ordinal", "bin": expected},
+        "bin_channel": _COLOR_CLASSES[name].__name__,
+    }
+
+
+def test_V7_the_bin_rule_sets_the_legends_edges():
+    """``bin={"extent": (0, 60), "bin_count": 3, "nice": False}`` draws edges 0, 20, 40, 60."""
+    rule = {"extent": (0.0, 60.0), "bin_count": 3, "nice": False}
+    svg = _quiet(P(color=fm.Color("z", bin=rule)).to_svg)
+    assert legend_set(svg) == {"z": ("0", "20", "40", "60")}
+
+
+#: Each Bin parameter a binned color refuses: it computes no statistic,
+#: groups no edges, and publishes no rows.
+_COLOR_BIN_REFUSED: dict[str, dict] = {
+    "groupby": {"groupby": ["c"]},
+    "cumulative": {"cumulative": True},
+    "agg_field/agg": {"agg_field": "y", "agg": "mean"},
+    "aggregates": {"aggregates": [fm.AggregateOp("y", "mean", "mean_y")]},
+    "per_row": {"per_row": True},
+    "shared_extent": {"shared_extent": True},
+}
+
+
+def _color_bin_value(param: str, spelling: str) -> Any:
+    kwargs = _COLOR_BIN_REFUSED[param]
+    return fm.Bin("z", **kwargs) if spelling == "pre-built" else dict(kwargs)
+
+
+def _color_bin_refusal(cls: type, param: str, spelling: str) -> str:
+    written = f"{cls._channel_name}={cls.__name__}('z', {_SPELLINGS[spelling]})"
+    return (
+        f"{written} declares {param}, but bin= on {cls.__name__} builds a binned color "
+        "scale: each row keeps its 'z' and is colored by its bin, and no statistic is "
+        f"computed, so {param} would be ignored. Remove {param} from {_SPELLINGS[spelling]}; "
+        "to compute it, use .transform(fm.Bin('z', ...)) and bind its output column."
     )
-    return mk("bar", x="g", y="count", color=fm.Color("v", bin=own))
 
 
-@pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
+_COLOR_BIN_REFUSAL_CASES = {
+    f"V7/{name}/{param}/{spelling}/{door}": (name, param, spelling, door)
+    for name in _COLOR_CLASSES
+    for param in _COLOR_BIN_REFUSED
+    for spelling in _SPELLINGS
+    for door in _vocabulary_doors(name, lambda: None)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_COLOR_BIN_REFUSAL_CASES))
+def test_V7_a_binned_colors_bin_declaring_a_statistic_or_grouping_is_refused_on_every_door(case):
+    """A Bin carrying a statistic, a groupby, ``per_row`` or ``shared_extent`` refuses, named.
+
+    Rejects ignoring the parameter, and the row-replacing Bin that computed it
+    and replaced the chart's rows.
+    """
+    name, param, spelling, door = _COLOR_BIN_REFUSAL_CASES[case]
+    cls = _COLOR_CLASSES[name]
+    build = _vocabulary_doors(name, lambda: cls("z", bin=_color_bin_value(param, spelling)))[door]
+    with pytest.raises(ValueError) as refused:
+        _quiet(build)
+    assert str(refused.value) == _color_bin_refusal(cls, param, spelling)
+
+
+@pytest.mark.parametrize("door", sorted(_vocabulary_doors("color", lambda: None)))
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+def test_V7_bin_with_scale_is_refused_with_the_spec_string_on_every_door(name, door):
+    cls = _COLOR_CLASSES[name]
+    build = _vocabulary_doors(
+        name, lambda: cls("z", bin=True, scale=fm.BinOrdinalScale(bins=[0.0, 20.0, 50.0]))
+    )[door]
+    with pytest.raises(ValueError) as refused:
+        _quiet(build)
+    assert str(refused.value) == (
+        f"{cls.__name__}(bin=...) cannot be combined with scale=: bin= builds the channel's "
+        "binned color scale. Pass explicit edges with scale=fm.BinOrdinalScale(bins=[...]) "
+        "and drop bin=, or drop scale=."
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+def test_V7_bin_with_aggregate_on_one_color_channel_stays_refused(name):
+    cls = _COLOR_CLASSES[name]
+    with pytest.raises(ValueError) as refused:
+        cls("z", bin=True, aggregate="mean")
+    assert str(refused.value).startswith(
+        f"encoding channel {cls._channel_name!r} carries both bin= and aggregate="
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+def test_V7_a_bin_that_is_no_bin_or_bins_another_field_is_refused(name):
+    cls = _COLOR_CLASSES[name]
+    with pytest.raises(ValueError) as not_a_bin:
+        cls("z", bin=3)
+    assert str(not_a_bin.value) == (
+        f"{cls.__name__}(bin=3) is not a bin: pass bin=True, a dict of Bin parameters "
+        "(bin_count, bin_width, extent, nice) or fm.Bin(...)."
+    )
+    with pytest.raises(ValueError) as other_field:
+        cls("z", bin=fm.Bin("v"))
+    assert str(other_field.value) == (
+        f"{cls._channel_name}={cls.__name__}('z', bin=Bin(...)) bins 'v', but {cls.__name__} "
+        "colors by 'z': a binned color bins the field it colors by. Build the Bin over 'z', "
+        "or color by 'v'."
+    )
+
+
+#: ``df2`` with a string ``z``, the frame a right operand or data layer reads.
+_STRING_Z = df2.with_columns(pl.col("g").alias("z"))
+
+_NON_NUMERIC_DOORS: dict[str, Callable[[str, Any], fm.Chart]] = {
+    "F": lambda name, color: P(**{name: color("g")}),
+    "L": lambda name, color: P().layer(layer("point", y="r", **{name: color("g")})),
+    "LD": lambda name, color: P().layer(
+        fm.Layer(data=_STRING_Z, mark="point", encoding={name: color("z")})
+    ),
+    "+d": lambda name, color: P() + P(_STRING_Z, **{name: color("z")}),
+    "transform": lambda name, color: (
+        fm.Chart(df)
+        .transform(fm.transform_calculate("s", "datum.g + 'x'"))
+        .mark_point()
+        .encode(x="v", y="y", **{name: color("s")})
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_NON_NUMERIC_DOORS))
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+def test_V7_a_binned_color_over_a_non_numeric_column_is_refused_naming_its_class(name, door):
+    """A bin cuts numbers: a string column is refused naming the class written, on every door.
+
+    One voice on every door, including rows a transform, a right operand or a
+    data layer produce, which Python cannot see. Rejects the wire's
+    ``color(bin=...)``, which names the channel the family draws as rather
+    than the class the caller wrote.
+    """
+    cls = _COLOR_CLASSES[name]
+    chart = _NON_NUMERIC_DOORS[door](name, lambda field: cls(field, bin=True))
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert re.search(
+        rf"{cls.__name__}\(bin=\.\.\.\) bins numbers, but column '[gzs]' is Utf8\. "
+        r"Bind a numeric column, or drop bin=$",
+        str(refused.value),
+    ), str(refused.value)
+    assert "color(bin=" not in str(refused.value)
+
+
+def _non_numeric_refusal(cls: type, column: str) -> str:
+    return (
+        f"{cls.__name__}(bin=...) bins numbers, but column {column!r} is Utf8. "
+        "Bind a numeric column, or drop bin="
+    )
+
+
+#: Each layered shape whose later layer alone bins a string column, with the
+#: class written and the column: refused whatever color scale another layer
+#: establishes.
+_LATER_LAYER_NON_NUMERIC: dict[str, tuple[Callable[[], Any], type, str]] = {
+    "unbinned-categorical+binned": (
+        lambda: P(fill="g") + P(fill=fm.Fill("g", bin=True)),
+        fm.Fill,
+        "g",
+    ),
+    "binned-numeric+binned": (
+        lambda: P(fill=fm.Fill("z", bin=True)) + P(fill=fm.Fill("g", bin=True)),
+        fm.Fill,
+        "g",
+    ),
+    "host-color+layer-stroke": (
+        lambda: P(color="z").layer(
+            fm.Layer(mark="point", encoding={"stroke": fm.Stroke("g", bin=True)})
+        ),
+        fm.Stroke,
+        "g",
+    ),
+    "+d-right-operand": (
+        lambda: P(color=fm.Color("z", bin=True)) + P(_STRING_Z, color=fm.Color("z", bin=True)),
+        fm.Color,
+        "z",
+    ),
+    "+d-right-operand-interactive": (
+        lambda: (
+            P(color=fm.Color("z", bin=True)) + P(_STRING_Z, color=fm.Color("z", bin=True))
+        ).interactive(),
+        fm.Color,
+        "z",
+    ),
+}
+
+
+def _render_any(chart: Any) -> str:
+    return chart.to_svg() if hasattr(chart, "to_svg") else chart.to_html()
+
+
+@pytest.mark.parametrize("case", sorted(_LATER_LAYER_NON_NUMERIC))
+def test_V7_a_later_layers_binned_color_over_a_string_column_is_refused(case):
+    """A binned color over text is refused on the layer that wrote it, whoever establishes the scale.
+
+    Rejects judging the binding only when it establishes the color scale: an
+    unbinned layer 0 left the later binned layer unchecked (it rendered
+    silently), and a binned numeric layer 0 excluded it with a warning.
+    """
+    build, cls, column = _LATER_LAYER_NON_NUMERIC[case]
+    with pytest.raises(ValueError) as refused:
+        _quiet(lambda: _render_any(build()))
+    assert str(refused.value) == _non_numeric_refusal(cls, column)
+
+
+#: ``df`` with a string ``n``: the rows an own-data layer reads under a host
+#: binning a numeric ``n``.
+_GATE_ROWS = pl.DataFrame({"v": [1.0, 2.0], "y": [4.0, 3.0], "n": ["a", "b"]})
+_GATE_HOST_ROWS = df.with_columns(pl.col("z").alias("n"))
+
+
+def _literal_paint(cls: type) -> Callable[[], Any]:
+    """Two points painted by a literal, composed under ``cls('g', bin=True)``."""
+    name = cls.__name__.lower()
+    paint = "stroke" if cls is fm.Stroke else "fill"
+
+    def build() -> Any:
+        a = fm.Chart(df).mark_point(**{paint: "black"}).encode(x="v", y="y")
+        b = fm.Chart(df).mark_point(**{paint: "red"}).encode(x="v", y="y")
+        return (a + b).encode(**{name: cls("g", bin=True)})
+
+    return build
+
+
+def _json_literal_fill() -> Any:
+    """The JSON door: a chart-level binned Fill over text, a layer painting its own fill."""
+    from ferrum import _core
+
+    binned = {
+        "field": "g",
+        "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": False}},
+        "bin_channel": "Fill",
+    }
+    xy = {"x": {"field": "v"}, "y": {"field": "y"}}
+    spec = _core.ChartSpec.from_json(
+        json.dumps(
+            {
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {**xy, "color": binned},
+                "layers": [{"mark": "point", "encoding": xy, "mark_style": {"fill": "black"}}],
+            }
+        )
+    )
+    return _core.render_svg(spec, df, viewport=(300.0, 200.0))
+
+
+#: Each shape where the color scale reads a binned binding the layer itself
+#: does not draw (its own literal paint clears it), with the class and column.
+_SCALE_READ_NON_NUMERIC: dict[str, tuple[Callable[[], Any], type, str]] = {
+    **{
+        f"+literal-paint/{cls.__name__}": (lambda cls=cls: _literal_paint(cls)().to_svg(), cls, "g")
+        for cls in (fm.Color, fm.Fill, fm.Stroke)
+    },
+    "+literal-paint/interactive": (
+        lambda: _literal_paint(fm.Fill)().interactive().to_html(),
+        fm.Fill,
+        "g",
+    ),
+    "LD-literal-fill": (
+        lambda: (
+            fm.Chart(_GATE_HOST_ROWS)
+            .mark_point()
+            .encode(x="v", y="y", fill=fm.Fill("n", bin=True))
+            .layer(fm.Layer(data=_GATE_ROWS, mark="point", mark_kwargs={"fill": "red"}))
+            .to_svg()
+        ),
+        fm.Fill,
+        "n",
+    ),
+    "LD-same-field-own-color": (
+        lambda: (
+            fm.Chart(_GATE_HOST_ROWS)
+            .mark_point()
+            .encode(x="v", y="y", fill=fm.Fill("n", bin=True))
+            .layer(fm.Layer(data=_GATE_ROWS, mark="point", encoding={"color": "n"}))
+            .to_svg()
+        ),
+        fm.Fill,
+        "n",
+    ),
+    "json-literal-fill": (_json_literal_fill, fm.Fill, "g"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SCALE_READ_NON_NUMERIC))
+def test_V7_a_binned_color_the_scale_reads_over_text_is_refused_naming_its_class(case):
+    """A binned binding the color scale reads over text is refused, though no layer draws it.
+
+    A layer painting its own literal fill draws no inherited color, but the
+    scale still reads its column. Rejects a refusal naming the wrong channel
+    with no ``bin=`` remedy (two literal-paint layers), and a silent exclusion
+    of the binned rule (an own-data layer with a literal fill). The same-field
+    own color, which the layer completes binned, stays refused.
+    """
+    build, cls, column = _SCALE_READ_NON_NUMERIC[case]
+    with pytest.raises(ValueError) as refused:
+        _quiet(build)
+    assert str(refused.value) == _non_numeric_refusal(cls, column)
+
+
+def test_V7_a_later_layers_unbinned_string_color_under_a_binned_layer_is_excluded_once():
+    """Control: a later layer whose own color is unbinned is excluded from the binned scale, warned once."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = (P(color=fm.Color("z", bin=True)) + P(color="g")).to_svg()
+    excluded = [str(w.message) for w in caught if "stays out of that scale" in str(w.message)]
+    assert len(excluded) == 1, excluded
+    assert list(legend_set(svg)) == ["z"]
+
+
+def test_an_encoding_spec_carries_bin_channel_only_beside_a_binned_color_scale():
+    """``bin_channel`` names a binned color's class: without a binned scale it is refused."""
+    with pytest.raises(ValueError, match=r"drop bin_channel$"):
+        fm.EncodingSpec("x", bin_channel="Fill")
+    spec = fm.EncodingSpec("z", scale={"type": "bin-ordinal", "bin": {}}, bin_channel="Fill")
+    assert spec.bin_channel == "Fill"
+
+
+#: Each door a binned color is written on, with the override applied to the chart.
+_BINNED_OVERRIDE_DOORS: dict[str, Callable[[str, Any], Any]] = {
+    "F": lambda name, ch: P(**{name: ch}),
+    "+": lambda name, ch: (P() + line()).encode(**{name: ch}),
+    "L": lambda name, ch: P().layer(fm.Layer(mark="point", encoding={"y": "r", name: ch})),
+    "LD": lambda name, ch: P().layer(
+        fm.Layer(data=df2, mark="point", encoding={"y": "y", name: ch})
+    ),
+}
+
+#: Each refused leaf (wire key suffix) and a value; ``type`` values other than
+#: ``bin-ordinal`` strip the binned scale.
+_REFUSED_BINNED_LEAVES: dict[str, Any] = {
+    "type-linear": ("type", "linear"),
+    "bins": ("bins", [0.0, 25.0, 50.0]),
+    "bin": ("bin", {"bin_count": 2}),
+    "domain": ("domain", [0.0, 50.0]),
+}
+
+#: (class written, override prefix): the same-named leaf, and an alias
+#: source's binned Fill reached through the color leaf.
+_BINNED_OVERRIDE_CLASSES = {
+    "color": ("color", fm.Color, "color"),
+    "fill": ("fill", fm.Fill, "fill"),
+    "stroke": ("stroke", fm.Stroke, "stroke"),
+    "fill-via-color-leaf": ("fill", fm.Fill, "color"),
+}
+
+_BINNED_OVERRIDE_CASES = {
+    f"{who}/{leaf}/{door}/{kind}": (who, leaf, door, kind)
+    for who in _BINNED_OVERRIDE_CLASSES
+    for leaf in [*_REFUSED_BINNED_LEAVES, *(["type-quantize"] if who == "color" else [])]
+    for door in _BINNED_OVERRIDE_DOORS
+    for kind in ("static", "interactive")
+}
+
+
+def _binned_override_chart(who: str, door: str, **leaves: Any) -> Any:
+    name, cls, _ = _BINNED_OVERRIDE_CLASSES[who]
+    chart = _BINNED_OVERRIDE_DOORS[door](name, cls("z", bin=True))
+    return chart.override(**leaves) if leaves else chart
+
+
+@pytest.mark.parametrize("case", sorted(_BINNED_OVERRIDE_CASES))
+def test_V7_an_override_leaf_replacing_a_binned_colors_scale_is_refused(case):
+    """A scale override that replaces what ``bin=`` builds is refused as ``scale=`` is.
+
+    Named in the channel door's voice: the class written and the override
+    path written, never the wire's ``bin_channel``. Rejects the leaf
+    silently replacing the bin rule or edges (``bins``, ``bin``), a refusal
+    steering to ``bin``/``bins`` (``domain``), and a type override reaching
+    the wire's ``bin_channel`` refusal.
+    """
+    who, leaf, door, kind = _BINNED_OVERRIDE_CASES[case]
+    _, cls, prefix = _BINNED_OVERRIDE_CLASSES[who]
+    key, value = ("type", "quantize") if leaf == "type-quantize" else _REFUSED_BINNED_LEAVES[leaf]
+    path = f"{prefix}_scale_{key}"
+    chart = _binned_override_chart(who, door, **{path: value})
+    with pytest.raises(fm.FerrumOverrideError) as refused:
+        _quiet(lambda: chart.to_svg() if kind == "static" else chart.interactive().to_html())
+    assert str(refused.value) == (
+        f"{cls.__name__}(bin=...) cannot be combined with Chart.override({path}=...): bin= "
+        "builds the channel's binned color scale. Pass explicit edges with "
+        "scale=fm.BinOrdinalScale(bins=[...]) and drop bin=, or drop "
+        f"Chart.override({path}=...)."
+    )
+    assert "bin_channel" not in str(refused.value)
+
+
+@pytest.mark.parametrize("door", sorted(_BINNED_OVERRIDE_DOORS))
+@pytest.mark.parametrize("who", sorted(_BINNED_OVERRIDE_CLASSES))
+def test_V7_a_binned_colors_scheme_override_is_honored_and_its_own_type_is_a_no_op(who, door):
+    """``<channel>_scale_scheme`` recolors the bins; ``<channel>_scale_type='bin-ordinal'`` changes nothing."""
+    _, _, prefix = _BINNED_OVERRIDE_CLASSES[who]
+    bare = _quiet(_binned_override_chart(who, door).to_svg)
+    schemed = _quiet(
+        _binned_override_chart(who, door, **{f"{prefix}_scale_scheme": "viridis"}).to_svg
+    )
+    same = _quiet(
+        _binned_override_chart(who, door, **{f"{prefix}_scale_type": "bin-ordinal"}).to_svg
+    )
+    assert schemed != bare
+    assert same == bare
+
+
+def test_an_unbinned_colors_type_override_is_unchanged_by_the_binned_rule():
+    """Control: on an unbinned color, ``color_scale_type`` still reaches the scale."""
+    chart = P(color="z").override(color_scale_type="quantize")
+    assert _wire(chart)["encoding"]["color"]["scale"]["type"] == "quantize"
+    assert "bin_channel" not in _wire(chart)["encoding"]["color"]
+
+
+@pytest.mark.parametrize("name", ["fill", "stroke"])
+def test_V7_a_fill_or_stroke_scale_bin_override_reaches_the_color_it_draws_as(name):
+    """``.override(fill_scale_bin=...)`` bins the color ``Fill`` draws as, as ``color_scale_bin=`` does.
+
+    Rejects dropping a ``fill_``/``stroke_`` scale override because the wire
+    carries the binding under ``color``.
+    """
+    rule = {"extent": [0.0, 60.0], "bin_count": 3, "nice": False}
+    chart = P(**{name: _COLOR_CLASSES[name]("z")}).override(
+        **{f"{name}_scale_type": "bin-ordinal", f"{name}_scale_bin": rule}
+    )
+    assert _wire(chart)["encoding"]["color"]["scale"] == {"type": "bin-ordinal", "bin": rule}
+    assert legend_set(_quiet(chart.to_svg)) == {"z": ("0", "20", "40", "60")}
+
+
+#: Override cells: the chart (flat ``P`` or an attached layer binding the
+#: colors), the override, and whether the leaf reaches the drawn color.
+_OVERRIDE_SHAPES: dict[str, tuple[dict, dict, bool]] = {
+    "fill-domain": ({"fill": "z"}, {"fill_scale_domain": [0, 100]}, True),
+    "stroke-domain": ({"stroke": "z"}, {"stroke_scale_domain": [0, 100]}, True),
+    "color+fill-leaf": ({"color": "z"}, {"fill_scale_domain": [0, 100]}, False),
+    "color+dropped-stroke": (
+        {"color": "z", "stroke": "y"},
+        {"stroke_scale_domain": [0, 100]},
+        False,
+    ),
+    "fill+stroke+stroke-leaf": (
+        {"fill": "z", "stroke": "y"},
+        {"stroke_scale_domain": [0, 100]},
+        False,
+    ),
+    "categorical+fill-leaf": ({"color": "g"}, {"fill_scale_domain": ["b", "a"]}, False),
+}
+
+
+def _override_door(door: str, bindings: dict) -> fm.Chart:
+    if door == "F":
+        return P(**bindings)
+    return P().layer(fm.Layer(mark="point", encoding={"y": "r", **bindings}))
+
+
 @pytest.mark.parametrize("door", ["F", "L"])
-def test_X6_a_color_bin_groups_by_its_own_groupby_then_the_drawn_fields(spelling, door):
-    """X6, a non-positional bin with its own groupby: own ``c`` first, then the drawn ``g``.
+@pytest.mark.parametrize("shape", sorted(_OVERRIDE_SHAPES))
+def test_a_fill_or_stroke_scale_override_reaches_only_the_color_it_draws_as(shape, door):
+    """A ``fill_``/``stroke_`` scale leaf reaches color only when that channel draws as color.
 
-    A color bin with its own Bin parameters is the cell the color family's
-    parameter refusal replaces once a color bin computes no rows.
+    Fill or stroke draws as color when it wins the alias (color unbound;
+    fill before stroke). Where it wins, its leaf scales the color it draws;
+    where it lost, it draws nothing and its leaf leaves the chart's bytes
+    as they are without it. Rejects dropping a winner's leaf, and merging a
+    loser's leaf into another channel's scale (which rescaled ``color='z'``
+    and refused ``color='g'``).
     """
-    chart = _color_own_groupby(spelling)
-    if door == "L":
-        chart = chart.layer(layer("point"))
-    steps = _bin_steps(_quiet(lambda: chart))
-    assert steps
-    for step in steps:
-        assert step["groupby"] == ["c", "g"]
-        assert step["shared_extent"] is True
-        assert "per_row" not in step
-
-
-@pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
-@pytest.mark.parametrize("door", sorted(_declared_doors(P)))
-def test_X6_a_color_bin_with_its_own_groupby_draws_a_bar_per_bin_and_group(spelling, door):
-    """One bar per (bin, group): every bin of the shared edges, for each (c, g) group.
-
-    The oracle is numpy's histogram over the same explicit edges, per group,
-    and it counts each group's bins, empty ones included, as a grouped Bin
-    emits them. A faceted panel holds the groups of its own ``c``, so the
-    total is the same.
-    """
-    edges = np.linspace(*_COLOR_BIN_EDGES["extent"], _COLOR_BIN_EDGES["bin_count"] + 1)
-    expected = sum(
-        len(np.histogram(group["v"].to_numpy(), bins=edges)[0])
-        for _, group in df.group_by(["c", "g"])
-    )
-    doors = _declared_doors(lambda: _color_own_groupby(spelling), lambda: mk("point", x="g", y="y"))
-    if door == "LCx":
-        # The LCx door is the overlay's interactive scene: read its bar nodes.
-        overlay = _quiet(doors["LCs"])
-        census_ = _quiet(lambda: interactive_census(overlay))
-        bars = sum(n for (kind, _), n in census_.items() if kind == "bar")
+    bindings, leaves, reaches = _OVERRIDE_SHAPES[shape]
+    bare = _quiet(_override_door(door, bindings).to_svg)
+    overridden = _quiet(_override_door(door, bindings).override(**leaves).to_svg)
+    if reaches:
+        assert overridden != bare
+        assert legend_set(overridden)["z"][0] == "0"
     else:
-        bars = tag_counts(_quiet(_quiet(doors[door]).to_svg))["rect"]
-    assert bars == expected
+        assert overridden == bare
+
+
+@pytest.mark.parametrize("door", ["F", "L"])
+def test_a_color_leaf_wins_over_a_fill_leaf_on_the_same_key(door):
+    chart = _override_door(door, {"fill": "z"})
+    both = chart.override(fill_scale_domain=[0, 100], color_scale_domain=[0, 60])
+    color_only = chart.override(color_scale_domain=[0, 60])
+    assert _quiet(both.to_svg) == _quiet(color_only.to_svg)
+
+
+#: Each ``type_`` spelling a binned color refuses, and the code it reads as.
+_REFUSED_BIN_TYPES = {"N": "N", "nominal": "N", "T": "T", "temporal": "T"}
+
+
+@pytest.mark.parametrize("spelling", sorted(_REFUSED_BIN_TYPES))
+@pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
+def test_V7_a_binned_color_typed_nominal_or_temporal_is_refused(name, spelling):
+    """A binned color is ordered by its bins: a nominal or temporal type contradicts it."""
+    cls = _COLOR_CLASSES[name]
+    with pytest.raises(ValueError) as refused:
+        cls("z", bin=True, type_=spelling)
+    assert str(refused.value) == (
+        f"{cls.__name__}(bin=...) cannot be combined with type_="
+        f"{_REFUSED_BIN_TYPES[spelling]!r}: a binned color is ordered by its bins, so it "
+        "cannot be nominal or temporal. Drop type_= or use quantitative or ordinal."
+    )
+    with pytest.raises(ValueError):
+        cls(f"z:{_REFUSED_BIN_TYPES[spelling]}", bin=True)
+
+
+@pytest.mark.parametrize("sort", ["descending", ["b", "a"], "-y"])
+@pytest.mark.parametrize(
+    "name", sorted(n for n, c in _COLOR_CLASSES.items() if "sort" in c._honored_kwargs)
+)
+def test_V7_a_binned_color_sorted_other_than_ascending_is_refused(name, sort):
+    """A binned color lists its bins in ascending order; no ``sort=`` reaches another order."""
+    cls = _COLOR_CLASSES[name]
+    with pytest.raises(ValueError) as refused:
+        cls("z", bin=True, sort=sort)
+    assert str(refused.value) == (
+        f"{cls.__name__}(bin=...) cannot be combined with sort={sort!r}: a binned color "
+        "lists its bins in ascending order; sort= cannot reorder them. Drop sort=."
+    )
+
+
+def _binned_with(cls: type, **kwargs: Any) -> fm.Chart:
+    return P(**{cls.__name__.lower(): cls("z", bin=True, **kwargs)})
+
+
+#: Each honored kwarg a binned color keeps (the rest are refused above), and
+#: what it changes on the drawn chart.
+_BINNED_HONORED: dict[str, tuple[dict, Callable[[str], Any]]] = {
+    "title": ({"title": "Zed"}, lambda svg: list(legend_set(svg))),
+    "legend": ({"legend": None}, lambda svg: legend_set(svg)),
+    "scheme": (
+        {"scheme": "viridis"},
+        lambda svg: sorted(set(re.findall(r'fill="(#[0-9a-f]{6})"', svg))),
+    ),
+    "type-Q": ({"type_": "Q"}, lambda svg: legend_set(svg)),
+    "type-O": ({"type_": "O"}, lambda svg: legend_set(svg)),
+    "sort-ascending": ({"sort": "ascending"}, lambda svg: legend_set(svg)),
+}
+
+#: What each honored kwarg reads as on the drawn chart, against the bare binned color.
+_BINNED_HONORED_EXPECTED: dict[str, Callable[[Any, Any], bool]] = {
+    "title": lambda got, bare: got == ["Zed"],
+    "legend": lambda got, bare: got == {},
+    "scheme": lambda got, bare: got != bare,
+    "type-Q": lambda got, bare: got == bare,
+    "type-O": lambda got, bare: got == bare,
+    "sort-ascending": lambda got, bare: got == bare,
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "kwarg"),
+    [
+        (name, kwarg)
+        for name, cls in sorted(_COLOR_CLASSES.items())
+        for kwarg, (kwargs, _) in sorted(_BINNED_HONORED.items())
+        if set(kwargs) - {"type_"} <= cls._honored_kwargs
+    ],
+)
+def test_V7_each_kwarg_a_binned_color_honors_reaches_its_drawn_chart(name, kwarg):
+    """Every honored kwarg on a binned color is honored (or refused above), none silently dropped."""
+    cls = _COLOR_CLASSES[name]
+    kwargs, read = _BINNED_HONORED[kwarg]
+    got = read(_quiet(_binned_with(cls, **kwargs).to_svg))
+    bare = read(_quiet(_binned_with(cls).to_svg))
+    assert _BINNED_HONORED_EXPECTED[kwarg](got, bare), (got, bare)
+
+
+def test_V7_a_binned_color_condition_reaches_the_wire():
+    """``Color(bin=..., condition=...)``: the conditional reaches the wire beside the binned scale."""
+    sel = fm.selection_point(fields=["g"], name="pick")
+    chart = P(color=fm.Color("z", bin=True, condition=sel.when("#ff0000").otherwise("#cccccc")))
+    wire = _wire(chart.add_params(sel))
+    assert wire["encoding"]["color"]["scale"]["type"] == "bin-ordinal"
+    assert [c["channel"] for c in wire.get("conditionals", [])] == ["color"]
+
+
+# The statistics marker sits where the user's steps end, on every + door: a
+# step the caller wrote never follows a marker in its chain, so it runs as
+# written beside a binned operand.
+
+_USER_STEP_TYPES = frozenset({"data_aggregate", "filter", "calculate"})
+
+
+def _caller_steps_after_a_marker(steps: list[dict]) -> list[str]:
+    """The caller-written steps that follow a statistics marker in their chain, at any depth."""
+    out: list[str] = []
+    marked = False
+    for step in steps:
+        if step == _STATISTICS_MARKER:
+            marked = True
+        elif marked and step["type"] in _USER_STEP_TYPES:
+            out.append(step["type"])
+        if step["type"] == "branch":
+            out += _caller_steps_after_a_marker(step["transforms"])
+    return out
+
+
+def _user_mean() -> dict:
+    return fm.transform_aggregate({"field": "y", "fn": "mean", "as": "my"}, groupby=["g", "v"])
+
+
+def _user_bars(color: Any, data: pl.DataFrame = _GROUP_ROWS) -> fm.Chart:
+    """Dodged bars of a caller's own aggregate grouped by raw ``v``: 16 bars."""
+    rows = fm.Chart(data).transform(_user_mean())
+    return rows.mark_bar(position=fm.Dodge()).encode(x="g", y="my", color=color)
+
+
+def _box(color: Any) -> fm.Chart:
+    return fm.Chart(_GROUP_ROWS).mark_boxplot().encode(x="g", y="y", color=color)
+
+
+def _user_points(color: Any) -> fm.Chart:
+    return fm.Chart(_GROUP_ROWS).mark_point().encode(x="g", y="my", color=color)
+
+
+def _binned_hist(color: Any) -> fm.Chart:
+    return fm.Chart(_GROUP_ROWS).mark_histogram().encode(x="y", color=color)
+
+
+def _plain_points(color: Any) -> fm.Chart:
+    return fm.Chart(_GROUP_ROWS).mark_point().encode(x="g", y="y", color=color)
+
+
+def _hist_points(color: Any) -> fm.Chart:
+    """Points on the histogram's continuous x."""
+    return fm.Chart(_GROUP_ROWS).mark_point().encode(x="y", y="v", color=color)
+
+
+#: ``_GROUP_ROWS`` as a different frame: a right operand over it reads its own rows.
+_GROUP_ROWS_OTHER = _GROUP_ROWS.with_columns(pl.col("y").alias("y_copy"))
+
+
+def _filtered(chart: fm.Chart) -> fm.Chart:
+    return chart.transform(fm.transform_filter("datum.y > 3"))
+
+
+#: Each + door: the composition, and the parts whose standalone marks it draws.
+_MARKER_DOORS: dict[str, tuple[Callable[[Any], Any], tuple[Callable[[Any], Any], ...]]] = {
+    "L+B": (lambda c: _user_bars(c) + _box(c), (_user_bars, _box)),
+    "B+L": (lambda c: _box(c) + _user_bars(c), (_box, _user_bars)),
+    "(B+P).transform": (
+        lambda c: (_box(c) + _user_points(c)).transform(_user_mean()),
+        (_box, lambda c: _user_points(c).transform(_user_mean())),
+    ),
+    "(Hist+P).transform": (
+        lambda c: (_binned_hist(c) + _hist_points(c)).transform(fm.transform_filter("true")),
+        (_binned_hist, _hist_points),
+    ),
+    "B+B": (lambda c: _box(c) + _box(c), (_box, _box)),
+    "B.layer(LD)": (
+        lambda c: _box(c).layer(fm.Layer(data=_GROUP_ROWS, mark="point", encoding={"y": "y"})),
+        (_box, _plain_points),
+    ),
+    "+d": (lambda c: _box(c) + _user_bars(c, _GROUP_ROWS_OTHER), (_box, _user_bars)),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_MARKER_DOORS))
+def test_a_caller_step_never_follows_a_statistics_marker_on_any_plus_door(door):
+    """No caller-written step follows a marker in its chain, so it runs as written.
+
+    Each part draws inside the composition what it draws alone: the caller's
+    own aggregate grouped by raw ``v`` keeps its 16 bars (or its points)
+    beside a binned boxplot or histogram, in either order and after a
+    ``.transform()`` on the composition, and the composition's own chain
+    holds no marker. Rejects merging a binned operand's marked chain into
+    the composition's chain, which put the caller's step after the marker
+    and re-binned it (16 bars to 8).
+    """
+    compose, parts = _MARKER_DOORS[door]
+    color = _binned_color()
+    chart = _quiet(lambda: compose(color))
+    steps = _wire(chart).get("transforms") or []
+    assert _caller_steps_after_a_marker(steps) == []
+    assert _STATISTICS_MARKER not in steps
+    expected = Counter()
+    for part in parts:
+        expected.update(tag_counts(_quiet(_quiet(lambda part=part: part(color)).to_svg)))
+    assert Counter(tag_counts(_quiet(chart.to_svg))) == expected
+
+
+#: The SVG bytes each door renders under the unbinned color ``g``, unchanged by
+#: the binned color's marker placement.
+_MARKER_DOOR_CONTROL_DIGESTS = {
+    "(B+P).transform": "d4a6869d9078d676d1d88c5efbfb58de1417f8909c63549bbd52f9501263d60f",
+    "(Hist+P).transform": "1917be7c83632268e1a7619697c824483e7d5bd53aec5586f8787fe926cf3374",
+    "+d": "ec4cbacb6fdc20927df4686cd4e87fbf525d59df87885f3708d3986559e3a0cf",
+    "B+B": "9f75420b81af1aa458d60b85bf743cb46a4a121377e3540fbbaef047405ce4cd",
+    "B+L": "ec4cbacb6fdc20927df4686cd4e87fbf525d59df87885f3708d3986559e3a0cf",
+    "B.layer(LD)": "d4a6869d9078d676d1d88c5efbfb58de1417f8909c63549bbd52f9501263d60f",
+    "L+B": "80f38aef04122177e3673ea13d7a1050a603c9dc802e28de67f6b6d10e43e3dc",
+}
+
+
+@pytest.mark.parametrize("door", sorted(_MARKER_DOORS))
+def test_a_plus_door_with_no_binned_color_renders_its_pinned_bytes_and_no_marker(door):
+    """Control: unbinned, each door sends no marker and renders the bytes it rendered before."""
+    import hashlib
+
+    compose, _ = _MARKER_DOORS[door]
+    chart = _quiet(lambda: compose("g"))
+    assert _STATISTICS_MARKER not in _wire_layers_and_steps(chart)
+    svg = _quiet(chart.to_svg)
+    assert hashlib.sha256(svg.encode()).hexdigest() == _MARKER_DOOR_CONTROL_DIGESTS[door]
+
+
+# Statistics under a binned color group by its bins, on every door. The
+# oracle is the same chart grouped by an explicit bin column (``v_bin``, the
+# floor of ``v`` under the unit bins): the binned chart draws the marks it
+# draws, on the same door.
+
+#: ``_GROUP_ROWS`` plus a response a smooth can fit per bin.
+_BIN_GROUP_ROWS = _GROUP_ROWS.with_columns((pl.col("y") * 0.5 + pl.col("v") ** 2).alias("w"))
+_BIN_GROUP_ROWS_BINNED = _BIN_GROUP_ROWS.with_columns(pl.col("v").floor().alias("v_bin"))
+
+_BIN_GROUPED_STATISTICS: dict[str, Callable[[fm.Chart, Any], fm.Chart]] = {
+    "aggregate": lambda base, c: base.mark_bar().encode(x="g", y="mean(y)", color=c),
+    "aggregate-stacked": lambda base, c: base.mark_bar(position=fm.Stack()).encode(
+        x="g", y="mean(y)", color=c
+    ),
+    "aggregate-dodged": lambda base, c: base.mark_bar(position=fm.Dodge()).encode(
+        x="g", y="mean(y)", color=c
+    ),
+    "bin+count": lambda base, c: base.mark_bar().encode(
+        x=fm.X("y", bin={"bin_width": 4.0, "extent": (0.0, 16.0), "nice": False}),
+        y="count()",
+        color=c,
+    ),
+    "histogram": lambda base, c: base.mark_histogram(bin_width=4.0).encode(x="y", color=c),
+    "density": lambda base, c: base.mark_density().encode(x="y", color=c),
+    "boxplot": lambda base, c: base.mark_boxplot().encode(x="g", y="y", color=c),
+    "violin": lambda base, c: base.mark_violin().encode(x="g", y="y", color=c),
+}
+
+#: Marks each statistic draws per (x, bin), pinned on the flat door.
+_BIN_GROUPED_MARKS = {
+    "aggregate": {"rect": 8},
+    "aggregate-stacked": {"rect": 8},
+    "aggregate-dodged": {"rect": 8},
+    "bin+count": {"rect": 16},
+    "histogram": {"rect": 12},
+    "density": {"path": 4},
+    "boxplot": {"line": 32, "rect": 8},
+    "violin": {"path": 8, "line": 32, "rect": 8},
+}
+
+
+def _bin_grouped(statistic: str) -> Callable[[], fm.Chart]:
+    return lambda: _BIN_GROUPED_STATISTICS[statistic](fm.Chart(_BIN_GROUP_ROWS), _binned_color())
+
+
+def _bin_column_grouped(statistic: str) -> Callable[[], fm.Chart]:
+    return lambda: _BIN_GROUPED_STATISTICS[statistic](
+        fm.Chart(_BIN_GROUP_ROWS_BINNED), fm.Color("v_bin", type_="N")
+    )
+
+
+def _bin_partner() -> fm.Chart:
+    return mk("rule", _BIN_GROUP_ROWS, y="y")
+
+
+def _drawn(build: Callable[[], Any], door: str) -> Any:
+    chart = _quiet(build)
+    if door == "LCx":
+        return Counter(kind for kind, _ in interactive_census(chart).elements())
+    return tag_counts(_quiet(chart.to_svg))
+
+
+_BIN_GROUPED_CASES = {
+    f"{statistic}/{door}": (statistic, door)
+    for statistic in _BIN_GROUPED_STATISTICS
+    for door in _declared_doors(P)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BIN_GROUPED_CASES))
+def test_a_statistic_under_a_binned_color_groups_by_its_bins_on_every_door(case):
+    """Each statistic grouped by a binned color draws what grouping by the bin column draws.
+
+    Rejects grouping by the raw values (16 bars, or two dodged to a slot,
+    and one histogram, curve, box or violin per distinct value). A door
+    that refuses the statistic's shape refuses both spellings alike.
+    """
+    statistic, door = _BIN_GROUPED_CASES[case]
+    binned = _declared_doors(_bin_grouped(statistic), _bin_partner)[door]
+    oracle = _declared_doors(_bin_column_grouped(statistic), _bin_partner)[door]
+    if door == "LCx":
+        binned = lambda: fm.LayerChart(_bin_grouped(statistic)(), _bin_partner())  # noqa: E731
+        oracle = lambda: fm.LayerChart(_bin_column_grouped(statistic)(), _bin_partner())  # noqa: E731
+    try:
+        expected = _drawn(oracle, door)
+    except ValueError as refused:
+        with pytest.raises(ValueError) as also:
+            _drawn(binned, door)
+        assert str(also.value) == str(refused)
+        return
+    assert _drawn(binned, door) == expected
+    if door == "F":
+        assert expected == _BIN_GROUPED_MARKS[statistic]
+
+
+@pytest.mark.parametrize("statistic", sorted(_BIN_GROUPED_STATISTICS))
+def test_a_statistic_under_a_binned_color_sits_after_its_chains_statistics_marker(statistic):
+    """The wire marks where the lowered statistics start, and the user's rows stay before it."""
+    base = fm.Chart(_BIN_GROUP_ROWS).transform(fm.transform_filter("datum.y > 0"))
+    steps = _wire(_BIN_GROUPED_STATISTICS[statistic](base, _binned_color()))["transforms"]
+    marker = steps.index(_STATISTICS_MARKER)
+    assert [s["type"] for s in steps[:marker]] == ["filter"]
+    assert steps[marker + 1 :]
+    assert steps.count(_STATISTICS_MARKER) == 1
+
+
+def test_a_chart_drawing_no_binned_color_sends_no_statistics_marker():
+    """An unbinned chart's wire is unchanged: no marker on any chain."""
+    for statistic in _BIN_GROUPED_STATISTICS:
+        chart = _bin_column_grouped(statistic)()
+        assert _STATISTICS_MARKER not in _wire_layers_and_steps(chart)
+    assert _STATISTICS_MARKER not in _wire_layers_and_steps(
+        _bin_column_grouped("aggregate")() + _bin_partner()
+    )
+
+
+def test_a_layer_statistic_reading_the_tail_sits_behind_the_top_chains_marker():
+    """A right operand reading the composition's tail computes its aggregate as a named top step.
+
+    The top chain is exactly the marker, then that aggregate: the marker
+    leads the lowered statistics and no caller step follows it.
+    """
+    chart = _bin_partner() + _bin_grouped("aggregate")()
+    steps = _wire(chart)["transforms"]
+    assert [s["type"] for s in steps] == ["identity", "aggregate"]
+    assert steps[0] == _STATISTICS_MARKER
+    assert steps[1]["name"].startswith("_layer_agg_")
+    assert tag_counts(_quiet(chart.to_svg))["rect"] == 8
+
+
+def test_a_layer_statistic_reading_a_named_output_is_marked_in_its_own_branch():
+    """A right operand reading its rows through a named output computes its aggregate in a branch.
+
+    Beside a left operand whose own step advanced the chain, the right
+    operand reads the source's identity, so its aggregate runs in a branch
+    whose steps are the marker, then the aggregate, and the top chain holds
+    no marker. Rejects a marker in the composition's chain, where the left
+    operand's step would sit after it and be grouped by bin.
+    """
+    chart = _user_bars(_binned_color()) + _bin_grouped("aggregate")()
+    steps = _wire(chart)["transforms"]
+    assert _STATISTICS_MARKER not in steps
+    (branch,) = [s for s in steps if s.get("name", "").startswith("_layer_agg_")]
+    assert branch["type"] == "branch"
+    assert [t["type"] for t in branch["transforms"]] == ["identity", "aggregate"]
+    assert branch["transforms"][0] == _STATISTICS_MARKER
+    assert _caller_steps_after_a_marker(steps) == []
+
+
+def test_a_non_finite_binned_value_keeps_its_own_group():
+    """NaN, +inf and -inf fall in no bin, so each stays its own group beside the bins.
+
+    Rejects dropping their rows: per ``g``, 4 bins plus 3 non-finite groups.
+    """
+    rows = _GROUP_ROWS.with_columns(
+        pl.Series("v", [1.1, float("nan"), 2.2, float("inf"), 3.1, float("-inf"), 4.4, 4.9] * 2)
+    )
+    chart = (
+        fm.Chart(rows)
+        .mark_bar(position=fm.Dodge())
+        .encode(x="g", y="mean(y)", color=_binned_color())
+    )
+    keys = rows.select(
+        "g",
+        pl.when(pl.col("v").is_finite())
+        .then(pl.col("v").floor().cast(pl.Utf8))
+        .otherwise(pl.col("v").cast(pl.Utf8))
+        .alias("key"),
+    )
+    assert tag_counts(_quiet(chart.to_svg))["rect"] == keys.n_unique() == 14
+
+
+def test_a_user_transform_grouped_by_the_binned_field_runs_as_written():
+    """A caller's own ``.transform()`` aggregate grouped by ``v`` keeps every raw ``v`` group."""
+    chart = (
+        fm.Chart(_GROUP_ROWS)
+        .transform(
+            fm.transform_aggregate({"field": "y", "fn": "mean", "as": "my"}, groupby=["g", "v"])
+        )
+        .mark_bar(position=fm.Dodge())
+        .encode(x="g", y="my", color=_binned_color())
+    )
+    assert tag_counts(_quiet(chart.to_svg))["rect"] == _GROUP_ROWS.select("g", "v").n_unique()
+
+
+# Areas group by bin: one band per bin, stacked or not, on every door.
+
+_AREA_BIN = {"bin_count": 2, "nice": False}
+_AREA_ROWS_BINNED = df.with_columns(
+    pl.when(pl.col("z") < 27.5).then(pl.lit("low")).otherwise(pl.lit("high")).alias("z_bin")
+)
+
+
+def _binned_area(data: pl.DataFrame, color: Any, position: Any) -> fm.Chart:
+    return fm.Chart(data).mark_area(position=position).encode(x="v", y="y", color=color)
+
+
+_AREA_CASES = {
+    f"{stacked}/{door}": (stacked, door)
+    for stacked in ("stacked", "unstacked")
+    for door in _declared_doors(P)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_AREA_CASES))
+def test_an_area_under_a_binned_color_draws_one_band_per_bin_on_every_door(case):
+    """An area under ``Color("z", bin=...)`` draws one band per bin, stacked or not.
+
+    The oracle is the same area colored by an explicit two-bin column.
+    Rejects one band per distinct value.
+    """
+    stacked, door = _AREA_CASES[case]
+    position = fm.Stack() if stacked == "stacked" else None
+    binned = lambda: _binned_area(df, fm.Color("z", bin=_AREA_BIN), position)  # noqa: E731
+    oracle = lambda: _binned_area(_AREA_ROWS_BINNED, fm.Color("z_bin", type_="N"), position)  # noqa: E731
+    built, expected = _declared_doors(binned, P)[door], _declared_doors(oracle, P)[door]
+    if door == "LCx":
+        built = lambda: fm.LayerChart(binned(), P())  # noqa: E731
+        expected = lambda: fm.LayerChart(oracle(), P())  # noqa: E731
+    assert _drawn(built, door) == _drawn(expected, door)
+    if door == "F":
+        assert _drawn(built, door) == {"path": 2}
+
+
+# Concat and overlay panels share one binned edge set and legend by default.
+
+
+def _union_rows() -> pl.DataFrame:
+    return pl.concat([df.select("v", "y", "z"), df2.select("v", "y", "z")])
+
+
+def _binned_panel(data: pl.DataFrame = df, **rule: Any) -> fm.Chart:
+    return P(data, color=fm.Color("z", bin=rule or True))
+
+
+_SHARED_BINNED: dict[str, Callable[[], Any]] = {
+    "hconcat": lambda: fm.hconcat(_binned_panel(), _binned_panel(df2)),
+    "vconcat": lambda: fm.vconcat(_binned_panel(), _binned_panel(df2)),
+    "LCs": lambda: fm.LayerChart(_binned_panel(), _binned_panel(df2)),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_SHARED_BINNED))
+def test_panels_binning_one_field_alike_share_one_edge_set_and_legend(route):
+    """Two panels binning ``z`` alike draw one legend cut from both panels' rows.
+
+    The oracle is one chart over both frames' rows. Rejects a legend per
+    panel, each over its own edges.
+    """
+    svg = _quiet(_SHARED_BINNED[route]().to_svg)
+    union = _quiet(_binned_panel(_union_rows()).to_svg)
+    assert legend_set(svg) == legend_set(union)
+    assert _legend_title_count(svg, "z") == 1
+
+
+def test_a_concat_leaves_its_color_resolve_unset_for_the_default_to_apply():
+    from ferrum.composition import _lower_any
+
+    tree = _lower_any(
+        fm.hconcat(_binned_panel(), _binned_panel(df2)),
+        is_root=True,
+        auto_tooltips=False,
+        payloads=[],
+        leaf_inputs=[],
+        leaf_nodes=[],
+    )
+    assert "color" not in json.dumps(tree.get("resolve") or {})
+
+
+def test_an_independent_color_resolve_keeps_a_legend_per_panel():
+    chart = fm.hconcat(
+        _binned_panel(), _binned_panel(df2), resolve=fm.Resolve(scale={"color": "independent"})
+    )
+    assert _legend_title_count(_quiet(chart.to_svg), "z") == 2
+
+
+def test_panels_binning_with_different_rules_keep_a_legend_each_by_default():
+    chart = fm.hconcat(_binned_panel(bin_count=4), _binned_panel(df2, bin_count=2))
+    assert _legend_title_count(_quiet(chart.to_svg), "z") == 2
+
+
+def test_a_shared_color_over_differing_bin_rules_is_refused_as_a_typed_error():
+    chart = fm.hconcat(
+        _binned_panel(bin_count=4),
+        _binned_panel(df2, bin_count=2),
+        resolve=fm.Resolve(scale={"color": "shared"}),
+    )
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert str(refused.value) == (
+        "composite scale resolution failed: failed to resolve shared color domain for field "
+        "'z': a shared color needs one color scale on every panel, but one panel colors by "
+        "'z' binned with bin={\"bin_count\":4,\"nice\":true} and another by 'z' binned with "
+        'bin={"bin_count":2,"nice":true}. Make the panels\' colors match, or resolve color '
+        "independently with Resolve(scale={'color': 'independent'})"
+    )
+
+
+def test_a_nested_concat_shares_the_inner_binned_panels_legend():
+    chart = fm.vconcat(fm.hconcat(_binned_panel(), _binned_panel(df2)), P(color="c"))
+    legends = legend_set(_quiet(chart.to_svg))
+    assert legends["z"] == legend_set(_quiet(_binned_panel(_union_rows()).to_svg))["z"]
+    assert legends["c"] == ("p", "q")
+
+
+# A line-drawn mark under a binned color.
+
+_LINE_UNDER_BINNED: dict[str, Callable[[], fm.Chart]] = {
+    "line": lambda: (
+        fm.Chart(df).mark_line().encode(x="v", y="y", color=fm.Color("z", bin=_AREA_BIN))
+    ),
+    "line-mean": lambda: (
+        fm.Chart(df).mark_line().encode(x="v", y="mean(y)", color=fm.Color("z", bin=_AREA_BIN))
+    ),
+    "ribbon": lambda: (
+        fm.Chart(df.with_columns((pl.col("y") + 1).alias("y_hi")))
+        .mark_ribbon()
+        .encode(x="v", y="y", y2="y_hi", color=fm.Color("z", bin=_AREA_BIN))
+    ),
+}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "a line, trail or ribbon under a binned color is drawn as one series with no "
+        "per-mark color and a suppressed legend; it should draw one series per bin, "
+        "each in its bin's step"
+    ),
+)
+@pytest.mark.parametrize("mark", sorted(_LINE_UNDER_BINNED))
+def test_a_line_under_a_binned_color_draws_one_series_per_bin(mark):
+    """Two bins of ``z``: two series, each in its own bin's color, and a legend of bin ranges."""
+    svg = _quiet(_LINE_UNDER_BINNED[mark]().to_svg)
+    series = [e for e in census(svg).elements() if e[0] in ("polyline", "path")]
+    assert len(series) == 2
+    assert list(legend_set(svg)) == ["z"]

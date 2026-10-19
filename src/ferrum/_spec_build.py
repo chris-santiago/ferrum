@@ -43,10 +43,11 @@ from ferrum._encode_lowering import (
     _theta_axis,
 )
 from ferrum._layer import layer_mark
-from ferrum._layer_transforms import _POSITIONAL
+from ferrum._layer_transforms import _POSITIONAL, _with_statistics_marker
 from ferrum._override_apply import OverridePayload
 from ferrum._override_consume import (
     merge_encoding_scale as _merge_encoding_scale,
+    refuse_binned_color_scale_overrides as _refuse_binned_color_scale_overrides,
     refuse_malformed_scale_overrides as _refuse_malformed_scale_overrides,
 )
 
@@ -62,19 +63,42 @@ class _ResolvedStatistic(NamedTuple):
     encoding: dict
 
 
-def _with_override_scale(d: dict, channel: str, override: OverridePayload | None) -> dict:
+def _override_channels(channel: str, source: str) -> list[str]:
+    """The override channel names whose ``<name>_scale_*`` leaves reach *channel*'s scale.
+
+    *source* is the binding that draws as *channel* (``alias_source``): when
+    it is an alias (``fill`` or ``stroke`` drawing as ``color``), its leaves
+    apply, then *channel*'s own, which win per leaf. A source the alias rules
+    dropped draws nothing, so its leaves reach no scale.
+    """
+    return [source, channel] if source != channel else [channel]
+
+
+def _color_source(channel: str, color_source: str | None) -> str | None:
+    """The alias source drawing as *channel*: *color_source* on ``color``, else ``None``."""
+    return color_source if channel == "color" else None
+
+
+def _with_override_scale(
+    d: dict, channel: str, override: OverridePayload | None, source: str | None = None
+) -> dict:
     """Return channel spec dict *d* with ``Chart.override``'s scale leaves for *channel* merged in.
 
     The one place an override's ``<channel>_scale_*`` leaves meet a channel's
-    own ``scale=``, for the chart-level encoding and for every layer that
+    own ``scale=`` (*source*: the alias source drawing as *channel*, whose
+    leaves apply too, see :func:`_override_channels`), for the chart-level encoding and for every layer that
     declares the channel alike, so a layered chart renders the override exactly
     as the channel's own ``scale=`` would. Override leaves win (spec §7). The
     merged dict goes back through ``_scale_to_dict`` so a typeless override
     (just ``domain``) gains the ``type`` discriminator the wire requires.
 
-    Three refusal layers run in order, named after the value's own origin
+    Four refusal layers run in order, named after the value's own origin
     (#157):
 
+    - on a binned color (*d* carries ``bin_channel``, the class written),
+      :func:`~ferrum._override_consume.refuse_binned_color_scale_overrides`
+      refuses a leaf that would replace what ``bin=`` builds, naming the
+      class and the override path;
     - :func:`~ferrum._override_consume.merge_encoding_scale` refuses the
       CHART's own keys first (its own docstring states each of its internal
       stages' exact voice: the tag check, the two shape-probe buckets, and
@@ -91,9 +115,15 @@ def _with_override_scale(d: dict, channel: str, override: OverridePayload | None
     """
     if override is None:
         return d
-    scale_overrides = override.encoding.get(channel, {}).get("scale")
+    scale_overrides: dict = {}
+    paths: dict = {}
+    for name in _override_channels(channel, source or channel):
+        scale_overrides.update(override.encoding.get(name, {}).get("scale") or {})
+        paths.update(override.encoding_paths.get(name, {}))
     if not scale_overrides:
         return d
+    if d.get("bin_channel"):
+        _refuse_binned_color_scale_overrides(d["bin_channel"], scale_overrides, paths)
     from ferrum.encoding._scale import _scale_to_dict
 
     existing_scale = d.get("scale")
@@ -113,9 +143,7 @@ def _with_override_scale(d: dict, channel: str, override: OverridePayload | None
     # "linear")`). Passing `None` through to `refuse_malformed_scale_overrides`
     # lets its own per-key fragment omit the `type` key too, so the same
     # single call supplies the default for both the probe and the merge.
-    _refuse_malformed_scale_overrides(
-        pre_merge.get("type"), scale_overrides, override.encoding_paths.get(channel, {})
-    )
+    _refuse_malformed_scale_overrides(pre_merge.get("type"), scale_overrides, paths)
     merged = _scale_to_dict(pre_merge)
     _validate_scale_dict(merged)
     return {**d, "scale": merged}
@@ -507,6 +535,7 @@ class SpecBuildMixin:
         override: OverridePayload | None = None,
         *,
         mark_zero: bool,
+        color_source: str | None = None,
     ) -> dict:
         """Build ``EncodingSpec`` entries for each honored channel.
 
@@ -604,7 +633,7 @@ class SpecBuildMixin:
             # gate-refused shape the zero-anchor fix below exists to avoid,
             # just reached through override composition instead of a direct
             # scale= dict.
-            d = _with_override_scale(d, axis, override)
+            d = _with_override_scale(d, axis, override, _color_source(axis, color_source))
             d = _bar_zero_anchor(
                 d,
                 mark=resolved._mark,
@@ -659,7 +688,7 @@ class SpecBuildMixin:
             layer is serialized.
         """
         from ferrum.chart import _apply_inferred_type, _strip_unstackable
-        from ferrum.encoding._aliases import apply_channel_aliases
+        from ferrum.encoding._aliases import alias_source, apply_channel_aliases
 
         out = []
         layer_list = (layers if layers is not None else self._layers) or []
@@ -681,6 +710,7 @@ class SpecBuildMixin:
             if inherited_detail is not None:
                 layer_enc.setdefault("detail", inherited_detail)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
+            layer_color_source = alias_source(layer_enc, "color")
             layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
 
             # Bucket-partition safety net (single enforcement point, see
@@ -714,7 +744,9 @@ class SpecBuildMixin:
                     # Auto-infer temporal type from column dtype when no explicit type
                     # annotation was given (same logic as _build_encoding_specs).
                     d = _apply_inferred_type(d, field, self._data)
-                    d = _with_override_scale(d, axis, override)
+                    d = _with_override_scale(
+                        d, axis, override, _color_source(axis, layer_color_source)
+                    )
                     if anchor_bar_value:
                         d = _bar_zero_anchor(
                             d,
@@ -788,6 +820,7 @@ class SpecBuildMixin:
                         "sort",
                         "stack",
                         "impute",
+                        "bin_channel",
                     ):
                         if opt_key in d:
                             enc_json_dict[opt_key] = d[opt_key]
@@ -809,7 +842,9 @@ class SpecBuildMixin:
                         enc_json_dict["formatType"] = d["format_type"]
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
-                    d = _with_override_scale({"field": ch}, axis, override)
+                    d = _with_override_scale(
+                        {"field": ch}, axis, override, _color_source(axis, layer_color_source)
+                    )
                     if anchor_bar_value:
                         # The shorthand's declared type decides the anchor, as
                         # a channel object's `type_` does; the wire dict keeps
@@ -827,10 +862,11 @@ class SpecBuildMixin:
                             d = {**d, "scale": scale}
                     encoding_dict[axis] = d
             # Rust's position grouping reads `group` (dodge and stack slots by
-            # the field the parent draws as color); no other reader sees it.
-            group_field = grouping.wire_field() if grouping is not None else None
-            if isinstance(group_field, str):
-                encoding_dict[GROUPING_KEY] = {"field": group_field}
+            # the field the parent draws as color, by its bins when it bins);
+            # no other reader sees it.
+            group = grouping.wire() if grouping is not None else None
+            if group is not None:
+                encoding_dict[GROUPING_KEY] = group
             layer_dict: dict = {
                 "mark": layer_mark(layer.mark),
                 "encoding": encoding_dict,
@@ -956,7 +992,7 @@ class SpecBuildMixin:
         transforms: list = []
         for t in effective_transforms:
             if t is site and plan.computes:
-                transforms.append(plan.step())
+                transforms.extend(_with_statistics_marker([plan.step()]))
             elif not isinstance(t, (_PendingAggregate, _PendingBin)):
                 transforms.append(t)
         return _ResolvedStatistic(transforms, plan.encoding)

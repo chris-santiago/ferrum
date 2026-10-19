@@ -77,11 +77,24 @@ def resolve_channel_alias(enc: dict, channel: str) -> object | None:
     Returns ``None`` when neither *channel* nor any alias source targeting
     it (``fill``/``stroke`` for ``color``) is present in *enc*.
     """
+    source = alias_source(enc, channel)
+    return enc[source] if source is not None else None
+
+
+def alias_source(enc: dict, channel: str) -> str | None:
+    """Return the name of the binding *channel* resolves to under the alias rules, read-only.
+
+    *channel* itself when *enc* binds it, else the first alias source
+    targeting it that *enc* binds, in ``_ENCODING_ALIASES`` order (``fill``
+    before ``stroke`` for ``color``): the binding :func:`apply_channel_aliases`
+    keeps, and :func:`resolve_channel_alias` returns. ``None`` when none is
+    bound.
+    """
     if channel in enc:
-        return enc[channel]
+        return channel
     for rule in _ENCODING_ALIASES:
         if rule.target == channel and rule.source in enc:
-            return enc[rule.source]
+            return rule.source
     return None
 
 

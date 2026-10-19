@@ -14,12 +14,13 @@
 //!
 //! **Which steps.** A step bins a column only when (1) a layer whose drawn
 //! color, or whose text grouping-only `group` key, carries a `bin` rule on
-//! that column reads the step's output directly (its `data_source`, or the
-//! chart rows for a layer with none), and (2) the step sits after its
-//! chain's statistics marker ([`is_statistics_marker`]): the steps a layer's
-//! encoding or mark lowered to, never the user's own `.transform()` steps,
-//! which run as written. A chain with no marker holds only user steps, so
-//! nothing in it bins.
+//! that column reads the step's output (its `data_source`, or the chart rows
+//! for a layer with none), directly or through the input of a branch whose
+//! chain it reads, and (2) the step sits after its chain's statistics marker
+//! ([`is_statistics_marker`]): the steps a layer's encoding or mark lowered
+//! to, never the user's own `.transform()` steps, which run as written. A
+//! chain with no marker holds only user steps, so nothing in it bins, but a
+//! read of its tail still reaches the statistic its input names.
 //!
 //! **Edges.** The edges are cut from the rows the binned statistics consume,
 //! so the render runs the pipeline twice. Both runs record, beside each
@@ -90,11 +91,12 @@ struct StepDemand {
 impl ChainDemand {
     /// The demand `demands` (one `(data_source, field)` per binned binding of
     /// a reading layer) places on `transforms`: each pair names the step that
-    /// produces `data_source` directly ([`Self::claim`]).
+    /// produces `data_source`, and through branch inputs every statistic
+    /// those rows were computed from ([`Self::claim`]).
     pub(crate) fn of(transforms: &[TransformSpec], demands: &[(Option<&str>, &str)]) -> Self {
         let mut demand = Self::skeleton(transforms);
         for (source, field) in demands {
-            demand.claim(transforms, *source, field);
+            demand.claim(transforms, &[], *source, field);
         }
         demand
     }
@@ -128,50 +130,116 @@ impl ChainDemand {
         self.steps.get(index).map(|step| &step.branch)
     }
 
-    /// Mark the steps of `chain` that produce `source` directly as binning
-    /// `field`, among the lowered steps (after the chain's marker):
-    /// - `None`: the chain's unnamed steps, which advance to its tail;
-    /// - a key: the last step in chain order that publishes exactly that key
-    ///   ([`publication`]), as the run's last insert under a key is the batch
-    ///   a reader draws. A named or unnamed step's own key is that step; a
-    ///   `Branch`'s name is its unnamed steps; a key a branch scopes is
-    ///   resolved inside it.
-    ///
-    /// A key no step publishes resolves to nothing: the render refuses a
-    /// layer reading it before any scale reads its rows.
-    fn claim(&mut self, chain: &[TransformSpec], source: Option<&str>, field: &str) {
-        let lowered_from = chain.iter().position(is_statistics_marker).map(|marker| marker + 1);
-        let lowered = |index: usize| lowered_from.is_some_and(|from| index >= from);
-        let Some(key) = source else {
-            for (index, spec) in chain.iter().enumerate() {
-                if lowered(index) && spec_name(spec).is_none() {
-                    self.push(chain, index, field);
-                }
-            }
-            return;
-        };
-        let producer = chain.iter().enumerate().rev().find_map(|(index, spec)| publication(spec, key).map(|p| (index, spec, p)));
-        match producer {
-            Some((index, _, Publication::Own)) if lowered(index) => self.push(chain, index, field),
-            Some((index, TransformSpec::Branch(branch), Publication::BranchTail)) => {
-                self.steps[index].branch.claim(&branch.transforms, None, field)
-            }
-            Some((index, TransformSpec::Branch(branch), Publication::Scoped(inner))) => {
-                self.steps[index].branch.claim(&branch.transforms, Some(inner), field)
-            }
-            _ => {}
+    /// The demand on the chain at `path` (the `Branch` indices from the
+    /// pipeline's own chain down to it).
+    fn at_mut(&mut self, path: &[usize]) -> Option<&mut ChainDemand> {
+        match path.split_first() {
+            None => Some(self),
+            Some((&index, rest)) => self.steps.get_mut(index)?.branch.at_mut(rest),
         }
     }
 
-    /// Mark step `index` of `chain` as binning `field`, when it groups by it.
-    fn push(&mut self, chain: &[TransformSpec], index: usize, field: &str) {
+    /// Mark, in the chain at `path` of `root`, the steps that produce
+    /// `source` as binning `field`, among the lowered steps (after the
+    /// chain's marker):
+    /// - `None`: the chain's unnamed steps, which advance to its tail. The
+    ///   tail's rows start from the chain's input, so when the chain is a
+    ///   branch reading a published key, that key's producer is claimed
+    ///   too ([`Self::claim_input`]);
+    /// - a key: its producer ([`Self::claim_key`]).
+    fn claim(&mut self, root: &[TransformSpec], path: &[usize], source: Option<&str>, field: &str) {
+        let Some(chain) = chain_at(root, path) else { return };
+        let Some(key) = source else {
+            let lowered_from = lowered_from(chain);
+            for (index, spec) in chain.iter().enumerate() {
+                if lowered_from.is_some_and(|from| index >= from) && spec_name(spec).is_none() {
+                    self.push(path, chain, index, field);
+                }
+            }
+            self.claim_input(root, path, field);
+            return;
+        };
+        self.claim_key(root, path, chain.len(), key, field);
+    }
+
+    /// Mark the producer of `key` as a reader at position `before` of the
+    /// chain at `path` sees it: the last step before that position that
+    /// publishes exactly that key ([`publication`]), as the run's last
+    /// insert under a key is the batch a reader draws, else the producer
+    /// the enclosing chain holds before its branch, as a branch's run sees
+    /// every outer key. A named or unnamed step's own key is that step,
+    /// when lowered; a `Branch`'s name is its unnamed steps; a key a branch
+    /// scopes is resolved inside it.
+    ///
+    /// A named step's rows are its chain's tail at its position, shared by
+    /// every reader of that chain, so the claim stops at the named step. A
+    /// key no step publishes resolves to nothing: the render refuses a layer
+    /// reading it before any scale reads its rows.
+    fn claim_key(&mut self, root: &[TransformSpec], path: &[usize], before: usize, key: &str, field: &str) {
+        let Some(chain) = chain_at(root, path) else { return };
+        let visible = &chain[..before.min(chain.len())];
+        let producer = visible.iter().enumerate().rev().find_map(|(index, spec)| publication(spec, key).map(|p| (index, p)));
+        let inner_path = |index: usize| [path, &[index]].concat();
+        match producer {
+            Some((index, Publication::Own)) => {
+                if lowered_from(chain).is_some_and(|from| index >= from) {
+                    self.push(path, chain, index, field);
+                }
+            }
+            Some((index, Publication::BranchTail)) => self.claim(root, &inner_path(index), None, field),
+            Some((index, Publication::Scoped(inner))) => self.claim(root, &inner_path(index), Some(inner), field),
+            None => {
+                if let Some((&index, parent)) = path.split_last() {
+                    self.claim_key(root, parent, index, key, field);
+                }
+            }
+        }
+    }
+
+    /// Mark the producer of the published key the branch at `path` reads
+    /// (its `input`), as the branch sees it from its position. A branch
+    /// with no `input` reads the pipeline's original rows, and the
+    /// pipeline's own chain starts from them: neither has a producer.
+    fn claim_input(&mut self, root: &[TransformSpec], path: &[usize], field: &str) {
+        let Some((&index, parent)) = path.split_last() else { return };
+        let Some(TransformSpec::Branch(branch)) = chain_at(root, parent).and_then(|chain| chain.get(index)) else {
+            return;
+        };
+        if let Some(input) = branch.input.as_deref() {
+            self.claim_key(root, parent, index, input, field);
+        }
+    }
+
+    /// Mark step `index` of `chain` (the chain at `path`) as binning
+    /// `field`, when it groups by it.
+    fn push(&mut self, path: &[usize], chain: &[TransformSpec], index: usize, field: &str) {
         if !chain[index].groupby().is_some_and(|groupby| groupby.iter().any(|g| g == field)) {
             return;
         }
-        let fields = &mut self.steps[index].fields;
+        let Some(fields) = self.at_mut(path).and_then(|demand| demand.steps.get_mut(index)).map(|step| &mut step.fields) else {
+            return;
+        };
         if !fields.iter().any(|existing| existing == field) {
             fields.push(field.to_string());
         }
+    }
+}
+
+/// The index of `chain`'s first lowered step: the one after its first
+/// statistics marker; `None` when it has no marker, so every step is the
+/// user's.
+fn lowered_from(chain: &[TransformSpec]) -> Option<usize> {
+    chain.iter().position(is_statistics_marker).map(|marker| marker + 1)
+}
+
+/// The chain at `path` of `root`: the `Branch` at each index in turn.
+fn chain_at<'c>(root: &'c [TransformSpec], path: &[usize]) -> Option<&'c [TransformSpec]> {
+    match path.split_first() {
+        None => Some(root),
+        Some((&index, rest)) => match root.get(index)? {
+            TransformSpec::Branch(branch) => chain_at(&branch.transforms, rest),
+            _ => None,
+        },
     }
 }
 
@@ -288,6 +356,94 @@ mod tests {
         let inner = demand.branch(3).expect("the branch's demand");
         assert_eq!((inner.fields(2), inner.fields(3)), (&["v".to_string()][..], &["v".to_string()][..]), "a field the step does not group by is not demanded");
         assert!(inner.fields(0).is_empty());
+    }
+
+    /// A filter, unnamed, as a user writes it.
+    fn keep_all() -> serde_json::Value {
+        serde_json::json!({"type": "filter", "predicate": "true"})
+    }
+
+    /// A branch named `name` over `input` (the original rows when `None`).
+    fn branch(name: &str, input: Option<&str>, transforms: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type": "branch", "name": name, "input": input, "transforms": transforms})
+    }
+
+    /// A layer reading a branch whose input is a statistic's branch bins
+    /// that statistic, through as many branches as it takes, while the
+    /// user's own steps in the reading branches stay unbinned. Rejects
+    /// claiming only the branch the layer reads.
+    #[test]
+    fn a_read_through_a_branch_input_bins_the_statistic_it_reads() {
+        let chain = steps(serde_json::json!([
+            branch("stat", None, serde_json::json!([marker(), agg(None)])),
+            {"type": "identity", "name": "rows"},
+            keep_all(),
+            branch("post", Some("stat"), serde_json::json!([keep_all()])),
+            branch("again", Some("post"), serde_json::json!([keep_all()])),
+        ]));
+        for reader in ["post", "again"] {
+            let demand = ChainDemand::of(&chain, &[(Some(reader), "v")]);
+            assert_eq!(demand.branch(0).expect("the statistic's branch").fields(1), ["v"], "{reader}");
+            assert!(!demand.branch(3).expect("post").any() && !demand.branch(4).expect("again").any(), "{reader}");
+        }
+    }
+
+    /// A branch reading a named output, a statistic's own or one a branch
+    /// scopes, bins that statistic for the branch's readers. Rejects
+    /// stopping at the reading branch.
+    #[test]
+    fn a_branch_reading_a_named_output_bins_its_statistic() {
+        let chain = steps(serde_json::json!([marker(), agg(Some("s")), branch("post", Some("s"), serde_json::json!([keep_all()]))]));
+        assert_eq!(ChainDemand::of(&chain, &[(Some("post"), "v")]).fields(1), ["v"]);
+        let chain = steps(serde_json::json!([
+            branch("b", None, serde_json::json!([marker(), agg(Some("s"))])),
+            branch("post", Some("b_s"), serde_json::json!([keep_all()])),
+        ]));
+        assert_eq!(ChainDemand::of(&chain, &[(Some("post"), "v")]).branch(0).expect("b").fields(1), ["v"]);
+        let chain = steps(serde_json::json!([
+            branch("b", None, serde_json::json!([marker(), agg(Some("s")), branch("post", Some("s"), serde_json::json!([keep_all()]))])),
+        ]));
+        let demand = ChainDemand::of(&chain, &[(Some("b_post"), "v")]);
+        assert_eq!(demand.branch(0).expect("b").fields(1), ["v"], "an inner key resolves before an outer one");
+    }
+
+    /// Demand reaches only the statistics the binned reader's rows came
+    /// from: a sibling statistic of the same shape that an unbinned layer
+    /// reads keeps its raw grain, and so do the shared rows before a named
+    /// statistic. Rejects binning every lowered step.
+    #[test]
+    fn a_transitive_read_leaves_its_siblings_unbinned() {
+        let chain = steps(serde_json::json!([
+            branch("stat", None, serde_json::json!([marker(), agg(None)])),
+            branch("sibling", None, serde_json::json!([marker(), agg(None)])),
+            branch("post", Some("stat"), serde_json::json!([keep_all()])),
+        ]));
+        let demand = ChainDemand::of(&chain, &[(Some("post"), "v")]);
+        assert_eq!(demand.branch(0).expect("stat").fields(1), ["v"]);
+        assert!(!demand.branch(1).expect("sibling").any(), "the sibling statistic keeps its grain");
+        let chain = steps(serde_json::json!([marker(), agg(None), agg(Some("s")), branch("post", Some("s"), serde_json::json!([keep_all()]))]));
+        let demand = ChainDemand::of(&chain, &[(Some("post"), "v")]);
+        assert_eq!((demand.fields(1), demand.fields(2)), (&[][..], &["v".to_string()][..]), "the chain rows other layers read stay raw");
+    }
+
+    /// A user step before a statistic's marker, and a user branch with no
+    /// marker, run as written under a transitive read; only the lowered
+    /// statistic bins. Rejects binning the user's own grouping steps.
+    #[test]
+    fn a_users_steps_stay_raw_under_a_transitive_read() {
+        let chain = steps(serde_json::json!([
+            branch("stat", None, serde_json::json!([agg(None), marker(), agg(None)])),
+            branch("post", Some("stat"), serde_json::json!([agg(None)])),
+        ]));
+        let demand = ChainDemand::of(&chain, &[(Some("post"), "v")]);
+        let stat = demand.branch(0).expect("stat");
+        assert_eq!((stat.fields(0), stat.fields(2)), (&[][..], &["v".to_string()][..]));
+        assert!(!demand.branch(1).expect("post").any(), "the user's aggregate in the reading branch");
+        let chain = steps(serde_json::json!([
+            branch("user", None, serde_json::json!([agg(None)])),
+            branch("post", Some("user"), serde_json::json!([keep_all()])),
+        ]));
+        assert!(!ChainDemand::of(&chain, &[(Some("post"), "v")]).any(), "a user branch with no marker");
     }
 
     /// A context whose step groups `v` by the bins of `edges`.

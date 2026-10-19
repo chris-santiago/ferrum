@@ -1168,7 +1168,7 @@ mod tests {
             let scale_obj = d.into_any();
             let spec = EncodingSpec::new(
                 py, "date", None, Some(&scale_obj), None, None, None, None, None, None, None,
-                None, None, None,
+                None, None, None, None,
             )
             .unwrap();
             match spec.scale {
@@ -1281,7 +1281,7 @@ mod tests {
 
             let encoding_err = EncodingSpec::new(
                 py, "x", None, Some(d.as_any()), None, None, None, None, None, None, None,
-                None, None, None,
+                None, None, None, None,
             )
             .unwrap_err();
 

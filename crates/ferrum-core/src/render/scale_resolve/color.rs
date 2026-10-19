@@ -166,7 +166,6 @@ pub fn build_color_scale(
         } else {
             admitted_aux_reads(layer_reads, "color", false, primary_batch, transform_outputs, &mut warnings)?
         };
-        refuse_unbinnable_reads(c_enc, &reads, primary_batch, transform_outputs)?;
         let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, transform_origins, &mut warnings)?;
         return Ok((scale, warnings));
     }
@@ -180,12 +179,6 @@ pub fn build_color_scale(
     .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
     let inferred = infer_spec_type(c_enc, located.col.data_type());
-    // A binned color's establishing column must be one the `Bin` transform
-    // reads.
-    if binned {
-        let field = layer_reads.first().map_or(c_enc.field.as_str(), AuxRead::field);
-        require_binnable(field, located.col)?;
-    }
     // FA-5: When force_categorical is set (mark_area), treat any quantitative/temporal
     // color field as categorical.  Area always groups by distinct color values
     // (col_as_ordinal_category_str), so both the fills and the legend must agree on
@@ -220,7 +213,6 @@ pub fn build_color_scale(
     };
     let layer_reads = layer_reads.as_slice();
     if is_continuous_color {
-        refuse_unbinnable_reads(c_enc, layer_reads, primary_batch, transform_outputs)?;
         let continuous_extent = |col: &dyn arrow::array::Array, _: &str| {
             if !crate::render::arrow_cast::is_numeric(col.data_type()) {
                 return Err(RenderError::EncodingTypeMismatch {
@@ -746,33 +738,23 @@ fn derived_bin_partition(
 
 /// A binned color bins its column with the `Bin` transform's edge rule,
 /// which reads only numbers: any other column `field` holds is refused,
-/// naming it.
-fn require_binnable(field: &str, col: &dyn arrow::array::Array) -> Result<(), RenderError> {
+/// naming it and the class `binding` was written with. The render's column
+/// gate asks it, before any scale reads a column, of both sets a binned rule
+/// reaches: each layer's drawn and grouping bindings against its own rows,
+/// and each binned read of the color scale against the column it reads.
+pub(in crate::render) fn require_binnable(
+    binding: &crate::spec::encoding::EncodingSpec,
+    field: &str,
+    col: &dyn arrow::array::Array,
+) -> Result<(), RenderError> {
     if crate::transform::numeric_util::is_numeric_dtype(col.data_type()) {
         return Ok(());
     }
     Err(RenderError::BinnedColorNotNumeric {
-        channel: "color",
+        channel: binding.binned_color_class().as_str(),
         field: field.to_string(),
         dtype: format!("{:?}", col.data_type()),
     })
-}
-
-/// [`require_binnable`] over every column read in `reads`, for a binned
-/// color: each admitted layer's column joins the edges' values.
-fn refuse_unbinnable_reads(
-    enc: &crate::spec::encoding::EncodingSpec,
-    reads: &[AuxRead<'_>],
-    primary_batch: &RecordBatch,
-    transform_outputs: &HashMap<String, RecordBatch>,
-) -> Result<(), RenderError> {
-    if enc.color_bin().is_none() {
-        return Ok(());
-    }
-    reads
-        .iter()
-        .filter_map(|read| read.locate(primary_batch, transform_outputs).map(|located| (read.field(), located)))
-        .try_for_each(|(field, located)| require_binnable(field, located.col))
 }
 
 /// Turn a `Quantize` spec's declared `domain` into an ascending `(lo, hi)`

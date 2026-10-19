@@ -10315,7 +10315,7 @@ fn a_statistic_grouped_by_a_non_numeric_binned_color_is_refused() {
     )
     .unwrap();
     let err = gate_render(&binned_mean_bar_spec(None), &rows).0.expect_err("refused");
-    assert_eq!(err.to_string(), "color(bin=...) bins numbers, but column 'v' is Utf8. Bind a numeric column, or drop bin=");
+    assert_eq!(err.to_string(), "Color(bin=...) bins numbers, but column 'v' is Utf8. Bind a numeric column, or drop bin=");
 }
 
 /// A spec without a binned color, a binned color no statistic groups by, and
@@ -10587,6 +10587,37 @@ fn a_branch_statistics_legend_matches_its_bars() {
     assert!(bars.iter().all(|v| starts.contains(v)), "every bar sits in a legend bin: {bars:?} {starts:?}");
 }
 
+/// A layer reading a branch whose input is a statistic's branch (a step
+/// written on a composition after a binned operand) groups that statistic
+/// by the legend's bins, and the legend's edges are cut from the rows the
+/// statistic read, recorded for the reading branch too. Rejects claiming
+/// only the branch the layer reads, which left the statistic grouped by raw
+/// value.
+#[test]
+fn a_layer_reading_a_statistic_through_a_branch_groups_it_by_bin() {
+    let rows = binned_stat_rows();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [
+            {"type": "branch", "name": "operand", "transforms": [statistics_marker(), mean_by_g_v(None)]},
+            {"type": "branch", "name": "post", "input": "operand", "transforms": [{"type": "filter", "predicate": "true"}]},
+        ],
+        "encoding": {},
+        "layers": [{"mark": "bar", "data_source": "post",
+            "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": sturges_binned_v()}}],
+    }))
+    .unwrap();
+    let p = prep(&spec, &rows);
+    let expected = sturges_edges(&float_col(&rows, "v"));
+    assert_eq!(binned_bounds(&p), expected, "the legend's edges");
+    let starts = &expected[..expected.len() - 1];
+    for key in ["operand", "post"] {
+        let bars = float_col(&p.transform_outputs[key], "v");
+        assert!(bars.iter().all(|v| starts.contains(v)), "{key}: every bar sits in a legend bin: {bars:?} {starts:?}");
+    }
+}
+
 /// The origins a run publishes are the same on the run that groups by the
 /// edges as on the run that cuts them, so the final scale's edges are the
 /// edges the statistics grouped by; and with no demanded step nothing is
@@ -10702,4 +10733,275 @@ fn a_binned_statistics_consumed_rows_sit_beside_the_outputs() {
     let origins: Vec<&str> = p.transform_origins.keys().map(String::as_str).collect();
     assert_eq!(origins, ["__final__"], "the tail's lineage grouped v by bin");
     assert_eq!(p.transform_origins["__final__"].rows_of("v").expect("v was grouped").num_rows(), rows.num_rows());
+}
+
+/// Rows with a numeric `n`, a string `s` and a timestamp `t` beside a
+/// categorical `g` and numeric `x`, `y`: two rows per `g`.
+fn mixed_dtype_rows() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("n", DataType::Float64, false),
+            Field::new("s", DataType::Utf8, false),
+            Field::new("t", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![4.0, 3.0, 2.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5, 4.5])),
+            Arc::new(StringArray::from(vec!["lo", "hi", "lo", "hi"])),
+            Arc::new(arrow::array::TimestampMillisecondArray::from(vec![0_i64, 1_000, 2_000, 3_000])),
+        ],
+    )
+    .unwrap()
+}
+
+/// A binned color over `field`, written as `class` (no `bin_channel` when
+/// `None`).
+fn binned_over(field: &str, class: Option<&str>) -> serde_json::Value {
+    let mut binding = serde_json::json!({"field": field, "scale": {"type": "bin-ordinal", "bin": {"bin_count": 2, "nice": false}}});
+    if let Some(class) = class {
+        binding["bin_channel"] = serde_json::json!(class);
+    }
+    binding
+}
+
+/// A two-layer point spec over the chart rows, each layer coloring by its
+/// own binding.
+fn two_point_layers(color0: serde_json::Value, color1: serde_json::Value) -> ChartSpec {
+    let layer = |color: serde_json::Value| serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": color}});
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "layers": [layer(color0), layer(color1)],
+    }))
+    .unwrap()
+}
+
+/// The refusal text of a binned color written as `class` over a column of
+/// `dtype`.
+fn not_numeric(class: &str, field: &str, dtype: &str) -> String {
+    format!("{class}(bin=...) bins numbers, but column '{field}' is {dtype}. Bind a numeric column, or drop bin=")
+}
+
+/// A later layer whose own binned color reads a string column is refused
+/// naming the class it was written as, whatever establishes the scale:
+/// an unbinned categorical layer 0 (`fill='s' + Fill('s', bin=True)`), a
+/// binned numeric one (`Fill('n', bin=True) + Fill('s', bin=True)`) and a
+/// continuous one. Rejects judging only the establishing binding, which let
+/// the first draw silently and turned the others into a scale exclusion.
+#[test]
+fn a_later_layers_binned_color_over_strings_is_refused_naming_its_class() {
+    let rows = mixed_dtype_rows();
+    for (establishing, label) in [
+        (serde_json::json!({"field": "s"}), "categorical"),
+        (binned_over("n", Some("Fill")), "binned"),
+        (serde_json::json!({"field": "n", "type": "quantitative"}), "continuous"),
+    ] {
+        let spec = two_point_layers(establishing, binned_over("s", Some("Fill")));
+        let err = gate_render(&spec, &rows).0.expect_err(label);
+        assert_eq!(err.to_string(), not_numeric("Fill", "s", "Utf8"), "{label}");
+    }
+}
+
+/// A flat binned color over a column the `Bin` transform cannot read is
+/// refused naming the class its wire carries (`Color` when it carries
+/// none) and the Arrow dtype, whatever type the binding declares: a string
+/// column and a timestamp one. Rejects the categorical scale a string
+/// column drew, silently dropping the bins.
+#[test]
+fn a_flat_binned_color_over_a_non_numeric_column_is_refused_naming_its_class() {
+    let rows = mixed_dtype_rows();
+    for (field, class, declared, dtype) in [
+        ("s", Some("Fill"), None, "Utf8"),
+        ("s", Some("Stroke"), Some("ordinal"), "Utf8"),
+        ("s", None, None, "Utf8"),
+        ("t", Some("Fill"), None, "Timestamp(Millisecond, None)"),
+    ] {
+        let mut color = binned_over(field, class);
+        if let Some(declared) = declared {
+            color["type"] = serde_json::json!(declared);
+        }
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": color},
+        }))
+        .unwrap();
+        let err = gate_render(&spec, &rows).0.expect_err(field);
+        assert_eq!(err.to_string(), not_numeric(class.unwrap_or("Color"), field, dtype));
+    }
+}
+
+/// A layer whose rows a filter emptied is still refused on its binned
+/// column's dtype, which stands without rows. Rejects a check that runs
+/// after the empty-rows skip.
+#[test]
+fn an_emptied_layers_binned_color_over_strings_is_still_refused() {
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [{"type": "filter", "predicate": "datum.x > 100", "name": "none"}],
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("n", Some("Stroke"))}},
+            {"mark": "point", "data_source": "none", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("s", Some("Stroke"))}},
+        ],
+    }))
+    .unwrap();
+    let err = gate_render(&spec, &mixed_dtype_rows()).0.expect_err("refused");
+    assert_eq!(err.to_string(), not_numeric("Stroke", "s", "Utf8"));
+}
+
+/// Negative control: a later layer whose own color is unbinned over a
+/// string column, under a binned numeric layer 0, still renders, left out
+/// of the binned scale with one `LayerScaleExcluded`; and a binned layer
+/// reading a statistic's output (numeric bin starts) renders.
+#[test]
+fn an_unbinned_later_color_and_a_binned_statistic_still_render() {
+    let rows = mixed_dtype_rows();
+    let spec = two_point_layers(binned_over("n", Some("Fill")), serde_json::json!({"field": "s"}));
+    let (scene, warnings) = gate_render(&spec, &rows);
+    scene.expect("an unbinned later color renders");
+    assert_eq!(scale_exclusions(&warnings), excluded(1, 0, "color"));
+    let rows = binned_stat_rows();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "transforms": [statistics_marker(), mean_by_g_v(Some("stat"))],
+        "encoding": {},
+        "layers": [{"mark": "bar", "data_source": "stat",
+            "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": unit_binned_v()}}],
+    }))
+    .unwrap();
+    gate_render(&spec, &rows).0.expect("a binned statistic renders");
+}
+
+/// A layer's binding on the parent's field with no scale of its own,
+/// under a parent `Fill(bin=...)` over a string column, inherits the
+/// binned scale with its class and is refused naming `Fill`. Rejects
+/// adopting the scale without the class, which named `Color`.
+#[test]
+fn an_inherited_binned_color_is_refused_in_the_parents_class() {
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("s", Some("Fill"))},
+        "layers": [{"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "s"}}}],
+    }))
+    .unwrap();
+    let err = gate_render(&spec, &mixed_dtype_rows()).0.expect_err("refused");
+    assert_eq!(err.to_string(), not_numeric("Fill", "s", "Utf8"));
+}
+
+/// A hand-built spec whose binding writes a binned color's class with no
+/// binned color scale is refused at render, naming where it was written,
+/// on the chart encoding and on a layer's own. Rejects ignoring the field.
+#[test]
+fn a_bin_channel_without_a_binned_color_is_refused_at_render() {
+    let rows = mixed_dtype_rows();
+    let spec = two_point_layers(serde_json::json!({"field": "n"}), serde_json::json!({"field": "n", "bin_channel": "Stroke"}));
+    let err = gate_render(&spec, &rows).0.expect_err("a layer's class without a scale");
+    assert!(matches!(err, RenderError::BinChannelWithoutBinnedColor { .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "layers[1].color: bin_channel='Stroke' names the class of a binned color, but this binding has no binned color \
+         scale (a 'bin-ordinal' scale with 'bin'); drop bin_channel"
+    );
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "n", "scale": {"type": "linear"}, "bin_channel": "Fill"}},
+    }))
+    .unwrap();
+    let err = gate_render(&spec, &rows).0.expect_err("a chart encoding's class beside an unbinned scale").to_string();
+    assert!(err.starts_with("color: bin_channel='Fill'"), "{err}");
+}
+
+/// A chart-level binned color over `field`, written as `class`, drawn by
+/// layers that each carry their own literal `fill`; the layers inherit it
+/// into the color scale without drawing it.
+fn literal_fill_layers(field: &str, class: Option<&str>) -> ChartSpec {
+    let layer = |fill: &str| serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"fill": fill}});
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over(field, class)},
+        "layers": [layer("black"), layer("red")],
+    }))
+    .unwrap()
+}
+
+/// Layers whose own literal fill clears the chart's binned color from what
+/// they draw still read it into the color scale, so a string column there
+/// is refused naming the class written, not as a wrong-channel type
+/// mismatch. Rejects judging only the bindings a layer draws. A numeric
+/// column renders with no warning.
+#[test]
+fn literal_fill_layers_under_a_binned_color_over_strings_are_refused_naming_its_class() {
+    let rows = mixed_dtype_rows();
+    for (class, voice) in [(Some("Fill"), "Fill"), (Some("Stroke"), "Stroke"), (None, "Color")] {
+        let err = gate_render(&literal_fill_layers("s", class), &rows).0.expect_err(voice);
+        assert_eq!(err.to_string(), not_numeric(voice, "s", "Utf8"));
+    }
+    let (scene, warnings) = gate_render(&literal_fill_layers("n", Some("Fill")), &rows);
+    scene.expect("a numeric binned color renders");
+    assert_eq!(warnings, Vec::new());
+}
+
+/// A two-layer spec whose later layer, over its own rows where `n` is a
+/// string, carries a literal fill and inherits the chart's binned
+/// `Fill('n')`, under a layer 0 whose `n` is numeric. `numeric_later`
+/// gives the later layer numbers instead.
+fn literal_fill_layer_over_other_rows(numeric_later: bool) -> ChartSpec {
+    let n_later = if numeric_later { "datum.y" } else { "datum.s" };
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [{"type": "branch", "name": "other", "transforms": [{"type": "calculate", "as_field": "n", "expr": n_later}]}],
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("n", Some("Fill"))},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("n", Some("Fill"))}},
+            {"mark": "point", "data_source": "other", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                "inherited_positional": ["x", "y"], "mark_style": {"fill": "red"}},
+        ],
+    }))
+    .unwrap()
+}
+
+/// A literal-fill layer over other rows that inherits a binned color over
+/// a string column is refused naming the class written, not left out of
+/// the scale with a `LayerScaleExcluded`. Rejects the silent degrade. The
+/// same layer over numbers renders with no warning.
+#[test]
+fn a_literal_fill_layer_over_strings_under_a_binned_color_is_refused_not_excluded() {
+    let rows = mixed_dtype_rows();
+    let err = gate_render(&literal_fill_layer_over_other_rows(false), &rows).0.expect_err("refused");
+    assert_eq!(err.to_string(), not_numeric("Fill", "n", "Utf8"));
+    let (scene, warnings) = gate_render(&literal_fill_layer_over_other_rows(true), &rows);
+    scene.expect("numbers render");
+    assert_eq!(warnings, Vec::new());
+}
+
+/// A text layer inheriting a binned color over a string column, with no
+/// statistic grouping by it, draws no color of its own and reads none into
+/// the scale, so this check does not refuse it.
+#[test]
+fn a_text_inheriting_a_binned_color_over_strings_is_not_refused() {
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("s", Some("Fill"))},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": binned_over("n", Some("Fill"))}},
+            {"mark": "text", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}},
+                "inherited_channels": ["color"]},
+        ],
+    }))
+    .unwrap();
+    gate_render(&spec, &mixed_dtype_rows()).0.expect("the text renders");
 }

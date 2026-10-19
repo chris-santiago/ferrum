@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
 
 import polars as pl
 import pytest
@@ -516,23 +515,18 @@ def test_a_grouped_bin_folds_its_aggregate_per_bin_and_group():
     assert chart.to_svg().count("<rect") >= 4
 
 
-def test_unhonored_bin_on_color_fails_with_unknown_column():
-    """The honored-kwarg gate is half-enforced: ``to_implicit_transforms()``
-    emits a ``_PendingBin`` for ANY channel's ``bin=``, honored or not, so an
-    unhonored ``Color(bin=True)`` still puts a Bin transform on the chart's
-    pipeline and re-points the color channel at the Bin's own output column
-    (``_encode_lowering._lower_bin_encoding``'s binned-channel scan is
-    deliberately not honored-gated either -- see its docstring). The Bin then
-    replaces the WHOLE batch schema with its own columns, dropping the column
-    ``y`` reads, so the failure names ``w`` as "unknown" rather than
-    ``color=``'s bin=. This pins that failure mode so the earmarked
-    sentinel-bypass follow-up (closing the gate at ``to_implicit_transforms``)
-    has a visible blast radius to fix."""
+def test_a_binned_color_keeps_every_row_and_adds_no_bin_step():
+    """``Color(bin=True)`` maps its field through a binned scale over the unchanged rows.
+
+    Rejects the row-replacing ``Bin`` it used to lower to, which dropped the
+    column ``y`` reads and refused with ``unknown column 'w'``.
+    """
     chart = fm.Chart(_df()).mark_point().encode(x="v", y="w", color=fm.Color("w", bin=True))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        with pytest.raises(ValueError, match=r"unknown column 'w'"):
-            chart.to_svg()
+    spec = _spec(chart)
+    assert _transforms(spec, "bin") == []
+    assert spec["encoding"]["color"]["field"] == "w"
+    assert spec["encoding"]["color"]["scale"]["type"] == "bin-ordinal"
+    assert chart.to_svg().count("<circle") == _df().height
 
 
 def test_a_color_aggregate_beside_a_bin_is_computed_per_bin():

@@ -149,6 +149,12 @@ SCHEME = frozenset({"scheme"})
 #: nothing (Detail, Shape, the facet and error channels, ...) refuse it.
 AGGREGATE = frozenset({"aggregate"})
 
+#: The ``bin=`` kwarg on a color-family channel (Color, Fill, Stroke): the
+#: channel draws its field through a binned color scale whose edges Rust cuts
+#: from the rows it draws, so the rows are left unchanged
+#: (``ChannelBase._color_bin_scale``).
+BINNED_COLOR = frozenset({"bin"})
+
 #: Adds an explicit scale override. (Size, Opacity, FillOpacity,
 #: StrokeOpacity and StrokeWidth, which also draw a legend and so honor
 #: ``legend``/``title`` through their ``own`` surface.)

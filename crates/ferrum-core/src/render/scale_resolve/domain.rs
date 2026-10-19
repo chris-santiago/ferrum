@@ -329,6 +329,17 @@ impl<'a> AuxRead<'a> {
         self.field
     }
 
+    /// The binding this read draws by when it carries a binned color rule
+    /// ([`crate::spec::encoding::EncodingSpec::color_bin`]): the binding
+    /// whose column a binned color scale cuts. `None` for an unbinned
+    /// binding, and for a raster image's cells, which no binding names.
+    pub(in crate::render) fn binned_binding(&self) -> Option<&'a crate::spec::encoding::EncodingSpec> {
+        match self.kind {
+            AuxReadKind::Column { binding } => binding.color_bin().is_some().then_some(binding),
+            AuxReadKind::RasterCells { .. } => None,
+        }
+    }
+
     /// The refusal of a raster image's cells under a categorical color scale
     /// ([`RenderError::RasterColorNotQuantitative`]), voiced by the image
     /// layer's public call (ruling F: `mark_raster`, else `layer {i}:
@@ -536,7 +547,9 @@ struct ReadExtent {
 /// The first read is the establishing layer's: the first layer that draws
 /// the channel, layer 0 when it does, the layer whose binding the rendering
 /// encoding carries (`prepare`'s `establishing_encoding`). Empty when no layer
-/// draws the channel, which then gets no scale and no legend.
+/// draws the channel, which then gets no scale and no legend. The column gate
+/// judges a color's binned reads ([`AuxRead::binned_binding`]) before any
+/// scale reads them.
 pub(in crate::render) fn aux_reads<'a>(
     layers: &'a [Layer],
     chart_encoding: &'a crate::spec::encoding::Encoding,

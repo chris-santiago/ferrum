@@ -372,6 +372,20 @@ impl LayerPrepared {
         encoding
     }
 
+    /// The bindings of this layer that carry a binned color rule: its drawn
+    /// color ([`Self::drawn_encoding`]) and its grouping-only `group` key,
+    /// each when it carries `bin`. The bindings whose statistics group by
+    /// bin ([`binned_color_demand`]); the gate requires their columns to be
+    /// numbers, as it does the color scale's binned reads
+    /// ([`crate::render::scale_resolve::AuxRead::binned_binding`]).
+    pub(in crate::render) fn binned_color_bindings(&self) -> Vec<crate::spec::encoding::EncodingSpec> {
+        [self.drawn_encoding().color, self.encoding.group.clone()]
+            .into_iter()
+            .flatten()
+            .filter(|binding| binding.color_bin().is_some())
+            .collect()
+    }
+
     /// Whether this layer draws its binding on the channel `wire` names. A positional channel is judged by layer completion
     /// ([`crate::spec::layer::Layer::completed_encoding`]), so every one it
     /// keeps is drawn. A raster image draws `color` bound to the field its
@@ -1289,6 +1303,7 @@ pub fn prepare_render_inputs(
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
     let mut layers = build_layers(spec)?;
     refuse_malformed_sort_specs(spec)?;
+    refuse_bin_channel_without_binned_color(spec)?;
 
     // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
     // ONCE here from the layers' `independent_y` flags, then hand it to every
@@ -1337,7 +1352,38 @@ pub fn prepare_render_inputs(
     let mut column_warnings = Vec::new();
     {
         let pipeline = PipelineBatches { source: source_schema.as_ref(), outputs: &transform_outputs, transforms: &spec.transforms };
+        // The color scale's reads of a layered spec, as the scale reads them
+        // (the call `establishing_binding` makes): a layer whose own literal
+        // paint clears its inherited color from what it draws still reads it
+        // into the scale. Empty on an unlayered spec, whose one layer draws
+        // the chart's own color.
+        let color_channel = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS.iter().find(|channel| channel.name == "color");
+        let color_reads = match (spec.layers.as_deref(), color_channel) {
+            (Some(raw), Some(color)) => {
+                crate::render::scale_resolve::aux_reads(raw, &spec.encoding, *color, &transformed, &transform_outputs)
+            }
+            _ => Vec::new(),
+        };
         for (i, (layer, own_batch)) in layers.iter_mut().zip(&layer_batches).enumerate() {
+            // A binned color cuts numbers: each binned binding is judged
+            // against its own layer's column, whichever layer establishes
+            // the scale, and before the empty-rows skip, since a column's
+            // dtype stands without rows. The bindings judged are both sets
+            // a binned rule reaches: the ones the layer draws and groups by
+            // (`binned_color_bindings`) and the ones the color scale cuts
+            // (`color_reads`). A column the rows lack is left to the
+            // missing-column refusal below.
+            for binding in layer.binned_color_bindings() {
+                if let Some(col) = own_batch.column_by_name(&binding.field) {
+                    crate::render::scale_resolve::require_binnable(&binding, &binding.field, col.as_ref())?;
+                }
+            }
+            for read in color_reads.iter().filter(|read| read.layer() == i) {
+                let Some(binding) = read.binned_binding() else { continue };
+                if let Some(located) = read.locate(&transformed, &transform_outputs) {
+                    crate::render::scale_resolve::require_binnable(binding, read.field(), located.col)?;
+                }
+            }
             if own_batch.num_rows() == 0 {
                 continue;
             }
@@ -1674,15 +1720,12 @@ fn run_pipeline(
 /// whose layers cannot be built is left to the render's own refusal.
 fn binned_color_demand(spec: &ChartSpec) -> Option<ChainDemand> {
     let layers = build_layers(spec).ok()?;
-    let mut demands: Vec<(Option<&str>, String)> = Vec::new();
-    for layer in &layers {
-        let drawn = layer.drawn_encoding();
-        for binding in [drawn.color.as_ref(), layer.encoding.group.as_ref()].into_iter().flatten() {
-            if binding.color_bin().is_some() {
-                demands.push((layer.data_source.as_deref(), binding.field.clone()));
-            }
-        }
-    }
+    let demands: Vec<(Option<&str>, String)> = layers
+        .iter()
+        .flat_map(|layer| {
+            layer.binned_color_bindings().into_iter().map(|binding| (layer.data_source.as_deref(), binding.field))
+        })
+        .collect();
     let pairs: Vec<(Option<&str>, &str)> = demands.iter().map(|(source, field)| (*source, field.as_str())).collect();
     let demand = ChainDemand::of(&spec.transforms, &pairs);
     demand.any().then_some(demand)
@@ -2200,6 +2243,29 @@ fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<R
         });
     }
     warnings
+}
+
+/// Refuse a binding that writes a binned color's class (`bin_channel`)
+/// without the binned color scale it describes, anywhere a hand-built spec
+/// could carry one past `EncodingSpec::new`'s refusal of the same shape:
+/// `spec.encoding`'s channels, then every `spec.layers[i]`'s own. Walks the
+/// raw spec, before inheritance, as [`refuse_malformed_sort_specs`] does: a
+/// binding that writes the class writes the scale it describes. Shares
+/// [`crate::spec::encoding::EncodingSpec::bin_channel_conflict`] with the
+/// constructor, so the two refusals cannot disagree.
+fn refuse_bin_channel_without_binned_color(spec: &ChartSpec) -> Result<(), RenderError> {
+    let check = |location: String, enc: &crate::spec::encoding::EncodingSpec| {
+        enc.bin_channel_conflict().map_err(|reason| RenderError::BinChannelWithoutBinnedColor { location, reason })
+    };
+    for (name, enc) in spec.encoding.channels() {
+        check(name, enc)?;
+    }
+    for (i, layer) in spec.layers.iter().flatten().enumerate() {
+        for (name, enc) in layer.encoding.channels() {
+            check(format!("layers[{i}].{name}"), enc)?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a malformed sort-field object anywhere it could reach render

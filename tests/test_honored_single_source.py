@@ -124,9 +124,12 @@ _ROLE_CONTRACT = [
     # (`encode()`'s two forms, `Layer(encoding=...)`'s two forms) routes the
     # real value through `ChartSpec.conditionals` instead, via that
     # different, encode()-only mechanism.
+    # A binned color is refused beside scale= and aggregate=, so Color and
+    # Fill are represented unbinned here; their bin= serialization is pinned
+    # by test_a_binned_color_serializes_its_field_and_a_binned_scale.
     (
         fm.Color,
-        fm.Color._honored_kwargs,
+        fm.Color._honored_kwargs - {"bin"},
         {
             "field",
             "type_",
@@ -139,7 +142,7 @@ _ROLE_CONTRACT = [
     ),
     (
         fm.Fill,
-        fm.Fill._honored_kwargs,
+        fm.Fill._honored_kwargs - {"bin"},
         {
             "field",
             "type_",
@@ -274,6 +277,21 @@ def test_spec_dict_drops_bin_and_aggregate():
     d = x.to_encoding_spec_dict()
     assert "bin" not in d and "aggregate" not in d
     assert {"field", "type_"} == set(d.keys())
+
+
+@pytest.mark.parametrize("channel_cls", [fm.Color, fm.Fill, fm.Stroke])
+def test_a_binned_color_serializes_its_field_and_a_binned_scale(channel_cls):
+    """A color-family bin= keeps its field and draws it through a ``bin-ordinal`` scale."""
+    reset_warnings()
+    d = channel_cls("f", bin={"bin_count": 4, "nice": False}, title="F").to_encoding_spec_dict()
+    assert d == {
+        "field": "f",
+        "title": "F",
+        "scale": {"type": "bin-ordinal", "bin": {"bin_count": 4, "nice": False}},
+        "bin_channel": channel_cls.__name__,
+    }
+    assert "bin_channel" not in channel_cls("f").to_encoding_spec_dict()
+    assert channel_cls("f", bin=True).to_implicit_transforms() == []
 
 
 def test_spec_dict_only_serializes_honored_kwargs():

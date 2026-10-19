@@ -110,8 +110,10 @@ from ferrum.encoding.appearance import (
 # When a channel's membership intentionally changes, update this table and
 # add a dated comment explaining why.
 _EXPECTED: dict[type, frozenset[str]] = {
+    # Color, Fill and Stroke honor "bin" since 2026-10-19: bin= draws the
+    # field through a binned color scale over the unchanged rows.
     Color: frozenset(
-        {"type", "scale", "title", "legend", "condition", "sort", "scheme", "aggregate"}
+        {"type", "scale", "title", "legend", "condition", "sort", "scheme", "aggregate", "bin"}
     ),
     Size: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     # Shape LOST "condition" 2026-09-11 (batch-H close re-review), the same
@@ -129,7 +131,9 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # Opacity LOST "title" and "legend" 2026-09-23 (#123, sixth change
     # above) and regained both 2026-10-16 (eighth change): it draws a legend.
     Opacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
-    Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme", "aggregate"}),
+    Fill: frozenset(
+        {"type", "scale", "title", "legend", "condition", "scheme", "aggregate", "bin"}
+    ),
     # Stroke LOST "condition" 2026-09-11 (batch-H close re-review): a stroke
     # conditional would repaint the fill (ferrum-wasm's apply_value_common
     # writes EncodingValue::Color to fill_color; FillStrokeView has no
@@ -137,7 +141,7 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # advertise it. Fill keeps it -- Color *is* the fill. As of cycle 3
     # (2026-09-11), Fill and Stroke both declare the SAME role set
     # (APPEARANCE_SCHEME) -- see Shape's comment above for the pattern.
-    Stroke: frozenset({"type", "scale", "title", "legend", "scheme", "aggregate"}),
+    Stroke: frozenset({"type", "scale", "title", "legend", "scheme", "aggregate", "bin"}),
     # FillOpacity/StrokeOpacity/StrokeWidth/Angle gained "condition"
     # 2026-09-11 (batch-H close remediation) — all four are conditional
     # channels on the wire; StrokeWidth/Angle still carry no "scale"/"title".

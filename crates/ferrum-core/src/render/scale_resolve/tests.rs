@@ -5514,45 +5514,6 @@ fn a_binned_colors_scheme_is_honored() {
     assert_ne!(rgb(blues.lookup_f64(1.3).unwrap()), rgb(reds.lookup_f64(1.3).unwrap()));
 }
 
-/// A binned color over a column the `Bin` transform cannot read as numbers
-/// is refused, naming the channel and the column, whatever type the binding
-/// declares: a string column, and a timestamp one. Rejects the categorical
-/// scale a string column drew, silently dropping the bins.
-#[test]
-fn a_binned_color_over_a_non_numeric_column_is_refused_naming_it() {
-    use crate::spec::encoding::{DataType as SDT, ScaleSpec};
-    pyo3::Python::initialize();
-    let rows = |column: Arc<dyn arrow::array::Array>| {
-        let dtype = column.data_type().clone();
-        RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("x", ArrowDataType::Utf8, false),
-                Field::new("y", ArrowDataType::Utf8, false),
-                Field::new("v", dtype, true),
-            ])),
-            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(StringArray::from(vec!["a", "b"])), column],
-        )
-        .unwrap()
-    };
-    let strings = rows(Arc::new(StringArray::from(vec!["lo", "hi"])));
-    let stamps = rows(Arc::new(arrow::array::TimestampMillisecondArray::from(vec![0_i64, 1_000])));
-    for (batch, declared, dtype) in [
-        (&strings, None, "Utf8"),
-        (&strings, Some(SDT::Ordinal), "Utf8"),
-        (&stamps, None, "Timestamp(Millisecond, None)"),
-    ] {
-        let mut spec = binned_color_spec(serde_json::json!({}));
-        let color = spec.encoding.color.as_mut().unwrap();
-        color.type_ = declared;
-        assert!(matches!(color.scale, Some(ScaleSpec::BinOrdinal { .. })));
-        let err = resolve_color_err(&spec, batch);
-        assert_eq!(
-            err.to_string(),
-            format!("color(bin=...) bins numbers, but column 'v' is {dtype}. Bind a numeric column, or drop bin="),
-        );
-    }
-}
-
 /// A layered binned color's edges are cut from every drawing layer's values
 /// (layer 0's `mean_z` over 0..2, layer 1's over 10..20), so the layers share
 /// one set of bins. Rejects edges cut from the establishing layer alone.

@@ -99,6 +99,41 @@ _NO_BIN_MESSAGE = (
 )
 
 
+#: ``{scale}`` names the conflicting side as written: ``scale=`` on the
+#: channel, or an override leaf (``Chart.override(fill_scale_type=...)``).
+_BIN_WITH_SCALE_MESSAGE = (
+    "{channel}(bin=...) cannot be combined with {scale}: bin= builds the channel's binned "
+    "color scale. Pass explicit edges with scale=fm.BinOrdinalScale(bins=[...]) and drop "
+    "bin=, or drop {scale}."
+)
+
+#: The ``Bin`` parameters a binned color scale's ``bin`` rule takes.
+_COLOR_BIN_RULE_KEYS = ("bin_count", "bin_width", "extent", "nice")
+
+#: The keys of its ``bin-ordinal`` scale a binned color's ``bin=`` owns: the
+#: bin rule and the edges it cuts.
+_BIN_OWNED_SCALE_KEYS = ("bin", "bins")
+
+#: ``Bin`` parameters beyond its statistics that a binned color refuses: it
+#: bins no rows in place and groups no edges.
+_COLOR_BIN_REFUSED = ("per_row", "shared_extent")
+
+
+def _pending_bin(field: Any, bin_arg: Any) -> "_PendingBin":
+    """Return the ``_PendingBin`` a channel's ``bin=`` value stands for.
+
+    A dict is read as ``Bin`` keyword arguments and ``True`` as the defaults.
+    Any other value is a pre-built ``Bin``: the PyO3 ``Bin`` exposes no
+    Python-readable attributes, so it is kept whole (``bin_obj``) beside the
+    channel's own field.
+    """
+    if isinstance(bin_arg, dict):
+        return _PendingBin(field=field, bin_kwargs=tuple(bin_arg.items()))
+    if isinstance(bin_arg, bool):
+        return _PendingBin(field=field)
+    return _PendingBin(field=field, bin_obj=bin_arg)
+
+
 def _unset_statistic(kwarg: str, value: Any) -> bool:
     """Whether *value* leaves the statistic kwarg *kwarg* unset.
 
@@ -505,7 +540,7 @@ class ChannelBase:
     # no legend, keyed to a message template (see `_FACET_COLUMNS_MESSAGE`).
     _refused_kwargs: ClassVar[dict[str, str]] = {}
     # Color, Fill and Stroke set this True: their ``bin=`` builds a binned
-    # color scale, so it is not refused as drawing no binned value.
+    # color scale over the unchanged rows instead of a ``Bin`` step.
     _binned_color_scale: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -588,7 +623,7 @@ class ChannelBase:
         # rows, so it is refused rather than warned about.
         if template is None and kwarg == "aggregate":
             template = _NO_AGGREGATE_MESSAGE
-        if template is None and kwarg == "bin" and not self._binned_color_scale:
+        if template is None and kwarg == "bin":
             template = _NO_BIN_MESSAGE
         if template is None:
             return None
@@ -619,6 +654,8 @@ class ChannelBase:
             from ferrum._core import validate_numeric_aux_scale
 
             validate_numeric_aux_scale(self._channel_name, _scale_to_dict(self._kwargs["scale"]))
+        if self._binned_color():
+            self._validate_color_bin()
         if self._stack_kwarg:
             stack = self._kwargs.get("stack")
             if stack is not None:
@@ -751,6 +788,12 @@ class ChannelBase:
             if handler is None:
                 continue
             handler(self._kwargs[key], out)
+        if self._binned_color():
+            out["scale"] = self._color_bin_scale()
+            # The class written travels with the binding, so the render's
+            # refusal of a non-numeric binned column names it on every door,
+            # though the wire draws fill and stroke as color.
+            out["bin_channel"] = type(self).__name__
         return out
 
     def to_implicit_transforms(self) -> list:
@@ -766,19 +809,8 @@ class ChannelBase:
           encoding channels are known (Altair-style auto-groupby).
         """
         out: list = []
-        bin_arg = self._kwargs.get("bin")
-        if bin_arg:
-            if isinstance(bin_arg, dict):
-                out.append(_PendingBin(field=self.field, bin_kwargs=tuple(bin_arg.items())))
-            elif isinstance(bin_arg, bool):
-                out.append(_PendingBin(field=self.field))
-            else:
-                # Bin instance passed directly.  The PyO3 Bin object exposes no
-                # Python-readable attributes (no .field, .bin_count, etc.), so
-                # we cannot extract kwargs from it.  Store the instance in
-                # bin_obj alongside the channel's own field name so resolvers
-                # can use the pre-built Bin directly without guessing internals.
-                out.append(_PendingBin(field=self.field, bin_obj=bin_arg))
+        if self._lowers_row_bin():
+            out.append(_pending_bin(self.field, self._kwargs["bin"]))
         agg = self._kwargs.get("aggregate")
         if agg:
             out.append(
@@ -789,6 +821,102 @@ class ChannelBase:
                 )
             )
         return out
+
+    def _lowers_row_bin(self) -> bool:
+        """Whether this channel's ``bin=`` lowers to a ``Bin`` step over the rows.
+
+        A positional bin does. A color-family bin never does: it is a binned
+        color scale over the unchanged rows (:meth:`_color_bin_scale`).
+        """
+        return bool(self._kwargs.get("bin")) and not self._binned_color_scale
+
+    def _binned_color(self) -> bool:
+        """Whether this channel draws a binned color scale (``Color/Fill/Stroke(bin=...)``)."""
+        return self._binned_color_scale and not _unset_statistic("bin", self._kwargs.get("bin"))
+
+    def _color_bin_scale(self) -> dict:
+        """Return the ``bin-ordinal`` scale a binned color draws through, ruled by ``bin=``.
+
+        ``bin=True`` sends an empty rule (the ``Bin`` transform's defaults);
+        ``bin={...}`` and ``bin=fm.Bin(...)`` send the edge parameters their
+        ``Bin`` carries. The edges themselves are cut in Rust.
+        """
+        from ferrum._encode_lowering import _bin_declaration
+
+        rule: dict = {}
+        if self._kwargs["bin"] is not True:
+            wire = _bin_declaration(self._channel_name, self).bin_wire
+            rule = {key: wire[key] for key in _COLOR_BIN_RULE_KEYS if wire.get(key) is not None}
+        return {"type": "bin-ordinal", "bin": rule}
+
+    def _validate_color_bin(self) -> None:
+        """Refuse a color-family ``bin=`` the binned color scale cannot honor.
+
+        Raises
+        ------
+        ValueError
+            If ``bin=`` is combined with ``scale=`` or ``aggregate=``, with a
+            nominal or temporal ``type_=`` or with a ``sort=`` other than
+            ascending (a binned color is ordered by its bins), if it is not
+            ``True``, a dict of ``Bin`` parameters or a ``Bin``, if a ``Bin``
+            names another field, or if its ``Bin`` declares a statistic, a
+            grouping or a name: a binned color computes no statistic and
+            publishes no rows.
+        """
+        from ferrum import Bin
+        from ferrum._encode_lowering import _bin_declaration
+
+        cls = self.__class__.__name__
+        value = self._kwargs["bin"]
+        if self._kwargs.get("scale") is not None:
+            raise ValueError(_BIN_WITH_SCALE_MESSAGE.format(channel=cls, scale="scale="))
+        if not _unset_statistic("aggregate", self._kwargs.get("aggregate")):
+            raise ValueError(
+                f"encoding channel {self._channel_name!r} carries both bin= and aggregate=; "
+                "one channel cannot be both a binned color and an aggregated value. Drop "
+                "bin= to color by the aggregate, or drop aggregate= to color each row by "
+                "its bin."
+            )
+        if value is not True and not isinstance(value, (dict, Bin)):
+            raise ValueError(
+                f"{cls}(bin={value!r}) is not a bin: pass bin=True, a dict of Bin "
+                "parameters (bin_count, bin_width, extent, nice) or fm.Bin(...)."
+            )
+        type_ = self._kwargs.get("type")
+        if type_ in ("N", "T"):
+            raise ValueError(
+                f"{cls}(bin=...) cannot be combined with type_={type_!r}: a binned color is "
+                "ordered by its bins, so it cannot be nominal or temporal. Drop type_= or use "
+                "quantitative or ordinal."
+            )
+        sort = self._kwargs.get("sort")
+        if sort is not None and sort != "ascending":
+            raise ValueError(
+                f"{cls}(bin=...) cannot be combined with sort={sort!r}: a binned color lists "
+                "its bins in ascending order; sort= cannot reorder them. Drop sort=."
+            )
+        declaration = _bin_declaration(self._channel_name, self)
+        if isinstance(value, Bin) and declaration.bin_wire.get("field") != self.field:
+            raise ValueError(
+                f"{declaration.written} bins {declaration.bin_wire.get('field')!r}, but {cls} "
+                f"colors by {self.field!r}: a binned color bins the field it colors by. "
+                f"Build the Bin over {self.field!r}, or color by "
+                f"{declaration.bin_wire.get('field')!r}."
+            )
+        declared = [
+            name
+            for name in (*declaration.statistics, *_COLOR_BIN_REFUSED)
+            if name in declaration.statistics or declaration.bin_wire.get(name)
+        ]
+        if declared:
+            params = " and ".join(dict.fromkeys(declared))
+            raise ValueError(
+                f"{declaration.written} declares {params}, but bin= on {cls} builds a binned "
+                f"color scale: each row keeps its {self.field!r} and is colored by its bin, "
+                f"and no statistic is computed, so {params} would be ignored. Remove "
+                f"{params} from {declaration.spelling}; to compute it, use "
+                f".transform(fm.Bin({self.field!r}, ...)) and bind its output column."
+            )
 
     def _with_options(self, **options: Any) -> "ChannelBase":
         """Return a copy of this channel, same class and field, with *options* set over its own."""

@@ -102,6 +102,25 @@ fn encoding_spec_all_known_fields_round_trip_under_deny() {
     assert!(parsed.scale.is_some());
 }
 
+/// A binned color's written class rides its wire as `bin_channel` and
+/// round-trips; a binding without it serializes with no `bin_channel` key,
+/// and a class outside the color family is refused.
+#[test]
+fn a_binned_colors_class_round_trips_on_its_wire_and_is_absent_otherwise() {
+    for class in ["Color", "Fill", "Stroke"] {
+        let json = format!(r#"{{"field":"v","bin_channel":"{class}"}}"#);
+        let parsed: EncodingSpec = serde_json::from_str(&json).expect("a color-family class deserializes");
+        assert_eq!(parsed.binned_color_class().as_str(), class);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+    let unset: EncodingSpec = serde_json::from_str(r#"{"field":"v"}"#).unwrap();
+    assert_eq!(unset.bin_channel, None);
+    assert_eq!(unset.binned_color_class(), BinnedColorClass::Color);
+    assert_eq!(serde_json::to_string(&unset).unwrap(), r#"{"field":"v"}"#);
+    assert!(serde_json::from_str::<EncodingSpec>(r#"{"field":"v","bin_channel":"Size"}"#).is_err());
+    assert!("Size".parse::<BinnedColorClass>().is_err());
+}
+
 #[test]
 fn test_encoding_round_trip_both_axes() {
     let e = Encoding {
@@ -1132,7 +1151,7 @@ fn new_encoding_spec_with_sort<'py>(
     py: Python<'py>,
     sort: Option<&pyo3::Bound<'py, pyo3::PyAny>>,
 ) -> PyResult<EncodingSpec> {
-    EncodingSpec::new(py, "a", None, None, None, None, None, sort, None, None, None, None, None, None)
+    EncodingSpec::new(py, "a", None, None, None, None, None, sort, None, None, None, None, None, None, None)
 }
 
 /// Matrix control: valid `EncodingSpec(sort=)` forms (a direction string, an
@@ -1384,4 +1403,55 @@ fn retain_bindings_clears_rejected_bindings_and_tooltip_entries() {
     assert_eq!(e.color, spec("c"));
     assert_eq!(e.shape, None);
     assert_eq!(e.tooltip_fields, Some(vec![]));
+}
+
+/// The PyO3 constructor's `bin_channel` kwarg (the door Python's channel
+/// lowering uses) carries a color-family class onto a binned color's spec
+/// and its wire; it refuses a class outside the color family, and a class
+/// on a binding with no binned color scale, which it would not describe.
+#[test]
+fn encoding_spec_constructor_carries_a_binned_colors_class() {
+    attach(|py| {
+        let json_module = py.import("json").unwrap();
+        let binned = json_module.call_method1("loads", (r#"{"type": "bin-ordinal", "bin": {}}"#,)).unwrap();
+        let unbinned = json_module.call_method1("loads", (r#"{"type": "linear"}"#,)).unwrap();
+        let new = |scale: Option<&pyo3::Bound<'_, pyo3::PyAny>>, class: Option<&str>| {
+            EncodingSpec::new(py, "v", None, scale, None, None, None, None, None, None, None, None, None, None, class)
+        };
+        let fill = new(Some(&binned), Some("Fill")).expect("a class beside a binned scale constructs");
+        assert_eq!(fill.bin_channel, Some(BinnedColorClass::Fill));
+        assert!(serde_json::to_string(&fill).unwrap().ends_with(r#","bin_channel":"Fill"}"#));
+        assert_eq!(new(Some(&binned), None).unwrap().bin_channel, None);
+        let err = new(Some(&binned), Some("Size")).expect_err("a class outside the color family is refused").to_string();
+        assert!(err.contains("unknown bin_channel 'Size'") && err.contains("[Color, Fill, Stroke]"), "{err}");
+        for scale in [None, Some(&unbinned)] {
+            let err = new(scale, Some("Fill")).expect_err("a class with no binned scale is refused").to_string();
+            assert!(
+                err.contains("EncodingSpec(bin_channel=...): bin_channel='Fill' names the class of a binned color")
+                    && err.ends_with("drop bin_channel"),
+                "{err}"
+            );
+        }
+    });
+}
+
+/// A child binding on the parent's field adopts the parent's binned scale
+/// with its class; a child with a scale of its own keeps its own (and no
+/// class); a missing child adopts the whole parent. Rejects adopting the
+/// scale without the class it describes.
+#[test]
+fn an_inherited_binned_scale_brings_its_class() {
+    let parent: Option<EncodingSpec> = Some(
+        serde_json::from_str(r#"{"field":"s","scale":{"type":"bin-ordinal","bin":{}},"bin_channel":"Fill"}"#).unwrap(),
+    );
+    let mut child: Option<EncodingSpec> = Some(serde_json::from_str(r#"{"field":"s"}"#).unwrap());
+    inherit_encoding_spec(&mut child, &parent);
+    let child = child.unwrap();
+    assert_eq!((child.bin_channel, child.color_bin().is_some()), (Some(BinnedColorClass::Fill), true));
+    let mut own: Option<EncodingSpec> = Some(serde_json::from_str(r#"{"field":"s","scale":{"type":"linear"}}"#).unwrap());
+    inherit_encoding_spec(&mut own, &parent);
+    assert_eq!(own.unwrap().bin_channel, None);
+    let mut missing = None;
+    inherit_encoding_spec(&mut missing, &parent);
+    assert_eq!(missing, parent);
 }

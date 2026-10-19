@@ -84,6 +84,40 @@ impl FromStr for DataType {
     }
 }
 
+/// The color-family class a binned color was written with (`Color`, `Fill`
+/// or `Stroke`), carried on its wire as `bin_channel` so a refusal of the
+/// binding names the class the caller wrote whatever door the binding took.
+/// A binding without it (a hand-built spec) reads as `Color`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BinnedColorClass {
+    #[default]
+    Color,
+    Fill,
+    Stroke,
+}
+
+impl BinnedColorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BinnedColorClass::Color => "Color",
+            BinnedColorClass::Fill => "Fill",
+            BinnedColorClass::Stroke => "Stroke",
+        }
+    }
+}
+
+impl FromStr for BinnedColorClass {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Color" => Ok(BinnedColorClass::Color),
+            "Fill" => Ok(BinnedColorClass::Fill),
+            "Stroke" => Ok(BinnedColorClass::Stroke),
+            other => Err(format!("unknown bin_channel '{other}'; expected one of [Color, Fill, Stroke]")),
+        }
+    }
+}
+
 /// Shared fields across all 7 continuous `ScaleSpec` variants (Linear, Log, Time,
 /// Symlog, Pow, Sqrt, Utc).  Embedded via `#[serde(flatten)]` so these fields
 /// appear at the same JSON level as the variant-specific fields (no `"common"` key).
@@ -729,6 +763,11 @@ fn default_band_align() -> f64 {
 /// scheme : str, optional
 ///     Color scheme name for quantitative color encodings (e.g. ``"viridis"``).
 ///     Honored by the renderer via ``scale_resolve``.
+/// bin_channel : {"Color", "Fill", "Stroke"}, optional
+///     The class a binned color was written with, set only on a binding
+///     with ``bin=``, and accepted only beside a binned color scale (a
+///     ``"bin-ordinal"`` scale with ``"bin"``). A refusal of the binned
+///     color names this class; ``"Color"`` when omitted.
 /// format : str, optional
 ///     Tick/label format string. Applied to axis tick labels for x/y
 ///     encodings and to text mark labels. Honored by the renderer.
@@ -815,6 +854,8 @@ pub struct EncodingSpec {
     pub format: Option<String>,
     #[serde(rename = "formatType", default, skip_serializing_if = "Option::is_none")]
     pub format_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_channel: Option<BinnedColorClass>,
 }
 
 impl EncodingSpec {
@@ -847,6 +888,27 @@ impl EncodingSpec {
         match self.scale.as_ref()? {
             ScaleSpec::BinOrdinal { bin, .. } => bin.as_ref(),
             _ => None,
+        }
+    }
+
+    /// The class a binned color was written with: its wire `bin_channel`,
+    /// `Color` when the spec omits it.
+    pub(crate) fn binned_color_class(&self) -> BinnedColorClass {
+        self.bin_channel.unwrap_or_default()
+    }
+
+    /// Refuse a `bin_channel` on a binding with no binned color scale: the
+    /// class names what a binned color was written as, so without the
+    /// `bin-ordinal` scale carrying `bin` it describes nothing. `Err` holds
+    /// the reason, naming the class written.
+    pub(crate) fn bin_channel_conflict(&self) -> Result<(), String> {
+        match self.bin_channel {
+            Some(class) if self.color_bin().is_none() => Err(format!(
+                "bin_channel='{}' names the class of a binned color, but this binding has no binned color \
+                 scale (a 'bin-ordinal' scale with 'bin'); drop bin_channel",
+                class.as_str()
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -895,6 +957,7 @@ impl EncodingSpec {
         scale = None, title = None,
         axis = None, legend = None, sort = None, stack = None,
         condition = None, impute = None, scheme = None, format = None, format_type = None,
+        bin_channel = None,
     ))]
     fn new(
         py: Python,
@@ -911,6 +974,7 @@ impl EncodingSpec {
         scheme: Option<String>,
         format: Option<String>,
         format_type: Option<String>,
+        bin_channel: Option<&str>,
     ) -> PyResult<Self> {
         if field.is_empty() {
             return Err(PyValueError::new_err("field must be non-empty"));
@@ -922,6 +986,10 @@ impl EncodingSpec {
             ),
             None => None,
         };
+        let bin_channel = bin_channel
+            .map(str::parse::<BinnedColorClass>)
+            .transpose()
+            .map_err(PyValueError::new_err)?;
 
         fn json_round<T: for<'de> serde::Deserialize<'de>>(
             py: Python,
@@ -949,7 +1017,7 @@ impl EncodingSpec {
             )?;
         }
 
-        Ok(EncodingSpec {
+        let spec = EncodingSpec {
             field: field.to_string(),
             type_,
             scale: deserialize_scale_value(py, scale)?,
@@ -963,7 +1031,11 @@ impl EncodingSpec {
             scheme,
             format,
             format_type,
-        })
+            bin_channel,
+        };
+        spec.bin_channel_conflict()
+            .map_err(|reason| PyValueError::new_err(format!("EncodingSpec(bin_channel=...): {reason}")))?;
+        Ok(spec)
     }
 
     /// Column name in the input DataFrame.
@@ -1047,6 +1119,13 @@ impl EncodingSpec {
     #[getter]
     fn format_type(&self) -> Option<&str> {
         self.format_type.as_deref()
+    }
+
+    /// The class a binned color was written with (``"Color"``, ``"Fill"`` or
+    /// ``"Stroke"``), or ``None`` when unset.
+    #[getter]
+    fn bin_channel(&self) -> Option<&'static str> {
+        self.bin_channel.map(|class| class.as_str())
     }
 
     /// Return a string representation of this encoding spec.
@@ -1184,7 +1263,9 @@ pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 8] = [
 /// - If `child` is `None`, adopt the entire parent value.
 /// - If `child` and `parent` share the same `field`, propagate any parent
 ///   metadata that the child has not set (scale, title, scheme, type_,
-///   axis, legend, format, format_type).
+///   axis, legend, format, format_type). An adopted scale brings the
+///   parent's `bin_channel` with it, so a binned color's class travels with
+///   the scale it describes.
 /// - If the fields differ, do nothing.
 fn inherit_encoding_spec(child: &mut Option<EncodingSpec>, parent: &Option<EncodingSpec>) {
     match (child.as_mut(), parent.as_ref()) {
@@ -1194,6 +1275,7 @@ fn inherit_encoding_spec(child: &mut Option<EncodingSpec>, parent: &Option<Encod
         (Some(c), Some(p)) if c.field == p.field => {
             if c.scale.is_none() && p.scale.is_some() {
                 c.scale = p.scale.clone();
+                c.bin_channel = p.bin_channel;
             }
             if c.title.is_none() && p.title.is_some() {
                 c.title = p.title.clone();

@@ -443,8 +443,9 @@ pub enum RenderError {
     },
     /// A binned color (`Color(bin=...)`, a `bin-ordinal` scale carrying
     /// `bin`) over a column the `Bin` transform cannot read as numbers.
-    /// `channel` is the wire name (`color`), never positional; `field` the
-    /// column; `dtype` its Arrow dtype, pre-formatted.
+    /// `channel` is the class the binding was written with (`Color`, `Fill`
+    /// or `Stroke`); `field` the column; `dtype` its Arrow dtype,
+    /// pre-formatted.
     BinnedColorNotNumeric {
         channel: &'static str,
         field: String,
@@ -932,6 +933,17 @@ pub enum RenderError {
     /// so it refuses too — `location` is `"facet.row_sort"`, `value` is the
     /// (possibly well-formed) row_sort value verbatim, and `reason` states
     /// the missing dimension rather than an object-shape complaint.
+    /// An encoding binding written with a `bin_channel` (the class of a
+    /// binned color) but no binned color scale to describe, reachable only
+    /// from a hand-built spec, since `EncodingSpec::new` refuses the same
+    /// shape with the same reason
+    /// ([`crate::spec::encoding::EncodingSpec::bin_channel_conflict`]).
+    /// `location` is the authored wire channel (`color`, or
+    /// `layers[i].color`); `reason` names the class and the remedy.
+    BinChannelWithoutBinnedColor {
+        location: String,
+        reason: String,
+    },
     SortSpecMalformed {
         location: String,
         reason: String,
@@ -1240,6 +1252,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // channel-shorthand family (never the resolved/post-flip slot), so
         // nothing here needs an un-flip correction.
         | RenderError::SortSpecMalformed { .. }
+        // `location` is the authored wire channel the raw-spec walk found,
+        // as for `SortSpecMalformed` directly above.
+        | RenderError::BinChannelWithoutBinnedColor { .. }
         // Carries a column name (or none, for the schema-rebuild case), not
         // a positional encoding channel token — nothing here to un-flip.
         | RenderError::StringNormalizationFailed { .. }) => other,
@@ -1588,6 +1603,7 @@ impl std::fmt::Display for RenderError {
                 f,
                 "Shape(scale=...) range entry '{entry}' is not a recognized shape name"
             ),
+            Self::BinChannelWithoutBinnedColor { location, reason } => write!(f, "{location}: {reason}"),
             Self::SortSpecMalformed { location, reason, value } => write!(
                 f,
                 "{location}: sort={value} is malformed ({reason})"

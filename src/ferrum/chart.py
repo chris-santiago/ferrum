@@ -40,6 +40,10 @@ from ferrum._layer_transforms import (
     _resolve_layer_statistics,
     _same_step,
     _scoped_to_layers,
+    _StatisticsMarker,
+    _draws_binned_color,
+    _holds_statistics_marker,
+    _statistics_marked,
     _transforms_to_json_list_named,
 )
 from ferrum._configure_mixin import ConfigureMixin
@@ -93,6 +97,7 @@ from ferrum._facet import (
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
+from ferrum.encoding._aliases import alias_source
 from ferrum.encoding._resolve import channel_class, channel_for_value
 from ferrum.encoding._aliases import layered_chart_detail
 from ferrum.selection import ConditionalSpec
@@ -370,18 +375,21 @@ def _point_operand_layers(
 
 
 def _route_tail_readers_to_source(
-    chart: "Chart", layers: list, name: str, *, operand: "Chart"
+    chart: "Chart", layers: list, name: str, *, operand: "Chart", chain: list
 ) -> list:
     """Point *layers* that read the pipeline tail at the chart's source rows.
 
-    When ``chart``'s chain has an unnamed step, its tail is that chain's
-    output, not the source. Each layer with no ``data_source`` is then
-    pointed at a named identity of the source, added ahead of the chain (see
-    ``_merge_top_transforms``), through :func:`_point_operand_layers`. With no
-    unnamed step the tail is the source and *layers* is returned unchanged.
+    When the left operand's *chain*, as its caller wrote it, has an unnamed
+    step, the tail is that chain's output, not the source. Each layer with no
+    ``data_source`` is then pointed at a named identity of the source, added
+    ahead of ``chart``'s chain (see ``_merge_top_transforms``), through
+    :func:`_point_operand_layers`. With no unnamed step the tail is the
+    source and *layers* is returned unchanged. The chain is judged as
+    written, so a left chain the merge ran as its own branch routes the right
+    operand exactly as it would unwrapped.
     """
     tail_readers = [l for l in layers if l.data_source is None]
-    if not tail_readers or not any(_advances_chain(t) for t in chart._transforms):
+    if not tail_readers or not any(_advances_chain(t) for t in chain):
         return layers
     _merge_top_transforms(chart, [_source_identity(name)])
     return _point_operand_layers(layers, tail=name, operand=operand)
@@ -417,7 +425,9 @@ def _route_rhs_chain(
     added as it is: placed ahead of the LHS chain, each step reads the source.
     Any other chain becomes one named step: the step itself when the chain
     has one step and no layer reads a name inside it, else one ``_Branch``
-    over the source running the whole chain. A branch publishes its inner
+    over the source running the whole chain. A chain carrying lowered
+    statistics (a statistics marker) always runs as its own branch, so its
+    marker never sits in the composition's own chain. A branch publishes its inner
     outputs under its own name (``secondary_key``), so two operands'
     composites never share a key.
 
@@ -428,7 +438,8 @@ def _route_rhs_chain(
     if not rhs_chain:
         return rhs_layers
     routed = any(l.data_source is not None for l in rhs_layers)
-    if routed and not any(_advances_chain(t) for t in rhs_chain):
+    marked = _holds_statistics_marker(rhs_chain)
+    if routed and not marked and not any(_advances_chain(t) for t in rhs_chain):
         _merge_top_transforms(new, rhs_chain)
         return rhs_layers
     only = rhs_chain[0]
@@ -490,13 +501,54 @@ def _read_rows(chain: list, rows: str) -> list:
 
 
 def _operand_branch(
-    marker: str, renames: dict[str, str], columns: tuple[str, ...], chain: list
+    marker: str | None, renames: dict[str, str], columns: tuple[str, ...], chain: list
 ) -> _Branch:
-    """Run one operand's whole chain as a branch over that operand's own rows and columns."""
-    prefix = _operand_rows_prefix(marker, renames, columns)
-    branch = _Branch("", None, prefix + _read_rows(chain, marker))
+    """Run one operand's whole chain as a branch over that operand's own rows and columns.
+
+    With a row *marker* (an operand over a different frame), the branch first
+    keeps that operand's own rows and columns (:func:`_operand_rows_prefix`)
+    and its inner branches read them. With ``None`` (an operand over the
+    shared source) the chain runs over the source as it is.
+    """
+    if marker is None:
+        branch = _Branch("", None, list(chain))
+    else:
+        prefix = _operand_rows_prefix(marker, renames, columns)
+        branch = _Branch("", None, prefix + _read_rows(chain, marker))
     branch.name = f"_auto_{id(branch):x}"
     return branch
+
+
+def _run_lhs_as_branch(
+    lhs_layers: list,
+    chain: list,
+    *,
+    marker: str | None = None,
+    columns: tuple[str, ...] = (),
+) -> tuple[list, _Branch]:
+    """Run the left ``+`` operand's *chain* as its own branch and point its layers at it.
+
+    The left chain becomes the branch's, so its own post-merge steps settle
+    onto the layers reading its rows first (:func:`_settle_chart_rows`). The
+    left's tail readers read the chart's pipeline before the merge, so they
+    keep taking the composed chart's positional channels and its later
+    unnamed steps (``rows_from_chart``). A layer attached to the left is not a
+    tail reader: it reads the chart's data. *marker* and *columns* pick the
+    operand's own rows out of a combined frame (:func:`_operand_branch`).
+    Returns the re-pointed layers and the branch.
+    """
+    lhs_layers, settled = _settle_chart_rows(lhs_layers, chain)
+    branch = _operand_branch(marker, {}, columns, chain + settled)
+    lhs_layers = _read_operand_tail(
+        [
+            replace(l, rows_from_chart=True) if l.data_source is None and not l.chart_data else l
+            for l in lhs_layers
+        ],
+        tail=branch.name,
+        source="encoding",
+        scope=branch.name,
+    )
+    return lhs_layers, branch
 
 
 def _take_layers(new: "Chart") -> list:
@@ -3104,24 +3156,8 @@ class Chart(
                 )
             )
             lhs_df = lhs_df.with_columns(pl.lit(True).alias(lhs_marker))
-            # The LHS chain becomes the branch's, so its own post-merge
-            # steps settle onto the layers reading its rows first.
-            lhs_layers, lhs_settled = _settle_chart_rows(lhs_layers, lhs_top_xforms)
-            lhs_branch = _operand_branch(lhs_marker, {}, lhs_columns, lhs_top_xforms + lhs_settled)
-            # The LHS's tail readers read the chart's pipeline before the
-            # merge, so they keep taking the composed chart's positional
-            # channels and its later unnamed steps. A layer attached to the
-            # LHS is not a tail reader: it reads the chart's data.
-            lhs_layers = _read_operand_tail(
-                [
-                    replace(l, rows_from_chart=True)
-                    if l.data_source is None and not l.chart_data
-                    else l
-                    for l in lhs_layers
-                ],
-                tail=lhs_branch.name,
-                source="encoding",
-                scope=lhs_branch.name,
+            lhs_layers, lhs_branch = _run_lhs_as_branch(
+                lhs_layers, lhs_top_xforms, marker=lhs_marker, columns=lhs_columns
             )
             rhs_df = rhs_df.with_columns(pl.lit(True).alias(rhs_marker))
             rhs_branch = _operand_branch(rhs_marker, col_renames, rhs_columns, rhs_chain)
@@ -3137,18 +3173,30 @@ class Chart(
             # rows too, so the right rows' renamed copy of a facet column fills
             # it, as .facet() does when declared after the merge.
             _coalesce_facet_rhs_columns(new)
-        elif not _is_lhs_pipeline(rhs_chain, lhs_top_xforms):
-            # Same data: an RHS whose chain is the LHS's own pipeline (a chart
-            # composed with itself, `mark_line(point=True)`'s line + point)
-            # already reads the merged tail; every other RHS is routed to read
-            # its own chain over the source.
-            rhs_layers = _route_rhs_chain(
-                new,
-                rhs_layers,
-                rhs_chain,
-                operand=rhs,
-            )
-            rhs_layers = _route_tail_readers_to_source(new, rhs_layers, source_name, operand=rhs)
+        else:
+            # Same data. A left chain carrying lowered statistics (behind a
+            # statistics marker) runs as its own branch over the source, as a
+            # different-data operand's does, so the composition's own chain
+            # holds no marker and no step written later (the right operand's,
+            # a `.transform()` on the composition) lands after one.
+            lhs_wrapped = _holds_statistics_marker(lhs_top_xforms)
+            if lhs_wrapped:
+                lhs_layers, own_branch = _run_lhs_as_branch(lhs_layers, lhs_top_xforms)
+                new._transforms = [own_branch]
+            # An RHS whose chain is the LHS's own pipeline (a chart composed
+            # with itself, `mark_line(point=True)`'s line + point) already
+            # reads the merged tail; every other RHS is routed to read its own
+            # chain over the source.
+            if lhs_wrapped or not _is_lhs_pipeline(rhs_chain, lhs_top_xforms):
+                rhs_layers = _route_rhs_chain(
+                    new,
+                    rhs_layers,
+                    rhs_chain,
+                    operand=rhs,
+                )
+                rhs_layers = _route_tail_readers_to_source(
+                    new, rhs_layers, source_name, operand=rhs, chain=lhs_top_xforms
+                )
 
         # Every right layer that takes positional channels from a chart takes
         # the ones it still lacks from the composition's written bindings
@@ -3969,6 +4017,7 @@ class Chart(
             # `mark_style`.
             mk = {}
             chart_detail = enc.pop("detail", None)
+        color_source = alias_source(enc, "color")
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
         # --- The chart's own encoding statistic (single-chart) ---
@@ -4006,7 +4055,11 @@ class Chart(
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
-        kw.update(self._build_encoding_specs(resolved, enc, _override_payload, mark_zero=mark_zero))
+        kw.update(
+            self._build_encoding_specs(
+                resolved, enc, _override_payload, mark_zero=mark_zero, color_source=color_source
+            )
+        )
 
         # --- Resolve per-layer encoding statistics (layered charts) ---
         # Each layer that aggregates or bins gets its own NAMED chart-level
@@ -4045,11 +4098,20 @@ class Chart(
             effective_transforms = effective_transforms + layer_statistics
 
         # --- Transform serialization ---
+        # A statistic groups by a binned color's bins only after its chain's
+        # statistics marker; a chart drawing no binned color sends none.
+        effective_transforms = _statistics_marked(
+            effective_transforms,
+            keep=_draws_binned_color([enc, *(layer.encoding for layer in serialized_layers or ())]),
+        )
         if effective_transforms:
             # If any transform is a _NamedTransform, a _Branch or a plain dict
             # (Phase 12 data transforms), serialize everything via JSON so Rust
             # receives the full pipeline through the serde path.
-            has_named = any(isinstance(t, (_NamedTransform, _Branch)) for t in effective_transforms)
+            has_named = any(
+                isinstance(t, (_NamedTransform, _Branch, _StatisticsMarker))
+                for t in effective_transforms
+            )
             has_dict = any(isinstance(t, dict) for t in effective_transforms)
             if has_named or has_dict:
                 xform_json = _transforms_to_json_list_named(effective_transforms)

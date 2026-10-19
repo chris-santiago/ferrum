@@ -53,6 +53,7 @@ from ferrum._layer import (
     titled_encoding,
 )
 from ferrum._encode_lowering import _rebind_channel
+from ferrum._layer_transforms import _with_statistics_marker
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
@@ -1114,6 +1115,49 @@ _PENDING_PREP: dict[str, _KindPrep] = {
 }
 
 
+def _binned_color_of(encoding: dict) -> ChannelBase | None:
+    """The binned color *encoding* draws (``Color/Fill/Stroke(bin=...)``), or ``None``."""
+    from ferrum.encoding._aliases import resolve_channel_alias
+
+    color = resolve_channel_alias(encoding, "color")
+    return color if isinstance(color, ChannelBase) and color._binned_color() else None
+
+
+def _mark_statistics(chart: "Chart", steps: list) -> list:
+    """A composite mark's *steps*, behind the statistics marker when the chart's color bins.
+
+    A statistic a composite mark groups by its chart's color groups by that
+    color's bins only after the marker (``_StatisticsMarker``). Its groupby
+    names the color only when the chart binds it as the mark resolves, so a
+    chart drawing no binned color then keeps its chain as it was.
+    """
+    return _with_statistics_marker(steps) if _binned_color_of(chart._encoding) else steps
+
+
+def _with_binned_color(layers: list, encoding: dict) -> list:
+    """*layers* drawing the chart's binned color wherever they color by its field.
+
+    A composite mark's sub-layers rebuild their color from the chart color's
+    field name alone (a nominal discriminator), which would drop its bins:
+    each one coloring by that field draws the chart's binned color instead,
+    so its statistic groups by the same bins its legend lists.
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    color = _binned_color_of(encoding)
+    if color is None:
+        return layers
+    out = []
+    for layer in layers:
+        rebound = {
+            channel: color
+            for channel in ("color", "fill", "stroke")
+            if channel in layer.encoding and _channel_field(layer.encoding[channel]) == color.field
+        }
+        out.append(replace(layer, encoding={**layer.encoding, **rebound}) if rebound else layer)
+    return out
+
+
 def _resolve_pending_impl(chart: "Chart") -> "Chart":
     """Resolve a pending statistical mark desugar once encoding is known.
 
@@ -1278,7 +1322,7 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
 
     # Layered mode: result.layers is set.
     if result.layers is not None:
-        new._transforms = list(chart._transforms) + list(result.transforms)
+        new._transforms = list(chart._transforms) + _mark_statistics(chart, list(result.transforms))
         # Aim the caller's per-layer `layer_kwargs=` at the layers they named,
         # THEN apply the chart-level catch-all to every emitted layer, on
         # `catch_all_over`'s terms: it overrides a desugar-set default, but
@@ -1304,6 +1348,7 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
             emitted = [
                 replace(lyr, encoding=titled_encoding(lyr.encoding, titles)) for lyr in emitted
             ]
+        emitted = _with_binned_color(emitted, chart._encoding)
         new._layers = _prior_layers + emitted
         new._mark = None  # signals layered mode in to_spec
         return new
@@ -1359,13 +1404,13 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
             data_source="smooth",
             entry=entry,
         )
-        new._transforms = list(chart._transforms) + list(transforms)
+        new._transforms = list(chart._transforms) + _mark_statistics(chart, list(transforms))
         new._layers = _prior_layers + [smooth_layer]
         new._mark = None
         return new
     new._mark = mark
     new._entry = entry
-    new._transforms = list(chart._transforms) + list(transforms)
+    new._transforms = list(chart._transforms) + _mark_statistics(chart, list(transforms))
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named
     # keys, not a fixed winner -- then merge THAT onto `new._mark_kwargs`

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
+from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin, _pending_bin
 
 if TYPE_CHECKING:
     from ferrum._core import Aggregate, Bin
@@ -36,11 +36,22 @@ class _GroupingOnly:
 
     bindings: tuple[tuple[str, Any], ...]
 
-    def wire_field(self) -> Any:
-        """The field the parent draws as color, under the color alias rules (``_ENCODING_ALIASES``)."""
+    def wire(self) -> dict | None:
+        """The layer's wire ``group``: what the parent draws as color, under the alias rules.
+
+        The field (``_ENCODING_ALIASES`` picks the binding), plus the binned
+        color scale when that binding bins, so dodge and stack group by its
+        bins. ``None`` when the parent draws no concrete color field.
+        """
         from ferrum.encoding._aliases import _channel_field, resolve_channel_alias
 
-        return _channel_field(resolve_channel_alias(dict(self.bindings), "color"))
+        binding = resolve_channel_alias(dict(self.bindings), "color")
+        field = _channel_field(binding)
+        if not isinstance(field, str):
+            return None
+        if isinstance(binding, ChannelBase) and binding._binned_color():
+            return {"field": field, "scale": binding._color_bin_scale()}
+        return {"field": field}
 
 
 def _expand_grouping(encoding: dict) -> dict:
@@ -109,6 +120,8 @@ class _BinDeclaration:
     outputs : frozenset of str
         The columns this Bin computes, from Rust
         (``ferrum._core.bin_output_columns``).
+    bin_wire : dict
+        The Bin's wire form on every spelling, read for its parameters.
     wire : dict or None
         A pre-built Bin's wire form, the only way its parameters can be
         extended; ``None`` for the other spellings.
@@ -119,6 +132,7 @@ class _BinDeclaration:
     groupby: tuple[str, ...]
     statistics: tuple[str, ...]
     outputs: frozenset[str]
+    bin_wire: dict
     wire: dict | None = None
 
 
@@ -139,7 +153,7 @@ def _bin_declaration(channel: str, ch: ChannelBase) -> _BinDeclaration:
     from ferrum._core import bin_output_columns
     from ferrum._registry import transform_wires
 
-    pending = _own_bin(ch)
+    pending = _pending_bin(ch.field, ch._kwargs["bin"])
     if pending.bin_obj is not None:
         spelling, built = "bin=Bin(...)", pending.bin_obj
     elif pending.bin_kwargs:
@@ -168,22 +182,21 @@ def _bin_declaration(channel: str, ch: ChannelBase) -> _BinDeclaration:
         tuple(wire.get("groupby") or ()),
         tuple(name for name in _BIN_STATISTIC_PARAMETERS if present[name]),
         frozenset(bin_output_columns(built)),
+        wire,
         wire if pending.bin_obj is not None else None,
     )
 
 
 def _binned_channels(encoding: dict) -> list[tuple[str, ChannelBase]]:
-    """The ``(channel, binding)`` pairs of *encoding* that carry ``bin=``."""
+    """The ``(channel, binding)`` pairs of *encoding* whose ``bin=`` bins the rows.
+
+    A binned color is not one: it draws its field through a binned scale.
+    """
     return [
         (channel, ch)
         for channel, ch in encoding.items()
-        if isinstance(ch, ChannelBase) and ch._kwargs.get("bin")
+        if isinstance(ch, ChannelBase) and ch._lowers_row_bin()
     ]
-
-
-def _own_bin(ch: ChannelBase) -> _PendingBin:
-    """The ``_PendingBin`` sentinel *ch*'s own ``bin=`` emits."""
-    return next(t for t in ch.to_implicit_transforms() if isinstance(t, _PendingBin))
 
 
 def _statistic_groupby(encoding: dict, facet) -> list[str]:
@@ -214,7 +227,7 @@ def _statistic_groupby(encoding: dict, facet) -> list[str]:
     fields: list[str] = []
     for ch in encoding.values():
         if isinstance(ch, ChannelBase):
-            if ch._kwargs.get("aggregate") or ch._kwargs.get("bin"):
+            if ch._kwargs.get("aggregate") or ch._lowers_row_bin():
                 continue
             column = ch.field
         elif isinstance(ch, str):
@@ -551,8 +564,8 @@ def _lower_bin_encoding(
     The Bin aggregates when any channel aggregates or names one of its own
     output columns (``y="count"``), grouped by :func:`_statistic_groupby`.
     A positional bin with neither bins each row in place (``per_row``): every
-    row is kept and placed at its bin. A bin on a non-positional channel with
-    neither still counts its rows.
+    row is kept and placed at its bin. A color-family ``bin=`` never reaches
+    here: it is a binned color scale, not a row step.
 
     Column names come from the transform registry, never from literals, so a
     Rust-side rename raises here naming the stale column (spec §4.6 / M6a).
@@ -592,11 +605,7 @@ def _lower_bin_encoding(
         )
     grouping = _grouping_of(encoding)
     encoding = _expand_grouping(encoding)
-    bin_axis = next(
-        axis
-        for axis, ch in encoding.items()
-        if isinstance(ch, ChannelBase) and ch._kwargs.get("bin")
-    )
+    bin_axis = next(axis for axis, _ in _binned_channels(encoding))
 
     # Only channels that HONOR aggregate= are scanned. ChannelBase's contract
     # (encoding/base.py, "Honored-kwarg contract") is that an unhonored kwarg

@@ -14,6 +14,7 @@ from ferrum.encoding._honored import (
     APPEARANCE_FULL,
     APPEARANCE_SCHEME,
     APPEARANCE_SORT,
+    BINNED_COLOR,
 )
 from ferrum.encoding.base import ChannelBase
 
@@ -36,6 +37,15 @@ class Color(ChannelBase):
         ``fm.continuous_palette("viridis")``).
     title : str, optional
         Legend title override.  When omitted the field name is used.
+    bin : bool, dict or Bin, optional
+        Color by bins of the numeric field: ``True`` for the ``Bin``
+        transform's default edges, or a dict or ``fm.Bin(...)`` of
+        ``bin_count``, ``bin_width``, ``extent`` and ``nice``. The rows are
+        kept, each colored by its bin, the legend lists the bin ranges, and a
+        statistic grouped by this channel groups by bin. Refused together
+        with ``scale=``, ``aggregate=``, a nominal or temporal ``type_=`` or
+        a ``sort=`` other than ascending, and for a ``Bin`` declaring a
+        statistic, a grouping or a name.
 
     Notes
     -----
@@ -62,7 +72,7 @@ class Color(ChannelBase):
     # {"type","legend","scale","title","sort","scheme"} plus "condition",
     # added by ChannelBase.__init_subclass__ -- "color" is a real conditional
     # channel (ferrum.encoding._channel_policy._CONDITIONAL_CHANNELS).
-    _honored_kwargs = APPEARANCE_COLOR | AGGREGATE
+    _honored_kwargs = APPEARANCE_COLOR | AGGREGATE | BINNED_COLOR
 
 
 class Size(ChannelBase):
@@ -322,6 +332,15 @@ class Fill(ChannelBase):
         Explicit scale override (e.g. ``fm.ContinuousScheme("viridis")``).
     title : str, optional
         Legend title override.  When omitted the field name is used.
+    bin : bool, dict or Bin, optional
+        Color by bins of the numeric field: ``True`` for the ``Bin``
+        transform's default edges, or a dict or ``fm.Bin(...)`` of
+        ``bin_count``, ``bin_width``, ``extent`` and ``nice``. The rows are
+        kept, each colored by its bin, the legend lists the bin ranges, and a
+        statistic grouped by this channel groups by bin. Refused together
+        with ``scale=``, ``aggregate=``, a nominal or temporal ``type_=`` or
+        a ``sort=`` other than ascending, and for a ``Bin`` declaring a
+        statistic, a grouping or a name.
 
     Notes
     -----
@@ -350,7 +369,7 @@ class Fill(ChannelBase):
     # ChannelBase.__init_subclass__ -- "fill" aliases to "color" and gains
     # the bit. Stroke shares this same role set and does NOT gain it -- see
     # APPEARANCE_SCHEME's docstring.
-    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE
+    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE | BINNED_COLOR
 
 
 class Stroke(ChannelBase):
@@ -371,6 +390,15 @@ class Stroke(ChannelBase):
         Explicit scale override (e.g. ``fm.ContinuousScheme("viridis")``).
     title : str, optional
         Legend title override.  When omitted the field name is used.
+    bin : bool, dict or Bin, optional
+        Color by bins of the numeric field: ``True`` for the ``Bin``
+        transform's default edges, or a dict or ``fm.Bin(...)`` of
+        ``bin_count``, ``bin_width``, ``extent`` and ``nice``. The rows are
+        kept, each colored by its bin, the legend lists the bin ranges, and a
+        statistic grouped by this channel groups by bin. Refused together
+        with ``scale=``, ``aggregate=``, a nominal or temporal ``type_=`` or
+        a ``sort=`` other than ascending, and for a ``Bin`` declaring a
+        statistic, a grouping or a name.
 
     Notes
     -----
@@ -408,7 +436,7 @@ class Stroke(ChannelBase):
     # (_channel_policy._CONDITIONAL_REFUSALS["stroke"]) and encode() refuses
     # it. Fill shares this same role set and DOES gain the bit -- the
     # derivation, not a second role set, is what keeps the two channels apart.
-    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE
+    _honored_kwargs = APPEARANCE_SCHEME | AGGREGATE | BINNED_COLOR
 
 
 class FillOpacity(ChannelBase):

@@ -98,6 +98,84 @@ class _Branch:
     __hash__ = None  # type: ignore[assignment]
 
 
+class _StatisticsMarker:
+    """The boundary in one chain between the caller's steps and the statistics ferrum lowers.
+
+    Every step after it in its chain was lowered from a layer's encoding or
+    mark (an encoding aggregate or bin, a composite mark's statistics); every
+    step before it is the caller's own. Rust groups a statistic after it by a
+    binned color's bins when a layer drawing that color reads its output,
+    and runs the caller's steps as written. Serialized as an unnamed
+    pass-through identity, which never advances the chain (spec §6.7).
+
+    Every instance is the same marker: two compare equal, so a chain
+    deduplicated step by step (``_same_step``) keeps one.
+    """
+
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _StatisticsMarker)
+
+    def __hash__(self) -> int:
+        return hash(_StatisticsMarker)
+
+    def __repr__(self) -> str:
+        return "_StatisticsMarker()"
+
+
+#: The marker's wire step.
+_STATISTICS_MARKER_WIRE = {"type": "identity", "statistics": True}
+
+
+def _with_statistics_marker(steps: list) -> list:
+    """*steps*, lowered statistics, behind the chain's statistics marker; empty stays empty."""
+    return [_StatisticsMarker(), *steps] if steps else []
+
+
+def _holds_statistics_marker(chain: list) -> bool:
+    """Whether *chain* (its own steps, not its branches') carries lowered statistics."""
+    return any(isinstance(step, _StatisticsMarker) for step in chain)
+
+
+def _statistics_marked(transforms: list, *, keep: bool) -> list:
+    """*transforms* with one statistics marker per chain, or none.
+
+    With *keep*, each chain (the top one and every branch's) keeps its first
+    marker and drops the later ones, so the boundary sits before the first
+    lowered statistic. Without it every marker is dropped: a chart drawing no
+    binned color has no statistic to group by bin, and its wire stays as it
+    was. Branches are rebuilt, never mutated.
+
+    No step the caller wrote follows a marker in its chain: a chart's own
+    ``.transform()`` is inserted before its lowered statistics, and a ``+``
+    composition runs an operand chain carrying a marker as its own branch.
+    """
+    out: list = []
+    seen = False
+    for step in transforms:
+        if isinstance(step, _StatisticsMarker):
+            if keep and not seen:
+                out.append(step)
+            seen = True
+            continue
+        if isinstance(step, _Branch):
+            step = _Branch(step.name, step.input, _statistics_marked(step.transforms, keep=keep))
+        out.append(step)
+    return out
+
+
+def _draws_binned_color(encodings: list) -> bool:
+    """Whether any of *encodings* binds a binned color, or a grouping key over one."""
+    for encoding in encodings:
+        for value in encoding.values():
+            if isinstance(value, ChannelBase) and value._binned_color():
+                return True
+            if isinstance(value, _GroupingOnly) and "scale" in (value.wire() or {}):
+                return True
+    return False
+
+
 def _source_identity(name: str) -> _NamedTransform:
     """Build a named identity step, which publishes the batch it reads under *name*."""
     from ferrum.marks._desugar_helpers import identity_transform
@@ -246,7 +324,7 @@ def _advances_chain(step: object) -> bool:
     object carrying its own ``name``) publish beside the chain and leave the
     tail where it was.
     """
-    if isinstance(step, (_NamedTransform, _Branch)):
+    if isinstance(step, (_NamedTransform, _Branch, _StatisticsMarker)):
         return False
     entry = step if isinstance(step, dict) else _transforms_to_json_list_named([step])[0]
     return entry.get("name") is None
@@ -286,7 +364,7 @@ def _layer_step(layer: _Layer, transform: object, name: str) -> "_NamedTransform
     """
     if layer.data_source is None:
         return _NamedTransform(transform, name)
-    return _Branch(name, layer.data_source, [transform])
+    return _Branch(name, layer.data_source, _with_statistics_marker([transform]))
 
 
 def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
@@ -327,7 +405,8 @@ def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
         ``new_layers`` is the layer list with computing layers rewritten;
         ``named_transforms`` the steps to add to the chart-level pipeline,
         every ``Aggregate`` before every ``Bin`` (empty when no layer
-        computes).
+        computes). The steps reading the chart's chain sit behind one
+        statistics marker; a branch carries its own.
     """
     new_layers: list = []
     aggregate_steps: list = []
@@ -350,7 +429,10 @@ def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
         carried = _carried_bindings(layer, chart._encoding, plan.encoding)
         new_layers.append(replace(_with_carried(layer, carried), data_source=name))
 
-    return new_layers, aggregate_steps + bin_steps
+    steps = aggregate_steps + bin_steps
+    if any(not isinstance(step, _Branch) for step in steps):
+        steps = _with_statistics_marker(steps)
+    return new_layers, steps
 
 
 _POSITIONAL = ("x", "y", "x2", "y2")
@@ -745,6 +827,10 @@ def _transforms_to_json_list_named(transforms: list) -> list:
         pyo3_batch.clear()
 
     for t in transforms:
+        if isinstance(t, _StatisticsMarker):
+            flush()
+            result.append(dict(_STATISTICS_MARKER_WIRE))
+            continue
         if isinstance(t, _Branch):
             flush()
             result.append(

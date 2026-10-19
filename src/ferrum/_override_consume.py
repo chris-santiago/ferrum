@@ -9,9 +9,10 @@ the cascade (spec §7: override > per-channel ``axis=``/``legend=`` > ``configur
 > theme > ``set_default_theme`` > Rust defaults).
 
 Six payload pieces are consumed here, called in this order:
-:func:`apply_mark_style`; the encoding piece, which is two functions
-(:func:`merge_encoding_scale`, then :func:`refuse_malformed_scale_overrides`
-— both called from ``_spec_build.py``'s ``_with_override_scale``, with a
+:func:`apply_mark_style`; the encoding piece, which is three functions
+(:func:`refuse_binned_color_scale_overrides` on a binned color, then
+:func:`merge_encoding_scale`, then :func:`refuse_malformed_scale_overrides`
+— all called from ``_spec_build.py``'s ``_with_override_scale``, with a
 staged validation order inside ``merge_encoding_scale`` itself, see its own
 docstring); and :func:`apply_coord` — all three from inside
 :meth:`Chart.to_spec` — then, once ``to_spec`` returns,
@@ -214,6 +215,44 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
             _refuse_old_type_padding_value(old_type, key, value)
 
     return {**translated, **scale_overrides}
+
+
+def refuse_binned_color_scale_overrides(
+    binned_class: str, scale_overrides: Mapping[str, Any], paths: Mapping[str, str]
+) -> None:
+    """Refuse an override leaf that would replace what a binned color's ``bin=`` builds.
+
+    A binned color (``Color/Fill/Stroke(bin=...)``, written as *binned_class*)
+    draws through a ``bin-ordinal`` scale whose rule and edges its ``bin=``
+    owns, so an override leaf is honored only when it is a key that scale
+    accepts and ``bin=`` does not own (read from Rust's accepted-key table,
+    today ``scheme``), or ``type`` set to ``"bin-ordinal"`` itself. Any other
+    leaf (another type, ``bins``, ``bin``, ``domain``, ...) contradicts
+    ``bin=`` as an explicit ``scale=`` on the channel does, and is refused in
+    that refusal's voice, naming the class and the override path written.
+
+    *scale_overrides* and *paths* are one channel's wire-keyed override leaves
+    and their flat override paths, as for
+    :func:`refuse_malformed_scale_overrides`.
+
+    Raises
+    ------
+    FerrumOverrideError
+        On the first refused leaf, as an ``_OverrideRefusal`` naming
+        ``{entry}({path}=...)``.
+    """
+    from ferrum.encoding.base import _BIN_OWNED_SCALE_KEYS, _BIN_WITH_SCALE_MESSAGE
+
+    honored = set(_scale_accepted_keys("bin-ordinal")) - set(_BIN_OWNED_SCALE_KEYS)
+    for key, value in scale_overrides.items():
+        if key in honored or (key == "type" and value == "bin-ordinal"):
+            continue
+        path = paths[key]
+        raise _OverrideRefusal(
+            lambda entry, path=path: _BIN_WITH_SCALE_MESSAGE.format(
+                channel=binned_class, scale=f"{entry}({path}=...)"
+            )
+        )
 
 
 def refuse_malformed_scale_overrides(
