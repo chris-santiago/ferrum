@@ -32,7 +32,7 @@ pub(crate) fn apply(spec: &FilterSpec, batch: &RecordBatch) -> PyResult<RecordBa
     })?;
 
     let schema = batch.schema();
-    ensure_expr_fields_supported(&expr, &schema, "data_filter")?;
+    ensure_expr_fields_readable(&expr, &schema, "data_filter")?;
 
     let n_rows = batch.num_rows();
     let mut keep_indices: Vec<u32> = Vec::with_capacity(n_rows);
@@ -61,7 +61,7 @@ pub(crate) fn apply(spec: &FilterSpec, batch: &RecordBatch) -> PyResult<RecordBa
 /// Batch-D dtype policy (spec §4.1): every integer / unsigned / float dtype
 /// reads as a `Number`, so an expression over a `UInt32` or `Int16` column
 /// behaves exactly like the same data as `Int64`. Anything outside this set is
-/// refused by [`ensure_expr_fields_supported`] before evaluation starts —
+/// refused by [`ensure_expr_fields_readable`] before evaluation starts —
 /// before that check existed, an unsupported dtype silently read as `Null` on
 /// every row, which made `transform_filter` drop the entire dataset and
 /// `transform_calculate` emit an all-null column.
@@ -89,22 +89,36 @@ pub(crate) fn expr_dtype_supported(dtype: &DataType) -> bool {
     )
 }
 
-/// Refuse, before evaluation, any column the expression reads whose dtype
-/// [`field_value`] cannot represent.
+/// Refuse, before evaluation, any column the expression reads that the
+/// input rows lack, or whose dtype [`field_value`] cannot represent.
 ///
-/// A dtype is a schema property, so this runs once per batch rather than per
-/// row. Fields the expression names but the schema lacks are left alone —
-/// `datum.missing` evaluating to `Null` is Vega's documented behavior, and is
-/// unrelated to the dtype policy. `ctx` is the calling transform's error prefix.
-pub(crate) fn ensure_expr_fields_supported(
+/// A column the rows lack would read as `Null` on every row, so a filter
+/// would drop every row and a calculate would emit an all-null column: the
+/// chart would blank with nothing naming why. The refusal names the column
+/// and the columns the rows do carry. A column that is present but holds
+/// only nulls is not refused; the expression runs over it as written.
+///
+/// Both are schema properties, so this runs once per batch rather than per
+/// row. Missing columns are checked first, in name order, so the message is
+/// deterministic. `ctx` is the calling transform's error prefix.
+pub(crate) fn ensure_expr_fields_readable(
     expr: &Expr,
     schema: &arrow::datatypes::SchemaRef,
     ctx: &str,
 ) -> PyResult<()> {
+    let mut columns = Vec::new();
     for name in expr.field_refs() {
-        let Ok(idx) = schema.index_of(&name) else {
-            continue;
-        };
+        match schema.index_of(&name) {
+            Ok(idx) => columns.push((name, idx)),
+            Err(_) => {
+                let available: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                return Err(PyValueError::new_err(format!(
+                    "{ctx}: column '{name}' not found; available: {available:?}"
+                )));
+            }
+        }
+    }
+    for (name, idx) in columns {
         let dtype = schema.field(idx).data_type();
         if !expr_dtype_supported(dtype) {
             return Err(PyValueError::new_err(format!(
@@ -118,8 +132,8 @@ pub(crate) fn ensure_expr_fields_supported(
 
 /// Extract a field value from a row as an ExprValue.
 ///
-/// Callers must have run [`ensure_expr_fields_supported`] first; the trailing
-/// arm is unreachable for any column that check admits.
+/// Callers must have run [`ensure_expr_fields_readable`] first; the missing-
+/// column and trailing arms are unreachable for any column that check admits.
 fn field_value(
     batch: &RecordBatch,
     schema: &arrow::datatypes::SchemaRef,
@@ -414,21 +428,71 @@ mod tests {
         assert!(msg.contains("List"), "err must name the dtype: {msg}");
     }
 
-    #[test]
-    fn filter_missing_field_still_evaluates_to_null() {
-        // Vega semantics for `datum.absent` are unchanged by the dtype policy:
-        // an unknown field is Null, not an error.
-        let batch = make_batch();
-        let out = apply(
+    fn filter_by(predicate: &str, batch: &RecordBatch) -> PyResult<RecordBatch> {
+        apply(
             &FilterSpec {
-                predicate: "datum.absent > 1".into(),
+                predicate: predicate.into(),
                 name: None,
                 param: None,
             },
-            &batch,
+            batch,
         )
-        .unwrap();
-        assert_eq!(out.num_rows(), 0);
+    }
+
+    /// A predicate naming a column the rows lack is refused, naming the
+    /// column and the columns the rows carry, rather than reading `Null` on
+    /// every row and dropping them all. The rejected alternative is the
+    /// Vega-style missing-field `Null`, which blanks the chart silently.
+    #[test]
+    fn filter_on_a_missing_column_is_refused_naming_it_and_the_available_columns() {
+        pyo3::Python::initialize();
+        let batch = make_batch();
+        for predicate in [
+            "datum.count > 1",
+            "datum.x > 1 && datum.count > 1",
+            "datum['count'] > 1",
+            "datum.count.inner > 1",
+            "indexof([1, 2], datum.count) >= 0",
+        ] {
+            let msg = filter_by(predicate, &batch)
+                .expect_err(&format!("{predicate}: reads a column the rows lack"))
+                .to_string();
+            assert_eq!(
+                msg,
+                r#"ValueError: data_filter: column 'count' not found; available: ["x", "y"]"#,
+                "{predicate}"
+            );
+        }
+    }
+
+    /// The first missing column in name order is the one named, so the
+    /// message does not depend on where the expression mentions it.
+    #[test]
+    fn filter_names_the_first_missing_column_in_name_order() {
+        pyo3::Python::initialize();
+        let msg = filter_by("datum.zeta > 1 || datum.alpha > 1", &make_batch())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("column 'alpha' not found"), "{msg}");
+    }
+
+    /// A column that is present but all null is read as written: the
+    /// predicate is falsy on every row, so every row drops, with no error.
+    /// A missing-column check that also treated all-null as missing would
+    /// refuse here.
+    #[test]
+    fn filter_on_an_all_null_column_runs_as_written() {
+        let batch = one_col("n", Arc::new(Float64Array::from(vec![None, None])));
+        assert_eq!(filter_by("datum.n > 1", &batch).unwrap().num_rows(), 0);
+        assert_eq!(filter_by("datum.n == null", &batch).unwrap().num_rows(), 2);
+    }
+
+    /// An expression with no column reference is unchanged, over any rows.
+    #[test]
+    fn filter_without_a_column_reference_is_unchanged() {
+        let batch = make_batch();
+        assert_eq!(filter_by("true", &batch).unwrap().num_rows(), 5);
+        assert_eq!(filter_by("1 > 2", &batch).unwrap().num_rows(), 0);
     }
 
     #[test]

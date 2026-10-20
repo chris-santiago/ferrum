@@ -4491,31 +4491,6 @@ def _layer_mark_kwargs(c) -> dict | None:
     return kwargs or None
 
 
-def _merge_top_transforms(new, steps: list) -> None:
-    """Add named pipeline steps to the composed chart so each reads the source.
-
-    Every step in *steps* publishes beside the unnamed chain (a named step, a
-    ``_Branch`` or a named identity), and is inserted ahead of the first
-    unnamed step of ``new._transforms``: at that position nothing has narrowed
-    or replaced the batch yet, so the step reads the composed chart's original
-    rows whatever the other operand's chain does.  With no unnamed step the
-    insertion point is the end of the list.
-
-    A step already present (by identity, or publishing the same output under
-    the same key, see ``_same_step``) is not added twice.
-    """
-    from ferrum._layer_transforms import _first_chain_step, _same_step
-
-    existing = list(new._transforms or [])
-    at = _first_chain_step(existing)
-    for step in steps:
-        if any(_same_step(step, e) for e in existing):
-            continue
-        existing.insert(at, step)
-        at += 1
-    new._transforms = existing
-
-
 def _carry_layer_coord(rhs_layers: list, lhs_coord, rhs_coord) -> list:
     """Stamp the RHS chart's own coordinate system onto the layers it contributes.
 

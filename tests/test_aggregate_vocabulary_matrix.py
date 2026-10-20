@@ -97,6 +97,7 @@ from ferrum._core import (
     x_estimator_accepted_values,
 )
 from ferrum.transforms import transform_aggregate, transform_join_aggregate, transform_window
+from tests._wire_steps import all_steps
 
 # ---------------------------------------------------------------------------
 # Derived populations -- every one read live from the wire.
@@ -746,7 +747,7 @@ def _smooth_x_estimator_attempt(door: str, x_estimator) -> None:
 def _smooth_wire_x_estimator(chart) -> str:
     """The Smooth transform's x_estimator field straight off *chart*'s wire spec."""
     spec = json.loads(chart._build_spec().to_json())
-    for t in spec["transforms"]:
+    for t in all_steps(spec):
         if t.get("type") == "smooth":
             return t["x_estimator"]
     raise AssertionError("no smooth transform in the built spec")

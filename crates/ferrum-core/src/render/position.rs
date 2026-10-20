@@ -1189,8 +1189,8 @@ fn jitter_axis_values(
 // Swarm
 // ---------------------------------------------------------------------------
 
-/// The transform output a layer reads, the key a `Swarm` that fed it is
-/// recorded under in `transform_swarms`.
+/// The transform output a layer reads, the key whose lineage records the
+/// `Swarm` that fed it (`transform_lineages`).
 pub(crate) fn swarm_key(layer: &crate::render::prepare::LayerPrepared) -> &str {
     layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY)
 }
@@ -1260,14 +1260,14 @@ fn swarm_layer_bound(
 pub(crate) fn chart_swarms<'a>(
     layers: &[crate::render::prepare::LayerPrepared],
     chart_layer_batches: &[RecordBatch],
-    transform_swarms: &'a HashMap<String, crate::transform::swarm::SwarmSpec>,
+    transform_lineages: &'a crate::transform::run::OutputLineages,
     scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
 ) -> Vec<Option<crate::transform::swarm::SwarmPacking<'a>>> {
     let mut widest: HashMap<&str, f64> = HashMap::new();
     for (layer, batch) in layers.iter().zip(chart_layer_batches) {
         let key = swarm_key(layer);
-        let Some(swarm) = transform_swarms.get(key) else {
+        let Some(swarm) = transform_lineages.get(key).and_then(|lineage| lineage.swarm.as_ref()) else {
             continue;
         };
         if let Some(d) = swarm_layer_bound(layer, batch, swarm, scales, theme) {
@@ -1279,7 +1279,7 @@ pub(crate) fn chart_swarms<'a>(
         .iter()
         .map(|layer| {
             let key = swarm_key(layer);
-            let spec = transform_swarms.get(key)?;
+            let spec = transform_lineages.get(key)?.swarm.as_ref()?;
             let diameter_px = widest.get(key).copied().unwrap_or(spec.point_size);
             Some(crate::transform::swarm::SwarmPacking { spec, diameter_px })
         })
@@ -2072,9 +2072,15 @@ mod tests {
             dodge: None,
             name: None,
         };
-        let swarms = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), declared.clone())]);
+        let lineage = crate::transform::run::OutputLineage {
+            swarm: Some(declared.clone()),
+            statistic_input: None,
+            lowered: Vec::new(),
+            source: batch_xyg().schema(),
+        };
+        let lineages = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), lineage)]);
         let theme = crate::layout::ThemeInputs::default();
-        let packings = chart_swarms(&layers, &batches, &swarms, &dummy_scales(), &theme);
+        let packings = chart_swarms(&layers, &batches, &lineages, &dummy_scales(), &theme);
         assert_eq!(packings.len(), 2);
         for packing in packings {
             let packing = packing.expect("both layers read the swarm-fed output");

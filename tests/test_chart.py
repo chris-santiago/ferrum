@@ -182,8 +182,8 @@ def test_add_differing_columns_null_pad_merges():
     result = c1 + c2
     unified = result._data
     assert isinstance(unified, pl.DataFrame)
-    # Beside the two frames' columns, one row marker per operand picks out its own rows.
-    markers = {c for c in unified.columns if c.startswith(("__lhs_row", "__rhs_row"))}
+    # Beside the two frames' columns, one row marker per frame picks out its own rows.
+    markers = {c for c in unified.columns if c.startswith("__operand_row")}
     assert len(markers) == 2
     assert set(unified.columns) - markers == {"a", "b", "c", "d"}
     # Original rows from df1 have nulls in c, d columns

@@ -415,7 +415,7 @@ pub(crate) fn render_composite_scene(
             encoding: prep.rendering_encoding(),
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
-            transform_origins: &prep.transform_origins,
+            transform_lineages: &prep.transform_lineages,
         })
         .collect();
     // `warnings` opens with the resolve pass, the first stage that can produce
@@ -9610,6 +9610,48 @@ mod tests {
         let holds: Vec<LeafHold> = specs.into_iter().map(|spec| LeafHold { spec, ..hold() }).collect();
         let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
         render_composite_scene(&tree, &leaves, &ThemeInputs::default()).map(|(scene, _)| scene)
+    }
+
+    /// The bold title texts a scene's panels draw on their axes, each with
+    /// its rotation: a y title is rotated, an x title is not.
+    fn axis_title_texts(scene: &SceneGraph) -> Vec<(String, bool)> {
+        fn walk(nodes: &[SceneNode], out: &mut Vec<(String, bool)>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Text { content, style, .. } if style.font_weight != ferrum_scene::FontWeight::Normal => {
+                        out.push((content.clone(), style.angle != 0.0));
+                    }
+                    SceneNode::Group { children, .. } => walk(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for panel in &scene.panels {
+            walk(&panel.axes, &mut out);
+            walk(&panel.chrome_above, &mut out);
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// An overlay of flipped leaves titles each axis by the channel drawn on
+    /// it: the y channel's explicit title `n` moves to the screen x axis with
+    /// the channel, and the x channel's derived title `x` to the screen y
+    /// axis. Rejects keeping the explicit title on its screen axis, which
+    /// titled both axes `n`.
+    #[test]
+    fn an_overlay_of_flipped_leaves_titles_each_axis_by_its_channel() {
+        let flipped = |title: Option<&str>| {
+            let mut spec = scatter_spec();
+            spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+            spec.encoding.y.as_mut().expect("y").title = title.map(str::to_string);
+            spec
+        };
+        let overlay = |leaf: &dyn Fn(usize) -> CompositeNode| composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]);
+        let scene = render_tree(overlay, vec![flipped(Some("n")), flipped(None)]).unwrap();
+        assert_eq!(axis_title_texts(&scene), [("n".to_string(), false), ("x".to_string(), true)]);
     }
 
     /// A `LayerChart` nested in a composition is one chart: a selection one

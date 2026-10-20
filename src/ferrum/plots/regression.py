@@ -610,8 +610,7 @@ def _fit_chart_from_named_transform(
     (#199). When ``scatter=False`` leaves the fit alone there is no sibling
     layer to fall back on.
     """
-    chart = Chart(data)._clone()
-    chart._transforms = [transform]
+    chart = Chart(data)._with_statistics(transform)
     chart._layers = [
         _propagate_layer_scale({"x": chart_x, "y": chart_y}, layer)
         for layer in build_fit_layers(
@@ -1576,7 +1575,7 @@ def residplot(
     # constant. Same neutral-paint idiom `build_fit_layers` uses.
     point_kwargs: dict = {} if color_arg.paint is None else {"fill": color_arg.paint}
 
-    chart = Chart(data).transform(resid_transform).mark_point(**point_kwargs)
+    chart = Chart(data)._with_statistics(resid_transform).mark_point(**point_kwargs)
     # Both channels are bound to the residual batch's own column names, which
     # are the axis titles the renderer reads off layer 0 -- so without a
     # `title=` this chart announced its x axis as "x" and its value axis as
@@ -1631,8 +1630,7 @@ def residplot(
                 )
             )
         if lowess:
-            chart._transforms = [
-                resid_transform,
+            chart = chart._with_statistics(
                 Smooth(
                     x=_resid_x,
                     y="residual",
@@ -1645,7 +1643,7 @@ def residplot(
                     # curve through the pooled cloud.
                     **({"groupby": groupby} if groupby else {}),
                 ),
-            ]
+            )
             # Derived from the registry (spec §4.6 / M6a) rather than
             # hardcoded: this layer reads the named `lowess` Smooth
             # transform's fit-grid output, so a Rust-side rename raises here

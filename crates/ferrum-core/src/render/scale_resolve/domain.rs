@@ -11,7 +11,7 @@ use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
-use crate::transform::color_bin_group::BinnedOrigins;
+use crate::transform::run::OutputLineages;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// Result of looking up a field across the primary batch and named
@@ -302,21 +302,37 @@ pub(in crate::render) fn establishing_sort_rows<'a>(
     spec: &'a ChartSpec,
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
+    lineages: &'a OutputLineages,
     include_final: bool,
 ) -> Option<SortRows<'a>> {
     let (_, layer) = establishing_axis_layer(spec, spec.layers.as_deref()?, channel)?;
+    Some(layer_sort_rows(spec, layer, primary_batch, transform_outputs, lineages, include_final))
+}
+
+/// The rows a data-aware sort reads for one `layer`: its pre-statistic rows
+/// (`prepare::pre_statistic_rows`) and the fields it draws on the rendered x
+/// and y. Shared by the establishing axis sort and the facet panel sort,
+/// which reads each panel value's first drawing layer.
+pub(in crate::render) fn layer_sort_rows<'a>(
+    spec: &'a ChartSpec,
+    layer: &'a Layer,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    lineages: &'a OutputLineages,
+    include_final: bool,
+) -> SortRows<'a> {
     let batch = crate::render::prepare::pre_statistic_rows(
         layer.data_source.as_deref(),
-        &spec.transforms,
+        lineages,
         primary_batch,
         transform_outputs,
         include_final,
     );
-    Some(SortRows {
+    SortRows {
         batch,
         x_field: drawn_channel_slots(spec, layer, "x").value,
         y_field: drawn_channel_slots(spec, layer, "y").value,
-    })
+    }
 }
 
 /// `spec` with the primary y axis owned by a layer that draws y: when no
@@ -385,7 +401,7 @@ pub struct AuxRead<'a> {
     field: &'a str,
     kind: AuxReadKind<'a>,
     /// The rows an overlay member's bin-grouped statistic consumed for this
-    /// read (`BinnedOrigin`), resolved against the member's own origins
+    /// read (`OutputLineage::binned_rows`), resolved against the member's own lineages
     /// before its batch is carried as [`LayerSource::Batch`]; `None` for
     /// every other read, which looks its origin up by its source key.
     origin: Option<&'a RecordBatch>,
@@ -533,13 +549,13 @@ impl<'a> AuxRead<'a> {
         batch.column_by_name(self.field).map(|_| batch)
     }
 
-    /// The rows a bin-grouped statistic consumed for this read: the origin
-    /// its run published for the read's field in the output it draws
-    /// (`transform_origins`, keyed like the outputs; the chart rows for a
-    /// layer with no `data_source`), or an overlay member's, resolved before
-    /// its batch was carried. `None` when no bin-grouped step that grouped
-    /// the read's field produced what the read draws.
-    fn published_origin<'b>(&self, transform_origins: &'b BinnedOrigins) -> Option<&'b RecordBatch>
+    /// The rows a bin-grouped statistic consumed for this read: what the
+    /// run recorded in the lineage of the output it draws
+    /// (`OutputLineage::binned_rows`; the chart rows' for a layer with no
+    /// `data_source`), or an overlay member's, resolved before its batch
+    /// was carried. `None` when no statistic of that output's own grouped
+    /// the read's field.
+    fn published_origin<'b>(&self, transform_lineages: &'b OutputLineages) -> Option<&'b RecordBatch>
     where
         'a: 'b,
     {
@@ -548,7 +564,7 @@ impl<'a> AuxRead<'a> {
             LayerSource::Output(key) => key,
             LayerSource::Batch(_) => return self.origin,
         };
-        transform_origins.get(key)?.rows_of(self.field)
+        transform_lineages.get(key)?.binned_rows(self.field)
     }
 
     /// The batch a binned color's edges read this column read's values from:
@@ -561,7 +577,7 @@ impl<'a> AuxRead<'a> {
         &self,
         primary_batch: &'b RecordBatch,
         transform_outputs: &'b HashMap<String, RecordBatch>,
-        transform_origins: &'b BinnedOrigins,
+        transform_lineages: &'b OutputLineages,
         facet_shared: bool,
     ) -> Option<&'b RecordBatch>
     where
@@ -570,7 +586,7 @@ impl<'a> AuxRead<'a> {
         if self.is_raster_cells() {
             return None;
         }
-        self.published_origin(transform_origins)
+        self.published_origin(transform_lineages)
             .filter(|origin| origin.column_by_name(self.field).is_some())
             .or_else(|| self.column_batch(primary_batch, transform_outputs, facet_shared))
     }
@@ -790,7 +806,7 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
             Some(layers) => {
                 for read in aux_reads(layers, &input.spec.encoding, channel, final_batch, transform_outputs) {
                     let Some(batch) = read.source.batch(final_batch, transform_outputs) else { continue };
-                    let origin = read.published_origin(input.transform_origins);
+                    let origin = read.published_origin(input.transform_lineages);
                     reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), origin, ..read });
                 }
                 first_layer += layers.len();
@@ -807,7 +823,7 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
                     source: LayerSource::Batch(located.batch),
                     field,
                     kind: AuxReadKind::Column { binding },
-                    origin: input.transform_origins.get(FINAL_OUTPUT_KEY).and_then(|origin| origin.rows_of(field)),
+                    origin: input.transform_lineages.get(FINAL_OUTPUT_KEY).and_then(|origin| origin.binned_rows(field)),
                 });
             }
         }
@@ -1065,10 +1081,10 @@ pub(in crate::render) fn binned_color_values<'a: 'b, 'b>(
     reads: &[AuxRead<'a>],
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
-    transform_origins: &'b BinnedOrigins,
+    transform_lineages: &'b OutputLineages,
     facet_shared: bool,
 ) -> Vec<f64> {
-    binned_color_sources(reads, primary_batch, transform_outputs, transform_origins, facet_shared).into_iter().flatten().collect()
+    binned_color_sources(reads, primary_batch, transform_outputs, transform_lineages, facet_shared).into_iter().flatten().collect()
 }
 
 /// The distinct sources of the values a binned color's edges are cut from:
@@ -1085,7 +1101,7 @@ pub(in crate::render) fn binned_color_sources<'a: 'b, 'b>(
     reads: &[AuxRead<'a>],
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
-    transform_origins: &'b BinnedOrigins,
+    transform_lineages: &'b OutputLineages,
     facet_shared: bool,
 ) -> Vec<Vec<f64>> {
     let mut sources: Vec<Vec<f64>> = Vec::new();
@@ -1094,7 +1110,7 @@ pub(in crate::render) fn binned_color_sources<'a: 'b, 'b>(
             sources.push(finite_sorted(crate::render::marks::image::raster_cell_values(raster)));
             continue;
         }
-        let Some(batch) = read.binned_sample_batch(primary_batch, transform_outputs, transform_origins, facet_shared) else { continue };
+        let Some(batch) = read.binned_sample_batch(primary_batch, transform_outputs, transform_lineages, facet_shared) else { continue };
         let values = crate::render::arrow_cast::col_as_f64(batch, read.field).unwrap_or_default().into_iter().flatten();
         add_distinct_source(&mut sources, finite_sorted(values));
     }
@@ -4552,6 +4568,7 @@ mod tests {
             super::super::PositionalFields { x: Some("g"), y: Some("v") },
             &merged,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 300.0),
             &spec,
             false,

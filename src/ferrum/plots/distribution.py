@@ -806,7 +806,7 @@ def _displot_build(
         # `shared_extent=True` is unconditional (not gated on `multiple=`):
         # an ECDF is a per-group comparison, so a common x-grid is the only
         # reading under which the curves are comparable.
-        chart = chart.transform(
+        chart = chart._with_statistics(
             Bin(
                 field=_ecdf_x_name,
                 bins=bins,
@@ -878,9 +878,10 @@ def _displot_build(
                 bw_adjust=bw_adjust,
                 cumulative=cumulative,
             )
-            # Prepend the named Kde before the unnamed Bin so it reads from
-            # the original (pre-Bin) data batch.
-            chart._transforms = [kde_transform] + list(chart._transforms or [])
+            # The named Kde sits right after the statistics marker, ahead of
+            # the unnamed Bin, so it reads the caller's rows, after any
+            # `.transform(...)` step, never the bins.
+            chart = chart._with_statistics(kde_transform, reading="rows")
             chart._layers.append(kde_layer)
             # The chart's own value axis, for the one kind whose primary mark
             # has none (GH #201). `kind="rug"` binds x only: `hist` remaps
@@ -917,9 +918,10 @@ def _displot_build(
             from ferrum.marks._desugar_helpers import identity_transform
 
             rug_xform = identity_transform("rug_data")
-            # Prepend the named Identity before the unnamed Bin so it
-            # captures the original data for the rug tick marks.
-            chart._transforms = [rug_xform] + list(chart._transforms or [])
+            # The named Identity sits right after the statistics marker,
+            # ahead of the unnamed Bin, so it captures the caller's rows for
+            # the rug tick marks, after any `.transform(...)` step.
+            chart = chart._with_statistics(rug_xform, reading="rows")
             chart._layers.append(
                 _Layer(
                     name="rug",
@@ -1614,7 +1616,8 @@ def catplot(
     * ``"boxen"``  -- ``mark_boxen`` (letter-value / extended box).
     * ``"point"``  -- ``Summary`` + one mean marker per category group over a bootstrap-CI whisker.
     * ``"bar"``    -- ``Summary`` + one mean bar per category group under a bootstrap-CI whisker.
-    * ``"count"``  -- ``Aggregate(count)`` + ``mark_bar``.
+    * ``"count"``  -- ``mark_bar`` at ``y=count()``, titled ``n``; a ``layers=`` label
+      ``fm.Layer(mark="text", encoding={"text": "count()"})`` draws each bar's count.
 
     Parameters
     ----------
@@ -2241,53 +2244,28 @@ def _catplot_build(
             n_boot=n_boot,
             seed=seed,
         )
-        # `.transform()` returns a fresh Chart, so assigning the layered state
-        # onto it mutates nothing the caller holds (the idiom
+        # The summary is the figure's statistic, after the caller's steps. A
+        # fresh Chart comes back, so assigning the layered state onto it
+        # mutates nothing the caller holds (the idiom
         # `_fit_chart_from_named_transform` uses in plots/regression.py).
-        chart = chart.transform(summary)
+        chart = chart._with_statistics(summary)
         chart._mark = None
         chart._layers = summary_layers
     elif kind == "count":
-        # Aggregate(count of the resolved category channel) → bar. Derived
-        # from `cat_channel` -- not the raw `cat_field` argument -- for two
-        # reasons: `cat_channel` is already unwrapped to a plain column name
-        # (a bare-string `cat_field` passes through `_field_name` a no-op;
-        # a channel object like `fm.X("g")` does not, and the raw object
-        # reaching `AggregateOp` raised a PyO3 TypeError naming neither
-        # `catplot` nor `kind="count"`), and `cat_channel` is also the
-        # POST-`encode=`-override channel (`:1777`-`:1778`), the same value
-        # bound on `enc["x"]` a few lines up -- so `encode={"x": fm.X("other")}`
-        # aggregates the column the axis actually binds, not the one named by
-        # the original `x=`/`y=` keyword. Mirrors `_catplot_summary_layers`'s
-        # own `cat_field = _field_name(cat_channel)` (`:1052`).
+        # One bar per category (and hue level) at its row count, as an
+        # encoding statistic: `y=count()`, as Vega-Lite's count plot is. The
+        # statistic groups by the drawn category, the hue and the facet like
+        # every encoding statistic, runs after the caller's `.transform(...)`
+        # steps, and a layer attached through `layers=` inherits it and
+        # counts its own rows (`Layer(encoding={"text": "count()"})` labels
+        # each bar with its height). The value axis keeps the title "n".
         if cat_name is None:
             raise ValueError("catplot(kind='count') requires x= (or y= when orient='h')")
-        count_field = _field_name(cat_channel)
-        op = AggregateOp(count_field, "count", "n")
-        # Group by the hue column too when one is bound. Aggregate emits only
-        # its groupby columns, so grouping by the category alone dropped the
-        # hue column from the transform's output and the color encoding then
-        # referenced a column that no longer existed -- `catplot(kind="count",
-        # hue=...)` raised "unknown column referenced by an encoding" for every
-        # hue dtype. Counting per (category, hue) is also the reading the rest
-        # of this branch already assumes, since `dodge=True` offsets the bars
-        # by hue level, and it matches seaborn's countplot(hue=).
-        #
-        # Through the SAME helper the aggregating kinds use, not a second
-        # inline copy of its rule: "hue joins the groupby unless it names the
-        # category column" is one rule with one owner, and this branch and
-        # `_catplot_summary_layers` were spelling it separately, forty lines
-        # apart, inside one function.
-        count_groupby, _split_hue = resolve_color_groupby(
-            count_field, _field_name(hue), [count_field]
-        )
-        chart = chart.transform(Aggregate([op], groupby=count_groupby))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
-        # Remap value axis to the count column.
-        # After enc normalisation, val is always on y (cat on x), so "n" always
-        # goes on y regardless of orientation.
-        enc["y"] = "n"
+        # After enc normalisation the value is always on y (cat on x).
+        from ferrum.encoding import Y as _Y_count
 
+        enc["y"] = _Y_count(aggregate="count", title="n")
     chart = chart.encode(**enc)
 
     # orient="h" → CoordFlip.
@@ -2306,7 +2284,7 @@ def _catplot_build(
     # Properties: delegate to shared helper so catplot and displot cannot drift.
     chart = _apply_facet_sizing(chart, data=data, row=row, height=height, aspect=aspect)
 
-    return _finalize_chart(
+    chart = _finalize_chart(
         chart,
         entry="catplot",
         mark=mark,
@@ -2315,6 +2293,49 @@ def _catplot_build(
         layers=layers,
         theme=theme,
     )
+    if kind == "count" and layers:
+        _refuse_count_column_reads(chart, len(layers))
+    return chart
+
+
+def _refuse_count_column_reads(chart: Chart, attached: int) -> None:
+    """Refuse a layer of ``catplot(kind="count")`` binding ``n``, a column its rows lack.
+
+    The count plot draws each bar's height as ``y=count()``, an encoding
+    statistic, so no column named ``n`` exists; a layer attached through
+    ``layers=`` (the last *attached* layers of the finished *chart*, one per
+    argument) labels each bar with its count through its own statistic,
+    ``text="count()"``. A binding of ``n`` is refused with that remedy only
+    on a channel that takes ``aggregate=``, and only where Python knows the
+    rows the layer reads (:func:`ferrum._compose.known_columns`) and they
+    lack ``n``. A column ``n`` those rows hold is drawn as written; any
+    other binding is left to the render's own missing-column refusal.
+    """
+    from ferrum._compose import known_columns
+    from ferrum._layer_transforms import _own_channels
+    from ferrum._spec_build import _encoding_field_and_type
+    from ferrum.encoding._resolve import channel_class
+    from ferrum.encoding.base import ChannelBase
+
+    for layer in (chart._layers or [])[-attached:]:
+        for channel in _own_channels(layer):
+            value = layer.encoding[channel]
+            if not isinstance(value, (str, ChannelBase)):
+                continue
+            if _encoding_field_and_type(value)[0] != "n":
+                continue
+            cls = channel_class(channel)
+            if "aggregate" not in cls._honored_kwargs:
+                continue
+            columns = known_columns(layer, chart)
+            if columns is None or "n" in columns:
+                continue
+            raise ValueError(
+                f"catplot(kind='count'): layers= binds {channel}='n', but the count plot "
+                "draws each bar's count as y=count(), so there is no column 'n'; label "
+                f"each bar with {channel}='count()' (or fm.{cls.__name__}(aggregate='count')), "
+                "which counts the rows the layer reads as each bar does"
+            )
 
 
 # ---------------------------------------------------------------------------

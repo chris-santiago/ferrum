@@ -46,7 +46,7 @@ pub(crate) fn apply_with_context(
 /// `batch` cut to `spec.fields`, in that order, followed by each of `keep`
 /// the list does not already name and the batch holds. A listed field the
 /// batch lacks, or one listed twice, is a malformed spec and is refused.
-fn project(spec: &ProjectSpec, batch: &RecordBatch, keep: &[String]) -> PyResult<RecordBatch> {
+pub(crate) fn project(spec: &ProjectSpec, batch: &RecordBatch, keep: &[String]) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let mut listed: HashSet<&str> = HashSet::with_capacity(spec.fields.len());
     let mut indices: Vec<usize> = Vec::with_capacity(spec.fields.len() + keep.len());

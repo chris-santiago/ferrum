@@ -47,24 +47,21 @@ import pytest
 
 import ferrum as fm
 
+from tests._wire_steps import operand_branches, steps_of_type
+
 
 def _multi_row_df() -> pl.DataFrame:
     return pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]})
 
 
 def _bin_transforms(spec_dict: dict) -> list[dict]:
-    """Each top-level bin step, under the name a layer reads it by.
+    """Each bin step: the top chain's unnamed ones, then each published one under the key a layer reads.
 
-    A layer that reads a named input gets its step as a one-step branch over
-    that input; the branch publishes the step's output under its own name.
+    A layer's own bin runs inside the chain of the rows it reads and
+    publishes under a key scoped by that chain's branch (``tests._wire_steps``).
     """
-    steps = []
-    for t in spec_dict.get("transforms") or []:
-        if t.get("type") == "branch" and len(t["transforms"]) == 1:
-            t = {**t["transforms"][0], "name": t["name"]}
-        if t.get("type") == "bin":
-            steps.append(t)
-    return steps
+    top = [t for t in spec_dict.get("transforms") or [] if t["type"] == "bin" and "name" not in t]
+    return top + steps_of_type(spec_dict, "bin")
 
 
 def _layer_bin(spec_dict: dict, layer: dict) -> dict:
@@ -98,8 +95,8 @@ def test_binning_layer_routes_to_named_bin_transform():
     assert layers[0]["encoding"]["x"]["field"] == "bin_start"
     assert "bin" not in layers[0]["encoding"]["x"]
 
-    # Raw layer untouched: no data_source, field stays v.
-    assert layers[1].get("data_source") is None
+    # Raw layer untouched: it reads its operand's rows, field stays v.
+    assert layers[1]["data_source"] in operand_branches(d)
     assert layers[1]["encoding"]["x"]["field"] == "v"
     assert "x2" not in layers[1]["encoding"]
 
@@ -164,8 +161,8 @@ def test_single_binning_layer_in_layered_chart():
     assert bin_xform["field"] == "v"
     assert layers[0]["encoding"]["x"]["field"] == "bin_start"
 
-    # Raw layer untouched.
-    assert layers[1].get("data_source") is None
+    # Raw layer untouched: it reads its operand's rows.
+    assert layers[1]["data_source"] in operand_branches(d)
     assert layers[1]["encoding"]["x"]["field"] == "v"
 
     # Exactly one named Bin transform overall.
@@ -264,7 +261,7 @@ def test_no_bin_layered_chart_unchanged():
     d = json.loads((line + point).to_spec().to_json())
     assert not _bin_transforms(d)
     for layer in d["layers"]:
-        assert layer.get("data_source") is None
+        assert layer["data_source"] in operand_branches(d)
 
 
 def test_standalone_single_chart_bin_stays_unnamed():
@@ -371,7 +368,7 @@ def test_bin_and_aggregate_on_same_layer_folds_into_one_named_bin():
     assert bin_xform["agg_field"] == "v"
     assert bin_xform["agg"] == "mean"
     # Exactly one named transform for that layer: no separate Aggregate.
-    assert not [t for t in (d.get("transforms") or []) if t.get("type") == "aggregate"]
+    assert not steps_of_type(d, "aggregate")
     assert layer["encoding"]["y"]["field"] == "agg_value"
     assert layer["encoding"]["y"]["title"] == "mean_v"
     assert (raw + binned_agg).to_svg().lstrip().startswith("<")
@@ -387,7 +384,7 @@ def test_bin_and_count_shorthand_on_same_layer_reads_the_bins_count_column():
     layer = d["layers"][1]
     bin_xform = _layer_bin(d, layer)
     assert "agg" not in bin_xform
-    assert not [t for t in (d.get("transforms") or []) if t.get("type") == "aggregate"]
+    assert not steps_of_type(d, "aggregate")
     assert layer["encoding"]["y"]["field"] == "count"
 
 

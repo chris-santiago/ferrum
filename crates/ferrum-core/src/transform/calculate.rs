@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::expr::{Expr, ExprValue};
-use crate::transform::filter::{batch_field_value, ensure_expr_fields_supported};
+use crate::transform::filter::{batch_field_value, ensure_expr_fields_readable};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,27 +31,21 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
         PyValueError::new_err(format!("data_calculate: invalid expression: {e}"))
     })?;
 
-    // A bare field reference (`datum.x` or `datum["x"]`, no operators) that
-    // resolves against this batch carries that column's array through
-    // unchanged — dtype, nulls and dictionary encoding included — rather
-    // than going through the row-by-row `ExprValue`
-    // evaluator below, which can only represent Number/Str/Bool/Null and so
-    // would collapse an Int64, Date32, Datetime or Dictionary column to
-    // Float64 or Utf8. A bare reference that does NOT resolve falls through
-    // to the inference path below, exactly like every other expression
-    // shape: `datum.missing` evaluating to `Null` on every row (and so to an
-    // all-null `Float64` column here) is the documented, pinned Vega-style
-    // missing-field rule (`filter.rs`'s `ensure_expr_fields_supported` doc),
-    // not a malformed input — a bare reference is not a special case of that
-    // rule, just the one shape this function can also preserve a dtype for
-    // when the column IS there.
+    // A bare field reference (`datum.x` or `datum["x"]`, no operators)
+    // carries that column's array through unchanged — dtype, nulls and
+    // dictionary encoding included — rather than going through the
+    // row-by-row `ExprValue` evaluator below, which can only represent
+    // Number/Str/Bool/Null and so would collapse an Int64, Date32, Datetime
+    // or Dictionary column to Float64 or Utf8. A bare reference to a column
+    // the rows lack takes the path below, whose check refuses it like any
+    // other expression naming a missing column.
     let bare_ref_idx = parsed
         .as_bare_field_ref()
         .and_then(|field_name| batch.schema().index_of(field_name).ok());
     let (dtype, col): (DataType, ArrayRef) = if let Some(idx) = bare_ref_idx {
         (batch.schema().field(idx).data_type().clone(), batch.column(idx).clone())
     } else {
-        ensure_expr_fields_supported(&parsed, &batch.schema(), "data_calculate")?;
+        ensure_expr_fields_readable(&parsed, &batch.schema(), "data_calculate")?;
 
         let n_rows = batch.num_rows();
 
@@ -428,24 +422,53 @@ mod tests {
         assert_eq!(z.values().to_vec(), [1.0, 2.0, 3.0]);
     }
 
-    /// A bare reference to a missing column is not malformed: it falls
-    /// through to the same inference path every other expression shape
-    /// takes, yielding an all-null Float64
-    /// column (`ExprValue::Null` per row maps to `None` in
-    /// `infer_and_build_column`'s default branch), never a typed error.
-    /// `non_bare_expression_still_infers_as_float64` above pins the
-    /// sibling fact that an OPERATOR over the same missing field yields
-    /// `NaN` (not a null) through the same default branch, since `Null`
-    /// arithmetic coerces via `as_number()` before reaching inference — a
-    /// bare reference is the one shape where the raw per-row `ExprValue`
-    /// (not an arithmetic result) reaches inference directly.
+    /// An expression naming a column the rows lack is refused, naming the
+    /// column and the columns the rows carry, in every shape: a bare
+    /// reference (which would otherwise take the dtype-preserving path's
+    /// miss and emit an all-null column), an operator over it, and a
+    /// replacement of an existing column. The rejected alternative is the
+    /// Vega-style missing-field `Null`, an all-null or all-NaN column that
+    /// blanks whatever reads it.
     #[test]
-    fn bare_reference_to_missing_column_is_null_like_any_expression() {
+    fn a_missing_column_is_refused_naming_it_and_the_available_columns() {
+        pyo3::Python::initialize();
         let batch = make_batch();
-        let out = apply(&calc("z", "datum.nonexistent"), &batch).unwrap();
-        let idx = out.schema().index_of("z").unwrap();
-        assert_eq!(out.schema().field(idx).data_type(), &DataType::Float64);
-        let z = out.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(z.null_count(), z.len(), "every row must be a genuine Arrow null, not NaN");
+        for (as_field, expr) in [
+            ("z", "datum.nonexistent"),
+            ("z", "datum[\"nonexistent\"]"),
+            ("z", "datum.nonexistent * 2"),
+            ("x", "datum.x + datum.nonexistent"),
+        ] {
+            let msg = apply(&calc(as_field, expr), &batch)
+                .expect_err(&format!("{expr}: reads a column the rows lack"))
+                .to_string();
+            assert_eq!(
+                msg,
+                r#"ValueError: data_calculate: column 'nonexistent' not found; available: ["x", "y"]"#,
+                "{expr}"
+            );
+        }
+    }
+
+    /// A column that is present but all null is read as written, on both
+    /// the bare-reference path and the evaluator; an expression with no
+    /// column reference computes as before.
+    #[test]
+    fn an_all_null_column_and_a_literal_expression_still_compute() {
+        let batch = make_batch_with_extra(
+            "n",
+            DataType::Float64,
+            Arc::new(Float64Array::from(vec![None, None, None])),
+        );
+        let column = |expr: &str| {
+            let out = apply(&calc("z", expr), &batch).unwrap();
+            out.column(out.schema().index_of("z").unwrap()).clone()
+        };
+        assert_eq!(column("datum.n").null_count(), 3);
+        let doubled = column("datum.n * 2");
+        assert_eq!(doubled.len(), 3);
+        let literal = column("1 + 2");
+        let literal = literal.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(literal.values().to_vec(), vec![3.0, 3.0, 3.0]);
     }
 }

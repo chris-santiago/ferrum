@@ -1571,6 +1571,9 @@ impl Encoding {
     /// - [`crate::render::scale_resolve::numeric_domain_union`] applies it to
     ///   read a still-authored `spec.layers` encoding in the post-flip space
     ///   its `channel` argument names.
+    /// - `render::prepare::build_axes` applies it to the chart's authored
+    ///   encoding, so a channel's title moves with the channel to the axis it
+    ///   draws on.
     ///
     /// A second, hand-rolled swap at either site would be a second flip
     /// convention to keep in sync; there is deliberately only this one.

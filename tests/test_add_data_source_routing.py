@@ -37,14 +37,10 @@ and is asserted here as the discriminating claim -- is the GEOMETRY each
 side contributes: the same circle positions and the same reference-line
 endpoints, regardless of which side is LHS.
 
-A second, closely related defect surfaced during this fix and is pinned
-here too: two DIFFERENT composite-mark charts that happen to share a
-transform name (every ``mark_qq()`` names its transform ``"qq_main"``
-regardless of field) used to compose WITHOUT raising, but silently: Rust's
-named-output map has no duplicate-name guard, so the second transform
-processed overwrites the first's entry and every layer reading that name --
-from EITHER side -- resolves to the transform that ran last. Composition now
-refuses this case at ``+``-time instead of rendering corrupted output.
+Two different composite-mark charts that share a transform name (every
+``mark_qq()`` names its transform ``"qq_main"`` regardless of field) each
+draw their own output: every ``+`` operand publishes its outputs inside its
+own branch, so neither side's output can replace the other's.
 """
 
 from __future__ import annotations
@@ -151,30 +147,19 @@ class TestSelfComposition:
         assert len(_circle_centers(svg)) == 100
 
 
-class TestUnroutableCollisionRefusal:
-    """Two different composite marks sharing a transform name must refuse,
-    not silently let one side's data overwrite the other's.
-    """
+class TestSharedOutputNames:
+    """Two different composite marks sharing a transform name each draw their own output."""
 
-    def test_two_different_qq_charts_refuse_instead_of_corrupting(self):
+    def test_two_different_qq_charts_each_draw_their_own_scatter_and_line(self):
         rng = np.random.default_rng(0)
         df = pl.DataFrame({"a": rng.normal(size=50), "b": rng.normal(loc=5.0, size=50)})
         qq_a = fm.Chart(df).mark_qq().encode(x="a")
         qq_b = fm.Chart(df).mark_qq().encode(x="b")
-        with pytest.raises(ValueError, match="qq_main"):
-            qq_a + qq_b
-
-    def test_refusal_names_the_layer_mark_and_output(self):
-        rng = np.random.default_rng(0)
-        df = pl.DataFrame({"a": rng.normal(size=50), "b": rng.normal(loc=5.0, size=50)})
-        qq_a = fm.Chart(df).mark_qq().encode(x="a")
-        qq_b = fm.Chart(df).mark_qq().encode(x="b")
-        with pytest.raises(ValueError) as excinfo:
-            qq_a + qq_b
-        message = str(excinfo.value)
-        assert "point" in message  # layer name
-        assert "mark='point'" in message  # mark
-        assert "qq_main" in message  # named output
+        svg = (qq_a + qq_b).to_svg()
+        centers = _circle_centers(svg)
+        assert len(centers) == 100
+        assert len(set(centers)) == 100
+        assert len(_qq_reference_lines(svg)) == 2
 
     def test_two_qq_charts_on_the_same_field_do_not_refuse(self, qq_df):
         """Structurally-identical (dedup-safe) transforms are not a collision."""

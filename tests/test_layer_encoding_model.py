@@ -50,6 +50,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._wire_steps import all_steps, operand_branches
 
 SY = fm.SecondaryY
 
@@ -394,6 +395,11 @@ def _drawn_fields(encoding: dict, mark_style: dict | None) -> dict[str, str]:
 def _wire(chart: Any) -> dict:
     merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
     return json.loads(_quiet(lambda: merged.to_spec().to_json()))
+
+
+def _steps_at_any_depth(chart: Any) -> list[dict]:
+    """Every pipeline step of *chart*'s wire, each branch's own steps after it, in written order."""
+    return all_steps(_wire(chart))
 
 
 def check_wire_seam(case: Case) -> None:
@@ -4176,7 +4182,7 @@ def test_a_one_axis_count_rule_counts_every_row_beside_a_layer_with_its_own_x():
     chart = P(x="z") + mk("rule", y="count()")
     rule = _wire(chart)["layers"][-1]
     assert "x" not in rule["encoding"]
-    assert [s.get("groupby") for s in _wire(chart)["transforms"] if s["type"] == "aggregate"] == [
+    assert [s.get("groupby") for s in _steps_at_any_depth(chart) if s["type"] == "aggregate"] == [
         []
     ]
     assert tag_counts(_quiet(chart.to_svg)) == {"circle": 8, "line": 1}
@@ -7638,12 +7644,8 @@ _V7_CASES = {
 
 
 def _wire_layers_and_steps(chart: Any) -> list[dict]:
-    """Every transform on *chart*'s wire, a branch's inner steps included."""
-    merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
-    steps = []
-    for step in _wire(merged).get("transforms") or []:
-        steps += [step, *step.get("transforms", [])]
-    return steps
+    """Every transform on *chart*'s wire, each branch's inner steps included at any depth."""
+    return _steps_at_any_depth(chart)
 
 
 @pytest.mark.parametrize("case", sorted(_V7_CASES))
@@ -8336,7 +8338,7 @@ def test_V7_a_binned_color_condition_reaches_the_wire():
 # step the caller wrote never follows a marker in its chain, so it runs as
 # written beside a binned operand.
 
-_USER_STEP_TYPES = frozenset({"data_aggregate", "filter", "calculate"})
+_USER_STEP_TYPES = frozenset({"data_aggregate", "filter", "calculate", "composed"})
 
 
 def _caller_steps_after_a_marker(steps: list[dict]) -> list[str]:
@@ -8355,6 +8357,11 @@ def _caller_steps_after_a_marker(steps: list[dict]) -> list[str]:
 
 def _user_mean() -> dict:
     return fm.transform_aggregate({"field": "y", "fn": "mean", "as": "my"}, groupby=["g", "v"])
+
+
+def _user_copy() -> dict:
+    """``my`` as a copy of ``y``: a step every operand of a same-frame composition can take."""
+    return fm.transform_calculate("my", "datum.y")
 
 
 def _user_bars(color: Any, data: pl.DataFrame = _GROUP_ROWS) -> fm.Chart:
@@ -8388,17 +8395,16 @@ def _hist_points(color: Any) -> fm.Chart:
 _GROUP_ROWS_OTHER = _GROUP_ROWS.with_columns(pl.col("y").alias("y_copy"))
 
 
-def _filtered(chart: fm.Chart) -> fm.Chart:
-    return chart.transform(fm.transform_filter("datum.y > 3"))
-
-
 #: Each + door: the composition, and the parts whose standalone marks it draws.
 _MARKER_DOORS: dict[str, tuple[Callable[[Any], Any], tuple[Callable[[Any], Any], ...]]] = {
     "L+B": (lambda c: _user_bars(c) + _box(c), (_user_bars, _box)),
     "B+L": (lambda c: _box(c) + _user_bars(c), (_box, _user_bars)),
     "(B+P).transform": (
-        lambda c: (_box(c) + _user_points(c)).transform(_user_mean()),
-        (_box, lambda c: _user_points(c).transform(_user_mean())),
+        lambda c: (_box(c) + _user_points(c)).transform(_user_copy()),
+        (
+            lambda c: _box(c).transform(_user_copy()),
+            lambda c: _user_points(c).transform(_user_copy()),
+        ),
     ),
     "(Hist+P).transform": (
         lambda c: (_binned_hist(c) + _hist_points(c)).transform(fm.transform_filter("true")),
@@ -8451,13 +8457,12 @@ _MARKER_DOOR_CONTROL_DIGESTS = {
 
 
 @pytest.mark.parametrize("door", sorted(_MARKER_DOORS))
-def test_a_plus_door_with_no_binned_color_renders_its_pinned_bytes_and_no_marker(door):
-    """Control: unbinned, each door sends no marker and renders the bytes it rendered before."""
+def test_a_plus_door_with_no_binned_color_renders_its_pinned_bytes(door):
+    """Control: unbinned, each door renders the bytes it rendered before."""
     import hashlib
 
     compose, _ = _MARKER_DOORS[door]
     chart = _quiet(lambda: compose("g"))
-    assert _STATISTICS_MARKER not in _wire_layers_and_steps(chart)
     svg = _quiet(chart.to_svg)
     assert hashlib.sha256(svg.encode()).hexdigest() == _MARKER_DOOR_CONTROL_DIGESTS[door]
 
@@ -8568,47 +8573,43 @@ def test_a_statistic_under_a_binned_color_sits_after_its_chains_statistics_marke
     assert steps.count(_STATISTICS_MARKER) == 1
 
 
-def test_a_chart_drawing_no_binned_color_sends_no_statistics_marker():
-    """An unbinned chart's wire is unchanged: no marker on any chain."""
+def test_a_chart_drawing_no_binned_color_marks_its_statistics_all_the_same():
+    """The marker leads every chain's lowered statistics, binned color or not."""
     for statistic in _BIN_GROUPED_STATISTICS:
-        chart = _bin_column_grouped(statistic)()
-        assert _STATISTICS_MARKER not in _wire_layers_and_steps(chart)
-    assert _STATISTICS_MARKER not in _wire_layers_and_steps(
-        _bin_column_grouped("aggregate")() + _bin_partner()
-    )
+        steps = _wire(_bin_column_grouped(statistic)())["transforms"]
+        assert steps.count(_STATISTICS_MARKER) == 1
+        assert steps[steps.index(_STATISTICS_MARKER) + 1 :]
 
 
-def test_a_layer_statistic_reading_the_tail_sits_behind_the_top_chains_marker():
-    """A right operand reading the composition's tail computes its aggregate as a named top step.
+#: Compositions whose operands carry caller steps, statistics, or both.
+_OPERAND_CHAIN_DOORS: dict[str, Callable[[], fm.Chart]] = {
+    "partner+aggregate": lambda: _bin_partner() + _bin_grouped("aggregate")(),
+    "user-bars+aggregate": lambda: _user_bars(_binned_color()) + _bin_grouped("aggregate")(),
+    "histogram+chained-points": lambda: (
+        _binned_hist(_binned_color()) + _chained_points(_binned_color())
+    ),
+    "box+user-points": lambda: _box("g") + _user_points("g").transform(_user_copy()),
+}
 
-    The top chain is exactly the marker, then that aggregate: the marker
-    leads the lowered statistics and no caller step follows it.
+
+@pytest.mark.parametrize("door", sorted(_OPERAND_CHAIN_DOORS))
+def test_each_operand_branch_holds_its_steps_then_one_marker_then_its_statistics(door):
+    """The top chain holds one branch per operand; in each, no caller step follows the marker.
+
+    Every lowered step of an operand (its mark's statistics, its layers'
+    encoding statistics) sits after its one marker, and every step its
+    caller wrote before it. Rejects lowering a layer's statistic outside its
+    operand's chain, as a sibling of the operand branches.
     """
-    chart = _bin_partner() + _bin_grouped("aggregate")()
-    steps = _wire(chart)["transforms"]
-    assert [s["type"] for s in steps] == ["identity", "aggregate"]
-    assert steps[0] == _STATISTICS_MARKER
-    assert steps[1]["name"].startswith("_layer_agg_")
-    assert tag_counts(_quiet(chart.to_svg))["rect"] == 8
-
-
-def test_a_layer_statistic_reading_a_named_output_is_marked_in_its_own_branch():
-    """A right operand reading its rows through a named output computes its aggregate in a branch.
-
-    Beside a left operand whose own step advanced the chain, the right
-    operand reads the source's identity, so its aggregate runs in a branch
-    whose steps are the marker, then the aggregate, and the top chain holds
-    no marker. Rejects a marker in the composition's chain, where the left
-    operand's step would sit after it and be grouped by bin.
-    """
-    chart = _user_bars(_binned_color()) + _bin_grouped("aggregate")()
-    steps = _wire(chart)["transforms"]
-    assert _STATISTICS_MARKER not in steps
-    (branch,) = [s for s in steps if s.get("name", "").startswith("_layer_agg_")]
-    assert branch["type"] == "branch"
-    assert [t["type"] for t in branch["transforms"]] == ["identity", "aggregate"]
-    assert branch["transforms"][0] == _STATISTICS_MARKER
-    assert _caller_steps_after_a_marker(steps) == []
+    steps = _wire(_quiet(_OPERAND_CHAIN_DOORS[door]))["transforms"]
+    assert [step["type"] for step in steps] == ["branch"] * len(steps)
+    for branch in steps:
+        chain = branch["transforms"]
+        assert chain.count(_STATISTICS_MARKER) <= 1
+        assert _caller_steps_after_a_marker(chain) == []
+        if _STATISTICS_MARKER in chain:
+            lowered = chain[chain.index(_STATISTICS_MARKER) + 1 :]
+            assert lowered and all(step["type"] not in _USER_STEP_TYPES for step in lowered)
 
 
 def test_a_non_finite_binned_value_keeps_its_own_group():
@@ -8791,3 +8792,1352 @@ def test_a_line_under_a_binned_color_draws_one_series_per_bin(mark):
     series = [e for e in census(svg).elements() if e[0] in ("polyline", "path")]
     assert len(series) == 2
     assert list(legend_set(svg)) == ["z"]
+
+
+# A filter or calculate naming a column its rows lack is refused, and a panel
+# draws while any layer has rows.
+
+
+def _missing_column(step: str, column: str, available: pl.DataFrame) -> str:
+    """The render's refusal of an expression step naming *column*, which rows of *available* lack."""
+    return (
+        f"transform failed: ValueError: {step}: column '{column}' not found; "
+        f"available: {json.dumps(available.columns)}"
+    )
+
+
+#: The composite render's envelope around its first leaf's refusal.
+_FIRST_LEAF = "failed to render composite leaf leaf #0: "
+
+
+def _filter_count() -> Any:
+    return fm.transform_filter("datum.count > 1")
+
+
+def _calculate_count() -> Any:
+    return fm.transform_calculate("doubled", "datum.count * 2")
+
+
+#: Each door a step naming a column its rows lack is written on, the rows it
+#: reads, and the envelope the door's render wraps the refusal in.
+_MISSING_COLUMN_DOORS: dict[str, tuple[Callable[[Any], Any], pl.DataFrame, str]] = {
+    "F": (lambda step: P().transform(step), df, ""),
+    "L": (lambda step: P().transform(step).layer(layer("point", y="r")), df, ""),
+    "LD": (
+        lambda step: (
+            P()
+            .transform(step)
+            .layer(fm.Layer(data=df2, mark="point", encoding={"x": "v", "y": "y"}))
+        ),
+        df,
+        "",
+    ),
+    "+": (lambda step: (P() + P(y="r")).transform(step), df, ""),
+    "+l": (lambda step: P().transform(step) + P(y="r"), df, ""),
+    "+d": (lambda step: (P() + P(df2)).transform(step), df, ""),
+    "LCs": (lambda step: fm.LayerChart(P().transform(step), P(y="r")), df, _FIRST_LEAF),
+    "LCm": (lambda step: fm.LayerChart(P().transform(step), P(y="r"))._build_merged(), df, ""),
+    "Fc": (lambda step: P().transform(step).facet("c"), df, ""),
+    "hconcat": (lambda step: fm.hconcat(P().transform(step), P(y="r")), df, _FIRST_LEAF),
+}
+
+_MISSING_COLUMN_STEPS: dict[str, tuple[Callable[[], Any], str]] = {
+    "filter": (_filter_count, "data_filter"),
+    "calculate": (_calculate_count, "data_calculate"),
+}
+
+
+@pytest.mark.parametrize("step", sorted(_MISSING_COLUMN_STEPS))
+@pytest.mark.parametrize("door", sorted(_MISSING_COLUMN_DOORS))
+def test_a_step_naming_a_column_its_rows_lack_is_refused_on_every_door(door, step):
+    """``filter('datum.count > 1')`` over rows without ``count`` names the column and the rows' columns.
+
+    Rejects reading the missing column as null on every row, which emptied
+    the rows (a filter) or wrote an all-null column (a calculate) and
+    rendered a blank chart with no warning.
+    """
+    build, rows, envelope = _MISSING_COLUMN_DOORS[door]
+    make_step, name = _MISSING_COLUMN_STEPS[step]
+    chart = _quiet(lambda: build(make_step()))
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert str(refused.value) == envelope + _missing_column(name, "count", rows)
+
+
+#: ``df`` with a column every row of which is null.
+_ALL_NULL_ROWS = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("n"))
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        fm.transform_calculate("doubled", "datum.n * 2"),
+        fm.transform_calculate("one", "1 + 0"),
+        fm.transform_filter("1 < 2"),
+    ],
+    ids=["calculate-all-null", "calculate-literal", "filter-literal"],
+)
+def test_an_all_null_column_or_a_step_naming_no_column_runs_as_written(step):
+    """A present all-null column is read as written and a literal step names nothing: every point draws."""
+    chart = P(_ALL_NULL_ROWS).transform(step)
+    assert census(_quiet(chart.to_svg)) == census(_quiet(P(_ALL_NULL_ROWS).to_svg))
+
+
+def _emptied() -> fm.Chart:
+    return P().transform(fm.transform_filter("datum.y > 100"))
+
+
+#: Doors whose chart-level rows are empty while a layer reads rows of its own.
+_EMPTY_CHART_ROWS_DOORS: dict[str, Case] = {
+    "+s": Case(lambda: _emptied() + line(), (line,)),
+    "LD": Case(
+        lambda: _emptied().layer(fm.Layer(data=df2, mark="line", encoding={"x": "v", "y": "y"})),
+        (lambda: line(df2),),
+    ),
+    "Fc": Case(
+        lambda: (_emptied() + line()).facet("c"), (lambda: line().facet("c"),), faceted=True
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_EMPTY_CHART_ROWS_DOORS))
+def test_a_panel_draws_while_any_layer_has_rows(door):
+    """A filter emptying the left operand's rows leaves the other layer drawing its own.
+
+    Rejects skipping the panel on the chart-level rows alone, which blanked
+    the chart with no warning.
+    """
+    check_rendering(_EMPTY_CHART_ROWS_DOORS[door])
+
+
+# A step written on a + composition reaches the left operand and every
+# operand over the composition's frame, however the merge routed it, each over
+# its own rows, and never an operand over a different frame (user ruling
+# 2026-10-20). It runs where each reached operand's own steps end, before its
+# statistics, when those rows carry the columns it reads, else on the first
+# rows after the statistics that carry them; a chain whose rows never carry
+# them is left as written, and a step no reached chain can read is refused.
+
+
+def _scene_records(chart: Any) -> dict[str, Counter]:
+    """Per interactive mark kind, the multiset of its marks' tooltip records over every panel."""
+    out: dict[str, Counter] = {}
+    for panel in _scene(chart)["panels"]:
+        for batch in panel["marks"]:
+            records = out.setdefault(batch["kind"], Counter())
+            for tooltip in batch.get("tooltips") or []:
+                records[tuple((f["name"], f["value"]) for f in tooltip["fields"])] += 1
+    return out
+
+
+def _counted_above_one(records: Counter) -> Counter:
+    """The bar records whose ``count`` is above 1: the histogram's bars as the filter defines."""
+    return Counter({r: n for r, n in records.items() if float(dict(r)["count"]) > 1})
+
+
+def _hist_points_other(color: Any) -> fm.Chart:
+    """``_hist_points`` over a different frame holding the same rows."""
+    return fm.Chart(_GROUP_ROWS_OTHER).mark_point().encode(x="y", y="v", color=color)
+
+
+def _chained_points(color: Any) -> fm.Chart:
+    """``_hist_points`` with a chain of its own that keeps every row."""
+    return _hist_points(color).transform(fm.transform_filter("datum.y > 0"))
+
+
+def _bare_hist_points(color: Any) -> fm.Chart:
+    """``_hist_points`` uncolored: a ``Layer(data=)`` attached to a composition, which colors nothing."""
+    return fm.Chart(_GROUP_ROWS).mark_point().encode(x="y", y="v")
+
+
+#: The composition steps: a column every operand carries, two source columns
+#: the histogram's statistic drops, and the statistic's own output column.
+_REACH_STEPS: dict[str, Callable[[], Any]] = {
+    "v": lambda: fm.transform_filter("datum.v > 3"),
+    "y": lambda: fm.transform_filter("datum.y > 8"),
+    "g": lambda: fm.transform_filter("datum.g != 'b'"),
+    "count": lambda: fm.transform_filter("datum.count > 1"),
+}
+
+
+@dataclass(frozen=True)
+class _Reach:
+    """One door: the composition without its step, and each part with whether the step reaches it.
+
+    ``binned`` colors every part by ``v``'s unit bins (the histogram runs as
+    its own branch behind a statistics marker), else by ``c``.
+    """
+
+    compose: Callable[[Any], Any]
+    parts: tuple[tuple[Callable[[Any], Any], bool], ...]
+    binned: bool = True
+    facet: str | None = None
+
+
+_REACH_DOORS: dict[str, _Reach] = {
+    "+s": _Reach(
+        lambda c: _binned_hist(c) + _hist_points(c),
+        ((_binned_hist, True), (_hist_points, True)),
+        binned=False,
+    ),
+    "+s/rev": _Reach(
+        lambda c: _hist_points(c) + _binned_hist(c),
+        ((_hist_points, True), (_binned_hist, True)),
+        binned=False,
+    ),
+    "+s/chain-left": _Reach(
+        lambda c: _chained_points(c) + _binned_hist(c),
+        ((_chained_points, True), (_binned_hist, True)),
+        binned=False,
+    ),
+    "+s/chain-right": _Reach(
+        lambda c: _binned_hist(c) + _chained_points(c),
+        ((_binned_hist, True), (_chained_points, True)),
+        binned=False,
+    ),
+    "+s/marker-left": _Reach(
+        lambda c: _binned_hist(c) + _hist_points(c),
+        ((_binned_hist, True), (_hist_points, True)),
+    ),
+    "+s/marker-right": _Reach(
+        lambda c: _hist_points(c) + _binned_hist(c),
+        ((_hist_points, True), (_binned_hist, True)),
+    ),
+    "+d": _Reach(
+        lambda c: _binned_hist(c) + _hist_points_other(c),
+        ((_binned_hist, True), (_hist_points_other, False)),
+    ),
+    "+d/rev": _Reach(
+        lambda c: _hist_points_other(c) + _binned_hist(c),
+        ((_hist_points_other, True), (_binned_hist, False)),
+    ),
+    "(+s)+s": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points(c)) + _hist_points(c),
+        ((_binned_hist, True), (_hist_points, True), (_hist_points, True)),
+    ),
+    "(+s)+d": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points(c)) + _hist_points_other(c),
+        ((_binned_hist, True), (_hist_points, True), (_hist_points_other, False)),
+    ),
+    "s+(+s)": _Reach(
+        lambda c: _hist_points(c) + (_binned_hist(c) + _hist_points(c)),
+        ((_hist_points, True), (_binned_hist, True), (_hist_points, True)),
+    ),
+    "d+(+s)": _Reach(
+        lambda c: _hist_points_other(c) + (_binned_hist(c) + _hist_points(c)),
+        ((_hist_points_other, True), (_binned_hist, False), (_hist_points, False)),
+    ),
+    "Fc": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points(c)).facet("c"),
+        ((_binned_hist, True), (_hist_points, True)),
+        facet="c",
+    ),
+    "LD": _Reach(
+        lambda c: _binned_hist(c).layer(
+            fm.Layer(data=_GROUP_ROWS_OTHER, mark="point", encoding={"x": "y", "y": "v"})
+        ),
+        ((_binned_hist, True), (_hist_points_other, False)),
+    ),
+    "LD/same": _Reach(
+        lambda c: _binned_hist(c).layer(
+            fm.Layer(data=_GROUP_ROWS, mark="point", encoding={"x": "y", "y": "v"})
+        ),
+        ((_binned_hist, True), (_hist_points, True)),
+    ),
+    "(+d)+s": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points_other(c)) + _hist_points(c),
+        ((_binned_hist, True), (_hist_points_other, False), (_hist_points, True)),
+    ),
+    "s+(+d)": _Reach(
+        lambda c: _hist_points(c) + (_binned_hist(c) + _hist_points_other(c)),
+        ((_hist_points, True), (_binned_hist, True), (_hist_points_other, False)),
+    ),
+    "(+d).layer(LD/same)": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points_other(c)).layer(
+            fm.Layer(data=_GROUP_ROWS, mark="point", encoding={"x": "y", "y": "v"})
+        ),
+        ((_binned_hist, True), (_hist_points_other, False), (_bare_hist_points, True)),
+    ),
+    "(+d)+d": _Reach(
+        lambda c: (_binned_hist(c) + _hist_points_other(c)) + _hist_points_other(c),
+        ((_binned_hist, True), (_hist_points_other, False), (_hist_points_other, False)),
+    ),
+}
+
+
+def _reach_color(door: _Reach) -> Any:
+    return _binned_color() if door.binned else "c"
+
+
+def _part(build: Callable[[Any], Any], color: Any, facet: str | None) -> fm.Chart:
+    part = build(color)
+    return part.facet(facet) if facet is not None else part
+
+
+def _expected_reach_records(door: _Reach, step: str) -> dict[str, Counter]:
+    """The marks each part draws alone: filtered as the step defines where it reaches, else as written."""
+    color = _reach_color(door)
+    out: dict[str, Counter] = {}
+    for build, reached in door.parts:
+        alone = _quiet(lambda build=build: _part(build, color, door.facet))
+        if reached and step != "count":
+            alone = alone.transform(_REACH_STEPS[step]())
+        records = _quiet(lambda alone=alone: _scene_records(alone))
+        if reached and step == "count" and "bar" in records:
+            records["bar"] = _counted_above_one(records["bar"])
+        for kind, counted in records.items():
+            out[kind] = out.get(kind, Counter()) + counted
+    return out
+
+
+def _count_unreadable(door: _Reach) -> bool:
+    """Whether no reached part draws the histogram, so no reached chain carries ``count``."""
+    return not any(reached for build, reached in door.parts if build is _binned_hist)
+
+
+_REACH_CASES = [
+    (door, step)
+    for door in sorted(_REACH_DOORS)
+    for step in sorted(_REACH_STEPS)
+    if not (step == "count" and _count_unreadable(_REACH_DOORS[door]))
+]
+
+
+@pytest.mark.parametrize(("door", "step"), _REACH_CASES)
+def test_a_compositions_step_reaches_every_operand_over_its_frame(door, step):
+    """Each reached part draws what it draws alone filtered by the step; every other part, as written.
+
+    ``v``, ``y`` and ``g`` are on every operand's source rows, so the step
+    runs before the histogram bins (its bars equal ``Hist().transform(f)``
+    alone) and filters the points; ``count`` exists only after the
+    histogram's statistic, so the bars above count 1 draw and the points
+    draw unfiltered. Rejects placing the step by who reads a chain, after
+    the left's statistics only: that refused ``y`` and ``g``, which the
+    statistic drops, and never reached a right operand on the same frame.
+    """
+    spec = _REACH_DOORS[door]
+    chart = _quiet(lambda: spec.compose(_reach_color(spec)).transform(_REACH_STEPS[step]()))
+    expected = _expected_reach_records(spec, step)
+    assert _quiet(lambda: _scene_records(chart)) == expected
+    svg = _quiet(chart.to_svg)
+    drawn = Counter(signature[0] for signature in census(svg).elements())
+    assert drawn["circle"] == sum(expected.get("point", Counter()).values())
+
+
+#: The doors whose reached operands never carry ``count``, and the left operand's columns.
+_COUNT_REFUSED = {
+    door: _GROUP_ROWS_OTHER for door, spec in _REACH_DOORS.items() if _count_unreadable(spec)
+}
+
+
+@pytest.mark.parametrize("door", sorted(_COUNT_REFUSED))
+def test_a_compositions_step_no_reached_operand_can_read_is_refused(door):
+    """``count`` names no column any reached operand's rows carry: refused over the left's rows.
+
+    Rejects leaving the step unrun in silence, which drew every operand as
+    if no step had been written.
+    """
+    spec = _REACH_DOORS[door]
+    chart = _quiet(lambda: spec.compose(_reach_color(spec)).transform(_REACH_STEPS["count"]()))
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert str(refused.value) == _missing_column("data_filter", "count", _COUNT_REFUSED[door])
+
+
+def _normalized_wire(chart: Any) -> str:
+    """The chart's spec JSON with its identity-derived step names made stable."""
+    return re.sub(r"_(auto|ident)_[0-9a-f]+", r"_\1_", _quiet(lambda: chart.to_spec().to_json()))
+
+
+#: The spec JSON each door sends with no step written on it, pinned beside the
+#: census of what it draws: the marks of its parts, each drawn alone.
+_REACH_DOOR_WIRE_DIGESTS: dict[str, str] = {
+    "(+d)+d": "e4474f86bcbe15fba40e11f5ac06d03cb66308f761cbba171c5d114efee0cff5",
+    "(+d)+s": "ba0da136f3252f2a77501c3dd20af170885ea65959edcfa750192e70da116767",
+    "(+d).layer(LD/same)": "8e7e2e1a3d5ef36e56e7aa665f3b88e0cf72ebdec109f84048995d7f3b3cf8a4",
+    "(+s)+d": "0225068f2923f769483b0c8b8b64d757dd7a70ea72902db06c5a1e54cbf5c7bb",
+    "(+s)+s": "4189676ce4fe7b669d685cbf6adba88cc2ec0c80f69ee662b543dcfc968f8cc9",
+    "+d": "b1f785a31e05fc7b58ed0331be5004e3369fea16882d126c54290f41717ba06f",
+    "+d/rev": "4428721b969a9ac999eee8123137b51e1ef574ef675ab4613301c0f95612e957",
+    "+s": "b6f5a689880d5031173f3c75e3f7e6e47d80680f7abf72112b346f891d6bda9f",
+    "+s/chain-left": "0d991f50b6d7da65eb18e402b374734b26018b08ce513279bebbf016f71add9a",
+    "+s/chain-right": "cc3ec7da9ab48f3f8b7ecc2bdae41ff32db160a3000d3e4f4b3854eb6b066216",
+    "+s/marker-left": "8da077d0d75ec55c02c4ec69814bca84d9d468a33400b19e8bc60dcd1b368193",
+    "+s/marker-right": "ec64be3200fd6262c047ca5d4e234c52ccbfa63a18eb70773499388db1b86f54",
+    "+s/rev": "b5c2966684b4a18a87ae5458057b43b2b772890ebb96ee63de7fa8b883813051",
+    "Fc": "6f2024105a629d37a4abe509fafad73d64f3aed3aac063a9c1885b9f165a0a5f",
+    "LD": "329d76774e6813038be78fa11c7c3f607718990c836e6ba0d3a981f4597c057b",
+    "LD/same": "7c6c4ea1a1ed9cb6d18493f15e57dc5d28a7484e4e8b4e51b0b873c63c196f8e",
+    "d+(+s)": "ece143348ab29131cb449ae0fc66195406a5604607f94a15fd24cefea19dca42",
+    "s+(+d)": "ceda6e94d9bef400d46a359ffc8da0be1f89370757da23fcddda9c1b93ca7b0e",
+    "s+(+s)": "fc2c01eae4b42e08942abc49d55f381ff776b315b2c7499ca1fcabf0e3ff7c19",
+}
+
+
+@pytest.mark.parametrize("door", sorted(_REACH_DOORS))
+def test_a_composition_without_a_step_draws_its_parts_and_pins_its_wire(door):
+    """No composed step reaches the wire of a composition no step was written on."""
+    import hashlib
+
+    spec = _REACH_DOORS[door]
+    color = _reach_color(spec)
+    chart = _quiet(lambda: spec.compose(color))
+    expected: dict[str, Counter] = {}
+    for build, _ in spec.parts:
+        part = _quiet(lambda build=build: _part(build, color, spec.facet))
+        for kind, counted in _quiet(lambda part=part: _scene_records(part)).items():
+            expected[kind] = expected.get(kind, Counter()) + counted
+    assert _quiet(lambda: _scene_records(chart)) == expected
+    wire = _normalized_wire(chart)
+    assert '"composed"' not in wire
+    assert hashlib.sha256(wire.encode()).hexdigest() == _REACH_DOOR_WIRE_DIGESTS[door]
+
+
+def test_a_secondary_y_over_a_flat_chart_keeps_its_step_before_the_statistic():
+    """Control: a flat host's own step runs before its histogram bins, with a secondary axis or not."""
+    color = _binned_color()
+    step = _REACH_STEPS["y"]
+    chart = _quiet(lambda: (_binned_hist(color) + SY("v")).transform(step()))
+    alone = _quiet(lambda: _binned_hist(color).transform(step()))
+    assert (
+        _quiet(lambda: _scene_records(chart))["bar"] == _quiet(lambda: _scene_records(alone))["bar"]
+    )
+
+
+def test_steps_on_a_composition_run_in_the_order_written():
+    """A calculate then a filter reading its output: the filter runs after the calculate on every operand."""
+    color = _binned_color()
+    chart = _quiet(
+        lambda: (
+            (_binned_hist(color) + _hist_points(color))
+            .transform(fm.transform_calculate("half", "datum.y / 2"))
+            .transform(fm.transform_filter("datum.half > 4"))
+        )
+    )
+    expected = _expected_reach_records(_REACH_DOORS["+s/marker-left"], "y")
+    assert _quiet(lambda: _scene_records(chart)) == expected
+
+
+# A composition's step runs at most once over the rows of each operand it
+# reaches, whichever order the operands come in: a step that reads its own
+# output draws the same values on every door.
+
+
+def _by_value(records: Counter) -> Counter:
+    """*records* with every numeric value read as a number, so a computed column compares by value."""
+
+    def value(text: str) -> Any:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+    return Counter({tuple((k, value(v)) for k, v in r): n for r, n in records.items()})
+
+
+def _shifted(records: Counter, column: str, by: float) -> Counter:
+    """*records* with *column* raised by *by*: what a step adding *by* to it once draws."""
+    return Counter(
+        {tuple((k, v + by if k == column else v) for k, v in r): n for r, n in records.items()}
+    )
+
+
+def _records_by_value(chart: Any) -> dict[str, Counter]:
+    return {kind: _by_value(r) for kind, r in _quiet(lambda: _scene_records(chart)).items()}
+
+
+#: The doors where the composition's step reaches the histogram.
+_ONCE_DOORS = sorted(door for door, spec in _REACH_DOORS.items() if not _count_unreadable(spec))
+
+
+@pytest.mark.parametrize("door", _ONCE_DOORS)
+def test_a_step_reading_its_own_output_runs_once_on_every_reached_operand(door):
+    """``calculate('count', 'datum.count + 100')`` raises each reached histogram bar's count by 100, once.
+
+    The points never carry ``count``, so they draw as written. Rejects
+    running a deferred copy over every later output of the chain, which ran
+    it again on rows that a copy had already passed (counts raised by 200
+    when the points came first).
+    """
+    spec = _REACH_DOORS[door]
+    color = _reach_color(spec)
+    step = fm.transform_calculate("count", "datum.count + 100")
+    chart = _quiet(lambda: spec.compose(color).transform(step))
+    expected: dict[str, Counter] = {}
+    for build, reached in spec.parts:
+        part = _quiet(lambda build=build: _part(build, color, spec.facet))
+        for kind, counted in _records_by_value(part).items():
+            if reached and build is _binned_hist:
+                counted = _shifted(counted, "count", 100.0)
+            expected[kind] = expected.get(kind, Counter()) + counted
+    assert _records_by_value(chart) == expected
+
+
+# A composition's step reading an encoding statistic's output column runs on
+# that statistic's rows on every door: over the same frame, beside an operand
+# over another frame, nested, and before a layer over another frame is
+# attached.
+
+
+def _count_bars(color: Any) -> fm.Chart:
+    """One bar per (g, color) group, drawing its row count as ``count_all``."""
+    return fm.Chart(_GROUP_ROWS).mark_bar().encode(x="g", y="count()", color=color)
+
+
+def _group_points_other(color: Any) -> fm.Chart:
+    """``_plain_points`` over a different frame holding the same rows."""
+    return fm.Chart(_GROUP_ROWS_OTHER).mark_point().encode(x="g", y="y", color=color)
+
+
+def _bare_group_points_other(color: Any) -> fm.Chart:
+    """``_group_points_other`` with no color of its own: the records a ``Layer(data=)`` lists."""
+    return fm.Chart(_GROUP_ROWS_OTHER).mark_point().encode(x="g", y="y")
+
+
+def _other_layer() -> fm.Layer:
+    return fm.Layer(data=_GROUP_ROWS_OTHER, mark="point", encoding={"x": "g", "y": "y"})
+
+
+@dataclass(frozen=True)
+class _Counted:
+    """One door: the composition with the step written on it, and each part with whether it is reached."""
+
+    compose: Callable[[Any, Any], Any]
+    parts: tuple[tuple[Callable[[Any], Any], bool], ...]
+
+
+_COUNTED_DOORS: dict[str, _Counted] = {
+    "+s": _Counted(
+        lambda c, step: (_count_bars(c) + _plain_points(c)).transform(step),
+        ((_count_bars, True), (_plain_points, True)),
+    ),
+    "+s/rev": _Counted(
+        lambda c, step: (_plain_points(c) + _count_bars(c)).transform(step),
+        ((_plain_points, True), (_count_bars, True)),
+    ),
+    "+d": _Counted(
+        lambda c, step: (_count_bars(c) + _group_points_other(c)).transform(step),
+        ((_count_bars, True), (_group_points_other, False)),
+    ),
+    "(+s)+d": _Counted(
+        lambda c, step: ((_count_bars(c) + _plain_points(c)) + _group_points_other(c)).transform(
+            step
+        ),
+        ((_count_bars, True), (_plain_points, True), (_group_points_other, False)),
+    ),
+    "(+d)+s": _Counted(
+        lambda c, step: ((_count_bars(c) + _group_points_other(c)) + _plain_points(c)).transform(
+            step
+        ),
+        ((_count_bars, True), (_group_points_other, False), (_plain_points, True)),
+    ),
+    "LD": _Counted(
+        lambda c, step: _count_bars(c).layer(_other_layer()).transform(step),
+        ((_count_bars, True), (_bare_group_points_other, False)),
+    ),
+    "+s then LD": _Counted(
+        lambda c, step: (_count_bars(c) + _plain_points(c)).transform(step).layer(_other_layer()),
+        ((_count_bars, True), (_plain_points, True), (_bare_group_points_other, False)),
+    ),
+    "+s then +d": _Counted(
+        lambda c, step: (
+            (_count_bars(c) + _plain_points(c)).transform(step) + _group_points_other(c)
+        ),
+        ((_count_bars, True), (_plain_points, True), (_group_points_other, False)),
+    ),
+}
+
+
+#: Each step: what it does to the bars' records, which carry ``count_all``.
+_COUNTED_STEPS: dict[str, tuple[Callable[[], Any], Callable[[Counter], Counter]]] = {
+    "filter": (
+        lambda: fm.transform_filter("datum.count_all > 1 && datum.g == 'a'"),
+        lambda records: Counter({r: n for r, n in records.items() if dict(r)["g"] == "a"}),
+    ),
+    "calculate": (
+        lambda: fm.transform_calculate("count_all", "datum.count_all + 100"),
+        lambda records: _shifted(records, "count_all", 100.0),
+    ),
+}
+
+
+@pytest.mark.parametrize("step", sorted(_COUNTED_STEPS))
+@pytest.mark.parametrize("door", sorted(_COUNTED_DOORS))
+def test_a_step_reading_an_encoding_statistics_output_runs_on_its_rows_on_every_door(door, step):
+    """The bars draw as the step defines over their counts; every other part draws as written.
+
+    Rejects lowering the bars' count outside their operand's chain, where a
+    step deferred inside that chain never reached it once a layer or
+    operand over another frame joined the composition (refused, ``column
+    'count_all' not found``).
+    """
+    spec = _COUNTED_DOORS[door]
+    make_step, effect = _COUNTED_STEPS[step]
+    chart = _quiet(lambda: spec.compose("c", make_step()))
+    expected: dict[str, Counter] = {}
+    for build, reached in spec.parts:
+        for kind, counted in _records_by_value(_quiet(lambda build=build: build("c"))).items():
+            if reached and build is _count_bars:
+                counted = effect(counted)
+            expected[kind] = expected.get(kind, Counter()) + counted
+    assert _records_by_value(chart) == expected
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_F_a_flat_charts_step_reading_its_statistics_output_is_refused_with_the_remedy(output):
+    """A flat chart's ``.transform()`` runs before its encoding statistics, so a
+    step reading the count they compute is refused naming the step, the
+    statistic and the remedy. Rejects the step's own missing-column text
+    (``column 'count_all' not found``), which says nothing of why.
+    """
+    chart = mk("bar", x="g", y="count()").transform(fm.transform_filter("datum.count_all > 1"))
+    render = chart.to_svg if output == "static" else lambda: chart.interactive().to_html()
+    message = (
+        "transform failed: ValueError: data_filter: column 'count_all' is computed by the "
+        "chart's statistics (stat_aggregate), which run after the chart's .transform() steps: "
+        ".transform() reads the chart's rows before its statistics. Compute 'count_all' in "
+        ".transform() before this step (e.g. with fm.transform_aggregate) and bind the "
+        "encoding to it"
+    )
+    with pytest.raises(ValueError) as refused:
+        _quiet(render)
+    assert str(refused.value) == message
+
+
+def _screen_axis_titles(chart: fm.Chart, output: str) -> dict[str, str]:
+    """Each drawn axis title by the screen axis it sits on: a rotated title is the y axis's."""
+    if output == "static":
+        return {
+            ("y" if "rotate(" in (e.get("transform") or "") else "x"): "".join(e.itertext()).strip()
+            for e in _chrome_texts(chart.to_svg())
+            if e.get("font-weight") == "600" and e.get("font-size") == "13"
+        }
+    scene = json.loads(chart.interactive().scene_json)
+    titles: dict[str, str] = {}
+
+    def walk(nodes: list) -> None:
+        for node in nodes:
+            if node.get("type") == "text" and node["style"]["font_weight"] != "normal":
+                titles["y" if node["style"]["angle"] else "x"] = node["content"]
+            walk(node.get("children", []))
+
+    for panel in scene["panels"]:
+        walk(panel["axes"])
+    return titles
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_horizontal_count_catplot_titles_the_category_and_count_axes_by_their_channels(output):
+    """``catplot(kind='count', orient='h')`` titles the category axis ``g`` and the count axis ``n``.
+
+    The count channel's title moves with the channel under the flip, as its
+    scale and ticks do. Rejects keeping the explicit title on its screen
+    axis, which titled both axes ``n``.
+    """
+    chart = _quiet(lambda: fm.catplot(df, y="g", kind="count", orient="h"))
+    assert _screen_axis_titles(chart, output) == {"x": "n", "y": "g"}
+
+
+_SY_ROWS = pl.DataFrame({"g": ["a", "b", "c"], "v": [1.0, 2.0, 3.0], "r": [10.0, 20.0, 30.0]})
+
+
+def _sy_line(y: str = "v") -> fm.Chart:
+    return fm.Chart(_SY_ROWS).mark_line().encode(x="g", y=y)
+
+
+#: Every door a layer with an independent y scale reaches a non-Cartesian
+#: coord through: ``SecondaryY`` sugar with ``.coord()`` after and before
+#: ``+``, an independent-y ``LayerChart`` member, a composite leaf, and the
+#: polar coord the same rule covers.
+_SECONDARY_Y_COORD_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "SY/coord-after": (lambda: (_sy_line() + SY("r")).coord(fm.CoordFlip()), "fm.CoordFlip"),
+    "SY/coord-before": (lambda: _sy_line().coord(fm.CoordFlip()) + SY("r"), "fm.CoordFlip"),
+    "LCx/member-flip": (
+        lambda: fm.LayerChart(
+            _sy_line().coord(fm.CoordFlip()), _sy_line("r"), resolve={"y": "independent"}
+        ),
+        "fm.CoordFlip",
+    ),
+    "hconcat-leaf": (
+        lambda: fm.hconcat(_sy_line(), (_sy_line() + SY("r")).coord(fm.CoordFlip())),
+        "fm.CoordFlip",
+    ),
+    "SY/polar": (lambda: (_sy_line() + SY("r")).coord(fm.CoordPolar()), "fm.CoordPolar"),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_SECONDARY_Y_COORD_DOORS))
+def test_a_secondary_y_under_a_flip_or_polar_coord_is_refused_with_the_remedy(door, output):
+    """A right y axis has no place once the coord moves y off the vertical axis.
+
+    Refused naming the coord and the remedy on every door and output.
+    Rejects rendering, which drew the secondary axis under the other
+    channel's title under a flip and dropped it under a polar coord.
+    """
+    build, coord = _SECONDARY_Y_COORD_DOORS[door]
+    message = (
+        f"SecondaryY (a layer with an independent y scale) is not supported under {coord}: its right y "
+        "axis has no place once the coord moves y off the vertical axis; draw the series on a "
+        "Cartesian panel (put the categories on x and drop the coord), or draw it on the shared y "
+        "axis"
+    )
+    chart = build()
+    render = chart.to_svg if output == "static" else lambda: chart.interactive().scene_json
+    with pytest.raises(ValueError, match=re.escape(message) + "$"):
+        _quiet(render)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [lambda: _sy_line() + SY("r"), lambda: _sy_line().coord(fm.CoordFlip())],
+    ids=["SY-without-coord", "flip-without-SY"],
+)
+def test_a_secondary_y_or_a_flip_alone_still_renders(build):
+    """The refusal needs both parts: either alone draws, statically and interactively."""
+    chart = build()
+    assert _quiet(chart.to_svg).startswith("<svg")
+    assert _quiet(lambda: chart.interactive().scene_json)
+
+
+# Every composed copy of a step sits in exactly one branch per distinct
+# reached (frame, chain), and nowhere else.
+
+
+def _composed_sites(steps: list[dict], branch: str | None = None) -> list[tuple[str | None, str]]:
+    """``(top-level branch, group)`` of each composed step in *steps*, at any depth."""
+    out: list[tuple[str | None, str]] = []
+    for step in steps:
+        if step["type"] == "composed":
+            out.append((branch, step["group"]))
+        elif step["type"] == "branch":
+            out += _composed_sites(step["transforms"], step["name"] if branch is None else branch)
+    return out
+
+
+@pytest.mark.parametrize("door", sorted(_REACH_DOORS))
+def test_each_composed_copy_sits_once_in_each_reached_operands_branch_and_nowhere_else(door):
+    """One copy of the step per distinct reached (frame, chain) branch, and nowhere else.
+
+    Every operand lowers to exactly one branch, and operands over one frame
+    whose chains are equal read the same branch. The branches that draw a
+    reached part hold the copy: every layer a reached part contributes reads
+    inside one of them. Rejects copies
+    placed by route (a top-level copy, a copy in a branch an operand over
+    another frame reads, two copies in one operand's chain).
+    """
+    spec = _REACH_DOORS[door]
+    chart = _quiet(
+        lambda: spec.compose(_reach_color(spec)).transform(fm.transform_filter("datum.v > 3"))
+    )
+    wire = _wire(chart)
+    steps = wire["transforms"]
+    sites = _composed_sites(steps)
+    assert len({group for _, group in sites}) == 1
+    assert all(branch is not None for branch, _ in sites)
+    assert len(sites) == len({branch for branch, _ in sites})
+    branches = operand_branches(wire)
+    assert len(steps) == len(branches)
+    layer_branches = [
+        max(
+            (
+                b
+                for b in branches
+                if layer["data_source"] in (b,) or layer["data_source"].startswith(f"{b}_")
+            ),
+            key=len,
+        )
+        for layer in wire["layers"]
+    ]
+    reached: list[bool] = []
+    for build, is_reached in spec.parts:
+        part_layers = _wire(_quiet(lambda build=build: _part(build, "c", spec.facet))).get("layers")
+        reached += [is_reached] * (len(part_layers) if part_layers else 1)
+    assert len(reached) == len(layer_branches)
+    holding = {branch for branch, _ in sites}
+    for branch, is_reached in zip(layer_branches, reached, strict=True):
+        assert (branch in holding) == is_reached, branch
+
+
+# A step written on a composition that names its output publishes it inside
+# each operand it reaches, under that operand's own scoped key, and leaves
+# every operand's rows as they were.
+
+
+def _named(step: dict, name: str) -> dict:
+    return {**step, "name": name}
+
+
+def test_a_named_composition_step_publishes_once_in_each_reached_operand():
+    """One named copy per reached operand's branch, none in another frame's; every mark draws as written."""
+    color = _binned_color()
+    spec = _REACH_DOORS["(+s)+d"]
+    step = _named(fm.transform_calculate("half", "datum.y / 2"), "halved")
+    chart = _quiet(lambda: spec.compose(color).transform(step))
+    branches = _wire(chart)["transforms"]
+    named = [
+        [t["step"].get("name") for t in branch["transforms"] if t["type"] == "composed"]
+        for branch in branches
+    ]
+    assert named == [["halved"], ["halved"], []]
+    assert _quiet(lambda: _scene_records(chart)) == _quiet(
+        lambda: _scene_records(spec.compose(color))
+    )
+
+
+def test_a_named_composition_step_no_reached_operand_can_read_is_refused():
+    """A named ``filter('datum.count > 1')`` over operands that never carry ``count`` is refused."""
+    spec = _REACH_DOORS["d+(+s)"]
+    step = _named(fm.transform_filter("datum.count > 1"), "kept")
+    chart = _quiet(lambda: spec.compose(_reach_color(spec)).transform(step))
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert str(refused.value) == _missing_column("data_filter", "count", _GROUP_ROWS_OTHER)
+
+
+# A box and a violin over one frame each read their own statistic's outputs:
+# the composition renders both.
+
+_BOX_PARTS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "box+violin": (
+        lambda: fm.Chart(_GROUP_ROWS).mark_boxplot().encode(x="g", y="y"),
+        lambda: fm.Chart(_GROUP_ROWS).mark_violin().encode(x="g", y="y"),
+    ),
+    "violin+box": (
+        lambda: fm.Chart(_GROUP_ROWS).mark_violin().encode(x="g", y="y"),
+        lambda: fm.Chart(_GROUP_ROWS).mark_boxplot().encode(x="g", y="y"),
+    ),
+    "qq(y)+qq(v)": (
+        lambda: fm.Chart(_GROUP_ROWS).mark_qq().encode(x="y"),
+        lambda: fm.Chart(_GROUP_ROWS).mark_qq().encode(x="v"),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_BOX_PARTS))
+def test_two_composite_marks_publishing_one_output_name_each_draw_their_own(door):
+    """Each composite draws its own statistic's marks. Rejects refusing the composition as a name collision."""
+    a, b = _BOX_PARTS[door]
+    check_rendering(Case(lambda: a() + b(), (a, b)))
+
+
+# A flat chart's own steps run before its encoding statistic, whichever of
+# .encode() and .transform() is written first (user ruling 2026-10-20).
+
+_V_ABOVE_TWO = df.filter(pl.col("v") > 2)
+
+#: Each flat chart with an encoding statistic, built over a frame.
+_FLAT_STATISTICS: dict[str, Callable[[pl.DataFrame], fm.Chart]] = {
+    "count": lambda data: mk("bar", data, x="g", y="count()"),
+    "mean": lambda data: mk("bar", data, x="g", y="mean(y)"),
+    "binned-count": lambda data: mk("bar", data, x=fm.X("y", bin=True), y="count()"),
+    "colored-count": lambda data: mk("bar", data, x="g", y="count()", color="c"),
+}
+
+
+@pytest.mark.parametrize("order", ["transform-after-encode", "transform-before-encode"])
+@pytest.mark.parametrize("statistic", sorted(_FLAT_STATISTICS))
+def test_a_flat_charts_step_runs_before_its_encoding_statistic(statistic, order):
+    """``filter('datum.v > 2')`` filters the rows the statistic computes over, in either order.
+
+    The oracle is the statistic over the filtered frame. Rejects running
+    the step on the statistic's output, which refused ``v`` (gone after
+    the aggregate) or filtered the counted bars.
+    """
+    build = _FLAT_STATISTICS[statistic]
+    step = fm.transform_filter("datum.v > 2")
+    if order == "transform-after-encode":
+        chart = build(df).transform(step)
+    else:
+        written = mk("bar", df).transform(step)
+        chart = build(df)
+        chart = written.encode(**{ch: v for ch, v in chart._encoding.items()})
+    oracle = build(_V_ABOVE_TWO)
+    assert _records_by_value(chart) == _records_by_value(oracle)
+    assert census(_quiet(chart.to_svg)) == census(_quiet(oracle.to_svg))
+
+
+# A chart with no rows to draw after its transforms draws its panel frame and
+# axes over an explicit domain, else the unit fallback, and warns; a faceted
+# one draws no facet panel and warns the same way (user ruling 2026-10-19/20).
+
+_NO_ROWS_WARNING = "the chart has no rows to draw after its transforms; its panel is drawn empty"
+_NO_FACET_ROWS_WARNING = (
+    "the chart has no rows to draw after its transforms; no facet panel is drawn"
+)
+
+
+def _nothing_above(field: str = "y") -> Any:
+    return fm.transform_filter(f"datum.{field} > 100")
+
+
+#: Each door whose every layer has no rows; ``panels`` counts the plot clip
+#: groups it draws: one per empty chart, and the hconcat's drawing leaf too.
+_NO_ROWS_DOORS: dict[str, tuple[Callable[[], Any], int, int]] = {
+    "F": (lambda: P().transform(_nothing_above()), 1, 0),
+    "+": (lambda: (P() + P(y="r")).transform(_nothing_above()), 1, 0),
+    "LD": (
+        lambda: (
+            P()
+            .transform(_nothing_above())
+            .layer(
+                fm.Layer(
+                    data=df2.filter(pl.col("y") > 100), mark="line", encoding={"x": "v", "y": "y"}
+                )
+            )
+        ),
+        1,
+        0,
+    ),
+    "hconcat": (lambda: fm.hconcat(P().transform(_nothing_above()), P(y="r")), 2, 8),
+}
+
+
+def _warned(render: Callable[[], Any]) -> tuple[Any, list[str]]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = render()
+    return out, [str(w.message) for w in caught]
+
+
+@pytest.mark.parametrize("door", sorted(_NO_ROWS_DOORS))
+def test_a_chart_with_no_rows_draws_its_frame_and_axes_and_warns(door):
+    """Static and interactive: a plot area and axis text, no mark from the empty chart, one warning.
+
+    Rejects skipping the panel, which rendered a blank image with no
+    warning.
+    """
+    build, panels, marks = _NO_ROWS_DOORS[door]
+    chart = _quiet(build)
+    svg, caught = _warned(chart.to_svg)
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert len(_clip_groups(_svg_root(svg))) == panels
+    assert sum(census(svg).values()) == marks
+    assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
+    scene, caught = _warned(lambda: _scene(chart))
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert len(scene["panels"]) == panels
+    assert sum(len(b["nodes"]) for p in scene["panels"] for b in p["marks"]) == marks
+
+
+def test_an_empty_chart_draws_its_explicit_domain():
+    """An explicit x domain [0, 10] draws its ticks over no rows."""
+    chart = mk("point", x=fm.X("v", scale=fm.LinearScale(domain=[0, 10])), y="y").transform(
+        _nothing_above()
+    )
+    svg, caught = _warned(chart.to_svg)
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    texts = chrome_text(svg)
+    assert "0" in texts and "10" in texts
+
+
+def test_a_faceted_chart_with_no_rows_draws_no_facet_panel_and_warns():
+    chart = P().transform(_nothing_above()).facet("c")
+    svg, caught = _warned(chart.to_svg)
+    assert caught.count(_NO_FACET_ROWS_WARNING) == 1
+    assert _clip_groups(_svg_root(svg)) == []
+    scene, caught = _warned(lambda: _scene(chart))
+    assert caught.count(_NO_FACET_ROWS_WARNING) == 1
+    assert scene["panels"] == []
+
+
+# Facet panels come from the rows the layers draw, in the facet partition's
+# order whichever operand comes first, and a value no layer draws has no
+# panel.
+
+#: ``df``'s ``c`` with a value only the second half of the rows hold, so the
+#: partition order is p, q, s.
+_FACET_ROWS = df.with_columns(
+    pl.Series("c", ["p", "p", "q", "q", "s", "s", "q", "p"]),
+)
+
+
+def _facet_titles(svg: str) -> list[str]:
+    """The facet strip titles, in panel order: the chrome text naming a value of ``c``."""
+    return [t for t in chrome_text(svg) if t in {"p", "q", "s"}]
+
+
+def _only_s() -> fm.Chart:
+    return P(_FACET_ROWS).transform(fm.transform_filter("datum.c == 's'"))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: (_only_s() + line(_FACET_ROWS)).facet("c"),
+        lambda: (line(_FACET_ROWS) + _only_s()).facet("c"),
+    ],
+    ids=["filtered-left", "filtered-right"],
+)
+def test_facet_panels_follow_the_partition_order_in_either_operand_order(build):
+    """Rejects ordering panels by the chart rows first and the layers after, which put ``s`` first."""
+    assert _facet_titles(_quiet(build().to_svg)) == ["p", "q", "s"]
+
+
+def test_a_facet_value_no_layer_draws_has_no_panel():
+    """Both operands drop ``s``: no ``s`` panel, as on the flat chart.
+
+    The binned histogram runs as its own branch, so the chart-level rows
+    are the unread source, which still holds ``s``.
+    """
+    drop = fm.transform_filter("datum.c != 's'")
+    hist = fm.Chart(_FACET_ROWS).mark_histogram().encode(x="y", color=fm.Color("z", bin=True))
+    chart = (hist.transform(drop) + P(_FACET_ROWS).transform(drop)).facet("c")
+    flat = P(_FACET_ROWS).transform(drop).facet("c")
+    assert _facet_titles(_quiet(chart.to_svg)) == _facet_titles(_quiet(flat.to_svg)) == ["p", "q"]
+
+
+#: A frame whose only facet value, ``s``, no other frame holds, and which has
+#: no ``y`` column for a facet sort by ``sum(y)`` to read.
+_S_ONLY = pl.DataFrame({"v3": [1.0, 2.0], "w3": [3.0, 4.0], "c": ["s", "s"]})
+_SUM_Y_DESCENDING = {"field": "y", "op": "sum", "order": "descending"}
+
+#: Each door a facet is declared on, after the composition.
+_FACET_DECLARATIONS: dict[str, Callable[[fm.Chart], fm.Chart]] = {
+    "facet()": lambda chart: chart.facet("c", sort=_SUM_Y_DESCENDING),
+    "encode(facet=)": lambda chart: chart.encode(facet=fm.Facet("c", sort=_SUM_Y_DESCENDING)),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_FACET_DECLARATIONS))
+def test_a_partial_facet_sort_says_which_values_it_left_unsorted(door):
+    """``s``'s rows lack ``y``: the other panels sort, ``s`` sorts as a value with no rows, and one warning names it.
+
+    Rejects the warning that said every panel fell back to insertion order
+    though the others were sorted, and (``encode(facet=)``) dropping the
+    other frame's rows as null facet values, which drew no ``s`` panel.
+    """
+    chart = _FACET_DECLARATIONS[door](P() + mk("point", _S_ONLY, x="v3", y="w3"))
+    svg, caught = _warned(chart.to_svg)
+    assert caught == [
+        'facet sort left the values ["s"] unsorted: their rows in the layer that draws '
+        "them carry no 'y' value, so they sort as values with no rows; the other panels "
+        "are sorted"
+    ]
+    sums = df.group_by("c").agg(pl.col("y").sum()).sort("y", descending=True)["c"].to_list()
+    assert _facet_titles(svg) == [*sums, "s"]
+
+
+# A step written on a composition that drops a column an operand's statistic
+# reads is refused naming the step, the column and the remedy.
+
+
+def test_a_composition_step_dropping_a_column_a_statistic_reads_is_refused():
+    """``(box + points).transform(aggregate)`` drops ``y`` before the box's statistic reads it.
+
+    Rejects the statistic's own missing-column text, which named no step the
+    caller wrote.
+    """
+    chart = _quiet(lambda: (_box("g") + _user_points("g")).transform(_user_mean()))
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg)
+    assert str(refused.value) == (
+        "transform failed: ValueError: stat_box_stats: column 'y' was dropped by the step "
+        "written on the composition's .transform() (data_aggregate), which runs on this "
+        "operand's rows before its statistics; keep 'y' in that step's output, or write the "
+        "step on the operands it should change instead of on the composition"
+    )
+
+
+# A figure's statistics run behind its chain's statistics marker, after every
+# step the caller writes on the figure (user ruling 2026-10-20): a
+# `.transform(filter(...))` on a figure filters the rows its statistic reads,
+# as on a hand-built chart.
+
+#: Figure rows: a group, two numeric series and a wide-matrix row id.
+_FIGURE_ROWS = pl.DataFrame(
+    {
+        "g": ["a", "b", "a", "a", "b", "a", "b", "b", "a", "b"],
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        "y": [2.1, 3.9, 6.2, 7.8, 10.1, 12.2, 13.8, 16.1, 18.0, 20.3],
+        "row": ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"],
+    }
+)
+_FIGURE_FILTER = "datum.x > 3"
+_FIGURE_ROWS_KEPT = _FIGURE_ROWS.filter(pl.col("x") > 3)
+
+#: Each figure whose statistic a figure helper lowers, built over a frame.
+_STATISTIC_FIGURES: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "catplot-count": lambda d: fm.catplot(d, x="g", kind="count"),
+    "catplot-point": lambda d: fm.catplot(d, x="g", y="y", kind="point", seed=0),
+    "displot-ecdf": lambda d: fm.displot(d, x="y", kind="ecdf"),
+    "displot-hist-kde": lambda d: fm.displot(d, x="y", kde=True),
+    "displot-hist-rug": lambda d: fm.displot(d, x="y", rug=True),
+    "displot-rug-kde": lambda d: fm.displot(d, x="y", kind="rug", kde=True),
+    "residplot": lambda d: fm.residplot(d, x="x", y="y"),
+    "residplot-lowess": lambda d: fm.residplot(d, x="x", y="y", lowess=True),
+    "lmplot": lambda d: fm.lmplot(d, x="x", y="y"),
+    "heatmap": lambda d: fm.heatmap(d.select("row", "x", "y"), annot=False),
+    "heatmap-annot": lambda d: fm.heatmap(d.select("row", "x", "y")),
+}
+
+
+@pytest.mark.parametrize("figure", sorted(_STATISTIC_FIGURES))
+def test_a_figures_transform_filters_the_rows_its_statistic_reads(figure):
+    """The figure filtered by ``x > 3`` draws what the figure over the kept rows draws.
+
+    Rejects running the caller's step after the figure's statistic, which
+    refused ``x`` (gone after the statistic) or filtered its output.
+    """
+    build = _STATISTIC_FIGURES[figure]
+    chart = _quiet(lambda: build(_FIGURE_ROWS).transform(fm.transform_filter(_FIGURE_FILTER)))
+    oracle = _quiet(lambda: build(_FIGURE_ROWS_KEPT))
+    assert _records_by_value(chart) == _records_by_value(oracle)
+    assert census(_quiet(chart.to_svg)) == census(_quiet(oracle.to_svg))
+
+
+# Two operand frames are one frame when they hold the same schema and equal
+# values, NaN equal to NaN: a clone, a table built twice and a LazyFrame
+# collected again by a nested `+` are reached as the frame they copy.
+
+_NAN_COLUMNS = {
+    "x": [1.0, 4.0, 6.0, 7.0, 8.0],
+    "y": [2.0, 3.0, 1.0, 5.0, 4.0],
+    "w": [1.0, float("nan"), 2.0, 3.0, 4.0],
+}
+_NAN_ROWS = pl.DataFrame(_NAN_COLUMNS)
+_OTHER_NAN_ROWS = pl.DataFrame({"x": [2.0, 9.0], "y": [1.0, 2.0], "q": [0.5, 0.5]})
+
+
+def _same_frames(spelling: str) -> tuple[Any, Any]:
+    """The frame as two operands receive it: one object, a clone, rebuilt, or one LazyFrame."""
+    import pyarrow as pa
+
+    if spelling == "same-object":
+        return _NAN_ROWS, _NAN_ROWS
+    if spelling == "clone":
+        return _NAN_ROWS, _NAN_ROWS.clone()
+    if spelling == "pyarrow-twice":
+        return pa.table(_NAN_COLUMNS), pa.table(_NAN_COLUMNS)
+    lazy = _NAN_ROWS.lazy()
+    return lazy, lazy
+
+
+def _nan_points(data: Any) -> fm.Chart:
+    return fm.Chart(data).mark_point().encode(x="x", y="y")
+
+
+def _nan_ticks(data: Any) -> fm.Chart:
+    return fm.Chart(data).mark_tick().encode(x="x")
+
+
+#: Each door: the composition of the frame's two receipts, and the operands over it.
+_NAN_DOORS: dict[str, Callable[[Any, Any], Any]] = {
+    "(+d)+s": lambda a, b: (_nan_points(a) + _nan_points(_OTHER_NAN_ROWS)) + _nan_ticks(b),
+    "s+(+d)": lambda a, b: _nan_points(a) + (_nan_ticks(b) + _nan_points(_OTHER_NAN_ROWS)),
+    "(+d).layer(LD/same)": lambda a, b: (_nan_points(a) + _nan_points(_OTHER_NAN_ROWS)).layer(
+        fm.Layer(data=b, mark="tick", encoding={"x": "x"})
+    ),
+}
+
+
+def _marks_by_kind(chart: Any) -> Counter:
+    """The interactive scene's marks per kind, over every panel."""
+    out: Counter = Counter()
+    for panel in _scene(chart)["panels"]:
+        for batch in panel["marks"]:
+            out[batch["kind"]] += len(batch["nodes"])
+    return out
+
+
+@pytest.mark.parametrize("spelling", ["clone", "lazy", "pyarrow-twice", "same-object"])
+@pytest.mark.parametrize("door", sorted(_NAN_DOORS))
+def test_a_frame_holding_nan_is_one_frame_however_its_operands_receive_it(door, spelling):
+    """``filter('datum.x > 5')`` keeps 3 ticks and 3 of the frame's points; the other frame's 2 points stay.
+
+    Rejects Arrow table equality, which reads NaN unequal to itself, so a
+    clone or a re-collected LazyFrame became a second frame the
+    composition's step never reached (5 ticks).
+    """
+    a, b = _same_frames(spelling)
+    chart = _quiet(lambda: _NAN_DOORS[door](a, b).transform(fm.transform_filter("datum.x > 5")))
+    assert _quiet(lambda: _marks_by_kind(chart)) == Counter({"tick": 3, "point": 5})
+
+
+@pytest.mark.parametrize("door", sorted(_NAN_DOORS))
+def test_the_same_values_under_another_dtype_are_another_frame(door):
+    """Control: ``x`` as integers is another frame, so the step does not reach its ticks (5)."""
+    ints = _NAN_ROWS.with_columns(pl.col("x").cast(pl.Int64))
+    chart = _quiet(
+        lambda: _NAN_DOORS[door](_NAN_ROWS, ints).transform(fm.transform_filter("datum.x > 5"))
+    )
+    assert _quiet(lambda: _marks_by_kind(chart)) == Counter({"tick": 5, "point": 5})
+
+
+#: The SVG a clone of a frame holding no NaN draws on each door, unchanged by
+#: the NaN-aware frame identity.
+_NO_NAN_CLONE_DIGESTS: dict[str, str] = {
+    "(+d)+s": "1c979f6ddd1ece48579516c1aa2eafe96df90aafc6126dd2167ba7807922dd26",
+    "(+d).layer(LD/same)": "1c979f6ddd1ece48579516c1aa2eafe96df90aafc6126dd2167ba7807922dd26",
+    "s+(+d)": "82a38113738e96b1cd83d7019648b32dd1b92195401b7be3c4631c97afbc52b8",
+}
+
+
+@pytest.mark.parametrize("door", sorted(_NAN_DOORS))
+def test_a_clone_of_a_frame_without_nan_draws_its_pinned_bytes(door):
+    import hashlib
+
+    plain = _NAN_ROWS.with_columns(pl.col("w").fill_nan(0.0))
+    chart = _quiet(
+        lambda: _NAN_DOORS[door](plain, plain.clone()).transform(fm.transform_filter("datum.x > 5"))
+    )
+    svg = _quiet(chart.to_svg)
+    assert hashlib.sha256(svg.encode()).hexdigest() == _NO_NAN_CLONE_DIGESTS[door]
+
+
+# On a + composition, a figure's statistics join the left operand's chain.
+
+
+def _left_histogram() -> fm.Chart:
+    """A left operand whose mark lowers a statistic of its own: the histogram's unnamed Bin."""
+    return fm.Chart(df).mark_histogram().encode(x="v")
+
+
+#: Where the step sits among the left operand's statistics, by reading.
+_FIGURE_STATISTIC_ORDER = {
+    "rows": ["figure_bins", None],
+    "tail": [None, "figure_bins"],
+}
+
+
+@pytest.mark.parametrize("reading", sorted(_FIGURE_STATISTIC_ORDER))
+def test_a_figure_statistic_on_a_pending_mark_takes_its_place_among_the_marks_statistics(reading):
+    """The pending histogram resolves first: one marker, the step placed by *reading*, the resolved chain.
+
+    Rejects recording the step before the mark resolves, which put it ahead
+    of the histogram's bins whatever the reading.
+    """
+    step = fm.Bin(field="v", name="figure_bins")
+    steps = _wire(_quiet(lambda: _left_histogram()._with_statistics(step, reading=reading)))[
+        "transforms"
+    ]
+    resolved = _quiet(
+        lambda: _left_histogram()._resolve_pending()._with_statistics(step, reading=reading)
+    )
+    assert steps.count(_STATISTICS_MARKER) == 1
+    assert [t.get("name") for t in steps if t["type"] == "bin"] == _FIGURE_STATISTIC_ORDER[reading]
+    assert steps == _wire(resolved)["transforms"]
+
+
+@pytest.mark.parametrize("reading", sorted(_FIGURE_STATISTIC_ORDER))
+def test_a_figure_statistic_on_a_composition_with_a_pending_mark_takes_its_place_among_its_statistics(
+    reading,
+):
+    """``(point + rule).mark_histogram()``: the pending mark resolves first, into the left operand.
+
+    The left branch carries one marker and the step placed by *reading*
+    among the histogram's bins, the chain the resolved composition gives
+    (``_attach_host``). Rejects placing the step before the mark resolves,
+    which put it ahead of the bins whatever the reading.
+    """
+    from ferrum.chart import _attach_host
+
+    step = fm.Bin(field="v", name="figure_bins")
+
+    def pending() -> fm.Chart:
+        return (P() + mk("rule", x="v")).mark_histogram().encode(x="v")
+
+    chart = _quiet(lambda: pending()._with_statistics(step, reading=reading))
+    resolved = _quiet(lambda: _attach_host(pending())._with_statistics(step, reading=reading))
+    left = _wire(chart)["transforms"][0]["transforms"]
+    assert left.count(_STATISTICS_MARKER) == 1
+    assert [t.get("name") for t in left if t["type"] == "bin"] == _FIGURE_STATISTIC_ORDER[reading]
+    assert _wire(chart)["transforms"] == _wire(resolved)["transforms"]
+
+
+def test_a_figure_statistic_on_a_mark_without_its_encoding_is_refused_as_layer_refuses_it():
+    """A pending histogram with no ``.encode(x=...)`` refuses at the call, with ``.layer(...)``'s text."""
+    step = fm.Bin(field="v", name="figure_bins")
+    with pytest.raises(ValueError) as layered:
+        fm.Chart(df).mark_histogram().layer(fm.Layer(mark="rule"))
+    with pytest.raises(ValueError) as refused:
+        fm.Chart(df).mark_histogram()._with_statistics(step)
+    assert str(refused.value) == str(layered.value)
+
+
+@pytest.mark.parametrize("reading", sorted(_FIGURE_STATISTIC_ORDER))
+def test_a_figure_statistic_on_a_composition_joins_the_left_operands_branch(reading):
+    """The step joins the left branch behind its marker, before the histogram's bins under
+    ``"rows"`` and after them under ``"tail"``, as on the flat chart; the right branch has none.
+    """
+    step = fm.Bin(field="v", name="figure_bins")
+    composed = _quiet(lambda: (_left_histogram() + P(df2))._with_statistics(step, reading=reading))
+    flat = _quiet(
+        lambda: _left_histogram()._resolve_pending()._with_statistics(step, reading=reading)
+    )
+    left, right = _wire(composed)["transforms"]
+    chain = left["transforms"]
+    marker = chain.index(_STATISTICS_MARKER)
+    bins = [t.get("name") for t in chain[marker + 1 :] if t["type"] == "bin"]
+    assert bins == _FIGURE_STATISTIC_ORDER[reading]
+    assert chain == _wire(flat)["transforms"]
+    assert all(t["type"] != "bin" for t in right["transforms"])
+
+
+# A selection a composition filters by binds once per panel, however many
+# operand branches run its filter.
+
+_BRUSH = fm.selection_interval(name="brush", encodings=["x"])
+_OTHER_BRUSH = fm.selection_interval(name="other", encodings=["y"])
+
+
+def _by(selection: Any) -> Any:
+    return fm.transform_filter(selection)
+
+
+#: Each door, and the (param, panel) filter bindings its interactive scene carries.
+_FILTER_BINDING_DOORS: dict[str, tuple[Callable[[], Any], list[tuple[str, int]]]] = {
+    "composed-into-two-operands": (
+        lambda: (
+            (P().transform(fm.transform_filter("datum.v > 0")) + P(y="r"))
+            .add_selection(_BRUSH)
+            .transform(_by(_BRUSH))
+        ),
+        [("brush", 0)],
+    ),
+    "composed-nested": (
+        lambda: (
+            ((P().transform(fm.transform_filter("datum.v > 0")) + P(y="r")) + P(y="z"))
+            .add_selection(_BRUSH)
+            .transform(_by(_BRUSH))
+        ),
+        [("brush", 0)],
+    ),
+    "each-operand-by-the-same-brush": (
+        lambda: (
+            P().transform(_by(_BRUSH)).add_selection(_BRUSH)
+            + P(y="r").transform(fm.transform_filter("datum.v > 0"), _by(_BRUSH))
+        ),
+        [("brush", 0)],
+    ),
+    "composed-faceted": (
+        lambda: (
+            (P().transform(fm.transform_filter("datum.v > 0")) + P(y="r"))
+            .add_selection(_BRUSH)
+            .transform(_by(_BRUSH))
+            .facet("c")
+        ),
+        [("brush", 0), ("brush", 1)],
+    ),
+    "two-brushes": (
+        lambda: (
+            P().transform(_by(_BRUSH)).add_selection(_BRUSH)
+            + P(y="r").transform(_by(_OTHER_BRUSH)).add_selection(_OTHER_BRUSH)
+        ),
+        [("brush", 0), ("other", 0)],
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_FILTER_BINDING_DOORS))
+def test_each_param_binds_one_filter_per_panel(door):
+    """One filter binding per param per panel, in first-appearance order.
+
+    Rejects one binding per operand branch running the filter, which bound
+    a brush copied into two operands (or written on each) twice per panel.
+    """
+    build, expected = _FILTER_BINDING_DOORS[door]
+    scene = _quiet(lambda: _scene(build()))
+    bindings = scene["interaction"].get("param_bindings") or []
+    filters = [(b["param"], b["panel"]) for b in bindings if b["role"] == "filter"]
+    assert filters == expected

@@ -769,16 +769,42 @@ def test_expression_on_unreadable_dtype_raises_naming_column_and_dtype():
     assert "List" in msg
 
 
-def test_expression_missing_field_still_evaluates_to_null():
-    """Vega's ``datum.absent`` semantics are unchanged by the dtype policy."""
+@pytest.mark.parametrize(
+    ("transform", "prefix"),
+    [
+        (fm.transform_filter("datum.absent > 1"), "data_filter"),
+        (fm.transform_calculate("w", "datum.absent * 2"), "data_calculate"),
+        (fm.transform_calculate("w", "datum.absent"), "data_calculate"),
+    ],
+    ids=["filter", "calculate", "calculate-bare-reference"],
+)
+def test_expression_on_a_missing_column_raises_naming_it_and_the_available_columns(
+    transform, prefix
+):
+    """A column the rows lack is refused instead of reading as Null on every row.
+
+    Reading it as Null would drop every row (filter) or emit an all-null column
+    (calculate), blanking the chart with nothing naming why.
+    """
     df = pl.DataFrame({"n": [1, 2, 3], "v": [1.0, 2.0, 3.0]})
-    svg = (
+    chart = fm.Chart(df).transform(transform).mark_point().encode(x="n:Q", y="v:Q")
+    with pytest.raises(ValueError) as excinfo:
+        chart.to_svg()
+    assert f"""{prefix}: column 'absent' not found; available: ["n", "v"]""" in str(excinfo.value)
+
+
+def test_expression_on_an_all_null_column_runs_as_written():
+    """A present column holding only nulls is read, not refused: the filter drops its rows."""
+    df = pl.DataFrame(
+        {"n": [1, 2, 3], "v": [1.0, 2.0, 3.0], "z": pl.Series([None, None, None], dtype=pl.Float64)}
+    )
+    kept = (
         fm.Chart(df)
-        .transform(fm.transform_filter("datum.absent > 1"))
+        .transform(fm.transform_filter("datum.z == null || datum.n > 2"))
         .mark_point()
         .encode(x="n:Q", y="v:Q")
     ).to_svg()
-    assert svg.count("<circle") == 0
+    assert kept.count("<circle") == 3
 
 
 # ---------------------------------------------------------------------------

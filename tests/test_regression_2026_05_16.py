@@ -152,8 +152,8 @@ class TestRuleLayerColumnRename:
         c2 = fm.Chart(df2).mark_point().encode(x="c", y="d")
         layered = c1 + c2
 
-        # Beside the frames' own columns, one row marker per operand picks out its rows.
-        columns = {c for c in layered._data.columns if not c.startswith(("__lhs_row", "__rhs_row"))}
+        # Beside the frames' own columns, one row marker per frame picks out its rows.
+        columns = {c for c in layered._data.columns if not c.startswith("__operand_row")}
         assert columns == {"a", "b", "c", "d"}, f"Unexpected columns: {columns}"
 
     def test_layer_same_data_unchanged(self):

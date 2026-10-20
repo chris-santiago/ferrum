@@ -149,6 +149,7 @@ pub(in crate::render) fn build_axis_scale(
     positional_fields: PositionalFields<'_>,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &crate::transform::run::OutputLineages,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
     // Faceted + this channel resolves `ResolveMode::Shared`: the auto-inferred
@@ -184,7 +185,7 @@ pub(in crate::render) fn build_axis_scale(
     // batch with its own fields. Under a facet-shared channel the rows span
     // every panel, so each panel's sort agrees with the global axis order.
     let sort_rows = |include_final: bool| {
-        super::domain::establishing_sort_rows(channel, spec, primary_batch, transform_outputs, include_final).unwrap_or_else(|| {
+        super::domain::establishing_sort_rows(channel, spec, primary_batch, transform_outputs, transform_lineages, include_final).unwrap_or_else(|| {
             let batch = match include_final {
                 true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(seed.batch),
                 false => seed.batch,
@@ -1919,6 +1920,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some("cat") },
             &batch,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 500.0),
             &spec,
             false,
@@ -2175,6 +2177,7 @@ mod tests {
             super::PositionalFields { x: Some("v"), y: None },
             &batch,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 500.0),
             &spec,
             false,
@@ -2618,6 +2621,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some("v") },
             &batch,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
             false,
@@ -2706,6 +2710,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some("v") },
             &batch,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
             false,
@@ -2857,6 +2862,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some("lo") },
             &batch,
             &HashMap::new(),
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
             false,
@@ -2925,6 +2931,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some("cat") },
             &batch,
             &HashMap::new(),
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
             false,
@@ -2953,6 +2960,7 @@ mod tests {
             super::PositionalFields { x: None, y: Some(enc.field.as_str()) },
             batch,
             &std::collections::HashMap::new(),
+            &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
             false,
@@ -3196,6 +3204,7 @@ mod tests {
             super::PositionalFields { x: Some("cat"), y: None },
             &batch,
             &outputs,
+            &crate::transform::run::OutputLineages::new(),
             pixel_range,
             &spec,
             false,

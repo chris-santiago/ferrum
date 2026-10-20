@@ -376,7 +376,7 @@ pub struct TransformContext {
     /// every row in it (`transform::project`'s doc).
     pub facet_fields: Vec<String>,
     /// The degrade-warning sink (GH #162). `Rc<RefCell<_>>`, not a bare
-    /// `RefCell<Vec<_>>`, because `apply_transforms_named` (`core.rs`) does
+    /// `RefCell<Vec<_>>`, because `apply_transforms_named` (`run.rs`) does
     /// `let mut step_ctx = ctx.clone();` once per transform in the pipeline —
     /// a bare `RefCell` field would clone into a fresh, independent, and
     /// ultimately discarded sink for every step, silently dropping every
@@ -554,7 +554,7 @@ mod tests {
     }
 
     /// The keystone gotcha the design doc calls out: `apply_transforms_named`
-    /// (`core.rs`) does `let mut step_ctx = ctx.clone();` once per transform.
+    /// (`run.rs`) does `let mut step_ctx = ctx.clone();` once per transform.
     /// A push through the CLONE must still be visible through the ORIGINAL —
     /// proof that `Rc<RefCell<_>>` (not a bare `RefCell`) is load-bearing.
     #[test]

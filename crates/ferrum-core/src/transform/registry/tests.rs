@@ -785,12 +785,13 @@ fn transform_registry_covers_every_kind() {
 // serialized_keys`, which does the same for `ScaleSpec`).
 
 /// One instance of every `TransformSpec` variant, keyed by its registry
-/// `kind`. Field values are deliberately minimal/arbitrary — these are NEVER
-/// passed through a transform's `apply()`, only through `serde_json::to_value`
-/// to read the enum's derived `"type"` tag, so validity of the *content*
-/// (e.g. non-empty groupby, valid method spellings) doesn't matter, only that
-/// every field has SOME value of the declared type.
-fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
+/// `kind`. Field values are deliberately minimal/arbitrary: the wire-tag
+/// guard reads only the enum's derived `"type"` tag, and the label parity
+/// test (`transform::run`'s tests) applies each over rows lacking every
+/// column they name, so validity of the *content* (e.g. non-empty groupby,
+/// valid method spellings) doesn't matter, only that every field has SOME
+/// value of the declared type.
+pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
     use crate::transform::aggregate::AggregateSpec;
     use crate::transform::bin::BinSpec;
     use crate::transform::bin_2d::Bin2DSpec;

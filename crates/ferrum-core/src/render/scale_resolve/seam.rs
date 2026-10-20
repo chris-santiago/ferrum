@@ -58,9 +58,9 @@ pub(crate) struct LeafResolveInput<'a> {
     pub(crate) encoding: &'a crate::spec::encoding::Encoding,
     pub(crate) final_batch: &'a arrow::record_batch::RecordBatch,
     pub(crate) transform_outputs: &'a std::collections::HashMap<String, arrow::record_batch::RecordBatch>,
-    /// The leaf's binned-color origins, keyed like `transform_outputs`
-    /// (`PreparedInputs::transform_origins`).
-    pub(crate) transform_origins: &'a crate::transform::color_bin_group::BinnedOrigins,
+    /// Each of the leaf's outputs' lineage, keyed like `transform_outputs`
+    /// (`PreparedInputs::transform_lineages`).
+    pub(crate) transform_lineages: &'a crate::transform::run::OutputLineages,
 }
 
 /// The auxiliary channels an overlay group leaves to its members: those an

@@ -43,7 +43,7 @@ from ferrum._encode_lowering import (
     _theta_axis,
 )
 from ferrum._layer import layer_mark
-from ferrum._layer_transforms import _POSITIONAL, _with_statistics_marker
+from ferrum._layer_transforms import _POSITIONAL, _split_chain, _with_statistics_marker
 from ferrum._override_apply import OverridePayload
 from ferrum._override_consume import (
     merge_encoding_scale as _merge_encoding_scale,
@@ -939,7 +939,7 @@ class SpecBuildMixin:
         (:func:`ferrum._facet.facet_repeat`).
         """
         d = _build_facet_dict_fn(self._facet, self._data)
-        repeat = _facet_repeat_fn(d, self._operand_columns)
+        repeat = _facet_repeat_fn(d, self._frame_selectors)
         if repeat:
             d["repeat"] = repeat
         return d
@@ -960,11 +960,13 @@ class SpecBuildMixin:
         grouped like every layer's, never a sequence of steps: a second
         ``Aggregate`` would read the first one's output, where its source
         column is gone, and a ``Bin`` replaces the batch schema with its own
-        columns. The ``aggregate=``/``bin=`` sentinels ``encode()`` put on the
-        transform list mark where the step runs: at the bin's sentinel when
-        the chart bins, else at the first aggregate's. Every other sentinel
-        is dropped; the plan computes what the encoding asks for, and a
-        sentinel a later ``encode()`` left behind asks for nothing.
+        columns. It runs after every step the caller wrote with
+        ``.transform(...)``, whether written before or after ``encode()``,
+        behind the chain's statistics marker and after any statistic the
+        chart's mark lowered. The ``aggregate=``/``bin=`` sentinels
+        ``encode()`` put on the transform list are dropped; the plan
+        computes what the encoding asks for, and a sentinel a later
+        ``encode()`` left behind asks for nothing.
 
         Parameters
         ----------
@@ -981,21 +983,13 @@ class SpecBuildMixin:
         _ResolvedStatistic
             Both inputs unchanged when the list holds no sentinel.
         """
-        sentinels = [
-            t for t in effective_transforms if isinstance(t, (_PendingAggregate, _PendingBin))
-        ]
-        if not sentinels:
+        if not any(isinstance(t, (_PendingAggregate, _PendingBin)) for t in effective_transforms):
             return _ResolvedStatistic(effective_transforms, enc)
         plan = _statistic_plan(enc, resolved._facet)
-        kind = _PendingAggregate if plan.bin is None else _PendingBin
-        site = next((t for t in sentinels if isinstance(t, kind)), sentinels[0])
-        transforms: list = []
-        for t in effective_transforms:
-            if t is site and plan.computes:
-                transforms.extend(_with_statistics_marker([plan.step()]))
-            elif not isinstance(t, (_PendingAggregate, _PendingBin)):
-                transforms.append(t)
-        return _ResolvedStatistic(transforms, plan.encoding)
+        own, lowered = _split_chain(effective_transforms)
+        if plan.computes:
+            lowered = (*lowered, plan.step())
+        return _ResolvedStatistic([*own, *_with_statistics_marker(list(lowered))], plan.encoding)
 
     @staticmethod
     def _collect_params(resolved, enc: dict) -> list:

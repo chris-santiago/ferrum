@@ -127,10 +127,9 @@ class _Layer:
     entry: Optional[str] = None
     #: The positional channels (``"x"``, ``"y"``, ``"x2"``, ``"y2"``) this
     #: layer's ``encoding`` carries because they were copied from its
-    #: operand chart's own encoding, not declared on the layer. ``chart +
-    #: chart`` copies them when it routes a right-hand layer to a named
-    #: output, because Rust passes a layer with a ``data_source`` none of the
-    #: chart's positional channels.
+    #: operand chart's own encoding, not declared on the layer
+    #: (:func:`ferrum.chart._fill_chart_positional`), because Rust passes a
+    #: layer reading a named output none of the chart's positional channels.
     #: Rust treats a listed channel as inherited, not owned, so a rule or
     #: tick that owns one axis keeps spanning the other as it does on its
     #: own chart. Serialized onto the wire layer dict only when non-empty
@@ -150,32 +149,29 @@ class _Layer:
     #: Where this layer, though it reads a named output, takes each
     #: positional channel it does not bind, as a layer reading the chart's
     #: own rows takes the chart's: ``None`` (it takes none), ``"encoding"``
-    #: (the chart's encoding: a left ``+`` operand's tail reader routed into
-    #: its own-rows branch, drawing as on its own chart) or ``"written"`` (the
-    #: composition's caller-written bindings, ``Chart._written_positional``:
-    #: every layer a merge routed from the right side). ``chart + chart``
-    #: fills a right operand's tail readers from that operand first, so a
-    #: composed chart used as an operand keeps its own x/y; ``Chart.to_spec()``
-    #: fills the channels still unbound (listing every copied channel in
-    #: ``inherited_positional``). Never serialized.
+    #: (the chart's encoding: a ``+`` operand's tail reader, which reads its
+    #: operand's branch and draws as on its own chart) or ``"written"`` (the
+    #: caller-written bindings, ``Chart._written_positional``: a right
+    #: operand's layer, and a layer attached to a chart reading its rows
+    #: through a named output). ``chart + chart`` fills a right operand's
+    #: layers from that operand first, so a composed chart used as an operand
+    #: keeps its own x/y; ``Chart.to_spec()`` fills the channels still unbound
+    #: (listing every copied channel in ``inherited_positional``). Never
+    #: serialized.
     positional_source: Optional[str] = None
-    #: Whether this layer reads its operand's share of the chart's rows
-    #: through a branch, so each unnamed step of the chart's chain must run
-    #: over that share before the layer reads it. ``chart + chart`` over
-    #: different data sets it on the left operand's tail readers, which read
-    #: the chart's pipeline before the merge; a step a later
-    #: ``.transform(...)`` adds to the composed chart still reaches them. See
-    #: :func:`ferrum.chart._settle_chart_rows`. Never serialized.
-    rows_from_chart: bool = False
-    #: Whether this layer reads its chart's data: the chart's rows after the
-    #: caller's own ``.transform(...)`` steps, never a composite mark's
-    #: statistics. ``Chart.layer`` and ``chart + SecondaryY(...)`` set it on
-    #: the layers they attach. The role is resolved against the record of
-    #: the chart that owns the layer when the spec is built, or, for a right
-    #: ``+`` operand's layers, against that operand's record at the merge
-    #: (:func:`ferrum._layer_transforms._settle_chart_data`), and is cleared
-    #: there. Never serialized.
+    #: Whether this layer reads its chart's data: its operand's rows after
+    #: the caller's own ``.transform(...)`` steps and the composition steps
+    #: that reach it, never a composite mark's statistics. ``Chart.layer``
+    #: and ``chart + SecondaryY(...)`` set it on the layers they attach. The
+    #: role is resolved when the spec is built
+    #: (:func:`ferrum._compose.attach_to_rows`), and is cleared there.
+    #: Never serialized.
     chart_data: bool = False
+    #: Index of the operand this layer belongs to in its chart's operand list
+    #: (:func:`ferrum._compose.chart_operands`): ``0`` on a chart of one
+    #: operand. Its ``data_source`` names a key inside that operand's chain
+    #: until ``Chart.to_spec`` lowers the operands. Never serialized.
+    operand: int = 0
     #: Wire flag: this layer reads its chart's data through a named output
     #: (``Layer::reads_chart_data`` in Rust ``spec/layer.rs``), so Rust's
     #: unknown-column refusal names the remedy for a layer attached to a
@@ -193,6 +189,17 @@ class _Layer:
     #: against the final layer list (:func:`ferrum.composition._conditional_layer_scopes`).
     #: Never serialized and never compared.
     conditionals: tuple = field(default=(), compare=False, repr=False)
+
+
+def reads_named_output(layer: "_Layer") -> bool:
+    """Whether *layer* reads its rows through a named output once its chart is lowered.
+
+    Rust passes such a layer none of the chart's positional channels. It
+    names the output (``data_source``), or it takes its positional channels
+    from a chart itself (``positional_source``), as every layer of a ``+``
+    composition does: each reads its operand's branch.
+    """
+    return layer.data_source is not None or layer.positional_source is not None
 
 
 def owned_conditional_ids(layers: list) -> set[int]:

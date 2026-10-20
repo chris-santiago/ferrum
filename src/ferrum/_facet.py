@@ -518,23 +518,23 @@ def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
         return 1
 
 
-def facet_repeat(facet_dict: dict, operand_columns: tuple) -> list[dict]:
+def facet_repeat(facet_dict: dict, frames: tuple) -> list[dict]:
     """The ``repeat`` entries of a facet wire: each operand frame lacking a facet field.
 
-    *operand_columns* holds a ``+`` composition's ``(row marker, columns)``
-    pairs, one per operand frame (``Chart._operand_columns``). A frame whose
-    columns lack the facet's field or row field draws its rows in every panel
-    along that field, its statistics running on its own rows, as ggplot2
-    draws a layer whose data lacks the faceting variable. A frame holding
-    the field, under a merge's renamed copy included, partitions normally.
-    Empty for a chart over one frame.
+    *frames* holds a ``+`` composition's frame selectors, one per frame
+    (``Chart._frame_selectors``: each frame's row marker and own columns). A
+    frame whose columns lack the facet's field or row field draws its rows
+    in every panel along that field, its statistics running on its own
+    rows, as ggplot2 draws a layer whose data lacks the faceting variable. A
+    frame holding the field partitions normally. Empty for a chart over one
+    frame.
     """
     fields = [facet_dict["field"]] + ([facet_dict["row"]] if "row" in facet_dict else [])
     repeat = []
-    for marker, columns in operand_columns:
-        lacking = [field for field in fields if field not in columns]
+    for frame in frames:
+        lacking = [field for field in fields if field not in frame.columns]
         if lacking:
-            repeat.append({"marker": marker, "fields": lacking})
+            repeat.append({"marker": frame.marker, "fields": lacking})
     return repeat
 
 

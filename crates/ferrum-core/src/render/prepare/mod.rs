@@ -14,21 +14,21 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
-    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
+    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, LegendEntry,
     TickProjection,
 };
 use crate::spec::chart::ChartSpec;
-use crate::transform::color_bin_group::{BinnedOrigin, BinnedOrigins, ChainDemand, ColorBinPlan};
+use crate::transform::color_bin_group::{BinDemand, ColorBinPlan};
 use crate::transform::context::TransformContext;
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
-use crate::transform::swarm::SwarmSpec;
+use crate::transform::run::{OutputLineage, OutputLineages};
 
-use super::scale_resolve::{apply_sort_to_domain, SortContext};
 use super::scale_resolve::{OverlayLegends, ResolvedScales};
 use std::borrow::Cow;
 use super::{RenderError, RenderWarning};
 
 mod extent;
+mod facet_panels;
 mod legend;
 
 // Re-exported into this module's namespace so the orchestrator and the inline
@@ -602,12 +602,15 @@ fn normalize_transform_outputs(
         .collect()
 }
 
-/// [`normalize_transform_outputs`] for each output's binned-color origin
-/// rows, which scale resolution reads as it reads the outputs.
-fn normalize_transform_origins(origins: BinnedOrigins) -> Result<BinnedOrigins, RenderError> {
-    origins
+/// [`normalize_transform_outputs`] for the rows each output's statistics
+/// consumed, which a sort and a binned color read as they read the outputs.
+fn normalize_transform_lineages(lineages: OutputLineages) -> Result<OutputLineages, RenderError> {
+    lineages
         .into_iter()
-        .map(|(key, origin)| Ok((key, BinnedOrigin { rows: normalize_string_views(&origin.rows)?, fields: origin.fields })))
+        .map(|(key, lineage)| {
+            let statistic_input = lineage.statistic_input.as_ref().map(normalize_string_views).transpose()?;
+            Ok((key, OutputLineage { statistic_input, ..lineage }))
+        })
         .collect()
 }
 
@@ -619,17 +622,13 @@ pub struct PreparedInputs {
     /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY` via
     /// [`PreparedInputs::final_batch`].
     pub transform_outputs: HashMap<String, RecordBatch>,
-    /// Per `transform_outputs` key, the `Swarm` whose rows that batch still
-    /// is, as the transform routing recorded it
-    /// ([`crate::transform::core::apply_transforms_named`]). A layer reading
-    /// such a key has its dots placed at render time by that `Swarm`.
-    pub(in crate::render) transform_swarms: HashMap<String, SwarmSpec>,
-    /// Per `transform_outputs` key whose lineage grouped a binned color by
-    /// bin, the rows that lineage read before its first bin-grouped step
-    /// ([`crate::transform::color_bin_group::BinnedOrigin`]), as the
-    /// transform routing recorded it: what a binned color cuts its edges
-    /// from. Empty for every chart no binned color groups.
-    pub(in crate::render) transform_origins: BinnedOrigins,
+    /// Per `transform_outputs` key, what its rows went through, as the
+    /// transform run recorded it
+    /// ([`crate::transform::run::OutputLineage`]): the `Swarm` that places a
+    /// layer reading it at render time, whether it is a statistic's output
+    /// and the rows that statistic consumed (what a data-aware sort and a
+    /// binned color's edges read), and the rows its lineage started from.
+    pub(in crate::render) transform_lineages: OutputLineages,
     /// Scales resolved once during prepare **for tick-label generation only**.
     /// Their pixel ranges are not panel-specific, so the final per-panel scales —
     /// whose ranges differ per panel — are resolved fresh by
@@ -1303,7 +1302,7 @@ pub fn prepare_render_inputs(
     // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
     // here, above `scale_warnings`' construction below, so both land in the
     // one `PreparedInputs.warnings` vec this function returns.
-    let (transform_outputs, transform_warnings, transform_swarms, transform_origins) =
+    let (transform_outputs, transform_warnings, transform_lineages, facet_partitions) =
         run_pipeline(spec, &normalized, viewport, theme, leaf_scales)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
@@ -1365,7 +1364,7 @@ pub fn prepare_render_inputs(
     // column, naming the first channel that dropped it.
     let mut column_warnings = Vec::new();
     {
-        let pipeline = PipelineBatches { source: source_schema.as_ref(), outputs: &transform_outputs, transforms: &spec.transforms };
+        let pipeline = PipelineBatches { source: source_schema.as_ref(), outputs: &transform_outputs, lineages: &transform_lineages };
         // The color scale's reads of a layered spec, as the scale reads them
         // (the call `establishing_binding` makes): a layer whose own literal
         // paint clears its inherited color from what it draws still reads it
@@ -1504,7 +1503,7 @@ pub fn prepare_render_inputs(
             &spec.encoding,
             &transformed,
             &transform_outputs,
-            &transform_origins,
+            &transform_lineages,
             (0.0, 1.0),
             (0.0, 1.0),
             theme,
@@ -1565,36 +1564,21 @@ pub fn prepare_render_inputs(
     )?;
 
     let facet_groups = if let Some(fspec) = &spec.facet {
-        let axes = FacetSortAxes {
-            x_field: rendering_encoding.x.as_ref().map(|e| e.field.as_str()),
-            y_field: rendering_encoding.y.as_ref().map(|e| e.field.as_str()),
+        let chart_fields = (
+            rendering_encoding.x.as_ref().map(|e| e.field.as_str()),
+            rendering_encoding.y.as_ref().map(|e| e.field.as_str()),
+        );
+        let rows = facet_panels::FacetRows::new(
+            spec,
+            &transformed,
+            &transform_outputs,
+            &transform_lineages,
+            &layer_batches,
+            &facet_partitions,
+            chart_fields,
             coord_flipped,
-        };
-        if let Some(row_field) = &fspec.row {
-            // Grid mode: produce one FacetGroup per (row_val, col_val) pair in
-            // row-major order. Each group's `key` is the col dimension (drives the
-            // column-header strip title); `row_key` is the row dimension (drives the
-            // row-header strip title and secondary batch filter). `sort`/`row_sort`
-            // order each dimension independently (Facet/FacetRow/FacetCol(sort=)).
-            group_rows_by_two_fields(
-                &transformed,
-                &fspec.field,
-                row_field,
-                fspec.sort.as_ref(),
-                fspec.row_sort.as_ref(),
-                axes,
-                &mut scale_warnings,
-            )?
-        } else {
-            // Wrap mode: single-field grouping, ordered by `fspec.sort` when set.
-            group_rows_by_field(
-                &transformed,
-                &fspec.field,
-                fspec.sort.as_ref(),
-                axes,
-                &mut scale_warnings,
-            )?
-        }
+        );
+        facet_panels::facet_groups(&rows, fspec, &mut scale_warnings)?
     } else {
         Vec::new()
     };
@@ -1672,8 +1656,7 @@ pub fn prepare_render_inputs(
 
     Ok(PreparedInputs {
         transform_outputs,
-        transform_swarms,
-        transform_origins,
+        transform_lineages,
         provisional_scales,
         axes,
         facet_groups,
@@ -1697,17 +1680,19 @@ pub fn prepare_render_inputs(
 /// The pipeline run a render draws from ([`run_transforms_with_facet`]).
 ///
 /// A layer whose drawn color, or whose text grouping-only `group` key,
-/// carries a `bin` rule demands that the lowered statistic producing its
-/// rows groups that column by the color's bins
+/// carries a `bin` rule demands that the lowered statistics producing its
+/// rows group that column by the color's bins
 /// ([`crate::transform::color_bin_group`]), cut by the edges the chart's
 /// color scale draws, so the scale, the grouping and the legend share one
 /// edge set. Those edges are cut from the rows the binned statistics
-/// consume, so a chart with such a step runs twice: the first run publishes
-/// those rows (the origins) and groups by raw values, the color scale
-/// resolves its edges over them ([`binned_color_edges`]), and the second run
-/// groups by them. A chart whose color scale has no edges (an empty or
-/// all-null column, a scale another kind establishes) keeps the first run.
-/// Every other chart runs once, as written.
+/// consume, so such a chart runs twice: the first run groups by raw values
+/// and records, per output, the lowered steps its rows passed and the rows
+/// they consumed; the demand is read off those records ([`BinDemand::of`]),
+/// the color scale resolves its edges over those rows
+/// ([`binned_color_edges`]), and the second run groups the demanded steps by
+/// them. A chart no demanded step groups, or whose color scale has no edges
+/// (an empty or all-null column, a scale another kind establishes), keeps
+/// the first run.
 fn run_pipeline(
     spec: &ChartSpec,
     normalized: &RecordBatch,
@@ -1715,34 +1700,38 @@ fn run_pipeline(
     theme: &crate::layout::ThemeInputs,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<TransformRun, RenderError> {
-    let Some(demand) = binned_color_demand(spec) else {
-        return run_transforms_with_facet(spec, normalized, viewport, theme, None);
-    };
-    let mut plan = ColorBinPlan { demand, edges: None };
-    let first = run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))?;
-    let Some(edges) = binned_color_edges(spec, &first.0, &first.3, theme, leaf_scales) else {
+    let first = run_transforms_with_facet(spec, normalized, viewport, theme, None)?;
+    let reads = binned_color_reads(spec);
+    if reads.is_empty() {
+        return Ok(first);
+    }
+    let reads: Vec<(&str, &str)> = reads.iter().map(|(key, field)| (key.as_str(), field.as_str())).collect();
+    let demand = BinDemand::of(&first.2, &reads);
+    if !demand.any() {
+        return Ok(first);
+    }
+    let Some(edges) = binned_color_edges(spec, &first.0, &first.2, theme, leaf_scales) else {
         return Ok(first);
     };
-    plan.edges = Some(std::rc::Rc::from(edges));
+    let plan = ColorBinPlan { demand, edges: Some(std::rc::Rc::from(edges)) };
     run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))
 }
 
-/// The steps that group a binned color by bin: for each layer (the chart
+/// The binned reads a run's demand comes from: for each layer (the chart
 /// itself on an unlayered spec) whose drawn color, or whose grouping-only
-/// `group` key, carries a `bin` rule, the lowered step producing the rows
-/// it draws ([`ChainDemand::of`]). `None` when no step is demanded. A spec
-/// whose layers cannot be built is left to the render's own refusal.
-fn binned_color_demand(spec: &ChartSpec) -> Option<ChainDemand> {
-    let layers = build_layers(spec).ok()?;
-    let demands: Vec<(Option<&str>, String)> = layers
+/// `group` key, carries a `bin` rule, the key it draws
+/// ([`FINAL_OUTPUT_KEY`] for a layer with no `data_source`) and the binned
+/// column. Empty for a spec whose layers cannot be built, which the
+/// render's own refusal reports.
+fn binned_color_reads(spec: &ChartSpec) -> Vec<(String, String)> {
+    let Ok(layers) = build_layers(spec) else { return Vec::new() };
+    layers
         .iter()
         .flat_map(|layer| {
-            layer.binned_color_bindings().into_iter().map(|binding| (layer.data_source.as_deref(), binding.field))
+            let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
+            layer.binned_color_bindings().into_iter().map(move |binding| (key.clone(), binding.field))
         })
-        .collect();
-    let pairs: Vec<(Option<&str>, &str)> = demands.iter().map(|(source, field)| (*source, field.as_str())).collect();
-    let demand = ChainDemand::of(&spec.transforms, &pairs);
-    demand.any().then_some(demand)
+        .collect()
 }
 
 /// The edges the chart's color scale cuts when it is a binned color's,
@@ -1756,7 +1745,7 @@ fn binned_color_demand(spec: &ChartSpec) -> Option<ChainDemand> {
 fn binned_color_edges(
     spec: &ChartSpec,
     outputs: &HashMap<String, RecordBatch>,
-    origins: &BinnedOrigins,
+    lineages: &OutputLineages,
     theme: &crate::layout::ThemeInputs,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Option<Vec<f64>> {
@@ -1766,7 +1755,7 @@ fn binned_color_edges(
     encoding.color.as_ref()?.color_bin()?;
     let mut rendering = ChartSpec { encoding, ..spec.clone() };
     crate::render::scale_resolve::resolve_param_domains(&mut rendering);
-    let scale = crate::render::scale_resolve::resolve_color_scale(&rendering, &spec.encoding, transformed, outputs, origins, theme, leaf_scales);
+    let scale = crate::render::scale_resolve::resolve_color_scale(&rendering, &spec.encoding, transformed, outputs, lineages, theme, leaf_scales);
     match scale.ok()?? {
         crate::render::scale_resolve::ColorScale::Discretizing(buckets) => Some(buckets.bounds().to_vec()),
         _ => None,
@@ -1774,14 +1763,15 @@ fn binned_color_edges(
 }
 
 /// What [`run_transforms_with_facet`] produces: every published output batch,
-/// the transform warnings drained from the run, the `Swarm` each output
-/// descends from ([`PreparedInputs::transform_swarms`]), and each output's
-/// binned-color origin ([`PreparedInputs::transform_origins`]).
+/// the transform warnings drained from the run, each output's lineage
+/// ([`PreparedInputs::transform_lineages`]), and a faceted run's partition
+/// keys in the order it ran them (empty unfaceted), which order the facet's
+/// panels.
 type TransformRun = (
     HashMap<String, RecordBatch>,
     Vec<crate::transform::context::TransformWarning>,
-    HashMap<String, SwarmSpec>,
-    BinnedOrigins,
+    OutputLineages,
+    Vec<FacetPartitionKey>,
 );
 
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
@@ -1829,7 +1819,7 @@ fn run_transforms_with_facet(
             color_bin_plan: color_bin_plan.clone(),
             ..TransformContext::default()
         };
-        let (mut outputs, swarms, origins) = apply_transforms_named(&spec.transforms, normalized, &ctx)
+        let (mut outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
         // #162: drain whatever this run's (possibly per-step-cloned, but
@@ -1837,7 +1827,7 @@ fn run_transforms_with_facet(
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
         // `ctx.clone()` in `apply_transforms_named`.
         let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-        return Ok((normalize_transform_outputs(outputs)?, warnings, swarms, normalize_transform_origins(origins)?));
+        return Ok((normalize_transform_outputs(outputs)?, warnings, normalize_transform_lineages(lineages)?, Vec::new()));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1931,29 +1921,25 @@ fn run_transforms_with_facet(
     let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, normalized);
 
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
-    // Every partition runs the same transforms, so each routes the same
-    // `Swarm` to the same key.
-    let mut swarms: HashMap<String, SwarmSpec> = HashMap::new();
-    // Each key's origin rows across the panels, and the columns any panel
-    // grouped there, merged as the outputs are.
-    let mut merged_origins: HashMap<String, (Vec<RecordBatch>, Vec<String>)> = HashMap::new();
+    // Every partition runs the same transforms, so each key's lineage
+    // routes the same `Swarm` and passes the same steps in every panel; the
+    // rows its statistics consumed are merged across the panels as the
+    // outputs are.
+    let mut merged_lineages: HashMap<String, (OutputLineage, Vec<RecordBatch>)> = HashMap::new();
     for ((col_value, row_value), partition_batch) in &partitions {
-        let (mut panel_outputs, panel_swarms, panel_origins) =
+        let (mut panel_outputs, panel_lineages) =
             apply_transforms_named(&effective_transforms, partition_batch, &ctx)
                 .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
-        swarms.extend(panel_swarms);
-        for (key, origin) in panel_origins {
-            let mut rows = inject_facet_column(&origin.rows, &fspec.field, col_value);
-            if let (Some(row_field), Some(row_val)) = (&fspec.row, row_value) {
-                rows = inject_facet_column(&rows, row_field, row_val);
-            }
-            let (batches, fields) = merged_origins.entry(key).or_default();
-            batches.push(rows);
-            for field in origin.fields {
-                if !fields.contains(&field) {
-                    fields.push(field);
+        for (key, mut lineage) in panel_lineages {
+            let consumed = lineage.statistic_input.take().map(|rows| {
+                let rows = inject_facet_column(&rows, &fspec.field, col_value);
+                match (&fspec.row, row_value) {
+                    (Some(row_field), Some(row_val)) => inject_facet_column(&rows, row_field, row_val),
+                    _ => rows,
                 }
-            }
+            });
+            let (_, batches) = merged_lineages.entry(key).or_insert_with(|| (lineage, Vec::new()));
+            batches.extend(consumed);
         }
         // D10: per-panel imputation.
         apply_impute_to_final(&mut panel_outputs, spec);
@@ -1997,12 +1983,16 @@ fn run_transforms_with_facet(
     let warnings = crate::transform::context::merge_partition_null_key_counts(
         ctx.warnings.borrow_mut().drain(..).collect(),
     );
-    let mut origins = BinnedOrigins::new();
-    for (key, (batches, fields)) in merged_origins {
-        let rows = concat_batches_by_name(&key, batches)?;
-        origins.insert(key, BinnedOrigin { rows, fields });
+    let mut lineages = OutputLineages::new();
+    for (key, (lineage, batches)) in merged_lineages {
+        let statistic_input = match batches.is_empty() {
+            true => None,
+            false => Some(concat_batches_by_name(&key, batches)?),
+        };
+        lineages.insert(key, OutputLineage { statistic_input, ..lineage });
     }
-    Ok((normalize_transform_outputs(combined)?, warnings, swarms, normalize_transform_origins(origins)?))
+    let partition_keys = partitions.into_iter().map(|(key, _)| key).collect();
+    Ok((normalize_transform_outputs(combined)?, warnings, normalize_transform_lineages(lineages)?, partition_keys))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
@@ -2484,7 +2474,7 @@ pub(in crate::render) fn validate_layer_columns(
     if raw.is_none() {
         return Ok(Vec::new());
     }
-    let statistic_layer = reads_statistic_output(layer, pipeline.transforms);
+    let statistic_layer = reads_statistic_output(layer, pipeline.lineages);
     let mut dropped = Vec::new();
     for read in layer_column_reads(layer_index, layer, raw, encoding, conditionals) {
         if batch.column_by_name(read.field).is_some() {
@@ -2603,88 +2593,34 @@ fn python_channel(wire: &'static str) -> &'static str {
     }
 }
 
-/// Whether `layer` reads a statistic's output: it names a `data_source` that
-/// is not one of the user's row outputs ([`user_row_outputs`]). A layer with
-/// no `data_source`, or one reading a row output, reads the user's rows.
-fn reads_statistic_output(layer: &LayerPrepared, transforms: &[crate::transform::core::TransformSpec]) -> bool {
-    layer.data_source.as_deref().is_some_and(|name| !user_row_outputs(transforms).iter().any(|rows| rows == name))
-}
-
-/// The pipeline outputs whose rows are the user's rather than a statistic's,
-/// the one answer every "is this a statistic" question reads: every
-/// `Branch`'s tail; every named `Identity` snapshot, at any nesting (an
-/// output inside a branch scoped under it, as
-/// [`secondary_key`](crate::transform::registry::secondary_key) scopes it);
-/// and the tail ([`FINAL_OUTPUT_KEY`]) when no unnamed step advanced it, so
-/// it is the source (a composition's merged frame).
-///
-/// **Contract.** A named `Identity` is a snapshot of the user's rows: its
-/// producers (a `+` operand's row marker, `displot`'s rug data, a threshold
-/// line's data) publish one over rows no statistic changed, and the
-/// producer helper (`identity_transform` in Python) states the same.
-pub(in crate::render) fn user_row_outputs(transforms: &[crate::transform::core::TransformSpec]) -> Vec<String> {
-    use crate::transform::core::{spec_name, TransformSpec};
-    let mut keys = Vec::new();
-    for t in transforms {
-        match t {
-            TransformSpec::Branch(b) => {
-                keys.push(b.name.clone());
-                keys.extend(
-                    named_row_snapshots(&b.transforms)
-                        .iter()
-                        .map(|inner| crate::transform::registry::secondary_key(Some(&b.name), inner)),
-                );
-            }
-            TransformSpec::Identity(identity) => keys.extend(identity.name.clone()),
-            _ => {}
-        }
-    }
-    // A statistics marker passes its rows through, so it advances nothing.
-    let advances = |t: &TransformSpec| {
-        !matches!(t, TransformSpec::Branch(_)) && spec_name(t).is_none() && !crate::transform::color_bin_group::is_statistics_marker(t)
-    };
-    if !transforms.iter().any(advances) {
-        keys.push(FINAL_OUTPUT_KEY.to_string());
-    }
-    keys
-}
-
-/// The row outputs a branch's own steps publish ([`user_row_outputs`]
-/// without the tail, which a branch publishes as the branch itself).
-fn named_row_snapshots(transforms: &[crate::transform::core::TransformSpec]) -> Vec<String> {
-    user_row_outputs(transforms).into_iter().filter(|key| key != FINAL_OUTPUT_KEY).collect()
+/// Whether `layer` reads a statistic's output: the rows under its
+/// `data_source` passed a lowered step ([`OutputLineage::is_statistic`]). A
+/// layer with no `data_source`, or one reading the user's rows, reads the
+/// user's rows.
+fn reads_statistic_output(layer: &LayerPrepared, lineages: &OutputLineages) -> bool {
+    layer.data_source.as_deref().and_then(|key| lineages.get(key)).is_some_and(OutputLineage::is_statistic)
 }
 
 /// Every batch a chart's pipeline saw: its SOURCE schema, taken before any
 /// transform ran (the unpartitioned schema `prepare_render_inputs` takes),
-/// and every batch the
-/// transforms produced, the tail and each named output
-/// ([`PreparedInputs::transform_outputs`]). What
-/// [`validate_layer_columns`] searches to say where a column a
-/// layer cannot find does exist.
+/// every batch the transforms produced, the tail and each named output
+/// ([`PreparedInputs::transform_outputs`]), and each one's lineage. What
+/// [`validate_layer_columns`] searches to say where a column a layer cannot
+/// find does exist.
 pub(in crate::render) struct PipelineBatches<'a> {
     pub(in crate::render) source: &'a Schema,
     pub(in crate::render) outputs: &'a HashMap<String, RecordBatch>,
-    /// The chart's top-level transforms, read for the input a layer's branch
-    /// starts from ([`chart_rows_schema`]).
-    pub(in crate::render) transforms: &'a [crate::transform::core::TransformSpec],
+    pub(in crate::render) lineages: &'a OutputLineages,
 }
 
-/// The schema of the rows a layer reading its chart's data starts from: the
-/// published batch its branch reads as `input` when the layer's
-/// `data_source` names a top-level branch that reads one (a composition's
-/// left operand's own rows), else the pipeline's source schema.
-fn chart_rows_schema<'a>(layer: &LayerPrepared, pipeline: &PipelineBatches<'a>) -> Option<SchemaRef> {
-    use crate::transform::core::TransformSpec;
-    let input = layer.data_source.as_deref().and_then(|name| {
-        pipeline.transforms.iter().find_map(|t| match t {
-            TransformSpec::Branch(b) if b.name == name => b.input.as_deref(),
-            _ => None,
-        })
-    });
-    match input {
-        Some(key) => pipeline.outputs.get(key).map(RecordBatch::schema),
-        None => Some(Arc::new(pipeline.source.clone())),
+/// The schema of the rows a layer reading its chart's data starts from: for
+/// a layer with a `data_source`, the rows the lineage of the batch it draws
+/// started from (an operand's framed rows, never the combined frame); else
+/// the pipeline's source schema.
+fn chart_rows_schema(layer: &LayerPrepared, pipeline: &PipelineBatches<'_>) -> SchemaRef {
+    match layer.data_source.as_deref().and_then(|key| pipeline.lineages.get(key)) {
+        Some(lineage) => lineage.source.clone(),
+        None => Arc::new(pipeline.source.clone()),
     }
 }
 
@@ -2695,43 +2631,28 @@ fn chart_rows_schema<'a>(layer: &LayerPrepared, pipeline: &PipelineBatches<'a>) 
 /// - A layer with no `data_source` starts from the chart rows: `primary_batch`,
 ///   or the all-panels tail ([`FINAL_OUTPUT_KEY`]) when the channel is
 ///   shared across facet panels (`include_final`).
-/// - A layer reading one of the user's row outputs ([`user_row_outputs`])
-///   starts from that output.
-/// - A layer reading a statistic's output starts from the rows its scope's
-///   statistic consumed: the row snapshot of the `Branch` the output is
-///   published under (the `+` operand's row marker, else the branch's tail),
-///   or the chart rows for a top-level statistic.
+/// - A layer with a `data_source` starts from the rows its statistics
+///   consumed when it reads a statistic's output, else from the rows it
+///   reads ([`OutputLineage::pre_statistic_rows`]).
 ///
-/// Every named output already spans every panel, so a faceted channel reads
-/// the same key.
+/// Every output already spans every panel, so a faceted channel reads the
+/// same key.
 pub(in crate::render) fn pre_statistic_rows<'b>(
     data_source: Option<&str>,
-    transforms: &[crate::transform::core::TransformSpec],
+    lineages: &'b OutputLineages,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     include_final: bool,
 ) -> &'b RecordBatch {
-    use crate::transform::core::TransformSpec;
-    use crate::transform::registry::secondary_key;
     let chart_rows = || match include_final {
         true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(primary_batch),
         false => primary_batch,
     };
-    let Some(source) = data_source else { return chart_rows() };
-    if user_row_outputs(transforms).iter().any(|rows| rows == source) {
-        return transform_outputs.get(source).unwrap_or_else(|| chart_rows());
-    }
-    let scoping = transforms.iter().find_map(|t| match t {
-        TransformSpec::Branch(b) if source.starts_with(&secondary_key(Some(&b.name), "")) => Some(b),
-        _ => None,
-    });
-    match scoping {
-        Some(branch) => named_row_snapshots(&branch.transforms)
-            .last()
-            .and_then(|snapshot| transform_outputs.get(&secondary_key(Some(&branch.name), snapshot)))
-            .or_else(|| transform_outputs.get(&branch.name))
-            .unwrap_or_else(|| chart_rows()),
-        None => chart_rows(),
+    let Some(key) = data_source else { return chart_rows() };
+    match (transform_outputs.get(key), lineages.get(key)) {
+        (Some(batch), Some(lineage)) => lineage.pre_statistic_rows(batch),
+        (Some(batch), None) => batch,
+        (None, _) => chart_rows(),
     }
 }
 
@@ -2742,14 +2663,13 @@ pub(in crate::render) fn pre_statistic_rows<'b>(
 ///
 /// Precedence: the source batch first, since a source column the chain
 /// dropped is drawable from the source; then a statistic's output (any batch
-/// the pipeline produced but the user's row outputs, [`user_row_outputs`]), where
-/// the column is a statistic another layer's mark computes; otherwise
-/// `None`: the column exists nowhere (a typo), or only in rows of the user's
-/// that are not this layer's (another operand's own rows), which no remedy
-/// reaches. The source
+/// whose rows passed a lowered step), where the column is a statistic
+/// another layer's mark computes; otherwise `None`: the column exists
+/// nowhere (a typo), or only in rows of the user's that are not this
+/// layer's (another operand's own rows), which no remedy reaches. The source
 /// is the rows the layer's chart data starts from ([`chart_rows_schema`]): a
-/// composition's left operand's own rows, never the merged frame, which
-/// holds a sibling operand's columns too.
+/// composition's operand's own rows, never the merged frame, which holds a
+/// sibling operand's columns too.
 fn missing_column_remedy(
     name: &str,
     layer: &LayerPrepared,
@@ -2758,7 +2678,7 @@ fn missing_column_remedy(
     use crate::render::MissingColumnRemedy;
     if !layer.reads_chart_data {
         None
-    } else if chart_rows_schema(layer, pipeline).is_some_and(|schema| schema.index_of(name).is_ok()) {
+    } else if chart_rows_schema(layer, pipeline).index_of(name).is_ok() {
         Some(MissingColumnRemedy::Source)
     } else if statistic_outputs_hold(name, pipeline) {
         Some(MissingColumnRemedy::Statistic)
@@ -2767,12 +2687,12 @@ fn missing_column_remedy(
     }
 }
 
-/// Whether a statistic's output holds column `name`: a batch the pipeline
-/// produced that is not one of the user's row outputs
-/// ([`user_row_outputs`]).
+/// Whether a statistic's output holds column `name`: a batch whose rows
+/// passed a lowered step ([`OutputLineage::is_statistic`]).
 fn statistic_outputs_hold(name: &str, pipeline: &PipelineBatches<'_>) -> bool {
-    let rows = user_row_outputs(pipeline.transforms);
-    pipeline.outputs.iter().any(|(key, batch)| !rows.contains(key) && batch.column_by_name(name).is_some())
+    pipeline.outputs.iter().any(|(key, batch)| {
+        pipeline.lineages.get(key).is_some_and(OutputLineage::is_statistic) && batch.column_by_name(name).is_some()
+    })
 }
 
 /// What [`build_axes`] produces: the axis inputs, the two resolved primary tick
@@ -2840,11 +2760,19 @@ fn build_axes(
         chart_config,
         warnings,
     )?;
+    // The chart's own titles in screen space: a channel's title belongs to
+    // the channel, so under a flip it moves with the channel to the axis
+    // that channel draws on, as its scale and ticks do (`rendering_encoding`
+    // is already post-flip; `spec.encoding` is as authored).
+    let mut chart_encoding = spec.encoding.clone();
+    if coord_flipped {
+        chart_encoding.flip_positional();
+    }
     let axes = AxesInput {
         x: build_axis_input(
             Channel::X,
             rendering_encoding.x.as_ref(),
-            spec.encoding.x.as_ref(),
+            chart_encoding.x.as_ref(),
             &provisional_scales.x,
             x_tick_count,
             theme,
@@ -2853,7 +2781,7 @@ fn build_axes(
         y: build_axis_input(
             Channel::Y,
             rendering_encoding.y.as_ref(),
-            spec.encoding.y.as_ref(),
+            chart_encoding.y.as_ref(),
             &provisional_scales.y,
             y_tick_count,
             theme,
@@ -4843,178 +4771,6 @@ fn inject_facet_column(batch: &RecordBatch, field: &str, value: &str) -> RecordB
         .expect("inject_facet_column: schema + columns must be consistent")
 }
 
-/// Facet grouping's own `SortContext` inputs beyond the category field
-/// itself: the fields bound to the rendered x/y channels (for the channel-
-/// shorthand sort forms) and whether the chart is `CoordFlip`ped. Shared by
-/// [`group_rows_by_field`] and [`group_rows_by_two_fields`] so both read the
-/// same rendering-encoding facts `prepare_render_inputs` already resolved,
-/// rather than each re-deriving them.
-#[derive(Clone, Copy)]
-struct FacetSortAxes<'a> {
-    x_field: Option<&'a str>,
-    y_field: Option<&'a str>,
-    coord_flipped: bool,
-}
-
-/// [`apply_sort_to_domain`] for a facet dimension: identical resolution, but
-/// every [`RenderWarning::SortSpecIgnored`] it would have pushed becomes
-/// [`RenderWarning::FacetSortSpecIgnored`] instead before reaching the
-/// caller's `warnings` sink.
-///
-/// A translating wrapper rather than a facet-aware parameter on
-/// `apply_sort_to_domain` itself: the resolver is shared verbatim with
-/// positional/color axis sort (SortOp/SortOrder parsing, the channel-
-/// shorthand and sort-field-object logic all stay in ONE place), and the
-/// choice of WHICH `RenderWarning` variant a failure becomes is a fact about
-/// the CALLER's own supersession semantics
-/// ([`provisional_scale_warning_superseded_by_panel_pass`]'s doc), not about
-/// how the sort itself resolves.
-fn apply_facet_sort_to_domain(
-    domain: &mut Vec<String>,
-    sort: Option<&serde_json::Value>,
-    ctx: &SortContext<'_>,
-    warnings: &mut Vec<RenderWarning>,
-) -> Result<(), RenderError> {
-    let mut scratch = Vec::new();
-    apply_sort_to_domain(domain, sort, ctx, &mut scratch)?;
-    warnings.extend(scratch.into_iter().map(|w| match w {
-        RenderWarning::SortSpecIgnored { reason } => RenderWarning::FacetSortSpecIgnored { reason },
-        other => other,
-    }));
-    Ok(())
-}
-
-fn group_rows_by_field(
-    batch: &RecordBatch,
-    field: &str,
-    sort: Option<&serde_json::Value>,
-    axes: FacetSortAxes<'_>,
-    warnings: &mut Vec<RenderWarning>,
-) -> Result<Vec<FacetGroup>, RenderError> {
-    let arr = crate::render::facet_key_column(batch, field)?;
-    let mut order: Vec<String> = Vec::new();
-    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for v in arr.iter().flatten() {
-        let s = v.to_string();
-        if !counts.contains_key(&s) {
-            order.push(s.clone());
-        }
-        *counts.entry(s).or_insert(0) += 1;
-    }
-    // Facet(sort=): order the distinct values via the SAME ordinal domain
-    // sort resolution positional/color axes use -- there is no facet-local
-    // sorter (`#176`(11) + N3).
-    let sort_ctx = SortContext {
-        category_field: field,
-        batch,
-        x_field: axes.x_field,
-        y_field: axes.y_field,
-        coord_flipped: axes.coord_flipped,
-    };
-    apply_facet_sort_to_domain(&mut order, sort, &sort_ctx, warnings)?;
-    Ok(order
-        .into_iter()
-        .map(|v| FacetGroup {
-            key: FacetKey {
-                field: field.to_string(),
-                value: v.clone(),
-            },
-            n_rows: counts[&v],
-            row_key: None,
-        })
-        .collect())
-}
-
-/// Grid-mode two-field grouping: one `FacetGroup` per `(row_val, col_val)` pair
-/// in row-major order.
-///
-/// Distinct row values appear in first-appearance order from the data; within
-/// each row the col values appear in first-appearance order. `key` carries the
-/// col dimension (drives the column-header strip); `row_key` carries the row
-/// dimension (drives the row-header strip and secondary batch filter).
-/// `col_sort`/`row_sort` (`FacetSpec.sort`/`.row_sort`) each reorder their own
-/// dimension before the row-major cartesian product is built, via the same
-/// ordinal domain sort resolution `group_rows_by_field` uses.
-fn group_rows_by_two_fields(
-    batch: &RecordBatch,
-    col_field: &str,
-    row_field: &str,
-    col_sort: Option<&serde_json::Value>,
-    row_sort: Option<&serde_json::Value>,
-    axes: FacetSortAxes<'_>,
-    warnings: &mut Vec<RenderWarning>,
-) -> Result<Vec<FacetGroup>, RenderError> {
-    let col_arr = crate::render::facet_key_column(batch, col_field)?;
-    let row_arr = crate::render::facet_key_column(batch, row_field)?;
-
-    // Collect distinct row values and col values (first-appearance order).
-    let mut row_order: Vec<String> = Vec::new();
-    let mut row_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut col_order: Vec<String> = Vec::new();
-    let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Count rows per (row_val, col_val) pair.
-    let mut counts: std::collections::HashMap<(String, String), u64> =
-        std::collections::HashMap::new();
-
-    for i in 0..batch.num_rows() {
-        let row_v = match row_arr.is_null(i) {
-            true => continue,
-            false => row_arr.value(i).to_string(),
-        };
-        let col_v = match col_arr.is_null(i) {
-            true => continue,
-            false => col_arr.value(i).to_string(),
-        };
-        if row_seen.insert(row_v.clone()) {
-            row_order.push(row_v.clone());
-        }
-        if col_seen.insert(col_v.clone()) {
-            col_order.push(col_v.clone());
-        }
-        *counts.entry((row_v, col_v)).or_insert(0) += 1;
-    }
-
-    let col_ctx = SortContext {
-        category_field: col_field,
-        batch,
-        x_field: axes.x_field,
-        y_field: axes.y_field,
-        coord_flipped: axes.coord_flipped,
-    };
-    apply_facet_sort_to_domain(&mut col_order, col_sort, &col_ctx, warnings)?;
-    let row_ctx = SortContext {
-        category_field: row_field,
-        batch,
-        x_field: axes.x_field,
-        y_field: axes.y_field,
-        coord_flipped: axes.coord_flipped,
-    };
-    apply_facet_sort_to_domain(&mut row_order, row_sort, &row_ctx, warnings)?;
-
-    // Emit groups in row-major order: (r0,c0), (r0,c1), ..., (r1,c0), ...
-    let mut groups = Vec::with_capacity(row_order.len() * col_order.len());
-    for row_v in &row_order {
-        for col_v in &col_order {
-            let n_rows = counts
-                .get(&(row_v.clone(), col_v.clone()))
-                .copied()
-                .unwrap_or(0);
-            groups.push(FacetGroup {
-                key: FacetKey {
-                    field: col_field.to_string(),
-                    value: col_v.clone(),
-                },
-                n_rows,
-                row_key: Some(FacetKey {
-                    field: row_field.to_string(),
-                    value: row_v.clone(),
-                }),
-            });
-        }
-    }
-    Ok(groups)
-}
-
 /// `(col_val, row_val)` composite key for a single grid-mode partition.
 type GridPartitionKey = (String, String);
 
@@ -5242,57 +4998,6 @@ mod grid_partition_tests {
         assert_eq!(keys[2], ("c3", "r1"), "Third partition should be (c3, r1)");
         assert_eq!(keys[3], ("c1", "r2"), "Fourth partition should be (c1, r2)");
         assert_eq!(keys[8], ("c3", "r3"), "Last partition should be (c3, r3)");
-    }
-
-    #[test]
-    fn group_rows_by_two_fields_produces_correct_count_and_row_keys() {
-        let batch = grid_3x3_batch();
-        let axes = FacetSortAxes { x_field: None, y_field: None, coord_flipped: false };
-        let mut warnings = Vec::new();
-        let groups =
-            group_rows_by_two_fields(&batch, "col_cat", "row_cat", None, None, axes, &mut warnings)
-                .unwrap();
-        assert_eq!(
-            groups.len(),
-            9,
-            "Expected 9 groups for a 3×3 grid; got {}",
-            groups.len()
-        );
-
-        for group in &groups {
-            assert!(
-                group.row_key.is_some(),
-                "Every grid-mode group must have a row_key; got None for col={}",
-                group.key.value
-            );
-        }
-
-        // First group: col="c1", row="r1".
-        assert_eq!(groups[0].key.value, "c1");
-        assert_eq!(groups[0].row_key.as_ref().unwrap().value, "r1");
-        // Last group: col="c3", row="r3".
-        assert_eq!(groups[8].key.value, "c3");
-        assert_eq!(groups[8].row_key.as_ref().unwrap().value, "r3");
-        // All groups have 2 rows each (from the fixture).
-        for g in &groups {
-            assert_eq!(g.n_rows, 2, "Expected 2 rows per group; got {}", g.n_rows);
-        }
-    }
-
-    #[test]
-    fn wrap_mode_groups_have_no_row_key() {
-        // Single-field (wrap mode) grouping must leave row_key = None.
-        let batch = grid_3x3_batch();
-        let axes = FacetSortAxes { x_field: None, y_field: None, coord_flipped: false };
-        let mut warnings = Vec::new();
-        let groups = group_rows_by_field(&batch, "col_cat", None, axes, &mut warnings).unwrap();
-        for g in &groups {
-            assert!(
-                g.row_key.is_none(),
-                "Wrap-mode groups must have row_key = None; got {:?}",
-                g.row_key
-            );
-        }
     }
 
     // ── facet_key_column contract ──────────────────────────────

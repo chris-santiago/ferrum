@@ -896,6 +896,8 @@ def stale_dispositions(findings: Findings) -> list[tuple[str, str, str]]:
 #: job, not a false positive.
 KNOWN_NON_CHANNEL_KEYWORDS = frozenset(
     {
+        # Y(aggregate="count") -- names the encoding statistic's op, not a column.
+        "aggregate",
         "align",  # e.g. mark_kwargs align="right" / a rule layer's text align
         "axis",  # e.g. jitter axis="x"
         "how",  # e.g. a join/merge how="left"
@@ -911,7 +913,6 @@ KNOWN_NON_CHANNEL_KEYWORDS = frozenset(
 )
 KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
     {
-        "AggregateOp",  # AggregateOp(field, "count", "n")
         "Series",  # pl.Series("y", ...)
         "_channel_class_for",  # internal channel-name -> class lookup, not a column read
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column

@@ -848,4 +848,4 @@ pub(crate) fn secondary_key(name: Option<&str>, key: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -1,16 +1,15 @@
-"""Layered-transform routing for the :class:`~ferrum.chart.Chart` value class.
+"""Layer encodings and pipeline steps for the :class:`~ferrum.chart.Chart` value class.
 
-This module owns the free functions that resolve per-layer encoding aggregates
-and bins into *named* chart-level transforms, plus the ``_NamedTransform``
-wrapper and the transform-to-JSON serialisers.  They were extracted from
-``chart.py`` (cohesion finding CHART-01) so the chart module keeps only the
-fluent surface and ``to_spec`` orchestration.
+This module owns each layer's effective encoding over its parent, the
+resolution of per-layer encoding aggregates and bins into *named* steps, the
+pipeline step holders (``_NamedTransform``, ``_Branch``, the statistics
+marker, a composition's ``_ComposedStep``) and the transform-to-JSON
+serialiser. ``ferrum._compose`` places the steps in their operands' chains.
 
 The renderer never executes a layer's own ``transforms`` standalone; a layer
-reads its input batch from a *named* chart-level transform via ``data_source``.
-The resolvers here build those named transforms and re-point the layer's
-``data_source`` accordingly, keeping serialised output byte-identical to the
-pre-extraction behaviour.
+reads its input batch from a *named* step via ``data_source``. The resolvers
+here build those named steps and re-point the layer's ``data_source``
+accordingly.
 
 The encode-path lowering these resolvers call (auto-groupby inference and
 ``bin=`` lowering) is shared with the single-chart path and lives in
@@ -41,18 +40,17 @@ from ferrum._layer import (
     draws_inherited_color,
     inherited_positional_taken,
     layer_mark,
+    reads_named_output,
 )
 from ferrum.position import stack_honored, warn_stack_ignored
 
 
 class _NamedTransform:
-    """Pairs a PyO3 transform object with an explicit name for chart-level serialization.
+    """Pairs a PyO3 transform object with an explicit name for serialization.
 
-    When a single-mark chart's transforms are promoted to chart level during
-    ``+`` composition, we need them to be *named* in the Rust pipeline so that
-    ``FINAL_OUTPUT_KEY`` remains the original input batch (named transforms do
-    not advance the unnamed chain).  The corresponding ``_Layer`` sets
-    ``data_source`` to the same name so it reads the correct output.
+    A named step publishes its output under the name and does not advance
+    its chain's unnamed tail; the ``_Layer`` reading it sets ``data_source``
+    to the same name.
     """
 
     __slots__ = ("transform", "name")
@@ -67,23 +65,32 @@ class _Branch:
 
     ``transforms`` runs as its own chain (unnamed steps chain, named steps
     publish) starting from the pipeline's original batch when ``input`` is
-    ``None``, or from the output already published under ``input``. The
-    sub-chain tail is published under ``name`` and every named or secondary
-    output inside it under its own key. A branch never advances the outer
-    unnamed chain, so a layer reading ``name`` sees its own chain applied to
-    its own input whatever sits before it in the composed pipeline.
+    ``None``, or from the output already published under ``input``. With a
+    ``frame`` (:class:`_OperandFrame`) the branch first keeps one operand's
+    own rows and columns of that input, and a nested branch with no ``input``
+    reads those rows. The sub-chain tail is published under ``name`` and
+    every named or secondary output inside it under its own scoped key
+    (``secondary_key(name, key)``). A branch never advances the outer unnamed
+    chain, so a layer reading ``name`` sees its own chain applied to its own
+    input whatever sits before it in the composed pipeline.
 
     The original transform objects are kept (not pre-serialized) so value
-    equality and the identity-derived names ``+`` gives its steps stay valid
-    for as long as the branch lives.
+    equality stays valid for as long as the branch lives.
     """
 
-    __slots__ = ("name", "input", "transforms")
+    __slots__ = ("name", "input", "transforms", "frame")
 
-    def __init__(self, name: str, input: str | None, transforms: list) -> None:
+    def __init__(
+        self,
+        name: str,
+        input: str | None,
+        transforms: list,
+        frame: "_OperandFrame | None" = None,
+    ) -> None:
         self.name = name
         self.input = input
         self.transforms = list(transforms)
+        self.frame = frame
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, _Branch):
@@ -91,6 +98,7 @@ class _Branch:
         return (
             self.name == other.name
             and self.input == other.input
+            and self.frame == other.frame
             and len(self.transforms) == len(other.transforms)
             and all(_same_step(a, b) for a, b in zip(self.transforms, other.transforms))
         )
@@ -98,18 +106,44 @@ class _Branch:
     __hash__ = None  # type: ignore[assignment]
 
 
+@dataclass(frozen=True)
+class _OperandFrame:
+    """Which rows of a combined batch are one ``+`` operand's, under their own names.
+
+    A composition over several frames holds them in one batch: each frame's
+    rows carry ``marker`` (true on that frame's rows), and each of its
+    columns whose name an earlier frame already holds is renamed in the
+    batch. Serialized as a branch's ``frame``, which keeps the rows whose
+    marker is true, writes each original column from its renamed copy and
+    keeps exactly the frame's own ``columns``.
+    """
+
+    marker: str
+    renames: tuple[tuple[str, str], ...]
+    columns: tuple[str, ...]
+
+    def wire(self) -> dict:
+        return {
+            "marker": self.marker,
+            "renames": dict(self.renames),
+            "columns": list(self.columns),
+        }
+
+
 class _StatisticsMarker:
     """The boundary in one chain between the caller's steps and the statistics ferrum lowers.
 
     Every step after it in its chain was lowered from a layer's encoding or
     mark (an encoding aggregate or bin, a composite mark's statistics); every
-    step before it is the caller's own. Rust groups a statistic after it by a
-    binned color's bins when a layer drawing that color reads its output,
-    and runs the caller's steps as written. Serialized as an unnamed
+    step before it is the caller's own. Rust reads the rows at the marker as
+    the caller's rows: a statistic after it groups by a binned color's bins
+    when a layer drawing that color reads its output, a data-aware sort of a
+    statistic's output reads the rows the statistic started from, and a
+    column the caller's steps lack is refused with the statistic remedy when
+    a step after the marker computes it. Serialized as an unnamed
     pass-through identity, which never advances the chain (spec §6.7).
 
-    Every instance is the same marker: two compare equal, so a chain
-    deduplicated step by step (``_same_step``) keeps one.
+    Every instance is the same marker: two compare equal.
     """
 
     __slots__ = ()
@@ -133,47 +167,25 @@ def _with_statistics_marker(steps: list) -> list:
     return [_StatisticsMarker(), *steps] if steps else []
 
 
-def _holds_statistics_marker(chain: list) -> bool:
-    """Whether *chain* (its own steps, not its branches') carries lowered statistics."""
-    return any(isinstance(step, _StatisticsMarker) for step in chain)
+class _ComposedStep:
+    """One written step of a ``+`` composition, as each reached operand's chain runs it.
 
-
-def _statistics_marked(transforms: list, *, keep: bool) -> list:
-    """*transforms* with one statistics marker per chain, or none.
-
-    With *keep*, each chain (the top one and every branch's) keeps its first
-    marker and drops the later ones, so the boundary sits before the first
-    lowered statistic. Without it every marker is dropped: a chart drawing no
-    binned color has no statistic to group by bin, and its wire stays as it
-    was. Branches are rebuilt, never mutated.
-
-    No step the caller wrote follows a marker in its chain: a chart's own
-    ``.transform()`` is inserted before its lowered statistics, and a ``+``
-    composition runs an operand chain carrying a marker as its own branch.
+    Every copy of one written step is this same object, so they share its
+    ``group``: Rust runs each copy where its rows carry the columns the
+    step reads, else on the first later rows of the same lineage that do,
+    and refuses the step when no copy could run. A named step publishes its
+    output inside each operand's branch and leaves the chain where it was.
+    Serialized as ``{"type": "composed", "group": ..., "step": ...}``.
     """
-    out: list = []
-    seen = False
-    for step in transforms:
-        if isinstance(step, _StatisticsMarker):
-            if keep and not seen:
-                out.append(step)
-            seen = True
-            continue
-        if isinstance(step, _Branch):
-            step = _Branch(step.name, step.input, _statistics_marked(step.transforms, keep=keep))
-        out.append(step)
-    return out
 
+    __slots__ = ("step",)
 
-def _draws_binned_color(encodings: list) -> bool:
-    """Whether any of *encodings* binds a binned color, or a grouping key over one."""
-    for encoding in encodings:
-        for value in encoding.values():
-            if isinstance(value, ChannelBase) and value._binned_color():
-                return True
-            if isinstance(value, _GroupingOnly) and "scale" in (value.wire() or {}):
-                return True
-    return False
+    def __init__(self, step: object) -> None:
+        self.step = step
+
+    @property
+    def group(self) -> str:
+        return f"_auto_{id(self):x}"
 
 
 def _source_identity(name: str) -> _NamedTransform:
@@ -183,119 +195,29 @@ def _source_identity(name: str) -> _NamedTransform:
     return _NamedTransform(identity_transform(name), name)
 
 
-@dataclass(frozen=True)
-class ChartRows:
-    """Where a chart's data sits in its pipeline. Never serialized.
-
-    A chart's data is its rows after the steps its caller added with
-    ``.transform(...)`` (and the aggregates or bins on its own encoding),
-    never the statistics a composite mark appends when it resolves. A layer
-    attached to the chart (``_Layer.chart_data``) reads these rows.
-
-    Attributes
-    ----------
-    input :
-        The named output holding the rows *steps* start from; ``None`` is the
-        pipeline's original batch.
-    steps :
-        The chart's chain: the caller's steps, without composite statistics
-        or pending encoding sentinels.
-    at_tail :
-        Whether these rows are exactly the pipeline output the chart's own
-        primitive mark reads, so an attached layer reads the tail directly.
-    boundary :
-        On a flat chart, the index in ``chart._transforms`` where the mark's
-        statistics begin, where a later ``.transform(...)`` is inserted;
-        ``None`` on a composition, whose later steps append.
-    columns :
-        The columns of the chart's data before *steps*, when the pipeline's
-        input holds other rows too: on a ``+`` composition, its left
-        operand's, since the composition's frame also holds the right
-        operand's rows and columns. ``None`` when the data is the input
-        itself, or its columns are not known.
-    """
-
-    input: str | None
-    steps: tuple
-    at_tail: bool
-    boundary: int | None
-    columns: tuple[str, ...] | None = None
-
-
 def _chain_steps(transforms: list) -> tuple:
     """Return the steps of *transforms* that run in the pipeline, without encoding sentinels."""
     return tuple(t for t in transforms if not isinstance(t, (_PendingAggregate, _PendingBin)))
 
 
-def _chart_rows_of(chart) -> ChartRows:
-    """Return *chart*'s data record, the one reader of ``Chart._chart_rows``.
+def _statistics_start(transforms: list) -> int:
+    """Index in *transforms* where the statistics a mark lowered begin: its first marker, else the end.
 
-    A chart with no record holds no mark statistic in its ``_transforms``
-    (a pending composite, a primitive chart, or a chart assembled from its
-    own layers and steps), so its whole chain is its chain and its tail is
-    its data.
+    A composite mark's statistics follow the caller's steps behind one
+    statistics marker (``_desugar._with_mark_statistics``), so a step the caller
+    writes after the mark resolved runs before them.
     """
-    if chart._chart_rows is not None:
-        return chart._chart_rows
-    transforms = list(chart._transforms or [])
-    return ChartRows(None, _chain_steps(transforms), True, len(transforms))
+    for i, step in enumerate(transforms):
+        if isinstance(step, _StatisticsMarker):
+            return i
+    return len(transforms)
 
 
-def _resolved_chart_rows(pre, resolved) -> ChartRows:
-    """Return the data record of *resolved*, the chart *pre*'s pending mark resolved into.
-
-    The resolution appends the mark's statistics after *pre*'s own steps,
-    so *pre*'s record still names the chart's data; it stops being the tail
-    when an appended step advances the chain.
-    """
-    rows = _chart_rows_of(pre)
-    appended = list(resolved._transforms or [])[len(pre._transforms or []) :]
-    if any(_advances_chain(t) for t in appended):
-        return replace(rows, at_tail=False)
-    return rows
-
-
-def _settle_chart_data(layers: list, chart) -> tuple[list, list]:
-    """Point each layer holding the chart-data role at *chart*'s data.
-
-    When the record is ``at_tail`` the layers read the pipeline tail as they
-    are. Otherwise one named ``_Branch`` runs the chart's chain over the
-    record's input, and every role layer reads it with ``reads_chart_data``
-    set. A chain with no step runs a named identity, so the branch publishes
-    its input unchanged. Returns the layers, role cleared, and the branches
-    for the caller to add as named steps.
-
-    A layer reading the chart's data through a named output takes its
-    x/y/x2/y2 from the written bindings of the chart that owns it when it
-    settles (see ``ferrum.chart._written_bindings``), never from the
-    resolved encoding a composite mark rewrote, so its ``positional_source``
-    is cleared here and its caller marks it ``"written"``: ``Chart.to_spec``
-    for the chart's own layers, and ``Chart.__add__`` for a right operand's,
-    which fills them from that operand before the composition's written
-    bindings fill what it never wrote.
-    """
-    if not any(layer.chart_data for layer in layers):
-        return layers, []
-    rows = _chart_rows_of(chart)
-    if rows.at_tail:
-        return [replace(layer, chart_data=False) for layer in layers], []
-    branch = _Branch("", rows.input, list(rows.steps))
-    branch.name = f"_auto_{id(branch):x}"
-    if not branch.transforms:
-        branch.transforms = [_source_identity(f"{branch.name}_rows")]
-    settled = [
-        replace(
-            layer,
-            chart_data=False,
-            data_source=branch.name,
-            reads_chart_data=True,
-            positional_source=None,
-        )
-        if layer.chart_data
-        else layer
-        for layer in layers
-    ]
-    return settled, [branch]
+def _split_chain(transforms: list) -> tuple[tuple, tuple]:
+    """*transforms* as ``(the caller's steps, the statistics its mark lowered)``, sentinels and markers dropped."""
+    steps = _chain_steps(transforms)
+    at = _statistics_start(list(steps))
+    return steps[:at], tuple(s for s in steps[at:] if not isinstance(s, _StatisticsMarker))
 
 
 def _same_step(a: object, b: object) -> bool:
@@ -322,24 +244,14 @@ def _advances_chain(step: object) -> bool:
 
     Named steps (a ``_NamedTransform``, a ``_Branch``, a dict or transform
     object carrying its own ``name``) publish beside the chain and leave the
-    tail where it was.
+    tail where it was; a composed copy advances as its step does.
     """
     if isinstance(step, (_NamedTransform, _Branch, _StatisticsMarker)):
         return False
+    if isinstance(step, _ComposedStep):
+        return _advances_chain(step.step)
     entry = step if isinstance(step, dict) else _transforms_to_json_list_named([step])[0]
     return entry.get("name") is None
-
-
-def _first_chain_step(transforms: list) -> int:
-    """Index of the first unnamed step in *transforms*, or its length when there is none.
-
-    Every step inserted at or before this index reads the pipeline's original
-    batch, because no unnamed step has run yet.
-    """
-    for i, step in enumerate(transforms):
-        if _advances_chain(step):
-            return i
-    return len(transforms)
 
 
 def _layer_pending_aggregates(layer: _Layer) -> list[_PendingAggregate]:
@@ -353,64 +265,56 @@ def _layer_pending_bins(layer: _Layer) -> list[_PendingBin]:
 
 
 def _layer_step(layer: _Layer, transform: object, name: str) -> "_NamedTransform | _Branch":
-    """The named step a layer's own aggregate or bin runs as.
+    """The named step a layer's own aggregate or bin runs as, inside the chain of the rows it reads.
 
-    A layer reading the pipeline tail (no ``data_source``) gets a plain named
-    step, which reads that tail.  A layer that reads a named output gets a
-    one-step ``_Branch`` over that output, so the aggregate or bin sees the
-    rows the layer draws rather than the tail of another operand's chain.
-    *transform* itself must be unnamed for the branch case, so it advances
-    the branch's chain.
+    A layer reading its chain's tail (no ``data_source``) gets a plain named
+    step, which reads that tail. A layer that reads a named output of its
+    chain gets a one-step ``_Branch`` over that output, so the aggregate or
+    bin sees the rows the layer draws. *transform* itself must be unnamed
+    for the branch case, so it advances the branch's chain.
     """
     if layer.data_source is None:
         return _NamedTransform(transform, name)
     return _Branch(name, layer.data_source, _with_statistics_marker([transform]))
 
 
+@dataclass(frozen=True)
+class _LayerStatistic:
+    """The step a layer's encoding statistic runs as (:func:`_resolve_layer_statistics`)."""
+
+    step: "_NamedTransform | _Branch"
+    bins: bool
+
+
 def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
-    """Resolve each layer's encoding statistic into a named chart-level transform.
+    """Resolve each layer's encoding statistic into a named step of the chain it reads.
 
     The renderer never executes per-layer transforms on their own; a layer
-    reads its input batch from a *named* chart-level transform via
-    ``data_source``. So for every layer whose effective encoding
-    (:func:`_effective_encoding` over *chart*'s encoding) carries an
-    ``aggregate=`` or a ``bin=``, its own or one it inherits whole from its
-    parent, this builds the layer's statistic plan
-    (:func:`~ferrum._encode_lowering._statistic_plan`, grouped by that
-    encoding plus *chart*'s facet fields), adds the plan's one ``Aggregate``
-    or ``Bin`` as a named step, points the layer's ``data_source`` at it and
-    draws each re-pointed channel from the step's output columns.
+    reads its input batch from a *named* transform via ``data_source``. So
+    for every layer whose effective encoding (:func:`_effective_encoding`
+    over *chart*'s encoding) carries an ``aggregate=`` or a ``bin=``, its
+    own or one it inherits whole from its parent, this builds the layer's
+    statistic plan (:func:`~ferrum._encode_lowering._statistic_plan`,
+    grouped by that encoding plus *chart*'s facet fields), builds the plan's
+    one ``Aggregate`` or ``Bin`` as a named step (:func:`_layer_step`),
+    points the layer's ``data_source`` at it and draws each re-pointed
+    channel from the step's output columns.
 
     Each computing layer gets its OWN named step, so two layers compute
     their statistics independently, each at the grain its own effective
     encoding gives it. A binning layer's aggregates fold into its ``Bin``.
-
-    A layer that already carries a ``data_source`` (a ``+`` operand routed to
-    its own chain or to the source) computes over that named output: its
-    step is a ``_Branch`` over ``data_source`` (see :func:`_layer_step`), and
-    re-pointing the layer's ``data_source`` keeps the
-    ``inherit_non_positional`` routing. Layers computing nothing pass
-    through unchanged.
-
-    Parameters
-    ----------
-    layers :
-        The chart's resolved ``_Layer`` list.
-    chart :
-        The chart the layers belong to, whose encoding is their parent.
+    The layers' addresses are relative to the chain each reads, which places
+    the step (``ferrum._compose.lower_operands``).
 
     Returns
     -------
-    (new_layers, named_transforms)
-        ``new_layers`` is the layer list with computing layers rewritten;
-        ``named_transforms`` the steps to add to the chart-level pipeline,
-        every ``Aggregate`` before every ``Bin`` (empty when no layer
-        computes). The steps reading the chart's chain sit behind one
-        statistics marker; a branch carries its own.
+    (new_layers, statistics)
+        ``new_layers`` is the layer list with computing layers re-pointed;
+        ``statistics`` holds, per layer, its :class:`_LayerStatistic`, or
+        ``None`` for a layer computing nothing.
     """
     new_layers: list = []
-    aggregate_steps: list = []
-    bin_steps: list = []
+    statistics: list = []
     for i, layer in enumerate(layers):
         effective = _effective_encoding(layer, chart._encoding)
         plan = _statistic_plan(effective, chart._facet)
@@ -419,20 +323,17 @@ def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
             # Inside a branch the Bin must stay unnamed, so it advances the
             # branch's own chain and its output is what the branch publishes.
             step = plan.step(name=name if layer.data_source is None else None)
-            bin_steps.append(_layer_step(layer, step, name))
+            statistics.append(_LayerStatistic(_layer_step(layer, step, name), bins=True))
         elif plan.aggregates:
             name = f"_layer_agg_{i}"
-            aggregate_steps.append(_layer_step(layer, plan.step(), name))
+            statistics.append(_LayerStatistic(_layer_step(layer, plan.step(), name), bins=False))
         else:
             new_layers.append(layer)
+            statistics.append(None)
             continue
         carried = _carried_bindings(layer, chart._encoding, plan.encoding)
         new_layers.append(replace(_with_carried(layer, carried), data_source=name))
-
-    steps = aggregate_steps + bin_steps
-    if any(not isinstance(step, _Branch) for step in steps):
-        steps = _with_statistics_marker(steps)
-    return new_layers, steps
+    return new_layers, statistics
 
 
 _POSITIONAL = ("x", "y", "x2", "y2")
@@ -456,8 +357,9 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
     :func:`~ferrum.encoding._aliases.resolved_channel`), shadows the
     parent's. Every other parent binding arrives whole: field, type,
     aggregate, bin, scale and title. A layer reading a named output
-    (``data_source``) takes no positional channel from *parent*, as Rust's
-    ``inherit_non_positional`` gives it none; its x/y fallback is copied onto
+    (:func:`~ferrum._layer.reads_named_output`) takes no positional channel
+    from *parent*, as Rust's ``inherit_non_positional`` gives it none; its
+    x/y fallback is copied onto
     it by ``ferrum.chart._fill_chart_positional``. A parent field names the
     same-named column of the rows the layer reads. A ``None`` value binds
     nothing, so the parent's binding arrives as for a channel the layer
@@ -474,11 +376,18 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
     # A channel the layer binds under the parent's own spelling keeps the
     # parent's position in the result (the layer's value replaces it below),
     # so the order the effective groupby reads is the parent's, then the
-    # layer's own additions.
+    # layer's own additions. That holds for a positional channel copied onto
+    # a layer reading its chain's tail too; a layer reading a named output
+    # takes no other positional channel from the parent.
+    named = reads_named_output(layer)
     inherited = {
         channel: value
         for channel, value in parent.items()
-        if (layer.data_source is None or channel not in _POSITIONAL)
+        if (
+            not named
+            or channel not in _POSITIONAL
+            or (layer.data_source is None and channel in bound)
+        )
         and (channel in bound or resolved_channel(channel) not in own)
     }
     offered = [channel for channel in _POSITIONAL if channel in inherited and channel not in bound]
@@ -638,11 +547,7 @@ def _layers_over_parent(layers: list, parent: dict, coord: object = None) -> lis
         if positional:
             listed = tuple(dict.fromkeys([*layer.inherited_positional, *positional]))
             layer = replace(layer, inherited_positional=listed)
-        if (
-            layer.data_source is None
-            and layer.positional_source is None
-            and any(_encoding_statistics(effective))
-        ):
+        if not reads_named_output(layer) and any(_encoding_statistics(effective)):
             layer = replace(layer, positional_source="encoding")
         out.append(layer)
     return out
@@ -685,103 +590,6 @@ def _statistic_columns(encoding: dict) -> set:
     return columns
 
 
-def _record_columns(data, rows: ChartRows) -> list[str] | None:
-    """The columns of the data record *rows* over the frame *data*, when known; else ``None``.
-
-    Known when no step of the record advances the chain: then they are the
-    record's own ``columns`` (a composition's left operand's), else, when
-    the record starts from the source, *data*'s columns. An encoding
-    aggregate or bin is computed per layer and is no chain step. Rows a
-    user's ``.transform(...)`` step produced are the engine's to know.
-    """
-    if data is None or any(_advances_chain(t) for t in rows.steps):
-        return None
-    if rows.columns is not None:
-        return list(rows.columns)
-    if rows.input is not None:
-        return None
-    return list(data.columns)
-
-
-def _known_chart_data_columns(chart) -> list[str] | None:
-    """The columns of *chart*'s data, when Python knows them; else ``None``.
-
-    Read off the chart's data record (:func:`_chart_rows_of`) by
-    :func:`_record_columns`: on a ``+`` composition they are its left
-    operand's, never the combined frame's.
-    """
-    return _record_columns(chart._data, _chart_rows_of(chart))
-
-
-def _known_columns(layer: _Layer, chart) -> list[str] | None:
-    """The columns of the rows *layer* reads, when Python knows them; else ``None``.
-
-    A layer reading its chart's data (``chart_data`` / ``reads_chart_data``)
-    reads the chart's data record (:func:`_known_chart_data_columns`). A
-    layer reading the chart's tail reads the chart's chain: known when no
-    step of it advances, and then the chart's data columns. A layer reading
-    an operand's named output is the engine's to know.
-    """
-    if layer.chart_data or layer.reads_chart_data:
-        return _known_chart_data_columns(chart)
-    if chart._data is None or layer.data_source is not None:
-        return None
-    if any(_advances_chain(t) for t in _chain_steps(list(chart._transforms or []))):
-        return None
-    return list(chart._data.columns)
-
-
-def _refuse_missing_statistic_inputs(layers: list, chart) -> None:
-    """Refuse a per-layer statistic whose input or groupby column the layer's rows lack.
-
-    Each layer's statistic is read off its effective encoding over *chart*'s
-    (:func:`_effective_encoding`), so a statistic it inherits from its parent
-    is checked over the rows it reads too. Checked where Python knows those
-    rows (:func:`_known_columns`). A missing column is voiced by the render
-    gate's own message (``ferrum._core.layer_unknown_column_message``), naming
-    a layer a figure or composite mark built by that call (``_Layer.entry``)
-    as the gate does: the
-    statistic remedy when it is another layer's statistic output or a column
-    the chart's composite mark binds (one its layers reading a named output
-    draw), else the plain message. Any other layer is left to the transform
-    stage.
-    """
-    from ferrum._core import layer_unknown_column_message
-
-    effective = [_effective_encoding(layer, chart._encoding) for layer in layers]
-    statistics: set = set()
-    for layer, encoding in zip(layers, effective):
-        statistics |= _statistic_columns(encoding)
-        if (
-            chart._composite_kind is not None
-            and layer.data_source is not None
-            and not layer.reads_chart_data
-        ):
-            statistics |= {
-                ch.field for ch in layer.encoding.values() if isinstance(ch, ChannelBase)
-            }
-    for i, (layer, encoding) in enumerate(zip(layers, effective)):
-        aggregates, bins = _encoding_statistics(encoding)
-        if not aggregates and not bins:
-            continue
-        columns = _known_columns(layer, chart)
-        if columns is None:
-            continue
-        inputs = {a.field for a in aggregates if a.field} | {b.field for b in bins}
-        inputs |= set(_statistic_plan(encoding, chart._facet).groupby)
-        missing = inputs - set(columns)
-        # A grouping-only color is refused under the spelling it was bound as.
-        for channel, value in _expand_grouping(encoding).items():
-            field = value.field if isinstance(value, ChannelBase) else value
-            if field in missing:
-                remedy = "statistic" if field in statistics else "plain"
-                raise ValueError(
-                    layer_unknown_column_message(
-                        i, channel, field, remedy, layer.independent_y, entry=layer.entry
-                    )
-                )
-
-
 def _transforms_to_json_list_named(transforms: list) -> list:
     """Serialize a mixed transform list to the Rust ``TransformSpec`` wire shape.
 
@@ -797,8 +605,12 @@ def _transforms_to_json_list_named(transforms: list) -> list:
       resolution and ``+`` composition.  These are serialized via a
       ``ChartSpec`` round-trip (the only way to reach their serde shape).
     * **A** :class:`_Branch` — serialized as
-      ``{"type": "branch", "name", "input", "transforms"}`` with its own
-      sub-chain serialized by this same function.
+      ``{"type": "branch", "name", "input", "transforms"}`` (plus ``frame``
+      when it carries one) with its own sub-chain serialized by this same
+      function.
+    * **A** :class:`_ComposedStep` — serialized as
+      ``{"type": "composed", "group", "step"}``, its step by this same
+      function.
 
     A dict or PyO3 entry may be wrapped in a :class:`_NamedTransform`, whose
     ``name`` is injected into the serialized entry.  Mixing named and unnamed in
@@ -831,16 +643,27 @@ def _transforms_to_json_list_named(transforms: list) -> list:
             flush()
             result.append(dict(_STATISTICS_MARKER_WIRE))
             continue
-        if isinstance(t, _Branch):
+        if isinstance(t, _ComposedStep):
             flush()
             result.append(
                 {
-                    "type": "branch",
-                    "name": t.name,
-                    "input": t.input,
-                    "transforms": _transforms_to_json_list_named(t.transforms),
+                    "type": "composed",
+                    "group": t.group,
+                    "step": _transforms_to_json_list_named([t.step])[0],
                 }
             )
+            continue
+        if isinstance(t, _Branch):
+            flush()
+            entry = {
+                "type": "branch",
+                "name": t.name,
+                "input": t.input,
+                "transforms": _transforms_to_json_list_named(t.transforms),
+            }
+            if t.frame is not None:
+                entry["frame"] = t.frame.wire()
+            result.append(entry)
             continue
         inner = t.transform if isinstance(t, _NamedTransform) else t
         if isinstance(inner, dict):

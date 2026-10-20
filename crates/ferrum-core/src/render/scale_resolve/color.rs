@@ -123,7 +123,7 @@ pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
-    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
+    transform_lineages: &crate::transform::run::OutputLineages,
     theme: &ThemeInputs,
     grouping_area: Option<usize>,
     facet_shared: bool,
@@ -163,7 +163,7 @@ pub fn build_color_scale(
         let mut warnings = Vec::new();
         let kind = if binned { ColorReads::Binned } else { ColorReads::Kind { categorical: false } };
         let reads = admitted_color_reads(layer_reads, c_enc, kind, primary_batch, transform_outputs, &mut warnings)?;
-        let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, transform_origins, &mut warnings)?;
+        let scale = raster_cell_scale(Some(c_enc), &reads, composite_domain, theme, primary_batch, transform_outputs, transform_lineages, &mut warnings)?;
         return Ok((scale, warnings));
     }
     // The column that decides the kind: the establishing layer's, read from
@@ -250,20 +250,20 @@ pub fn build_color_scale(
         // A quantile color's cut-points are taken from the values every
         // admitted layer draws, as the extent above is. A binned color's
         // edges are taken from the rows its bin-grouped statistics consume
-        // ([`binned_color_values`]; on an unlayered spec, the origin its run
-        // published for the chart rows), the same before and after they
-        // group by the edges.
+        // ([`binned_color_values`]; on an unlayered spec, the rows its run
+        // recorded in the chart rows' lineage), the same before and after
+        // they group by the edges.
         let sample = || match (composite_samples(composite_domain), layer_reads) {
             (Some(shared), _) => shared,
             (None, []) => column_sample(
-                transform_origins
+                transform_lineages
                     .get(FINAL_OUTPUT_KEY)
-                    .and_then(|origin| origin.rows_of(&c_enc.field))
+                    .and_then(|origin| origin.binned_rows(&c_enc.field))
                     .filter(|_| binned)
                     .unwrap_or_else(|| shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared)),
                 &c_enc.field,
             ),
-            (None, reads) if binned => binned_color_values(reads, primary_batch, transform_outputs, transform_origins, facet_shared),
+            (None, reads) if binned => binned_color_values(reads, primary_batch, transform_outputs, transform_lineages, facet_shared),
             (None, reads) => aux_numeric_values(reads, primary_batch, transform_outputs, facet_shared),
         };
         if let Some((buckets, warnings)) =
@@ -1117,7 +1117,7 @@ pub(in crate::render) fn raster_cell_scale(
     theme: &ThemeInputs,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
-    transform_origins: &crate::transform::color_bin_group::BinnedOrigins,
+    transform_lineages: &crate::transform::run::OutputLineages,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<Option<ColorScale>, RenderError> {
     let numeric = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
@@ -1134,7 +1134,7 @@ pub(in crate::render) fn raster_cell_scale(
     if let Some(enc) = binding {
         let sample = || {
             composite_samples(composite_domain).unwrap_or_else(|| match enc.color_bin() {
-                Some(_) => binned_color_values(reads, primary_batch, transform_outputs, transform_origins, false),
+                Some(_) => binned_color_values(reads, primary_batch, transform_outputs, transform_lineages, false),
                 None => aux_numeric_values(reads, primary_batch, transform_outputs, false),
             })
         };

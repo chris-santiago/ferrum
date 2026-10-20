@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 import ferrum as fe
+from tests._wire_steps import all_steps
 
 
 def test_all_8_functions_importable():
@@ -50,17 +51,17 @@ class TestDisplot:
         d = json.loads(chart.to_spec().to_json())
         # Histogram desugars to mark_bar with a Bin transform.
         assert d["mark"] == "bar"
-        assert any(t.get("type") == "bin" for t in d.get("transforms", []))
+        assert any(t.get("type") == "bin" for t in all_steps(d))
 
     def test_kde(self, iris_like):
         chart = fe.displot(iris_like, x="sepal_length", kind="kde")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "kde" for t in d.get("transforms", []))
+        assert any(t.get("type") == "kde" for t in all_steps(d))
 
     def test_ecdf_uses_cumulative_bin(self, iris_like):
         chart = fe.displot(iris_like, x="sepal_length", kind="ecdf")
         d = json.loads(chart.to_spec().to_json())
-        bin_t = next((t for t in d.get("transforms", []) if t.get("type") == "bin"), None)
+        bin_t = next((t for t in all_steps(d) if t.get("type") == "bin"), None)
         assert bin_t is not None
         assert bin_t.get("cumulative") is True
 
@@ -88,7 +89,7 @@ class TestDisplot:
     def test_cumulative_param_threads_to_bin(self, iris_like):
         chart = fe.displot(iris_like, x="sepal_length", cumulative=True)
         d = json.loads(chart.to_spec().to_json())
-        bin_t = next(t for t in d.get("transforms", []) if t.get("type") == "bin")
+        bin_t = next(t for t in all_steps(d) if t.get("type") == "bin")
         assert bin_t["cumulative"] is True
 
     def test_renders_e2e(self, iris_like):
@@ -110,7 +111,7 @@ class TestDisplot:
         # column as Kde.groupby so the output retains it for color encoding.
         chart = fe.displot(iris_like, x="sepal_length", hue="species", kind="kde")
         d = json.loads(chart.to_spec().to_json())
-        kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
+        kde_t = next(t for t in all_steps(d) if t.get("type") == "kde")
         assert kde_t.get("groupby") == ["species"]
         # End-to-end render must not raise and must produce SVG.
         assert "<svg" in chart.to_svg()
@@ -126,7 +127,7 @@ class TestDisplot:
             )
         )
         d = json.loads(chart.to_spec().to_json())
-        kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
+        kde_t = next(t for t in all_steps(d) if t.get("type") == "kde")
         assert kde_t.get("groupby") == ["species"]
 
     def test_mark_histogram_horizontal_orientation(self, iris_like):
@@ -181,22 +182,22 @@ class TestCatplot:
     def test_swarm(self, cat_data):
         chart = fe.catplot(cat_data, x="group", y="value", kind="swarm")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "swarm" for t in d.get("transforms", []))
+        assert any(t.get("type") == "swarm" for t in all_steps(d))
 
     def test_box(self, cat_data):
         chart = fe.catplot(cat_data, x="group", y="value", kind="box")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "box_stats" for t in d.get("transforms", []))
+        assert any(t.get("type") == "box_stats" for t in all_steps(d))
 
     def test_violin(self, cat_data):
         chart = fe.catplot(cat_data, x="group", y="value", kind="violin")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "violin" for t in d.get("transforms", []))
+        assert any(t.get("type") == "violin" for t in all_steps(d))
 
     def test_boxen(self, cat_data):
         chart = fe.catplot(cat_data, x="group", y="value", kind="boxen")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "letter_value" for t in d.get("transforms", []))
+        assert any(t.get("type") == "letter_value" for t in all_steps(d))
 
     def test_point(self, cat_data):
         """point is a LAYERED estimate: a CI whisker under one mean marker.
@@ -209,7 +210,7 @@ class TestCatplot:
         chart = fe.catplot(cat_data, x="group", y="value", kind="point")
         d = json.loads(chart.to_spec().to_json())
         assert [ly["mark"] for ly in d["layers"]] == ["rule", "point"]
-        assert any(t["type"] == "summary" for t in d["transforms"])
+        assert any(t["type"] == "summary" for t in all_steps(d))
         assert all(ly["data_source"] == "summary" for ly in d["layers"])
         assert chart.to_svg().count("<circle") == 3
 
@@ -218,7 +219,7 @@ class TestCatplot:
         chart = fe.catplot(cat_data, x="group", y="value", kind="bar")
         d = json.loads(chart.to_spec().to_json())
         assert [ly["mark"] for ly in d["layers"]] == ["bar", "rule"]
-        assert any(t["type"] == "summary" for t in d["transforms"])
+        assert any(t["type"] == "summary" for t in all_steps(d))
         assert all(ly["data_source"] == "summary" for ly in d["layers"])
         svg = chart.to_svg()
         assert len([r for r in re.findall(r"<rect[^/]*/>", svg) if 'fill="#2563eb"' in r]) == 3
@@ -227,7 +228,7 @@ class TestCatplot:
         chart = fe.catplot(cat_data, x="group", kind="count")
         d = json.loads(chart.to_spec().to_json())
         assert d["mark"] == "bar"
-        assert any(t.get("type") == "aggregate" for t in d.get("transforms", []))
+        assert any(t.get("type") == "aggregate" for t in all_steps(d))
 
     def test_dodge_with_hue(self, cat_data):
         """dodge=True offsets EVERY layer of the estimate, not the chart.
@@ -343,7 +344,7 @@ class TestLmplot:
         chart = fe.lmplot(reg_data, x="x", y="y", method="loess")
         d = json.loads(chart.to_spec().to_json())
         smooth_t = next(
-            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            (t for t in all_steps(d) if t.get("type") == "smooth"),
             None,
         )
         assert smooth_t is not None
@@ -352,23 +353,23 @@ class TestLmplot:
     def test_logistic_method(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="logistic")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "logistic" for t in d.get("transforms", []))
+        assert any(t.get("type") == "logistic" for t in all_steps(d))
 
     def test_glm_method(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="glm")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "glm" for t in d.get("transforms", []))
+        assert any(t.get("type") == "glm" for t in all_steps(d))
 
     def test_robust_method(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="robust")
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "robust" for t in d.get("transforms", []))
+        assert any(t.get("type") == "robust" for t in all_steps(d))
 
     def test_x_bins_estimator(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", x_bins=5, x_estimator="mean")
         d = json.loads(chart.to_spec().to_json())
         smooth_t = next(
-            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            (t for t in all_steps(d) if t.get("type") == "smooth"),
             None,
         )
         assert smooth_t is not None
@@ -432,7 +433,7 @@ class TestResidplot:
         )
         d = json.loads(chart.to_spec().to_json())
         smooth_t = next(
-            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            (t for t in all_steps(d) if t.get("type") == "smooth"),
             None,
         )
         assert smooth_t is not None
@@ -451,7 +452,7 @@ class TestResidplot:
         )
         d = json.loads(chart.to_spec().to_json())
         robust_t = next(
-            (t for t in d.get("transforms", []) if t.get("type") == "robust"),
+            (t for t in all_steps(d) if t.get("type") == "robust"),
             None,
         )
         assert robust_t is not None
@@ -622,7 +623,7 @@ class TestHeatmap:
     def test_default(self, heat_data):
         chart = fe.heatmap(heat_data)
         d = json.loads(chart.to_spec().to_json())
-        assert any(t.get("type") == "unpivot" for t in d.get("transforms", []))
+        assert any(t.get("type") == "unpivot" for t in all_steps(d))
 
     def test_annot_true_layers(self, heat_data):
         chart = fe.heatmap(heat_data, annot=True)
@@ -693,7 +694,7 @@ class TestClustermap:
         # Both linkages, then a row Reorder and a column Reorder, each reading
         # its linkage's `order` output, then an Unpivot with no `value_vars`
         # so its blocks follow the permuted column order.
-        transforms = d.get("transforms", [])
+        transforms = [t for t in all_steps(d) if t != {"type": "identity", "statistics": True}]
         assert [t.get("type") for t in transforms] == [
             "linkage",
             "linkage",
@@ -730,7 +731,7 @@ class TestClustermap:
     def test_z_score_threads_to_linkage(self, cluster_data):
         cm = fe.clustermap(cluster_data, z_score="rows")
         d = json.loads(cm.heatmap.to_spec().to_json())
-        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        link_t = next(t for t in all_steps(d) if t.get("type") == "linkage")
         assert link_t.get("z_score") == "rows"
 
     @pytest.mark.parametrize(
@@ -746,7 +747,7 @@ class TestClustermap:
         """
         cm = fe.clustermap(cluster_data, z_score=z_score)
         d = json.loads(cm.heatmap.to_spec().to_json())
-        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        link_t = next(t for t in all_steps(d) if t.get("type") == "linkage")
         assert link_t.get("z_score") == expected
         # Renders without error.
         svg = cm.to_svg()
@@ -759,7 +760,7 @@ class TestClustermap:
     def test_standard_scale_int_maps_to_axis_string(self, cluster_data, standard_scale, expected):
         cm = fe.clustermap(cluster_data, standard_scale=standard_scale)
         d = json.loads(cm.heatmap.to_spec().to_json())
-        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        link_t = next(t for t in all_steps(d) if t.get("type") == "linkage")
         assert link_t.get("standard_scale") == expected
         svg = cm.to_svg()
         assert "<svg" in svg[:200]
@@ -777,7 +778,7 @@ class TestClustermap:
     def test_method_metric_threads_to_linkage(self, cluster_data):
         cm = fe.clustermap(cluster_data, method="average", metric="cosine")
         d = json.loads(cm.heatmap.to_spec().to_json())
-        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        link_t = next(t for t in all_steps(d) if t.get("type") == "linkage")
         assert link_t.get("method") == "average"
         assert link_t.get("metric") == "cosine"
 
@@ -870,18 +871,18 @@ class TestJointplot:
         d = json.loads(jc.center.to_spec().to_json())
         # 2D kde routes through desugar_contour → layered output.
         assert d.get("layers") is not None or any(
-            t.get("type") in ("kde2d", "contour") for t in d.get("transforms", [])
+            t.get("type") in ("kde2d", "contour") for t in all_steps(d)
         )
 
     def test_hist_center_uses_bin2d(self, joint_data):
         jc = fe.jointplot(joint_data, x="x", y="y", kind="hist")
         d = json.loads(jc.center.to_spec().to_json())
-        assert any(t.get("type") == "bin_2d" for t in d.get("transforms", []))
+        assert any(t.get("type") == "bin_2d" for t in all_steps(d))
 
     def test_hex_center(self, joint_data):
         jc = fe.jointplot(joint_data, x="x", y="y", kind="hex")
         d = json.loads(jc.center.to_spec().to_json())
-        assert any(t.get("type") == "hex" for t in d.get("transforms", []))
+        assert any(t.get("type") == "hex" for t in all_steps(d))
 
     def test_reg_center(self, joint_data):
         jc = fe.jointplot(joint_data, x="x", y="y", kind="reg")

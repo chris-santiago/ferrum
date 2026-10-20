@@ -289,7 +289,6 @@ pub enum LayoutError {
         side: &'static str,
         viewport_dim: f64,
     },
-    EmptyFacetGroups,
 }
 
 impl std::fmt::Display for LayoutError {
@@ -308,9 +307,6 @@ impl std::fmt::Display for LayoutError {
                 f,
                 "padding {side}={padding} exceeds viewport dimension {viewport_dim}"
             ),
-            LayoutError::EmptyFacetGroups => {
-                write!(f, "facet specified but facet_groups input is empty")
-            }
         }
     }
 }
@@ -3457,9 +3453,6 @@ pub fn compute_layout(
                 ));
             }
             _ => {}
-        }
-        if facet_groups.is_empty() {
-            return Err(LayoutError::EmptyFacetGroups);
         }
     }
 

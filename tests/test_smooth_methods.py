@@ -38,6 +38,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._wire_steps import all_steps
 from ferrum import Smooth
 
 
@@ -48,12 +49,12 @@ def _xy(n: int = 20) -> pl.DataFrame:
 
 
 def _transform_method(chart: fm.Chart) -> object:
-    """The serialized `method` field of a chart's sole transform, read from
+    """The serialized `method` field of a chart's sole smooth step, read from
     the ChartSpec (not the rendered SVG) — the fastest, least-confounded
     way to observe what `desugar_smooth` actually forwarded to `Smooth`."""
-    spec = chart.to_spec()
-    transforms = json.loads(spec.to_json())["transforms"]
-    return transforms[0]["method"]
+    wire = json.loads(chart.to_spec().to_json())
+    (smooth,) = [t for t in all_steps(wire) if t["type"] == "smooth"]
+    return smooth["method"]
 
 
 # ---------------------------------------------------------------------------

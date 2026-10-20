@@ -45,6 +45,7 @@ import pytest
 import ferrum as fm
 from tests._svg_extents import value_axis_ladder, value_axis_ladders
 from tests._svg_rects import data_bar_rects, mark_groups, mark_layer, polylines, svg_elements
+from tests._wire_steps import all_steps
 from tests.test_plus_composes_transforms import DF, _N, H as H_VALUE, _box, _violin
 
 SY = fm.SecondaryY
@@ -605,13 +606,152 @@ def test_a_figures_layers_door_attaches_as_chart_layer_does():
     assert mark_layer(through_door.to_svg()) == mark_layer(through_layer.to_svg())
 
 
-def test_a_figure_assembled_charts_whole_chain_is_its_chain():
-    """A figure's own aggregate is its chain, so an attached label reads the counts."""
-    data = pl.DataFrame({"g": ["a", "b", "a", "a", "b", "a", "a", "b"]})
+#: Rows whose (g, h) and (g, f) groups have distinct counts.
+_COUNTED_G = pl.DataFrame(
+    {
+        "g": ["a", "b", "a", "a", "b", "a", "a", "b", "c", "c"],
+        "h": ["u", "v", "u", "v", "v", "u", "u", "u", "v", "u"],
+        "f": ["p", "q"] * 5,
+    }
+)
+_COUNT_LABELS: dict[str, Any] = {
+    "shorthand": {"text": "count()"},
+    "channel": {"text": fm.Text(aggregate="count")},
+}
+#: Each count plot door, and the columns each panel counts by.
+_COUNT_DOORS: dict[str, tuple[dict, list[str], str | None]] = {
+    "plain": ({}, ["g"], None),
+    "hue": ({"hue": "h"}, ["g", "h"], None),
+    "hue-dodged": ({"hue": "h", "dodge": True}, ["g", "h"], None),
+    "faceted": ({"col": "f"}, ["g"], "f"),
+}
+
+
+def _panel_counts(chart: Any) -> list[tuple[list[float], list[float]]]:
+    """Per interactive panel: the bars' heights and the labels' values, each sorted."""
+    out = []
+    for panel in json.loads(chart.interactive().scene_json)["panels"]:
+        bars: list[float] = []
+        labels: list[float] = []
+        for batch in panel["marks"]:
+            for tooltip in batch.get("tooltips") or []:
+                fields = {f["name"]: f["value"] for f in tooltip["fields"]}
+                if batch["kind"] == "bar":
+                    bars.append(float(fields["n"]))
+                elif batch["kind"] == "text":
+                    labels.append(float(fields["count_all"]))
+        out.append((sorted(bars), sorted(labels)))
+    return out
+
+
+@pytest.mark.parametrize("label", sorted(_COUNT_LABELS))
+@pytest.mark.parametrize("door", sorted(_COUNT_DOORS))
+def test_a_count_plot_label_draws_each_bars_count(door, label):
+    """``catplot(kind="count", layers=[text=count()])``: each panel's labels are its bars' heights.
+
+    The oracle is the row count per drawn group, from the frame. Rejects a
+    label counting at a coarser grain than the bars (one label per category
+    beside per-hue bars) or reading the bars' output column.
+    """
+    kwargs, by, facet = _COUNT_DOORS[door]
+    chart = fm.catplot(
+        _COUNTED_G,
+        x="g",
+        kind="count",
+        layers=[fm.Layer(mark="text", encoding=_COUNT_LABELS[label])],
+        **kwargs,
+    )
+    panels = (
+        [_COUNTED_G]
+        if facet is None
+        else [_COUNTED_G.filter(pl.col(facet) == value) for value in ("p", "q")]
+    )
+    expected = [sorted(float(n) for n in rows.group_by(by).len()["len"]) for rows in panels]
+    assert _panel_counts(chart) == [(counts, counts) for counts in expected]
+
+
+def test_a_count_plot_layer_naming_n_is_refused_with_the_count_label_remedy():
+    """``text="n"`` names no column: the count is ``y=count()``, so the remedy is ``text="count()"``."""
+    with pytest.raises(ValueError) as exc:
+        fm.catplot(
+            _COUNTED_G, x="g", kind="count", layers=[fm.Layer(mark="text", encoding={"text": "n"})]
+        )
+    assert str(exc.value) == (
+        "catplot(kind='count'): layers= binds text='n', but the count plot draws each bar's "
+        "count as y=count(), so there is no column 'n'; label each bar with text='count()' "
+        "(or fm.Text(aggregate='count')), which counts the rows the layer reads as each bar does"
+    )
+
+
+#: Other rows holding their own ``n``, one row per category.
+_OTHER_WITH_N = pl.DataFrame({"g": ["a", "b", "c"], "n": [7, 8, 9]})
+
+
+def test_a_count_plot_data_layer_whose_rows_hold_n_draws_them():
+    """Control: a ``Layer(data=)`` whose own rows hold ``n`` draws those rows as written."""
+    chart = fm.catplot(
+        _COUNTED_G,
+        x="g",
+        kind="count",
+        layers=[
+            fm.Layer(data=_OTHER_WITH_N, mark="text", encoding={"x": "g", "y": "n", "text": "n"})
+        ],
+    )
+    # The labels draw above the plot clip, after every axis and legend text.
+    labels = re.findall(r"<text[^>]*>([^<]*)</text>", chart.to_svg())[-3:]
+    assert sorted(labels) == ["7", "8", "9"]
+
+
+def test_a_count_plot_data_layer_lacking_n_is_refused_though_the_figures_rows_hold_it():
+    """The rows the layer reads are its own frame's: the figure's ``n`` is not theirs."""
+    with pytest.raises(ValueError) as exc:
+        fm.catplot(
+            _COUNTED_G.with_columns(pl.lit(1).alias("n")),
+            x="g",
+            kind="count",
+            layers=[
+                fm.Layer(
+                    data=_OTHER_WITH_N.drop("n"), mark="text", encoding={"x": "g", "text": "n"}
+                )
+            ],
+        )
+    assert str(exc.value).startswith("catplot(kind='count'): layers= binds text='n'")
+
+
+@pytest.mark.parametrize(("channel", "mark"), [("detail", "line"), ("shape", "point")])
+def test_a_count_plot_layer_binding_n_on_a_channel_taking_no_aggregate_gets_the_plain_refusal(
+    channel, mark
+):
+    """No ``aggregate=`` remedy where the channel refuses ``aggregate=``: the render's plain message."""
+    chart = fm.catplot(
+        _COUNTED_G, x="g", kind="count", layers=[fm.Layer(mark=mark, encoding={channel: "n"})]
+    )
+    with pytest.raises(ValueError) as exc:
+        chart.to_svg()
+    assert str(exc.value) == (
+        f"catplot: encoding '{channel}' references unknown column 'n' "
+        "(not present in that layer's data)"
+    )
+
+
+def test_a_count_plot_internal_layer_binding_n_is_refused_like_any_attached_layer():
+    """An internal ``_Layer`` passed to ``layers=`` is checked as a public ``Layer`` is."""
+    from ferrum._layer import _Layer
+
+    with pytest.raises(ValueError) as exc:
+        fm.catplot(
+            _COUNTED_G, x="g", kind="count", layers=[_Layer(mark="text", encoding={"text": "n"})]
+        )
+    assert str(exc.value).startswith("catplot(kind='count'): layers= binds text='n'")
+
+
+def test_a_count_plot_layer_naming_a_column_n_the_data_holds_draws_it():
+    """Control: a frame's own ``n`` column is the caller's, drawn as written."""
+    data = _COUNTED_G.with_columns(pl.lit(7.0).alias("n"))
     chart = fm.catplot(
         data, x="g", kind="count", layers=[fm.Layer(mark="text", encoding={"text": "n"})]
     )
-    assert re.findall(r"<text[^>]*>([^<]*)</text>", chart.to_svg())[-2:] == ["5", "3"]
+    assert set(re.findall(r"<text[^>]*>([^<]*)</text>", chart.to_svg())) >= {"7"}
 
 
 _NO_MUTATION_CALLS: dict[str, Callable[[fm.Chart], Any]] = {
@@ -635,9 +775,21 @@ _NO_MUTATION_CALLS: dict[str, Callable[[fm.Chart], Any]] = {
 )
 def test_no_door_mutates_the_callers_chart(base, call):
     chart = base()
-    before = (_wire(chart), copy.copy(chart._transforms), chart._chart_rows, chart._layers)
+    before = (
+        _wire(chart),
+        copy.copy(chart._transforms),
+        chart._operands,
+        chart._frames,
+        chart._layers,
+    )
     _NO_MUTATION_CALLS[call](chart).to_svg()
-    assert (_wire(chart), chart._transforms, chart._chart_rows, chart._layers) == before
+    assert (
+        _wire(chart),
+        chart._transforms,
+        chart._operands,
+        chart._frames,
+        chart._layers,
+    ) == before
 
 
 # ---------------------------------------------------------------------------
@@ -747,25 +899,29 @@ _JSON_DIGESTS = {
     "filtered-point-layer-line": "59f04ad9a65008584a7c10db1fb9bf1036a8a2498321c7971c12ce83229c8af6",
     "filtered-point+secondary": "6db2f7ac79e16b913d048e1e41c6cd2c20f0698d974dab068f63ff1ea628d908",
     "line+secondary-bar": "3120a59a390e3ded3ee669c3b491b521756aff6ef63bf29e8f9b90bec5e073d4",
-    "boxplot-layer-tick": "0eb98540cf35859da31024b464b860da85f7ab1871f1a8b182f97ba3fd22084e",
-    "violin-layer-tick": "7299afcc30b59070b446a4b3f989c9d7703fb2a63fd82b6e3d374e520f8c6e6f",
-    "smooth-band+secondary": "a017ff9d025631978ae40100d4e6beb92eb23e7c667980845eaaf1d4346e1ecd",
+    "boxplot-layer-tick": "837624cb5090256ff8d481b1b7ff259159f73192c1eb9083b282a3583a22c5af",
+    "violin-layer-tick": "cbb20d5c76b7fb8f684d3d5b78c93d7e1517cb1ba1ebd42048f96ff4b6d56f47",
+    "smooth-band+secondary": "c4cec8f19c26803966c4f21c39766bde63db237dee84d18362f58d13c43487a6",
     "swarm-layer-text": "018eaa033fcd4648f86e543d1f1a06f03ab9a09acdccb5438fe13ad5f2ecc443",
-    "same-frame-composition+secondary": "4a26913bd141094ce8fc892349334241c72eed7e399e1a065ab3837c47b791fd",
-    "same-frame-composition-layer-line": "aa855589e4516cbfcf31e1645c58af22b42db9e3ae2cd36606f63ed12979e570",
+    "same-frame-composition+secondary": "df270ca1ec6dd0e0d247533786598d40290d58f52172be5dad45cada89c4fa71",
+    "same-frame-composition-layer-line": "b3ff99269a0c13339e4ad6190900f526ad504bb9b6f80eef5ebce86d7a8fbe4f",
     "faceted-point+secondary": "aaf6cef5c01f57d17c064daedf33f5fa989f071b89ee5671b620efdf7b6e8853",
-    "layer-chart-independent-bar": "11542e32c0be6517dcf5e3b8afc7dbc18ccf174bfa31101b40ee85bc9987e27e",
-    # Each operand reads its own-rows branch, projected to its own frame's columns.
-    "composition-transform": "f6cb15c8c42c64750a73ed4d34dbc8c411d921e45f8328f0427772a793c17def",
-    "same-frame-composition-transform": "eed6f78eaaa652224a7d6d5d7fda0c114c6037ffce250bcdfac5386d5d4d0a29",
-    "flat-mean-bar": "5cf1f31799b8c2a33b12ff4275debacd3ea82caf3e4eb0585e21dabae93ac825",
-    "mean-bar+mean-point": "82bf37a8596924292c93f84787a1bda02898fcd60c8fbb367d3ceb1a0be3ed62",
+    "layer-chart-independent-bar": "9a23f515bc5a2c70e15b5cb918a532d5c3f8810aa1ffd91b88e8f47d874f92da",
+    # Each operand runs as one branch over its own frame. A composition's
+    # filter is a composed step copied into each operand chain it reaches,
+    # the left's here and not the other frame's; its render is pinned
+    # beside an oracle in
+    # test_a_controls_composition_step_draws_what_its_parts_draw_filtered.
+    "composition-transform": "1cbe1ae047b86c92c20d4999d0880fd955858c988ab5d49e7db0f8887cd1caca",
+    "same-frame-composition-transform": "cab22b75964ad0cb84897be582b99ee5c950980505533b638273c8bef09a6fad",
+    "flat-mean-bar": "2d162c1ff7e599abcb6e4880d6b6edd1c05829847402650c6a16da1317a6e0d4",
+    "mean-bar+mean-point": "1aee8ae29a47aa292be1d571d327729e54d6037489efac8bde22dae25f8bc48e",
     # The spec carries no selection fields in its tooltip: the render's
     # tooltip reader adds them where the rows hold them.
-    "plus-each-own-conditional": "a4b9ae1343bb3349235333d08145cf7de6b2f44cdf46fd6704defbfe9a5f5497",
-    "ungrouped-binned-count": "ee159220f7be8224dc4745e3986334e13822c1c87bec82b22f118d30329d9941",
+    "plus-each-own-conditional": "1eac3e0ab559a6ced86598eca5dfdb6fb03c6153e2138e6215c168652dc288cb",
+    "ungrouped-binned-count": "74ff073ed84e9a1416e76addcba55b61060cdbb75126878303a502f5f3d44233",
     # The y-only rule takes no binned x: an aggregate, not a second bin.
-    "ungrouped-binned-count-layer-rule": "5f0c778b676eb7ea9ddd79f97fdc8dc0add5cebc4818b96dcebb5b462f68b29d",
+    "ungrouped-binned-count-layer-rule": "c5669a521646f12a78dd6fc3f799bcfedcfdacef9b4ad88c326c8ae4b98096e0",
     "no-data-host-data-layer": "e9efaf8931203b579be8a46e221aa8fcbfcbf35c89319637170f3ae2dac2f232",
 }
 
@@ -798,18 +954,73 @@ def test_a_control_serializes_its_pinned_spec(case):
     assert _digest(_normalized_json(case)) == _JSON_DIGESTS[case]
 
 
-@pytest.mark.parametrize("case", list(_CONTROLS))
+def _drawn_marks(chart: Any) -> tuple[int, list[int]]:
+    """The points a chart draws, and each line's vertex count, sorted."""
+    marks = mark_layer(_quiet_svg(chart))
+    return marks.count("<circle"), sorted(len(points) for _, points in polylines(marks))
+
+
+def _quiet_svg(chart: Any) -> str:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return chart.to_svg()
+
+
+def _composition_filter() -> dict:
+    return fm.transform_filter("datum.y > 1")
+
+
+#: Each control that writes a step on a ``+`` composition, and its oracle:
+#: the standalone parts it draws. The step reaches the left operand and every
+#: operand over the composition's frame, never one over a different frame.
+_COMPOSED_STEP_PARTS: dict[str, Callable[[], tuple]] = {
+    "composition-transform": lambda: (fP().transform(_composition_filter()), P(df2)),
+    "same-frame-composition-transform": lambda: (
+        P().transform(_composition_filter()),
+        P2().transform(_composition_filter()),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_COMPOSED_STEP_PARTS))
+def test_a_controls_composition_step_draws_what_its_parts_draw_filtered(case):
+    """The pinned render is the oracle's: each reached part filtered, a different-frame part as written."""
+    got = _drawn_marks(_CONTROLS[case]())
+    parts = [_drawn_marks(part) for part in _COMPOSED_STEP_PARTS[case]()]
+    assert got == (sum(c for c, _ in parts), sorted(n for _, lines in parts for n in lines))
+
+
+#: The controls whose layer attached to a ``+`` composition reads the
+#: composition's data: its left operand's rows, published inside that
+#: operand's branch.
+_COMPOSITION_ATTACHED = {"same-frame-composition+secondary", "same-frame-composition-layer-line"}
+
+
+@pytest.mark.parametrize("case", sorted(set(_CONTROLS) - _COMPOSITION_ATTACHED))
 def test_a_control_never_flags_a_chart_data_reader(case):
     chart = _CONTROLS[case]()
     merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
     assert "reads_chart_data" not in merged.to_spec().to_json()
 
 
+@pytest.mark.parametrize("case", sorted(_COMPOSITION_ATTACHED))
+def test_a_layer_attached_to_a_composition_reads_its_left_operands_rows(case):
+    """The attached layer reads the rows the left operand's branch publishes, flagged as the chart's data."""
+    layers = _wire(_CONTROLS[case]())["layers"]
+    attached = layers[-1]
+    assert attached["data_source"] == "_operand_0__rows"
+    assert attached["reads_chart_data"] is True
+    assert all(not layer.get("reads_chart_data") for layer in layers[:-1])
+
+
 @pytest.mark.parametrize("case", sorted(_SECONDARY_CONTROLS))
 def test_a_secondary_control_lists_its_x_as_inherited(case):
     secondary = _secondary_of(_CONTROLS[case]())
     assert secondary["inherited_positional"] == ["x"]
-    assert "data_source" not in secondary
+    if case in _COMPOSITION_ATTACHED:
+        assert secondary["data_source"] == "_operand_0__rows"
+    else:
+        assert "data_source" not in secondary
 
 
 # ---------------------------------------------------------------------------
@@ -864,8 +1075,9 @@ def _expected(agg: str, by: list[str]) -> list[str]:
 
 
 def _steps(chart: Any, kind: str) -> list[dict]:
+    """The chart's pipeline steps of type *kind*, at any depth, in the order they are written."""
     merged = chart._build_merged() if isinstance(chart, fm.LayerChart) else chart
-    return [t for t in _wire(merged).get("transforms", []) if t["type"] == kind]
+    return [step for step in all_steps(_wire(merged)) if step["type"] == kind]
 
 
 @pytest.mark.parametrize("color", [None, "c"], ids=["by-g", "by-g-and-c"])

@@ -751,7 +751,7 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
     chart_resolved = (
         fm.Chart(sort_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
-    transform_repr = repr(chart_resolved._transforms[0])
+    transform_repr = repr(chart_resolved._transforms[1])  # after the statistics marker
     assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
         f"boxen sort='-y' must set a descending aggregate sort on the LetterValue "
         f"transform; got {transform_repr!r}"
@@ -2394,7 +2394,7 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
     chart_resolved = (
         fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
-    transform_repr = repr(chart_resolved._transforms[0])
+    transform_repr = repr(chart_resolved._transforms[1])  # after the statistics marker
     assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
         f"boxen sort='-y' on pandas input must set a descending aggregate sort on the "
         f"LetterValue transform; got {transform_repr!r}"
@@ -2442,7 +2442,7 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
     chart_resolved = (
         fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
-    transform_repr = repr(chart_resolved._transforms[0])
+    transform_repr = repr(chart_resolved._transforms[1])  # after the statistics marker
     assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
         f"boxen sort='-y' on PyArrow input must set a descending aggregate sort on the "
         f"LetterValue transform; got {transform_repr!r}"
@@ -3006,7 +3006,7 @@ def test_r2_boxen_aggregate_sort_on_transform(
         fm.Chart(_r2_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort=shorthand), y="val:Q")
     )._resolve_pending()
 
-    transform_repr = repr(chart._transforms[0])
+    transform_repr = repr(chart._transforms[1])  # after the statistics marker
     assert "LetterValueSort" in transform_repr and order_token in transform_repr, (
         f"boxen sort={shorthand!r} must carry a {order_token} aggregate sort on the "
         f"LetterValue transform; got {transform_repr!r}"
@@ -3041,7 +3041,7 @@ def test_r2_boxen_explicit_list_sort_uses_layer_path(_r2_boxen_df: pl.DataFrame)
     )._resolve_pending()
 
     # No aggregate sort on the transform for the explicit-list form.
-    transform_repr = repr(chart._transforms[0])
+    transform_repr = repr(chart._transforms[1])  # after the statistics marker
     assert "sort=None" in transform_repr, (
         f"explicit-list boxen sort must not set an aggregate transform sort; got {transform_repr!r}"
     )
@@ -3061,7 +3061,7 @@ def test_r2_boxen_horizontal_aggregate_sort(_r2_boxen_df: pl.DataFrame) -> None:
         .encode(x="val:Q", y=fm.Y("cat:N", sort="-x"))
     )._resolve_pending()
 
-    transform_repr = repr(chart._transforms[0])
+    transform_repr = repr(chart._transforms[1])  # after the statistics marker
     assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
         f"horizontal boxen Y(sort='-x') must carry a descending aggregate sort on the "
         f"LetterValue transform; got {transform_repr!r}"
@@ -3076,7 +3076,7 @@ def test_r2_boxen_horizontal_aggregate_sort(_r2_boxen_df: pl.DataFrame) -> None:
 def test_r2_boxen_no_sort_unchanged(_r2_boxen_df: pl.DataFrame) -> None:
     """Unsorted boxen sets no aggregate transform sort and no layer sort."""
     chart = (fm.Chart(_r2_boxen_df).mark_boxen().encode(x="cat:N", y="val:Q"))._resolve_pending()
-    transform_repr = repr(chart._transforms[0])
+    transform_repr = repr(chart._transforms[1])  # after the statistics marker
     assert "sort=None" in transform_repr, (
         f"unsorted boxen must not set an aggregate transform sort; got {transform_repr!r}"
     )

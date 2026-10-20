@@ -1536,24 +1536,47 @@ def _has_y_slot_axis(chart, y_slot: str) -> bool:
     )
 
 
-class TestAxisY2GridlinesCoord:
-    """#141 -- a lit secondary draws its gridlines only where the coordinate
-    system draws Cartesian axis chrome.
+#: The coordinate systems that move y off the vertical axis, so a secondary
+#: (independent) y axis has no place: a chart declaring one with an
+#: independent-y layer is refused (user ruling 2026-10-20).
+_Y2_REFUSING_COORDS = frozenset({"CoordFlip", "CoordPolar", "CoordGeo"})
 
-    A coordinate system that draws no Cartesian axes (polar, geo) owns no
-    secondary tick to rule a line at, so a lit ``axis_y2`` adds nothing;
-    every other one adds exactly one gridline per secondary tick. Which
-    coords draw axes is read off each render's own axis groups, not listed.
+
+def _independent_y_refusal(coord: str) -> str:
+    return (
+        f"SecondaryY (a layer with an independent y scale) is not supported under fm.{coord}: "
+        "its right y axis has no place once the coord moves y off the vertical axis; draw the "
+        "series on a Cartesian panel (put the categories on x and drop the coord), or draw it "
+        "on the shared y axis"
+    )
+
+
+class TestAxisY2GridlinesCoord:
+    """#141 -- a lit secondary rules its gridlines on every coordinate system that draws it.
+
+    Every public ``fm.Coord*`` class and no ``.coord()`` at all are crossed
+    with every route. A chart-level coord that moves y off the vertical axis
+    (``_Y2_REFUSING_COORDS``) refuses the independent-y secondary on every
+    route, static and interactive; every other one draws the secondary axis
+    and adds exactly one gridline per secondary tick when it is lit.
     """
+
+    def test_the_refusing_coords_are_public_coords(self):
+        assert _Y2_REFUSING_COORDS <= set(_Y2_COORDS)
 
     @pytest.mark.parametrize("route_name", sorted(_Y2_ROUTES))
     def test_both_outcomes_occur(self, y2_df, route_name):
+        """Some coords refuse and the rest draw the secondary axis: no coord renders without it."""
         route = _Y2_ROUTES[route_name]
-        outcomes = {
-            _has_y_slot_axis(_coord_cell(y2_df, route, coord), route.designated_slot)
-            for coord in _Y2_COORDS
-        }
-        assert outcomes == {True, False}
+        outcomes = set()
+        for coord in _Y2_COORDS:
+            try:
+                drawn = _has_y_slot_axis(_coord_cell(y2_df, route, coord), route.designated_slot)
+            except ValueError:
+                outcomes.add("refused")
+            else:
+                outcomes.add("drawn" if drawn else "missing")
+        assert outcomes == {"refused", "drawn"}
 
     @pytest.mark.parametrize("coord", _Y2_COORDS, ids=str)
     @pytest.mark.parametrize("route_name", sorted(_Y2_ROUTES))
@@ -1562,9 +1585,14 @@ class TestAxisY2GridlinesCoord:
         unlit = _coord_cell(y2_df, route, coord)
         lit = unlit.configure(axis_y2=fm.AxisConfig(grid=True))
         label = f"{route_name} x {coord}"
-        if not _has_y_slot_axis(lit, route.designated_slot):
-            _assert_adds_nothing(lit, unlit, label=label)
+        if coord in _Y2_REFUSING_COORDS:
+            for chart in (unlit, lit):
+                for render in (chart.to_svg, lambda chart=chart: chart.interactive().scene_json):
+                    with pytest.raises(ValueError) as refused:
+                        render()
+                    assert str(refused.value) == _independent_y_refusal(coord), label
             return
+        assert _has_y_slot_axis(lit, route.designated_slot), label
         ticks = [y for slot in route.all_slots for y in _y2_tick_ys(lit, y_slot=slot)]
         _assert_adds_exactly_the_ticks(lit, unlit, ticks, label=label)
 

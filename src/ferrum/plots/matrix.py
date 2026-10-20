@@ -980,7 +980,7 @@ def _heatmap_build(
         # Data already melted and filtered — no Unpivot transform needed.
         chart = Chart(melted_data).mark_rect(**rect_kwargs).encode(**enc)
     else:
-        chart = Chart(data).transform(unpivot).mark_rect(**rect_kwargs).encode(**enc)
+        chart = Chart(data)._with_statistics(unpivot).mark_rect(**rect_kwargs).encode(**enc)
 
     # square=True → fix width=height proportions.
     if square:
@@ -1003,7 +1003,7 @@ def _heatmap_build(
         else:
             text_layer = (
                 Chart(data)
-                .transform(unpivot)
+                ._with_statistics(unpivot)
                 .mark_text()
                 .encode(x="column", y=id_col, text=Text("value", format=fmt))
             )
@@ -1342,7 +1342,7 @@ def _clustermap_build(
     # id and the numeric value columns.
     center = (
         Chart(tbl.select([id_col, *value_cols]))
-        .transform(
+        ._with_statistics(
             row_link,
             col_link,
             Reorder(
@@ -1393,7 +1393,7 @@ def _clustermap_build(
         },
         data_source=secondary_key(col_link_name, _segments_key),
     )
-    col_dendro = Chart(data).transform(col_link)
+    col_dendro = Chart(data)._with_statistics(col_link)
     col_dendro._mark = None
     col_dendro._layers = [col_dendro_layer]
     col_dendro = col_dendro.axis(show=False)
@@ -1420,7 +1420,7 @@ def _clustermap_build(
         },
         data_source=secondary_key(row_link_name, _segments_key),
     )
-    row_dendro = Chart(data).transform(row_link)
+    row_dendro = Chart(data)._with_statistics(row_link)
     row_dendro._mark = None
     row_dendro._layers = [row_dendro_layer]
     row_dendro = row_dendro.coord(CoordFlip()).axis(show=False)
@@ -1688,7 +1688,7 @@ def _jointplot_build(
             hist_enc["y"] = _Y(_bin2d_cols["y_lo"], scale={"domain": list(ylim)})
         center = (
             Chart(data)
-            .transform(Bin2D(x=x, y=y, **bin2d_kwargs))
+            ._with_statistics(Bin2D(x=x, y=y, **bin2d_kwargs))
             .mark_rect(**jk)
             .encode(**hist_enc)
         )

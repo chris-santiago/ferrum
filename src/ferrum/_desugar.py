@@ -53,7 +53,7 @@ from ferrum._layer import (
     titled_encoding,
 )
 from ferrum._encode_lowering import _rebind_channel
-from ferrum._layer_transforms import _with_statistics_marker
+from ferrum._layer_transforms import _statistics_start, _with_statistics_marker
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
@@ -1123,15 +1123,20 @@ def _binned_color_of(encoding: dict) -> ChannelBase | None:
     return color if isinstance(color, ChannelBase) and color._binned_color() else None
 
 
-def _mark_statistics(chart: "Chart", steps: list) -> list:
-    """A composite mark's *steps*, behind the statistics marker when the chart's color bins.
+def _with_mark_statistics(transforms: list, steps: list) -> list:
+    """*transforms*, a chart's chain, followed by its composite mark's *steps* behind the marker.
 
-    A statistic a composite mark groups by its chart's color groups by that
-    color's bins only after the marker (``_StatisticsMarker``). Its groupby
-    names the color only when the chart binds it as the mark resolves, so a
-    chart drawing no binned color then keeps its chain as it was.
+    The marker is where the caller's own steps end (``_StatisticsMarker``):
+    a ``.transform(...)`` written after the mark resolved runs before it,
+    and Rust reads the rows at the marker as the caller's (a statistic
+    grouped by a binned color groups by its bins only after it). A chain
+    already holding statistics behind a marker keeps that one marker and the
+    mark's steps follow them, so the chain carries one marker.
     """
-    return _with_statistics_marker(steps) if _binned_color_of(chart._encoding) else steps
+    chain = list(transforms)
+    if _statistics_start(chain) < len(chain):
+        return [*chain, *steps]
+    return [*chain, *_with_statistics_marker(list(steps))]
 
 
 def _with_binned_color(layers: list, encoding: dict) -> list:
@@ -1322,7 +1327,7 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
 
     # Layered mode: result.layers is set.
     if result.layers is not None:
-        new._transforms = list(chart._transforms) + _mark_statistics(chart, list(result.transforms))
+        new._transforms = _with_mark_statistics(chart._transforms, result.transforms)
         # Aim the caller's per-layer `layer_kwargs=` at the layers they named,
         # THEN apply the chart-level catch-all to every emitted layer, on
         # `catch_all_over`'s terms: it overrides a desugar-set default, but
@@ -1404,13 +1409,13 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
             data_source="smooth",
             entry=entry,
         )
-        new._transforms = list(chart._transforms) + _mark_statistics(chart, list(transforms))
+        new._transforms = _with_mark_statistics(chart._transforms, transforms)
         new._layers = _prior_layers + [smooth_layer]
         new._mark = None
         return new
     new._mark = mark
     new._entry = entry
-    new._transforms = list(chart._transforms) + _mark_statistics(chart, list(transforms))
+    new._transforms = _with_mark_statistics(chart._transforms, transforms)
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named
     # keys, not a fixed winner -- then merge THAT onto `new._mark_kwargs`

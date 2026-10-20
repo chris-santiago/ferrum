@@ -1,14 +1,13 @@
-use std::collections::HashMap;
-
 use arrow::array::RecordBatch;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
-use crate::transform::color_bin_group::{BinnedOrigin, BinnedOrigins, ChainDemand, StepBins};
 use crate::transform::context::TransformContext;
 
 use crate::transform::aggregate::AggregateSpec;
-use crate::transform::branch::{self, BranchSpec};
+use crate::transform::branch::BranchSpec;
+use crate::transform::composed::ComposedSpec;
+use crate::transform::fields_read::FieldsRead;
 use crate::transform::bin::BinSpec;
 use crate::transform::bin_2d::Bin2DSpec;
 use crate::transform::contour::ContourSpec;
@@ -106,6 +105,10 @@ pub(crate) enum TransformSpec {
     /// (`transform::branch`). The one combinator variant: it is not a row of
     /// [`for_each_transform!`], so every dispatcher spells its arm out.
     Branch(BranchSpec),
+    /// One copy of a step written on a `+` composition, which the runner
+    /// places by the columns its rows carry (`transform::composed`). Like
+    /// `Branch`, it is not a row of [`for_each_transform!`].
+    Composed(ComposedSpec),
 }
 
 /// Single source of truth for the 43 leaf `TransformSpec` variants (every
@@ -262,7 +265,9 @@ impl TransformSpec {
             ($($V:ident => $m:ident : $py:ident,)*) => {
                 match self {
                     $( Self::$V(s) => crate::transform::$m::apply(s, batch), )*
-                    Self::Branch(_) => self.apply_with_context(batch, &TransformContext::default()),
+                    Self::Branch(_) | Self::Composed(_) => {
+                        self.apply_with_context(batch, &TransformContext::default())
+                    }
                 }
             };
         }
@@ -319,15 +324,10 @@ impl TransformSpec {
                     $( Self::$V(s) => crate::transform::$m::apply_with_context(s, batch, ctx), )*
                     Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
                         s, batch, Some(&ctx.named_outputs)),
-                    Self::Branch(s) => {
-                        let mut published = Published {
-                            outputs: ctx.named_outputs.clone(),
-                            swarms: HashMap::new(),
-                            origins: HashMap::new(),
-                            inserted: Vec::new(),
-                        };
-                        run_branch(s, batch, &mut published, ctx, None).map(|tail| tail.batch)
-                    }
+                    Self::Branch(s) => crate::transform::run::apply_branch(s, batch, ctx),
+                    // Outside a pipeline run there are no later rows for the
+                    // step to wait for, so it runs as written.
+                    Self::Composed(s) => s.step.apply_with_context(batch, ctx),
                     Self::Bin2D(_)
                     | Self::Swarm(_)
                     | Self::Contour(_)
@@ -484,239 +484,126 @@ impl TransformSpec {
             | Self::Sample(_)
             | Self::TimeUnit(_)
             | Self::DataBin(_)
-            | Self::Branch(_) => None,
+            | Self::Branch(_)
+            | Self::Composed(_) => None,
         }
     }
 }
 
-/// Sentinel key under which the final pipeline output is always published in
-/// the map returned by [`apply_transforms_named`]. Layers with `data_source: None`
-/// resolve to this key.
-pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
-
-/// The batch every transform output key publishes, and, per key, the `Swarm`
-/// whose rows that batch still is and the binned-color origin of its rows
-/// ([`apply_transforms_named`]).
-pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, HashMap<String, SwarmSpec>, BinnedOrigins);
-
-/// Apply each transform; record named outputs with fan-out semantics.
-///
-/// - **Named transforms** (`name = Some(...)`) run on the CURRENT chained
-///   batch (the prior unnamed output, or the original input if none). They
-///   publish their output under their name but do NOT advance the chained
-///   pipeline pointer — subsequent unnamed transforms see the same chained
-///   input the named transform did.
-/// - **Unnamed transforms** chain: each consumes the prior unnamed output.
-/// - **`Branch`** runs its own sub-chain, with these same rules, over the
-///   original batch (`input = None`) or the batch published under `input`.
-///   Every named and secondary output inside it — a branch's outputs are
-///   its secondary outputs — is published
-///   SCOPED under [`crate::transform::registry::secondary_key`]`(Some(branch.name), key)`,
-///   then the sub-chain tail under the branch's own `name`, unscoped, as
-///   always. It does not advance the chained pipeline pointer.
-///
-/// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
-/// the original input when no unnamed transforms ran.
-///
-/// Beside the batches, the routing itself records, per published key, the
-/// last `Swarm` that batch descends from through the chain (a later
-/// transform after it keeps it; a secondary output descends from none; a
-/// branch over a published key starts from that key's record).
-/// Swarm placement runs at render time against the panel's resolved scale
-/// (`render::position::apply_swarm`) and reads that record, so the one
-/// routing rule decides both which batch a layer reads and which `Swarm`
-/// places it. Under a binned color's grouping
-/// ([`crate::transform::color_bin_group`]), the routing records the same way,
-/// per key, the rows that batch's lineage read before its first bin-grouped
-/// step ([`BinnedOrigin`]).
-///
-/// A named step reads the chained batch rather than the original input so
-/// compound desugars (mark_contour's Kde2D→Contour, clustermap's
-/// Linkage→Reorder→Unpivot, residplot's residuals overlay) can consume the
-/// previous unnamed transform's output; `Branch` is the route to the
-/// original input.
-pub(crate) fn apply_transforms_named(
-    specs: &[TransformSpec],
-    batch: &RecordBatch,
-    ctx: &TransformContext,
-) -> PyResult<NamedOutputs> {
-    let mut published = Published::default();
-    let demand = ctx.color_bin_plan.as_deref().map(|plan| &plan.demand);
-    let start = ChainTail { batch: batch.clone(), swarm: None, origin: None };
-    let tail = run_chain(specs, start, batch, &mut published, ctx, demand)?;
-    published.insert(FINAL_OUTPUT_KEY.to_string(), tail.batch, tail.swarm, tail.origin);
-    Ok((published.outputs, published.swarms, published.origins))
-}
-
-/// Every output published so far in one pipeline run, with the `Swarm`
-/// record and the binned-color origin each key carries ([`NamedOutputs`]).
-#[derive(Default, Clone)]
-struct Published {
-    outputs: HashMap<String, RecordBatch>,
-    swarms: HashMap<String, SwarmSpec>,
-    origins: BinnedOrigins,
-    /// Keys [`Self::insert`] has recorded since the last [`Self::clear_log`]
-    /// (construction counts as one), in insertion order, not deduplicated —
-    /// a key an inner step overwrites is logged once per insert. A branch's
-    /// sub-chain runs against a CHILD `Published` cloned from the parent;
-    /// this log is how [`run_branch`] tells "genuinely new in this run" from
-    /// "inherited by the clone" without diffing the two maps.
-    inserted: Vec<String>,
-}
-
-impl Published {
-    /// Publish `batch` under `key`, replacing any earlier batch, swarm
-    /// record and origin there.
-    fn insert(&mut self, key: String, batch: RecordBatch, swarm: Option<SwarmSpec>, origin: Option<BinnedOrigin>) {
-        match swarm {
-            Some(swarm) => self.swarms.insert(key.clone(), swarm),
-            None => self.swarms.remove(&key),
-        };
-        match origin {
-            Some(origin) => self.origins.insert(key.clone(), origin),
-            None => self.origins.remove(&key),
-        };
-        self.inserted.push(key.clone());
-        self.outputs.insert(key, batch);
+impl TransformSpec {
+    /// The input columns this step reads ([`crate::transform::fields_read`]).
+    /// A `Branch` reads its own input, not the rows it sits beside, so it
+    /// reads none of them; a `Composed` reads what its step reads.
+    pub(crate) fn fields_read(&self) -> std::collections::BTreeSet<String> {
+        macro_rules! arm {
+            ($($V:ident => $m:ident : $py:ident,)*) => {
+                match self {
+                    $( Self::$V(s) => s.fields_read(), )*
+                    Self::Branch(_) => std::collections::BTreeSet::new(),
+                    Self::Composed(s) => s.step.fields_read(),
+                }
+            };
+        }
+        for_each_transform!(arm)
     }
 
-    /// Reset the insertion log without touching `outputs`/`swarms` — called
-    /// on a branch's child `Published` right after it is cloned from the
-    /// parent, so the log that follows counts only this branch's own run.
-    fn clear_log(&mut self) {
-        self.inserted.clear();
+    /// The columns this step computes, by name: an aggregate's `as` names,
+    /// a `Bin`'s [`BinSpec::computed_columns`], a `Composed` copy's step's,
+    /// else the kind's registry `outputs`
+    /// ([`crate::transform::registry::entry_for_kind`]). A `Branch` computes
+    /// none beside its input rows.
+    pub(crate) fn output_columns(&self) -> Vec<String> {
+        let named = |names: &mut dyn Iterator<Item = &String>| names.cloned().collect();
+        match self {
+            Self::Aggregate(s) => named(&mut s.ops.iter().map(|op| &op.as_)),
+            Self::DataAggregate(s) => named(&mut s.aggregates.iter().map(|agg| &agg.as_)),
+            Self::JoinAggregate(s) => named(&mut s.aggregates.iter().map(|agg| &agg.as_)),
+            Self::Bin(s) => s.computed_columns(),
+            Self::Composed(s) => s.step.output_columns(),
+            Self::Branch(_) => Vec::new(),
+            step => crate::transform::registry::entry_for_kind(step.kind())
+                .map(|entry| entry.outputs.into_iter().map(|(name, _)| name.to_string()).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The step's label: the prefix every refusal raised inside its own
+    /// module already carries (`"data_filter"`, `"stat_box_stats"`). It is
+    /// the voice of a step's refusals raised outside its module, so a step
+    /// reaches the user under one prefix whichever gate refuses it; each
+    /// arm must equal its module's literal. A `Composed` copy speaks as its
+    /// step.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Bin(_) => "stat_bin",
+            Self::Bin2D(_) => "stat_bin_2d",
+            Self::Kde(_) => "stat_kde",
+            Self::Smooth(_) => "stat_smooth",
+            Self::Aggregate(_) => "stat_aggregate",
+            Self::Summary(_) => "stat_summary",
+            Self::Outliers(_) => "stat_outliers",
+            Self::ErrorExtent(_) => "stat_error_extent",
+            Self::BoxStats(_) => "stat_box_stats",
+            Self::Violin(_) => "stat_violin",
+            Self::Kde2D(_) => "stat_kde_2d",
+            Self::Contour(_) => "stat_contour",
+            Self::Qq(_) => "stat_qq",
+            Self::Linkage(_) => "linkage",
+            Self::Raster(_) => "stat_raster",
+            Self::Hex(_) => "stat_hex",
+            Self::Swarm(_) => "stat_swarm",
+            Self::Unpivot(_) => "stat_unpivot",
+            Self::Reorder(_) => "stat_reorder",
+            Self::ReferenceLine(_) => "stat_reference_line",
+            Self::LetterValue(_) => "stat_letter_value",
+            Self::Logistic(_) => "Logistic",
+            Self::Glm(_) => "Glm",
+            Self::Robust(_) => "Robust",
+            Self::Identity(_) => "identity",
+            Self::Filter(_) => "data_filter",
+            Self::Calculate(_) => "data_calculate",
+            Self::Project(_) => "project",
+            Self::Fold(_) => "data_fold",
+            Self::Pivot(_) => "data_pivot",
+            Self::JoinAggregate(_) => "data_join_aggregate",
+            Self::DataWindow(_) => "data_window",
+            Self::DensityData(_) => "data_density",
+            Self::RegressionData(_) => "data_regression",
+            Self::LoessData(_) => "data_loess",
+            Self::Impute(_) => "data_impute",
+            Self::Flatten(_) => "data_flatten",
+            Self::Sample(_) => "data_sample",
+            Self::TopK(_) => "data_top_k",
+            Self::DataStack(_) => "data_stack",
+            Self::TimeUnit(_) => "data_timeunit",
+            Self::DataBin(_) => "data_bin",
+            Self::DataAggregate(_) => "data_aggregate",
+            Self::Branch(_) => "branch",
+            Self::Composed(s) => s.step.label(),
+        }
+    }
+
+    /// The step's kind: its module name in [`for_each_transform!`]
+    /// (`"filter"`, `"bin_2d"`), `"branch"` or `"composed"`.
+    pub(crate) fn kind(&self) -> &'static str {
+        macro_rules! arm {
+            ($($V:ident => $m:ident : $py:ident,)*) => {
+                match self {
+                    $( Self::$V(_) => stringify!($m), )*
+                    Self::Branch(_) => "branch",
+                    Self::Composed(_) => "composed",
+                }
+            };
+        }
+        for_each_transform!(arm)
     }
 }
 
-/// A chain's tail batch, the `Swarm` whose rows it still is, and its origin
-/// when a bin-grouped step is in its lineage.
-struct ChainTail {
-    batch: RecordBatch,
-    swarm: Option<SwarmSpec>,
-    origin: Option<BinnedOrigin>,
-}
-
-/// Run `specs` as one chain starting from `start`, publishing named,
-/// secondary and branch outputs into `published`; returns the chain tail.
-/// `source` is the pipeline's original batch, which a `Branch` with no
-/// `input` reads.
-///
-/// `demand` names, per step, the binned colors that step groups by bin
-/// ([`ChainDemand`]): each such step runs with those columns in its
-/// context ([`TransformContext::color_bins`], with the run's edges), and
-/// every output whose lineage passed one publishes its origin beside it
-/// ([`Published::insert`]).
-fn run_chain(
-    specs: &[TransformSpec],
-    start: ChainTail,
-    source: &RecordBatch,
-    published: &mut Published,
-    ctx: &TransformContext,
-    demand: Option<&ChainDemand>,
-) -> PyResult<ChainTail> {
-    let ChainTail { batch: mut current, swarm: mut current_swarm, origin: mut current_origin } = start;
-    let edges = ctx.color_bin_plan.as_deref().and_then(|plan| plan.edges.clone());
-    for (index, spec) in specs.iter().enumerate() {
-        if let TransformSpec::Branch(branch) = spec {
-            let tail = run_branch(branch, source, published, ctx, demand.and_then(|demand| demand.branch(index)))?;
-            published.insert(branch.name.clone(), tail.batch, tail.swarm, tail.origin);
-            continue;
-        }
-        let fields = demand.map_or(&[][..], |demand| demand.fields(index));
-        // Each transform sees the named outputs accumulated so far via the
-        // context, which `Reorder(from=...)` reads.
-        let mut step_ctx = ctx.clone();
-        step_ctx.named_outputs = published.outputs.clone();
-        step_ctx.color_bins = (!fields.is_empty())
-            .then(|| std::rc::Rc::new(StepBins { fields: fields.to_vec(), edges: edges.clone() }));
-        // The Swarm whose rows this step's output is: this step's own, or
-        // the one its chained input already carried.
-        let fed = match spec {
-            TransformSpec::Swarm(swarm) => Some(swarm.clone()),
-            _ => current_swarm.clone(),
-        };
-        // The origin of this step's outputs: its lineage's, else its own
-        // input when it is the first to group a binned color by bin.
-        let origin = match &current_origin {
-            Some(origin) => Some(origin.with_fields(fields)),
-            None => (!fields.is_empty()).then(|| BinnedOrigin { rows: current.clone(), fields: fields.to_vec() }),
-        };
-        let result = spec.apply_with_context(&current, &step_ctx)?;
-        // Secondary outputs first, so a named step's explicit `name` wins a
-        // key collision.
-        for (key, b) in spec.secondary_outputs(&current, &result, &step_ctx)? {
-            published.insert(key, b, None, origin.clone());
-        }
-        match spec_name(spec) {
-            Some(name) => published.insert(name.to_string(), result, fed, origin),
-            None => {
-                current = result;
-                current_swarm = fed;
-                current_origin = origin;
-            }
-        }
-    }
-    Ok(ChainTail { batch: current, swarm: current_swarm, origin: current_origin })
-}
-
-/// Run a branch's sub-chain over its input, publishing every output inside
-/// it into `published` SCOPED under the branch's own name — a branch's
-/// inner outputs are its secondary outputs. Returns the sub-chain tail,
-/// which the caller (`run_chain`'s `Branch` arm) publishes UNSCOPED under
-/// the branch's `name`.
-///
-/// The sub-chain runs against a CHILD `Published` cloned from `published`
-/// (batches are Arc-backed, so the clone is cheap): every inner step sees
-/// every outer key plus its own unscoped inner keys, exactly as if run at
-/// top level — `Reorder(from=)` on an inner `Linkage`, and a nested `Branch`
-/// whose `input` names an inner or outer key, both resolve correctly. The
-/// child's insertion log is cleared right after cloning
-/// ([`Published::clear_log`]), so only keys this run genuinely adds —
-/// the branch's own named/secondary outputs, and (recursively) a nested
-/// branch's tail plus its own already-scoped keys — are logged. Each
-/// logged key, deduplicated and read at its final value, is re-published
-/// into the PARENT under [`crate::transform::registry::secondary_key`]`(Some(&spec.name),
-/// key)`: a scoped key can never equal the branch's own bare name (the
-/// rule's `"{name}_{key}"` shape always has the separator), so two sibling
-/// branches that reuse the same inner name publish two DIFFERENT scoped
-/// keys, each carrying its own rows.
-fn run_branch(
-    spec: &BranchSpec,
-    source: &RecordBatch,
-    published: &mut Published,
-    ctx: &TransformContext,
-    demand: Option<&ChainDemand>,
-) -> PyResult<ChainTail> {
-    let input = branch::resolve_input(spec, source, &published.outputs)?.clone();
-    let input_swarm = spec.input.as_ref().and_then(|key| published.swarms.get(key)).cloned();
-    let input_origin = spec.input.as_ref().and_then(|key| published.origins.get(key)).cloned();
-
-    let mut child = published.clone();
-    child.clear_log();
-    let start = ChainTail { batch: input, swarm: input_swarm, origin: input_origin };
-    let tail = run_chain(&spec.transforms, start, source, &mut child, ctx, demand)?;
-
-    let mut seen = std::collections::HashSet::new();
-    for key in &child.inserted {
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        // `insert` always logs and inserts a key together, so `child.inserted`
-        // never names a key `child.outputs` lacks — `get` rather than
-        // indexing keeps that invariant from becoming a panic site if it
-        // ever stops holding.
-        let Some(batch) = child.outputs.get(key).cloned() else { continue };
-        let scoped = crate::transform::registry::secondary_key(Some(&spec.name), key);
-        let swarm = child.swarms.get(key).cloned();
-        let origin = child.origins.get(key).cloned();
-        published.insert(scoped, batch, swarm, origin);
-    }
-
-    Ok(tail)
-}
+pub(crate) use crate::transform::run::{apply_transforms_named, FINAL_OUTPUT_KEY};
 
 /// The name a step publishes its output under: a named step's `name`, a
-/// `Branch`'s own, `None` for an unnamed step, which advances the chain.
+/// `Branch`'s own, a `Composed` copy's step's, `None` for an unnamed step,
+/// which advances the chain.
 pub(crate) fn spec_name(spec: &TransformSpec) -> Option<&str> {
     // The module + wrapper columns of the table are unused here; we keep
     // them in the pattern so spec_name reads off the same source of truth.
@@ -725,6 +612,7 @@ pub(crate) fn spec_name(spec: &TransformSpec) -> Option<&str> {
             match spec {
                 $( TransformSpec::$V(s) => s.name.as_deref(), )*
                 TransformSpec::Branch(s) => Some(s.name.as_str()),
+                TransformSpec::Composed(s) => spec_name(&s.step),
             }
         };
     }
@@ -734,6 +622,8 @@ pub(crate) fn spec_name(spec: &TransformSpec) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
 
     use arrow::array::{Float64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -742,6 +632,11 @@ mod tests {
     use crate::transform::aggregate::{AggregateSpec, AggregateOp, AggFn};
     use crate::transform::bin::BinSpec;
     use crate::transform::bin_mode::BinMode;
+
+    /// Each key's `Swarm` record.
+    fn swarms_of(lineages: &crate::transform::run::OutputLineages) -> HashMap<String, crate::transform::swarm::SwarmSpec> {
+        lineages.iter().filter_map(|(key, lineage)| Some((key.clone(), lineage.swarm.clone()?))).collect()
+    }
 
     fn make_one_col_batch(name: &str, values: Vec<f64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -799,7 +694,8 @@ mod tests {
             filter(None),
             filter(Some("after")),
         ];
-        let (outputs, swarms, _) = apply_transforms_named(&specs, &batch, &TransformContext::default()).unwrap();
+        let (outputs, lineages) = apply_transforms_named(&specs, &batch, &TransformContext::default()).unwrap();
+        let swarms = swarms_of(&lineages);
         let fed = |key: &str| swarms.get(key).map(|s| (s.value.clone(), s.name.clone()));
         assert_eq!(fed("x"), None, "a later non-Swarm output under the same name replaces the Swarm's");
         assert_eq!(fed("sw"), Some(("v".into(), Some("sw".into()))));
@@ -851,7 +747,7 @@ mod tests {
     fn test_apply_transforms_empty_returns_input_unchanged() {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
         let ctx = TransformContext::default();
-        let (outputs, _, _) = apply_transforms_named(&[], &batch, &ctx).unwrap();
+        let (outputs, _) = apply_transforms_named(&[], &batch, &ctx).unwrap();
         let out = &outputs[FINAL_OUTPUT_KEY];
         assert_eq!(out.num_rows(), 3);
         assert_eq!(out.num_columns(), 1);
@@ -894,7 +790,7 @@ mod tests {
         // pipeline failed with a schema-mismatch error; it now coerces the count
         // column and sums it. Ten input rows → total_count 10.
         let ctx = TransformContext::default();
-        let (outputs, _, _) = apply_transforms_named(&pipeline, &batch, &ctx).unwrap();
+        let (outputs, _) = apply_transforms_named(&pipeline, &batch, &ctx).unwrap();
         let out = &outputs[FINAL_OUTPUT_KEY];
         assert_eq!(out.schema().field(0).name(), "total_count");
         let totals = out

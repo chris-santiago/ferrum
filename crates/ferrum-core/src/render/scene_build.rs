@@ -48,6 +48,19 @@ fn break_axis_incompatible_coord(
     })
 }
 
+/// The public spelling of the panel's coord when a layer with an
+/// independent y scale (`SecondaryY`, an independent-y `LayerChart` member)
+/// is drawn under it and it moves y off the vertical axis or replaces the
+/// Cartesian axes: `CoordFlip`, `CoordPolar` or `CoordGeo`. Only the panel's
+/// (chart-level) coord counts: a secondary layer carrying its own flip on a
+/// Cartesian panel still draws its own right y axis. `None` for every chart
+/// with no independent-y layer, and for a Cartesian or fixed-ratio panel.
+fn independent_y_incompatible_coord(spec: &ChartSpec) -> Option<&'static str> {
+    use crate::spec::coord::{public_spelling, CoordKind};
+    let coord = spec.coord.as_ref().filter(|coord| matches!(coord, CoordKind::Flip | CoordKind::Polar { .. } | CoordKind::Geo { .. }))?;
+    spec.layers.iter().flatten().any(|layer| layer.independent_y).then(|| public_spelling(coord))
+}
+
 /// The `(layer index, coord spelling, panel-scoped property)` of the first
 /// layer whose OWN `coord` declares something that belongs to the whole panel —
 /// the combination `#172`(1) refuses. `None` when every layer's coord is a
@@ -105,6 +118,13 @@ pub fn build_scene(
     // corruption (not suppression) was the pre-fix behavior for both coords.
     if let Some((coord, axis)) = break_axis_incompatible_coord(spec, chart_config) {
         return Err(RenderError::BreakAxisIncompatibleCoord { coord, axis });
+    }
+    // A secondary y axis has no place once a coord moves y off the vertical
+    // axis: refused at the same funnel, before any geometry, so every door
+    // (sugar, an independent-y LayerChart member, either `.coord()` order,
+    // static, interactive, a composite leaf) meets one check.
+    if let Some(coord) = independent_y_incompatible_coord(spec) {
+        return Err(RenderError::IndependentYIncompatibleCoord { coord });
     }
 
     // `#172`(1) (REFUSE MALFORMED). A per-layer coord that declares a PANEL
@@ -217,7 +237,7 @@ pub fn build_scene(
     let chart_swarms = position::chart_swarms(
         &prep.layers,
         &chart_layer_batches,
-        &prep.transform_swarms,
+        &prep.transform_lineages,
         &prep.provisional_scales,
         theme,
     );
@@ -234,6 +254,12 @@ pub fn build_scene(
     let resolve = spec.facet.as_ref().map(|f| &f.resolve);
     let x_independent = resolve.is_some_and(|r| r.x == ResolveMode::Independent);
     let y_independent = resolve.is_some_and(|r| r.y == ResolveMode::Independent);
+
+    // A faceted chart whose layers draw no facet value has no panel to lay
+    // out (`prepare`'s facet groups come from the rows layers draw).
+    if spec.facet.is_some() && layout.panels.is_empty() {
+        warnings.push(RenderWarning::NoRowsToDraw { faceted: true });
+    }
 
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
@@ -262,22 +288,27 @@ pub fn build_scene(
 
         let facet_keys = (panel.facet_key.as_ref(), panel.row_facet_key.as_ref());
         let panel_batch = panel_batch(prep, facet_keys)?;
-        // #118 exemption table item (c): a panel with no rows for its own
-        // facet combination (an incomplete factorial design, an empty
-        // category after a chart-level filter, …) is a legitimate, common
-        // shape, not a misconfiguration — it stays silent. This is distinct
-        // from a LAYER's own resolved batch coming back empty further below
-        // (`build_panel_mark_batches`'s per-layer skip), which can only
-        // happen via a named transform output producing zero rows, not via
-        // facet filtering — and stays silent too, for its own reason (see
-        // that skip's comment).
-        if panel_batch.num_rows() == 0 {
-            continue;
-        }
-        any_panel_resolved = true;
-
         let layer_batches =
             panel_layer_batches(prep, &chart_layer_batches, &panel_batch, facet_keys)?;
+        // A panel is judged by the rows its drawing layers draw (an
+        // unlayered chart's one layer draws the chart rows): a layer reading
+        // a named output draws even when the chart-level rows are empty, and
+        // chart rows no layer reads draw nothing.
+        // #118 exemption table item (c): a facet cell with no rows in any
+        // layer (an incomplete factorial design) is a legitimate, common
+        // shape, not a misconfiguration — it is skipped silently. An
+        // unfaceted chart whose layers have no rows still draws its one
+        // panel, frame and axes over the empty batches, and says so once.
+        // This is distinct from ONE layer's batch coming back empty while
+        // another draws (`build_panel_mark_batches`'s per-layer skip), which
+        // stays silent for its own reason (see that skip's comment).
+        if layer_batches.iter().all(|b| b.num_rows() == 0) {
+            if spec.facet.is_some() {
+                continue;
+            }
+            warnings.push(RenderWarning::NoRowsToDraw { faceted: false });
+        }
+        any_panel_resolved = true;
 
 
         // GH #70: this panel's displacement from the reference (panel 0)
@@ -1033,7 +1064,7 @@ fn resolve_panel_scales(
         &spec.encoding,
         panel_batch,
         &prep.transform_outputs,
-        &prep.transform_origins,
+        &prep.transform_lineages,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         theme,
@@ -2079,18 +2110,31 @@ fn collect_param_bindings(
     bindings
 }
 
-/// The `param` marker of every filter in `transforms`, in chain order,
-/// descending into `Branch` sub-chains.
+/// Each `param` a filter in `transforms` tests, once, in first-appearance
+/// chain order, descending into `Branch` sub-chains and a `Composed` copy's
+/// step: a param's filter role on a panel is one fact, however many operand
+/// branches carry a copy of its filter.
 fn filter_params(transforms: &[crate::transform::core::TransformSpec]) -> Vec<&str> {
-    use crate::transform::core::TransformSpec;
-    transforms
-        .iter()
-        .flat_map(|transform| match transform {
-            TransformSpec::Filter(filter) => filter.param.as_deref().into_iter().collect(),
-            TransformSpec::Branch(branch) => filter_params(&branch.transforms),
-            _ => Vec::new(),
-        })
-        .collect()
+    fn collect<'t>(transforms: &'t [crate::transform::core::TransformSpec], out: &mut Vec<&'t str>) {
+        use crate::transform::core::TransformSpec;
+        for transform in transforms {
+            match transform {
+                TransformSpec::Filter(filter) => {
+                    if let Some(param) = filter.param.as_deref() {
+                        if !out.contains(&param) {
+                            out.push(param);
+                        }
+                    }
+                }
+                TransformSpec::Branch(branch) => collect(&branch.transforms, out),
+                TransformSpec::Composed(composed) => collect(std::slice::from_ref(&*composed.step), out),
+                _ => {}
+            }
+        }
+    }
+    let mut params = Vec::new();
+    collect(transforms, &mut params);
+    params
 }
 
 fn build_title(
@@ -2197,7 +2241,7 @@ pub(crate) fn resolve_legend_color_scale(
             &spec.encoding,
             prep.final_batch(),
             &prep.transform_outputs,
-            &prep.transform_origins,
+            &prep.transform_lineages,
             theme,
             None,
         )?
@@ -4008,7 +4052,7 @@ mod tests {
             })
         };
         let branch = |name: &str, transforms| {
-            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, transforms })
+            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, frame: None, transforms })
         };
         let mut spec = spec_with_x_domain_param(Vec::new());
         spec.encoding.x = None;
@@ -4019,6 +4063,34 @@ mod tests {
         let params: Vec<(&str, BindingRole)> =
             bindings.iter().map(|b| (b.param.as_str(), b.role.clone())).collect();
         assert_eq!(params, [("brush", BindingRole::Filter), ("pick", BindingRole::Filter)]);
+    }
+
+    /// A param's filter binds once per panel however many operand branches
+    /// carry its filter: one brush written on a composition and copied into
+    /// two operand branches, and two operands each filtering by the same
+    /// brush, both give one binding per panel; two distinct params give one
+    /// each, in first-appearance order. Rejects one binding per copy, which
+    /// double-applies one brush's crossfilter.
+    #[test]
+    fn collect_param_bindings_binds_each_filter_param_once_per_panel() {
+        let bindings = |transforms: serde_json::Value| -> Vec<(String, Option<usize>)> {
+            let mut spec = spec_with_x_domain_param(Vec::new());
+            spec.encoding.x = None;
+            spec.transforms = serde_json::from_value(transforms).expect("the transforms deserialize");
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 2)
+                .into_iter()
+                .filter(|b| b.role == BindingRole::Filter)
+                .map(|b| (b.param, b.panel))
+                .collect()
+        };
+        let brush = |param: &str| serde_json::json!({"type": "filter", "predicate": "true", "param": param});
+        let composed = serde_json::json!({"type": "composed", "group": "c", "step": brush("brush")});
+        let operand = |name: &str, steps: serde_json::Value| serde_json::json!({"type": "branch", "name": name, "transforms": steps});
+        let once = vec![("brush".to_string(), Some(0)), ("brush".to_string(), Some(1))];
+        assert_eq!(bindings(serde_json::json!([operand("a", serde_json::json!([composed.clone()])), operand("b", serde_json::json!([composed]))])), once);
+        assert_eq!(bindings(serde_json::json!([operand("a", serde_json::json!([brush("brush")])), operand("b", serde_json::json!([brush("brush")]))])), once);
+        let two = bindings(serde_json::json!([operand("a", serde_json::json!([brush("p"), brush("q")])), operand("b", serde_json::json!([brush("p")]))]));
+        assert_eq!(two, [("p".to_string(), Some(0)), ("p".to_string(), Some(1)), ("q".to_string(), Some(0)), ("q".to_string(), Some(1))]);
     }
 
     #[test]
@@ -4586,6 +4658,75 @@ mod tests {
             batch,
             &super::super::chart_config::ChartConfig::default(),
         )
+    }
+
+    /// A layer with an independent y scale on a panel whose coord moves y off
+    /// the vertical axis or replaces the Cartesian axes (flip, polar, geo) is
+    /// refused naming the coord and the remedy; under no coord, a Cartesian
+    /// or a fixed-ratio coord it renders, a flip with no independent-y layer
+    /// renders, and so does an independent-y layer carrying its own flip on a
+    /// Cartesian panel, which draws its own right y axis. Rejects drawing the
+    /// right axis under the other channel's title, or dropping it.
+    #[test]
+    fn an_independent_y_layer_under_a_flip_polar_or_geo_coord_is_refused() {
+        pyo3::Python::initialize();
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("r", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            ],
+        )
+        .unwrap();
+        let spec = |coord: Option<serde_json::Value>, layer_coord: Option<serde_json::Value>, independent: bool| -> ChartSpec {
+            let mut secondary = serde_json::json!({"mark": "line", "independent_y": independent, "encoding": {"y": {"field": "r"}}});
+            if let Some(layer_coord) = layer_coord {
+                secondary["coord"] = layer_coord;
+            }
+            let mut spec = serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "line",
+                "encoding": {"x": {"field": "g"}, "y": {"field": "v"}},
+                "layers": [{"mark": "line"}, secondary],
+            });
+            if let Some(coord) = coord {
+                spec["coord"] = coord;
+            }
+            serde_json::from_value(spec).expect("the spec deserializes")
+        };
+        let message = |coord: &str| {
+            format!(
+                "SecondaryY (a layer with an independent y scale) is not supported under {coord}: its right y axis \
+                 has no place once the coord moves y off the vertical axis; draw the series on a Cartesian panel \
+                 (put the categories on x and drop the coord), or draw it on the shared y axis"
+            )
+        };
+        let flip = serde_json::json!({"kind": "flip"});
+        for (coord, spelling) in [
+            (flip.clone(), "fm.CoordFlip"),
+            (serde_json::json!({"kind": "polar"}), "fm.CoordPolar"),
+            (serde_json::json!({"kind": "geo", "projection": "equirectangular"}), "fm.CoordGeo"),
+        ] {
+            match try_build_scene_for(&spec(Some(coord), None, true), &batch) {
+                Err(err @ RenderError::IndependentYIncompatibleCoord { .. }) => assert_eq!(err.to_string(), message(spelling)),
+                other => panic!("{spelling}: expected the refusal, got {:?}", other.map(|_| "a scene")),
+            }
+        }
+        if let Err(err @ RenderError::IndependentYIncompatibleCoord { .. }) = try_build_scene_for(&spec(None, Some(flip.clone()), true), &batch) {
+            panic!("a layer's own flip on a Cartesian panel keeps rendering, got {err}");
+        }
+        for coord in [None, Some(serde_json::json!({"kind": "cartesian"})), Some(serde_json::json!({"kind": "fixed"}))] {
+            try_build_scene_for(&spec(coord.clone(), None, true), &batch).unwrap_or_else(|e| panic!("{coord:?}: {e}"));
+        }
+        try_build_scene_for(&spec(Some(flip), None, false), &batch).expect("a flip with no independent y renders");
     }
 
     /// [`try_build_scene_for`], but with an explicit `ChartConfig` passed to
@@ -8866,6 +9007,12 @@ mod tests {
     // named `data_source` output) — a unit test that hands the function a batch
     // picks the answer it is meant to prove.
 
+    /// A chain's statistics marker: the steps after it are lowered from the
+    /// layers' encodings and marks.
+    fn statistics_marker() -> crate::transform::core::TransformSpec {
+        serde_json::from_value(serde_json::json!({"type": "identity", "statistics": true})).expect("the marker deserializes")
+    }
+
     /// Two-layer chart with a FAN-OUT named `Bin` transform:
     ///
     /// - base batch: `x`/`y0` (Float64) + `cat` (Utf8); `__final__` keeps it,
@@ -8921,7 +9068,7 @@ mod tests {
                 color: field("cat"),
                 ..Default::default()
             },
-            transforms: vec![TransformSpec::Bin(BinSpec {
+            transforms: vec![statistics_marker(), TransformSpec::Bin(BinSpec {
                 field: "x".into(),
                 mode: BinMode::Fixed { n: 2 },
                 extent: Some((1.0, 3.0)),
@@ -9187,6 +9334,233 @@ mod tests {
             warnings.is_empty(),
             "a zero-row data_source layer must stay silent: {warnings:?}"
         );
+    }
+
+    /// `layer_gate_binned_spec` with an unnamed filter after its named Bin:
+    /// the filter empties the chart-level rows, and `named_predicate`, when
+    /// given, also filters the named output layer 1 reads.
+    fn chart_rows_emptied_spec(named_predicate: Option<&str>) -> (ChartSpec, RecordBatch) {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        let filter = |predicate: &str, name: Option<&str>| {
+            TransformSpec::Filter(FilterSpec {
+                predicate: predicate.into(),
+                name: name.map(Into::into),
+                param: None,
+            })
+        };
+        if let Some(predicate) = named_predicate {
+            spec.transforms = vec![filter(predicate, Some("binned"))];
+        }
+        spec.transforms.push(filter("datum.x > 1000", None));
+        (spec, batch)
+    }
+
+    /// A panel is drawn while any of its layers has rows: the chart-level
+    /// rows are filtered away, but layer 1 reads the named Bin output, which
+    /// has two bins, so the panel draws layer 1's two points. The rejected
+    /// alternative skips the panel on the chart-level rows alone, which
+    /// blanks the chart with no panel at all.
+    #[test]
+    fn a_panel_draws_while_a_layer_has_rows_under_empty_chart_rows() {
+        pyo3::Python::initialize();
+        let (spec, batch) = chart_rows_emptied_spec(None);
+        let scene = try_build_scene_for(&spec, &batch).expect("renders");
+        assert_eq!(scene.panels.len(), 1, "the panel is drawn");
+        assert_eq!(
+            panel_mark_batch_node_counts(&scene),
+            vec![2],
+            "layer 1 draws its two bins; layer 0 has no rows and draws nothing"
+        );
+    }
+
+    /// Every text a panel's axes draw, depth first.
+    fn panel_axis_texts(panel: &ferrum_scene::Panel) -> Vec<String> {
+        fn texts(nodes: &[SceneNode], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Text { content, .. } => out.push(content.clone()),
+                    SceneNode::Group { children, .. } => texts(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        texts(&panel.axes, &mut out);
+        out
+    }
+
+    /// With no rows in the chart's data or any layer, the chart still draws
+    /// its panel, frame and both axes, with no marks, and warns once. The
+    /// rejected alternative skips the panel and leaves a blank render with
+    /// nothing saying why.
+    #[test]
+    fn a_chart_with_no_rows_draws_its_panel_and_axes_and_warns() {
+        pyo3::Python::initialize();
+        let (spec, batch) = chart_rows_emptied_spec(Some("datum.x > 1000"));
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("an empty chart renders");
+        assert_eq!(scene.panels.len(), 1, "the panel is drawn");
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.iter().map(|b| b.nodes.len()).sum::<usize>(), 0, "no marks");
+        assert!(!panel_axis_texts(panel).is_empty(), "the axes draw their ticks");
+        let no_rows: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
+        assert_eq!(no_rows, [&RenderWarning::NoRowsToDraw { faceted: false }], "{warnings:?}");
+    }
+
+    /// An empty chart's explicit x domain is honored: its ticks span 0..10,
+    /// while y takes the empty-column fallback.
+    #[test]
+    fn an_empty_charts_explicit_domain_is_honored() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        pyo3::Python::initialize();
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"mark":"point","encoding":{"x":{"field":"a","scale":{"type":"linear","domain":[0.0,10.0]}},"y":{"field":"b"}},"transforms":[{"type":"filter","predicate":"datum.a > 100"}]}"#,
+        )
+        .expect("the spec deserializes");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![1.0, 2.0])), Arc::new(Float64Array::from(vec![3.0, 4.0]))],
+        )
+        .unwrap();
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("an empty chart renders");
+        assert_eq!(scene.panels.len(), 1);
+        let texts = panel_axis_texts(&scene.panels[0]);
+        assert!(texts.iter().any(|t| t == "10"), "x spans its domain: {texts:?}");
+        assert!(texts.iter().any(|t| t == "0"), "{texts:?}");
+        assert!(warnings.contains(&RenderWarning::NoRowsToDraw { faceted: false }), "{warnings:?}");
+    }
+
+    /// Chart rows no layer reads do not count as rows to draw: every layer
+    /// reads an emptied named output, so the chart warns that it has none,
+    /// though its chart-level rows are full. The rejected alternative also
+    /// counts the unread chart rows and stays silent.
+    #[test]
+    fn unread_chart_rows_do_not_count_as_rows_to_draw() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        pyo3::Python::initialize();
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.transforms.insert(
+            0,
+            TransformSpec::Filter(FilterSpec { predicate: "datum.x > 1000".into(), name: Some("emptied".into()), param: None }),
+        );
+        for layer in spec.layers.as_mut().expect("a layered fixture") {
+            layer.data_source = Some("emptied".into());
+            layer.mark = Mark::Point;
+            layer.encoding.x = Some(crate::spec::encoding::EncodingSpec { field: "x".into(), ..Default::default() });
+            layer.encoding.y = Some(crate::spec::encoding::EncodingSpec { field: "y0".into(), ..Default::default() });
+        }
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("renders");
+        assert_eq!(scene.panels.len(), 1);
+        assert!(warnings.contains(&RenderWarning::NoRowsToDraw { faceted: false }), "{warnings:?}");
+    }
+
+    /// An empty chart over a categorical x draws its panel with an empty
+    /// band axis, never refusing for an empty domain.
+    #[test]
+    fn an_empty_chart_over_a_categorical_axis_draws_its_panel() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        pyo3::Python::initialize();
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"mark":"bar","encoding":{"x":{"field":"g"},"y":{"field":"v"}},"transforms":[{"type":"filter","predicate":"datum.v > 100"}]}"#,
+        )
+        .expect("the spec deserializes");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+        )
+        .unwrap();
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("an empty categorical chart renders");
+        assert_eq!(scene.panels.len(), 1);
+        let texts = panel_axis_texts(&scene.panels[0]);
+        assert!(!texts.iter().any(|t| t == "a" || t == "b"), "no category ticks: {texts:?}");
+        assert!(warnings.contains(&RenderWarning::NoRowsToDraw { faceted: false }), "{warnings:?}");
+    }
+
+    /// A faceted chart whose layers draw no facet value draws no panel and
+    /// warns, rather than failing layout for want of facet groups.
+    #[test]
+    fn a_faceted_chart_with_no_rows_draws_no_panel_and_warns() {
+        pyo3::Python::initialize();
+        let (mut spec, batch) = chart_rows_emptied_spec(Some("datum.x > 1000"));
+        spec.facet = Some(crate::layout::FacetSpec {
+            field: "cat".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        });
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("an empty faceted chart renders");
+        assert!(scene.panels.is_empty(), "no facet value is drawn");
+        let no_rows: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
+        assert_eq!(no_rows, [&RenderWarning::NoRowsToDraw { faceted: true }], "{warnings:?}");
+    }
+
+    /// A facet panel is drawn while any layer has rows for it: over `cat`
+    /// (`a`, `b`), the chart's rows are filtered to none, or to `a` alone,
+    /// while layer 1's named Bin output holds both values, so both panels
+    /// draw layer 1. The rejected alternative takes the facet's panels from
+    /// the chart's rows alone, which fails layout with no panel (empty rows)
+    /// or drops the `b` panel the layer draws.
+    #[test]
+    fn a_facet_panel_draws_while_a_layer_has_rows_for_it() {
+        pyo3::Python::initialize();
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        for predicate in ["datum.x > 1000", "datum.cat == 'a'"] {
+            let (mut spec, batch) = layer_gate_binned_spec();
+            spec.transforms.push(TransformSpec::Filter(FilterSpec {
+                predicate: predicate.into(),
+                name: None,
+                param: None,
+            }));
+            spec.facet = Some(crate::layout::FacetSpec {
+                field: "cat".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                repeat: Vec::new(),
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            });
+            let scene = try_build_scene_for(&spec, &batch).unwrap_or_else(|e| panic!("{predicate}: {e}"));
+            assert_eq!(scene.panels.len(), 2, "{predicate}: one panel per value a layer draws");
+            for panel in &scene.panels {
+                let drawn: usize = panel.marks.iter().map(|b| b.nodes.len()).sum();
+                assert!(drawn > 0, "{predicate}: panel {} draws layer 1's bins", panel.id);
+            }
+        }
     }
 
     // ── Wave-1 close remediation (S3-1): provisional-pass vs. panel-real-pass
@@ -10039,7 +10413,7 @@ mod tests {
     }
 
     /// The named-only-chain case: the chart's only transform carries a
-    /// `name`, so [`crate::transform::core::apply_transforms_named`] publishes
+    /// `name`, so [`crate::transform::run::apply_transforms_named`] publishes
     /// it as a branch and leaves `__final__` — the tail both layers read —
     /// byte-identical to the source. `spec.transforms` is non-empty (so the
     /// deleted heuristic would have claimed the remedy), but the missing
@@ -10447,6 +10821,7 @@ mod tests {
             mark: Mark::Tick,
             encoding: Encoding { x: field("mean_v"), ..Default::default() },
             transforms: vec![
+                statistics_marker(),
                 aggregate(AggFn::Sum, "total", Some("agg")),
                 aggregate(AggFn::Mean, "mean_v", None),
             ],

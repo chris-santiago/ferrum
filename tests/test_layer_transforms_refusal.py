@@ -6,8 +6,8 @@ per-layer list was accepted, serialized, deserialized and never read. A
 non-empty value is now refused at construction with the text below, and a
 hand-built wire spec whose ``layers[i].transforms`` is non-empty is refused at
 render with a typed error naming layer ``i``. The route that does work (a
-named chart-level transform read through ``data_source``, which ``+`` builds
-for a composed chart's own ``.transform(...)``) keeps rendering.
+composed chart's own ``.transform(...)``, which runs in the branch its
+operand's layers read through ``data_source``) keeps rendering.
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def test_wire_without_layer_transforms_renders(output_kind):
 
 
 # ---------------------------------------------------------------------------
-# The working route: a named chart-level transform read through data_source.
+# The working route: a ``+`` operand's own transform, run in the branch its layer reads.
 # ---------------------------------------------------------------------------
 
 
@@ -134,10 +134,10 @@ def test_named_transform_read_through_data_source_still_filters_its_layer():
     chart = points + filtered_line
 
     wire = json.loads(chart.to_json())
-    (named,) = wire["transforms"]
-    assert named["type"] == "filter"
-    assert "data_source" not in wire["layers"][0]
-    assert wire["layers"][1]["data_source"] == named["name"]
+    points_branch, line_branch = wire["transforms"]
+    assert [t["type"] for t in line_branch["transforms"]] == ["filter"]
+    assert wire["layers"][0]["data_source"] == points_branch["name"]
+    assert wire["layers"][1]["data_source"] == line_branch["name"]
 
     svg = chart.to_svg()
     assert svg.count("<circle") == 4

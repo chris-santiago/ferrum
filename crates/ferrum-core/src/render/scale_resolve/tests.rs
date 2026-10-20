@@ -4162,7 +4162,7 @@ fn d4b_shared_numeric_seeds_auto_path_with_padding() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
 
     // Domain is REPLACED by the shared extent, not the leaf's own [1, 6].
     let (lo, hi) = shared.x.data_domain().unwrap();
@@ -4211,7 +4211,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
     // The union category vector seeds the axis — every leaf renders the full domain.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4246,7 +4246,7 @@ fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
     // Seeded order survives verbatim despite the "-y" sort on the encoding.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4264,7 +4264,7 @@ fn d4b_none_context_is_byte_identical_noop() {
     let (plain, _) =
         resolve_scales_with_outputs(&spec, &batch, &empty, pr, pr, &theme).unwrap();
     let (threaded_none, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, None).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, None).unwrap();
 
     assert_eq!(plain.x.data_domain(), threaded_none.x.data_domain());
     assert_eq!(plain.y.data_domain(), threaded_none.y.data_domain());
@@ -4311,7 +4311,7 @@ fn d4b_user_scale_wins_over_shared() {
         ..Default::default()
     };
     let (scales, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
 
     // User scale wins: the explicit [0, 500] domain is used, NOT the shared [-100, 100].
     let (lo, hi) = scales.x.data_domain().unwrap();
@@ -4356,7 +4356,7 @@ fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
     match shared.color.expect("shared color scale") {
         ColorScale::Categorical { domain, .. } => assert_eq!(
             domain,
@@ -4391,7 +4391,7 @@ fn d10preb_shared_size_extent_seeds_scale_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::color_bin_group::BinnedOrigins::new(), pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, Some(&ctx)).unwrap();
     let shared_size = shared.size.expect("shared size scale");
     let (lo, hi) = shared_size.inner.data_domain().unwrap();
     assert!(
@@ -5588,7 +5588,7 @@ fn a_texts_inherited_color_does_not_widen_a_binned_colors_edges() {
             &spec,
             &chart_encoding,
             &primary,
-            &outputs, &crate::transform::color_bin_group::BinnedOrigins::new(),
+            &outputs, &crate::transform::run::OutputLineages::new(),
             (0.0, 100.0),
             (0.0, 80.0),
             &ThemeInputs::default(),
@@ -7490,7 +7490,7 @@ fn resolve_against(
         spec,
         chart_encoding,
         &batch,
-        &outputs, &crate::transform::color_bin_group::BinnedOrigins::new(),
+        &outputs, &crate::transform::run::OutputLineages::new(),
         (0.0, 100.0),
         (0.0, 80.0),
         &ThemeInputs::default(),
@@ -7567,7 +7567,7 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
             serde_json::from_value(serde_json::json!({ name: { "field": field } })).unwrap();
         let spec = ChartSpec { encoding, ..Default::default() };
         let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash, stroke_width, raster_cells: _ } =
-            build_auxiliary_scales(&spec, &spec.encoding, &batch, &HashMap::new(), &crate::transform::color_bin_group::BinnedOrigins::new(), &ThemeInputs::default(), None, &mut Vec::new())
+            build_auxiliary_scales(&spec, &spec.encoding, &batch, &HashMap::new(), &crate::transform::run::OutputLineages::new(), &ThemeInputs::default(), None, &mut Vec::new())
                 .unwrap();
         let built = [
             color.is_some(),
@@ -8032,7 +8032,7 @@ fn resolve_aux_layered(spec: &ChartSpec, chart_encoding: &crate::spec::encoding:
         spec,
         chart_encoding,
         &primary,
-        &outputs, &crate::transform::color_bin_group::BinnedOrigins::new(),
+        &outputs, &crate::transform::run::OutputLineages::new(),
         (0.0, 100.0),
         (0.0, 80.0),
         &ThemeInputs::default(),
@@ -8116,7 +8116,7 @@ fn an_inheriting_layer_reads_the_chart_field_from_its_own_batch() {
         &spec,
         &chart_encoding,
         &primary,
-        &outputs, &crate::transform::color_bin_group::BinnedOrigins::new(),
+        &outputs, &crate::transform::run::OutputLineages::new(),
         (0.0, 100.0),
         (0.0, 80.0),
         &ThemeInputs::default(),
@@ -8147,7 +8147,7 @@ fn resolve_aux_layered_warned(
         spec,
         chart_encoding,
         &primary,
-        &outputs, &crate::transform::color_bin_group::BinnedOrigins::new(),
+        &outputs, &crate::transform::run::OutputLineages::new(),
         (0.0, 100.0),
         (0.0, 80.0),
         &ThemeInputs::default(),
@@ -8418,8 +8418,8 @@ fn an_unlayered_overlay_member_binding_an_absent_column_refuses() {
     let outputs = HashMap::new();
     let (absent, other) = (chart("w"), chart("x"));
     let members = [
-        LeafResolveInput { spec: &absent, encoding: &absent.encoding, final_batch: &rows, transform_outputs: &outputs, transform_origins: &crate::transform::color_bin_group::BinnedOrigins::new() },
-        LeafResolveInput { spec: &other, encoding: &other.encoding, final_batch: &rows, transform_outputs: &outputs, transform_origins: &crate::transform::color_bin_group::BinnedOrigins::new() },
+        LeafResolveInput { spec: &absent, encoding: &absent.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new() },
+        LeafResolveInput { spec: &other, encoding: &other.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new() },
     ];
     let refusal = build_overlay_auxiliary_scales(&members, &absent.encoding, &ThemeInputs::default(), &mut Vec::new())
         .expect_err("member 0's color names a column its rows lack");

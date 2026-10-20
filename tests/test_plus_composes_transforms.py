@@ -987,13 +987,13 @@ def test_layerchart_independent_y_renders_both_chains():
 
 
 def test_layerchart_interactive_renders_both_chains():
-    """The interactive route renders LayerChart's merged chart: its density layer reads the routed KDE."""
+    """The interactive route renders LayerChart's merged chart: its density layer reads its own KDE."""
     merged = fm.LayerChart(H(), D())._build_merged()
     wire = json.loads(merged.to_spec().to_json())
     assert len(wire["layers"]) == 2
-    source = wire["layers"][1]["data_source"]
-    published = {t["name"]: t for t in wire["transforms"] if "name" in t}
-    assert published[source]["type"] == "kde"
+    branches = {t["name"]: t for t in wire["transforms"]}
+    density = branches[wire["layers"][1]["data_source"]]
+    assert [t["type"] for t in density["transforms"]] == ["identity", "kde"]
     assert _plot_marks(merged.to_svg()) == _plot_marks(fm.LayerChart(H(), D()).to_svg())
     assert "<html" in fm.LayerChart(H(), D()).interactive().to_html().lower()
 
@@ -1102,7 +1102,7 @@ def test_a_path_chart_with_a_layer_frame_is_refused():
 
 
 # ---------------------------------------------------------------------------
-# Routing shape on the wire.
+# Operand shape on the wire.
 # ---------------------------------------------------------------------------
 
 
@@ -1110,21 +1110,23 @@ def _wire_transforms(chart) -> list[dict]:
     return json.loads(chart.to_spec().to_json())["transforms"]
 
 
-def test_a_two_step_right_hand_chain_is_one_branch_over_the_source():
+def _marker() -> dict:
+    return {"type": "identity", "statistics": True}
+
+
+def test_each_operand_runs_its_own_chain_as_one_branch_over_the_source():
+    """The histogram's bins and the filtered density each run in their operand's branch.
+
+    Each branch reads the source, runs its operand's own steps, then its
+    statistics behind one marker; the top chain holds nothing else.
+    """
     filtered = fm.Chart(DF).transform(_positive()).mark_density().encode(x="value")
     transforms = _wire_transforms(H() + filtered)
-    branch = transforms[0]
-    assert branch["type"] == "branch"
-    assert branch["input"] is None
-    assert [t["type"] for t in branch["transforms"]] == ["filter", "kde"]
-    assert transforms[1]["type"] == "bin" and "name" not in transforms[1]
-
-
-def test_a_one_step_right_hand_chain_is_a_named_step_ahead_of_the_left_chain():
-    transforms = _wire_transforms(H() + D())
-    assert [t["type"] for t in transforms] == ["kde", "bin"]
-    assert "name" in transforms[0]
-    assert "name" not in transforms[1]
+    assert [t["type"] for t in transforms] == ["branch", "branch"]
+    assert all(t["input"] is None for t in transforms)
+    assert [t["type"] for t in transforms[0]["transforms"]] == ["identity", "bin"]
+    assert [t["type"] for t in transforms[1]["transforms"]] == ["filter", "identity", "kde"]
+    assert transforms[0]["transforms"][0] == transforms[1]["transforms"][1] == _marker()
 
 
 # ---------------------------------------------------------------------------

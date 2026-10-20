@@ -405,7 +405,7 @@ def test_layer_chart_with_zero_row_chart():
     """LayerChart where one layer has 0 rows should still produce valid SVG.
 
     Targets LayerChart._build_merged which calls + operator.
-    The + operator's _shares_data_with path may handle empty differently.
+    The + operator's frame comparison may handle empty data differently.
     """
     df_empty = pl.DataFrame(
         {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}

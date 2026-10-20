@@ -1077,6 +1077,17 @@ pub enum RenderError {
     /// therefore refuses per-leaf, exactly like every other per-leaf
     /// render error.
     BreakAxisIncompatibleCoord { coord: &'static str, axis: AlignAxis },
+    /// A layer with an independent y scale (`SecondaryY`, an independent-y
+    /// `LayerChart` member) on a panel whose own (chart-level) coord is
+    /// `CoordFlip`, `CoordPolar` or `CoordGeo`; a layer's own coord on a
+    /// Cartesian panel does not count. Its right y axis has no
+    /// place once the coord moves y off the vertical axis: under a flip the
+    /// axis drew with the other channel's title, and under a polar or geo
+    /// coord it vanished, both silently. Raised beside
+    /// [`Self::BreakAxisIncompatibleCoord`] at the top of
+    /// `scene_build::build_scene`, the funnel every door and every composite
+    /// leaf passes through. `coord` is the coord's public spelling.
+    IndependentYIncompatibleCoord { coord: &'static str },
     /// A `Utf8View`/`LargeUtf8` string column (raw input, or a transform
     /// output that materializes one — `data_flatten` on a polars
     /// `LargeList<LargeUtf8>`, a `LargeUtf8` groupby column
@@ -1213,6 +1224,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // #230-8: carries a coord name and the `BreakAxis.axis` token, not a
         // positional encoding channel — nothing here to un-flip.
         | RenderError::BreakAxisIncompatibleCoord { .. }
+        | RenderError::IndependentYIncompatibleCoord { .. }
         // `#172`(1): carries a layer index, a coord constructor and the
         // panel-scoped property it declared — no channel token either.
         | RenderError::LayerCoordUnplaceable { .. }
@@ -1663,6 +1675,12 @@ impl std::fmt::Display for RenderError {
                  remove the break or render this chart under Cartesian coords",
                 axis.wire_name()
             ),
+            Self::IndependentYIncompatibleCoord { coord } => write!(
+                f,
+                "SecondaryY (a layer with an independent y scale) is not supported under {coord}: its right y \
+                 axis has no place once the coord moves y off the vertical axis; draw the series on a Cartesian panel \
+                 (put the categories on x and drop the coord), or draw it on the shared y axis"
+            ),
             Self::StringNormalizationFailed { field, reason } => match field {
                 None => write!(f, "could not normalize string columns to Utf8: {reason}"),
                 Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
@@ -1928,6 +1946,11 @@ pub enum RenderWarning {
         reason: String,
     },
     EmptyPanel { panel_index: usize },
+    /// No layer, nor the chart itself, has a row to draw after its
+    /// transforms. An unfaceted chart still draws its panel frame and axes
+    /// (an explicit domain, else the empty-column fallback); a faceted one
+    /// has no facet value to draw, so it draws no panel.
+    NoRowsToDraw { faceted: bool },
     /// A chart-level `configure_color(range=…)` named a different number of
     /// colors than the discretizing (Quantize/Quantile/Threshold/BinOrdinal)
     /// color scale has buckets. The bucket count is fixed by the scale's own
@@ -1969,6 +1992,12 @@ pub enum RenderWarning {
     /// (which is nearly every render), since the shared predicate would
     /// strip it as an assumed duplicate that was never actually re-derived.
     FacetSortSpecIgnored { reason: String },
+    /// A data-aware facet sort ordered the panels whose rows carry what it
+    /// reads, and left the `unsorted` values, whose rows (in the layer that
+    /// draws each) do not carry `source`, among the values with no rows.
+    /// The sort is applied, so this is not [`Self::FacetSortSpecIgnored`]:
+    /// it names the values the sort could not place.
+    FacetSortPartial { unsorted: Vec<String>, source: String },
     /// A position adjustment was requested with a grouping channel that could
     /// not yield categories — the named `by`/color column is absent from the
     /// data, or its dtype cannot be turned into category keys (e.g. timestamp /
@@ -2421,6 +2450,11 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "panel {panel_index} is too small to render and was left empty"
             ),
+            RenderWarning::NoRowsToDraw { faceted } => write!(
+                f,
+                "the chart has no rows to draw after its transforms; {}",
+                if *faceted { "no facet panel is drawn" } else { "its panel is drawn empty" }
+            ),
             RenderWarning::ColorRangeBucketCountMismatch { expected, received } => write!(
                 f,
                 "color range names {received} color(s) but the binned color scale has \
@@ -2441,6 +2475,11 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "facet sort spec could not be applied ({reason}); panels fall back \
                  to insertion order"
+            ),
+            RenderWarning::FacetSortPartial { unsorted, source } => write!(
+                f,
+                "facet sort left the values {unsorted:?} unsorted: their rows in the layer that draws \
+                 them carry no {source}, so they sort as values with no rows; the other panels are sorted"
             ),
             RenderWarning::PositionAdjustSkipped { adjustment, reason } => write!(
                 f,
@@ -2716,10 +2755,13 @@ mod tests {
                 reason: "mark_rect() needs an ordinal x or y axis".into(),
             },
             RenderWarning::EmptyPanel { panel_index: 1 },
+            RenderWarning::NoRowsToDraw { faceted: false },
+            RenderWarning::NoRowsToDraw { faceted: true },
             RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
             RenderWarning::ColorDomainOmitsCategories { categories: vec!["c".into()] },
             RenderWarning::SortSpecIgnored { reason: "missing field".into() },
             RenderWarning::FacetSortSpecIgnored { reason: "missing field".into() },
+            RenderWarning::FacetSortPartial { unsorted: vec!["b".into()], source: "'z' value".into() },
             RenderWarning::PositionAdjustSkipped {
                 adjustment: "dodge".into(),
                 reason: "by-column 'grp' not found in data".into(),

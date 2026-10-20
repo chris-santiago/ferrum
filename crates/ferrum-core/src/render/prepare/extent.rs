@@ -209,13 +209,30 @@ pub(crate) fn fix_transform_extents_for_facet(
                 .unwrap_or_else(|| t.clone())
             }
             // A branch's sub-chain runs per panel too, so its extent-carrying
-            // steps pin against the same whole-frame batch.
+            // steps pin against the same whole-frame batch: for an operand's
+            // framed branch, that operand's own rows of it. A frame that
+            // cannot pick them is left unpinned, since the run refuses it.
             TransformSpec::Branch(branch) => {
-                TransformSpec::Branch(crate::transform::branch::BranchSpec {
-                    name: branch.name.clone(),
-                    input: branch.input.clone(),
-                    transforms: fix_transform_extents_for_facet(&branch.transforms, batch),
-                })
+                let transforms = match &branch.frame {
+                    None => fix_transform_extents_for_facet(&branch.transforms, batch),
+                    Some(frame) => match frame.rows(&branch.name, batch, &[]) {
+                        Ok(rows) => fix_transform_extents_for_facet(&branch.transforms, &rows),
+                        Err(_) => branch.transforms.clone(),
+                    },
+                };
+                TransformSpec::Branch(crate::transform::branch::BranchSpec { transforms, ..branch.clone() })
+            }
+            // A composed copy's step runs per panel as written, so it pins
+            // like the same step written directly.
+            TransformSpec::Composed(composed) => {
+                let step = fix_transform_extents_for_facet(std::slice::from_ref(&*composed.step), batch);
+                match step.into_iter().next() {
+                    Some(step) => TransformSpec::Composed(crate::transform::composed::ComposedSpec {
+                        group: composed.group.clone(),
+                        step: Box::new(step),
+                    }),
+                    None => t.clone(),
+                }
             }
             _ => t.clone(),
         })
@@ -633,7 +650,7 @@ mod tests {
             aggregates: None,
         });
         let branch = |name: &str, transforms| {
-            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, transforms })
+            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, frame: None, transforms })
         };
         let spec = branch("outer", vec![bin.clone(), branch("inner", vec![bin])]);
         let out = fix_transform_extents_for_facet(&[spec], &v_batch());
@@ -644,5 +661,44 @@ mod tests {
         let TransformSpec::Bin(pinned) = &inner.transforms[0] else { panic!("expected a Bin") };
         assert!(pinned.extent.is_some(), "the nested branch's Bin was not pinned");
         assert_eq!((outer.name.as_str(), inner.name.as_str()), ("outer", "inner"));
+    }
+
+    /// An operand's framed branch pins its statistics against that
+    /// operand's own rows of the whole frame: the right operand's `v`
+    /// (100..105, renamed `v__r` in the combined batch), never the left's
+    /// `v` (0..1) the combined batch holds under that name. Rejects pinning
+    /// from the combined batch, which bins the right's histogram over the
+    /// left's range so every bar is empty.
+    #[test]
+    fn a_framed_branch_pins_against_its_operands_own_rows() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        use arrow::array::{BooleanArray, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let combined = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, true),
+                Field::new("v__r", DataType::Float64, true),
+                Field::new("right", DataType::Boolean, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), None, None])),
+                Arc::new(Float64Array::from(vec![None, None, Some(100.0), Some(105.0)])),
+                Arc::new(BooleanArray::from(vec![false, false, true, true])),
+            ],
+        )
+        .unwrap();
+        let spec: TransformSpec = serde_json::from_value(serde_json::json!({
+            "type": "branch", "name": "op",
+            "frame": {"marker": "right", "renames": {"v": "v__r"}, "columns": ["v"]},
+            "transforms": [{"type": "bin", "field": "v", "bin_count": 5, "nice": false}],
+        }))
+        .unwrap();
+        let out = fix_transform_extents_for_facet(&[spec], &combined);
+        let TransformSpec::Branch(op) = &out[0] else { panic!("expected the Branch back") };
+        let TransformSpec::Bin(pinned) = &op.transforms[0] else { panic!("expected a Bin") };
+        assert_eq!(pinned.extent, Some((100.0, 105.0)));
+        assert!(op.frame.is_some(), "the frame is kept");
     }
 }

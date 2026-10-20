@@ -8160,35 +8160,29 @@ fn a_facet_with_no_values_is_refused() {
 }
 
 /// The rows a layer reading its chart's data starts from, for the remedy a
-/// missing column names: a branch reading a published `input` (a
-/// composition's left operand's own rows) starts from that input, never from
-/// the merged source, which also holds a sibling operand's `w`. So `w`, absent
-/// from the left's rows and from every produced batch, gets the plain message
-/// (`None`). The rejected reading consults the merged source and names the
-/// Source remedy. The control: a branch reading the original batch keeps the
-/// Source remedy for a source column its chain dropped.
+/// missing column names: an operand's framed branch starts from its own rows
+/// and columns, never from the combined source, which also holds a sibling
+/// operand's `w`. So `w`, absent from the operand's rows and from every
+/// produced batch, gets the plain message (`None`). The rejected reading
+/// consults the combined source and names the Source remedy. The control:
+/// an unframed branch over the source keeps the Source remedy for a source
+/// column its chain dropped.
 #[test]
-fn the_remedy_source_is_the_rows_the_layers_branch_starts_from() {
-    use crate::transform::branch::BranchSpec;
-    use crate::transform::core::TransformSpec;
-    use crate::transform::filter::FilterSpec;
-    let merged_source = Schema::new(vec![
-        Field::new("x", DataType::Float64, true),
-        Field::new("w", DataType::Float64, true),
-    ]);
-    let left_rows = RecordBatch::try_new(
-        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)])),
-        vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+fn the_remedy_source_is_the_rows_the_layers_lineage_starts_from() {
+    pyo3::Python::initialize();
+    let combined = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new("left", DataType::Boolean, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+            Arc::new(Float64Array::from(vec![None, None, Some(3.0)])),
+            Arc::new(arrow::array::BooleanArray::from(vec![true, true, false])),
+        ],
     )
     .expect("schema and columns agree");
-    let outputs = HashMap::from([("left_rows".to_string(), left_rows.clone()), ("layer_rows".to_string(), left_rows)]);
-    let branch = |input: Option<&str>| {
-        TransformSpec::Branch(BranchSpec {
-            name: "layer_rows".into(),
-            input: input.map(str::to_string),
-            transforms: vec![TransformSpec::Filter(FilterSpec { predicate: "true".into(), name: None, param: None })],
-        })
-    };
     let layer = crate::spec::layer::Layer {
         mark: Mark::Line,
         encoding: Encoding { y: Some(EncodingSpec { field: "w".into(), ..Default::default() }), ..Default::default() },
@@ -8197,12 +8191,19 @@ fn the_remedy_source_is_the_rows_the_layers_branch_starts_from() {
         ..Default::default()
     };
     let prepared = LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer);
-    let reading_input = [branch(Some("left_rows"))];
-    let pipeline = PipelineBatches { source: &merged_source, outputs: &outputs, transforms: &reading_input };
-    assert_eq!(missing_column_remedy("w", &prepared, &pipeline), None);
-    let reading_source = [branch(None)];
-    let pipeline = PipelineBatches { source: &merged_source, outputs: &outputs, transforms: &reading_source };
-    assert_eq!(missing_column_remedy("w", &prepared, &pipeline), Some(crate::render::MissingColumnRemedy::Source));
+    let remedy = |frame: serde_json::Value| {
+        let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
+            {"type": "branch", "name": "layer_rows", "frame": frame, "transforms": [{"type": "project", "fields": ["x"]}]},
+        ]))
+        .expect("the transforms deserialize");
+        let (outputs, lineages) = crate::transform::core::apply_transforms_named(&transforms, &combined, &TransformContext::default())
+            .expect("the pipeline runs");
+        let schema = combined.schema();
+        let pipeline = PipelineBatches { source: &schema, outputs: &outputs, lineages: &lineages };
+        missing_column_remedy("w", &prepared, &pipeline)
+    };
+    assert_eq!(remedy(serde_json::json!({"marker": "left", "columns": ["x"]})), None);
+    assert_eq!(remedy(serde_json::Value::Null), Some(crate::render::MissingColumnRemedy::Source));
 }
 
 /// A repeat marker that is not Boolean is a malformed wire, refused by name.
@@ -8302,16 +8303,37 @@ fn column_gate_spec(transforms: serde_json::Value, layers: serde_json::Value) ->
     .expect("the layered spec deserializes")
 }
 
-/// A named statistic: the per-`g` mean of `z` as `mean_z`, published as
-/// `stats`. A layer reading the chart's rows does not see it.
-fn named_mean_z() -> serde_json::Value {
-    serde_json::json!([{"type": "aggregate", "ops": [{"field": "z", "fn": "mean", "as": "mean_z"}], "groupby": ["g"], "name": "stats"}])
+/// [`column_gate_batch`] as two `+` operands' combined rows: `is_left` marks
+/// the first two rows, `is_right` the last two.
+fn two_operand_rows() -> RecordBatch {
+    let rows = column_gate_batch();
+    let mut fields: Vec<Field> = rows.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut columns = rows.columns().to_vec();
+    for (name, marks) in [("is_left", [true, true, false, false]), ("is_right", [false, false, true, true])] {
+        fields.push(Field::new(name, DataType::Boolean, false));
+        columns.push(Arc::new(arrow::array::BooleanArray::from(marks.to_vec())));
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("schema and columns agree")
 }
 
-/// An unnamed statistic the chart's rows advance through: per `g`, the sum
-/// of `x` as `total`. `z` and `k` are source columns it drops.
+/// A named statistic: the per-`g` mean of `z` as `mean_z`, published as
+/// `stats` after the chain's statistics marker. A layer reading the chart's
+/// rows does not see it.
+fn named_mean_z() -> serde_json::Value {
+    serde_json::json!([
+        {"type": "identity", "statistics": true},
+        {"type": "aggregate", "ops": [{"field": "z", "fn": "mean", "as": "mean_z"}], "groupby": ["g"], "name": "stats"},
+    ])
+}
+
+/// An unnamed statistic the chart's rows advance through, after the
+/// chain's statistics marker: per `g`, the sum of `x` as `total`. `z` and
+/// `k` are source columns it drops.
 fn chain_dropping_z_and_k() -> serde_json::Value {
-    serde_json::json!([{"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"]}])
+    serde_json::json!([
+        {"type": "identity", "statistics": true},
+        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"]},
+    ])
 }
 
 /// The scene the whole pipeline builds for `spec` over `batch`, or its refusal,
@@ -8496,8 +8518,9 @@ fn a_statistic_sub_layer_drops_an_inherited_read_its_statistic_does_not_carry_wi
 
 /// What still refuses beside a statistic sub-layer's dropped read: the same
 /// column bound by the statistic layer itself (its own binding), the same
-/// inherited binding on a layer over the user's rows (a `Branch` output),
-/// and an inherited column found nowhere, even in the source.
+/// inherited binding on a layer over the user's rows (a branch running only
+/// the user's own steps, no statistics marker), and an inherited column
+/// found nowhere, even in the source.
 #[test]
 fn own_bindings_raw_row_layers_and_unknown_columns_still_refuse_beside_a_statistic_layer() {
     let own = column_gate_spec(
@@ -8510,7 +8533,9 @@ fn own_bindings_raw_row_layers_and_unknown_columns_still_refuse_beside_a_statist
     assert_eq!(gate_refusal(&own).to_string(), gate_message("color", "k", None, false));
 
     let mut branch = column_gate_spec(
-        serde_json::json!([{"type": "branch", "name": "rows", "transforms": chain_dropping_z_and_k()}]),
+        serde_json::json!([{"type": "branch", "name": "rows", "transforms": [
+            {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"]},
+        ]}]),
         serde_json::json!([
             {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
             {"mark": "point", "data_source": "rows", "encoding": {"x": {"field": "total"}, "y": {"field": "total"}}},
@@ -8696,27 +8721,37 @@ fn a_color_left_out_of_a_numeric_scale_draws_unscaled_on_every_mark() {
     }
 }
 
-/// A layer reads the user's rows when its `data_source` is a `Branch`
-/// output, at any nesting (a nested branch's tail is published scoped under
-/// its enclosing branch), and a statistic's output when it names any other
-/// published key: a named step's output, scoped or not.
+/// A layer reads a statistic's output when the rows under its
+/// `data_source` passed a lowered step (a step after its chain's statistics
+/// marker), whatever shape published them: a named statistic, scoped or not,
+/// and a branch reading one through its `input`. A nested branch's tail and
+/// the rows before the marker are the user's. Rejects classifying by wire
+/// shape, which reads every branch tail as the user's rows.
 #[test]
-fn a_layer_reads_a_statistic_unless_a_branch_publishes_its_data_source() {
+fn a_layer_reads_a_statistic_when_its_rows_passed_a_lowered_step() {
+    pyo3::Python::initialize();
     let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
         {"type": "branch", "name": "outer", "transforms": [
             {"type": "branch", "name": "inner", "transforms": [{"type": "filter", "predicate": "true"}]},
-            {"type": "aggregate", "ops": [{"field": "z", "fn": "mean", "as": "mean_z"}], "groupby": ["g"], "name": "stats"},
+            {"type": "identity", "name": "rows"},
+            {"type": "identity", "statistics": true},
+            {"type": "aggregate", "ops": [{"field": "x", "fn": "mean", "as": "mean_x"}], "groupby": ["g"], "name": "stats"},
         ]},
+        {"type": "branch", "name": "post", "input": "outer_stats", "transforms": [{"type": "filter", "predicate": "true"}]},
     ]))
     .expect("the transforms deserialize");
+    let (_, lineages) = crate::transform::core::apply_transforms_named(&transforms, &column_gate_batch(), &TransformContext::default())
+        .expect("the pipeline runs");
     let reading = |data_source: Option<&str>| {
         let layer = crate::spec::layer::Layer { data_source: data_source.map(str::to_string), ..Default::default() };
-        reads_statistic_output(&LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer), &transforms)
+        reads_statistic_output(&LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer), &lineages)
     };
     assert!(!reading(None));
-    assert!(!reading(Some("outer")));
+    assert!(!reading(Some("outer")), "the marker passes its rows through");
     assert!(!reading(Some("outer_inner")));
+    assert!(!reading(Some("outer_rows")));
     assert!(reading(Some("outer_stats")));
+    assert!(reading(Some("post")), "a branch over a statistic's output reads that statistic");
 }
 
 /// A dropped column warns once per layer, naming the first channel that
@@ -8998,20 +9033,19 @@ fn a_text_only_chart_with_a_parent_color_warns_it_is_not_drawn() {
 }
 
 /// A column only another `+` operand's rows hold is no statistic: a layer
-/// whose rows are its operand's own snapshot (a branch over a published
-/// `Identity` row marker) refuses with the plain message, though the other
-/// operand's branch, its row marker and the unadvanced tail all hold the
-/// column. Rejects classifying any named output as a statistic.
+/// whose rows are its operand's own (a branch over the snapshot its framed
+/// branch publishes) refuses with the plain message, though the other
+/// operand's branch, its snapshot and the unadvanced tail all hold the
+/// column. Rejects classifying any named output as a statistic, and reading
+/// the combined frame as the layer's source.
 #[test]
 fn a_column_only_another_operands_rows_hold_gets_the_plain_message() {
     let spec = column_gate_spec(
         serde_json::json!([
-            {"type": "branch", "name": "left", "transforms": [
-                {"type": "project", "fields": ["x", "y"]},
+            {"type": "branch", "name": "left", "frame": {"marker": "is_left", "columns": ["x", "y"]}, "transforms": [
                 {"type": "identity", "name": "rows"},
             ]},
-            {"type": "branch", "name": "right", "transforms": [
-                {"type": "project", "fields": ["x", "y", "z"]},
+            {"type": "branch", "name": "right", "frame": {"marker": "is_right", "columns": ["x", "y", "z"]}, "transforms": [
                 {"type": "identity", "name": "rows"},
             ]},
             {"type": "branch", "name": "secondary", "input": "left_rows", "transforms": [{"type": "filter", "predicate": "true"}]},
@@ -9022,7 +9056,10 @@ fn a_column_only_another_operands_rows_hold_gets_the_plain_message() {
             {"mark": "line", "data_source": "secondary", "reads_chart_data": true, "encoding": {"x": {"field": "x"}, "y": {"field": "z"}}},
         ]),
     );
-    let err = gate_refusal(&spec);
+    let err = match gate_render(&spec, &two_operand_rows()).0 {
+        Err(e @ RenderError::LayerUnknownColumn { .. }) => e,
+        other => panic!("expected the column gate's refusal, got {:?}", other.map(|_| "a rendered scene")),
+    };
     assert_eq!(
         err.to_string(),
         "layer 2: encoding 'y' references unknown column 'z' (not present in that layer's data)"
@@ -9050,65 +9087,39 @@ fn a_gate_refusal_on_a_desugared_layer_names_its_public_entry() {
 
 /// The rows each kind of layer starts from before its own statistic: a
 /// layer on the chart's rows starts from them (every panel's under a shared
-/// facet channel), a layer on a row output from that output, and a layer on
-/// a statistic's output from the rows its scope's statistic consumed: the
-/// row snapshot of the branch it is published under, or the chart's rows for
-/// a top-level statistic.
+/// facet channel), a layer on the user's rows from those rows, and a layer
+/// on a statistic's output from the rows its lineage's statistics consumed,
+/// in its own branch or at the top level, after the user's own steps.
 #[test]
 fn a_layers_pre_statistic_rows_are_the_rows_its_statistic_consumed() {
+    pyo3::Python::initialize();
     let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
         {"type": "branch", "name": "b", "transforms": [
-            {"type": "identity", "name": "marker"},
+            {"type": "filter", "predicate": "datum.x > 1"},
+            {"type": "identity", "statistics": true},
             {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"], "name": "box"},
         ]},
+        {"type": "filter", "predicate": "datum.x > 2"},
+        {"type": "identity", "statistics": true},
         {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": ["g"], "name": "stats"},
     ]))
     .expect("transforms");
-    let rows = |n: usize| {
-        RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)])),
-            vec![Arc::new(Float64Array::from(vec![0.0; n]))],
-        )
-        .expect("rows")
-    };
-    let primary = rows(1);
-    let mut outputs = HashMap::new();
-    for (key, n) in [(FINAL_OUTPUT_KEY, 2), ("b", 3), ("b_marker", 4), ("b_box", 5), ("stats", 6)] {
-        outputs.insert(key.to_string(), rows(n));
-    }
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false), Field::new("x", DataType::Float64, false)])),
+        vec![Arc::new(StringArray::from(vec!["a", "a", "b", "b"])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))],
+    )
+    .expect("rows");
+    let (outputs, lineages) =
+        crate::transform::core::apply_transforms_named(&transforms, &rows, &TransformContext::default()).expect("the pipeline runs");
+    let primary = rows.slice(0, 1);
     let read = |source: Option<&str>, include_final: bool| {
-        pre_statistic_rows(source, &transforms, &primary, &outputs, include_final).num_rows()
+        pre_statistic_rows(source, &lineages, &primary, &outputs, include_final).num_rows()
     };
     assert_eq!(read(None, false), 1, "chart rows");
     assert_eq!(read(None, true), 2, "every panel's chart rows");
-    assert_eq!(read(Some("b"), false), 3, "a row output");
-    assert_eq!(read(Some("b_marker"), false), 4, "a row snapshot");
-    assert_eq!(read(Some("b_box"), false), 4, "a branch statistic's consumed rows: the branch's snapshot");
-    assert_eq!(read(Some("stats"), false), 1, "a top-level statistic's consumed rows: the chart's");
-}
-
-/// The user's row outputs: every branch tail, every named Identity snapshot
-/// at any nesting (the `+` operand's row marker, displot's rug data, a
-/// threshold line's data), and the tail when no unnamed step advanced it.
-#[test]
-fn user_row_outputs_name_the_three_producer_shapes_and_the_unadvanced_tail() {
-    let parse = |json: serde_json::Value| -> Vec<crate::transform::core::TransformSpec> {
-        serde_json::from_value(json).expect("transforms")
-    };
-    let operand = parse(serde_json::json!([
-        {"type": "branch", "name": "left", "transforms": [{"type": "filter", "predicate": "true"}, {"type": "identity", "name": "row"}]},
-    ]));
-    assert_eq!(user_row_outputs(&operand), ["left", "left_row", FINAL_OUTPUT_KEY]);
-    let rug = parse(serde_json::json!([
-        {"type": "identity", "name": "rug_data"},
-        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": [], "name": "hist"},
-    ]));
-    assert_eq!(user_row_outputs(&rug), ["rug_data", FINAL_OUTPUT_KEY]);
-    let advanced = parse(serde_json::json!([
-        {"type": "identity", "name": "threshold"},
-        {"type": "aggregate", "ops": [{"field": "x", "fn": "sum", "as": "total"}], "groupby": []},
-    ]));
-    assert_eq!(user_row_outputs(&advanced), ["threshold"], "an advanced tail is a statistic's rows");
+    assert_eq!(read(Some("b"), false), 3, "the user's rows");
+    assert_eq!(read(Some("b_box"), false), 3, "a branch statistic's consumed rows");
+    assert_eq!(read(Some("stats"), false), 2, "a top-level statistic's consumed rows, after the user's filter");
 }
 
 /// A data-aware sort orders a layered axis by the establishing layer's own
@@ -10320,7 +10331,8 @@ fn a_statistic_grouped_by_a_non_numeric_binned_color_is_refused() {
 
 /// A spec without a binned color, a binned color no statistic groups by, and
 /// a binned color over an all-null column each run the pipeline once, as
-/// written: no statistic regroups and no pre-statistic rows are published.
+/// written: no statistic regroups, and the run records what the plain run
+/// records.
 #[test]
 fn a_chart_no_statistic_groups_by_a_binned_color_runs_its_pipeline_as_written() {
     let theme = crate::layout::ThemeInputs::default();
@@ -10335,9 +10347,9 @@ fn a_chart_no_statistic_groups_by_a_binned_color_runs_its_pipeline_as_written() 
     }))
     .unwrap();
     for spec in [unbinned, ungrouped] {
-        let (outputs, _, _, origins) = run_pipeline(&spec, &rows, viewport, &theme, None).expect("runs");
-        let (as_written, _, _, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
-        assert!(origins.is_empty());
+        let (outputs, _, lineages, _) = run_pipeline(&spec, &rows, viewport, &theme, None).expect("runs");
+        let (as_written, _, written_lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+        assert_eq!(lineages, written_lineages);
         assert_eq!(outputs, as_written);
     }
     let nulls = RecordBatch::try_new(
@@ -10618,25 +10630,27 @@ fn a_layer_reading_a_statistic_through_a_branch_groups_it_by_bin() {
     }
 }
 
-/// The origins a run publishes are the same on the run that groups by the
-/// edges as on the run that cuts them, so the final scale's edges are the
-/// edges the statistics grouped by; and with no demanded step nothing is
-/// published.
+/// The rows a run records as its statistics' input are the same on the run
+/// that groups by the edges as on the run that cuts them, so the final
+/// scale's edges are the edges the statistics grouped by.
 #[test]
-fn origins_are_the_same_on_both_runs() {
+fn the_consumed_rows_are_the_same_on_both_runs() {
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
     let rows = binned_stat_rows();
     let mut spec = flat_binned_bar(serde_json::json!([statistics_marker(), mean_by_g_v(None)]));
     spec.encoding.color = Some(serde_json::from_value(sturges_binned_v()).unwrap());
-    let demand = binned_color_demand(&spec).expect("the lowered aggregate is demanded");
-    let mut plan = crate::transform::color_bin_group::ColorBinPlan { demand, edges: None };
-    let (first, _, _, first_origins) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
-    let edges = binned_color_edges(&spec, &first, &first_origins, &theme, None).expect("edges");
-    plan.edges = Some(std::rc::Rc::from(edges.clone()));
-    let (second, _, _, second_origins) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
-    assert!(!first_origins.is_empty(), "the demanded step records its origin");
-    assert_eq!(first_origins, second_origins);
+    let (first, _, first_lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).unwrap();
+    let reads = binned_color_reads(&spec);
+    let reads: Vec<(&str, &str)> = reads.iter().map(|(key, field)| (key.as_str(), field.as_str())).collect();
+    let demand = crate::transform::color_bin_group::BinDemand::of(&first_lineages, &reads);
+    assert_eq!(demand.fields(&[1]), ["v"], "the lowered aggregate is demanded");
+    let edges = binned_color_edges(&spec, &first, &first_lineages, &theme, None).expect("edges");
+    let plan = crate::transform::color_bin_group::ColorBinPlan { demand, edges: Some(std::rc::Rc::from(edges.clone())) };
+    let (second, _, second_lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
+    let consumed = |lineages: &crate::transform::run::OutputLineages| lineages[FINAL_OUTPUT_KEY].binned_rows("v").cloned();
+    assert!(consumed(&first_lineages).is_some(), "the lowered step records the rows it consumed");
+    assert_eq!(consumed(&first_lineages), consumed(&second_lineages));
     assert_eq!(binned_bounds(&prep(&spec, &rows)), edges, "the final scale cuts the grouping edges");
     let starts = &edges[..edges.len() - 1];
     assert!(float_col(&second[FINAL_OUTPUT_KEY], "v").iter().all(|v| starts.contains(v)));
@@ -10730,9 +10744,10 @@ fn a_binned_statistics_consumed_rows_sit_beside_the_outputs() {
     let mut outputs: Vec<&str> = p.transform_outputs.keys().map(String::as_str).collect();
     outputs.sort_unstable();
     assert_eq!(outputs, ["__final__", "means"]);
-    let origins: Vec<&str> = p.transform_origins.keys().map(String::as_str).collect();
-    assert_eq!(origins, ["__final__"], "the tail's lineage grouped v by bin");
-    assert_eq!(p.transform_origins["__final__"].rows_of("v").expect("v was grouped").num_rows(), rows.num_rows());
+    let binned: Vec<&str> =
+        p.transform_lineages.iter().filter(|(_, lineage)| lineage.binned_rows("v").is_some()).map(|(key, _)| key.as_str()).collect();
+    assert_eq!(binned, ["__final__"], "only the tail's lineage grouped v by bin");
+    assert_eq!(p.transform_lineages["__final__"].binned_rows("v").expect("v was grouped").num_rows(), rows.num_rows());
 }
 
 /// Rows with a numeric `n`, a string `s` and a timestamp `t` beside a
@@ -11863,4 +11878,52 @@ fn stacked_operands_on_their_own_branches_keep_every_segment() {
     let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
     let drawn: Vec<usize> = scene.panels[0].marks.iter().map(|batch| rects_of(batch).len()).collect();
     assert_eq!(drawn, vec![4, 4], "every segment of both operands draws");
+}
+
+/// A channel's title belongs to the channel: under a flip it moves with the
+/// channel to the axis it draws on, as its scale and ticks do, whether the
+/// title is set on one channel, on both, or on neither (derived titles), on
+/// a flat chart and on a layered one. Rejects keeping an explicit title on
+/// its screen axis, which titled both axes `n` with one title set and
+/// swapped the two titles with both set.
+#[test]
+fn an_explicit_title_moves_with_its_channel_under_a_flip() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false), Field::new("v", DataType::Float64, false)])),
+        vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+    )
+    .unwrap();
+    let channel = |field: &str, title: Option<&str>| match title {
+        Some(title) => serde_json::json!({"field": field, "title": title}),
+        None => serde_json::json!({"field": field}),
+    };
+    // (x title, y title, the screen (x, y) titles under a flip).
+    let cases = [
+        (None, None, ("v", "g")),
+        (None, Some("n"), ("n", "g")),
+        (Some("G"), None, ("v", "G")),
+        (Some("G"), Some("n"), ("n", "G")),
+    ];
+    for (x_title, y_title, (screen_x, screen_y)) in cases {
+        let encoding = serde_json::json!({"x": channel("g", x_title), "y": channel("v", y_title)});
+        let flat: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar", "encoding": encoding, "coord": {"kind": "flip"},
+        }))
+        .unwrap();
+        let mut layered = flat.clone();
+        layered.layers = Some(serde_json::from_value(serde_json::json!([{"mark": "bar"}, {"mark": "point"}])).unwrap());
+        for (door, spec) in [("flat", flat.clone()), ("layered", layered)] {
+            let p = prep(&spec, &rows);
+            let titles = (p.axes.x.title.get().clone(), p.axes.y.title.get().clone());
+            assert_eq!(titles, (Some(screen_x.to_string()), Some(screen_y.to_string())), "{door} {x_title:?} {y_title:?}");
+        }
+        let unflipped = prep(&ChartSpec { coord: None, ..flat }, &rows);
+        let authored = (x_title.unwrap_or("g"), y_title.unwrap_or("v"));
+        assert_eq!(
+            (unflipped.axes.x.title.get().as_deref(), unflipped.axes.y.title.get().as_deref()),
+            (Some(authored.0), Some(authored.1)),
+            "unflipped titles stay on their axes"
+        );
+    }
 }
