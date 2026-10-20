@@ -11927,3 +11927,406 @@ fn an_explicit_title_moves_with_its_channel_under_a_flip() {
         );
     }
 }
+
+// ── Faceted marks under a domain-less positional scale read the shared axis ──
+//
+// A facet-shared axis shows the domain of every panel's rows. A mark whose
+// channel carries a scale stating no `domain` (the bar zero anchor the spec
+// build injects, or a caller's own continuous or categorical scale) resolves
+// each panel against that same domain, so every mark reads true against the
+// axis its panel shows.
+
+/// Rows `g`, `z`, `c` and the facet field `f`, one row per tuple.
+fn facet_rows(rows: &[(&str, f64, &str, &str)]) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(rows.iter().map(|r| r.3).collect::<Vec<_>>())),
+        ],
+    )
+    .unwrap()
+}
+
+/// `g = a` draws `z = 2` in both panels; `b` draws 4 in panel `p` and 20 in
+/// panel `q`, so the panels' own extents differ while `a`'s value is shared.
+fn shared_value_rows() -> RecordBatch {
+    facet_rows(&[("a", 2.0, "u", "p"), ("b", 4.0, "u", "p"), ("a", 2.0, "u", "q"), ("b", 20.0, "u", "q")])
+}
+
+/// One `a` stack per panel: `2 + 2` in panel `p` and `2 + 20` in panel `q`.
+fn shared_stack_rows() -> RecordBatch {
+    facet_rows(&[("a", 2.0, "u", "p"), ("a", 2.0, "v", "p"), ("a", 2.0, "u", "q"), ("a", 20.0, "v", "q")])
+}
+
+/// The bar zero anchor the spec build injects on a bar's value channel.
+fn injected_anchor() -> serde_json::Value {
+    serde_json::json!({"type": "linear", "clamp": false, "nice": false, "zero": true, "systemInjected": true})
+}
+
+/// A spec faceted by `facet`, from the wire `encoding` and any other
+/// top-level keys in `extra`.
+fn faceted_spec(mark: &str, encoding: serde_json::Value, facet: serde_json::Value, extra: serde_json::Value) -> ChartSpec {
+    let mut spec = serde_json::json!({"mark": mark, "encoding": encoding, "facet": facet});
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        spec[key] = value.clone();
+    }
+    serde_json::from_value(spec).expect("the faceted spec deserializes")
+}
+
+/// Panels by `f`, one above the other.
+fn wrap_by_f() -> serde_json::Value {
+    serde_json::json!({"field": "f", "mode": {"kind": "wrap", "ncols": 1}})
+}
+
+/// Panels by `f`, side by side, each drawing its own category axis.
+fn side_by_side_by_f() -> serde_json::Value {
+    serde_json::json!({"field": "f", "mode": {"kind": "wrap", "ncols": 2}})
+}
+
+/// The domain the chart's provisional pass resolves on `axis`: the domain
+/// the shared axis shows.
+fn axis_domain(spec: &ChartSpec, rows: &RecordBatch, axis: StackAxis) -> Option<(f64, f64)> {
+    let prepared = prep(spec, rows);
+    match axis {
+        StackAxis::Y => prepared.provisional_scales.y.data_domain(),
+        StackAxis::X => prepared.provisional_scales.x.data_domain(),
+    }
+}
+
+use crate::spec::position::StackValueAxis as StackAxis;
+
+/// Every panel's bar rects on the value axis `axis`, each as `(start, length)`
+/// in pixels from the inset start of the panel's value range, ordered along
+/// the category axis, then outward from the baseline; with the pixel span a
+/// domain maps onto in that panel.
+fn panel_value_bars(scene: &ferrum_scene::SceneGraph, axis: StackAxis) -> Vec<(f64, Vec<(f64, f64)>)> {
+    scene
+        .panels
+        .iter()
+        .map(|panel| {
+            let area = panel.plot_area;
+            let extent = match axis {
+                StackAxis::Y => area.h,
+                StackAxis::X => area.w,
+            };
+            let (inset, end) =
+                crate::layout::geometry::inset_pixel_range((0.0, extent), crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC);
+            let mut bars: Vec<(f64, f64, f64)> = panel
+                .marks
+                .iter()
+                .flat_map(rects_of)
+                .map(|(x, y, w, h)| match axis {
+                    StackAxis::Y => (x, area.y + area.h - (y + h) - inset, h),
+                    StackAxis::X => (y, x - area.x - inset, w),
+                })
+                .collect();
+            bars.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (end - inset, bars.into_iter().map(|(_, start, len)| (start, len)).collect())
+        })
+        .collect()
+}
+
+/// Each panel's bars span the data intervals `expected` (in the order
+/// [`panel_value_bars`] reads them) on a zero-based domain topped at that
+/// panel's `tops` entry.
+fn assert_bars_read(case: &str, scene: &ferrum_scene::SceneGraph, axis: StackAxis, tops: &[f64], expected: &[&[(f64, f64)]]) {
+    let panels = panel_value_bars(scene, axis);
+    assert_eq!(panels.len(), expected.len(), "{case}: panels {panels:?}");
+    for (((span, bars), want), top) in panels.iter().zip(expected).zip(tops) {
+        let want: Vec<(f64, f64)> = want.iter().map(|(lo, hi)| (lo / top * span, (hi - lo) / top * span)).collect();
+        let close = bars.len() == want.len()
+            && bars.iter().zip(&want).all(|(g, w)| (g.0 - w.0).abs() < 1e-6 && (g.1 - w.1).abs() < 1e-6);
+        assert!(close, "{case}: bars {bars:?} must read {want:?} on a domain topped at {top}");
+    }
+}
+
+/// An unlayered faceted bar, vertical and horizontal, and with a caller's
+/// own domain-less scale: the axis shows the domain of the unfaceted frame,
+/// `(0, 20)`, and every panel's bars read it, so `p`'s tallest (4) spans a
+/// fifth of the range. Rejects each panel scaling to its own rows (`p` to
+/// `0..4`, its `b` bar filling the panel), and every panel sharing one
+/// wrong domain (the bars read their values against `(0, 20)` exactly).
+#[test]
+fn a_faceted_bar_scales_every_panel_to_the_shared_axis() {
+    let caller_scale = serde_json::json!({"type": "linear", "clamp": false, "nice": true, "zero": true});
+    let cases = [
+        ("vertical", StackAxis::Y, serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}})),
+        ("horizontal", StackAxis::X, serde_json::json!({"x": {"field": "z", "scale": injected_anchor()}, "y": {"field": "g"}})),
+        ("caller scale", StackAxis::Y, serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": caller_scale}})),
+    ];
+    let rows = shared_value_rows();
+    for (case, axis, encoding) in cases {
+        let spec = faceted_spec("bar", encoding, wrap_by_f(), serde_json::json!({}));
+        let unfaceted = ChartSpec { facet: None, ..spec.clone() };
+        assert_eq!(axis_domain(&spec, &rows, axis), Some((0.0, 20.0)), "{case}: the shared axis");
+        assert_eq!(axis_domain(&unfaceted, &rows, axis), Some((0.0, 20.0)), "{case}: the unfaceted frame");
+        let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+        assert_bars_read(case, &scene, axis, &[20.0, 20.0], &[&[(0.0, 2.0), (0.0, 4.0)], &[(0.0, 2.0), (0.0, 20.0)]]);
+    }
+}
+
+/// The negative control: under an independent y each panel keeps its own
+/// domain, so `p`'s bars read a domain topped at its own 4, under the 20
+/// the shared axis would show, and each panel's bars agree with the axis it
+/// draws.
+#[test]
+fn an_independent_faceted_bar_keeps_per_panel_domains() {
+    let facet = serde_json::json!({"field": "f", "mode": {"kind": "wrap", "ncols": 1}, "resolve": {"x": "shared", "y": "independent"}});
+    let spec = faceted_spec(
+        "bar",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}}),
+        facet,
+        serde_json::json!({}),
+    );
+    let (scene, _) = scene_over(&spec, &shared_value_rows(), &crate::layout::ThemeInputs::default());
+    assert_bars_read("independent", &scene, StackAxis::Y, &[4.0, 20.0], &[&[(0.0, 2.0), (0.0, 4.0)], &[(0.0, 2.0), (0.0, 20.0)]]);
+}
+
+/// A faceted colored bar: stacked vertically (an explicit `Stack`, the
+/// `stack` shorthand) and horizontally (an explicit `Stack` on x, the
+/// shorthand under `CoordFlip`), the axis spans the tallest panel's stack
+/// (`2 + 20 = 22`) and every segment of every panel reads it; drawn
+/// overlapping under a color alone, the axis spans `(0, 20)`. Rejects each
+/// panel scaling to its own stack (`p` to 4) and stacking across panels
+/// (26).
+#[test]
+fn a_faceted_colored_bar_scales_every_panel_to_the_shared_axis() {
+    let vertical = serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}, "color": {"field": "c"}});
+    let horizontal = serde_json::json!({"x": {"field": "z", "scale": injected_anchor()}, "y": {"field": "g"}, "color": {"field": "c"}});
+    let shorthand = serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor(), "stack": "zero"}, "color": {"field": "c"}});
+    let stack = |value_axis: Option<&str>| {
+        let mut position = serde_json::json!({"type": "stack", "offset": "zero", "anchor": "top"});
+        if let Some(axis) = value_axis {
+            position["value_axis"] = serde_json::json!(axis);
+        }
+        serde_json::json!({"position": position})
+    };
+    let stacked: &[&[(f64, f64)]] = &[&[(0.0, 2.0), (2.0, 4.0)], &[(0.0, 2.0), (2.0, 22.0)]];
+    let cases = [
+        ("vertical stack", StackAxis::Y, vertical.clone(), stack(None), 22.0, stacked),
+        ("vertical shorthand", StackAxis::Y, shorthand.clone(), serde_json::json!({}), 22.0, stacked),
+        ("horizontal stack", StackAxis::X, horizontal, stack(Some("x")), 22.0, stacked),
+        ("flipped shorthand", StackAxis::X, shorthand, serde_json::json!({"coord": {"kind": "flip"}}), 22.0, stacked),
+        ("color, unstacked", StackAxis::Y, vertical, serde_json::json!({}), 20.0, &[&[(0.0, 2.0), (0.0, 2.0)][..], &[(0.0, 2.0), (0.0, 20.0)][..]][..]),
+    ];
+    let rows = shared_stack_rows();
+    for (case, axis, encoding, extra, top, expected) in cases {
+        let spec = faceted_spec("bar", encoding, wrap_by_f(), extra);
+        assert_eq!(axis_domain(&spec, &rows, axis), Some((0.0, top)), "{case}: the shared axis");
+        let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+        assert_bars_read(case, &scene, axis, &[top, top], expected);
+    }
+}
+
+/// A faceted histogram (the bar anchor on its count axis): the axis spans
+/// the tallest bin of any panel (4, in `q`), and `p`'s one-row bins read a
+/// quarter of it. Rejects each panel scaling its counts to its own tallest
+/// bin (1 in `p`).
+#[test]
+fn a_faceted_histogram_scales_every_panel_to_the_shared_count_axis() {
+    let rows = facet_rows(&[
+        ("a", 1.0, "u", "p"),
+        ("a", 9.0, "u", "p"),
+        ("a", 1.0, "u", "q"),
+        ("a", 9.0, "u", "q"),
+        ("a", 9.0, "u", "q"),
+        ("a", 9.0, "u", "q"),
+        ("a", 9.0, "u", "q"),
+    ]);
+    let spec = faceted_spec(
+        "bar",
+        serde_json::json!({
+            "x": {"field": "bin_start", "title": "z"},
+            "y": {"field": "count", "scale": injected_anchor()},
+            "x2": {"field": "bin_end", "type": "quantitative"},
+        }),
+        wrap_by_f(),
+        serde_json::json!({"transforms": [
+            {"type": "identity", "statistics": true},
+            {"type": "bin", "field": "z", "nice": true, "cumulative": false, "shared_extent": true, "groupby": ["f"]},
+        ]}),
+    );
+    assert_eq!(axis_domain(&spec, &rows, StackAxis::Y), Some((0.0, 4.0)), "the shared count axis");
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    assert_bars_read(
+        "histogram",
+        &scene,
+        StackAxis::Y,
+        &[4.0, 4.0],
+        &[&[(0.0, 1.0), (0.0, 1.0)], &[(0.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.0, 4.0)]],
+    );
+}
+
+/// A layered faceted bar already scaled every panel to the shared axis
+/// through the layered union; it still does.
+#[test]
+fn a_layered_faceted_bar_keeps_the_shared_axis() {
+    let layer = |mark: &str| serde_json::json!({"mark": mark, "encoding": {"x": {"field": "g"}, "y": {"field": "z"}}});
+    let spec = faceted_spec(
+        "bar",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}}),
+        wrap_by_f(),
+        serde_json::json!({"layers": [layer("bar"), layer("point")]}),
+    );
+    let rows = shared_value_rows();
+    assert_eq!(axis_domain(&spec, &rows, StackAxis::Y), Some((0.0, 20.0)));
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    assert_bars_read("layered", &scene, StackAxis::Y, &[20.0, 20.0], &[&[(0.0, 2.0), (0.0, 4.0)], &[(0.0, 2.0), (0.0, 20.0)]]);
+}
+
+/// A grid facet with an empty cell (`q` × `v`) draws only the cells that
+/// have rows, and the drawn cells read the shared axis `(0, 20)`, though
+/// only `p × v` reaches 20.
+#[test]
+fn a_grid_facet_with_an_empty_cell_skips_it_and_shares_the_axis() {
+    let rows = facet_rows(&[("a", 2.0, "u", "p"), ("b", 20.0, "v", "p"), ("a", 2.0, "u", "q")]);
+    let spec = faceted_spec(
+        "bar",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}}),
+        serde_json::json!({"field": "c", "row": "f", "mode": {"kind": "grid", "nrows": 2, "ncols": 2}}),
+        serde_json::json!({}),
+    );
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    assert_bars_read("grid", &scene, StackAxis::Y, &[20.0, 20.0, 20.0], &[&[(0.0, 2.0)], &[(0.0, 20.0)], &[(0.0, 2.0)]]);
+}
+
+/// Panels `A` (`a` = 2, `b` = 4) and `B` (`a` = 3, `c` = 20): each holds a
+/// category the other lacks.
+fn split_category_rows() -> RecordBatch {
+    facet_rows(&[("a", 2.0, "u", "A"), ("b", 4.0, "u", "A"), ("a", 3.0, "u", "B"), ("c", 20.0, "u", "B")])
+}
+
+/// Each panel's category tick labels on `axis`, as `(label, position)`, and
+/// the centres of its marks along that axis, in pixels.
+fn categories_and_marks(panel: &ferrum_scene::Panel, axis: StackAxis) -> (Vec<(String, f64)>, Vec<f64>) {
+    fn labels(nodes: &[ferrum_scene::SceneNode], axis: StackAxis, out: &mut Vec<(String, f64)>) {
+        for node in nodes {
+            match node {
+                ferrum_scene::SceneNode::Text { x, y, content, .. } if ["a", "b", "c"].contains(&content.as_str()) => {
+                    out.push((content.clone(), if axis == StackAxis::X { *x } else { *y }));
+                }
+                ferrum_scene::SceneNode::Group { children, .. } => labels(children, axis, out),
+                _ => {}
+            }
+        }
+    }
+    let mut ticks = Vec::new();
+    labels(&panel.axes, axis, &mut ticks);
+    let centres = panel
+        .marks
+        .iter()
+        .flat_map(|batch| batch.nodes.iter())
+        .filter_map(|node| match (node, axis) {
+            (ferrum_scene::SceneNode::Rect { x, w, .. }, StackAxis::X) => Some(x + w / 2.0),
+            (ferrum_scene::SceneNode::Rect { y, h, .. }, StackAxis::Y) => Some(y + h / 2.0),
+            (ferrum_scene::SceneNode::Circle { cx, .. }, StackAxis::X) => Some(*cx),
+            (ferrum_scene::SceneNode::Circle { cy, .. }, StackAxis::Y) => Some(*cy),
+            _ => None,
+        })
+        .collect();
+    (ticks, centres)
+}
+
+/// Each panel shows the `ladder` categories in that order along `axis`, and
+/// its marks sit on the labels of its own `drawn` categories: each mark's
+/// centre is one fixed offset (0 on x, the label baseline's on y) from its
+/// category's label.
+fn assert_marks_on_labels(case: &str, panel: &ferrum_scene::Panel, axis: StackAxis, ladder: &[&str], drawn: &[&str]) {
+    let (mut ticks, mut centres) = categories_and_marks(panel, axis);
+    ticks.sort_by(|a, b| a.1.total_cmp(&b.1));
+    centres.sort_by(f64::total_cmp);
+    let names: Vec<&str> = ticks.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ladder, "{case}: panel {} labels {ticks:?}", panel.id);
+    let at: Vec<f64> = ticks.iter().filter(|(name, _)| drawn.contains(&name.as_str())).map(|(_, pos)| *pos).collect();
+    assert_eq!(centres.len(), at.len(), "{case}: panel {} marks {centres:?} for labels {ticks:?}", panel.id);
+    let offsets: Vec<f64> = centres.iter().zip(&at).map(|(centre, label)| centre - label).collect();
+    let on_labels = offsets.iter().all(|offset| (offset - offsets[0]).abs() < 1e-6 && offset.abs() < 6.0);
+    assert!(on_labels, "{case}: panel {} marks {centres:?} sit off their labels {ticks:?}", panel.id);
+}
+
+/// A caller's categorical scale stating no `domain` (Band, Point, a
+/// positional Ordinal, a Band under `CoordFlip`, a Band on a layered chart)
+/// over panels holding different categories: every panel lays out the
+/// all-panels ladder `[a, b, c]` the shared axis labels, and each mark sits
+/// on its label. On the layered chart the ladder is the establishing bar
+/// layer's column across panels; the point sibling's own column (`u`)
+/// stays out of it. A data-aware sort orders that ladder over every panel's
+/// rows (`c` 20, `a` 5, `b` 4). Rejects each panel enumerating its own
+/// categories (two bands under three labels, `A`'s `b` bar between the `b`
+/// and `c` labels) and sorting its own rows (`A` ordering `b` before `a`).
+#[test]
+fn a_faceted_categorical_scale_lays_out_the_shared_ladder_in_every_panel() {
+    let band = serde_json::json!({"type": "band", "padding": 0.2, "align": 0.5});
+    let bar_y = serde_json::json!({"field": "z", "scale": injected_anchor()});
+    let layer = |mark: &str, x: &str| serde_json::json!({"mark": mark, "encoding": {"x": {"field": x}, "y": {"field": "z"}}});
+    let cases = [
+        ("band", "bar", StackAxis::X, serde_json::json!({"x": {"field": "g", "scale": band}, "y": bar_y}), serde_json::json!({}), ["a", "b", "c"]),
+        (
+            "band sorted",
+            "bar",
+            StackAxis::X,
+            serde_json::json!({"x": {"field": "g", "scale": band, "sort": "-y"}, "y": bar_y}),
+            serde_json::json!({}),
+            ["c", "a", "b"],
+        ),
+        (
+            "point",
+            "point",
+            StackAxis::X,
+            serde_json::json!({"x": {"field": "g", "scale": {"type": "point", "align": 0.5, "reverse": false}}, "y": {"field": "z"}}),
+            serde_json::json!({}),
+            ["a", "b", "c"],
+        ),
+        ("ordinal", "bar", StackAxis::X, serde_json::json!({"x": {"field": "g", "scale": {"type": "ordinal"}}, "y": bar_y}), serde_json::json!({}), ["a", "b", "c"]),
+        (
+            "flipped band",
+            "bar",
+            StackAxis::Y,
+            serde_json::json!({"x": {"field": "g", "scale": {"type": "band", "align": 0.5}}, "y": bar_y}),
+            serde_json::json!({"coord": {"kind": "flip"}}),
+            ["a", "b", "c"],
+        ),
+        (
+            "layered band",
+            "bar",
+            StackAxis::X,
+            serde_json::json!({"x": {"field": "g", "scale": band}, "y": bar_y}),
+            serde_json::json!({"layers": [layer("bar", "g"), layer("point", "c")]}),
+            ["a", "b", "c"],
+        ),
+    ];
+    let rows = split_category_rows();
+    for (case, mark, axis, encoding, extra, ladder) in cases {
+        let spec = faceted_spec(mark, encoding, side_by_side_by_f(), extra);
+        let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+        let [a, b] = scene.panels.as_slice() else { panic!("{case}: two panels, got {}", scene.panels.len()) };
+        assert_marks_on_labels(case, a, axis, &ladder, &["a", "b"]);
+        assert_marks_on_labels(case, b, axis, &ladder, &["a", "c"]);
+    }
+}
+
+/// The control: under an independent x each panel keeps its own categories
+/// and its marks sit on its own labels.
+#[test]
+fn an_independent_faceted_categorical_scale_keeps_per_panel_ladders() {
+    let facet = serde_json::json!({"field": "f", "mode": {"kind": "wrap", "ncols": 2}, "resolve": {"x": "independent", "y": "shared"}});
+    let spec = faceted_spec(
+        "bar",
+        serde_json::json!({"x": {"field": "g", "scale": {"type": "band", "padding": 0.2, "align": 0.5}}, "y": {"field": "z", "scale": injected_anchor()}}),
+        facet,
+        serde_json::json!({}),
+    );
+    let (scene, _) = scene_over(&spec, &split_category_rows(), &crate::layout::ThemeInputs::default());
+    let [a, b] = scene.panels.as_slice() else { panic!("two panels, got {}", scene.panels.len()) };
+    assert_marks_on_labels("independent", a, StackAxis::X, &["a", "b"], &["a", "b"]);
+    assert_marks_on_labels("independent", b, StackAxis::X, &["a", "c"], &["a", "c"]);
+}
+

@@ -77,11 +77,10 @@ def _two_panel_df(q_high: float = 900.0) -> pl.DataFrame:
     """Two facet panels carrying the same two categories.
 
     ``q_high`` is the second panel's high value: equal to the first panel's
-    (``900``) the two panels report the same resolved domain; far below it
-    the two panels' bar-chart zero-baseline domains differ, which the ledger
-    can observe under `share_scale(y="independent")` *or* under the default
-    shared resolve (a bar mark's zero-baseline domain resolves per panel
-    either way).
+    (``900``) the two panels report the same resolved domain. Far below it,
+    the two panels' bar-chart zero-baseline domains differ only under
+    `share_scale(y="independent")`; the default shared resolve gives every
+    panel the one ``(0, 900)`` domain the shared axis shows.
     """
     return pl.DataFrame(
         {
@@ -280,36 +279,22 @@ def test_free_scale_facet_names_the_panel_when_a_gap_misses_every_panel_with_div
     )
 
 
-def test_default_resolve_facet_names_the_panel_without_claiming_independent_scales():
-    """The recurring honesty-class finding (T11 cycle-5 quality review).
+def test_default_resolve_bar_facet_reports_one_unqualified_shared_domain():
+    """A bar facet under the default (shared) y resolve resolves one domain.
 
-    The cycle-4 divergence wording claimed "each independently-scaled panel
-    resolves its own domain", but the ledger's comparison fires on payload
-    inequality alone — it never checks the facet's resolve mode. Reproduced
-    live with NO `share_scale` call anywhere in this chart (the default,
-    shared resolve): `mark_bar()`'s per-panel zero-baseline domain still
-    disagrees across panels with different group maxima, so the divergence
-    check trips exactly as it does under `share_scale(y="independent")`. The
-    qualifier must state only what the ledger observed -- a payload
-    disagreement -- and must not claim the chart's scales are independent,
-    since this chart's scales are not."""
+    ``mark_bar()`` writes a domain-less zero scale on the value channel, and
+    under a shared facet axis each panel's scale spans the rows of every
+    panel, the domain the shared axis shows. Groups with different maxima
+    (``900`` and ``30``) therefore meet one ``(0, 900)`` domain, and a gap
+    that misses it is one chart-level fact: reported once, unqualified,
+    naming that shared domain and no panel."""
     chart = fm.Chart(_two_panel_df(q_high=30.0)).mark_bar().encode(x="c:N", y="v:Q").facet(
         col="g"
     ) + fm.BreakAxis(axis="y", gap=(2000, 3000))
     _, msgs = _render(chart)
-    reports = _ineffective(msgs)
-    assert len(reports) == 1, f"still ONE report, not one per panel: {msgs}"
-    reason = reports[0]
-    assert "facet panel 0" in reason, (
-        f"the report attributes the payload to the panel it was measured on: {reason}"
-    )
-    assert "independent" not in reason, (
-        f"no `share_scale` call is anywhere in this chart, so the report must not "
-        f"claim the chart is independently scaled: {reason}"
-    )
-    assert "applies on the rest" not in reason, (
-        f"every panel missed its own gap here, so there is no 'rest' the break applied on: {reason}"
-    )
+    assert _ineffective(msgs) == [
+        "BreakAxis on the y axis had no effect: no gap overlaps the axis domain (0, 900)"
+    ], f"one unqualified report naming the shared domain: {msgs}"
 
 
 def test_row_faceted_break_places_every_panel_at_its_own_vertical_offset():

@@ -2120,7 +2120,10 @@ pub(in crate::render) fn numeric_domain_union_over(
     let reads = AxisReads::over(layers, &stacks);
     let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
-    if spec.layers.is_none() {
+    // Unlayered means no layer to draw, an empty list included, as
+    // `build_axis_scale` and `position::axis_batch` read it: with no layer
+    // there is no seed, so the chart's one batch is the read.
+    if layers.is_empty() {
         read(None, field)?;
         if let Some(p) = paired_field {
             read(None, p)?;
@@ -2432,9 +2435,10 @@ pub(in crate::render) fn numeric_domain_union_over(
 /// batch separately (panel and global), because absence in one says nothing about
 /// the other and a batch that cannot answer keeps the band.
 ///
-/// Private to this module: [`positional_category_union`] is the one entry the
-/// scale paths call, so "the ordinal domain of this axis" has a single answer
-/// that always includes the layer union (task 12c).
+/// Private to this module: [`positional_category_union`] and
+/// [`establishing_categories`] are the entries the scale paths call, so "the
+/// ordinal domain of this axis" has a single answer per reading: the layer
+/// union on the auto path, the establishing column under a caller's scale.
 fn distinct_positional_categories_shared(
     panel_batch: &RecordBatch,
     field: &str,
@@ -2471,6 +2475,43 @@ fn distinct_positional_categories_shared(
         }
     }
     Ok(domain)
+}
+
+/// The categories of the column an axis's establishing layer draws: the one
+/// batch of an unlayered spec, else the batch of the layer that establishes
+/// the axis ([`locate_seed_field`]). Under a facet-shared channel
+/// (`include_final`) a seed on the chart's rows also reads the all-panels
+/// batch, so every panel enumerates the categories the shared axis shows; a
+/// seed on a named output reads that output, which already spans every panel.
+///
+/// This is the category set of an unlayered axis on the auto path
+/// ([`positional_category_union`]) and of a caller's categorical scale stating
+/// no `domain` on any spec: that scale is the establishing member's, so it
+/// takes its categories from that member's column alone, never the other
+/// layers'.
+pub(in crate::render) fn establishing_categories(
+    channel: &str,
+    field: &str,
+    paired_positional: Option<&str>,
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> Result<Vec<String>, RenderError> {
+    let seed = locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    let reads_chart_rows = spec
+        .layers
+        .as_deref()
+        .and_then(|layers| establishing_axis_layer(spec, layers, channel))
+        .is_none_or(|(_, layer)| LayerSource::of(layer) == LayerSource::Chart);
+    distinct_positional_categories_shared(
+        seed.batch,
+        field,
+        paired_positional,
+        transform_outputs,
+        include_final && reads_chart_rows,
+    )
 }
 
 /// The ordinal/nominal counterpart of [`numeric_domain_union`]: the category
@@ -2563,20 +2604,17 @@ pub(in crate::render) fn positional_category_union(
     spec: &ChartSpec,
     include_final: bool,
 ) -> Result<Vec<String>, RenderError> {
-    // The one precondition, layered or not: the locator the caller types this
-    // axis with finds the bound field somewhere.
-    let seed_batch = locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?
-        .batch;
-    let Some(layers) = &spec.layers else {
-        return distinct_positional_categories_shared(
-            seed_batch,
-            field,
-            paired_positional,
-            transform_outputs,
-            include_final,
-        );
-    };
+    // Unlayered means no layer to draw, an empty list included, as
+    // `numeric_domain_union_over` reads it.
+    let layers = spec.layers.as_deref().unwrap_or_default();
+    if layers.is_empty() {
+        return establishing_categories(channel, field, paired_positional, spec, primary_batch, transform_outputs, include_final);
+    }
+    // The precondition [`establishing_categories`] checks for an unlayered
+    // spec: the locator the caller types this axis with finds the bound field
+    // somewhere.
+    locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
     // Membership set rather than `Vec::contains`: the ladder can run to hundreds
     // of categories and every layer would re-scan it.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2746,6 +2784,23 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("group", DataType::Utf8, true)]));
         let arr: Vec<Option<&str>> = groups.into_iter().map(Some).collect();
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(arr))]).unwrap()
+    }
+
+    /// An empty layer list is unlayered on the auto ordinal ladder as on
+    /// every other positional reader: it enumerates the bound column, exactly
+    /// as no layer list does. Rejects keying on `Some(layers)`, which read no
+    /// seed and returned an empty ladder.
+    #[test]
+    fn an_empty_layer_list_reads_the_unlayered_category_ladder() {
+        let primary = group_batch(vec!["A", "B", "A"]);
+        let outputs = HashMap::new();
+        let ladder = |layers: Option<Vec<Layer>>| {
+            let spec = ChartSpec { layers, ..Default::default() };
+            positional_category_union("x", "group", None, &primary, &outputs, &spec, false)
+                .expect("the bound column enumerates")
+        };
+        assert_eq!(ladder(None), ["A", "B"]);
+        assert_eq!(ladder(Some(Vec::new())), ["A", "B"], "an empty layer list is unlayered");
     }
 
     /// An unlayered spec's one mark draws its one batch: `locate_field` reads

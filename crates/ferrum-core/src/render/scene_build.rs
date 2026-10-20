@@ -12504,29 +12504,15 @@ mod tests {
         );
     }
 
-    /// The recurring honesty-class finding (T11 cycle-5 quality review): the
-    /// divergence qualifier above fires purely on payload inequality
-    /// (`panels_reporting == panels && diverged`), which the cycle-4 wording
-    /// mischaracterized as reachable "only under independent scales." It is
-    /// not. `faceted_bar_spec`'s bare `y` encoding (no `scale` set) resolves a
-    /// genuinely shared domain across panels — confirmed by
-    /// `a_shared_scale_facet_reports_an_ineffective_break_once_not_once_per_panel`
-    /// staying unqualified — but Python's `mark_bar()` always sets an explicit
-    /// `zero: true` y-scale (confirmed via `Chart.to_spec().to_json()`), and
-    /// resolving THAT against a facet panel's own column, rather than the
-    /// shared batch, is what produces two panels' domains genuinely
-    /// disagreeing under the DEFAULT resolve (`resolve.y = Shared`, no
-    /// `share_scale` call anywhere in this fixture) — reproduced live through
-    /// `to_svg()` with no `share_scale` call in
-    /// `test_free_scale_facet_names_the_panel_when_a_gap_misses_every_panel_with_diverging_domains`'s
-    /// Python twin's sibling pin. That per-panel domain resolution under a
-    /// nominally shared facet is a separate, pre-existing scale-resolution
-    /// question (out of scope here); what this task owns is that the
-    /// qualifier text states only what the ledger checked (a payload
-    /// disagreement) and does NOT claim the chart is independently scaled,
-    /// since this fixture proves it need not be.
+    /// A facet under the default (shared) y resolve whose bar value channel
+    /// carries a domain-less zero scale (the shape Python's `mark_bar()`
+    /// writes) resolves one domain on every panel: each panel's scale spans
+    /// the rows of every panel, the domain the shared axis shows, so groups
+    /// with different maxima (`900` and `20`) still meet one `(0, 900)`
+    /// domain. A gap that misses it is one chart-level fact, reported once
+    /// and unqualified, naming that shared domain and no panel.
     #[test]
-    fn a_default_resolve_facet_names_the_panel_without_claiming_independent_scales() {
+    fn a_zero_scaled_default_resolve_facet_reports_one_unqualified_shared_domain() {
         use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
 
         let (mut spec, batch) = faceted_bar_spec(&[900.0, 20.0], 2);
@@ -12554,27 +12540,15 @@ mod tests {
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         scene.expect("the zero-baseline facet fixture must render");
 
-        let reports = ineffective_reports(&warnings);
+        let ineffective: Vec<String> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::BreakAxisIneffective { .. }))
+            .map(|w| w.to_string())
+            .collect();
         assert_eq!(
-            reports.len(),
-            1,
-            "still ONE report, not one per panel: {warnings:?}"
-        );
-        let reason = reports[0];
-        assert!(
-            reason.contains("facet panel 0"),
-            "the report attributes the payload to the panel it was measured \
-             on: {reason}"
-        );
-        assert!(
-            !reason.contains("independent"),
-            "no `share_scale` call is anywhere in this fixture, so the report \
-             must not claim the chart is independently scaled: {reason}"
-        );
-        assert!(
-            !reason.contains("applies on the rest"),
-            "every panel missed its own gap here, so there is no 'rest' the \
-             break applied on: {reason}"
+            ineffective,
+            ["BreakAxis on the y axis had no effect: no gap overlaps the axis domain (0, 900)"],
+            "one unqualified report naming the shared domain: {warnings:?}"
         );
     }
 

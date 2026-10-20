@@ -18,7 +18,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning, ScaleDomainSurface};
 
 use super::domain::{
-    apply_sort_to_domain, layered_caller_scale, locate_field, locate_seed_field, numeric_domain_union,
+    apply_sort_to_domain, establishing_categories, layered_caller_scale, locate_seed_field, numeric_domain_union,
     numeric_domain_union_over, positional_category_union,
     LayerUnion, SortContext,
 };
@@ -156,8 +156,10 @@ pub(in crate::render) fn build_axis_scale(
     // domain also unions the global all-panels batch (`FINAL_OUTPUT_KEY`) so a
     // faceted raw field's positional domain spans every panel (T4). `false` for
     // non-faceted charts and `Independent`-mode channels → byte-identical
-    // per-panel behavior. On the explicit `enc.scale` bypass it reaches only a
-    // layered spec's domain-less continuous scale, through the same union.
+    // per-panel behavior. On the explicit `enc.scale` bypass it reaches every
+    // scale stating no `domain` (a continuous scale's extent, a categorical
+    // scale's categories) and a data-aware sort, read the way the auto path
+    // reads them.
     include_final: bool,
     // Composite-shared domain for this channel (D4b). `Some` only for a
     // composite leaf whose channel shares a domain across the tree; it seeds this
@@ -268,7 +270,7 @@ pub(in crate::render) fn build_axis_scale(
         (injected, None) => injected.filter(|_| !yields_to_auto_path),
     };
     if let Some(scale_spec) = explicit_scale {
-        let rows = sort_rows(false);
+        let rows = sort_rows(include_final);
         let sort_ctx = SortContext {
             category_field: &enc.field,
             batch: rows.batch,
@@ -276,50 +278,45 @@ pub(in crate::render) fn build_axis_scale(
             y_field: rows.y_field,
             coord_flipped,
         };
-        // What a continuous scale stating no `domain` spans: the data of every
-        // layer carrying this same scale or declaring none, with their paired
-        // `x2`/`y2` endpoints and the facet-shared global batch. A composite
-        // mark's layers each carry a copy of the one scale the caller wrote on
-        // it, so the axis covers the whole mark; a sibling layer with a
-        // different scale stays out (see `LayerUnion::CarryingScale`).
-        // Unlayered, it is the bound column and its paired `x2`/`y2` column. A
-        // composite overlay group under this scale has already unioned its
-        // members the same way, and hands every member that extent as
-        // `shared` (see `LeafScaleContext::x_scale`).
+        // What a scale stating no `domain` spans, read as the auto path reads
+        // it. A continuous scale spans the data of every layer carrying this
+        // same scale or declaring none, with their paired `x2`/`y2` endpoints
+        // and, on a facet-shared channel, the all-panels batch
+        // (`LayerUnion::CarryingScale`; an unlayered spec's one batch and its
+        // all-panels batch), so each panel's marks scale to the shared axis
+        // the panel shows. A composite overlay group under this scale has
+        // already unioned its members the same way, and hands every member
+        // that extent as `shared` (see `LeafScaleContext::x_scale`). A
+        // categorical scale enumerates the column the establishing layer
+        // draws, across panels on a facet-shared channel
+        // (`establishing_categories`).
         let data_extent = || {
             if let Some(SharedDomain::Numeric { lo, hi }) = shared {
                 return Ok((*lo, *hi));
             }
-            if layered {
-                numeric_domain_union_over(
-                    channel,
-                    &enc.field,
-                    paired_enc.map(|p| p.field.as_str()),
-                    primary_batch,
-                    transform_outputs,
-                    spec,
-                    include_final,
-                    LayerUnion::CarryingScale(scale_spec),
-                )
-                .map_err(|e| match e {
-                    RenderError::UnsupportedDtype { field, dtype, context: None } => {
-                        RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
-                    }
-                    e => e,
-                })
-            } else {
-                let (mut lo, mut hi) = column_extent(seed.batch, &enc.field)?;
-                if let Some((l, p)) = paired_enc.and_then(|p| locate_field(&p.field, primary_batch).map(|l| (l, p))) {
-                    let (plo, phi) = column_extent(l.batch, &p.field)?;
-                    (lo, hi) = (lo.min(plo), hi.max(phi));
+            numeric_domain_union_over(
+                channel,
+                &enc.field,
+                paired_enc.map(|p| p.field.as_str()),
+                primary_batch,
+                transform_outputs,
+                spec,
+                include_final,
+                LayerUnion::CarryingScale(scale_spec),
+            )
+            .map_err(|e| match e {
+                RenderError::UnsupportedDtype { field, dtype, context: None } => {
+                    RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
                 }
-                // No value in either column: the same `(0, 1)` fallback the
-                // layered union and the auto path take.
-                if !lo.is_finite() || !hi.is_finite() {
-                    return Ok((0.0, 1.0));
-                }
-                Ok((lo, hi))
-            }
+                e => e,
+            })
+        };
+        // `#247`B: the null band is decided against the opposite positional
+        // field the sort reads, so the categories and their sort agree on
+        // which channel pairs with this one.
+        let paired_positional = PositionalFields { x: rows.x_field, y: rows.y_field }.paired_positional(channel);
+        let data_categories = || {
+            establishing_categories(channel, &enc.field, paired_positional, spec, primary_batch, transform_outputs, include_final)
         };
         // `channel` here is the RESOLVED (post-`CoordFlip`) token
         // `build_from_scale_spec` validated against, same as every other
@@ -335,7 +332,7 @@ pub(in crate::render) fn build_axis_scale(
         // matching on it explicitly means a future caller that did route an
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
-        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, warnings)
+        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
                     RenderError::InvalidBandPadding { channel, error: e, coord_flipped }
@@ -509,7 +506,8 @@ pub(in crate::render) fn imposed_axis_scale(
         Some(SharedDomain::Numeric { lo, hi }) => Ok((*lo, *hi)),
         _ => column_extent(&batch, &binding.field),
     };
-    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, warnings))
+    let data_categories = || distinct_positional_categories(&batch, &binding.field, None);
+    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, warnings))
 }
 
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
@@ -615,7 +613,10 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 ///
 /// `data_extent` answers what a continuous scale stating no `domain` spans; it
 /// is asked only then, so a categorical scale on a non-numeric column never
-/// reads it.
+/// reads it. `data_categories` answers the same for an Ordinal, Band or Point
+/// scale stating no `domain`: the categories it enumerates, null band
+/// included by the `#247`B occupancy rule against the caller's opposite
+/// positional field.
 ///
 /// `channel` (`"x"`/`"y"`) names the axis in the #152 explicit-domain/range shape
 /// refusal below — the same field `apply_axis_domain_config`'s sibling refusal on
@@ -630,6 +631,7 @@ pub(in crate::render) fn build_from_scale_spec(
     pr: (f64, f64),
     sort_ctx: &SortContext<'_>,
     data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
+    data_categories: &dyn Fn() -> Result<Vec<String>, RenderError>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::spec::encoding::ScaleSpec;
@@ -637,15 +639,6 @@ pub(in crate::render) fn build_from_scale_spec(
     if batch.column_by_name(&enc.field).is_none() {
         return Err(RenderError::UnknownColumn { name: enc.field.clone() });
     }
-
-    // `#247`B: an explicit Ordinal/Band/Point scale that names no `domain` resolves
-    // one from the data, so it bands nulls by the same rule the auto path does.
-    // `SortContext` already carries the rendered x/y field pair (it needs them for
-    // data-aware sort forms), so the pairing is re-read off it rather than passed a
-    // second time — one helper answers "which channel is opposite this one" for
-    // both entry points, so the two cannot disagree about the null band.
-    let paired_positional =
-        PositionalFields { x: sort_ctx.x_field, y: sort_ctx.y_field }.paired_positional(channel);
 
     Ok(match scale_spec {
         // `system_injected` is read by `build_axis_scale`'s bypass gate above,
@@ -678,7 +671,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Ordinal { domain, range, padding } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
+                None => data_categories()?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             // Extract numeric pixel range from the typed polymorphic `range`.
@@ -727,7 +720,7 @@ pub(in crate::render) fn build_from_scale_spec(
             })?;
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
+                None => data_categories()?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             let categories = d.len();
@@ -740,7 +733,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Point { domain, padding, align, range, reverse } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
+                None => data_categories()?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             // PointScale(reverse=True) reverses the resolved domain order (GH #65).
@@ -1592,7 +1585,7 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &|| super::column_extent(&batch, "cat"), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &|| super::column_extent(&batch, "cat"), &|| super::distinct_positional_categories(&batch, "cat", None), &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2062,7 +2055,7 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &|| super::column_extent(batch, field), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &|| super::column_extent(batch, field), &|| super::distinct_positional_categories(batch, field, None), &mut warnings)
     }
 
     fn resolve_scale(
@@ -3138,12 +3131,9 @@ mod tests {
     ///
     /// This is also what keeps a FACETED single-mark bar unchanged: a facet passes
     /// no shared domain and a faceted single-mark spec has no layers, so it stays
-    /// on the bypass. (That shape has its own separate defect — its panels resolve
-    /// per-panel extents under a shared facet axis — which this task does not
-    /// touch and which cannot be closed by another disjunct here: with no layers,
-    /// `layer_wants_bar_zero_anchor` has nothing to fire on, so the auto path
-    /// would trade the mark/axis disagreement for a lost zero baseline. Measured,
-    /// and logged with the north-star unification.)
+    /// on the bypass, whose extent spans the all-panels rows on a facet-shared
+    /// channel. Yielding to the auto path instead would lose the zero baseline:
+    /// with no layers, `layer_wants_bar_zero_anchor` has nothing to fire on.
     #[test]
     fn injected_scale_on_an_unlayered_standalone_chart_keeps_the_bypass() {
         let scale = build_zero_anchored_y(true, None, None);
