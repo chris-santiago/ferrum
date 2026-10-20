@@ -2135,9 +2135,12 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
     let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
 
+    // The layer's own position (its own, else the chart's), so a layer
+    // stacking on its own y axis widens it to the stack it draws.
     let mut layer_spec = ChartSpec {
         mark: layer.mark,
         encoding: layer.encoding.clone(),
+        position: layer.position.clone(),
         layers: None,
         ..spec.clone()
     };
@@ -2654,11 +2657,10 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         }
         match (x_enc, y_enc) {
             (Some(x_enc), None) => {
-                // Stack-aware x-axis (GH #77 follow-up): see
-                // `position::axis_batch_for_x` for the rationale.
-                let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
+                // Stack-aware x-axis: see `position::axis_batch`.
+                let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
@@ -2667,9 +2669,9 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 ), warnings));
             }
             (None, Some(y_enc)) => {
-                let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
+                let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_origins, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
@@ -2733,10 +2735,10 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    // Stack-aware x-axis (GH #77 follow-up): resolve against the post-Stack
-    // batch when the spec carries a matching Stack adjustment whose
-    // resolved value axis is X. See `position::axis_batch_for_x` for the
-    // rationale.
+    // Stack-aware axes: an unlayered spec resolves against its post-Stack
+    // batches when its mark stacks its value on the axis; a layered spec's
+    // stacking layers widen the axis in the layered union. See
+    // `position::axis_batch`.
     //
     // An overlay member drawing nothing on an axis resolves the one its
     // group imposes, over the group's domain, from no column of its own
@@ -2745,18 +2747,15 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         let (binding, domain) = leaf_scales?.imposed(channel)?;
         positional::imposed_axis_scale(channel.as_str(), binding, domain, pixel_range, warnings)
     };
-    let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
+    let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?,
     };
-    // Stack-aware y-axis: resolve against the post-Stack batch when the
-    // spec carries a matching Stack adjustment. See
-    // `position::axis_batch_for_y` for the rationale.
-    let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
+    let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the

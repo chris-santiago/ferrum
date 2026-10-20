@@ -11483,3 +11483,384 @@ fn a_binned_point_beside_raster_cells_is_excluded() {
     let [cells] = panels.as_slice() else { panic!("one image, got {}", panels.len()) };
     assert!(!drawn(cells).is_empty(), "the cells draw");
 }
+
+// ── The stacked value axis covers every layer that stacks ─────────────────
+//
+// A stacked segment draws from its base to its cumulative top. The axis has
+// to span the stack each layer draws, from the batch it draws (a statistic's
+// named output, the chart's rows, each facet panel's rows), or the scale
+// returns no pixel for the tops past the unstacked maximum and the drawer
+// drops those segments.
+
+/// Rows whose `mean(y)` by `(g, f)` stacks to 5.0 at `a` and 15.0 at `b`,
+/// above the largest single mean (9.5) and the largest raw `y` (12.0).
+fn stack_rows() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b", "b", "b"])),
+            Arc::new(StringArray::from(vec!["u", "u", "v", "v", "u", "u", "v", "v"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 12.0])),
+        ],
+    )
+    .unwrap()
+}
+
+/// The named mean of `y` by `groupby` the layered wire carries per layer.
+fn mean_y_output(name: &str, groupby: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "aggregate",
+        "ops": [{"field": "y", "fn": "mean", "as": "mean_y"}],
+        "groupby": groupby,
+        "name": name,
+    })
+}
+
+/// A layered spec over [`stack_rows`]: a chart-level bar binding with the
+/// bar anchor the spec build injects (and, as `Chart.layer` writes it, the
+/// host's `color`), `transforms`, `layers`, and a chart-level `offset` stack.
+fn stacked_layers_spec(
+    color: Option<&str>,
+    transforms: Vec<serde_json::Value>,
+    layers: serde_json::Value,
+    offset: &str,
+) -> ChartSpec {
+    let mut encoding = serde_json::json!({
+        "x": {"field": "g"},
+        "y": {"field": "y", "scale": {"type": "linear", "clamp": false, "nice": false, "zero": true, "systemInjected": true}},
+    });
+    if let Some(color) = color {
+        encoding["color"] = serde_json::json!({"field": color});
+    }
+    serde_json::from_value(serde_json::json!({
+        "mark": "bar",
+        "encoding": encoding,
+        "transforms": transforms,
+        "layers": layers,
+        "position": {"type": "stack", "offset": offset, "anchor": "top"},
+    }))
+    .expect("the stacked layered spec deserializes")
+}
+
+/// The chart's y-axis domain, as the prepare pass resolves it.
+fn y_domain(spec: &ChartSpec, rows: &RecordBatch) -> Option<(f64, f64)> {
+    prepare_render_inputs(
+        spec,
+        rows,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("the stacked spec prepares")
+    .provisional_scales
+    .y
+    .data_domain()
+}
+
+/// A stacked mean bar on its own named output, `offset` stacking.
+fn stacked_mean_bar(offset: &str) -> serde_json::Value {
+    serde_json::json!({
+        "mark": "bar",
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "color": {"field": "f"}},
+        "data_source": "_layer_agg_0",
+        "position": {"type": "stack", "offset": offset, "anchor": "top"},
+    })
+}
+
+/// Every `Rect` and `Text` node a mark batch draws, as `(x, y, w, h)` and
+/// `(x, y)`.
+fn rects_of(batch: &ferrum_scene::MarkBatch) -> Vec<(f64, f64, f64, f64)> {
+    batch
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Rect { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn texts_of(batch: &ferrum_scene::MarkBatch) -> Vec<(f64, f64)> {
+    batch
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            ferrum_scene::SceneNode::Text { x, y, .. } => Some((*x, *y)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A text label attached to a stacked mean bar (each on its own statistic
+/// output, the shape `Chart.layer`, `+` and `Layer` lower to) draws every
+/// segment and one label per segment, on it. Rejects a preview that stacks
+/// only the chart's rows, which left the `b`/`v` segment (top 15.0) past an
+/// axis spanning the unstacked means (9.5) and dropped it with its label.
+#[test]
+fn a_label_on_a_stacked_statistic_keeps_every_segment_and_sits_on_it() {
+    let label = serde_json::json!({
+        "mark": "text",
+        "encoding": {"x": {"field": "g"}, "y": {"field": "mean_y"}, "text": {"field": "mean_y"}, "group": {"field": "f"}},
+        "inherited_positional": ["x", "y"],
+        "data_source": "_layer_agg_1",
+    });
+    let spec = stacked_layers_spec(
+        Some("f"),
+        vec![mean_y_output("_layer_agg_0", &["g", "f"]), mean_y_output("_layer_agg_1", &["g", "f"])],
+        serde_json::json!([stacked_mean_bar("zero"), label]),
+        "zero",
+    );
+    let (scene, _) = scene_over(&spec, &stack_rows(), &crate::layout::ThemeInputs::default());
+    let marks = &scene.panels[0].marks;
+    let mut segments = rects_of(&marks[0]);
+    let mut labels = texts_of(&marks[1]);
+    assert_eq!((segments.len(), labels.len()), (4, 4), "every (g, f) segment draws, with its label");
+    segments.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+    labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for ((sx, sy, sw, sh), (lx, ly)) in segments.into_iter().zip(labels) {
+        assert!((lx - (sx + sw / 2.0)).abs() < 1e-6, "label x {lx} centers on its segment at {sx}+{sw}/2");
+        assert!(sy <= ly && ly <= sy + sh, "label y {ly} sits on its segment {sy}..{}", sy + sh);
+    }
+}
+
+/// `+` stacked mean bars over an unstacked point on the chart's rows: every
+/// segment draws, and the axis spans the stacked tops (15.0) and the
+/// point's own raw values, not a stack of them. Rejects stacking only the
+/// chart's rows (the axis stops at the point's 12.0 and the 15.0 segment
+/// drops) and stacking the unstacked sibling too (its rows at `b` would
+/// stack to 30.0).
+#[test]
+fn a_stacked_statistic_beside_an_unstacked_sibling_keeps_every_segment_and_the_siblings_own_extent() {
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}});
+    let spec = stacked_layers_spec(
+        None,
+        vec![mean_y_output("_layer_agg_0", &["g", "f"])],
+        serde_json::json!([stacked_mean_bar("zero"), point]),
+        "zero",
+    );
+    let (scene, _) = scene_over(&spec, &stack_rows(), &crate::layout::ThemeInputs::default());
+    assert_eq!(rects_of(&scene.panels[0].marks[0]).len(), 4, "every stacked segment draws");
+    assert_eq!(y_domain(&spec, &stack_rows()), Some((0.0, 15.0)));
+}
+
+/// Normalize and center stacks on a statistic's output keep their own
+/// domain rules: a normalized bar spans `[0, 1]`, and a center stack spans
+/// its lowest base and highest top, each bin centered on 0. Rejects reading
+/// the output's unstacked means (`[0, 9.5]`).
+#[test]
+fn normalize_and_center_stacks_on_a_statistic_keep_their_own_domain() {
+    let bar_alone = |offset: &str| {
+        stacked_layers_spec(
+            Some("f"),
+            vec![mean_y_output("_layer_agg_0", &["g", "f"])],
+            serde_json::json!([stacked_mean_bar(offset)]),
+            offset,
+        )
+    };
+    assert_eq!(y_domain(&bar_alone("normalize"), &stack_rows()), Some((0.0, 1.0)));
+    // `b` stacks 5.5 + 9.5 = 15.0, centered on 0 as [-7.5, 7.5].
+    assert_eq!(y_domain(&bar_alone("center"), &stack_rows()), Some((-7.5, 7.5)));
+}
+
+/// An area stacked through the encoding's `stack` shorthand spans every
+/// band's top, flat and as a layer beside an unstacked point. Rejects a
+/// preview that reads only an explicit `Stack` position: the axis stopped
+/// at the largest single value (9.0) and the top band, stacked to 18.0, was
+/// cut.
+#[test]
+fn an_area_stacked_by_the_stack_shorthand_spans_every_band() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
+            Arc::new(StringArray::from(vec!["p", "p", "p", "q", "q", "q", "r", "r", "r"])),
+        ],
+    )
+    .unwrap();
+    let area = serde_json::json!({
+        "mark": "area",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y", "stack": "zero"}, "color": {"field": "c"}},
+    });
+    let flat: ChartSpec = serde_json::from_value(area.clone()).unwrap();
+    let layered: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "area",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "layers": [area, {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}],
+    }))
+    .unwrap();
+    for spec in [flat, layered] {
+        assert_eq!(y_domain(&spec, &rows), Some((1.0, 18.0)), "layers: {}", spec.layers.is_some());
+    }
+}
+
+/// A faceted stacked statistic: each panel stacks its own rows, so the
+/// shared axis spans the tallest panel's stack (10 + 10 = 20), not a stack
+/// across panels (22), and every panel draws both of its segments on it.
+/// Rejects reading the output unstacked (H2's top segment, 20.0, past the
+/// largest mean 10.0, dropped) and stacking the all-panels batch whole.
+#[test]
+fn a_faceted_stacked_statistic_spans_the_tallest_panels_stack() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("h", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "a"])),
+            Arc::new(StringArray::from(vec!["u", "v", "u", "v"])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 10.0, 10.0])),
+            Arc::new(StringArray::from(vec!["H1", "H1", "H2", "H2"])),
+        ],
+    )
+    .unwrap();
+    let mut spec = stacked_layers_spec(
+        None,
+        vec![mean_y_output("_layer_agg_0", &["g", "f", "h"])],
+        serde_json::json!([
+            stacked_mean_bar("zero"),
+            {"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}},
+        ]),
+        "zero",
+    );
+    spec.facet = Some(serde_json::from_value(serde_json::json!({"field": "h", "mode": {"kind": "wrap", "ncols": 2}})).unwrap());
+    assert_eq!(y_domain(&spec, &rows), Some((0.0, 20.0)));
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    let heights: Vec<Vec<f64>> = scene
+        .panels
+        .iter()
+        .map(|panel| rects_of(&panel.marks[0]).into_iter().map(|(_, _, _, h)| (h * 1e3).round() / 1e3).collect())
+        .collect();
+    assert_eq!(heights.len(), 2);
+    // Each panel's two equal segments, on one shared scale: H2's ten times H1's.
+    for panel in &heights {
+        assert_eq!(panel.len(), 2, "every segment of every panel draws: {heights:?}");
+        assert!((panel[0] - panel[1]).abs() < 1e-3, "{heights:?}");
+    }
+    assert!((heights[1][0] / heights[0][0] - 10.0).abs() < 1e-3, "{heights:?}");
+}
+
+/// A layer that stacks on its own y axis (`independent_y`, under its own
+/// `Stack` position) spans the stack it draws there: every one of its eight
+/// segments draws. Rejects resolving the layer's axis under the chart's
+/// position (none here), which left `b`'s stack (to 30.0) on an axis
+/// spanning the unstacked rows (12.0).
+#[test]
+fn a_layer_stacking_on_its_own_y_axis_keeps_every_segment() {
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "g"}, "y": {"field": "y"}},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}},
+            {
+                "mark": "bar",
+                "encoding": {"x": {"field": "g"}, "y": {"field": "y"}, "color": {"field": "f"}},
+                "position": {"type": "stack", "offset": "zero", "anchor": "top"},
+                "independent_y": true,
+            },
+        ],
+    }))
+    .unwrap();
+    let (scene, _) = scene_over(&spec, &stack_rows(), &crate::layout::ThemeInputs::default());
+    assert_eq!(rects_of(&scene.panels[0].marks[1]).len(), 8);
+}
+
+
+/// A faceted unlayered stacked area: the shared axis spans the tallest
+/// panel's stack (10 + 10 = 20), whichever batch it resolves over. Rejects
+/// stacking the all-panels rows whole (22), which the axis drew while each
+/// panel placed its bands on its own stack.
+#[test]
+fn a_faceted_stacked_area_spans_the_tallest_panels_stack() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("f", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("h", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0, 1.0])),
+            Arc::new(StringArray::from(vec!["u", "v", "u", "v"])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 10.0, 10.0])),
+            Arc::new(StringArray::from(vec!["H1", "H1", "H2", "H2"])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "area",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "f"}},
+        "position": {"type": "stack", "offset": "zero", "anchor": "top"},
+        "facet": {"field": "h", "mode": {"kind": "wrap", "ncols": 2}},
+    }))
+    .unwrap();
+    assert_eq!(y_domain(&spec, &rows), Some((1.0, 20.0)));
+}
+
+/// `+` over two frames: each operand's stacked bars draw from their own
+/// branch of the combined rows, and the right operand stacks taller (to
+/// 15.0 at `d`) than the left's rows reach. Every segment of both draws,
+/// on an axis reaching 15.0. Rejects a preview that stacks only the chart's
+/// rows: the branch tails were read unstacked (largest 8.0), so the right
+/// operand's upper segments fell past the axis and dropped.
+#[test]
+fn stacked_operands_on_their_own_branches_keep_every_segment() {
+    use arrow::array::BooleanArray;
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("lhs", DataType::Boolean, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c", "d", "d"])),
+            Arc::new(StringArray::from(vec!["g1", "g2", "g1", "g2", "g1", "g2", "g1", "g2"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])),
+            Arc::new(BooleanArray::from(vec![true, true, true, true, false, false, false, false])),
+        ],
+    )
+    .unwrap();
+    let operand = |name: &str| {
+        serde_json::json!({
+            "mark": "bar",
+            "encoding": {"x": {"field": "cat", "type": "nominal"}, "y": {"field": "val"}, "color": {"field": "grp"}},
+            "data_source": name,
+            "position": {"type": "stack", "offset": "zero", "anchor": "top"},
+        })
+    };
+    let branch = |name: &str, side: bool| {
+        serde_json::json!({
+            "type": "branch",
+            "name": name,
+            "input": null,
+            "transforms": [{"type": "filter", "predicate": format!("datum[\"lhs\"] == {side}")}],
+        })
+    };
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "bar",
+        "encoding": {
+            "x": {"field": "cat", "type": "nominal"},
+            "y": {"field": "val", "scale": {"type": "linear", "clamp": false, "nice": false, "zero": true, "systemInjected": true}},
+        },
+        "transforms": [branch("left", true), branch("right", false)],
+        "layers": [operand("left"), operand("right")],
+        "position": {"type": "stack", "offset": "zero", "anchor": "top"},
+    }))
+    .unwrap();
+    assert_eq!(y_domain(&spec, &rows), Some((0.0, 15.0)));
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    let drawn: Vec<usize> = scene.panels[0].marks.iter().map(|batch| rects_of(batch).len()).collect();
+    assert_eq!(drawn, vec![4, 4], "every segment of both operands draws");
+}

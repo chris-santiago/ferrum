@@ -110,28 +110,31 @@ struct SeedRead<'a> {
 /// but draws it, the chart's data with the field that layer inherits: the
 /// chart-level binding in that layer's own coordinate space, as its completed
 /// encoding carries it ([`drawn_channel_slots`]), with the span and opposite
-/// fields it draws.
+/// fields it draws. Each read comes from where `reads` places that layer's
+/// reads on the axis ([`AxisReads`]): a layer that stacks its value there
+/// reads the stack it draws, with the segment bases as its span.
 fn seed_reads<'a>(
     spec: &'a ChartSpec,
     layers: &'a [Layer],
     channel: &str,
     bound: (&'a str, Option<&'a str>, Option<&'a str>),
+    reads: &AxisReads<'a>,
 ) -> Vec<SeedRead<'a>> {
     let (field, span, opposite) = bound;
     let Some((index, establisher)) = establishing_axis_layer(spec, layers, channel) else { return Vec::new() };
     let first = if index == 0 {
-        SeedRead { source: LayerSource::of(establisher), field, span, opposite, inheritor: None }
+        SeedRead { source: reads.source(index), field, span: reads.span(index, span), opposite, inheritor: None }
     } else {
         let drawn = drawn_channel_slots(spec, establisher, channel);
         SeedRead {
-            source: LayerSource::of(establisher),
+            source: reads.source(index),
             field,
-            span: span.and(drawn.span),
+            span: reads.span(index, span.and(drawn.span)),
             opposite: opposite.and(drawn.opposite),
             inheritor: None,
         }
     };
-    let mut reads = vec![first];
+    let mut seeds = vec![first];
     for (index, layer) in layers.iter().enumerate().skip(1) {
         if layer.data_source.is_some() || (channel == "y" && layer.independent_y) {
             continue;
@@ -142,12 +145,116 @@ fn seed_reads<'a>(
         }
         let drawn = drawn_channel_slots(spec, layer, channel);
         let Some(field) = drawn.value else { continue };
-        if reads.iter().any(|r| r.source == LayerSource::Chart && r.field == field) {
+        let source = reads.source(index);
+        if seeds.iter().any(|r| r.source == source && r.field == field) {
             continue;
         }
-        reads.push(SeedRead { source: LayerSource::Chart, field, span: drawn.span, opposite: drawn.opposite, inheritor: Some(index) });
+        seeds.push(SeedRead { source, field, span: reads.span(index, drawn.span), opposite: drawn.opposite, inheritor: Some(index) });
     }
-    reads
+    seeds
+}
+
+/// Where each layer's reads on one axis come from, by layer index: the batch
+/// the layer draws ([`LayerSource::of`]), or, for a layer that stacks its
+/// value on the axis, the stack it draws ([`axis_stacks`]), whose value
+/// column holds the segment tops and whose base column, read as the value's
+/// span, holds the nonzero segment bases.
+struct AxisReads<'a> {
+    sources: Vec<LayerSource<'a>>,
+    stacked: Vec<bool>,
+}
+
+impl<'a> AxisReads<'a> {
+    /// Every layer read from the batch it draws, as an axis no layer stacks
+    /// on (a categorical one) reads them.
+    fn unstacked(layers: &'a [Layer]) -> Self {
+        Self { sources: layers.iter().map(LayerSource::of).collect(), stacked: vec![false; layers.len()] }
+    }
+
+    /// Each layer read from its stack in `stacks` where it has one, else from
+    /// the batch it draws.
+    fn over(layers: &'a [Layer], stacks: &'a [Option<RecordBatch>]) -> Self {
+        Self {
+            sources: layers
+                .iter()
+                .zip(stacks)
+                .map(|(layer, stack)| stack.as_ref().map_or(LayerSource::of(layer), LayerSource::Batch))
+                .collect(),
+            stacked: stacks.iter().map(Option::is_some).collect(),
+        }
+    }
+
+    fn source(&self, layer: usize) -> LayerSource<'a> {
+        self.sources[layer]
+    }
+
+    /// The stack's base column for a layer that stacks on the axis: a
+    /// stacked segment draws from its base to its top.
+    fn base(&self, layer: usize) -> Option<&'static str> {
+        self.stacked[layer].then_some(crate::render::position::STACK_BASE_COLUMN)
+    }
+
+    /// The span a layer's seed read pairs with: `span`, its own `x2`/`y2`,
+    /// else the stack's base column for a stacking layer ([`Self::base`]),
+    /// the precedence an unlayered stack's axis gives them
+    /// (`position::axis_batch`).
+    fn span<'s>(&self, layer: usize, span: Option<&'s str>) -> Option<&'s str> {
+        span.or(self.base(layer))
+    }
+}
+
+/// The stack each layer draws on the numeric axis `channel`, by layer index:
+/// [`crate::render::position::layer_stack_preview`] over the batch the layer
+/// draws, or `None` for a layer that stacks nothing there. A layer on the
+/// chart's data on a facet-shared axis (`include_final`) previews the
+/// all-panels batch too, stacked panel by panel, so every panel's axis spans
+/// the tallest panel's stack. A layer whose own coord exchanges its channels
+/// relative to the panel is left to
+/// `scene_build::validate_layer_coord_exchange_is_servable`, and an
+/// `independent_y` layer stacks on its own y axis, not this one; neither
+/// stacks here. Refuses a facet field the panel split cannot read
+/// (`position::stack_preview`).
+fn axis_stacks(
+    spec: &ChartSpec,
+    layers: &[Layer],
+    channel: &str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> Result<Vec<Option<RecordBatch>>, RenderError> {
+    use crate::spec::position::StackValueAxis;
+    let axis = match channel {
+        "x" => StackValueAxis::X,
+        "y" => StackValueAxis::Y,
+        _ => return Ok(vec![None; layers.len()]),
+    };
+    let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let exchanges = index != 0 && layer_flips(layer, spec.coord.as_ref()) != chart_flipped;
+            if exchanges || (axis == StackValueAxis::Y && layer.independent_y) {
+                return Ok(None);
+            }
+            let preview = |batch: &RecordBatch| crate::render::position::layer_stack_preview(spec, layer, axis, batch);
+            match LayerSource::of(layer) {
+                LayerSource::Chart => {
+                    let Some(rows) = preview(primary_batch)? else { return Ok(None) };
+                    let all_panels = match include_final.then(|| transform_outputs.get(FINAL_OUTPUT_KEY)).flatten() {
+                        Some(all_panels) => preview(all_panels)?,
+                        None => None,
+                    };
+                    Ok(match all_panels {
+                        Some(all_panels) => arrow::compute::concat_batches(&rows.schema(), [&rows, &all_panels]).ok(),
+                        None => Some(rows),
+                    })
+                }
+                LayerSource::Output(key) => transform_outputs.get(key).map_or(Ok(None), preview),
+                LayerSource::Batch(batch) => preview(batch),
+            }
+        })
+        .collect()
 }
 
 /// The positional bindings `layer` draws on the shared `channel`: the
@@ -1984,15 +2091,18 @@ pub(in crate::render) fn numeric_domain_union_over(
     };
 
     // The bound field and its paired endpoint: from the primary batch on an
-    // unlayered spec, from the batches and fields that draw them on a layered
-    // one (see [`seed_reads`]). Which of those reads found its field is kept
-    // for the layer loop below, so a layer drawing a seed read's field from
-    // its batch is not read twice.
-    let seeds: Vec<SeedRead<'_>> = spec
-        .layers
-        .as_deref()
-        .map(|layers| seed_reads(spec, layers, channel, (field, paired_field, None)))
-        .unwrap_or_default();
+    // unlayered spec (whose caller already resolved its stack,
+    // `position::axis_batch`), from the batches and fields that draw them on
+    // a layered one (see [`seed_reads`]). A layer that stacks its value on
+    // this axis is read from the stack it draws ([`AxisReads`]), so its
+    // segments widen the axis whatever batch it draws, while an unstacked
+    // sibling reads its own values. Which of those reads found its field is
+    // kept for the layer loop below, so a layer drawing a seed read's field
+    // from its batch is not read twice.
+    let layers = spec.layers.as_deref().unwrap_or_default();
+    let stacks = axis_stacks(spec, layers, channel, primary_batch, transform_outputs, include_final)?;
+    let reads = AxisReads::over(layers, &stacks);
+    let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
     if spec.layers.is_none() {
         read(None, field)?;
@@ -2152,7 +2262,7 @@ pub(in crate::render) fn numeric_domain_union_over(
             // and the bar zero-anchor rule below must not fire on the
             // strength of the field's declared NAME alone when it never
             // contributed a single value (spec-review finding 3).
-            let source = LayerSource::of(layer);
+            let source = reads.source(layer_index);
             let mut value_field_contributed = false;
             for (i, lf) in layer_fields.into_iter().enumerate() {
                 let Some(lf) = lf else { continue };
@@ -2201,6 +2311,10 @@ pub(in crate::render) fn numeric_domain_union_over(
                 if i == 0 {
                     value_field_contributed = contributed;
                 }
+            }
+            // A stacking layer's segments reach down (or up) to their bases.
+            if let Some(base) = reads.base(layer_index) {
+                read(Some(source), base)?;
             }
             // The authored `y` decides the bar's orientation: categorical by
             // its declared type or by the column it reads in this layer's batch.
@@ -2464,7 +2578,7 @@ pub(in crate::render) fn positional_category_union(
     // batch; a named output is already the all-panels one. An inherited field
     // is a later layer's column, so a column that cannot be a category key
     // contributes nothing, as it does from that layer's own binding below.
-    let seeds = seed_reads(spec, layers, channel, (field, None, paired_positional));
+    let seeds = seed_reads(spec, layers, channel, (field, None, paired_positional), &AxisReads::unstacked(layers));
     for seed in &seeds {
         let Some(located) = seed.source.locate(seed.field, primary_batch, transform_outputs) else { continue };
         if seed.inheritor.is_some()

@@ -1177,12 +1177,35 @@ fn leaf_positional_domain(
 
     match dtype {
         SpecDataType::Quantitative | SpecDataType::Temporal => {
+            // An unlayered leaf that stacks its value on this channel spans
+            // the stack it draws, as its own render resolves it
+            // (`position::axis_batch`); a layered leaf's stacking layers
+            // widen the union itself.
+            let axis = match channel {
+                Channel::X => crate::spec::position::StackValueAxis::X,
+                _ => crate::spec::position::StackValueAxis::Y,
+            };
+            let stacked = crate::render::position::axis_batch(
+                leaf.spec,
+                leaf.encoding,
+                axis,
+                &enc.field,
+                leaf.final_batch,
+                leaf.transform_outputs,
+                false,
+            )
+            .map_err(|source| CompositeResolveError::DomainResolve {
+                source,
+                channel: channel.as_str(),
+                field: enc.field.clone(),
+                coord_flipped,
+            })?;
             let (lo, hi) = numeric_domain_union_over(
                 channel.as_str(),
                 &enc.field,
-                paired,
-                leaf.final_batch,
-                leaf.transform_outputs,
+                paired.or(stacked.base.as_ref().map(|base| base.field.as_str())),
+                &stacked.batch,
+                &stacked.outputs,
                 leaf.spec,
                 false,
                 selection,
@@ -2750,6 +2773,46 @@ mod tests {
         )
         .unwrap();
         owned(spec, batch)
+    }
+
+    /// An overlay member that stacks its bars spans the stack it draws on
+    /// the group's shared axis: `b` stacks to 5 + 6 + 7 + 20 = 38. Rejects
+    /// the member's unstacked rows (largest 20), which left every segment
+    /// above 20 off the shared axis, dropped when the member drew.
+    #[test]
+    fn leaf_positional_domain_spans_a_stacked_members_stack() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("f", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b", "b", "b"])),
+                Arc::new(StringArray::from(vec!["u", "u", "v", "v", "u", "u", "v", "v"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 20.0])),
+            ],
+        )
+        .unwrap();
+        let mut e = Encoding::default();
+        e.x = Some(enc("g"));
+        e.y = Some(enc("y"));
+        e.color = Some(enc("f"));
+        let spec = ChartSpec {
+            mark: Mark::Bar,
+            position: Some(crate::spec::position::PositionAdjust::Stack {
+                by: None,
+                offset: crate::spec::position::StackOffset::Zero,
+                anchor: crate::spec::position::StackAnchor::Top,
+                value_axis: None,
+            }),
+            ..spec_with(e)
+        };
+        let leaf = owned(spec, batch);
+        match leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every) {
+            Ok(Some(SharedDomain::Numeric { hi, .. })) => assert_eq!(hi, 38.0),
+            other => panic!("expected the member's numeric stacked extent, got {other:?}"),
+        }
     }
 
     #[test]

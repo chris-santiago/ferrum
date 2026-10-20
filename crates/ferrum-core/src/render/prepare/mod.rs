@@ -218,6 +218,17 @@ impl LayerPrepared {
         }
     }
 
+    /// This layer in the coordinate space it draws in: its coordinate-space
+    /// fields swapped ([`Self::flip_coords`]) when its own coord flips, as
+    /// every layer `build_layers` prepares is, and as the scale-resolve stack
+    /// preview reads one.
+    pub(crate) fn in_its_coord(mut self) -> Self {
+        if crate::spec::coord::flips_positional_channels(self.coord.as_ref()) {
+            self.flip_coords();
+        }
+        self
+    }
+
     /// Swap every coordinate-space field between the x and y roles (CoordFlip).
     ///
     /// The swap lives here as ONE operation over the whole coordinate-space
@@ -234,14 +245,13 @@ impl LayerPrepared {
     /// member of this group, and the close review was right that it had been
     /// left out of it. It is reconciled at
     /// [`resolve_stack_value_on_x`](crate::render::position::resolve_stack_value_on_x)
-    /// instead of here, because unlike `mark_style.value_axis` it has THREE
-    /// consumers, each of which already carries the real `coord_flipped`, and two
-    /// of them (`position::axis_batch_for_x`/`axis_batch_for_y`, the
-    /// domain-widening preview) read `spec.position`/`spec.layers` RAW —
-    /// `LayerPrepared` does not exist yet when they run. Swapping the field here
-    /// would leave those two reading the authored declaration against the real
-    /// flip, i.e. one rule in three places, so the reconciliation lives at the
-    /// single point all three already funnel through. `mark_style.value_axis` has
+    /// instead of here, because unlike `mark_style.value_axis` it has several
+    /// consumers, each of which already carries the real `coord_flipped`, and
+    /// one of them (`position::axis_batch`, an unlayered spec's domain-widening
+    /// preview) reads `spec.position` RAW from the rendering spec. Swapping the
+    /// field here would leave that one reading the authored declaration against
+    /// the real flip, i.e. one rule in two places, so the reconciliation lives at
+    /// the single point all of them already funnel through. `mark_style.value_axis` has
     /// the opposite shape — its consumer (`DrawCtx::series_curve_axis`) reads the
     /// post-flip `LayerPrepared` and holds no authored copy to reconcile — which
     /// is why that one is swapped eagerly, here.
@@ -1847,11 +1857,11 @@ fn run_transforms_with_facet(
     let col_repeat = facet_repeat_mask(normalized, &fspec.repeat, &fspec.field)?;
     let mut dropped_nulls = vec![(
         fspec.field.as_str(),
-        null_facet_rows(facet_str_arr(normalized, &fspec.field)?, &col_repeat),
+        null_facet_rows(crate::render::facet_key_column(normalized, &fspec.field)?, &col_repeat),
     )];
     let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if let Some(row_field) = &fspec.row {
         let row_repeat = facet_repeat_mask(normalized, &fspec.repeat, row_field)?;
-        dropped_nulls.push((row_field.as_str(), null_facet_rows(facet_str_arr(normalized, row_field)?, &row_repeat)));
+        dropped_nulls.push((row_field.as_str(), null_facet_rows(crate::render::facet_key_column(normalized, row_field)?, &row_repeat)));
         partition_batch_by_two_fields(
             normalized,
             (&fspec.field, &col_repeat),
@@ -2106,15 +2116,7 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
                 .collect()
         }
     };
-    Ok(raw
-        .into_iter()
-        .map(|mut lp| {
-            if crate::spec::coord::flips_positional_channels(lp.coord.as_ref()) {
-                lp.flip_coords();
-            }
-            lp
-        })
-        .collect())
+    Ok(raw.into_iter().map(LayerPrepared::in_its_coord).collect())
 }
 
 /// The encoding a chart's scales, axes and legends are built from, over its
@@ -4699,28 +4701,6 @@ mod tick_format_tests {
     }
 }
 
-/// Resolve a named column from `batch` as a `StringArray`, returning a typed
-/// error when the column is absent or has a non-Utf8 type. Shared by all four
-/// facet distinct-value scan helpers below so the column-lookup + downcast
-/// pattern lives in exactly one place.
-fn facet_str_arr<'a>(
-    batch: &'a RecordBatch,
-    field: &str,
-) -> Result<&'a arrow::array::StringArray, RenderError> {
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn {
-            name: field.to_string(),
-        })?;
-    col.as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!(
-                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
-            ))
-        })
-}
-
 /// Refuse a `FacetSpec::repeat` entry naming a field the facet does not
 /// split by: Python names only the facet's own fields, so any other is a
 /// malformed wire, not a field to ignore.
@@ -4784,7 +4764,7 @@ fn write_repeated_facet_value(
         return Ok(panel);
     }
     let index = panel.schema().index_of(field).map_err(|_| RenderError::UnknownColumn { name: field.to_string() })?;
-    let values = facet_str_arr(&panel, field)?;
+    let values = crate::render::facet_key_column(&panel, field)?;
     let written: StringArray = values
         .iter()
         .zip(repeated)
@@ -4815,7 +4795,7 @@ fn partition_batch_by_field(
 ) -> Result<Vec<(String, RecordBatch)>, RenderError> {
     use arrow::array::BooleanArray;
     use arrow::compute::filter_record_batch;
-    let arr = facet_str_arr(batch, field)?;
+    let arr = crate::render::facet_key_column(batch, field)?;
     // Collect distinct values in first-appearance order.
     let mut order: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4911,7 +4891,7 @@ fn group_rows_by_field(
     axes: FacetSortAxes<'_>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<FacetGroup>, RenderError> {
-    let arr = facet_str_arr(batch, field)?;
+    let arr = crate::render::facet_key_column(batch, field)?;
     let mut order: Vec<String> = Vec::new();
     let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for v in arr.iter().flatten() {
@@ -4964,8 +4944,8 @@ fn group_rows_by_two_fields(
     axes: FacetSortAxes<'_>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<FacetGroup>, RenderError> {
-    let col_arr = facet_str_arr(batch, col_field)?;
-    let row_arr = facet_str_arr(batch, row_field)?;
+    let col_arr = crate::render::facet_key_column(batch, col_field)?;
+    let row_arr = crate::render::facet_key_column(batch, row_field)?;
 
     // Collect distinct row values and col values (first-appearance order).
     let mut row_order: Vec<String> = Vec::new();
@@ -5055,8 +5035,8 @@ fn partition_batch_by_two_fields(
     use arrow::array::{Array, BooleanArray};
     use arrow::compute::filter_record_batch;
 
-    let col_arr = facet_str_arr(batch, col_field)?;
-    let row_arr = facet_str_arr(batch, row_field)?;
+    let col_arr = crate::render::facet_key_column(batch, col_field)?;
+    let row_arr = crate::render::facet_key_column(batch, row_field)?;
     let joins_col = |i: usize| col_repeat[i] || !col_arr.is_null(i);
     let joins_row = |i: usize| row_repeat[i] || !row_arr.is_null(i);
 
@@ -5127,7 +5107,7 @@ mod grid_partition_tests {
     }
 
     fn utf8(batch: &RecordBatch, field: &str) -> Vec<Option<String>> {
-        facet_str_arr(batch, field).expect("Utf8 facet column").iter().map(|v| v.map(str::to_string)).collect()
+        crate::render::facet_key_column(batch, field).expect("Utf8 facet column").iter().map(|v| v.map(str::to_string)).collect()
     }
 
     /// A wrap partition over `c = [p, q, null, null, null]` whose rows 2 and 3
@@ -5161,7 +5141,7 @@ mod grid_partition_tests {
         };
         assert_eq!(v(&partitions[0].1), [1.0, 3.0, 4.0]);
         assert_eq!(v(&partitions[1].1), [2.0, 3.0, 4.0]);
-        assert_eq!(null_facet_rows(facet_str_arr(&batch, "c").unwrap(), &repeat), 1);
+        assert_eq!(null_facet_rows(crate::render::facet_key_column(&batch, "c").unwrap(), &repeat), 1);
     }
 
     /// A grid whose second frame lacks only the row field: its rows (2, 3)
@@ -5315,11 +5295,11 @@ mod grid_partition_tests {
         }
     }
 
-    // ── T1.9 (SPINE-06): facet_str_arr contract ──────────────────────────────
+    // ── facet_key_column contract ──────────────────────────────
 
     /// A minimal batch with one Utf8 column `"cat"` and one Float64 column `"v"`.
-    /// Used by all three `facet_str_arr` tests below.
-    fn facet_str_arr_batch() -> RecordBatch {
+    /// Used by all three `facet_key_column` tests below.
+    fn facet_key_column_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
             Field::new("v", DataType::Float64, false),
@@ -5334,43 +5314,39 @@ mod grid_partition_tests {
         .unwrap()
     }
 
-    /// Happy path: `facet_str_arr` on a present Utf8 column returns the
+    /// Happy path: `facet_key_column` on a present Utf8 column returns the
     /// underlying `StringArray` with the correct values.
     #[test]
-    fn facet_str_arr_returns_correct_utf8_array() {
-        let batch = facet_str_arr_batch();
-        let arr = facet_str_arr(&batch, "cat").expect("cat is a Utf8 column");
+    fn facet_key_column_returns_correct_utf8_array() {
+        let batch = facet_key_column_batch();
+        let arr = crate::render::facet_key_column(&batch, "cat").expect("cat is a Utf8 column");
         assert_eq!(arr.len(), 3);
         assert_eq!(arr.value(0), "a");
         assert_eq!(arr.value(1), "b");
         assert_eq!(arr.value(2), "a");
     }
 
-    /// Missing column: `facet_str_arr` must return `RenderError::UnknownColumn`
+    /// Missing column: `facet_key_column` must return `RenderError::UnknownColumn`
     /// (not panic) when the field is absent from the batch.
     #[test]
-    fn facet_str_arr_missing_column_errors_unknown_column() {
-        let batch = facet_str_arr_batch();
-        let err = facet_str_arr(&batch, "nonexistent").unwrap_err();
+    fn facet_key_column_missing_column_errors_unknown_column() {
+        let batch = facet_key_column_batch();
+        let err = crate::render::facet_key_column(&batch, "nonexistent").unwrap_err();
         assert!(
             matches!(err, RenderError::UnknownColumn { .. }),
             "expected UnknownColumn, got: {err:?}"
         );
     }
 
-    /// Non-Utf8 column: `facet_str_arr` on a Float64 column must return a
-    /// `RenderError::ScaleResolutionFailed` containing "Phase 7 limitation"
-    /// (the SPINE-06 error contract pinned for the three call sites).
+    /// Non-Utf8 column: `facet_key_column` on a Float64 column refuses with
+    /// the one facet-field message every partition and scan site raises.
     #[test]
-    fn facet_str_arr_non_utf8_column_errors_phase7_limitation() {
-        let batch = facet_str_arr_batch();
-        let err = facet_str_arr(&batch, "v").unwrap_err();
+    fn facet_key_column_non_utf8_column_errors_must_be_utf8() {
+        let batch = facet_key_column_batch();
+        let err = crate::render::facet_key_column(&batch, "v").unwrap_err();
         match &err {
             RenderError::ScaleResolutionFailed(msg) => {
-                assert!(
-                    msg.contains("Phase 7 limitation"),
-                    "error message must contain 'Phase 7 limitation', got: {msg:?}"
-                );
+                assert_eq!(msg, "facet field 'v' must be Utf8");
             }
             other => panic!("expected ScaleResolutionFailed, got: {other:?}"),
         }

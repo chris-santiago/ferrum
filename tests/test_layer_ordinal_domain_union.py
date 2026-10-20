@@ -479,4 +479,6 @@ def test_the_union_leaves_the_stack_cumulation_alone():
         float(lower["y"]), abs=1e-3
     ), "a stacked segment starts where the one below it ends; got {upper}, {lower}"
     # 1:2 value ratio, so 1:2 pixel heights — the cumulation used the real values.
-    assert float(upper["height"]) == pytest.approx(2 * float(lower["height"]), rel=1e-6)
+    # The SVG writes coordinates to 3 decimals: each height is off by up to
+    # 0.0005, so twice the lower one and the upper one differ by up to 0.0015.
+    assert float(upper["height"]) == pytest.approx(2 * float(lower["height"]), abs=2e-3)

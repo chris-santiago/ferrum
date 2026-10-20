@@ -3490,22 +3490,32 @@ pub fn render_scene_json(
     Ok((json, packed_bytes, warnings))
 }
 
+/// The facet field `field` of `batch` as every facet reader reads it: a
+/// Utf8 column, refused otherwise (`UnknownColumn` when absent). The one
+/// reader of the panel split ([`filter_batch_by_facet`]), the prepare pass's
+/// facet value scans and null-row checks, and the stack preview's per-panel
+/// split (`position::stack_preview`), so every site splits rows into the
+/// same panels and refuses a facet column with one message.
+pub(crate) fn facet_key_column<'a>(
+    batch: &'a RecordBatch,
+    field: &str,
+) -> Result<&'a arrow::array::StringArray, RenderError> {
+    batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .ok_or_else(|| RenderError::ScaleResolutionFailed(format!("facet field '{field}' must be Utf8")))
+}
+
 pub(crate) fn filter_batch_by_facet(
     batch: &RecordBatch,
     field: &str,
     value: &str,
 ) -> Result<RecordBatch, RenderError> {
-    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::array::BooleanArray;
     use arrow::compute::filter_record_batch;
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let arr = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!("facet field '{field}' must be Utf8"))
-        })?;
+    let arr = facet_key_column(batch, field)?;
     let mask: BooleanArray = arr
         .iter()
         .map(|v| Some(v.map(|s| s == value).unwrap_or(false)))

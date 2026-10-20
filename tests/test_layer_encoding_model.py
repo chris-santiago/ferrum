@@ -3308,14 +3308,6 @@ def test_a_bar_stacked_by_a_binned_color_draws_one_segment_per_x_and_bin():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the stacked y-domain preview does not widen over a stacking layer that reads a "
-        "statistic's named output (a layered text label's bar), so segments above the "
-        "unstacked maximum are culled, for any color"
-    ),
-)
 def test_a_stacked_label_under_a_binned_color_sits_on_its_segment():
     """A label attached to a bar stacked by a binned color stacks with it, one per segment."""
     from tests._svg_rects import data_bar_rects, mark_layer
@@ -3337,6 +3329,117 @@ def test_a_stacked_label_under_a_binned_color_sits_on_its_segment():
     for (lx, ly), (sx, sy, sh) in zip(labels, segments, strict=True):
         assert lx == sx
         assert sy <= ly <= sy + sh
+
+
+def _mean_text() -> fm.Text:
+    return fm.Text("y", aggregate="mean")
+
+
+#: Every door that attaches a mark to a stacked mean bar, by the color it stacks by.
+_STACKED_BAR_DOORS: dict[str, Callable[[Any], Any]] = {
+    "L": lambda color: _binned_mark("bar", fm.Stack(), color=color).layer(
+        layer("text", text=_mean_text())
+    ),
+    "+e": lambda color: (
+        _binned_mark("bar", fm.Stack()) + _binned_mark("text", fm.Stack(), text=_mean_text())
+    ).encode(color=color),
+    "LD": lambda color: _binned_mark("bar", fm.Stack(), color=color).layer(
+        fm.Layer(
+            data=_GROUP_ROWS, mark="text", encoding={"x": "g", "y": "mean(y)", "text": _mean_text()}
+        )
+    ),
+    "+point": lambda color: (
+        _binned_mark("bar", fm.Stack(), color=color) + mk("point", _GROUP_ROWS, x="g", y="y")
+    ),
+}
+_STACK_COLORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "nominal": (lambda: "c", "c"),
+    "binned": (_binned_color, "v_bin"),
+}
+
+
+@pytest.mark.parametrize("color", sorted(_STACK_COLORS))
+@pytest.mark.parametrize("door", sorted(_STACKED_BAR_DOORS))
+def test_a_mark_attached_to_a_stacked_statistic_removes_no_segment(door, color):
+    """A label or point attached to a stacked mean bar keeps every segment; a label sits on its own.
+
+    Rejects an axis spanning the bar output's unstacked means: the segments
+    stacked above the largest mean fell past it and were dropped.
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    build, key = _STACK_COLORS[color]
+    svg = _quiet(_STACKED_BAR_DOORS[door](build()).to_svg)
+    segments = sorted(
+        (round(float(r["x"]) + float(r["width"]) / 2, 1), float(r["y"]), float(r["height"]))
+        for r in data_bar_rects(mark_layer(svg))
+    )
+    assert len(segments) == _GROUP_ROWS_BINNED.select(["g", key]).n_unique()
+    labels = sorted(
+        (round(float(x), 1), float(y))
+        for x, y, fill, _ in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    )
+    if door == "+point":
+        return
+    assert len(labels) == len(segments)
+    for (lx, ly), (sx, sy, sh) in zip(labels, segments, strict=True):
+        assert lx == sx
+        assert sy <= ly <= sy + sh
+
+
+def test_stacked_operands_on_their_own_frames_draw_every_segment():
+    """``+`` over two frames: the right operand stacks taller than the left's rows reach.
+
+    Every segment of both operands draws, each band's stack as tall as its
+    total, the right operand's reaching 15. Rejects reading each operand's branch output
+    unstacked, which stopped the axis at 8 and dropped the right operand's
+    upper segments.
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    def stacked(rows: pl.DataFrame) -> fm.Chart:
+        return fm.Chart(rows).mark_bar(position=fm.Stack()).encode(x="cat", y="val", color="grp")
+
+    left = pl.DataFrame(
+        {"cat": ["a", "a", "b", "b"], "grp": ["g1", "g2"] * 2, "val": [1.0, 2.0, 3.0, 4.0]}
+    )
+    right = pl.DataFrame(
+        {"cat": ["c", "c", "d", "d"], "grp": ["g1", "g2"] * 2, "val": [5.0, 6.0, 7.0, 8.0]}
+    )
+    svg = _quiet((stacked(left) + stacked(right)).to_svg)
+    rects = data_bar_rects(mark_layer(svg))
+    assert len(rects) == 8
+    stacks: dict[float, float] = {}
+    for r in rects:
+        band = round(float(r["x"]), 1)
+        stacks[band] = stacks.get(band, 0.0) + float(r["height"])
+    # Each band's stack height is its total (3, 7, 11, 15) on one scale.
+    heights = [stacks[x] for x in sorted(stacks)]
+    assert [h / heights[0] for h in heights] == pytest.approx([1.0, 7 / 3, 11 / 3, 5.0], abs=1e-3)
+
+
+@pytest.mark.parametrize("route", ["flat", "+point"])
+def test_an_area_stacked_by_the_stack_shorthand_draws_every_band(route):
+    """``Y(stack="zero")`` stacks an area's bands on an axis that spans their tops.
+
+    Rejects an axis spanning the unstacked values, which cut the top band.
+    """
+    rows = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0] * 3,
+            "y": [float(i) for i in range(1, 10)],
+            "c": ["p"] * 3 + ["q"] * 3 + ["r"] * 3,
+        }
+    )
+    chart = mk("area", rows, x="x", y=fm.Y("y", stack="zero"), color="c")
+    if route == "+point":
+        chart = chart + mk("point", rows, x="x", y="y")
+    stacked = _quiet(chart.to_svg)
+    explicit = fm.Chart(rows).mark_area(position=fm.Stack()).encode(x="x", y="y", color="c")
+    if route == "+point":
+        explicit = explicit + mk("point", rows, x="x", y="y")
+    assert stacked == _quiet(explicit.to_svg)
 
 
 def test_a_text_from_other_rows_adds_no_legend_entry_it_does_not_draw():
@@ -6163,7 +6266,7 @@ _CONTROL_DIGESTS = {
     "LCs/neither": "7d0f2c91ecb949cb1b20bb61543b06c1f7223390b381e767977fb5b53293bc24",
     "F/arc-theta": "5c5f1b01e3cdbac1ec0e6f2e3e86d88ab69f3534ff6b01d75b58b23066344d1b",
     "F/arc-theta-on-y": "6d975afe613277131bb547c5fa48984d4de13e97e56115175a88b6fe1c6bfc20",
-    "F/radial-stack": "3d8e9b8abf7f93f0685890ee0014db05bdcc3991d606f1e8d6dda02a17c0eac8",
+    "F/radial-stack": "f3336e01b5844bd24a0f9ea845abf74a4805ce8af6a37128a7bab9a013a62997",
     "L/polar-bar-text": "bd839ed9c6026b660bcbdd15192e73016a45e26af9ee0935de00452c29faccbd",
     "+/polar-bar-text": "bd839ed9c6026b660bcbdd15192e73016a45e26af9ee0935de00452c29faccbd",
     "LCs/polar-arcs": "614ffef7c51cfb8411810444014f4d4fe0fefa02453ca316b819f637640214aa",
