@@ -83,6 +83,19 @@ pub enum PositionAdjust {
     },
 }
 
+impl PositionAdjust {
+    /// The Python class that spells this adjustment (`fm.Stack`), for a
+    /// refusal that names the `position=` the caller wrote.
+    pub(crate) fn class_name(&self) -> &'static str {
+        match self {
+            Self::Identity => "Identity",
+            Self::Dodge { .. } => "Dodge",
+            Self::Jitter { .. } => "Jitter",
+            Self::Stack { .. } => "Stack",
+        }
+    }
+}
+
 fn default_padding() -> f64 { 0.05 }
 fn default_jitter_width() -> f64 { 0.4 }
 fn default_stack_offset() -> StackOffset { StackOffset::Zero }

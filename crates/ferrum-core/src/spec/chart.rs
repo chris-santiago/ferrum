@@ -153,6 +153,16 @@ impl From<ferrum_scene::ConditionalEncoding> for ChartConditional {
     }
 }
 
+impl ChartSpec {
+    /// Whether this chart draws layers: a non-empty `layers` list. An empty
+    /// list is unlayered, so with no layer to draw, every positional read
+    /// (axis scale, stacked axis batch, domain union, category union) takes
+    /// the chart's own mark and batch.
+    pub(crate) fn is_layered(&self) -> bool {
+        self.layers.as_ref().is_some_and(|layers| !layers.is_empty())
+    }
+}
+
 /// A point chart with every optional field empty: the base test literals
 /// spread with `..Default::default()`, so a new optional field costs them
 /// nothing. Test-only: a real spec always names its mark.

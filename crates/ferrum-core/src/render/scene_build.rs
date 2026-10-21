@@ -1780,7 +1780,7 @@ fn build_panel_mark_batches(
 
         // Position adjustment — always call apply_position; it is the
         // single authority for all adjustments (explicit layer.position
-        // *and* encoding-level encoding.y.stack).  When neither is set
+        // *and* the encoding-level `stack` shorthand on x or y).  When neither is set
         // it returns a cheap reference-counted clone and is a no-op.
         let adjusted_owned = position::apply_position(
             layer_batch,

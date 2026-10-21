@@ -108,6 +108,7 @@ from ferrum.selection import ConditionalSpec
 from ferrum.composition import (
     _bind_operand_conditionals,
     _carry_layer_coord,
+    _carry_layer_position,
     _ChartOperatorMixin,
     _conditional_layer_scopes,
     _expand_layers,
@@ -2686,6 +2687,14 @@ class Chart(
         if not host:
             lhs_layers = _scoped_to_layers(lhs_layers, lhs._encoding)
             new._encoding = _composition_encoding(lhs._encoding)
+        # An operand's own position= adjusts the layers it contributes and no
+        # sibling's, so it moves onto those layers and the composition keeps
+        # none. A host being extended keeps its position, the parent of every
+        # layer attached to it, as it keeps its encoding.
+        rhs_layers = _carry_layer_position(rhs_layers, rhs._position)
+        if not host:
+            lhs_layers = _carry_layer_position(lhs_layers, lhs._position)
+            new._position = None
         # Each operand's conditionals belong to the layers that operand
         # contributes, carried by identity through every rewrite below. A
         # host's own stay chart-wide.
@@ -2744,6 +2753,8 @@ class Chart(
             else:
                 new = rhs._clone()
                 new._layers = rhs_layers
+                if not host:
+                    new._position = None
                 new._annotations = new._annotations + _annotations_from_primitive(
                     lhs._annotation_primitive
                 )

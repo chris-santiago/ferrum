@@ -915,6 +915,10 @@ class SpecBuildMixin:
             # none was copied, so every other spec is unchanged on the wire.
             if layer.inherited_positional:
                 layer_dict["inherited_positional"] = list(layer.inherited_positional)
+            # Absent unless the layer's position is its operand's, so every
+            # other spec is unchanged on the wire.
+            if layer.inherited_position:
+                layer_dict["inherited_position"] = True
             # Non-positional channels the layer carries from a parent, as the
             # wire channels they draw as; absent when it carries none, so
             # every other spec is unchanged on the wire.

@@ -80,7 +80,7 @@ pub(crate) fn axis_batch<'a>(
         base: None,
         outputs: Cow::Borrowed(transform_outputs),
     };
-    if spec.layers.as_ref().is_some_and(|layers| !layers.is_empty()) {
+    if spec.is_layered() {
         return Ok(unstacked);
     }
     let value = match axis {
@@ -146,6 +146,8 @@ pub(crate) fn layer_stack_preview(
 /// holding no facet field repeats in every panel and stacks whole. A facet
 /// field the panel split cannot read is refused with the panel split's own
 /// error ([`crate::render::facet_key_column`]), never stacked across panels.
+/// A `stack` shorthand on both channels is refused as the draw pass refuses
+/// it ([`stack_shorthand`]).
 ///
 /// It stacks in first-appearance order (no color scale ranks the groups):
 /// the order moves segments within a bin, never a bin's positive or negative
@@ -159,7 +161,7 @@ pub(crate) fn stack_preview(
     axis: StackValueAxis,
     facet: Option<&crate::layout::facet::FacetSpec>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
-    let Some(effective) = effective_position(position, encoding, coord_flipped) else { return Ok(None) };
+    let Some(effective) = effective_position(position, encoding, coord_flipped)? else { return Ok(None) };
     let PositionAdjust::Stack { by, offset, anchor, value_axis } = effective.as_ref() else {
         return Ok(None);
     };
@@ -236,28 +238,79 @@ fn facet_panels(
         .map(Some)
 }
 
+/// The channel the encoding's `stack` shorthand stacks along, in the
+/// encoding's own (post-`CoordFlip`) space, and the offset it names: `x` or
+/// `y`, whichever declares a stack offset ([`EncodingSpec::stack_offset`]),
+/// as Vega-Lite and ggplot2 stack the value channel that declares it.
+/// `Ok(None)` when neither does. A shorthand on both is refused
+/// ([`RenderError::StackOnBothChannels`]): a mark stacks along one channel.
+///
+/// [`EncodingSpec::stack_offset`]: crate::spec::encoding::EncodingSpec::stack_offset
+/// [`RenderError::StackOnBothChannels`]: crate::render::RenderError::StackOnBothChannels
+pub(crate) fn stack_shorthand(
+    encoding: &crate::spec::encoding::Encoding,
+) -> Result<Option<(StackValueAxis, crate::spec::position::StackOffset)>, crate::render::RenderError> {
+    let on = |channel: Option<&crate::spec::encoding::EncodingSpec>| channel.and_then(|e| e.stack_offset());
+    match (on(encoding.x.as_ref()), on(encoding.y.as_ref())) {
+        (Some(_), Some(_)) => Err(crate::render::RenderError::StackOnBothChannels),
+        (Some(offset), None) => Ok(Some((StackValueAxis::X, offset))),
+        (None, Some(offset)) => Ok(Some((StackValueAxis::Y, offset))),
+        (None, None) => Ok(None),
+    }
+}
+
 /// The position adjustment a mark draws with: `position` when set, else a
-/// `Stack` from its encoding's `stack` shorthand on the value channel
-/// (`encoding.y`, or `encoding.x` under a `CoordFlip`, whose encoding the
-/// prepare pass already swapped), else none. The draw pass
-/// ([`apply_position`]) and the scale-resolve preview ([`stack_preview`])
-/// both read it, so the stack the domain widens to is the one drawn.
+/// `Stack` along the channel its encoding's `stack` shorthand declares
+/// ([`stack_shorthand`]), else none. The draw pass ([`apply_position`]) and
+/// the scale-resolve preview ([`stack_preview`]) both read it, so the stack
+/// the domain widens to is the one drawn.
+///
+/// `encoding` is post-`CoordFlip` (the prepare pass swapped it), while a
+/// `Stack`'s `value_axis` is authored, pre-flip ([`resolve_stack_value_on_x`]
+/// spends the flip). So the declaring channel is moved back into authored
+/// space: `value_axis` is `Some(X)` when the user's stacked channel is `x`,
+/// and `None` (the vertical default) when it is `y`, so a `y` shorthand,
+/// flipped or not, builds exactly the `Stack` it always has.
 fn effective_position<'a>(
     position: Option<&'a PositionAdjust>,
     encoding: &crate::spec::encoding::Encoding,
     coord_flipped: bool,
-) -> Option<Cow<'a, PositionAdjust>> {
+) -> Result<Option<Cow<'a, PositionAdjust>>, crate::render::RenderError> {
     if let Some(position) = position {
-        return Some(Cow::Borrowed(position));
+        return Ok(Some(Cow::Borrowed(position)));
     }
-    let stack_source = if coord_flipped { encoding.x.as_ref() } else { encoding.y.as_ref() };
-    // No explicit `value_axis`: this synthetic Stack comes from the
-    // `encoding.{x,y}.stack` shorthand, whose axis is already selected by
-    // `coord_flipped` above via `stack_source` (not a composite-mark desugar
-    // bypass), so `apply_stack`'s `coord_flipped` fallback is the correct
-    // (and only) signal here.
-    let offset = stack_source?.stack_offset()?;
-    Some(Cow::Owned(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top, value_axis: None }))
+    let Some((channel, offset)) = stack_shorthand(encoding)? else { return Ok(None) };
+    let authored_on_x = (channel == StackValueAxis::X) != coord_flipped;
+    let value_axis = authored_on_x.then_some(StackValueAxis::X);
+    Ok(Some(Cow::Owned(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top, value_axis })))
+}
+
+/// Refuse a `stack` shorthand on a channel whose resolved scale is
+/// categorical ([`RenderError::StackShorthandOnCategory`]): a band or point
+/// axis holds no value to accumulate, so the stack belongs on the other,
+/// value channel. Asked of the scales the draw pass resolved, so a string
+/// column and a number declared nominal or ordinal are refused alike.
+///
+/// [`RenderError::StackShorthandOnCategory`]: crate::render::RenderError::StackShorthandOnCategory
+fn refuse_shorthand_on_a_category(
+    encoding: &crate::spec::encoding::Encoding,
+    scales: &ResolvedScales,
+    coord_flipped: bool,
+) -> Result<(), crate::render::RenderError> {
+    let Some((channel, _)) = stack_shorthand(encoding)? else { return Ok(()) };
+    let (scale, binding, channel, value_channel) = match channel {
+        StackValueAxis::X => (&scales.x, encoding.x.as_ref(), "x", "y"),
+        StackValueAxis::Y => (&scales.y, encoding.y.as_ref(), "y", "x"),
+    };
+    match (scale, binding) {
+        (ScaleKind::Ordinal(_), Some(binding)) => Err(crate::render::RenderError::StackShorthandOnCategory {
+            channel,
+            value_channel,
+            field: binding.field.clone(),
+            coord_flipped,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// The encoding a layer's position adjustment reads. Under `CoordPolar` a
@@ -265,8 +318,9 @@ fn effective_position<'a>(
 /// sweeps it into a pie, a text stacks its labels into that sweep) reads its
 /// theta channel's `stack` there, never as a value axis to stack, so that
 /// `stack` is left out of what [`apply_position`]'s stack shorthand sees:
-/// with `CoordPolar(theta="y")` it sits on the channel the shorthand reads.
-/// Every other layer's encoding, unchanged.
+/// the shorthand reads both x and y, so whichever of them `CoordPolar`'s
+/// `theta` names has its `stack` stripped. Every other layer's encoding,
+/// unchanged.
 ///
 /// [`Mark::stacks_polar_theta`]: crate::spec::mark::Mark::stacks_polar_theta
 pub(crate) fn position_encoding<'a>(
@@ -306,9 +360,13 @@ pub(crate) fn apply_position(
     coord_flipped: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
-    // With no explicit position, the encoding's `stack` shorthand on the
-    // value channel stacks (`effective_position`).
-    let Some(p) = effective_position(position, encoding, coord_flipped) else { return Ok(batch.clone()); };
+    // With no explicit position, the encoding's `stack` shorthand stacks
+    // along the channel that declares it (`effective_position`), which must
+    // be a value axis.
+    if position.is_none() {
+        refuse_shorthand_on_a_category(encoding, scales, coord_flipped)?;
+    }
+    let Some(p) = effective_position(position, encoding, coord_flipped)? else { return Ok(batch.clone()); };
     match p.as_ref() {
         PositionAdjust::Identity => Ok(batch.clone()),
         PositionAdjust::Dodge { by, padding } => {

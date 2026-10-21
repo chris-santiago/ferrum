@@ -840,6 +840,41 @@ pub enum RenderError {
     /// refuses instead. Python writes it only there; this refuses a hand-built
     /// spec.
     GroupKeyMisplaced { layer: Option<usize>, mark: crate::spec::mark::Mark },
+    /// A mark's encoding carries the `stack=` shorthand on both `x` and `y`
+    /// with no explicit `position=`. The shorthand stacks along the channel
+    /// that declares it, and a mark stacks along one channel, so there is no
+    /// honest way to honor both: REFUSE MALFORMED. Decided once, by the one
+    /// reader of the shorthand (`position::stack_shorthand`), so every door
+    /// reaches it; the prepare pass wraps it in [`Self::InLayer`], which names
+    /// the layer and its public entry.
+    StackOnBothChannels,
+    /// A mark sets an explicit `position=` and also carries the `stack=`
+    /// shorthand on `channels` (`"x"`, `"y"` or `"x and y"`, as the caller
+    /// wrote them, before any `CoordFlip`). A mark draws one position
+    /// adjustment, and the two each name one, so there is no honest way to
+    /// draw both: REFUSE MALFORMED. `adjustment` is the `position=` class
+    /// ([`crate::spec::position::PositionAdjust::class_name`]). Raised beside
+    /// [`Self::StackOnBothChannels`] at prepare time, in the layer's voice.
+    StackShorthandWithPosition { adjustment: &'static str, channels: &'static str },
+    /// A mark sets `position=Stack` and also `stack=False` (any falsy
+    /// spelling) on `channels` (`"x"`, `"y"` or `"x and y"`, as the caller
+    /// wrote them): one stacks the mark and the other declines it, so there
+    /// is no honest way to draw both: REFUSE MALFORMED. `stack=False` beside
+    /// `Dodge`, `Jitter` or `Identity` agrees with them and renders. Raised
+    /// beside [`Self::StackShorthandWithPosition`] at prepare time.
+    StackDeclinedBesideStack { channels: &'static str },
+    /// The `stack=` shorthand sits on a channel whose scale is categorical
+    /// (`channel`, bound to `field`), so there is no value to accumulate
+    /// along it; the value channel is `value_channel`. Both tokens are
+    /// RESOLVED (post-`CoordFlip`); `coord_flipped` un-flips them at
+    /// `Display`, as [`Self::PositionAdjustFailed`] does. Raised by the draw
+    /// pass (`position::apply_position`), which holds the resolved scales.
+    StackShorthandOnCategory {
+        channel: &'static str,
+        value_channel: &'static str,
+        field: String,
+        coord_flipped: bool,
+    },
     /// `conditionals[index].layers` names layer `layer`, but the chart has
     /// only `layers` layers (one when it is unlayered). The scope could only
     /// be ignored, so it refuses instead. Python stamps a conditional with the
@@ -1246,6 +1281,14 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayerTransformsUnsupported { .. }
         // A layer index and a mark, no channel token.
         | RenderError::GroupKeyMisplaced { .. }
+        // Names both positional channels, so nothing here to un-flip.
+        | RenderError::StackOnBothChannels
+        // Authored channel names, set before any flip at construction.
+        | RenderError::StackShorthandWithPosition { .. }
+        | RenderError::StackDeclinedBesideStack { .. }
+        // Carries `coord_flipped`, set at its single construction site
+        // (`position::apply_position`, which has the layer's real flip).
+        | RenderError::StackShorthandOnCategory { .. }
         // Two indices and a layer count, no channel token.
         | RenderError::ConditionalLayerOutOfRange { .. }
         // Two width bindings, no channel token.
@@ -1587,6 +1630,33 @@ impl std::fmt::Display for RenderError {
                 "ChartSpec.layers is an empty list: a layered chart draws its layers, and this one \
                  has none. Add at least one layer, or leave layers unset to draw the chart's own mark."
             ),
+            Self::StackOnBothChannels => write!(
+                f,
+                "stack= is set on both x and y, but a mark stacks along one channel: the value \
+                 channel its segments run along. Keep stack= on x to stack them end to end \
+                 horizontally, or on y to stack them vertically."
+            ),
+            Self::StackShorthandWithPosition { adjustment, channels } => write!(
+                f,
+                "position=fm.{adjustment}(...) and stack= on {channels} are both set, but a mark \
+                 draws one position adjustment. Keep one: remove stack= from {channels}, or \
+                 remove position=."
+            ),
+            Self::StackDeclinedBesideStack { channels } => write!(
+                f,
+                "position=fm.Stack(...) and stack=False on {channels} are both set, but one stacks \
+                 the mark and the other declines it. Keep one: remove stack=False from {channels}, \
+                 or remove position=."
+            ),
+            Self::StackShorthandOnCategory { channel, value_channel, field, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let value_channel = prepare::user_facing_channel(value_channel, *coord_flipped);
+                write!(
+                    f,
+                    "stack= is set on {channel}, whose field '{field}' is categorical, so there is \
+                     no value to stack along it. Put stack= on the value channel, {value_channel}."
+                )
+            }
             Self::ConditionalLayerOutOfRange { index, layer, layers } => write!(
                 f,
                 "conditionals[{index}].layers names layer {layer}, but the chart has {layers} \

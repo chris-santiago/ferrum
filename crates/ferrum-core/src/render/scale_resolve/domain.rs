@@ -2120,10 +2120,9 @@ pub(in crate::render) fn numeric_domain_union_over(
     let reads = AxisReads::over(layers, &stacks);
     let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
-    // Unlayered means no layer to draw, an empty list included, as
-    // `build_axis_scale` and `position::axis_batch` read it: with no layer
-    // there is no seed, so the chart's one batch is the read.
-    if layers.is_empty() {
+    // Unlayered ([`ChartSpec::is_layered`]): with no layer there is no
+    // seed, so the chart's one batch is the read.
+    if !spec.is_layered() {
         read(None, field)?;
         if let Some(p) = paired_field {
             read(None, p)?;
@@ -2604,10 +2603,9 @@ pub(in crate::render) fn positional_category_union(
     spec: &ChartSpec,
     include_final: bool,
 ) -> Result<Vec<String>, RenderError> {
-    // Unlayered means no layer to draw, an empty list included, as
-    // `numeric_domain_union_over` reads it.
+    // Unlayered ([`ChartSpec::is_layered`]): the chart's own categories.
     let layers = spec.layers.as_deref().unwrap_or_default();
-    if layers.is_empty() {
+    if !spec.is_layered() {
         return establishing_categories(channel, field, paired_positional, spec, primary_batch, transform_outputs, include_final);
     }
     // The precondition [`establishing_categories`] checks for an unlayered

@@ -3448,6 +3448,713 @@ def test_an_area_stacked_by_the_stack_shorthand_draws_every_band(route):
     assert stacked == _quiet(explicit.to_svg)
 
 
+# The stack shorthand stacks the channel that declares it: x=X(..., stack=)
+# stacks a horizontal mark's segments end to end along x, as y=Y(..., stack=)
+# stacks a vertical one along y. A shorthand on both channels is refused.
+
+_HSTACK_ROWS = pl.DataFrame(
+    {
+        "g": ["a", "a", "b", "b"],
+        "z": [2.0, 6.0, 3.0, 1.0],
+        "t": [0.0, 1.0, 0.0, 1.0],
+        "c": ["u", "v", "u", "v"],
+        "f": ["p", "p", "q", "q"],
+    }
+)
+
+
+def _hbar(stack: Any = "zero") -> fm.Chart:
+    """A native horizontal bar, value ``z`` on x, with ``stack`` on x (``None``: unstacked)."""
+    return mk("bar", _HSTACK_ROWS, x=fm.X("z", stack=stack), y="g", color="c")
+
+
+def _hbar_explicit(offset: str = "zero") -> fm.Chart:
+    """The same bar under the explicit horizontal ``Stack``."""
+    return (
+        fm.Chart(_HSTACK_ROWS)
+        .mark_bar(position=fm.Stack(offset=offset, value_axis="x"))
+        .encode(x="z", y="g", color="c")
+    )
+
+
+def _hpoint() -> fm.Chart:
+    return mk("point", _HSTACK_ROWS, x="z", y="g")
+
+
+def _hbar_layer(stack: Any = None) -> fm.Layer:
+    return fm.Layer(mark="bar", encoding={"x": fm.X("z", stack=stack), "y": "g", "color": "c"})
+
+
+#: Door -> how it composes a horizontal bar built by the argument with a point.
+_HSTACK_DOORS: dict[str, Callable[[Callable[[], fm.Chart]], Any]] = {
+    "F": lambda bar: bar(),
+    "Fc": lambda bar: bar().facet("f"),
+    "+": lambda bar: bar() + _hpoint(),
+    "+rev": lambda bar: _hpoint() + bar(),
+    "+c": lambda bar: (bar() + _hpoint()).facet("f"),
+    "LCs": lambda bar: fm.LayerChart(bar(), _hpoint()),
+    "flip": lambda bar: bar().coord(fm.CoordFlip()),
+}
+
+
+def _hstack_door(door: str, which: str) -> Any:
+    """``door``'s chart with the bar stacked by the x shorthand, the explicit horizontal stack, or unstacked.
+
+    A ``Layer`` takes no ``position=``, so the attached door's explicit
+    stack is the point composed with the explicitly stacked bar, which
+    renders what the attached bar would.
+    """
+    if door == "L":
+        if which == "explicit":
+            return _hpoint() + _hbar_explicit()
+        return _hpoint().layer(_hbar_layer("zero" if which == "shorthand" else None))
+    bar = {"shorthand": _hbar, "explicit": _hbar_explicit, "unstacked": lambda: _hbar(None)}[which]
+    return _HSTACK_DOORS[door](bar)
+
+
+def _band_segments(svg: str) -> dict[float, list[tuple[float, float]]]:
+    """Each y band's bar segments as ``(left, right)``, left to right."""
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    bands: dict[float, list[tuple[float, float]]] = {}
+    for r in data_bar_rects(mark_layer(svg)):
+        left = float(r["x"])
+        bands.setdefault(round(float(r["y"]), 1), []).append((left, left + float(r["width"])))
+    return {band: sorted(segments) for band, segments in bands.items()}
+
+
+def test_a_horizontal_bar_stacks_its_segments_end_to_end_along_x():
+    """``X("z", stack="zero")`` on a native horizontal bar draws each band's segments end to end.
+
+    Each band's second segment starts where its first ends, and the band
+    totals (8 and 4) read 2 to 1 against an axis spanning the stack. Rejects
+    reading the shorthand from y on an unflipped chart, which drew every
+    segment from 0, overlapping.
+    """
+    bands = _band_segments(_quiet(_hbar().to_svg))
+    assert len(bands) == 2
+    for first, second in bands.values():
+        assert second[0] == pytest.approx(first[1], abs=1e-2)
+    widths = [segments[-1][1] - segments[0][0] for _, segments in sorted(bands.items())]
+    assert widths[0] / widths[1] == pytest.approx(2.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("door", sorted([*_HSTACK_DOORS, "L"]))
+def test_the_x_stack_shorthand_draws_the_explicit_horizontal_stack_on_every_door(door):
+    """The x shorthand renders what ``Stack(value_axis="x")`` renders, static and interactive.
+
+    Rejects any door reading the shorthand from y, which drew the bars
+    unstacked: the unstacked chart's render, which the shorthand must differ from.
+    """
+
+    def scene(which: str) -> dict:
+        return _quiet(lambda: _scene(_hstack_door(door, which)))
+
+    assert _quiet(_hstack_door(door, "shorthand").to_svg) == _quiet(
+        _hstack_door(door, "explicit").to_svg
+    )
+    assert scene("shorthand") == scene("explicit")
+    assert scene("shorthand") != scene("unstacked")
+
+
+@pytest.mark.parametrize("offset", ["zero", "normalize", "center"])
+def test_every_stack_offset_on_x_stacks_along_x(offset):
+    """Each offset of the x shorthand draws the explicit horizontal stack with that offset.
+
+    Rejects an x shorthand honored for ``"zero"`` only.
+    """
+    shorthand = _quiet(_hbar(offset).to_svg)
+    assert shorthand == _quiet(_hbar_explicit(offset).to_svg)
+    assert shorthand != _quiet(_hbar(None).to_svg)
+
+
+@pytest.mark.parametrize("off", [None, False])
+def test_stack_none_or_false_on_x_stacks_nothing(off):
+    """``X(..., stack=None)`` and ``stack=False`` draw the plain, unstacked bar."""
+    plain = mk("bar", _HSTACK_ROWS, x="z", y="g", color="c")
+    assert _quiet(_hbar(off).to_svg) == _quiet(plain.to_svg)
+
+
+@pytest.mark.parametrize("route", ["flat", "+point"])
+def test_a_horizontal_area_stacked_by_the_x_shorthand_draws_the_explicit_stack(route):
+    """``X("z", stack="zero")`` on an area over ``y="t"`` stacks its bands along x.
+
+    Rejects the y-only reading, which drew the bands unstacked.
+    """
+
+    def area(position: Any = None, stack: Any = None) -> fm.Chart:
+        chart = (
+            fm.Chart(_HSTACK_ROWS)
+            .mark_area(position=position)
+            .encode(x=fm.X("z", stack=stack), y="t", color="c")
+        )
+        return chart + mk("point", _HSTACK_ROWS, x="z", y="t") if route == "+point" else chart
+
+    shorthand = _quiet(area(stack="zero").to_svg)
+    assert shorthand == _quiet(area(fm.Stack(value_axis="x")).to_svg)
+    assert shorthand != _quiet(area().to_svg)
+    assert _quiet(lambda: _scene(area(stack="zero"))) == _quiet(
+        lambda: _scene(area(fm.Stack(value_axis="x")))
+    )
+
+
+def test_the_y_shorthand_and_the_flipped_shorthand_keep_the_default_stack():
+    """``Y(stack=)``, flipped or not, draws the explicit ``Stack()`` it always drew."""
+    vertical = mk("bar", _HSTACK_ROWS, x="g", y=fm.Y("z", stack="zero"), color="c")
+    explicit = fm.Chart(_HSTACK_ROWS).mark_bar(position=fm.Stack()).encode(x="g", y="z", color="c")
+    assert _quiet(vertical.to_svg) == _quiet(explicit.to_svg)
+    flip = fm.CoordFlip()
+    assert _quiet(vertical.coord(flip).to_svg) == _quiet(explicit.coord(flip).to_svg)
+
+
+def _position_conflict(adjustment: str, channels: str) -> str:
+    return (
+        f"position=fm.{adjustment}(...) and stack= on {channels} are both set, but a mark draws "
+        f"one position adjustment. Keep one: remove stack= from {channels}, or remove position=."
+    )
+
+
+def _positioned(position: Any, **encoding: Any) -> fm.Chart:
+    return (
+        fm.Chart(_HSTACK_ROWS)
+        .mark_bar(position=position)
+        .encode(**{"y": "g", "color": "c", **encoding})
+    )
+
+
+#: Door -> (render, the refusal it raises) for an explicit position beside a stack shorthand.
+_POSITION_CONFLICT_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "F": (
+        lambda: _positioned(fm.Stack(value_axis="x"), x=fm.X("z", stack="zero")).to_svg(),
+        f"mark_bar: {_position_conflict('Stack', 'x')}",
+    ),
+    "F-dodge": (
+        lambda: _positioned(fm.Dodge(), x=fm.X("z", stack="zero")).to_svg(),
+        f"mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "F-identity": (
+        lambda: _positioned(fm.Identity(), x=fm.X("z", stack="zero")).to_svg(),
+        f"mark_bar: {_position_conflict('Identity', 'x')}",
+    ),
+    "F-both": (
+        lambda: _positioned(
+            fm.Stack(), x=fm.X("z", stack="zero"), y=fm.Y("g", stack="zero")
+        ).to_svg(),
+        f"mark_bar: {_position_conflict('Stack', 'x and y')}",
+    ),
+    "flip": (
+        lambda: (
+            fm.Chart(_HSTACK_ROWS)
+            .mark_bar(position=fm.Dodge())
+            .encode(x="g", y=fm.Y("z", stack="zero"), color="c")
+            .coord(fm.CoordFlip())
+            .to_svg()
+        ),
+        f"mark_bar: {_position_conflict('Dodge', 'y')}",
+    ),
+    "Fc": (
+        lambda: _positioned(fm.Dodge(), x=fm.X("z", stack="zero")).facet("f").to_svg(),
+        f"mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "I": (
+        lambda: _positioned(fm.Dodge(), x=fm.X("z", stack="zero")).interactive().to_html(),
+        f"mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "+": (
+        lambda: (_positioned(fm.Dodge(), x=fm.X("z", stack="zero")) + _hpoint()).to_svg(),
+        f"layer 0: mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "+rev": (
+        lambda: (_hpoint() + _positioned(fm.Dodge(), x=fm.X("z", stack="zero"))).to_svg(),
+        f"layer 1: mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "LCs": (
+        lambda: fm.LayerChart(
+            _hpoint(), _positioned(fm.Dodge(), x=fm.X("z", stack="zero"))
+        ).to_svg(),
+        f"failed to render composite leaf leaf #1: layer 1: mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+    "LCx": (
+        lambda: (
+            fm.LayerChart(_hpoint(), _positioned(fm.Dodge(), x=fm.X("z", stack="zero")))
+            .interactive()
+            .to_html()
+        ),
+        f"layer 1: mark_bar: {_position_conflict('Dodge', 'x')}",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_POSITION_CONFLICT_DOORS))
+def test_an_explicit_position_beside_a_stack_shorthand_is_refused_on_every_door(door):
+    """``position=`` and a ``stack=`` shorthand on one mark are refused, naming both and the remedy.
+
+    Rejects the position silently winning, which drew the chart as though
+    the shorthand were not written.
+    """
+    render, message = _POSITION_CONFLICT_DOORS[door]
+    with pytest.raises(ValueError) as exc:
+        _quiet(render)
+    assert str(exc.value) == message
+
+
+def _category_refusal(channel: str, value: str, field: str = "g") -> str:
+    return (
+        f"mark_bar: stack= is set on {channel}, whose field '{field}' is categorical, so there is no value "
+        f"to stack along it. Put stack= on the value channel, {value}."
+    )
+
+
+#: Orientation -> (render, the refusal it raises) for a stack shorthand on the category channel.
+_CATEGORY_STACK_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "vertical": (
+        lambda: mk("bar", _HSTACK_ROWS, x=fm.X("g", stack="zero"), y="z", color="c").to_svg(),
+        _category_refusal("x", "y"),
+    ),
+    "horizontal": (
+        lambda: mk("bar", _HSTACK_ROWS, x="z", y=fm.Y("g", stack="zero"), color="c").to_svg(),
+        _category_refusal("y", "x"),
+    ),
+    "vertical-I": (
+        lambda: (
+            mk("bar", _HSTACK_ROWS, x=fm.X("g", stack="zero"), y="z", color="c")
+            .interactive()
+            .to_html()
+        ),
+        _category_refusal("x", "y"),
+    ),
+    "horizontal-flip": (
+        lambda: (
+            mk("bar", _HSTACK_ROWS, x="z", y=fm.Y("g", stack="zero"), color="c")
+            .coord(fm.CoordFlip())
+            .to_svg()
+        ),
+        _category_refusal("y", "x"),
+    ),
+    "nominal-number": (
+        lambda: mk("bar", _HSTACK_ROWS, x=fm.X("t:N", stack="zero"), y="z", color="c").to_svg(),
+        _category_refusal("x", "y", field="t"),
+    ),
+    "ordinal-number": (
+        lambda: mk("bar", _HSTACK_ROWS, x=fm.X("t:O", stack="zero"), y="z", color="c").to_svg(),
+        _category_refusal("x", "y", field="t"),
+    ),
+    "+": (
+        lambda: (
+            mk("point", _HSTACK_ROWS, x="g", y="z")
+            + mk("bar", _HSTACK_ROWS, x=fm.X("g", stack="zero"), y="z")
+        ).to_svg(),
+        f"layer 1: {_category_refusal('x', 'y')}",
+    ),
+    "L": (
+        lambda: (
+            mk("point", _HSTACK_ROWS, x="g", y="z")
+            .layer(fm.Layer(mark="bar", encoding={"x": fm.X("g", stack="zero"), "y": "z"}))
+            .to_svg()
+        ),
+        f"layer 1: {_category_refusal('x', 'y')}",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_CATEGORY_STACK_DOORS))
+def test_a_stack_shorthand_on_the_category_channel_is_refused(door):
+    """``stack=`` on a categorical channel names the channel, its field and the value channel.
+
+    Rejects the stack's dtype error, which named no remedy.
+    """
+    render, message = _CATEGORY_STACK_DOORS[door]
+    with pytest.raises(ValueError) as exc:
+        _quiet(render)
+    assert str(exc.value) == message
+
+
+_STACK_ON_BOTH = (
+    "stack= is set on both x and y, but a mark stacks along one channel: the value channel its "
+    "segments run along. Keep stack= on x to stack them end to end horizontally, or on y to stack "
+    "them vertically."
+)
+
+
+def _both_stacked() -> fm.Chart:
+    return mk("bar", _HSTACK_ROWS, x=fm.X("z", stack="zero"), y=fm.Y("g", stack="zero"), color="c")
+
+
+#: Door -> (render, the refusal it raises).
+_STACK_ON_BOTH_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "F": (lambda: _both_stacked().to_svg(), f"mark_bar: {_STACK_ON_BOTH}"),
+    "Fc": (lambda: _both_stacked().facet("f").to_svg(), f"mark_bar: {_STACK_ON_BOTH}"),
+    "flip": (lambda: _both_stacked().coord(fm.CoordFlip()).to_svg(), f"mark_bar: {_STACK_ON_BOTH}"),
+    "I": (lambda: _both_stacked().interactive().to_html(), f"mark_bar: {_STACK_ON_BOTH}"),
+    "+": (lambda: (_both_stacked() + _hpoint()).to_svg(), f"layer 0: mark_bar: {_STACK_ON_BOTH}"),
+    "+rev": (
+        lambda: (_hpoint() + _both_stacked()).to_svg(),
+        f"layer 1: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "L": (
+        lambda: (
+            _hpoint()
+            .layer(
+                fm.Layer(
+                    mark="bar",
+                    encoding={"x": fm.X("z", stack="zero"), "y": fm.Y("g", stack="zero")},
+                )
+            )
+            .to_svg()
+        ),
+        f"layer 1: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "LCs": (
+        lambda: fm.LayerChart(_hpoint(), _both_stacked()).to_svg(),
+        f"failed to render composite leaf leaf #1: layer 1: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "LCx": (
+        lambda: fm.LayerChart(_hpoint(), _both_stacked()).interactive().to_html(),
+        f"layer 1: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "+c": (
+        lambda: (_both_stacked() + _hpoint()).facet("f").to_svg(),
+        f"layer 0: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "LCs0": (
+        lambda: fm.LayerChart(_both_stacked(), _hpoint()).to_svg(),
+        f"failed to render composite leaf leaf #0: layer 0: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "LCx0": (
+        lambda: fm.LayerChart(_both_stacked(), _hpoint()).interactive().to_html(),
+        f"layer 0: mark_bar: {_STACK_ON_BOTH}",
+    ),
+    "IL": (
+        lambda: (
+            _hpoint()
+            .layer(
+                fm.Layer(
+                    mark="bar",
+                    encoding={"x": fm.X("z", stack="zero"), "y": fm.Y("g", stack="zero")},
+                )
+            )
+            .interactive()
+            .to_html()
+        ),
+        f"layer 1: mark_bar: {_STACK_ON_BOTH}",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_STACK_ON_BOTH_DOORS))
+def test_the_stack_shorthand_on_both_x_and_y_is_refused_on_every_door(door):
+    """A shorthand on both channels is refused, naming both and the remedy.
+
+    Rejects stacking silently along either channel.
+    """
+    render, message = _STACK_ON_BOTH_DOORS[door]
+    with pytest.raises(ValueError) as exc:
+        _quiet(render)
+    assert str(exc.value) == message
+
+
+# A + operand's position= adjusts that operand's own layers and no sibling's:
+# the composition carries no position of its own. A layer attached to a host
+# takes the host's position unless it writes its own stack= shorthand.
+
+_PLACED_ROWS = pl.DataFrame(
+    {
+        "g": ["a", "a", "b", "b"],
+        "c": ["p", "q", "p", "q"],
+        "y": [1.0, 2.0, 3.0, 4.0],
+        "f": ["r", "r", "s", "s"],
+    }
+)
+
+
+def _placed_bars(position: Any) -> fm.Chart:
+    return fm.Chart(_PLACED_ROWS).mark_bar(position=position).encode(x="g", y="y", color="c")
+
+
+def _shorthand_bars(stack: Any = "zero") -> fm.Chart:
+    return fm.Chart(_PLACED_ROWS).mark_bar().encode(x="g", y=fm.Y("y", stack=stack), color="c")
+
+
+def _stacked_layer(stack: Any = "zero") -> fm.Layer:
+    return fm.Layer(mark="bar", encoding={"y": fm.Y("y", stack=stack)})
+
+
+def _placed_points(position: Any = None) -> fm.Chart:
+    return fm.Chart(_PLACED_ROWS).mark_point(position=position).encode(x="g", y="y", color="c")
+
+
+def _placed_box(position: Any = None) -> fm.Chart:
+    return fm.Chart(_PLACED_ROWS).mark_boxplot(position=position).encode(x="g", y="y", color="c")
+
+
+def _rect_columns(svg: str) -> list[tuple[float, float]]:
+    """Every drawn rect's ``(x, width)``: a dodged bar and a full-band one differ here."""
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    return sorted(
+        (round(float(r["x"]), 1), round(float(r["width"]), 1))
+        for r in data_bar_rects(mark_layer(svg))
+    )
+
+
+def _scene_nodes(chart: Any) -> list[list[dict]]:
+    """Each interactive mark batch's nodes: the geometry and paint, without the tooltips."""
+    return [
+        batch["nodes"]
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+    ]
+
+
+def _circle_xs(svg: str) -> list[float]:
+    from tests._svg_rects import mark_layer, svg_elements
+
+    return sorted(
+        round(float(c["cx"]), 1)
+        for c in svg_elements(mark_layer(svg), "circle", lambda a: "cx" in a)
+    )
+
+
+#: Door -> how it composes the dodged bars with the stacked bars built by the argument.
+_DODGE_BESIDE_STACK_DOORS: dict[str, Callable[[Callable[[], fm.Chart]], Any]] = {
+    "+": lambda stacked: _placed_bars(fm.Dodge()) + stacked(),
+    "+rev": lambda stacked: stacked() + _placed_bars(fm.Dodge()),
+    "+c": lambda stacked: (_placed_bars(fm.Dodge()) + stacked()).facet("f"),
+    "LCs": lambda stacked: fm.LayerChart(_placed_bars(fm.Dodge()), stacked()),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_DODGE_BESIDE_STACK_DOORS))
+def test_dodged_bars_beside_shorthand_stacked_bars_draw_each_as_written(door):
+    """``dodge + stacked`` draws the dodge and the shorthand's stack, in either order, static and interactive.
+
+    The oracle is the same door with the stacked operand written as the
+    explicit ``position=fm.Stack()``, a position its own mark call writes,
+    which no sibling's can reach. Rejects the composition handing operand
+    0's Dodge to the stacked operand, which refused it for a position it
+    never wrote, and the stacked bars drawn dodged.
+    """
+    compose = _DODGE_BESIDE_STACK_DOORS[door]
+    shorthand = compose(_shorthand_bars)
+    explicit = compose(lambda: _placed_bars(fm.Stack()))
+    assert _quiet(shorthand.to_svg) == _quiet(explicit.to_svg)
+    assert _quiet(lambda: _scene(shorthand)) == _quiet(lambda: _scene(explicit))
+    assert _quiet(shorthand.to_svg) != _quiet(compose(lambda: _placed_bars(fm.Dodge())).to_svg)
+
+
+def test_a_plus_composition_carries_no_position_of_its_own():
+    """On the wire, ``dodge + stacked`` keeps Dodge on operand 0's layer and none at chart level.
+
+    A single-mark operand's layer writes its own position, so it carries no
+    ``inherited_position``; a composite operand's layers carry the operand's
+    position marked inherited, and a ``SecondaryY`` on the composition
+    inherits none. Rejects the composition keeping operand 0's position,
+    which reached every sibling that wrote none.
+    """
+    wire = _wire(_placed_bars(fm.Dodge()) + _shorthand_bars())
+    assert "position" not in wire
+    assert [
+        (l.get("position", {}).get("type"), "inherited_position" in l) for l in wire["layers"]
+    ] == [
+        ("dodge", False),
+        (None, False),
+    ]
+    boxed = _wire(_placed_points() + _placed_box(fm.Dodge()))
+    assert "position" not in boxed
+    assert boxed["layers"][0].get("position") is None
+    assert "inherited_position" not in boxed["layers"][0]
+    box_layers = boxed["layers"][1:]
+    assert box_layers and all(
+        l["position"]["type"] == "dodge" and l["inherited_position"] is True for l in box_layers
+    )
+    secondary = _wire(_placed_bars(fm.Dodge()) + _placed_points() + fm.SecondaryY("y"))
+    assert "position" not in secondary
+    assert [l.get("position", {}).get("type") for l in secondary["layers"]] == ["dodge", None, None]
+
+
+@pytest.mark.parametrize("order", ["box+point", "point+box"])
+def test_a_dodged_boxplot_beside_points_draws_each_as_alone(order):
+    """``box(Dodge) + point`` and ``point + box(Dodge)`` dodge the boxes and leave the points on their bands.
+
+    Rejects the left box's Dodge reaching the points, and the right box's
+    Dodge dropped with the right operand's chart.
+    """
+    box, points = _placed_box(fm.Dodge()), _placed_points()
+    chart = box + points if order == "box+point" else points + box
+    svg = _quiet(chart.to_svg)
+    assert _rect_columns(svg) == _rect_columns(_quiet(box.to_svg))
+    assert _rect_columns(svg) != _rect_columns(_quiet(_placed_box().to_svg))
+    assert _circle_xs(svg) == _circle_xs(_quiet(points.to_svg))
+    interactive = _quiet(lambda: _scene(chart))
+    oracle = _placed_box(fm.Dodge()) + _placed_points(fm.Identity())
+    if order == "point+box":
+        oracle = _placed_points(fm.Identity()) + _placed_box(fm.Dodge())
+    assert interactive == _quiet(lambda: _scene(oracle))
+
+
+def test_an_unpositioned_label_beside_dodged_bars_sits_on_its_band():
+    """A colored text operand with no position of its own sits at its band's center beside dodged bars.
+
+    Rejects the bars' Dodge reaching the labels.
+    """
+
+    def labels(position: Any = None) -> fm.Chart:
+        return (
+            fm.Chart(_PLACED_ROWS)
+            .mark_text(position=position)
+            .encode(x="g", y="y", text="y", color="c")
+        )
+
+    chart = _placed_bars(fm.Dodge()) + labels()
+    oracle = _placed_bars(fm.Dodge()) + labels(fm.Identity())
+    assert _quiet(chart.to_svg) == _quiet(oracle.to_svg)
+    assert _scene_nodes(chart) == _scene_nodes(oracle)
+    dodged = _placed_bars(fm.Dodge()) + labels(fm.Dodge())
+    assert _quiet(chart.to_svg) != _quiet(dodged.to_svg)
+
+
+#: Door -> the dodged host with an attached shorthand-stacked bar, and the
+#: same chart with the attached bar written as an explicitly stacked operand.
+_ATTACHED_STACK_DOORS: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+    "L": (
+        lambda: _placed_bars(fm.Dodge()).layer(_stacked_layer()),
+        lambda: _placed_bars(fm.Dodge()) + _placed_bars(fm.Stack()),
+    ),
+    "+L": (
+        lambda: _placed_points() + _placed_bars(fm.Dodge()).layer(_stacked_layer()),
+        lambda: _placed_points() + _placed_bars(fm.Dodge()) + _placed_bars(fm.Stack()),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_ATTACHED_STACK_DOORS))
+def test_an_attached_layer_s_own_shorthand_wins_over_its_host_s_position(door):
+    """An attached bar with ``Y(stack=)`` stacks under a dodged host, which stays dodged.
+
+    The attached layer takes its host's Dodge only when it writes no stack
+    of its own, also when the host is a ``+`` operand. Rejects the refusal
+    blaming the attached layer for its host's Dodge, and the right
+    operand's host losing its Dodge.
+    """
+    build, oracle = _ATTACHED_STACK_DOORS[door]
+    assert _quiet(build().to_svg) == _quiet(oracle().to_svg)
+    assert _scene_nodes(build()) == _scene_nodes(oracle())
+    assert _rect_columns(_quiet(build().to_svg)) != _rect_columns(
+        _quiet(_placed_bars(fm.Dodge()).layer(layer("bar")).to_svg)
+    )
+
+
+def test_identity_bars_beside_shorthand_stacked_bars_draw_the_stack():
+    """``bar(position=Identity()) + Y(stack=)`` renders the shorthand's stack.
+
+    Rejects operand 0's Identity reaching the stacked operand, which refused it.
+    """
+    chart = _placed_bars(fm.Identity()) + _shorthand_bars()
+    explicit = _placed_bars(fm.Identity()) + _placed_bars(fm.Stack())
+    assert _quiet(chart.to_svg) == _quiet(explicit.to_svg)
+    assert _quiet(lambda: _scene(chart)) == _quiet(lambda: _scene(explicit))
+
+
+def _declined_stack(channels: str) -> str:
+    return (
+        f"position=fm.Stack(...) and stack=False on {channels} are both set, but one stacks the mark "
+        f"and the other declines it. Keep one: remove stack=False from {channels}, or remove position=."
+    )
+
+
+def _stacked_declining(**encoding: Any) -> fm.Chart:
+    return (
+        fm.Chart(_PLACED_ROWS)
+        .mark_bar(position=fm.Stack())
+        .encode(**{"x": "g", "y": fm.Y("y", stack=False), "color": "c", **encoding})
+    )
+
+
+#: Door -> (render, the refusal it raises) for position=Stack() beside stack=False.
+_DECLINED_STACK_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
+    "F": (lambda: _stacked_declining().to_svg(), f"mark_bar: {_declined_stack('y')}"),
+    "F-both": (
+        lambda: _stacked_declining(x=fm.X("g", stack="none")).to_svg(),
+        f"mark_bar: {_declined_stack('x and y')}",
+    ),
+    "flip": (
+        lambda: _stacked_declining().coord(fm.CoordFlip()).to_svg(),
+        f"mark_bar: {_declined_stack('y')}",
+    ),
+    "I": (
+        lambda: _stacked_declining().interactive().to_html(),
+        f"mark_bar: {_declined_stack('y')}",
+    ),
+    "+": (
+        lambda: (_placed_points() + _stacked_declining()).to_svg(),
+        f"layer 1: mark_bar: {_declined_stack('y')}",
+    ),
+    "LCs": (
+        lambda: fm.LayerChart(_placed_points(), _stacked_declining()).to_svg(),
+        f"failed to render composite leaf leaf #1: layer 1: mark_bar: {_declined_stack('y')}",
+    ),
+    "LCx": (
+        lambda: fm.LayerChart(_placed_points(), _stacked_declining()).interactive().to_html(),
+        f"layer 1: mark_bar: {_declined_stack('y')}",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_DECLINED_STACK_DOORS))
+def test_position_stack_beside_stack_false_is_refused_on_every_door(door):
+    """``position=fm.Stack()`` and ``stack=False`` on one mark contradict, so they are refused.
+
+    Rejects either silently winning.
+    """
+    render, message = _DECLINED_STACK_DOORS[door]
+    with pytest.raises(ValueError) as exc:
+        _quiet(render)
+    assert str(exc.value) == message
+
+
+@pytest.mark.parametrize("position", ["Dodge", "Identity"])
+def test_stack_false_beside_a_position_that_does_not_stack_draws_that_position(position):
+    """``stack=False`` agrees with a Dodge or Identity, so the chart draws the plain position."""
+    declining = (
+        fm.Chart(_PLACED_ROWS)
+        .mark_bar(position=getattr(fm, position)())
+        .encode(x="g", y=fm.Y("y", stack=False), color="c")
+    )
+    plain = _placed_bars(getattr(fm, position)())
+    assert _quiet(declining.to_svg) == _quiet(plain.to_svg)
+    assert _quiet(lambda: _scene(declining)) == _quiet(lambda: _scene(plain))
+
+
+@pytest.mark.parametrize("door", ["L", "+"])
+def test_stack_false_declines_a_stack_the_layer_did_not_write(door):
+    """A bar writing ``Y(stack=False)`` draws unstacked beside a stacked host or a stacked operand.
+
+    An attached layer's inherited Stack yields to its own ``stack=False``;
+    a ``+`` operand never takes a sibling's. Rejects the refusal of a
+    contradiction the layer never wrote.
+    """
+    if door == "L":
+        chart = _placed_bars(fm.Stack()).layer(_stacked_layer(stack=False))
+    else:
+        chart = _placed_bars(fm.Stack()) + _shorthand_bars(stack=False)
+    oracle = _placed_bars(fm.Stack()) + _placed_bars(fm.Identity())
+    assert _quiet(chart.to_svg) == _quiet(oracle.to_svg)
+    assert _scene_nodes(chart) == _scene_nodes(oracle)
+
+
+def test_a_stack_offset_in_any_case_stacks():
+    """``Y(stack="Zero")`` stacks as ``stack="zero"`` does.
+
+    Rejects the offset reaching Rust in the caller's spelling, which it
+    validated and then stacked nothing.
+    """
+    assert _quiet(_shorthand_bars("Zero").to_svg) == _quiet(_shorthand_bars("zero").to_svg)
+    assert _quiet(_shorthand_bars("NORMALIZE").to_svg) == _quiet(
+        _shorthand_bars("normalize").to_svg
+    )
+    assert _quiet(_shorthand_bars("Zero").to_svg) != _quiet(_shorthand_bars(None).to_svg)
+
+
 def test_a_text_from_other_rows_adds_no_legend_entry_it_does_not_draw():
     """A text under a colored host draws no color, so its rows' values join no legend."""
     other = pl.DataFrame({"g": ["a", "b"], "c": ["zz", "zz"], "y": [5.0, 6.0]})
@@ -8452,7 +9159,7 @@ _MARKER_DOOR_CONTROL_DIGESTS = {
     "B+B": "9f75420b81af1aa458d60b85bf743cb46a4a121377e3540fbbaef047405ce4cd",
     "B+L": "ec4cbacb6fdc20927df4686cd4e87fbf525d59df87885f3708d3986559e3a0cf",
     "B.layer(LD)": "d4a6869d9078d676d1d88c5efbfb58de1417f8909c63549bbd52f9501263d60f",
-    "L+B": "80f38aef04122177e3673ea13d7a1050a603c9dc802e28de67f6b6d10e43e3dc",
+    "L+B": "f53747f38c1fad6e474264df163ec2194962d55300b9c9aa3f5d3752e54c931f",
 }
 
 

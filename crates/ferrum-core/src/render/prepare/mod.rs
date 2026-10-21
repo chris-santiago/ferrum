@@ -144,6 +144,31 @@ pub struct LayerPrepared {
     pub(in crate::render) raster_value_field: Option<String>,
 }
 
+/// The position adjustment `layer` of `spec` draws with, resolved once at
+/// its construction: the position the layer wrote itself wins. A position it
+/// inherits (its own `position` marked [`Layer::inherited_position`], else the
+/// chart-level `position`) yields to the layer's own `stack` shorthand
+/// ([`Layer::writes_stack_shorthand`]), and an inherited `Stack` yields to the
+/// layer's own `stack=False` ([`Layer::declines_stack`]), which every other
+/// adjustment agrees with. So a refusal of a position beside a shorthand only
+/// ever judges a position the layer wrote.
+///
+/// [`Layer::inherited_position`]: crate::spec::layer::Layer::inherited_position
+/// [`Layer::writes_stack_shorthand`]: crate::spec::layer::Layer::writes_stack_shorthand
+/// [`Layer::declines_stack`]: crate::spec::layer::Layer::declines_stack
+fn layer_position(
+    spec: &crate::spec::chart::ChartSpec,
+    layer: &crate::spec::layer::Layer,
+) -> Option<crate::spec::position::PositionAdjust> {
+    use crate::spec::position::PositionAdjust;
+    if let Some(own) = layer.position.as_ref().filter(|_| !layer.inherited_position) {
+        return Some(own.clone());
+    }
+    let inherited = layer.position.as_ref().or(spec.position.as_ref())?;
+    let yields = layer.writes_stack_shorthand() || (layer.declines_stack() && matches!(inherited, PositionAdjust::Stack { .. }));
+    (!yields).then(|| inherited.clone())
+}
+
 impl LayerPrepared {
     /// Build a single layer from chart-level fields (single-layer mode).
     pub(crate) fn from_chart_only(spec: &crate::spec::chart::ChartSpec) -> Self {
@@ -206,7 +231,7 @@ impl LayerPrepared {
             encoding,
             mark_style,
             data_source: layer.data_source.clone(),
-            position: layer.position.clone().or_else(|| spec.position.clone()),
+            position: layer_position(spec, layer),
             independent_y: layer.independent_y,
             reads_chart_data: layer.data_source.is_none() || layer.reads_chart_data,
             color_is_own,
@@ -1317,6 +1342,7 @@ pub fn prepare_render_inputs(
     let mut layers = build_layers(spec)?;
     refuse_malformed_sort_specs(spec)?;
     refuse_bin_channel_without_binned_color(spec)?;
+    refuse_unstackable_shorthands(spec, &layers)?;
 
     // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
     // ONCE here from the layers' `independent_y` flags, then hand it to every
@@ -2260,6 +2286,57 @@ fn refuse_bin_channel_without_binned_color(spec: &ChartSpec) -> Result<(), Rende
         for (name, enc) in layer.encoding.channels() {
             check(format!("layers[{i}].{name}"), enc)?;
         }
+    }
+    Ok(())
+}
+
+/// Refuse a layer whose `stack` shorthand cannot be drawn, in that layer's
+/// voice, before any scale previews the stack it would draw: a shorthand on
+/// both x and y ([`RenderError::StackOnBothChannels`]), a shorthand beside
+/// an explicit `position=` ([`RenderError::StackShorthandWithPosition`]),
+/// since a mark draws one position adjustment, or `stack=False` beside
+/// `position=Stack` ([`RenderError::StackDeclinedBesideStack`]), which say
+/// opposite things; `stack=False` beside any other position agrees with it.
+/// The position judged is the layer's resolved one ([`layer_position`]),
+/// so an inherited position that yields to the layer's shorthand is never
+/// judged. Asks the one reader the draw
+/// pass and the axis preview stack through
+/// ([`crate::render::position::stack_shorthand`]) over the encoding they hand
+/// it: the layer's completed, post-flip encoding, less a polar theta its mark
+/// sweeps itself ([`crate::render::position::position_encoding`]). The
+/// conflict names the channels as the caller wrote them, before the layer's
+/// own flip.
+fn refuse_unstackable_shorthands(spec: &ChartSpec, layers: &[LayerPrepared]) -> Result<(), RenderError> {
+    use crate::render::position::{position_encoding, stack_shorthand};
+    use crate::spec::position::StackValueAxis;
+    for (li, layer) in layers.iter().enumerate() {
+        let voiced = |e: RenderError| e.in_layer_context(public_layer(spec, li, layer.mark), &layer_entry(spec, li, layer.mark));
+        let encoding = position_encoding(layer.mark, layer.coord.as_ref(), &layer.encoding);
+        let shorthand = stack_shorthand(&encoding);
+        let Some(position) = layer.position.as_ref() else {
+            shorthand.map_err(voiced)?;
+            continue;
+        };
+        let flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
+        let authored = |channel: StackValueAxis| if (channel == StackValueAxis::X) != flipped { "x" } else { "y" };
+        let channels = match shorthand {
+            Err(_) => "x and y",
+            Ok(Some((channel, _))) => authored(channel),
+            Ok(None) => {
+                let declined = |e: &Option<crate::spec::encoding::EncodingSpec>| e.as_ref().is_some_and(|e| e.declines_stack());
+                let channels = match (declined(&encoding.x), declined(&encoding.y)) {
+                    (true, true) => "x and y",
+                    (true, false) => authored(StackValueAxis::X),
+                    (false, true) => authored(StackValueAxis::Y),
+                    (false, false) => continue,
+                };
+                if matches!(position, crate::spec::position::PositionAdjust::Stack { .. }) {
+                    return Err(voiced(RenderError::StackDeclinedBesideStack { channels }));
+                }
+                continue;
+            }
+        };
+        return Err(voiced(RenderError::StackShorthandWithPosition { adjustment: position.class_name(), channels }));
     }
     Ok(())
 }

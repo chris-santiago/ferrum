@@ -397,14 +397,38 @@ pub(crate) fn render_composite_scene(
             pass_one[i] = Some(LeafScaleContext { overlay, ..LeafScaleContext::default() });
         }
     }
+    // Overlay shared-rect planning (GH #89A): for a `layout: Overlay`
+    // composite node whose DIRECT children are ALL leaves (LayerChart's actual
+    // shape — every layer is one leaf), `overlay_groups[i] = Some(group_start)`
+    // for every non-primary child leaf index `i`, naming the group's first
+    // (`group_start`) leaf. [`impose_shared_overlay_rects`] then lays every
+    // group member out once to learn its natural plot region, intersects them,
+    // and writes the result into each member's `LeafScaleContext` so the real
+    // render below computes EVERY layout product against that one rect — and
+    // PRUNES `overlay_groups` for any group it could not equalize. The merge
+    // seam reads that same (pruned) map to decide chrome suppression, so the
+    // group that shares a rect is exactly the group that dedups its chrome.
+    // A cleared entry (a mixed leaf/composite Overlay, a singleton Overlay, or
+    // a group whose intersection degenerated) leaves that leaf laying out on
+    // its own terms and keeping its chrome.
+    let mut overlay_groups = plan_overlay_groups(tree, n);
+    // Read before the imposition pre-pass prunes the map: a group whose rect
+    // could not be shared is still one layered chart, its members still layers.
+    // A per-layer refusal from an overlay member names its layer inside the
+    // envelope, from whichever pass raises it (`leaf_refusal`).
+    let layer_of = overlay_layer_indices(&overlay_groups);
+    let leaf_refusal = |index: usize, source: RenderError| CompositeRenderError::LeafRender {
+        kind: "leaf",
+        index,
+        source: match layer_of[index] {
+            Some(layer) => source.in_layer(layer),
+            None => source,
+        },
+    };
     let mut prepared: Vec<prepare::PreparedInputs> = Vec::with_capacity(n);
     for (i, leaf) in leaves.iter().enumerate() {
         let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.viewport, leaf.chart_config, pass_one[i].as_ref())
-            .map_err(|source| CompositeRenderError::LeafRender {
-                kind: "leaf",
-                index: i,
-                source,
-            })?;
+            .map_err(|source| leaf_refusal(i, source))?;
         prepared.push(prep);
     }
     let resolve_inputs: Vec<LeafResolveInput<'_>> = leaves
@@ -455,24 +479,6 @@ pub(crate) fn render_composite_scene(
     let merges: Vec<bool> = prepared.iter().map(|p| leaf_merges_color_size(p.rendering_encoding())).collect();
     let band_plan = plan_legend_bands(tree, &merges, &mut contexts);
 
-    // Overlay shared-rect planning (GH #89A): for a `layout: Overlay`
-    // composite node whose DIRECT children are ALL leaves (LayerChart's actual
-    // shape — every layer is one leaf), `overlay_groups[i] = Some(group_start)`
-    // for every non-primary child leaf index `i`, naming the group's first
-    // (`group_start`) leaf. [`impose_shared_overlay_rects`] then lays every
-    // group member out once to learn its natural plot region, intersects them,
-    // and writes the result into each member's `LeafScaleContext` so the real
-    // render below computes EVERY layout product against that one rect — and
-    // PRUNES `overlay_groups` for any group it could not equalize. The merge
-    // seam reads that same (pruned) map to decide chrome suppression, so the
-    // group that shares a rect is exactly the group that dedups its chrome.
-    // A cleared entry (a mixed leaf/composite Overlay, a singleton Overlay, or
-    // a group whose intersection degenerated) leaves that leaf laying out on
-    // its own terms and keeping its chrome.
-    let mut overlay_groups = plan_overlay_groups(tree, n);
-    // Read before the imposition pre-pass prunes the map: a group whose rect
-    // could not be shared is still one layered chart, its members still layers.
-    let layer_of = overlay_layer_indices(&overlay_groups);
     // Before the imposition pre-pass measures each member's natural region:
     // a member's size legend swatch kind sets its legend gutter.
     plan_size_dot_siblings(&layer_of, &prepared, &mut contexts);
@@ -518,17 +524,7 @@ pub(crate) fn render_composite_scene(
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = (!ctx.is_empty()).then_some(ctx);
-        // A per-layer refusal from an overlay member names its layer inside
-        // the envelope, as the resolve pass's `LayerCoordUnplaceable` does.
-        let (mut scene, leaf_warnings, bundle) =
-            render_leaf(leaf, ctx_opt).map_err(|source| CompositeRenderError::LeafRender {
-                kind: "leaf",
-                index: i,
-                source: match layer_of[i] {
-                    Some(layer) => source.in_layer(layer),
-                    None => source,
-                },
-            })?;
+        let (mut scene, leaf_warnings, bundle) = render_leaf(leaf, ctx_opt).map_err(|source| leaf_refusal(i, source))?;
         // Uniquify each leaf's raw-fragment clip ids exactly once, keyed by the
         // leaf's global pre-order index so colorbar/legend-clip/inset def ids stay
         // disjoint across the composite (panel clips are auto-unique via the

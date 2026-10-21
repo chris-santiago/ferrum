@@ -146,6 +146,16 @@ class _Layer:
     #: serializes the wire channels they draw as (``Layer::inherited_channels``
     #: in Rust ``spec/layer.rs``), only when non-empty.
     inherited_channels: tuple[str, ...] = ()
+    #: Whether this layer's ``position`` is its operand chart's, given to it
+    #: by the ``chart + chart`` merge
+    #: (:func:`ferrum.composition._carry_layer_position`), not one its own
+    #: mark call wrote: the position counterpart of ``inherited_positional``
+    #: and ``inherited_channels``. Rust lets an inherited position yield to
+    #: a ``stack=`` shorthand the layer writes itself, as it treats a
+    #: chart-level position reaching a layer that writes none. Serialized
+    #: onto the wire layer dict only when True (``Layer::inherited_position``
+    #: in Rust ``spec/layer.rs``).
+    inherited_position: bool = False
     #: Where this layer, though it reads a named output, takes each
     #: positional channel it does not bind, as a layer reading the chart's
     #: own rows takes the chart's: ``None`` (it takes none), ``"encoding"``

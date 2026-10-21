@@ -4533,6 +4533,29 @@ def _carry_layer_coord(rhs_layers: list, lhs_coord, rhs_coord) -> list:
     ]
 
 
+def _carry_layer_position(layers: list, position) -> list:
+    """Give one ``chart + chart`` operand's own ``position=`` to the layers it contributes.
+
+    A position written on an operand chart adjusts that operand's marks and
+    no sibling's. A single-mark operand's layer already carries it
+    (:func:`_expand_layers`), but a composite-mark operand's position lives
+    only on its chart, and the composition keeps no position of its own, so
+    each of the operand's layers that writes none is given it here, marked
+    ``inherited_position``: Rust lets an inherited position yield to a
+    ``stack=`` shorthand the layer writes itself, as it does for a position
+    a layer takes from its host. A layer with a position of its own keeps
+    it.
+    """
+    if position is None:
+        return layers
+    return [
+        layer
+        if layer.position is not None
+        else replace(layer, position=position, inherited_position=True)
+        for layer in layers
+    ]
+
+
 def _warn_on_layer_conflicts(lhs, rhs) -> None:
     """Warn when layered chart ``+`` would silently discard RHS theme/facet.
 

@@ -244,15 +244,15 @@ pub(in crate::render) fn build_axis_scale(
     // baseline needs keeping in view — today's behavior anchors an axis for a mark
     // that does not exist. Pinned by
     // `layered_spec_with_no_bar_layer_takes_the_union_without_an_anchor`.
-    // `is_some_and(!is_empty)`, not a bare `is_some()`: the question is "are there
-    // layers whose fields the cross-layer union can read", and a `Some(vec![])`
-    // spec has none — it would strip the anchor while offering nothing to union
+    // `ChartSpec::is_layered` (a non-empty list), not a bare `is_some()`: the
+    // question is "are there layers whose fields the cross-layer union can
+    // read", and a `Some(vec![])` spec has none — it would strip the anchor while offering nothing to union
     // against. No Python lowering emits an empty layers list today (the key is
     // written only when `_layers is not None`, and every producer appends at least
     // the LHS's own layer), so this is the predicate saying what it means rather
     // than a fix for a live shape. Pinned by
     // `injected_scale_with_an_empty_layers_list_keeps_the_bypass`.
-    let layered = spec.layers.as_ref().is_some_and(|l| !l.is_empty());
+    let layered = spec.is_layered();
     let yields_to_auto_path = shared.is_some() || layered;
     // The scale this axis resolves with, in precedence order. A layered spec
     // whose chart-level encoding declares no scale of the caller's on this

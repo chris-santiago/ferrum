@@ -3118,6 +3118,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             mark_style: None,
             data_source: None,
             position: None,
+            inherited_position: false,
             name: None,
             independent_y: false,
             reads_chart_data: false,
@@ -12330,3 +12331,499 @@ fn an_independent_faceted_categorical_scale_keeps_per_panel_ladders() {
     assert_marks_on_labels("independent", b, StackAxis::X, &["a", "c"], &["a", "c"]);
 }
 
+
+// ── The stack shorthand stacks the channel that declares it ──
+//
+// `stack=` on `x` stacks a horizontal mark's segments end to end along x, as
+// `stack=` on `y` stacks a vertical one along y: one reader
+// (`position::stack_shorthand`) names the channel for the draw pass and the
+// axis preview alike. A shorthand on both channels is refused.
+
+/// The marks every panel of `scene` draws, serialized, so two specs can be
+/// compared for the geometry they draw.
+fn panel_marks(scene: &ferrum_scene::SceneGraph) -> Vec<String> {
+    scene.panels.iter().map(|panel| serde_json::to_string(&panel.marks).expect("marks serialize")).collect()
+}
+
+/// The marks `spec` draws over `rows`.
+fn marks_over(spec: &ChartSpec, rows: &RecordBatch) -> Vec<String> {
+    panel_marks(&scene_over(spec, rows, &crate::layout::ThemeInputs::default()).0)
+}
+
+/// An explicit `Stack` with `offset`, on the authored `value_axis` when set.
+fn explicit_stack(offset: &str, value_axis: Option<&str>) -> serde_json::Value {
+    let mut position = serde_json::json!({"type": "stack", "offset": offset, "anchor": "top"});
+    if let Some(axis) = value_axis {
+        position["value_axis"] = serde_json::json!(axis);
+    }
+    position
+}
+
+/// The refusal `spec`'s static render raises over `rows`, as the caller reads it.
+fn refusal_over(spec: &ChartSpec, rows: &RecordBatch) -> String {
+    pyo3::Python::initialize();
+    let refused = crate::render::render_svg(
+        spec,
+        rows,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::config::RenderConfig::default(),
+        &crate::render::chart_config::ChartConfig::default(),
+    );
+    match refused {
+        Ok(_) => panic!("the spec must be refused"),
+        Err(e) => e.to_string(),
+    }
+}
+
+const STACK_ON_BOTH: &str = "stack= is set on both x and y, but a mark stacks along one channel: the value \
+     channel its segments run along. Keep stack= on x to stack them end to end horizontally, or on y to \
+     stack them vertically.";
+
+/// A native horizontal bar with `x=X(..., stack="zero")` stacks its segments
+/// end to end along x, faceted (the facet-shared x axis spans the tallest
+/// panel's stack, 22) and not (panel `q`'s rows alone, 22), and draws what
+/// the explicit horizontal `Stack(value_axis="x")` draws. Rejects reading
+/// the shorthand from y on an unflipped chart: segments drawn overlapping
+/// from 0 against an axis topped at 20.
+#[test]
+fn a_horizontal_bar_stacks_along_the_x_that_declares_the_stack() {
+    let shorthand = serde_json::json!({"x": {"field": "z", "scale": injected_anchor(), "stack": "zero"}, "y": {"field": "g"}, "color": {"field": "c"}});
+    let unstacked = serde_json::json!({"x": {"field": "z", "scale": injected_anchor()}, "y": {"field": "g"}, "color": {"field": "c"}});
+    let rows = shared_stack_rows();
+    let spec = faceted_spec("bar", shorthand.clone(), wrap_by_f(), serde_json::json!({}));
+    assert_eq!(axis_domain(&spec, &rows, StackAxis::X), Some((0.0, 22.0)), "the facet-shared x axis spans the tallest stack");
+    let (scene, _) = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default());
+    assert_bars_read("faceted shorthand on x", &scene, StackAxis::X, &[22.0, 22.0], &[&[(0.0, 2.0), (2.0, 4.0)], &[(0.0, 2.0), (2.0, 22.0)]]);
+    let explicit = faceted_spec("bar", unstacked.clone(), wrap_by_f(), serde_json::json!({"position": explicit_stack("zero", Some("x"))}));
+    assert_eq!(marks_over(&spec, &rows), marks_over(&explicit, &rows), "the shorthand draws the explicit horizontal stack");
+
+    let q_rows = facet_rows(&[("a", 2.0, "u", "q"), ("a", 20.0, "v", "q")]);
+    let single = faceted_spec("bar", shorthand, wrap_by_f(), serde_json::json!({}));
+    let single = ChartSpec { facet: None, ..single };
+    assert_eq!(axis_domain(&single, &q_rows, StackAxis::X), Some((0.0, 22.0)), "the x axis spans the stack");
+    let (scene, _) = scene_over(&single, &q_rows, &crate::layout::ThemeInputs::default());
+    assert_bars_read("shorthand on x", &scene, StackAxis::X, &[22.0], &[&[(0.0, 2.0), (2.0, 22.0)]]);
+}
+
+/// Every offset on x draws what the explicit horizontal `Stack` with that
+/// offset draws, and none draws the unstacked bars; `stack=False` (`"false"`
+/// on the wire) and `None` on x stack nothing. Rejects an x shorthand that is
+/// read for `zero` only, or that stacks on a non-offset value.
+#[test]
+fn every_stack_offset_on_x_stacks_along_x() {
+    let rows = facet_rows(&[("a", 2.0, "u", "p"), ("a", 6.0, "v", "p"), ("b", 3.0, "u", "p"), ("b", 1.0, "v", "p")]);
+    let encoding = |stack: Option<&str>| {
+        let mut x = serde_json::json!({"field": "z"});
+        if let Some(stack) = stack {
+            x["stack"] = serde_json::json!(stack);
+        }
+        serde_json::json!({"x": x, "y": {"field": "g"}, "color": {"field": "c"}})
+    };
+    let spec = |encoding: serde_json::Value, extra: serde_json::Value| ChartSpec { facet: None, ..faceted_spec("bar", encoding, wrap_by_f(), extra) };
+    let unstacked = marks_over(&spec(encoding(None), serde_json::json!({})), &rows);
+    for offset in ["zero", "normalize", "center"] {
+        let shorthand = marks_over(&spec(encoding(Some(offset)), serde_json::json!({})), &rows);
+        let explicit = marks_over(&spec(encoding(None), serde_json::json!({"position": explicit_stack(offset, Some("x"))})), &rows);
+        assert_eq!(shorthand, explicit, "{offset}: the shorthand on x draws the explicit horizontal stack");
+        assert_ne!(shorthand, unstacked, "{offset}: the shorthand on x stacks");
+    }
+    for off in ["false", "none"] {
+        assert_eq!(marks_over(&spec(encoding(Some(off)), serde_json::json!({})), &rows), unstacked, "stack={off} on x stacks nothing");
+    }
+}
+
+/// The vertical shorthand and the `CoordFlip` shorthand keep the stack they
+/// always built: the explicit `Stack` with no `value_axis`. The x shorthand
+/// under `CoordFlip` stacks the x it declares, drawn vertically: the explicit
+/// `Stack(value_axis="x")` under the flip.
+#[test]
+fn the_y_shorthand_and_the_flip_keep_their_stack() {
+    let rows = shared_stack_rows();
+    let vertical = |stack: bool| {
+        let mut y = serde_json::json!({"field": "z", "scale": injected_anchor()});
+        if stack {
+            y["stack"] = serde_json::json!("zero");
+        }
+        serde_json::json!({"x": {"field": "g"}, "y": y, "color": {"field": "c"}})
+    };
+    let flip = serde_json::json!({"kind": "flip"});
+    for (case, coord) in [("vertical", None), ("flipped", Some(flip.clone()))] {
+        let extra = |position: Option<serde_json::Value>| {
+            let mut extra = serde_json::json!({});
+            if let Some(coord) = &coord {
+                extra["coord"] = coord.clone();
+            }
+            if let Some(position) = position {
+                extra["position"] = position;
+            }
+            extra
+        };
+        let shorthand = faceted_spec("bar", vertical(true), wrap_by_f(), extra(None));
+        let explicit = faceted_spec("bar", vertical(false), wrap_by_f(), extra(Some(explicit_stack("zero", None))));
+        assert_eq!(marks_over(&shorthand, &rows), marks_over(&explicit, &rows), "{case}: the y shorthand is the default stack");
+    }
+    let x_stacked = serde_json::json!({"x": {"field": "z", "scale": injected_anchor(), "stack": "zero"}, "y": {"field": "g"}, "color": {"field": "c"}});
+    let x_plain = serde_json::json!({"x": {"field": "z", "scale": injected_anchor()}, "y": {"field": "g"}, "color": {"field": "c"}});
+    let shorthand = faceted_spec("bar", x_stacked, wrap_by_f(), serde_json::json!({"coord": flip}));
+    let explicit = faceted_spec("bar", x_plain, wrap_by_f(), serde_json::json!({"coord": flip, "position": explicit_stack("zero", Some("x"))}));
+    assert_eq!(axis_domain(&shorthand, &rows, StackAxis::Y), Some((0.0, 22.0)), "flipped x shorthand: the drawn y axis spans the stack");
+    assert_eq!(marks_over(&shorthand, &rows), marks_over(&explicit, &rows), "flipped x shorthand draws the explicit x stack");
+}
+
+/// The shorthand on both x and y of one mark is refused in that mark's
+/// voice, unflipped and flipped, and on a layer of a layered chart in the
+/// layer's. Rejects stacking along either channel silently.
+#[test]
+fn the_shorthand_on_both_channels_is_refused() {
+    let rows = shared_stack_rows();
+    let both = serde_json::json!({"x": {"field": "z", "stack": "zero"}, "y": {"field": "g", "stack": "normalize"}, "color": {"field": "c"}});
+    let unlayered = ChartSpec { facet: None, ..faceted_spec("bar", both.clone(), wrap_by_f(), serde_json::json!({})) };
+    assert_eq!(refusal_over(&unlayered, &rows), format!("mark_bar: {STACK_ON_BOTH}"));
+    let flipped = ChartSpec { facet: None, ..faceted_spec("bar", both.clone(), wrap_by_f(), serde_json::json!({"coord": {"kind": "flip"}})) };
+    assert_eq!(refusal_over(&flipped, &rows), format!("mark_bar: {STACK_ON_BOTH}"));
+    let faceted = faceted_spec("bar", both.clone(), wrap_by_f(), serde_json::json!({}));
+    assert_eq!(refusal_over(&faceted, &rows), format!("mark_bar: {STACK_ON_BOTH}"));
+
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "z"}, "y": {"field": "g"}}});
+    let layered = ChartSpec {
+        facet: None,
+        ..faceted_spec(
+            "bar",
+            serde_json::json!({"x": {"field": "z"}, "y": {"field": "g"}}),
+            wrap_by_f(),
+            serde_json::json!({"layers": [point, {"mark": "bar", "encoding": both}]}),
+        )
+    };
+    assert_eq!(refusal_over(&layered, &rows), format!("layer 1: mark_bar: {STACK_ON_BOTH}"));
+
+}
+
+/// An explicit `position=` beside a `stack` shorthand is refused, naming
+/// the adjustment and the channels as written (before a flip), on a flat
+/// chart and on a layer. Rejects the position silently winning, which drew
+/// the chart as though the shorthand were not written.
+#[test]
+fn an_explicit_position_beside_a_stack_shorthand_is_refused() {
+    let rows = shared_stack_rows();
+    let conflict = |adjustment: &str, channels: &str| {
+        format!(
+            "position=fm.{adjustment}(...) and stack= on {channels} are both set, but a mark draws one \
+             position adjustment. Keep one: remove stack= from {channels}, or remove position=."
+        )
+    };
+    let bar = |x: serde_json::Value, y: serde_json::Value, extra: serde_json::Value| ChartSpec {
+        facet: None,
+        ..faceted_spec("bar", serde_json::json!({"x": x, "y": y, "color": {"field": "c"}}), wrap_by_f(), extra)
+    };
+    let stacked_z = serde_json::json!({"field": "z", "stack": "zero"});
+    let plain_z = serde_json::json!({"field": "z"});
+    let plain_g = serde_json::json!({"field": "g"});
+    let stacked_g = serde_json::json!({"field": "g", "stack": "zero"});
+    let stack = serde_json::json!({"position": explicit_stack("zero", Some("x"))});
+    let dodge = serde_json::json!({"position": {"type": "dodge"}});
+    let identity = serde_json::json!({"position": {"type": "identity"}});
+    let flipped_dodge = serde_json::json!({"position": {"type": "dodge"}, "coord": {"kind": "flip"}});
+    let cases = [
+        ("stack beside x", bar(stacked_z.clone(), plain_g.clone(), stack.clone()), conflict("Stack", "x")),
+        ("dodge beside x", bar(stacked_z.clone(), plain_g.clone(), dodge.clone()), conflict("Dodge", "x")),
+        ("identity beside y", bar(plain_g.clone(), stacked_z.clone(), identity), conflict("Identity", "y")),
+        ("flipped dodge beside y", bar(plain_g.clone(), stacked_z.clone(), flipped_dodge), conflict("Dodge", "y")),
+        ("stack beside both", bar(stacked_z.clone(), stacked_g, stack), conflict("Stack", "x and y")),
+    ];
+    for (case, spec, message) in cases {
+        assert_eq!(refusal_over(&spec, &rows), format!("mark_bar: {message}"), "{case}");
+    }
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": plain_z.clone(), "y": plain_g.clone()}});
+    let layered = ChartSpec {
+        facet: None,
+        ..faceted_spec(
+            "bar",
+            serde_json::json!({"x": plain_z, "y": plain_g.clone()}),
+            wrap_by_f(),
+            serde_json::json!({"layers": [point, {"mark": "bar", "encoding": {"x": stacked_z, "y": plain_g}, "position": {"type": "dodge"}}]}),
+        )
+    };
+    assert_eq!(refusal_over(&layered, &rows), format!("layer 1: mark_bar: {}", conflict("Dodge", "x")));
+}
+
+/// A `stack` shorthand on a categorical channel is refused, naming the
+/// channel, its field and the value channel to move it to: `X(<cat>,
+/// stack=)` on a vertical bar and `Y(<cat>, stack=)` on a horizontal one,
+/// and a number declared nominal. Rejects the stack's dtype error, which
+/// named no remedy, and a nominal number stacked along its categories.
+#[test]
+fn a_stack_shorthand_on_a_categorical_channel_is_refused() {
+    let rows = shared_stack_rows();
+    let refusal = |channel: &str, field: &str, value: &str| {
+        format!(
+            "mark_bar: stack= is set on {channel}, whose field '{field}' is categorical, so there is no \
+             value to stack along it. Put stack= on the value channel, {value}."
+        )
+    };
+    let bar = |encoding: serde_json::Value, extra: serde_json::Value| ChartSpec { facet: None, ..faceted_spec("bar", encoding, wrap_by_f(), extra) };
+    let vertical = bar(serde_json::json!({"x": {"field": "g", "stack": "zero"}, "y": {"field": "z"}, "color": {"field": "c"}}), serde_json::json!({}));
+    assert_eq!(refusal_over(&vertical, &rows), refusal("x", "g", "y"));
+    let horizontal = bar(serde_json::json!({"x": {"field": "z"}, "y": {"field": "g", "stack": "zero"}, "color": {"field": "c"}}), serde_json::json!({}));
+    assert_eq!(refusal_over(&horizontal, &rows), refusal("y", "g", "x"));
+    let flipped = bar(serde_json::json!({"x": {"field": "g", "stack": "zero"}, "y": {"field": "z"}, "color": {"field": "c"}}), serde_json::json!({"coord": {"kind": "flip"}}));
+    assert_eq!(refusal_over(&flipped, &rows), refusal("x", "g", "y"));
+    let nominal = bar(serde_json::json!({"x": {"field": "z", "type": "nominal", "stack": "zero"}, "y": {"field": "z"}, "color": {"field": "c"}}), serde_json::json!({}));
+    assert_eq!(refusal_over(&nominal, &rows), refusal("x", "z", "y"));
+}
+
+/// A horizontal area (`y` the series axis, `x` the value) with the shorthand
+/// on x stacks along x, as the explicit `Stack(value_axis="x")` does, and its
+/// x axis spans the stack. Rejects the y-only reading, which draws the
+/// unstacked areas.
+#[test]
+fn a_horizontal_area_stacks_along_x() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 5.0, 7.0])),
+            Arc::new(StringArray::from(vec!["u", "u", "v", "v"])),
+        ],
+    )
+    .unwrap();
+    let encoding = |stack: bool| {
+        let mut x = serde_json::json!({"field": "z"});
+        if stack {
+            x["stack"] = serde_json::json!("zero");
+        }
+        serde_json::json!({"x": x, "y": {"field": "t"}, "color": {"field": "c"}})
+    };
+    let spec = |stack: bool, extra: serde_json::Value| ChartSpec { facet: None, ..faceted_spec("area", encoding(stack), wrap_by_f(), extra) };
+    let shorthand = spec(true, serde_json::json!({}));
+    let explicit = spec(false, serde_json::json!({"position": explicit_stack("zero", Some("x"))}));
+    let unstacked = spec(false, serde_json::json!({}));
+    let top = axis_domain(&shorthand, &rows, StackAxis::X).expect("an x domain").1;
+    assert!(top >= 10.0, "the x axis spans the stacked total 10, got top {top}");
+    assert_eq!(marks_over(&shorthand, &rows), marks_over(&explicit, &rows), "the x shorthand draws the explicit horizontal stack");
+    assert_ne!(marks_over(&shorthand, &rows), marks_over(&unstacked, &rows), "the x shorthand stacks");
+}
+
+/// A layer with the x shorthand stacks along x beside an unstacked sibling,
+/// faceted, and draws what the same layer under an explicit horizontal
+/// `Stack` draws; the facet-shared x axis spans the tallest panel's stack.
+#[test]
+fn a_layered_horizontal_shorthand_stacks_along_x() {
+    let rows = shared_stack_rows();
+    let bar = |encoding: serde_json::Value, position: Option<serde_json::Value>| {
+        let mut layer = serde_json::json!({"mark": "bar", "encoding": encoding});
+        if let Some(position) = position {
+            layer["position"] = position;
+        }
+        layer
+    };
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "z"}, "y": {"field": "g"}}});
+    let chart = serde_json::json!({"x": {"field": "z"}, "y": {"field": "g"}});
+    let shorthand = faceted_spec(
+        "bar",
+        chart.clone(),
+        wrap_by_f(),
+        serde_json::json!({"layers": [bar(serde_json::json!({"x": {"field": "z", "stack": "zero"}, "y": {"field": "g"}, "color": {"field": "c"}}), None), point]}),
+    );
+    let explicit = faceted_spec(
+        "bar",
+        chart,
+        wrap_by_f(),
+        serde_json::json!({"layers": [bar(serde_json::json!({"x": {"field": "z"}, "y": {"field": "g"}, "color": {"field": "c"}}), Some(explicit_stack("zero", Some("x")))), point]}),
+    );
+    let top = axis_domain(&shorthand, &rows, StackAxis::X).expect("an x domain").1;
+    assert!(top >= 22.0, "the facet-shared x axis spans the tallest stack 22, got top {top}");
+    assert_eq!(axis_domain(&shorthand, &rows, StackAxis::X), axis_domain(&explicit, &rows, StackAxis::X));
+    assert_eq!(marks_over(&shorthand, &rows), marks_over(&explicit, &rows), "the layer's shorthand draws the explicit horizontal stack");
+}
+
+/// A chart is layered when it carries a non-empty layer list; an empty list
+/// is unlayered.
+#[test]
+fn a_chart_is_layered_only_with_layers_to_draw() {
+    let layer: crate::spec::layer::Layer =
+        serde_json::from_value(serde_json::json!({"mark": "point", "encoding": {}})).expect("a layer deserializes");
+    assert!(!ChartSpec::default().is_layered());
+    assert!(!ChartSpec { layers: Some(Vec::new()), ..ChartSpec::default() }.is_layered());
+    assert!(ChartSpec { layers: Some(vec![layer]), ..ChartSpec::default() }.is_layered());
+}
+
+// ── A layer's position is its own; an inherited one yields to its shorthand ──
+//
+// A position a layer wrote itself is drawn (and judged beside its shorthand).
+// A position it inherits, marked `inherited_position` or the chart-level
+// fallback, yields to a `stack` shorthand the layer writes itself, and an
+// inherited `Stack` yields to the layer's own `stack=False`.
+
+/// A layer from wire JSON.
+fn wire_layer(layer: serde_json::Value) -> crate::spec::layer::Layer {
+    serde_json::from_value(layer).expect("the layer deserializes")
+}
+
+/// The position `layer` draws under a chart whose own position is `chart`.
+fn drawn_position(chart: Option<serde_json::Value>, layer: serde_json::Value) -> Option<crate::spec::position::PositionAdjust> {
+    let mut spec = faceted_spec("bar", serde_json::json!({"x": {"field": "g"}, "y": {"field": "z"}}), wrap_by_f(), serde_json::json!({}));
+    spec.facet = None;
+    spec.position = chart.map(|p| serde_json::from_value(p).expect("the position deserializes"));
+    LayerPrepared::from_chart_and_layer(&spec, &wire_layer(layer)).position
+}
+
+fn position_of(value: serde_json::Value) -> Option<crate::spec::position::PositionAdjust> {
+    Some(serde_json::from_value(value).expect("the position deserializes"))
+}
+
+/// Each row of the construction rule: an own position wins; an inherited one
+/// (the flag, or the chart fallback) reaches a layer that writes no
+/// shorthand; an own x or y shorthand blocks both; a shorthand Python filled
+/// from a parent (`inherited_positional`) does not block; an inherited
+/// `Stack` yields to an own `stack=False` while any other inherited position
+/// agrees with it. Rejects the old `layer.position.or(spec.position)`, which
+/// handed every inherited position to a layer whatever it wrote.
+#[test]
+fn a_layer_draws_its_own_position_and_an_inherited_one_yields_to_its_shorthand() {
+    let dodge = serde_json::json!({"type": "dodge"});
+    let jitter = serde_json::json!({"type": "jitter", "axis": "x"});
+    let stack = serde_json::json!({"type": "stack", "offset": "zero", "anchor": "top"});
+    let enc = |x: serde_json::Value, y: serde_json::Value| serde_json::json!({"x": x, "y": y, "color": {"field": "c"}});
+    let g = serde_json::json!({"field": "g"});
+    let z = serde_json::json!({"field": "z"});
+    let z_stacked = serde_json::json!({"field": "z", "stack": "zero"});
+    let z_declined = serde_json::json!({"field": "z", "stack": "false"});
+    let layer = |encoding: serde_json::Value, extra: serde_json::Value| {
+        let mut layer = serde_json::json!({"mark": "bar", "encoding": encoding});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            layer[key] = value.clone();
+        }
+        layer
+    };
+    let cases = [
+        ("own position wins", None, layer(enc(g.clone(), z_stacked.clone()), serde_json::json!({"position": dodge})), position_of(dodge.clone())),
+        ("inherited flag reaches", None, layer(enc(g.clone(), z.clone()), serde_json::json!({"position": dodge, "inherited_position": true})), position_of(dodge.clone())),
+        ("chart fallback reaches", Some(dodge.clone()), layer(enc(g.clone(), z.clone()), serde_json::json!({})), position_of(dodge.clone())),
+        ("own y shorthand blocks the flag", None, layer(enc(g.clone(), z_stacked.clone()), serde_json::json!({"position": dodge, "inherited_position": true})), None),
+        ("own y shorthand blocks the fallback", Some(dodge.clone()), layer(enc(g.clone(), z_stacked.clone()), serde_json::json!({})), None),
+        ("own x shorthand blocks the fallback", Some(dodge.clone()), layer(enc(z_stacked.clone(), g.clone()), serde_json::json!({})), None),
+        ("own x shorthand blocks the flag", None, layer(enc(z_stacked.clone(), g.clone()), serde_json::json!({"position": stack, "inherited_position": true})), None),
+        ("inherited shorthand does not block", Some(dodge.clone()), layer(enc(g.clone(), z_stacked.clone()), serde_json::json!({"inherited_positional": ["y"]})), position_of(dodge.clone())),
+        ("own stack=False: an inherited Stack yields", Some(stack.clone()), layer(enc(g.clone(), z_declined.clone()), serde_json::json!({})), None),
+        ("own stack=False: a flagged Stack yields", None, layer(enc(g.clone(), z_declined.clone()), serde_json::json!({"position": stack, "inherited_position": true})), None),
+        ("own stack=False: an inherited Dodge applies", Some(dodge.clone()), layer(enc(g.clone(), z_declined.clone()), serde_json::json!({})), position_of(dodge.clone())),
+        ("own stack=False: an inherited Jitter applies", None, layer(enc(g.clone(), z_declined.clone()), serde_json::json!({"position": jitter, "inherited_position": true})), position_of(jitter.clone())),
+        ("own stack=False keeps its own Stack", None, layer(enc(g.clone(), z_declined), serde_json::json!({"position": stack})), position_of(stack.clone())),
+        ("no position anywhere", None, layer(enc(g, z), serde_json::json!({})), None),
+    ];
+    for (case, chart, layer, expected) in cases {
+        assert_eq!(drawn_position(chart, layer), expected, "{case}");
+    }
+}
+
+/// `inherited_position` round-trips, and is omitted from the wire when false.
+#[test]
+fn inherited_position_round_trips_and_is_omitted_when_false() {
+    let flagged = wire_layer(serde_json::json!({"mark": "bar", "position": {"type": "dodge"}, "inherited_position": true}));
+    assert!(flagged.inherited_position);
+    let json = serde_json::to_value(&flagged).expect("the layer serializes");
+    assert_eq!(json["inherited_position"], serde_json::json!(true));
+    assert_eq!(wire_layer(json), flagged);
+    let own = wire_layer(serde_json::json!({"mark": "bar", "position": {"type": "dodge"}}));
+    assert!(!own.inherited_position);
+    assert!(serde_json::to_value(&own).expect("the layer serializes").get("inherited_position").is_none());
+}
+
+/// A dodged layer beside a layer stacked by its own shorthand renders, the
+/// chart-level position the composition carried yielding to the shorthand
+/// (`bar(Dodge) + bar(Y(stack))`), as does a layer attached to a dodged host
+/// that stacks by its own shorthand, and the flagged form of the same. The
+/// stacked layer draws what it draws alone. Rejects judging the inherited
+/// Dodge beside the layer's shorthand, which refused a chart whose every mark
+/// call is well-formed.
+#[test]
+fn an_inherited_position_yields_to_a_layers_own_stack_shorthand() {
+    let rows = shared_stack_rows();
+    let chart = serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}, "color": {"field": "c"}});
+    let stacked_encoding = serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor(), "stack": "zero"}, "color": {"field": "c"}});
+    let dodge = serde_json::json!({"type": "dodge"});
+    let alone = ChartSpec { facet: None, ..faceted_spec("bar", stacked_encoding.clone(), wrap_by_f(), serde_json::json!({})) };
+    let alone_marks = marks_over(&alone, &rows);
+    let stacked = serde_json::json!({"mark": "bar", "encoding": stacked_encoding});
+    let mut flagged = stacked.clone();
+    flagged["position"] = dodge.clone();
+    flagged["inherited_position"] = serde_json::json!(true);
+    let dodged = serde_json::json!({"mark": "bar", "encoding": chart.clone(), "position": dodge});
+    let specs = [
+        ("plus: chart fallback", serde_json::json!({"position": dodge, "layers": [dodged.clone(), stacked.clone()]})),
+        ("attached to a dodged host", serde_json::json!({"position": dodge, "layers": [{"mark": "bar", "encoding": chart.clone()}, stacked.clone()]})),
+        ("flagged inherited", serde_json::json!({"layers": [dodged, flagged]})),
+    ];
+    for (case, extra) in specs {
+        let spec = ChartSpec { facet: None, ..faceted_spec("bar", chart.clone(), wrap_by_f(), extra) };
+        let scene = scene_over(&spec, &rows, &crate::layout::ThemeInputs::default()).0;
+        let stacked_layer = serde_json::to_value(&scene.panels[0].marks[1]).expect("marks serialize");
+        let alone_layer: Vec<serde_json::Value> = serde_json::from_str(&alone_marks[0]).expect("marks parse");
+        assert_eq!(stacked_layer, alone_layer[0], "{case}: the stacked layer draws as alone");
+    }
+}
+
+/// `position=Stack` beside `stack=False` is refused, naming both and the
+/// remedy, on a flat chart, flipped, and on a layer; `stack=False` beside
+/// Dodge, Jitter or Identity renders. Rejects the Stack silently winning over
+/// the declared `stack=False`.
+#[test]
+fn stack_false_beside_position_stack_is_refused() {
+    let rows = shared_stack_rows();
+    let declined = |channels: &str| {
+        format!(
+            "position=fm.Stack(...) and stack=False on {channels} are both set, but one stacks the mark and \
+             the other declines it. Keep one: remove stack=False from {channels}, or remove position=."
+        )
+    };
+    let bar = |y: serde_json::Value, extra: serde_json::Value| ChartSpec {
+        facet: None,
+        ..faceted_spec("bar", serde_json::json!({"x": {"field": "g"}, "y": y, "color": {"field": "c"}}), wrap_by_f(), extra)
+    };
+    let z_false = serde_json::json!({"field": "z", "stack": "false"});
+    let stack = serde_json::json!({"type": "stack", "offset": "zero", "anchor": "top"});
+    assert_eq!(refusal_over(&bar(z_false.clone(), serde_json::json!({"position": stack})), &rows), format!("mark_bar: {}", declined("y")));
+    assert_eq!(
+        refusal_over(&bar(z_false.clone(), serde_json::json!({"position": stack, "coord": {"kind": "flip"}})), &rows),
+        format!("mark_bar: {}", declined("y"))
+    );
+    let both = ChartSpec {
+        facet: None,
+        ..faceted_spec("bar", serde_json::json!({"x": {"field": "g", "stack": "none"}, "y": z_false.clone(), "color": {"field": "c"}}), wrap_by_f(), serde_json::json!({"position": stack}))
+    };
+    assert_eq!(refusal_over(&both, &rows), format!("mark_bar: {}", declined("x and y")));
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "g"}, "y": {"field": "z"}}});
+    let layered = bar(
+        serde_json::json!({"field": "z"}),
+        serde_json::json!({"layers": [point, {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": z_false.clone(), "color": {"field": "c"}}, "position": stack}]}),
+    );
+    assert_eq!(refusal_over(&layered, &rows), format!("layer 1: mark_bar: {}", declined("y")));
+    for position in [serde_json::json!({"type": "dodge"}), serde_json::json!({"type": "jitter", "axis": "x"}), serde_json::json!({"type": "identity"})] {
+        let with_false = bar(z_false.clone(), serde_json::json!({"position": position}));
+        let plain = bar(serde_json::json!({"field": "z"}), serde_json::json!({"position": position}));
+        assert_eq!(marks_over(&with_false, &rows), marks_over(&plain, &rows), "stack=False beside {position} renders as without it");
+    }
+}
+
+/// A stack offset reads in any case, as Python accepts it: `"Zero"` on y
+/// stacks exactly as `"zero"` does. Rejects the lowercase-only reading,
+/// which drew `"Zero"` unstacked.
+#[test]
+fn a_stack_offset_reads_in_any_case() {
+    let rows = shared_stack_rows();
+    let spec = |stack: &str| {
+        let encoding = serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor(), "stack": stack}, "color": {"field": "c"}});
+        ChartSpec { facet: None, ..faceted_spec("bar", encoding, wrap_by_f(), serde_json::json!({})) }
+    };
+    let unstacked = ChartSpec {
+        facet: None,
+        ..faceted_spec("bar", serde_json::json!({"x": {"field": "g"}, "y": {"field": "z", "scale": injected_anchor()}, "color": {"field": "c"}}), wrap_by_f(), serde_json::json!({}))
+    };
+    assert_eq!(marks_over(&spec("Zero"), &rows), marks_over(&spec("zero"), &rows));
+    assert_ne!(marks_over(&spec("Zero"), &rows), marks_over(&unstacked, &rows));
+}

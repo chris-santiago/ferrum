@@ -868,16 +868,24 @@ impl EncodingSpec {
 
     /// The stack offset this channel's `stack=` names: `None` when it is
     /// unset or names no stacking (`"false"`, `"null"`, `"none"`, or a value
-    /// that is no offset). The one reading of the wire `stack` string, shared
-    /// by the value-axis stack shorthand and a polar text's stacked theta.
+    /// that is no offset), in any case, as Python accepts the spelling. The
+    /// one reading of the wire `stack` string, shared by the value-axis stack
+    /// shorthand and a polar text's stacked theta.
     pub(crate) fn stack_offset(&self) -> Option<crate::spec::position::StackOffset> {
         use crate::spec::position::StackOffset;
-        match self.stack.as_deref()? {
+        match self.stack.as_deref()?.to_ascii_lowercase().as_str() {
             "zero" => Some(StackOffset::Zero),
             "normalize" => Some(StackOffset::Normalize),
             "center" => Some(StackOffset::Center),
             _ => None,
         }
+    }
+
+    /// Whether this channel's `stack=` declines stacking: a falsy spelling
+    /// (`"false"`, `"null"`, `"none"`, any case), which Python writes for
+    /// `stack=False`. Unset `stack` declines nothing.
+    pub(crate) fn declines_stack(&self) -> bool {
+        self.stack.as_deref().is_some_and(|stack| matches!(stack.to_ascii_lowercase().as_str(), "false" | "null" | "none"))
     }
 
     /// The bin parameters of a binned color (`Color(bin=...)`): this

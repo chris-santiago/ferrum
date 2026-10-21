@@ -726,8 +726,9 @@ class ChannelBase:
         Returns
         -------
         str
-            ``"zero"`` for ``True``; ``"false"`` for ``False``; the original
-            string when it is a recognized stack strategy or falsy spelling.
+            ``"zero"`` for ``True``; ``"false"`` for ``False``; a recognized
+            stack strategy in any case, lowercased; a falsy spelling as
+            written (Rust declines stacking for it in any case).
 
         Raises
         ------
@@ -754,7 +755,9 @@ class ChannelBase:
             # Surface the user's original spelling, but route through the single
             # canonical validator so all three entry points fail identically.
             _validate_stack_offset(value, func_name=channel, param="stack")
-        return value
+        # Rust reads an offset by its lowercase name, so an offset spelled in
+        # any case reaches it as that name.
+        return lowered
 
     def to_encoding_spec_dict(self) -> dict:
         """Return kwargs for the Rust EncodingSpec constructor / serde JSON.

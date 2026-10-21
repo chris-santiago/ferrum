@@ -198,6 +198,20 @@ pub struct Layer {
     pub data_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub position: Option<crate::spec::position::PositionAdjust>,
+    /// Whether this layer's `position` is one it inherited from its parent
+    /// rather than wrote: Python carries a `+` operand chart's `position=`
+    /// onto the operand's layers that wrote none, and marks it here. The
+    /// position counterpart of [`Self::inherited_positional`] and
+    /// [`Self::inherited_channels`], read only by
+    /// [`LayerPrepared::from_chart_and_layer`](crate::render::prepare::LayerPrepared):
+    /// an inherited position (this one, or the chart-level `position` a layer
+    /// with none falls back to) yields to a stack shorthand the layer writes
+    /// itself ([`Self::writes_stack_shorthand`]), while a position the layer
+    /// wrote is its own and is judged beside its shorthand. `false` (the
+    /// default) is omitted from the wire, so every spec without an inherited
+    /// position round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherited_position: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     /// Whether this layer resolves its own y-scale slot instead of sharing
@@ -272,6 +286,7 @@ impl Default for Layer {
             mark_style: None,
             data_source: None,
             position: None,
+            inherited_position: false,
             name: None,
             independent_y: false,
             reads_chart_data: false,
@@ -290,6 +305,36 @@ impl Layer {
             .into_iter()
             .filter(|c| c.slot(&self.encoding).is_some() && !self.inherited_positional.contains(c))
             .collect()
+    }
+
+    /// Whether this layer writes the `stack` shorthand itself: an x or y of
+    /// its own ([`Self::own_positional`]) whose binding names a stack offset
+    /// ([`EncodingSpec::stack_offset`], the reading
+    /// [`crate::render::position::stack_shorthand`] stacks by). A position the
+    /// layer inherits yields to it.
+    ///
+    /// [`EncodingSpec::stack_offset`]: crate::spec::encoding::EncodingSpec::stack_offset
+    pub(crate) fn writes_stack_shorthand(&self) -> bool {
+        self.own_stack_bindings().any(|binding| binding.stack_offset().is_some())
+    }
+
+    /// Whether this layer declines stacking itself: an x or y of its own
+    /// whose `stack=` is a falsy spelling ([`EncodingSpec::declines_stack`]).
+    /// An inherited `Stack` yields to it; any other inherited position agrees
+    /// with it and applies.
+    ///
+    /// [`EncodingSpec::declines_stack`]: crate::spec::encoding::EncodingSpec::declines_stack
+    pub(crate) fn declines_stack(&self) -> bool {
+        self.own_stack_bindings().any(|binding| binding.declines_stack())
+    }
+
+    /// The bindings of this layer's own x and y, the channels a `stack`
+    /// shorthand is written on.
+    fn own_stack_bindings(&self) -> impl Iterator<Item = &crate::spec::encoding::EncodingSpec> {
+        self.own_positional()
+            .into_iter()
+            .filter(|c| matches!(c, PositionalChannel::X | PositionalChannel::Y))
+            .filter_map(|c| c.slot(&self.encoding).as_ref())
     }
 
     /// Whether this layer binds the non-positional `channel` itself: bound on
