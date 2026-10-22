@@ -154,7 +154,7 @@ Earlier rulings that fail these criteria are open to review, not binding; revers
 
 The coding agents are the chris-code plugin's `python-coder` / `rust-coder` (the repo-local copies were retired 2026-08-28 — the plugin versions carry the same inlined review principles plus the typed-record contract). They internalize their review principles in their own system prompts, so code should pass the lite-review gate on first attempt; the ferrum hard constraints and severity escalations in this file bind them too. The orchestrator still handles staging, lite-review dispatch, and commits.
 
-**Model selection:** Coding agents default to Sonnet (set in their frontmatter). Override to Opus via `model: "opus"` on the Agent call when the task requires significant architectural judgment — e.g., cross-subsystem refactors, complex Rust lifetime/type reasoning, or tasks that would otherwise need multiple re-dispatches.
+**Model selection:** Coding agents default to Sonnet (set in their frontmatter). Overrides are available if the user requests or if SDD escalates a fix-cap per `chris-code` plugin.
 
 ---
 
