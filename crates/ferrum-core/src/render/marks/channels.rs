@@ -366,25 +366,22 @@ pub(crate) fn polar_channel_resolver<'a>(
 ///   is retained (detail subdivides each color group without its own legend).
 /// - Neither: a single group over all row indices `0..n_rows`.
 ///
-/// After the (color, detail) split above, `dash_values` (T12, spec §4.3)
-/// subdivides each resulting group further by per-row stroke-dash category —
-/// the series partition key extends from (color, detail) to (color, detail,
-/// stroke_dash-field) so a categorical `stroke_dash` encoding draws one
-/// polyline (or, for `ribbon`, one closed-polygon band) per distinct style
-/// even within a single color/detail group. `None` (a numeric `stroke_dash`
-/// field, or none at all) skips this step entirely, which is the pre-T12
-/// grouping, byte-identical. `line` and `ribbon` (T12 fix round, spec §4.3
-/// amended 2026-09-01) both pass `dash_cols.categorical.as_ref()`, so a
-/// categorical `stroke_dash` field subdivides both; `area`'s caller still
-/// always passes `None` since it does not consume the `stroke_dash` channel
-/// today.
+/// After the (color, detail) split above, each of `splits` subdivides every
+/// resulting group further by its per-row category, in order. A categorical
+/// `stroke_dash` (T12, spec §4.3) is one: the series partition key extends
+/// from (color, detail) to (color, detail, stroke_dash-field) so a
+/// categorical `stroke_dash` encoding draws one polyline (or, for `ribbon`,
+/// one closed-polygon band) per distinct style even within a single
+/// color/detail group; `line` and `ribbon` pass `dash_cols.categorical`,
+/// `area`, which does not consume the `stroke_dash` channel, does not. The
+/// fields a statistic grouped the series by beyond the drawn channels
+/// ([`grouping_series_values`]) follow, on all three. No splits is the
+/// (color, detail) grouping alone.
 ///
 /// # Arguments
 /// - `color_values`: optional per-row color strings (loaded by the caller).
 /// - `detail_values`: optional per-row detail strings (loaded by the caller).
-/// - `dash_values`: optional per-row stroke-dash category strings (loaded by
-///   the caller from [`DashColumns::categorical`](DashColumns), only when a
-///   categorical `stroke_dash` scale resolved).
+/// - `splits`: per-row category strings, one column per further split.
 /// - `has_color_scale`: whether a resolved color scale is present; gates the
 ///   color-only branch (matches `&ctx.scales.color` being `Some(_)`).
 /// - `n_rows`: total row count, used for the fallback all-rows group.
@@ -392,11 +389,11 @@ pub(crate) fn polar_channel_resolver<'a>(
 /// # Returns
 /// `Vec<(Option<String>, Vec<usize>)>` — one entry per group. The `Option<String>`
 /// is the color legend key for that group (`None` in the detail-only and
-/// fallback cases); a dash-subdivided group repeats its parent's key.
-pub(crate) fn build_color_detail_groups(
+/// fallback cases); a subdivided group repeats its parent's key.
+pub(crate) fn build_color_detail_groups<'v>(
     color_values: Option<&Vec<Option<String>>>,
     detail_values: Option<&Vec<Option<String>>>,
-    dash_values: Option<&Vec<Option<String>>>,
+    splits: impl IntoIterator<Item = &'v Vec<Option<String>>>,
     has_color_scale: bool,
     n_rows: usize,
 ) -> Vec<(Option<String>, Vec<usize>)> {
@@ -445,34 +442,41 @@ pub(crate) fn build_color_detail_groups(
         // No color, no detail (or color present but no scale): single group.
         _ => vec![(None, (0..n_rows).collect())],
     };
-    match dash_values {
-        Some(dv) => subdivide_by_dash(groups, dv),
-        None => groups,
-    }
+    splits.into_iter().fold(groups, |groups, values| subdivide(groups, values))
 }
 
-/// Subdivide each `(color_key, rows)` group by per-row stroke-dash category
-/// (T12), preserving the parent's color key on every subgroup. Rows within a
-/// parent group are re-partitioned in first-encounter order of their dash
-/// category, so subgroup ordering — and therefore the node/metadata alignment
-/// invariant (#6) — stays deterministic.
-fn subdivide_by_dash(
+/// Subdivide each `(color_key, rows)` group by per-row category `values`
+/// (a categorical stroke dash, a statistic's grouping field), preserving the
+/// parent's color key on every subgroup. Rows within a parent group are
+/// re-partitioned in first-encounter order of their category, so subgroup
+/// ordering — and therefore the node/metadata alignment invariant (#6) —
+/// stays deterministic.
+fn subdivide(
     groups: Vec<(Option<String>, Vec<usize>)>,
-    dash_values: &[Option<String>],
+    values: &[Option<String>],
 ) -> Vec<(Option<String>, Vec<usize>)> {
     let mut out = Vec::with_capacity(groups.len());
     for (key, rows) in groups {
         let mut sub: Vec<(Option<String>, Vec<usize>)> = Vec::new();
         for i in rows {
-            let dash_key = dash_values.get(i).cloned().flatten();
-            match sub.iter().position(|(dk, _)| dk == &dash_key) {
+            let category = values.get(i).cloned().flatten();
+            match sub.iter().position(|(seen, _)| seen == &category) {
                 Some(p) => sub[p].1.push(i),
-                None => sub.push((dash_key, vec![i])),
+                None => sub.push((category, vec![i])),
             }
         }
         out.extend(sub.into_iter().map(|(_, sub_rows)| (key.clone(), sub_rows)));
     }
     out
+}
+
+/// Each row's value of every field a series mark's statistic grouped its
+/// series by beyond the channels the mark draws
+/// ([`GroupStyle::series`](crate::render::draw::GroupStyle)), one column per
+/// field, for [`build_color_detail_groups`]'s splits. A field the rows do
+/// not carry splits nothing.
+pub(crate) fn grouping_series_values(ctx: &DrawCtx) -> Vec<Vec<Option<String>>> {
+    ctx.mark_style.group.series.iter().filter_map(|field| col_as_ordinal_category_str(ctx.batch, field).ok()).collect()
 }
 
 /// The series a binned color (`Color(bin=...)`) splits a mark into: each

@@ -275,6 +275,14 @@ def _scene(chart: Any) -> dict:
     return json.loads(chart.interactive().scene_json)
 
 
+def _scene_line_counts(scene: dict) -> list[int]:
+    """Each panel's line-batch node count, in panel order; 0 for a panel drawing none."""
+    return [
+        sum(len(batch["nodes"]) for batch in panel["marks"] if batch["kind"] == "line")
+        for panel in scene["panels"]
+    ]
+
+
 def interactive_census(chart: Any) -> Counter:
     """The multiset of interactive scene mark nodes, geometry left out."""
     out: Counter = Counter()
@@ -3063,32 +3071,8 @@ _GROUP_SHAPES: dict[str, tuple[dict, dict, list[str]]] = {
     "binned-color": ({"color": _binned_color()}, {}, ["g", "v_bin"]),
 }
 
-#: The doors where the parent is a ``+`` operand's own encoding (and the
-#: merged, interactive LayerChart).
-_OPERAND_DOORS = frozenset({"+L", "+e+"})
-
-
-def _operand_detail(shape: str, door: str, kind: str) -> bool:
-    operand = door in _OPERAND_DOORS or (door == "LC" and kind == "interactive")
-    return operand and "detail" in _GROUP_SHAPES[shape][0]
-
-
 _GROUP_CASES = [
-    pytest.param(
-        shape,
-        door,
-        kind,
-        id=f"{shape}/{door}/{kind}",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason=(
-                "a + operand's detail reaches only the layers whose mark draws it, so a "
-                "text under it groups coarser than its bars"
-            ),
-        )
-        if _operand_detail(shape, door, kind)
-        else (),
-    )
+    pytest.param(shape, door, kind, id=f"{shape}/{door}/{kind}")
     for shape in _GROUP_SHAPES
     for door in _GROUP_DOORS
     for kind in ("static", "interactive")
@@ -3114,10 +3098,14 @@ def test_a_text_label_groups_by_every_inherited_color_spelling_its_own_color_sha
 
     A text's own color, fill or stroke shadows the parent's under any
     spelling, an aggregated color groups nothing, and a binned color groups
-    by its bins, as the bars do. Rejects lowering the inherited color onto
-    the one ``detail`` slot, which dropped the color beside a detail, kept
-    only the first of two spellings, and grouped an own ``color`` by the
-    parent's too; and grouping a binned color by its raw values.
+    by its bins, as the bars do. A host's or ``+`` operand's ``detail``
+    groups the text's mean although a text draws no detail. Rejects
+    lowering the inherited color onto the one ``detail`` slot, which
+    dropped the color beside a detail, kept only the first of two
+    spellings, and grouped an own ``color`` by the parent's too; grouping a
+    binned color by its raw values; and handing a ``+`` operand's detail
+    only to the layers whose mark draws it, which grouped its text by
+    ``(g, c)`` beside bars grouped by ``(g, c, f)``.
     """
     parent, own, grain = _GROUP_SHAPES[shape]
     chart = _quiet(lambda: _GROUP_DOORS[door](parent, own))
@@ -5326,7 +5314,7 @@ _SELECTION_FAMILIES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
     "boxplot": (lambda: fm.Chart(df).mark_boxplot().encode(x="g", y="z"), []),
     "violin": (lambda: fm.Chart(df).mark_violin().encode(x="g", y="z"), []),
     "mark_qq": (lambda: fm.Chart(df).mark_qq().encode(x="z"), []),
-    "mark_qq-color": (lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"), []),
+    "mark_qq-color": (lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"), ["point", "rule"]),
     "catplot-point": (lambda: fm.catplot(_sel_cat(), x="cat", y="val", kind="point"), []),
     "catplot-boxen-hue": (
         lambda: fm.catplot(_sel_cat(), x="cat", y="val", kind="boxen", hue="grp"),
@@ -5334,7 +5322,7 @@ _SELECTION_FAMILIES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
     ),
     "lmplot-color": (
         lambda: fm.lmplot(_sel_cat(), x="x", y="y", encode={"color": "c"}),
-        ["point"],
+        ["line", "point", "ribbon"],
     ),
     "L-mean-point": (
         lambda: bar_mean().layer(layer("point", y=fm.Y("y", aggregate="mean"))),
@@ -5466,37 +5454,6 @@ def _dropped(entry: str, mark: str, channel: str, field: str) -> str:
 
 
 _W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
-    "mark_boxen-color": (
-        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
-        [
-            _dropped("mark_boxen", "rect", "color", "c"),
-            _dropped("mark_boxen", "point", "color", "c"),
-        ],
-        "07f1b8d46631dea387c8f79f4956694dc0fafe773c1b08f5561f4b717593c83c",
-    ),
-    "catplot-boxen-hue": (
-        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
-        [_dropped("catplot", "rect", "color", "grp"), _dropped("catplot", "point", "color", "grp")],
-        "075af3fbd416f1ca564e7f5d87da2390f1dea61d68a4e9f4020c770cca83a41f",
-    ),
-    "mark_qq-color": (
-        lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
-        [_dropped("mark_qq", "point", "color", "c"), _dropped("mark_qq", "rule", "color", "c")],
-        "07689d9d5965f22dbf35554e8b4bfdcd6fbafeccdef82ff21c8d496ada94f5a8",
-    ),
-    "mark_contour-color": (
-        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g"),
-        [_dropped("mark_contour", "segment", "color", "g")],
-        "abf76917ca5eccf1d7f1995b92485a75f466f263a8053d03c999f212fdf20e46",
-    ),
-    "lmplot-encode-color": (
-        lambda: fm.lmplot(_W_CAT, x="x", y="y", encode={"color": "cat"}),
-        [
-            _dropped("lmplot", "ribbon", "color", "cat"),
-            _dropped("lmplot", "line", "color", "cat"),
-        ],
-        "e77ac1f870b76a33fc8230b63c43fb4d7c69444b4b2197636496a7abd6faa46e",
-    ),
     "catplot-point-tooltip": (
         lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="point", tooltip="grp"),
         [
@@ -5514,8 +5471,8 @@ def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(ca
 
     Rejects refusing a call whose column is in the user's data (the
     statistic's output, not the user, dropped it), rejects dropping it
-    silently, and rejects exempting layer 0 (boxen's rect, qq's point,
-    catplot's error-bar rule) from the warning its later layers give.
+    silently, and rejects exempting layer 0 (catplot's error-bar rule) from
+    the warning its later layers give.
     """
     import hashlib
 
@@ -5525,43 +5482,6 @@ def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(ca
         svg = build().to_svg()
     assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == expected
     assert hashlib.sha256(svg.encode()).hexdigest() == digest
-
-
-# Each statistic chart whose every layer drops the bound channel, and the
-# same chart without the binding.
-_W_UNDRAWN: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
-    "mark_boxen-color": (
-        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
-        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z"),
-    ),
-    "catplot-boxen-hue": (
-        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
-        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen"),
-    ),
-    "mark_qq-color": (
-        lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
-        lambda: fm.Chart(df).mark_qq().encode(x="z"),
-    ),
-    "mark_contour-color": (
-        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g"),
-        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y"),
-    ),
-}
-
-
-@pytest.mark.parametrize("case", sorted(_W_UNDRAWN))
-def test_A7_W_a_channel_every_layer_drops_draws_no_scale_and_no_legend(case):
-    """P5: when no layer draws the bound channel there is no scale and no legend.
-
-    The chart renders the bytes it renders without the binding. Rejects a
-    legend read from the chart's source rows over marks that draw none of
-    its colors (boxen and qq drew a ``c`` legend over uncolored marks), and
-    rejects refusing the contour, whose rows the user supplied with ``g``.
-    """
-    bound, unbound = _W_UNDRAWN[case]
-    svg = _quiet(lambda: bound().to_svg())
-    assert legend_set(svg) == {}
-    assert svg == _quiet(lambda: unbound().to_svg())
 
 
 def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack():
@@ -6688,29 +6608,6 @@ def test_P5_a_shape_one_layers_point_draws_is_established_by_that_point():
     assert legend_set(svg) == {"g": ("a", "b")}
 
 
-@pytest.mark.parametrize(
-    ("build", "message"),
-    [
-        (
-            lambda: fm.Chart(df).mark_smooth().encode(x="v", y="y", color="c"),
-            "unknown column 'c' referenced by an encoding",
-        ),
-        (
-            lambda: fm.residplot(df, x="v", y="y", encode={"color": "c"}),
-            "residplot: encoding 'color' references unknown column 'c' (not present in that "
-            "layer's data) — this layer reads the chart's transformed rows, not its source "
-            "data; draw 'c' from the source by composing a separate chart with `+` instead",
-        ),
-    ],
-    ids=["mark_smooth-color", "residplot-encode-color"],
-)
-def test_P5_a_fit_whose_rows_lack_the_color_column_stays_refused(build, message):
-    """A fit's rows hold no ``c``, so its color is refused; residplot's residual layer 0 is gated."""
-    with pytest.raises(ValueError) as refused:
-        build().to_svg()
-    assert str(refused.value) == message
-
-
 # ---------------------------------------------------------------------------
 # A field selection declared on one LayerChart member reaches every member
 # ---------------------------------------------------------------------------
@@ -7635,7 +7532,7 @@ _FIGURE_DIGESTS = {
     "lmplot/order2": "048830ead8c0029e013785a496e99abfd1cb89eed2084449c98f4ad498c8b961",
     "lmplot/x_bins": "d9ad14d881455d715013c30a08c88de1977cba1bb56f2aaef6519110da44e359",
     "lmplot/scatter-false": "e931ecef99739b21d5e19843ab325d867a1bbaabfbf596b1b1b4a4197134c183",
-    "lmplot/robust-hue": "28b56d57025483f9f5b7654e08131ed2b22ca33fbd8590708de092e518c559ea",
+    "lmplot/robust-hue": "e4221df2adb38c4023b8846e1117a424d7aa0738cd0ebbd8bfacad4ce6a49b20",
     "lmplot/x_bins-hue": "9aee24538af3407953e91bac6949e91a21300421dcfcdc7cf2523aaaadbe979a",
     "regplot/hue": "f3ac385b78b66370f3426db7f3ad73f3d7d957de5c19fafbeadb2e6f3d050a55",
     "lmplot/col-hue": "4760e91c0648f68bbe436de48d991032fd31d992aebb5d04b720b374d8c1c104",
@@ -7649,7 +7546,7 @@ _FIGURE_DIGESTS = {
 _FIGURE_SCENE_DIGESTS = {
     "lmplot/hue": "de4baef90f117d8f893cd369c14229890eef23897bf8d9277e5017b80bd169cb",
     "lmplot/hue-size": "75235c3490d8f87598cfbc19a2cb3835c4bec5c72940cf473f29b05ac40206ef",
-    "lmplot/robust-hue": "8f49dd45c5ca48189db721f6da06b62135f1d647b7a7a1ad4f9cb7d4f9be2b73",
+    "lmplot/robust-hue": "9828e396f1cfd7e3e85a42b5352ad38ab06546550e2edf45386fe278e1b3fc40",
     "lmplot/x_bins-hue": "03446a41b512f2d3eb720bcc9fcbedf2053981cf782f13e21de79a9aaebdd46b",
     "regplot/hue": "de4baef90f117d8f893cd369c14229890eef23897bf8d9277e5017b80bd169cb",
     "lmplot/col-hue": "b19963e854966e2b994caf12ffb1dcf215656327697fe8ef2d02c445eddc25be",
@@ -9296,27 +9193,50 @@ _OPERAND_CHAIN_DOORS: dict[str, Callable[[], fm.Chart]] = {
         _binned_hist(_binned_color()) + _chained_points(_binned_color())
     ),
     "box+user-points": lambda: _box("g") + _user_points("g").transform(_user_copy()),
+    # A Chart.layer statistic door: the box's own BoxStats lowering, and its
+    # attached layer's own Aggregate lowering, both inside one operand.
+    "box.layer(mean)+points": lambda: (
+        _box("c").layer(fm.Layer(mark="point", encoding={"x": "g", "y": "mean(y)"}))
+        + _user_points("c")
+    ),
+    # A figure-statistic door: displot's own KDE lowering beside its rug
+    # overlay's, both inside one operand, with no `.layer()` involved.
+    "displot-kde-rug+rule": lambda: (
+        fm.displot(_GROUP_ROWS, x="v", kind="kde", rug=True)
+        + fm.Chart(_GROUP_ROWS).mark_rule().encode(x="v")
+    ),
 }
 
 
-@pytest.mark.parametrize("door", sorted(_OPERAND_CHAIN_DOORS))
-def test_each_operand_branch_holds_its_steps_then_one_marker_then_its_statistics(door):
-    """The top chain holds one branch per operand; in each, no caller step follows the marker.
+def _each_lowering_opens_its_own_marker(chain: list[dict]) -> None:
+    """Every lowering of *chain* (and of every branch it nests) is non-empty and led by its own marker."""
+    markers = [i for i, step in enumerate(chain) if step == _STATISTICS_MARKER]
+    for start, end in zip(markers, [*markers[1:], len(chain)]):
+        lowering = chain[start + 1 : end]
+        assert lowering and all(step["type"] not in _USER_STEP_TYPES for step in lowering)
+    for step in chain:
+        if step["type"] == "branch":
+            _each_lowering_opens_its_own_marker(step["transforms"])
 
-    Every lowered step of an operand (its mark's statistics, its layers'
-    encoding statistics) sits after its one marker, and every step its
-    caller wrote before it. Rejects lowering a layer's statistic outside its
-    operand's chain, as a sibling of the operand branches.
+
+@pytest.mark.parametrize("door", sorted(_OPERAND_CHAIN_DOORS))
+def test_each_operand_branch_leads_every_lowering_with_its_own_marker(door):
+    """The top chain holds one branch per operand; in each, every lowering is led by its own marker.
+
+    No caller-written step follows a chain's first marker, and every
+    lowering after it -- an operand's mark statistics, a figure's own,
+    each layer's encoding statistic -- opens behind a marker of its own,
+    never sharing one with a lowering beside it, at any nesting depth.
+    Rejects lowering a layer's statistic outside its operand's chain, as a
+    sibling of the operand branches, and rejects two lowerings sharing one
+    marker.
     """
     steps = _wire(_quiet(_OPERAND_CHAIN_DOORS[door]))["transforms"]
     assert [step["type"] for step in steps] == ["branch"] * len(steps)
     for branch in steps:
         chain = branch["transforms"]
-        assert chain.count(_STATISTICS_MARKER) <= 1
         assert _caller_steps_after_a_marker(chain) == []
-        if _STATISTICS_MARKER in chain:
-            lowered = chain[chain.index(_STATISTICS_MARKER) + 1 :]
-            assert lowered and all(step["type"] not in _USER_STEP_TYPES for step in lowered)
+        _each_lowering_opens_its_own_marker(chain)
 
 
 def test_a_non_finite_binned_value_keeps_its_own_group():
@@ -10709,10 +10629,12 @@ _FIGURE_STATISTIC_ORDER = {
 
 @pytest.mark.parametrize("reading", sorted(_FIGURE_STATISTIC_ORDER))
 def test_a_figure_statistic_on_a_pending_mark_takes_its_place_among_the_marks_statistics(reading):
-    """The pending histogram resolves first: one marker, the step placed by *reading*, the resolved chain.
+    """The pending histogram resolves first: two lowerings, the step placed by *reading*, the resolved chain.
 
-    Rejects recording the step before the mark resolves, which put it ahead
-    of the histogram's bins whatever the reading.
+    The figure's own step opens its own lowering beside the histogram's
+    Bin lowering, each behind its own marker. Rejects recording the step
+    before the mark resolves, which put it ahead of the histogram's bins
+    whatever the reading.
     """
     step = fm.Bin(field="v", name="figure_bins")
     steps = _wire(_quiet(lambda: _left_histogram()._with_statistics(step, reading=reading)))[
@@ -10721,7 +10643,7 @@ def test_a_figure_statistic_on_a_pending_mark_takes_its_place_among_the_marks_st
     resolved = _quiet(
         lambda: _left_histogram()._resolve_pending()._with_statistics(step, reading=reading)
     )
-    assert steps.count(_STATISTICS_MARKER) == 1
+    assert steps.count(_STATISTICS_MARKER) == 2
     assert [t.get("name") for t in steps if t["type"] == "bin"] == _FIGURE_STATISTIC_ORDER[reading]
     assert steps == _wire(resolved)["transforms"]
 
@@ -10732,10 +10654,11 @@ def test_a_figure_statistic_on_a_composition_with_a_pending_mark_takes_its_place
 ):
     """``(point + rule).mark_histogram()``: the pending mark resolves first, into the left operand.
 
-    The left branch carries one marker and the step placed by *reading*
-    among the histogram's bins, the chain the resolved composition gives
-    (``_attach_host``). Rejects placing the step before the mark resolves,
-    which put it ahead of the bins whatever the reading.
+    The left branch carries two lowerings, each behind its own marker: the
+    histogram's Bin, and the step placed by *reading* among them, the
+    chain the resolved composition gives (``_attach_host``). Rejects
+    placing the step before the mark resolves, which put it ahead of the
+    bins whatever the reading.
     """
     from ferrum.chart import _attach_host
 
@@ -10747,7 +10670,7 @@ def test_a_figure_statistic_on_a_composition_with_a_pending_mark_takes_its_place
     chart = _quiet(lambda: pending()._with_statistics(step, reading=reading))
     resolved = _quiet(lambda: _attach_host(pending())._with_statistics(step, reading=reading))
     left = _wire(chart)["transforms"][0]["transforms"]
-    assert left.count(_STATISTICS_MARKER) == 1
+    assert left.count(_STATISTICS_MARKER) == 2
     assert [t.get("name") for t in left if t["type"] == "bin"] == _FIGURE_STATISTIC_ORDER[reading]
     assert _wire(chart)["transforms"] == _wire(resolved)["transforms"]
 
@@ -10848,3 +10771,2636 @@ def test_each_param_binds_one_filter_per_panel(door):
     bindings = scene["interaction"].get("param_bindings") or []
     filters = [(b["param"], b["panel"]) for b in bindings if b["role"] == "filter"]
     assert filters == expected
+
+
+# ---------------------------------------------------------------------------
+# V8 / G7: a composite statistic groups by the grouping channels its layer
+# draws or inherits from its own parent (spec §4.2, §6.4)
+# ---------------------------------------------------------------------------
+
+
+def _smooth(data: pl.DataFrame = df, *, ci: float | None = None, **encoding: Any) -> fm.Chart:
+    """A linear fit, so a four-row group fits (a loess needs more rows than a group holds)."""
+    chart = fm.Chart(data).mark_smooth(method="lm", ci=ci)
+    return chart.encode(**{"x": "v", "y": "y", **encoding})
+
+
+#: Each composite mark over ``df``, by the statistic step its desugar builds.
+_COMPOSITES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
+    "histogram": (lambda **e: mk("histogram", x="v", **e), "bin"),
+    "density": (lambda **e: mk("density", x="v", **e), "kde"),
+    "boxplot": (lambda **e: mk("boxplot", x="g", y="y", **e), "box_stats"),
+    "violin": (lambda **e: mk("violin", x="g", y="y", **e), "violin"),
+    "smooth": (lambda **e: _smooth(**e), "smooth"),
+    "smooth-ci": (lambda **e: _smooth(ci=0.95, **e), "smooth"),
+    "boxen": (lambda **e: mk("boxen", x="g", y="z", **e), "letter_value"),
+    "qq": (lambda **e: mk("qq", x="z", **e), "qq"),
+    "contour": (lambda **e: mk("contour", x="v", y="y", **e), "kde2_d"),
+}
+
+
+def _statistic_groupby(chart: Any, step_type: str) -> list[list[str] | None]:
+    """The ``groupby`` of every *step_type* step on *chart*'s wire, in written order."""
+    return [s.get("groupby") for s in _steps_at_any_depth(chart) if s.get("type") == step_type]
+
+
+def _dropped_warnings(build: Callable[[], Any]) -> tuple[Any, list[str]]:
+    """*build*'s static render and every warning that a layer dropped a binding its rows lack."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = build().to_svg()
+    return svg, [str(w.message) for w in caught if "was dropped" in str(w.message)]
+
+
+# Per composite and grouping spelling: the groupby each statistic step carries.
+_GROUPED: dict[str, tuple[str, str, list[str]]] = {
+    **{
+        f"{kind}/{channel}": (kind, channel, expected)
+        for kind, expected in (
+            ("histogram", ["c"]),
+            ("density", ["c"]),
+            ("smooth", ["c"]),
+            ("smooth-ci", ["c"]),
+            ("qq", ["c"]),
+            ("boxen", ["c"]),
+            ("boxplot", ["g", "c"]),
+            ("violin", ["g", "c"]),
+        )
+        for channel in ("color", "fill", "stroke", "detail", "shape", "stroke_dash")
+    },
+    "contour/color": ("contour", "color", ["c"]),
+    "contour/shape": ("contour", "shape", ["c"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_GROUPED))
+def test_V8_G7_a_composite_statistic_groups_by_each_grouping_channel(case):
+    """Color under each spelling, detail, shape and stroke_dash each split the statistic.
+
+    Every step the composite builds groups by the field, after the box and
+    violin's category, so no sub-layer drops a binding its rows lack.
+    Rejects reading only ``color`` (``mark_smooth(color=)`` was refused and
+    ``mark_boxplot(shape=)`` drew one box per category, its outliers
+    shaped by rows the box never split), and rejects an alias spelling
+    grouping nothing (``fill=`` on a histogram was refused).
+    """
+    kind, channel, expected = _GROUPED[case]
+    build, step = _COMPOSITES[kind]
+    chart = build(**{channel: "c"})
+    groupbys = _statistic_groupby(chart, step)
+    assert groupbys and all(groupby == expected for groupby in groupbys)
+    _svg, dropped = _dropped_warnings(lambda: chart)
+    assert dropped == []
+
+
+def _hand_built_fit(**encoding: Any) -> fm.Chart:
+    """The linear fit built by hand: ``Smooth(groupby=["c"])`` drawn as a line."""
+    fit = fm.Smooth("v", "y", method="lm", ci=None, groupby=["c"])
+    return fm.Chart(df).transform(fit).mark_line().encode(x="x", y="y", **encoding)
+
+
+def _hand_built_counts(**encoding: Any) -> fm.Chart:
+    """The histogram built by hand: ``Bin(groupby=["c"])`` drawn as bars."""
+    counts = fm.Bin("v", groupby=["c"])
+    chart = fm.Chart(df).transform(counts).mark_bar()
+    return chart.encode(x="bin_start", x2="bin_end", y="count", **encoding)
+
+
+_HAND_BUILT: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "smooth/color": (lambda: _smooth(color="c"), lambda: _hand_built_fit(color="c")),
+    "smooth/detail": (lambda: _smooth(detail="c"), lambda: _hand_built_fit(detail="c")),
+    "smooth/stroke_dash": (
+        lambda: _smooth(stroke_dash="c"),
+        lambda: _hand_built_fit(stroke_dash="c"),
+    ),
+    "histogram/color": (
+        lambda: mk("histogram", x="v", color="c"),
+        lambda: _hand_built_counts(color="c"),
+    ),
+    "histogram/shape": (
+        lambda: mk("histogram", x="v", shape="c"),
+        lambda: _hand_built_counts(shape="c"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_HAND_BUILT))
+def test_V8_G7_a_grouped_composite_draws_what_the_hand_built_groupby_transform_draws(case):
+    """The composite equals the same transform written with ``groupby=``, mark for mark.
+
+    Rejects one fit through the pooled rows (one polyline where the
+    hand-built groupby draws two) and the old refusal of ``color`` on a fit.
+    """
+    composite, hand_built = _HAND_BUILT[case]
+    assert census(_quiet(composite().to_svg)) == census(_quiet(hand_built().to_svg))
+    assert interactive_census(_quiet(composite)) == interactive_census(_quiet(hand_built))
+
+
+# Per door: a grouped composite beside a rug, and the parts it draws alone.
+_V8_DOORS: dict[str, Case] = {
+    "V8/F-smooth": Case(
+        lambda: _smooth(color="c"), marks={"polyline": 2}, legends={"c": ("p", "q")}
+    ),
+    "V8/F-smooth-ci": Case(
+        lambda: _smooth(ci=0.95, color="c"),
+        marks={"path": 2, "polyline": 2},
+        legends={"c": ("p", "q")},
+    ),
+    "V8/F-histogram": Case(
+        lambda: mk("histogram", x="v", color="g"), marks={"rect": 6}, legends={"g": ("a", "b")}
+    ),
+    "V8/F-density": Case(
+        lambda: mk("density", x="v", color="g"), marks={"path": 2}, legends={"g": ("a", "b")}
+    ),
+    "V8/F-boxplot": Case(
+        lambda: mk("boxplot", x="g", y="y", color="c"),
+        marks={"line": 16, "rect": 4},
+        legends={"c": ("p", "q")},
+    ),
+    "V8/L-smooth-tick": Case(
+        lambda: _smooth(color="c").layer(layer("tick")),
+        (lambda: _smooth(color="c"), lambda: mk("tick", x="v", y="y", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "V8/L-smooth-ci-tick": Case(
+        lambda: _smooth(ci=0.95, color="c").layer(layer("tick")),
+        (lambda: _smooth(ci=0.95, color="c"), lambda: mk("tick", x="v", y="y", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "V8/SY-smooth": Case(
+        lambda: _smooth(color="c") + SY("r"),
+        marks={"polyline": 4},
+        chart_level=None,
+    ),
+    "V8/Fc-smooth": Case(
+        lambda: _smooth(color="c").facet("g"),
+        marks={"polyline": 4},
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    **_cases(
+        "V8/smooth-rug",
+        plus_doors(lambda: _smooth(color="c"), lambda: mk("tick", x="v")),
+    ),
+    **_cases(
+        "V8/boxplot-shape-point",
+        {
+            door: case
+            for door, case in plus_doors(
+                lambda: mk("boxplot", x="g", y="y", shape="c"), lambda: P(df2, x="g")
+            ).items()
+            # A multi-layer composite is no independent-y member.
+            if door != "LCi"
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_V8_DOORS))
+def test_V8_a_grouped_composite_keeps_its_groups_on_every_door(case):
+    """A composite's grouping holds beside a sibling, attached or composed, static and interactive.
+
+    Rejects ``S(color=c).layer(tick)`` fitting one ungrouped curve (it was
+    refused), and a sibling's door changing the composite's groups.
+    """
+    check_rendering(_V8_DOORS[case])
+
+
+def _panel_tag_counts(panel: Counter) -> dict[str, int]:
+    """One panel's census as tag counts."""
+    return dict(Counter(signature[0] for signature in panel.elements()))
+
+
+def test_V8_a_faceted_composite_groups_by_its_grouping_then_its_facet_fields():
+    """The groupby is the grouping fields, then the facet's, within each panel."""
+    chart = mk("density", x="v", color="c").facet("g")
+    assert _statistic_groupby(chart, "kde") == [["c", "g"]]
+    assert [_panel_tag_counts(panel) for panel in panel_census(_quiet(chart.to_svg))] == [
+        {"path": 2},
+        {"path": 2},
+    ]
+
+
+def test_V8_a_smooth_under_a_binned_color_fits_one_curve_per_bin():
+    """Each bin of ``Color("v", bin=...)`` gets its own fit, and the legend lists the bins.
+
+    Rejects grouping by the raw ``v`` (eight one-row groups, no fit) and
+    refusing the fit's color (the fit's rows carried no ``v``).
+    """
+    binned = fm.Color("v", bin={"bin_width": 4.0, "extent": (0.0, 8.0), "nice": False})
+    svg, dropped = _dropped_warnings(lambda: _smooth(color=binned))
+    assert dropped == []
+    assert tag_counts(svg) == {"polyline": 2}
+    assert legend_set(svg) == {"v": ("0", "4", "8")}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_V8_the_explicit_groupby_wins_over_the_charts_grouping(output):
+    """A caller's own ``groupby=`` is the statistic's grouping, as before.
+
+    Its counts then lack the ``c`` the bars draw, so the chart is refused
+    rather than drawn uncolored.
+    """
+    chart = fm.Chart(df).mark_histogram(groupby=["g"]).encode(x="v", color="c")
+    assert _statistic_groupby(chart, "bin") == [["g"]]
+    with pytest.raises(ValueError, match="unknown column 'c'"):
+        _quiet(chart.to_svg if output == "static" else lambda: chart.interactive().scene_json)
+
+
+#: A frame whose ``c`` has one one-row group and a null key.
+_SPARSE = df.with_columns(cs=pl.Series(["p", "p", "p", "p", "p", "p", "q", None]))
+
+
+def test_V8_a_group_too_small_for_its_fit_follows_the_transforms_per_group_contract():
+    """A one-row group cannot be fit: Smooth degrades that group and warns, as with groupby=."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        grouped = _smooth(_SPARSE, color="cs").to_svg()
+    with warnings.catch_warnings(record=True) as caught_by_hand:
+        warnings.simplefilter("always")
+        by_hand = (
+            fm.Chart(_SPARSE)
+            .mark_smooth(method="lm", groupby="cs")
+            .encode(x="v", y="y", color="cs")
+        ).to_svg()
+    assert grouped == by_hand
+    assert sorted(str(w.message) for w in caught) == sorted(str(w.message) for w in caught_by_hand)
+    assert any("could not fit group" in str(w.message) for w in caught)
+
+
+#: Per composite: the chart grouped through its encoding, and the same mark with ``groupby=``.
+_NULL_KEY_TWINS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    "histogram": (
+        lambda: mk("histogram", _SPARSE, x="v", color="cs"),
+        lambda: fm.Chart(_SPARSE).mark_histogram(groupby=["cs"]).encode(x="v", color="cs"),
+    ),
+    "density": (
+        lambda: mk("density", _SPARSE, x="v", color="cs"),
+        lambda: fm.Chart(_SPARSE).mark_density(groupby=["cs"]).encode(x="v", color="cs"),
+    ),
+    "smooth": (
+        lambda: _smooth(_SPARSE, color="cs"),
+        lambda: (
+            fm.Chart(_SPARSE)
+            .mark_smooth(method="lm", groupby=["cs"])
+            .encode(x="v", y="y", color="cs")
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_NULL_KEY_TWINS))
+def test_V8_a_null_group_key_follows_the_transforms_null_key_policy(kind):
+    """A null ``cs`` row groups exactly as the transform's own ``groupby=`` groups it."""
+    grouped, by_hand = _NULL_KEY_TWINS[kind]
+    assert _quiet(lambda: grouped().to_svg()) == _quiet(lambda: by_hand().to_svg())
+
+
+# Each composite whose statistic now carries the hue, with its legend: the
+# letter values, quantiles, isolines and residuals group by it, so every
+# layer draws it and no layer drops it.
+_RESTORED_HUE: dict[str, tuple[Callable[[], Any], dict[str, tuple[str, ...]]]] = {
+    "mark_boxen-color": (
+        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c"),
+        {"c": ("p", "q")},
+    ),
+    "mark_boxen-color-is-x": (
+        lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="g"),
+        {"g": ("a", "b")},
+    ),
+    "catplot-boxen-hue": (
+        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
+        {"grp": ("X", "Y")},
+    ),
+    "mark_qq-color": (
+        lambda: fm.Chart(df).mark_qq().encode(x="z", color="c"),
+        {"c": ("p", "q")},
+    ),
+    "mark_contour-color": (
+        lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g"),
+        {"g": ("a", "b")},
+    ),
+    "residplot-encode-color": (
+        lambda: fm.residplot(df, x="v", y="y", encode={"color": "c"}),
+        {"c": ("p", "q")},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RESTORED_HUE))
+def test_V8_a_composite_statistic_carries_its_hue_so_every_layer_draws_it(case):
+    """The hue groups the statistic, so its rows carry it: a legend, and no layer drops it.
+
+    Rejects computing the statistic over the pooled rows, which dropped the
+    hue from every layer with a warning and drew no legend.
+    """
+    build, legends = _RESTORED_HUE[case]
+    svg, dropped = _dropped_warnings(build)
+    assert dropped == []
+    assert legend_set(svg) == legends
+
+
+def test_V8_qq_draws_one_reference_line_per_group():
+    """Each group's quantiles get their own reference line, fit to that group's rows."""
+    svg = _quiet(lambda: fm.Chart(df).mark_qq().encode(x="z", color="c").to_svg())
+    assert tag_counts(svg) == {"circle": 8, "line": 2}
+
+
+def test_V8_a_contour_grouped_through_color_draws_the_isolines_groupby_draws():
+    """``encode(color=g)`` splits the surfaces as ``groupby="g"`` does."""
+    by_color = _quiet(lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g").to_svg())
+    by_groupby = _quiet(
+        lambda: fm.Chart(df).mark_contour(groupby="g").encode(x="v", y="y", color="g").to_svg()
+    )
+    assert census(by_color) == census(by_groupby)
+
+
+def test_V8_a_boxen_hue_draws_bands_per_category_and_hue():
+    """Each (category, hue) group draws its own median tick and bands."""
+    hued = _quiet(lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c").to_svg())
+    plain = _quiet(lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z").to_svg())
+    assert tag_counts(hued)["line"] == 2 * tag_counts(plain)["line"]
+
+
+def test_V8_residplot_refits_each_encoded_group_and_drops_the_single_corner_metrics():
+    """An encoded hue refits each group's residuals, so the one-fit corner metrics are omitted.
+
+    Rejects refusing the hue (the residuals carried no ``c``) and keeping
+    the pooled fit's R² beside per-group residuals.
+    """
+    chart = fm.residplot(df, x="v", y="y", encode={"color": "c"})
+    assert _statistic_groupby(chart, "smooth") == [["c"]]
+    svg = _quiet(chart.to_svg)
+    assert not any("R²" in text for text in chrome_text(svg))
+    keyword = fm.residplot(df, x="v", y="y", shape="c")
+    assert _statistic_groupby(keyword, "smooth") == [["c"]]
+
+
+#: Every layered residplot door that reaches the point layer with
+#: ``encode=``'s color bound: the zero rule drawn or not, the lowess
+#: overlay, ``show_metrics=False``, and the post-hoc rebuild. The flat
+#: path (no overlay requested at all) is excluded on purpose: nothing
+#: makes it layered, so its own encoding -- not a layer's -- already
+#: carries the binding, as the oracle cell below pins.
+_RESID_POINT_TOOLTIP_DOORS: dict[str, Callable[[], fm.Chart]] = {
+    "zero-line-off": lambda: _resid(zero_line=False, encode={"color": "c"}),
+    "zero-line-on": lambda: _resid(encode={"color": "c"}),
+    "lowess": lambda: _resid(lowess=True, encode={"color": "c"}),
+    "show-metrics-false": lambda: _resid(show_metrics=False, encode={"color": "c"}),
+    "post-hoc": lambda: _resid(zero_line=False).encode(color="c"),
+}
+
+#: Each door's static SVG bytes, pinned on the tree before the point layer
+#: bound ``encode=`` itself: the fix changes the interactive tooltip only.
+_RESID_POINT_TOOLTIP_DOOR_DIGESTS = {
+    "zero-line-off": "c281b5e43f488f1c179086c2c1a2f66b36dbee1ee5f7f84ac8c63d08d4c5a250",
+    "zero-line-on": "fe6951afdd0e59f9bb3c77da1802e865421d34eb2a83aca4c5b1a014f5779cdb",
+    "lowess": "51b7a6bb6e72d60bc541d1f7128bac7ccc51de062ac50e36609eec0d806a822c",
+    "show-metrics-false": "fe6951afdd0e59f9bb3c77da1802e865421d34eb2a83aca4c5b1a014f5779cdb",
+    "post-hoc": "c281b5e43f488f1c179086c2c1a2f66b36dbee1ee5f7f84ac8c63d08d4c5a250",
+}
+
+
+@pytest.mark.parametrize("door", sorted(_RESID_POINT_TOOLTIP_DOORS))
+def test_a_layered_residplots_points_keep_their_encoded_fields_in_the_tooltip(door):
+    """The point layer binds every ``encode=`` binding itself, so its tooltip keeps it.
+
+    Rejects reading the chart-level ``encode=`` as the layer's inherited
+    parent: the per-layer tooltip rule lists a layer's own fields only
+    when it has any, and the point layer already has its own (x, y
+    residual), so an inherited ``color`` was shadowed and dropped. The
+    static SVG stays byte-identical to the pre-fix render, since only the
+    interactive tooltip changes.
+    """
+    import hashlib
+
+    build = _RESID_POINT_TOOLTIP_DOORS[door]
+    tooltips = interactive_tooltip_fields(_quiet(build))
+    points = next(names for names in tooltips if "y residual" in names)
+    assert "c" in points
+    svg = _quiet(lambda: build().to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _RESID_POINT_TOOLTIP_DOOR_DIGESTS[door]
+
+
+def test_a_flat_residplots_own_encoding_already_carries_its_color():
+    """``residplot(encode={"color": "c"})`` with nothing to layer is unaffected by the layer fix.
+
+    Nothing requests an overlay, so the chart stays flat and ``encode=``
+    lands on the chart's own encoding, which every consumer already reads;
+    the point layer fix applies only once an overlay makes the chart
+    layered.
+    """
+    build = lambda: fm.residplot(  # noqa: E731
+        df, x="v", y="y", zero_line=False, show_metrics=False, encode={"color": "c"}
+    )
+    chart = build()
+    assert chart._layers is None or len(chart._layers) == 0
+    (points,) = interactive_tooltip_fields(_quiet(build))
+    assert "c" in points
+
+
+# An encoding aggregate on a composite's channel keeps the behavior it had:
+# the histogram and the box group by the aggregated field as written (their
+# color reads predate the grouping), the fit refuses as it did.
+_AGGREGATED_COMPOSITE_DIGESTS = {
+    "boxplot": "32a65d6338a647f449f41c04188848dad9fa033cf297a4a588f8b327708f276d",
+    "histogram": "7fc8b97c5018d3cbf9b16af629f0f8c109eee84c4b8485e430e2b3fc92413413",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_AGGREGATED_COMPOSITE_DIGESTS))
+def test_V8_an_aggregate_on_a_composites_color_renders_as_it_did(kind):
+    """``Color("z", aggregate="mean")`` on a histogram or box renders the bytes it rendered."""
+    import hashlib
+
+    build, _step = _COMPOSITES[kind]
+    svg = _quiet(lambda: build(color=fm.Color("z", aggregate="mean")).to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _AGGREGATED_COMPOSITE_DIGESTS[kind]
+
+
+def test_V8_an_aggregate_on_a_fits_color_is_refused_as_it_was():
+    """An aggregated color joins no grouping, so the fit's rows lack ``z`` and the mean refuses."""
+    with pytest.raises(ValueError) as refused:
+        _quiet(lambda: _smooth(color=fm.Color("z", aggregate="mean")).to_svg())
+    assert (
+        str(refused.value) == "transform failed: ValueError: stat_aggregate: column 'z' not found"
+    )
+
+
+# Composites the change does not reach: no grouping channel, or a grouping
+# field the composite already groups by. Each renders the bytes it rendered.
+_COMPOSITE_CONTROLS: dict[str, Callable[[], Any]] = {
+    **{f"{kind}/F": build for kind, (build, _step) in _COMPOSITES.items()},
+    **{
+        f"{kind}/L": (lambda build=build: build().layer(layer("tick")))
+        for kind, (build, _step) in _COMPOSITES.items()
+    },
+    **{
+        f"{kind}/+rug": (lambda build=build: build() + mk("tick", x="v"))
+        for kind, (build, _step) in _COMPOSITES.items()
+    },
+    **{
+        f"{kind}/LCs": (lambda build=build: fm.LayerChart(build(), mk("tick", df2, x="v")))
+        for kind, (build, _step) in _COMPOSITES.items()
+    },
+    **{
+        f"{kind}/Fc": (lambda build=build: build().facet("c"))
+        for kind, (build, _step) in _COMPOSITES.items()
+    },
+    "boxplot/color-is-x": lambda: mk("boxplot", x="g", y="y", color="g"),
+    "violin/color-is-x": lambda: mk("violin", x="g", y="y", color="g"),
+    "histogram/color": lambda: mk("histogram", x="v", color="g"),
+    "density/color": lambda: mk("density", x="v", color="g"),
+    "boxplot/color": lambda: mk("boxplot", x="g", y="y", color="c"),
+    "violin/color": lambda: mk("violin", x="g", y="y", color="c"),
+    "catplot-box-hue": lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="box", hue="grp"),
+    "displot-kde-hue": lambda: fm.displot(_W_CAT, x="val", hue="grp", kind="kde"),
+    "contour/groupby": lambda: fm.Chart(df).mark_contour(groupby="g").encode(x="v", y="y"),
+}
+
+_COMPOSITE_CONTROL_DIGESTS: dict[str, str] = {
+    "boxen/+rug": "2fb0b3a0a22181932eff7caa76c3779ae7be122062fd9f487455d26c7ffa5d13",
+    "boxen/F": "07f1b8d46631dea387c8f79f4956694dc0fafe773c1b08f5561f4b717593c83c",
+    "boxen/Fc": "e4f02dd48c6214c2b84e738e47bf24fa64e14e9bc34b22865f177207ae7eed32",
+    "boxen/L": "1459de388c91d3d097e8a751692993e712168009c6698d1e14787595cd055994",
+    "boxen/LCs": "5f6d9c2d2ee91023d1dce04492d21e0db2f911bf5b397434fc944be8c102767b",
+    "boxplot/+rug": "78a08ff86bb5f4670aaa6e5768cede923acfa41b717d19086881716184d1dddd",
+    "boxplot/F": "7312af034cc9add736a4483e31d96e1a158faa5d874630356241a11d2231306a",
+    "boxplot/Fc": "f30bb77e41b89b86f03022728d21cea222d97a0c169e3b9341ca90595c07d94c",
+    "boxplot/L": "e3e38c4096a9a14b8935a121958ec9521eb157f8cac2506ffd84160eb7334aa2",
+    "boxplot/LCs": "f9b28b75c741ce0ab4e636ea100dbf496958426b3ccf974e8f154eb4fd44d698",
+    "boxplot/color": "24a085e7c34374a48ffbba6402c52a237dcb8c579bc6e395b037ea4fd84b824b",
+    "boxplot/color-is-x": "5ab35cff26faaa3860b2041053378ad81517df94327fef5e9d218d02c8bd91fd",
+    "catplot-box-hue": "22aa5ebe2a0c4bf976e41f9b5ee8152bc449fff205a88348605c6396172c26be",
+    "contour/+rug": "25a0b78861dc918b042be8fabfcaca155923d52375d216437b9d4cf60adf2cc2",
+    "contour/F": "abf76917ca5eccf1d7f1995b92485a75f466f263a8053d03c999f212fdf20e46",
+    "contour/Fc": "b10ad83eea90ba6639dab125268e93d2af528976e5585ffb7eaee86f8a49cc0d",
+    "contour/L": "25a0b78861dc918b042be8fabfcaca155923d52375d216437b9d4cf60adf2cc2",
+    "contour/LCs": "cec1b4594b81260baa85ae417cb33fa01d203f005b17e1e0a12d86dbabe5ed3f",
+    "contour/groupby": "d3ae503b8103f09448afe3cf190db052407db636f11db1bc55072f8e18de71dd",
+    "density/+rug": "b5184eaea8968799a3045653673ce7fea885ce0cca5bbe2351e1427be7ec7a9d",
+    "density/F": "f163b168ec0074ad577648fc389f74af78c9f0cbf7042efa12cd17a2c074e3f0",
+    "density/Fc": "1513a44ff3f57caa13babd5551882582bcb5163ef5c22e00b63db5f6669e6729",
+    "density/L": "b5184eaea8968799a3045653673ce7fea885ce0cca5bbe2351e1427be7ec7a9d",
+    "density/LCs": "fff6862672557ccb68a0dcc6abeb86b4a907bc0fe61ffb18aecb99ca9e5286a7",
+    "density/color": "329a478d8290e1b7eb527be5385e8482dbf5f37deeba2be4b69710df6b73d484",
+    "displot-kde-hue": "c1c50349dacf306bb635f01daeb024e8f57cf0319b81e74898330f51c9fac621",
+    "histogram/+rug": "e6e5f94814f808e639d9966314ecb7e4f3e7d4f1f9818e510e35c3f0e932fc5d",
+    "histogram/F": "b4913a77287da34ca2337f02819e0440b9eaa47957020fd20585a48a5a1250fb",
+    "histogram/Fc": "40d4b34dc2cddc98a409ce0384ad1ae26291acdc0649a479d2c2422bf9c629fb",
+    "histogram/L": "e6e5f94814f808e639d9966314ecb7e4f3e7d4f1f9818e510e35c3f0e932fc5d",
+    "histogram/LCs": "f1bc1e8b83e132619ffa45c01c57d238f996b3cd508b69f0ef4337d2ff97a19b",
+    "histogram/color": "2685ec30c7e134cd4746044195c7e374deceec8edbb48e23ed78aa02e7be17fa",
+    "qq/+rug": "1ae5e25be02988956bf2068156568085bb09f4cae604461df1de3851cbb6ad2f",
+    "qq/F": "07689d9d5965f22dbf35554e8b4bfdcd6fbafeccdef82ff21c8d496ada94f5a8",
+    "qq/Fc": "cf1bccec74c736f5eb8c1878a50525864c0fd46f63ac4520806752fec4daf274",
+    "qq/L": "72ffa2b60c3bc8673fa41de49f4485e27f885e067d204de36d986df06bc3edc0",
+    "qq/LCs": "8895eac136b78004ebdbed47ef2a2e9f5b874d88a9f896d52061f57701639fe7",
+    "smooth-ci/+rug": "c64ef7f8f4e6c9529b6ea56e0b9b54074d142f21bd4b70dafa98a46d57aa6666",
+    "smooth-ci/F": "f148133044e97653d3478ce8c0ffba7bda12b78e874e4508eb7d98bd5628dc70",
+    "smooth-ci/Fc": "12fab76ef2ae00efd922f69e15c123d68cb88bb69bdd5cd8bd368336e718504d",
+    "smooth-ci/L": "c64ef7f8f4e6c9529b6ea56e0b9b54074d142f21bd4b70dafa98a46d57aa6666",
+    "smooth-ci/LCs": "eba64ed71edabaf65990107e7f1a68d4bd8008079d56aeb93850711819680723",
+    "smooth/+rug": "b89b8d826f9da69488e7b673c04edea8fda12c06a40e74800d681ef6fe9ab2d5",
+    "smooth/F": "a4806ad17d72e760e348eca5b8fa5e06f2398a3a29a460b3a7a0ce82009876f8",
+    "smooth/Fc": "cb31ffa5de55181779de48fdc03fb87f98d36c1b4259177d0f5db41c0e07b1b3",
+    "smooth/L": "771b46feb4551e72fd6448c06491030d1679d9f263751bde3c2819e555653020",
+    "smooth/LCs": "393b49ef4b68dc1c7fc8507538a573f9d0be03332d508a08c450553eb2cd4049",
+    "violin/+rug": "dccb5762ff381d06af4f819108a8e04619f1d9d4582b04647198b28e287dd3d5",
+    "violin/F": "576cdaaf65f1672d641462f86ac8e286e62afd090c05ea8ab4a50a803b5a7211",
+    "violin/Fc": "d14c61945ee0df934f4e7d59e59ee7364248d5b8e4d1b06715ca9c0fa4c58862",
+    "violin/L": "78a9f7dd6a5d29b0cfff561abc63a856110ae85fc32a9fa31ee678cb36bf622b",
+    "violin/LCs": "c35e52c9cedf460ad0dc5774ea1ce106c743f45f2f13769bc15d269f307b3185",
+    "violin/color": "fc6b619486bb01ad4c2dc7cfc02f6c1ca1e12a0b38b54347b408d740601d1085",
+    "violin/color-is-x": "22ac7ceabbdafc4aae3f63a95d077b31381ff16c5e0e0ff312a632494fa4f216",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_COMPOSITE_CONTROLS))
+def test_V8_a_composite_the_grouping_does_not_reach_renders_as_it_did(case):
+    """Byte-identical controls: no grouping channel, or one the composite already groups by."""
+    import hashlib
+
+    svg = _quiet(lambda: _COMPOSITE_CONTROLS[case]().to_svg())
+    assert hashlib.sha256(svg.encode()).hexdigest() == _COMPOSITE_CONTROL_DIGESTS[case]
+
+
+# ---------------------------------------------------------------------------
+# Attaching a label never changes its host's statistic, and a + operand's
+# detail groups every layer of the operand at the operand's grain
+# ---------------------------------------------------------------------------
+
+
+def _stacked_mean_bars(**encoding: Any) -> fm.Chart:
+    return _binned_mark("bar", fm.Stack(), color="c", **encoding)
+
+
+def _labelled(**encoding: Any) -> fm.Chart:
+    return _stacked_mean_bars(**encoding).layer(layer("text", text=_mean_text()))
+
+
+#: Every door that attaches a mean label to a stacked mean bar.
+_LABELLED_DOORS: dict[str, Callable[..., Any]] = {
+    "L": lambda **e: _labelled(**e),
+    "LD": lambda **e: _stacked_mean_bars(**e).layer(
+        fm.Layer(
+            data=_GROUP_ROWS, mark="text", encoding={"x": "g", "y": "mean(y)", "text": _mean_text()}
+        )
+    ),
+    "+L": lambda **e: _labelled(**e) + _group_rule(),
+    "+e": lambda **e: (
+        _binned_mark("bar", fm.Stack(), **e) + _binned_mark("text", fm.Stack(), text=_mean_text())
+    ).encode(color="c"),
+    "LCs": lambda **e: fm.LayerChart(_labelled(**e), _group_rule()),
+    "LCm": lambda **e: fm.LayerChart(_labelled(**e), _group_rule())._build_merged(),
+}
+
+
+def _bar_segments(chart: Any, kind: str) -> int:
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    if kind == "static":
+        return len(data_bar_rects(mark_layer(_quiet(chart.to_svg))))
+    marks = _quiet(lambda: _scene(chart))["panels"][0]["marks"]
+    return sum(len(batch["nodes"]) for batch in marks if batch["kind"] == "bar")
+
+
+@pytest.mark.parametrize("kind", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_LABELLED_DOORS))
+@pytest.mark.parametrize("detail", [False, True], ids=["color", "color+detail"])
+def test_attaching_a_label_never_changes_its_hosts_statistic(door, kind, detail):
+    """The stacked mean bars draw one segment per group, alone and with a label attached.
+
+    Four ``(g, c)`` segments, eight under a ``detail="f"``, on every door
+    and both outputs. Rejects the label's statistic taking the bars' rows
+    (three segments), and a ``+`` operand's detail grouping only the marks
+    that draw detail (the bars grouped by ``(g, c)`` beside the flat
+    chart's ``(g, c, f)``).
+    """
+    encoding = {"detail": "f"} if detail else {}
+    alone = _bar_segments(_quiet(lambda: _stacked_mean_bars(**encoding)), kind)
+    assert alone == _GROUP_ROWS.select(["g", "c", "f"] if detail else ["g", "c"]).n_unique()
+    chart = _quiet(lambda: _LABELLED_DOORS[door](**encoding))
+    if kind == "interactive" and isinstance(chart, fm.LayerChart):
+        chart = chart._build_merged()
+    assert _bar_segments(chart, kind) == alone
+
+
+# ---------------------------------------------------------------------------
+# A grouped boxen or qq under a facet: the null-key drop is counted over the frame
+# ---------------------------------------------------------------------------
+
+#: Panel ``F2``'s every ``h`` is null, so a statistic grouped by ``h`` keeps none of its rows.
+_NULL_PANEL = pl.DataFrame(
+    {
+        "cat": ["a", "b"] * 10,
+        "f": ["F1"] * 10 + ["F2"] * 10,
+        "h": ["X", "Y"] * 5 + [None] * 10,
+        "val": [float(i % 7) for i in range(20)],
+    }
+)
+
+_NULL_PANEL_CHARTS: dict[str, tuple[Callable[[], fm.Chart], str]] = {
+    "boxen": (
+        lambda: fm.Chart(_NULL_PANEL).mark_boxen().encode(x="cat", y="val", color="h").facet("f"),
+        "LetterValue",
+    ),
+    "qq": (
+        lambda: fm.Chart(_NULL_PANEL).mark_qq().encode(x="val", color="h").facet("f"),
+        "QQ",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_NULL_PANEL_CHARTS))
+def test_a_faceted_hue_drops_its_null_key_rows_once_counted_over_the_whole_frame(kind):
+    """The hue reaches the statistic under a facet, and its null-key drop warns once for every panel."""
+    build, label = _NULL_PANEL_CHARTS[kind]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build().to_svg()
+    assert [str(w.message) for w in caught if "null 'h'" in str(w.message)] == [
+        f"{label}: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+
+
+def _drop_warnings(build: Callable[[], Any], output: Callable[[Any], Any]) -> tuple[Any, list[str]]:
+    """*output* of *build*'s chart (or the exception it raised) and every null-key drop warning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result = output(build())
+        except ValueError as refused:
+            result = refused
+    return result, [str(w.message) for w in caught if "belong to no group" in str(w.message)]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("kind", sorted(_NULL_PANEL_CHARTS))
+def test_a_faceted_panel_the_null_key_drop_emptied_draws_empty_beside_the_drop_warning(
+    kind, output
+):
+    """Panel ``F2``, whose every hue is null, draws its frame with no marks, and the drop warns.
+
+    Rejects the panel vanishing (panels built from the rows drawn after the
+    statistic), which drew ``F1`` alone.
+    """
+    build, label = _NULL_PANEL_CHARTS[kind]
+    render = {"static": lambda chart: chart.to_svg(), "interactive": _scene}[output]
+    drawn, dropped = _drop_warnings(build, render)
+    assert dropped == [
+        f"{label}: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+    if output == "static":
+        panels = panel_census(drawn)
+        assert len(panels) == 2
+        assert panels[0] and not panels[1], [dict(panel) for panel in panels]
+        assert "F2" in [text for text in chrome_text(drawn)]
+    else:
+        assert [
+            sum(len(batch["nodes"]) for batch in panel["marks"]) > 0 for panel in drawn["panels"]
+        ] == [
+            True,
+            False,
+        ]
+
+
+@pytest.mark.parametrize("facet", [True, False], ids=["faceted", "unfaceted"])
+@pytest.mark.parametrize("kind", sorted(_NULL_PANEL_CHARTS))
+def test_a_null_key_drop_that_empties_every_panel_refuses_beside_the_drop_warning(kind, facet):
+    """Every hue null: the chart refuses with the statistic's empty-input refusal, and the drop warns.
+
+    Faceted and unfaceted refuse alike. Rejects the faceted chart rendering
+    with no panel (a ``NoRowsToDraw`` warning), and a refusal that hides the
+    drop that caused it.
+    """
+    build, label = _NULL_PANEL_CHARTS[kind]
+    refusal = {"boxen": "stat_letter_value", "qq": "stat_qq"}[kind]
+    all_null = _NULL_PANEL.with_columns(pl.lit(None, dtype=pl.Utf8).alias("h"))
+    chart = {
+        "boxen": lambda: fm.Chart(all_null).mark_boxen().encode(x="cat", y="val", color="h"),
+        "qq": lambda: fm.Chart(all_null).mark_qq().encode(x="val", color="h"),
+    }[kind]
+    refused, dropped = _drop_warnings(
+        lambda: chart().facet("f") if facet else chart(), lambda c: c.to_svg()
+    )
+    assert isinstance(refused, ValueError)
+    assert str(refused) == f"transform failed: ValueError: {refusal}: empty input after filter"
+    assert dropped == [
+        f"{label}: 20 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+
+
+def test_two_grouped_steps_of_one_kind_count_their_null_key_drops_apart_under_a_facet():
+    """Two named, caller-written ``QQ`` steps over the SAME rows and key report apart.
+
+    ``q1`` and ``q2`` both read the chart's rows unchanged (named steps
+    never advance the chain), but neither opens a lowering: a plain
+    ``mark_point()`` lowers no composite statistic, so the chain carries no
+    statistics marker at all, and a report with no lowering is never
+    collapsed with another's. Each of the two user-written steps reports
+    its own drop, faceted as unfaceted.
+    """
+    nulls = _NULL_PANEL.with_columns(pl.Series("h", ["X", "Y", None, "X"] * 5))
+
+    def chart(facet: bool) -> fm.Chart:
+        steps = (fm.QQ("val", groupby=["h"], name="q1"), fm.QQ("val", groupby=["h"], name="q2"))
+        built = fm.Chart(nulls).transform(*steps).mark_point().encode(x="val", y="val")
+        return built.facet("f") if facet else built
+
+    each = "QQ: 5 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'"
+    for facet in (True, False):
+        _svg, dropped = _drop_warnings(lambda facet=facet: chart(facet), lambda c: c.to_svg())
+        assert dropped == [each, each], facet
+
+
+# ---------------------------------------------------------------------------
+# Each lowering reports its own null-key drop apart from every other
+# lowering's, on every door that stacks one beside another
+# ---------------------------------------------------------------------------
+
+#: 30 rows, 10 with a null ``h``: the fixture the lowering cases group by.
+_LOWERING_ROWS = pl.DataFrame(
+    {
+        "g": ["a", "b"] * 15,
+        "h": ["X", "Y"] * 10 + [None] * 10,
+        "v": [float(i % 9) for i in range(30)],
+        "y": [float((i * 3) % 11) for i in range(30)],
+    }
+)
+#: The same rows, twice, under two facet panels: the probe frame for a faceted lowering.
+_LOWERING_ROWS_FACETED = pl.concat(
+    [_LOWERING_ROWS.with_columns(pl.lit(panel).alias("f")) for panel in ("F1", "F2")]
+)
+
+
+def _h_box(data: pl.DataFrame = _LOWERING_ROWS) -> fm.Chart:
+    return fm.Chart(data).mark_boxplot().encode(x="g", y="y", color="h")
+
+
+def _h_violin(data: pl.DataFrame = _LOWERING_ROWS) -> fm.Chart:
+    return fm.Chart(data).mark_violin().encode(x="g", y="y", color="h")
+
+
+def _h_bar_mean(data: pl.DataFrame = _LOWERING_ROWS) -> fm.Chart:
+    return fm.Chart(data).mark_bar().encode(x="g", y="mean(y)", color="h")
+
+
+def _h_line_mean(data: pl.DataFrame = _LOWERING_ROWS) -> fm.Chart:
+    return fm.Chart(data).mark_line().encode(x="g", y="mean(y)", color="h")
+
+
+def _drop_labels(build: Callable[[], Any], output: str) -> list[str]:
+    """The transform name leading each null-key drop warning *build*'s chart raises, in order."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg() if output == "static" else chart.interactive().scene_json
+    return [
+        str(w.message).split(":", 1)[0] for w in caught if "belong to no group" in str(w.message)
+    ]
+
+
+#: Per case: the chart, and the lowering(s) its own null-key drop reports, in order.
+_LOWERING_REPORT_CASES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
+    "boxplot": (_h_box, ["BoxStats"]),
+    "default-violin": (_h_violin, ["Violin"]),
+    "boxplot/facet": (lambda: _h_box(_LOWERING_ROWS_FACETED).facet("f"), ["BoxStats"]),
+    "default-violin/facet": (lambda: _h_violin(_LOWERING_ROWS_FACETED).facet("f"), ["Violin"]),
+    "errorband": (
+        lambda: fm.Chart(_LOWERING_ROWS).mark_errorband().encode(x="g", y="y", color="h"),
+        ["ErrorExtent"],
+    ),
+    "boxen": (
+        lambda: fm.Chart(_LOWERING_ROWS).mark_boxen().encode(x="g", y="y", color="h"),
+        ["LetterValue"],
+    ),
+    "boxplot+plain-layer": (
+        lambda: _h_box().layer(fm.Layer(mark="tick", encoding={"x": "g", "y": "y"})),
+        ["BoxStats"],
+    ),
+    "boxplot+violin": (lambda: _h_box() + _h_violin(), ["BoxStats", "Violin"]),
+    "layer-chart(boxplot,violin)": (
+        lambda: fm.LayerChart(_h_box(), _h_violin()),
+        ["BoxStats", "Violin"],
+    ),
+    "histogram+density": (
+        lambda: (
+            fm.Chart(_LOWERING_ROWS).mark_histogram().encode(x="v", color="h")
+            + fm.Chart(_LOWERING_ROWS).mark_density().encode(x="v", color="h")
+        ),
+        ["Bin", "Kde"],
+    ),
+    "smooth(lm)+smooth(loess)": (
+        lambda: (
+            fm.Chart(_LOWERING_ROWS).mark_smooth(method="lm").encode(x="v", y="y", color="h")
+            + fm.Chart(_LOWERING_ROWS).mark_smooth(method="loess").encode(x="v", y="y", color="h")
+        ),
+        ["Smooth", "Smooth"],
+    ),
+    "layer-two-means": (
+        lambda: (
+            fm.Chart(_LOWERING_ROWS)
+            .mark_point()
+            .encode(x="g", y="v", color="h")
+            .layer(
+                fm.Layer(mark="point", encoding={"y": "mean(y)"}),
+                fm.Layer(mark="point", encoding={"y": "mean(y)"}),
+            )
+        ),
+        ["Aggregate", "Aggregate"],
+    ),
+    "boxplot+layer-mean": (
+        lambda: _h_box().layer(fm.Layer(mark="point", encoding={"x": "g", "y": "mean(y)"})),
+        ["BoxStats", "Aggregate"],
+    ),
+    "bar-mean+line-mean": (lambda: _h_bar_mean() + _h_line_mean(), ["Aggregate", "Aggregate"]),
+    "layer-chart(bar-mean,line-mean)": (
+        lambda: fm.LayerChart(_h_bar_mean(), _h_line_mean()),
+        ["Aggregate", "Aggregate"],
+    ),
+    "bar-mean+secondary-y": (
+        lambda: _h_bar_mean() + fm.SecondaryY("v", mark="line"),
+        ["Aggregate"],
+    ),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_LOWERING_REPORT_CASES))
+def test_each_lowering_reports_its_own_null_key_drop_apart_from_every_others(case, output):
+    """Each lowering a chart runs reports its own null-key drop, named by its own transform.
+
+    Rejects collapsing two lowerings that read the same rows under the same
+    groupby into one report (a ``+`` operand's statistic swallowing the
+    other's, a ``Chart.layer`` statistic sharing the host mark's report):
+    two lowerings report twice, whichever door stacks them, and a single
+    lowering (a plain boxplot, a plain layer added beside it, a mark beside
+    a ``SecondaryY`` layer drawing no statistic of its own) still reports
+    once.
+    """
+    build, expected = _LOWERING_REPORT_CASES[case]
+    assert _drop_labels(build, output) == expected
+
+
+@pytest.mark.parametrize(
+    "plus_case, layerchart_case",
+    [
+        ("boxplot+violin", "layer-chart(boxplot,violin)"),
+        ("bar-mean+line-mean", "layer-chart(bar-mean,line-mean)"),
+    ],
+)
+def test_a_plus_operand_and_its_layerchart_equivalent_report_the_same_lowerings(
+    plus_case, layerchart_case
+):
+    """``a + b`` and ``LayerChart(a, b)`` report the identical lowerings, static and interactive.
+
+    Rejects a ``+`` composition and its ``LayerChart`` equivalent
+    disagreeing on how many null-key drops one chart reports, as they did
+    when every operand of a shared branch reported behind one outer
+    marker.
+    """
+    plus_build, _ = _LOWERING_REPORT_CASES[plus_case]
+    layerchart_build, _ = _LOWERING_REPORT_CASES[layerchart_case]
+    for output in ("static", "interactive"):
+        assert _drop_labels(plus_build, output) == _drop_labels(layerchart_build, output)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_faceted_plus_operand_still_reports_each_lowering_apart(output):
+    """``(B + V).facet('f')`` reports both lowerings, summed per panel, not collapsed into one."""
+    faceted = lambda: (  # noqa: E731
+        _h_box(_LOWERING_ROWS_FACETED) + _h_violin(_LOWERING_ROWS_FACETED)
+    ).facet("f")
+    assert _drop_labels(faceted, output) == ["BoxStats", "Violin"]
+
+
+# ---------------------------------------------------------------------------
+# A series mark whose statistic groups by a channel it does not draw draws one
+# series per group, as a detail channel does
+# ---------------------------------------------------------------------------
+
+#: Per case: the chart, and the marks it draws over ``df``'s two ``c`` groups.
+_SERIES_SPLIT: dict[str, tuple[Callable[[], fm.Chart], dict[str, int]]] = {
+    "density/shape": (lambda: mk("density", x="v", shape="c"), {"path": 2}),
+    "density/stroke_dash": (lambda: mk("density", x="v", stroke_dash="c"), {"path": 2}),
+    "density/detail": (lambda: mk("density", x="v", detail="c"), {"path": 2}),
+    "smooth/shape": (lambda: _smooth(shape="c"), {"polyline": 2}),
+    "smooth/detail": (lambda: _smooth(detail="c"), {"polyline": 2}),
+    "smooth-ci/detail": (lambda: _smooth(ci=0.95, detail="c"), {"path": 2, "polyline": 2}),
+    "smooth-ci/shape": (lambda: _smooth(ci=0.95, shape="c"), {"path": 2, "polyline": 2}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SERIES_SPLIT))
+def test_a_series_grouped_by_a_channel_it_does_not_draw_draws_one_series_per_group(case):
+    """One area, fit line or band per group, static and interactive, with no ignored-channel warning.
+
+    Rejects one series zigzagging through every group's rows (one path or
+    polyline), and the warning that the grouping channel was ignored when
+    it split the statistic and the series.
+    """
+    build, marks = _SERIES_SPLIT[case]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = build().to_svg()
+        scene_marks = Counter(
+            batch["kind"]
+            for panel in _scene(build())["panels"]
+            for batch in panel["marks"]
+            for _node in batch["nodes"]
+        )
+    assert tag_counts(svg) == marks
+    assert sum(scene_marks.values()) == sum(marks.values()), scene_marks
+    assert not [str(w.message) for w in caught if "has no effect" in str(w.message)]
+
+
+def _user_fit(groupby: list[str] | None = None, **encoding: Any) -> fm.Chart:
+    """A linear fit the user wrote as a step, drawn as a line."""
+    fit = fm.Smooth("v", "y", method="lm", ci=None, groupby=groupby)
+    return fm.Chart(df).transform(fit).mark_line().encode(x="x", y="y", **encoding)
+
+
+#: Per case: a line over a step the user wrote, and the fit lines it draws
+#: over ``df``'s two ``c`` groups.
+_USER_STEP_SPLIT: dict[str, tuple[Callable[[], fm.Chart], int]] = {
+    "grouped": (lambda: _user_fit(["c"]), 2),
+    "grouped/shape": (lambda: _user_fit(["c"], shape="c"), 2),
+    "grouped/stroke_dash": (lambda: _user_fit(["c"], stroke_dash="c"), 2),
+    "grouped/detail": (lambda: _user_fit(["c"], detail="c"), 2),
+    "ungrouped": (lambda: _user_fit(), 1),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_USER_STEP_SPLIT))
+def test_a_line_follows_the_groupby_of_a_step_the_user_wrote(case, output):
+    """One fit line per group of the user's ``Smooth(groupby=["c"])``, with no channel asking.
+
+    A ``shape`` or ``stroke_dash``/``detail`` on the same field splits once
+    (two lines, not four); an ungrouped fit draws one. Rejects the one line
+    zigzagging through every group's fitted rows.
+    """
+    build, lines = _USER_STEP_SPLIT[case]
+    if output == "static":
+        drawn = tag_counts(_quiet(lambda: build().to_svg())).get("polyline", 0)
+    else:
+        drawn = sum(_scene_line_counts(_quiet(lambda: _scene(build()))))
+    assert drawn == lines
+
+
+def test_a_shape_beside_a_user_grouped_step_is_still_reported_ignored():
+    """The line splits by the step's group, and the shape it does not draw still warns."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = _user_fit(["c"], shape="c").to_svg()
+    assert tag_counts(svg) == {"polyline": 2}
+    assert [str(w.message) for w in caught if "has no effect" in str(w.message)] == [
+        "mark_line: shape 'c' has no effect: no layer's mark draws shape (this line mark "
+        "does not), so it gets no scale and no legend; it was ignored"
+    ]
+
+
+def test_a_density_grouped_by_shape_draws_what_its_detail_draws():
+    """The shape-grouped density draws the detail-grouped density's areas, mark for mark."""
+    by_shape = _quiet(lambda: mk("density", x="v", shape="c").to_svg())
+    by_detail = _quiet(lambda: mk("density", x="v", detail="c").to_svg())
+    assert census(by_shape) == census(by_detail)
+
+
+# A sibling's grouping channel never splits another layer's series: each
+# layer splits by its own bindings over its parent's.
+_SERIES_HOSTS: dict[str, Callable[[], fm.Chart]] = {
+    "line": lambda: agg("line", x="v"),
+    "area": lambda: agg("area", x="v"),
+    "smooth-ci": lambda: _smooth(ci=0.95),
+}
+_GROUPING_SIBLINGS: dict[str, Callable[[], fm.Chart]] = {
+    "shape": lambda: P(shape="c"),
+    "stroke_dash": lambda: mk("line", x="v", y="y", stroke_dash="c"),
+    "detail": lambda: mk("line", x="v", y="y", detail="c"),
+}
+_SIBLING_SERIES: dict[str, Case] = {
+    f"{host}+{channel}/{door}": case
+    for host, build_host in _SERIES_HOSTS.items()
+    for channel, build_sibling in _GROUPING_SIBLINGS.items()
+    for door, case in {
+        **plus_doors(build_host, build_sibling, lcs=False),
+        "L": Case(
+            lambda build_host=build_host, channel=channel: build_host().layer(
+                layer("point", x="v", y="y", **{channel: "c"})
+                if channel == "shape"
+                else fm.Layer(mark="line", encoding={"x": "v", "y": "y", channel: "c"})
+            ),
+            (build_host, build_sibling),
+        ),
+    }.items()
+    if door not in ("LCi",)
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SIBLING_SERIES))
+def test_a_siblings_grouping_channel_never_splits_another_layers_series(case):
+    """Each layer draws what it draws alone, static and interactive, on every door.
+
+    Rejects a sibling's shape, stroke_dash or detail splitting the host's
+    line, area or smooth band and line.
+    """
+    check_rendering(_SIBLING_SERIES[case])
+
+
+def test_a_smooth_ci_under_detail_carries_detail_on_its_band_and_line():
+    """The band draws detail as the line does, so both carry it on the wire and split per group."""
+    chart = _smooth(ci=0.95, detail="c")
+    styles = {layer["mark"]: layer.get("mark_style", {}) for layer in _wire(chart)["layers"]}
+    assert styles["ribbon"].get("detail") == "c" and styles["line"].get("detail") == "c"
+    assert tag_counts(_quiet(chart.to_svg)) == {"path": 2, "polyline": 2}
+
+
+# A grouped box, violin, density or histogram under a facet: a panel whose
+# every hue is null draws empty, and the drop is counted over the whole
+# frame. ``mark_boxplot`` lowers two named steps (``BoxStats``, ``Outliers``)
+# over the same rows and key, so they report once, naming the first.
+_GROUPED_FACET_PANELS: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
+    "boxplot": (
+        lambda: fm.Chart(_NULL_PANEL).mark_boxplot().encode(x="cat", y="val", color="h").facet("f"),
+        ["BoxStats"],
+    ),
+    "violin": (
+        lambda: (
+            fm.Chart(_NULL_PANEL)
+            .mark_violin(inner="none")
+            .encode(x="cat", y="val", color="h")
+            .facet("f")
+        ),
+        ["Violin"],
+    ),
+    "density": (
+        lambda: fm.Chart(_NULL_PANEL).mark_density().encode(x="val", color="h").facet("f"),
+        ["Kde"],
+    ),
+    "histogram": (
+        lambda: fm.Chart(_NULL_PANEL).mark_histogram().encode(x="val", color="h").facet("f"),
+        ["Bin"],
+    ),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("kind", sorted(_GROUPED_FACET_PANELS))
+def test_a_grouped_statistics_facet_panel_the_null_key_drop_emptied_draws_empty(kind, output):
+    """``F2``, whose every hue is null, draws its frame with no marks; each step counts its drop once.
+
+    Rejects the panel vanishing and a per-panel all-null warning naming the
+    facet field ``f``.
+    """
+    build, steps = _GROUPED_FACET_PANELS[kind]
+    render = {"static": lambda chart: chart.to_svg(), "interactive": _scene}[output]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = render(build())
+    said = [str(w.message) for w in caught]
+    assert [m for m in said if "null" in m] == [
+        f"{step}: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+        for step in steps
+    ]
+    if output == "static":
+        panels = panel_census(drawn)
+        assert len(panels) == 2
+        assert panels[0] and not panels[1], [dict(panel) for panel in panels]
+    else:
+        drawn_panels = [
+            sum(len(batch["nodes"]) for batch in panel["marks"]) > 0 for panel in drawn["panels"]
+        ]
+        assert drawn_panels == [True, False]
+
+
+#: 30 rows, two real ``h`` groups of 10 and 10 rows whose ``h`` is null.
+_PARTLY_NULL_HUE = pl.DataFrame(
+    {
+        "x": list(range(30)),
+        "y": [float(i % 5) for i in range(30)],
+        "b": [float(i % 2) for i in range(30)],
+        "h": ["p"] * 10 + ["q"] * 10 + [None] * 10,
+    }
+)
+
+
+def test_mark_smooth_with_a_partly_null_hue_warns_once_and_still_draws_both_groups():
+    """``mark_smooth(color='h')`` drops the null-``h`` rows from the per-group fit and warns once.
+
+    Rejects the whole-batch-fallback policy staying silent on a partial
+    drop, the way it only should for `Impute`'s fill (below).
+    """
+    chart = fm.Chart(_PARTLY_NULL_HUE).mark_smooth(method="lm").encode(x="x", y="y", color="h")
+    drawn, dropped = _drop_warnings(lambda: chart, lambda c: c.to_svg())
+    assert dropped == [
+        "Smooth: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+    assert tag_counts(drawn).get("polyline", 0) == 2
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("method", ["lm", "loess", "robust", "logistic", "glm"])
+def test_lmplot_with_a_partly_null_hue_warns_once_and_still_draws_both_groups(method, output):
+    """``lmplot(method=..., hue='h')`` drops the null-``h`` rows from each group's fit and warns once.
+
+    Every method routes through one of four transforms: ``lm``/``loess``
+    both lower ``Smooth``, as ``residplot`` does.
+    """
+    transform = {
+        "lm": "Smooth",
+        "loess": "Smooth",
+        "robust": "Robust",
+        "logistic": "Logistic",
+        "glm": "Glm",
+    }[method]
+    y = "b" if method == "logistic" else "y"
+    chart = fm.lmplot(
+        _PARTLY_NULL_HUE, x="x", y=y, hue="h", method=method, scatter=False, show_metrics=False
+    )
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    drawn, dropped = _drop_warnings(lambda: chart, render)
+    assert dropped == [
+        f"{transform}: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+    if output == "static":
+        assert tag_counts(drawn).get("polyline", 0) == 2
+    else:
+        assert _scene_line_counts(drawn) == [2]
+
+
+#: 10 rows, every ``h`` null: the pooled-fit fixture.
+_ALL_NULL_HUE = pl.DataFrame(
+    {
+        "x": list(range(10)),
+        "y": [float(i % 5) for i in range(10)],
+        "b": [float(i % 2) for i in range(10)],
+        "h": pl.Series([None] * 10, dtype=pl.Utf8),
+    }
+)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("method", ["lm", "loess"])
+def test_mark_smooth_with_an_all_null_hue_renders_one_pooled_fit(method, output):
+    """``mark_smooth(color='h')``, every ``h`` null, draws one pooled fit and warns the all-null text.
+
+    The pooled fit's output carries ``h`` all null at its original dtype,
+    so color reads it without refusing: rejects the prior behavior, a raw
+    "unknown column 'h'" refusal, since the pooled output used to lack the
+    column the color reads.
+    """
+    chart = fm.Chart(_ALL_NULL_HUE).mark_smooth(method=method).encode(x="x", y="y", color="h")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught]
+    assert said == [
+        "Smooth: every row has a null in its groupby key (h), so the data could not be "
+        "split into groups; the whole batch was used as one ungrouped computation instead"
+    ]
+    if output == "static":
+        assert tag_counts(drawn).get("polyline", 0) == 1
+    else:
+        assert _scene_line_counts(drawn) == [1]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("method", ["lm", "robust", "logistic", "glm"])
+def test_lmplot_with_an_all_null_hue_warns_the_all_null_text_alone_and_draws_one_fit(
+    method, output
+):
+    """``lmplot(hue='h')``, every ``h`` null, warns the all-null text alone and draws one fit.
+
+    Rejects the doubled voice a column-gate "color h was dropped" warning
+    beside it would add: the pooled output carries ``h``, so no layer
+    reads a column its rows lack.
+    """
+    transform = {"lm": "Smooth", "robust": "Robust", "logistic": "Logistic", "glm": "Glm"}[method]
+    y = "b" if method == "logistic" else "y"
+    chart = fm.lmplot(
+        _ALL_NULL_HUE, x="x", y=y, hue="h", method=method, scatter=False, show_metrics=False
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught]
+    assert said == [
+        f"{transform}: every row has a null in its groupby key (h), so the data could not "
+        "be split into groups; the whole batch was used as one ungrouped computation instead"
+    ]
+    if output == "static":
+        assert tag_counts(drawn).get("polyline", 0) == 1
+    else:
+        assert _scene_line_counts(drawn) == [1]
+
+
+#: ``_ALL_NULL_HUE``, twice, under two facet panels: every ``h`` null in every panel.
+_ALL_NULL_HUE_FACETED = pl.concat(
+    [_ALL_NULL_HUE.with_columns(pl.lit(panel).alias("f")) for panel in ("F1", "F2")]
+)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("method", ["lm", "loess"])
+def test_mark_smooth_faceted_with_an_all_null_hue_pools_one_fit_per_panel(method, output):
+    """``mark_smooth(color='h').facet('f')``, every ``h`` null in every panel, pools a fit per panel.
+
+    Each panel draws one default-colored pooled fit, and the chart raises
+    only the ``GroupKeyAllNull`` warning. Rejects the pooled fallback
+    nulling the facet column along with ``h``: that emptied every panel
+    (``RenderWarning::NoRowsToDraw``) instead of drawing the per-panel
+    pooled fit the facet column should still carry.
+    """
+    chart = (
+        fm.Chart(_ALL_NULL_HUE_FACETED).mark_smooth(method=method).encode(x="x", y="y", color="h")
+    ).facet("f")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught]
+    assert said == [
+        "Smooth: every row has a null in its groupby key (h), so the data could not be "
+        "split into groups; the whole batch was used as one ungrouped computation instead"
+    ]
+    if output == "static":
+        panels = panel_census(drawn)
+        assert len(panels) == 2
+        assert panels[0] and panels[1], [dict(panel) for panel in panels]
+        assert tag_counts(drawn).get("polyline", 0) == 2
+    else:
+        assert _scene_line_counts(drawn) == [1, 1]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_lmplot_faceted_with_an_all_null_hue_pools_one_fit_per_panel(output):
+    """``lmplot(hue='h', col='f')``, every ``h`` null in every panel, pools a fit per panel.
+
+    Each panel draws one default-colored pooled fit under ``method="logistic"``,
+    and the chart raises only the ``GroupKeyAllNull`` warning (no doubled
+    "color was dropped" column-gate voice beside it).
+    """
+    chart = fm.lmplot(
+        _ALL_NULL_HUE_FACETED,
+        x="x",
+        y="b",
+        hue="h",
+        col="f",
+        method="logistic",
+        scatter=False,
+        show_metrics=False,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught]
+    assert said == [
+        "Logistic: every row has a null in its groupby key (h), so the data could not be "
+        "split into groups; the whole batch was used as one ungrouped computation instead"
+    ]
+    if output == "static":
+        panels = panel_census(drawn)
+        assert len(panels) == 2
+        assert panels[0] and panels[1], [dict(panel) for panel in panels]
+    else:
+        assert _scene_line_counts(drawn) == [1, 1]
+
+
+#: 12 rows, ``h`` all null, ``g`` a genuine two-value column (a x6, b x6): the
+#: pooled key must null ``g`` too, since it is not constant across the batch.
+_ALL_NULL_HUE_VARYING_DETAIL = pl.DataFrame(
+    {
+        "x": list(range(12)),
+        "y": [float(i % 5) for i in range(12)],
+        "g": ["a"] * 6 + ["b"] * 6,
+        "h": pl.Series([None] * 12, dtype=pl.Utf8),
+    }
+)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_pooled_fit_nulls_a_groupby_column_that_varies_not_just_the_all_null_one(output):
+    """``mark_smooth(color='g', detail='h')``, ``h`` all null, draws one pooled fit with no 'a' legend.
+
+    ``g`` (``a``/``b``) joins ``h`` in the statistic's groupby (color plus
+    detail), so the pooled fit's key must null ``g`` too, since it is not
+    the SAME value on every row the pooled fit covers. Rejects keeping
+    ``g``'s first-seen value (``"a"``): that mislabels a fit pooled over
+    both groups as belonging to one of them, drawing a one-entry 'a'
+    legend for a fit that is not actually all ``a``.
+    """
+    chart = (
+        fm.Chart(_ALL_NULL_HUE_VARYING_DETAIL)
+        .mark_smooth(method="lm")
+        .encode(x="x", y="y", color="g", detail="h")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if output == "static":
+            drawn = chart.to_svg()
+            assert legend_set(drawn) == {}
+            assert tag_counts(drawn).get("polyline", 0) == 1
+        else:
+            drawn = _scene(chart)
+            assert drawn["legend"] == []
+            assert _scene_line_counts(drawn) == [1]
+    said = [str(w.message) for w in caught]
+    assert said == [
+        "Smooth: every row has a null in its groupby key (g, h), so the data could not be "
+        "split into groups; the whole batch was used as one ungrouped computation instead"
+    ]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("entry", ["lmplot", "residplot"])
+def test_a_figures_encode_door_warns_the_one_count_and_draws_two_fits(entry, output):
+    """``lmplot(encode={'color': 'h'})`` and ``residplot(encode={'color': 'h'})`` warn once, draw two fits."""
+    build = {
+        "lmplot": lambda: fm.lmplot(
+            _PARTLY_NULL_HUE, x="x", y="y", encode={"color": "h"}, scatter=False, show_metrics=False
+        ),
+        "residplot": lambda: fm.residplot(
+            _PARTLY_NULL_HUE,
+            x="x",
+            y="y",
+            encode={"color": "h"},
+            lowess=True,
+            show_metrics=False,
+        ),
+    }[entry]
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    drawn, dropped = _drop_warnings(build, render)
+    assert dropped == [
+        "Smooth: 10 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+    if output == "static":
+        assert tag_counts(drawn).get("polyline", 0) == 2
+    else:
+        assert _scene_line_counts(drawn) == [2]
+
+
+#: 16 rows over two facet panels, each with 2 rows of a null ``h`` beside two real groups.
+_PARTLY_NULL_HUE_FACETED = pl.DataFrame(
+    {
+        "x": list(range(16)),
+        "y": [float(i % 5) for i in range(16)],
+        "h": ["p", "p", "q", "q", None, None, "p", "q"] * 2,
+        "f": ["F1"] * 8 + ["F2"] * 8,
+    }
+)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_mark_smooth_facet_with_a_partly_null_hue_in_every_panel_warns_the_summed_count_once(
+    output,
+):
+    """``mark_smooth(color='h').facet('f')``, both panels partly null, warns the summed count once.
+
+    The control, the same frame with no null ``h``, warns about nothing.
+    """
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    chart = (
+        fm.Chart(_PARTLY_NULL_HUE_FACETED).mark_smooth(method="lm").encode(x="x", y="y", color="h")
+    ).facet("f")
+    _drawn, dropped = _drop_warnings(lambda: chart, render)
+    assert dropped == [
+        "Smooth: 4 rows have a null 'h' and belong to no group, so they were dropped; "
+        "fill or filter the nulls in 'h'"
+    ]
+    control = fm.Chart(_PARTLY_NULL_HUE_FACETED.with_columns(pl.col("h").fill_null("p"))).facet("f")
+    control = control.mark_smooth(method="lm").encode(x="x", y="y", color="h")
+    _drawn, no_drop = _drop_warnings(lambda: control, render)
+    assert no_drop == []
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_lmplot_faceted_with_a_hue_null_in_one_panel_names_that_panel_and_fits_the_other(output):
+    """``lmplot(hue='h', col='f')``, ``h`` null only in panel F2: F2's text, F1's per-group fits.
+
+    F1 draws one fit line per real group; F2, pooled, draws one.
+    """
+    data = pl.DataFrame(
+        {
+            "x": list(range(20)),
+            "y": [float(i % 5) for i in range(20)],
+            "h": ["p"] * 5 + ["q"] * 5 + [None] * 10,
+            "f": ["F1"] * 10 + ["F2"] * 10,
+        }
+    )
+    build = lambda: fm.lmplot(  # noqa: E731
+        data, x="x", y="y", hue="h", col="f", scatter=False, show_metrics=False
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        drawn = chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught if "groupby key" in str(w.message)]
+    assert said == [
+        "Smooth: every row in facet panel f=F2 has a null in its groupby key (h), so that "
+        "panel's rows could not be split into groups; in that panel, the whole batch was "
+        "used as one ungrouped computation instead"
+    ]
+    if output == "static":
+        panels = panel_census(drawn)
+        assert len(panels) == 2
+        assert tag_counts(drawn).get("polyline", 0) == 3
+    else:
+        assert _scene_line_counts(drawn) == [2, 1]
+
+
+#: The frame ``test_a_whole_batch_fallback_pooled_in_one_facet_panel_names_it`` facets:
+#: F1's hue is partly null (both real groups kept), F2's is entirely null (pooled).
+_FACET_PARTIAL_ALL_NULL = pl.DataFrame(
+    {
+        "x": list(range(8)),
+        "y": [float(i) for i in range(8)],
+        "h": ["p", "p", "q", "q", None, None, None, None],
+        "f": ["F1"] * 4 + ["F2"] * 4,
+    }
+)
+
+#: Per method: the static SVG and the interactive scene sha256, recorded on
+#: the tree before the all-null pooling fix and confirmed byte-identical here.
+_FACET_PARTIAL_ALL_NULL_DIGESTS = {
+    "lm": (
+        "f4c14ebbdcd7a7046f7f7d4c9532b4560141c5aa246bea2d9232d46f7de7f365",
+        "f6c7378bf774c5340dd8d9d638f44c443fd67bffd8217fbd70e40b80cf873963",
+    ),
+    "loess": (
+        "40acd92c197104fe9e9681505cb4c339b8347d9a1c3a48e4d626299a5ec5382c",
+        "f47792a3184d842d6bab8946f82794f060793353bb50c21b0c1078dd21b55cd2",
+    ),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("method", ["lm", "loess"])
+def test_a_whole_batch_fallback_pooled_in_one_facet_panel_names_it(method, output):
+    """``mark_smooth(color='h').facet('f')`` pooled only in the all-null panel names it.
+
+    Rejects the whole-frame text, which would falsely claim every row (not
+    just the panel's) had a null ``h``. Byte-identical to the render
+    before the all-null pooling fix: this shape was never touched by it,
+    since F1's hue is only partly null.
+    """
+    import hashlib
+
+    chart = (
+        fm.Chart(_FACET_PARTIAL_ALL_NULL)
+        .mark_smooth(method=method)
+        .encode(x="x", y="y", color="h")
+        .facet("f")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = chart.to_svg() if output == "static" else chart.interactive().scene_json
+    said = [str(w.message) for w in caught if "groupby key" in str(w.message)]
+    assert said == [
+        "Smooth: every row in facet panel f=F2 has a null in its groupby key (h), so that "
+        "panel's rows could not be split into groups; in that panel, the whole batch was "
+        "used as one ungrouped computation instead"
+    ]
+    svg_digest, scene_digest = _FACET_PARTIAL_ALL_NULL_DIGESTS[method]
+    expected = svg_digest if output == "static" else scene_digest
+    assert hashlib.sha256(drawn.encode()).hexdigest() == expected
+
+
+def test_grouped_impute_with_a_partly_null_key_pushes_no_drop_count():
+    """``transform_impute(groupby=['h'])`` fills a null-keyed row from the whole column; nothing dropped."""
+    data = pl.DataFrame({"h": ["p", "p", "q", None], "v": [1.0, None, 3.0, 4.0]})
+    chart = (
+        fm.Chart(data)
+        .transform(fm.transform_impute("v", method="mean", groupby=["h"]))
+        .mark_point()
+        .encode(x="v", y="v")
+    )
+    _drawn, dropped = _drop_warnings(lambda: chart, lambda c: c.to_svg())
+    assert dropped == []
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_grouped_impute_faceted_with_every_key_null_in_one_panel_names_it_and_pushes_no_count(
+    output,
+):
+    """``transform_impute(groupby=['h']).facet('f')``, every ``h`` null in F2: F2's text, no drop count."""
+    data = pl.DataFrame(
+        {
+            "h": ["p", "q", "p", "q", None, None, None, None],
+            "v": [1.0, None, 3.0, 4.0, 5.0, None, 7.0, 8.0],
+            "f": ["F1"] * 4 + ["F2"] * 4,
+        }
+    )
+    chart = (
+        fm.Chart(data)
+        .transform(fm.transform_impute("v", method="mean", groupby=["h"]))
+        .mark_point()
+        .encode(x="v", y="v")
+        .facet("f")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart.to_svg() if output == "static" else _scene(chart)
+    said = [str(w.message) for w in caught]
+    assert [m for m in said if "groupby key" in m] == [
+        "Impute: every row in facet panel f=F2 has a null in its groupby key (h), so that "
+        "panel's rows could not be split into groups; in that panel, the whole batch was "
+        "used as one ungrouped computation instead"
+    ]
+    assert [m for m in said if "belong to no group" in m] == []
+
+
+#: A frame with a binary outcome ``b`` and a count ``n`` over two ``c`` groups.
+_FITS = pl.DataFrame(
+    {
+        "x": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] * 2,
+        "b": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0],
+        "n": [1.0, 2.0, 2.0, 3.0, 5.0, 8.0, 9.0, 7.0, 6.0, 4.0, 3.0, 1.0],
+        "c": ["p"] * 6 + ["q"] * 6,
+    }
+)
+
+_GROUPED_FITS: dict[str, Callable[..., Any]] = {
+    "Logistic": lambda **k: fm.Logistic("x", "b", n_grid=20, **k),
+    "Glm": lambda **k: fm.Glm("x", "n", family="poisson", n_grid=20, **k),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("fit", sorted(_GROUPED_FITS))
+def test_a_logistic_or_glm_fit_with_groupby_fits_each_group(fit, output):
+    """``groupby=["c"]`` fits each group on its own rows and the line draws one curve per group.
+
+    Rejects one pooled fit over both groups (no ``groupby`` on the transform).
+    """
+    grouped = fm.Chart(_FITS).transform(_GROUPED_FITS[fit](groupby=["c"])).mark_line()
+    grouped = grouped.encode(x="x", y="y")
+    if output == "static":
+        assert tag_counts(_quiet(grouped.to_svg)) == {"polyline": 2}
+    else:
+        assert sum(_scene_line_counts(_quiet(lambda: _scene(grouped)))) == 2
+    spec = json.loads(grouped.to_spec().to_json())
+    fitted = [t for t in spec["transforms"] if t["type"] == fit.lower()]
+    assert fitted and fitted[0]["groupby"] == ["c"]
+
+
+#: ``_FITS`` with a third group ``r`` of one row, which no fit can use.
+_FITS_SPARSE = pl.concat([_FITS, pl.DataFrame({"x": [2.0], "b": [1.0], "n": [3.0], "c": ["r"]})])
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("fit", sorted(_GROUPED_FITS))
+def test_a_logistic_or_glm_group_that_cannot_be_fit_draws_none_and_warns(fit, output):
+    """Group ``r`` (one row) draws no fit and a warning names it; ``p`` and ``q`` still draw.
+
+    Rejects the one bad group refusing the whole chart, as Smooth and
+    Robust degrade a group instead.
+    """
+    chart = fm.Chart(_FITS_SPARSE).transform(_GROUPED_FITS[fit](groupby=["c"])).mark_line()
+    chart = chart.encode(x="x", y="y")
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = render(chart)
+    assert [str(w.message) for w in caught if "could not fit" in str(w.message)] == [
+        f"{fit}: could not fit group c=r (fewer than 2 usable (non-null/non-NaN) x/y points); "
+        "it degraded to an empty/flat output instead of failing the whole chart"
+    ]
+    if output == "static":
+        assert tag_counts(drawn) == {"polyline": 2}
+    else:
+        lines = [b for panel in drawn["panels"] for b in panel["marks"] if b["kind"] == "line"]
+        assert sum(len(batch["nodes"]) for batch in lines) == 2
+
+
+#: ``_FITS`` with a third group ``s`` whose binary outcome ``b`` is perfectly
+#: separated by ``x``.
+_FITS_SEPARATED = pl.concat(
+    [
+        _FITS,
+        pl.DataFrame(
+            {
+                "x": [-100.0, -90.0, -80.0, 80.0, 90.0, 100.0],
+                "b": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                "n": [1.0] * 6,
+                "c": ["s"] * 6,
+            }
+        ),
+    ]
+)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_perfectly_separated_logistic_group_draws_none_and_warns(output):
+    """Group ``s`` separates perfectly, so it draws no fit and a warning names it; ``p`` and ``q`` draw.
+
+    Rejects the one separated group refusing the whole chart.
+    """
+    chart = fm.Chart(_FITS_SEPARATED).transform(fm.Logistic("x", "b", n_grid=20, groupby=["c"]))
+    chart = chart.mark_line().encode(x="x", y="y")
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = render(chart)
+    assert [str(w.message) for w in caught if "could not fit" in str(w.message)] == [
+        "Logistic: could not fit group c=s (perfect separation detected (model classifies every "
+        "observation with probability > 0.999)); it degraded to an empty/flat output instead of "
+        "failing the whole chart"
+    ]
+    if output == "static":
+        assert tag_counts(drawn) == {"polyline": 2}
+    else:
+        lines = [b for panel in drawn["panels"] for b in panel["marks"] if b["kind"] == "line"]
+        assert sum(len(batch["nodes"]) for batch in lines) == 2
+
+
+@pytest.mark.parametrize("fit", sorted(_GROUPED_FITS))
+def test_an_ungrouped_logistic_or_glm_fit_that_cannot_be_fit_still_refuses(fit):
+    """With no groupby the one fit is the whole chart, so its bad rows refuse it."""
+    one_row = _FITS_SPARSE.filter(pl.col("c") == "r")
+    chart = fm.Chart(one_row).transform(_GROUPED_FITS[fit]()).mark_line().encode(x="x", y="y")
+    with pytest.raises(ValueError, match="need at least 2 non-null observations"):
+        _quiet(chart.to_svg)
+
+
+# ---------------------------------------------------------------------------
+# A composition's own encoding groups its composite operands' statistics:
+# built when the spec is lowered, after the post-merge encoding is known
+# ---------------------------------------------------------------------------
+
+
+def _fit() -> fm.Chart:
+    return _smooth()
+
+
+def _rug() -> fm.Chart:
+    return mk("tick", x="v")
+
+
+#: Per door: a composition whose own ``color`` reaches a fit operand, and the
+#: parts it draws alone (each operand under the composition's binding).
+_POST_MERGE_DOORS: dict[str, Case] = {
+    "+e": Case(
+        lambda: (_fit() + P()).encode(color="c"),
+        (lambda: _smooth(color="c"), lambda: P(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "+e-rev": Case(
+        lambda: (P() + _fit()).encode(color="c"),
+        (lambda: P(color="c"), lambda: _smooth(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "+e-ci": Case(
+        lambda: (_smooth(ci=0.95) + P()).encode(color="c"),
+        (lambda: _smooth(ci=0.95, color="c"), lambda: P(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "nested-outer": Case(
+        lambda: ((_fit() + P()) + _rug()).encode(color="c"),
+        (lambda: _smooth(color="c"), lambda: P(color="c"), lambda: mk("tick", x="v", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "nested-inner": Case(
+        lambda: (_fit() + P()).encode(color="c") + _rug(),
+        (lambda: _smooth(color="c"), lambda: P(color="c"), _rug),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "attached-then-+e": Case(
+        lambda: (_fit().layer(layer("tick")) + P()).encode(color="c"),
+        (
+            lambda: _smooth(color="c"),
+            lambda: mk("tick", x="v", y="y", color="c"),
+            lambda: P(color="c"),
+        ),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "Fc": Case(
+        lambda: (_fit() + P()).encode(color="c").facet("g"),
+        (lambda: _smooth(color="c").facet("g"), lambda: P(color="c").facet("g")),
+        faceted=True,
+        chart_level=None,
+    ),
+    "histogram-+e": Case(
+        lambda: (mk("histogram", x="v") + _rug()).encode(color="c"),
+        (lambda: mk("histogram", x="v", color="c"), lambda: mk("tick", x="v", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "boxplot-+e": Case(
+        lambda: (mk("boxplot", x="g", y="y") + P(x="g")).encode(color="c"),
+        (lambda: mk("boxplot", x="g", y="y", color="c"), lambda: P(x="g", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "qq-+e": Case(
+        lambda: (mk("qq", x="z") + P(x="z")).encode(color="c"),
+        (lambda: mk("qq", x="z", color="c"), lambda: P(x="z", color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "contour-+e": Case(
+        lambda: (mk("contour", x="v", y="y") + P()).encode(color="g"),
+        (lambda: mk("contour", x="v", y="y", color="g"), lambda: P(color="g")),
+        legends={"g": ("a", "b")},
+        chart_level=None,
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_POST_MERGE_DOORS))
+def test_a_compositions_own_color_groups_its_composite_operands_statistic(door):
+    """``(fit + points).encode(color="c")`` fits per ``c`` as its points color, static and interactive.
+
+    Each operand draws what it draws alone under the composition's binding,
+    on ``+`` in both orders, nested ``+`` (the outer and the inner
+    composition's binding), a fit attached to before the merge, and faceted.
+    Rejects building the fit when the mark resolved at the merge, before the
+    composition's encoding existed, which fitted one curve through every
+    row and dropped its color with a warning.
+    """
+    check_rendering(_POST_MERGE_DOORS[door])
+
+
+#: Per composition: the groupby its fit's statistic carries.
+_POST_MERGE_GROUPBY: dict[str, tuple[Callable[[], Any], str, list[str] | None]] = {
+    "the-compositions-color": (lambda: (_fit() + P()).encode(color="c"), "smooth", ["c"]),
+    "an-alias-on-the-composition": (lambda: (_fit() + P()).encode(fill="c"), "smooth", ["c"]),
+    "the-operands-own-color-wins": (
+        lambda: (_smooth(color="g") + P()).encode(color="c"),
+        "smooth",
+        ["g"],
+    ),
+    "the-operands-own-fill-shadows-the-compositions-color": (
+        lambda: (_smooth(fill="g") + P()).encode(color="c"),
+        "smooth",
+        ["g"],
+    ),
+    "a-siblings-color-never-reaches-the-fit": (lambda: _fit() + P(color="c"), "smooth", None),
+    "the-inner-compositions-color-wins-over-the-outer": (
+        lambda: ((_fit() + P()).encode(color="c") + _rug()).encode(color="g"),
+        "smooth",
+        ["c"],
+    ),
+    "outer-detail-joins-inner-color": (
+        lambda: ((_fit() + P()).encode(color="c") + _rug()).encode(detail="g"),
+        "smooth",
+        ["c", "g"],
+    ),
+    "faceted": (
+        lambda: (_fit() + P()).encode(color="c").facet("g"),
+        "smooth",
+        ["c", "g"],
+    ),
+    "boxen": (
+        lambda: (mk("boxen", x="g", y="z") + P(x="g", y="z")).encode(color="c"),
+        "letter_value",
+        ["c"],
+    ),
+    "contour": (lambda: (mk("contour", x="v", y="y") + P()).encode(color="g"), "kde2_d", ["g"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_POST_MERGE_GROUPBY))
+def test_a_compositions_grouping_reaches_a_fit_only_where_the_fit_binds_none(case):
+    """The composition's grouping channels join the fit's groupby, the nearest binding winning.
+
+    The operand's own binding, under any spelling, wins over the
+    composition's; an inner composition's wins over an outer one's on the
+    same channel, and the two join on different channels. Rejects a
+    sibling's binding reaching the fit (sibling isolation) and the
+    composition's binding overriding the operand's own.
+    """
+    build, step, expected = _POST_MERGE_GROUPBY[case]
+    assert _statistic_groupby(_quiet(build), step) == [expected]
+
+
+def test_a_composite_operands_layers_redraw_as_the_grouped_mark_draws_them():
+    """A filled density grouped by its composition draws isoline segments, as a grouped one does.
+
+    Rejects swapping only the statistic under layers built for the
+    ungrouped density (filled polygons over grouped surfaces).
+    """
+    chart = _quiet(lambda: (mk("density", x="v", y="y") + P()).encode(color="g"))
+    marks = [layer_["mark"] for layer_ in _wire(chart)["layers"]]
+    assert marks == ["segment", "point"]
+    alone = _quiet(lambda: mk("density", x="v", y="y", color="g").to_svg())
+    assert census(_quiet(chart.to_svg)) == census(alone) + census(_quiet(P(color="g").to_svg))
+
+
+def test_the_composition_is_rebuilt_without_changing_the_callers_chart():
+    """Lowering the composition leaves the chart the caller holds as it was."""
+    chart = (_fit() + P()).encode(color="c")
+    operands = chart._operands
+    layers = list(chart._layers)
+    _quiet(chart.to_svg)
+    assert chart._operands is operands
+    assert chart._layers == layers
+
+
+# ---------------------------------------------------------------------------
+# A host's grouping bound after its layers were attached groups its statistic
+# as the same binding written before them does, on its own and as a + operand
+# ---------------------------------------------------------------------------
+
+
+def _attached_fit() -> fm.Chart:
+    return _smooth().layer(layer("tick"))
+
+
+#: Per spelling: the host bound after ``.layer(...)``, and the same binding
+#: written before it.
+_POST_ATTACH: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+    **{
+        f"smooth/{channel}": (
+            lambda channel=channel: _attached_fit().encode(**{channel: "c"}),
+            lambda channel=channel: _smooth(**{channel: "c"}).layer(layer("tick")),
+        )
+        for channel in ("color", "fill", "detail", "shape")
+    },
+    "density/color": (
+        lambda: mk("density", x="v").layer(layer("rule")).encode(color="c"),
+        lambda: mk("density", x="v", color="c").layer(layer("rule")),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_POST_ATTACH))
+def test_a_hosts_grouping_bound_after_attach_draws_what_it_draws_bound_before(case):
+    """``S().layer(tick).encode(color="c")`` fits per ``c``, static and interactive, as the pre-attach spelling.
+
+    Rejects building the fit when the layers were attached, before the
+    host's later binding existed: it was refused (``unknown column 'c'``,
+    with a remedy naming ``+``).
+    """
+    post, pre = _POST_ATTACH[case]
+    assert _quiet(lambda: post().to_svg()) == _quiet(lambda: pre().to_svg())
+    assert _quiet(lambda: post().interactive().scene_json) == _quiet(
+        lambda: pre().interactive().scene_json
+    )
+    kind = "kde" if case.startswith("density") else "smooth"
+    assert _statistic_groupby(_quiet(post), kind) == _statistic_groupby(_quiet(pre), kind)
+
+
+#: Per spelling and door: a host bound after the attach composed with points,
+#: and its parts.
+_POST_ATTACH_DOORS: dict[str, Case] = {
+    f"{channel}/{door}": Case(
+        build,
+        parts,
+        legends={"c": ("p", "q")} if channel in ("color", "fill") else None,
+        chart_level=None,
+    )
+    for channel in ("color", "fill", "detail", "shape")
+    for door, build, parts in (
+        (
+            "+left",
+            lambda channel=channel: _attached_fit().encode(**{channel: "c"}) + P(),
+            (
+                lambda channel=channel: _smooth(**{channel: "c"}),
+                lambda channel=channel: mk("tick", x="v", y="y", **{channel: "c"}),
+                P,
+            ),
+        ),
+        (
+            "+right",
+            lambda channel=channel: P() + _attached_fit().encode(**{channel: "c"}),
+            (
+                P,
+                lambda channel=channel: _smooth(**{channel: "c"}),
+                lambda channel=channel: mk("tick", x="v", y="y", **{channel: "c"}),
+            ),
+        ),
+    )
+}
+
+
+@pytest.mark.parametrize("door", sorted(_POST_ATTACH_DOORS))
+def test_a_hosts_grouping_bound_after_attach_is_its_own_in_either_operand_order(door):
+    """``P() + S().layer(tick).encode(color="c")`` fits per ``c`` like ``S().encode(color="c").layer(tick)``.
+
+    Rejects the composition reading the host's record as ungrouped: one
+    fit, its color dropped with a warning, so the order of ``.layer`` and
+    ``.encode`` decided the chart.
+    """
+    check_rendering(_POST_ATTACH_DOORS[door])
+    assert _statistic_groupby(_quiet(_POST_ATTACH_DOORS[door].build), "smooth") == [["c"]]
+
+
+def test_a_regrouped_host_leaves_the_callers_chart_as_it_was():
+    """Rendering the regrouped host never rewrites the chart the caller holds."""
+    chart = _attached_fit().encode(color="c")
+    transforms, layers, source = (
+        list(chart._transforms),
+        list(chart._layers),
+        chart._composite_source,
+    )
+    _quiet(chart.to_svg)
+    assert chart._transforms == transforms
+    assert chart._layers == layers
+    assert chart._composite_source is source
+
+
+# ---------------------------------------------------------------------------
+# A figure's statistics regroup under a grouping bound after the call, as a
+# composite mark's do; show_metrics warns only when the caller asked for it,
+# one voice whatever door bound the grouping
+# ---------------------------------------------------------------------------
+
+
+def _resid(**kwargs: Any) -> fm.Chart:
+    return fm.residplot(df, x="v", y="y", **kwargs)
+
+
+#: Per door: a figure under a later grouping, and the parts it draws alone.
+_FIGURE_REGROUP_DOORS: dict[str, Case] = {
+    "residplot+e": Case(
+        lambda: (_resid() + P()).encode(color="c"),
+        (lambda: _resid(encode={"color": "c"}), lambda: P(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "residplot-lowess+e": Case(
+        lambda: (_resid(lowess=True) + P()).encode(color="c"),
+        (lambda: _resid(lowess=True, encode={"color": "c"}), lambda: P(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "residplot.encode": Case(
+        lambda: _resid().encode(color="c"),
+        (lambda: _resid(encode={"color": "c"}),),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+    "lmplot+e": Case(
+        lambda: (fm.lmplot(df, x="v", y="y") + P()).encode(color="c"),
+        (lambda: fm.lmplot(df, x="v", y="y", encode={"color": "c"}), lambda: P(color="c")),
+        legends={"c": ("p", "q")},
+        chart_level=None,
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_FIGURE_REGROUP_DOORS))
+def test_a_figure_regroups_under_a_grouping_bound_after_the_call(door):
+    """``(residplot(...) + P).encode(color="c")`` refits per ``c``, as ``residplot(encode=...)`` does.
+
+    Each figure under the later binding draws what the same figure called
+    with that ``encode=`` draws, static and interactive. Left at its
+    default ``show_metrics``, no door warns about the single-fit corner it
+    never asked for: it is dropped the same way everywhere.
+    """
+    case = _FIGURE_REGROUP_DOORS[door]
+    check_rendering(case)
+    _svg, dropped = _dropped_warnings(case.build)
+    assert dropped == []
+    assert _statistic_groupby(_quiet(case.build), "smooth")[0] == ["c"]
+
+
+#: show_metrics=True, per entry: a maker of its chart, taking show_metrics=
+#: and encode= as the figure's own constructor keywords, and the voice its
+#: warning speaks as (regplot forwards its body to lmplot directly, as
+#: `_required_field_name(entry="lmplot", ...)` already does for a refusal,
+#: so its warning speaks as lmplot too).
+_METRICS_WARN_ENTRIES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
+    "residplot": (
+        lambda show_metrics=None, encode=None: _resid(show_metrics=show_metrics, encode=encode),
+        "residplot",
+    ),
+    "residplot-lowess": (
+        lambda show_metrics=None, encode=None: _resid(
+            lowess=True, show_metrics=show_metrics, encode=encode
+        ),
+        "residplot",
+    ),
+    "lmplot-lm": (
+        lambda show_metrics=None, encode=None: fm.lmplot(
+            df, x="v", y="y", method="lm", show_metrics=show_metrics, encode=encode
+        ),
+        "lmplot",
+    ),
+    "lmplot-loess": (
+        lambda show_metrics=None, encode=None: fm.lmplot(
+            df, x="v", y="y", method="loess", show_metrics=show_metrics, encode=encode
+        ),
+        "lmplot",
+    ),
+    "lmplot-robust": (
+        lambda show_metrics=None, encode=None: fm.lmplot(
+            df, x="v", y="y", method="robust", show_metrics=show_metrics, encode=encode
+        ),
+        "lmplot",
+    ),
+    "regplot": (
+        lambda show_metrics=None, encode=None: fm.regplot(
+            df, x="v", y="y", show_metrics=show_metrics, encode=encode
+        ),
+        "lmplot",
+    ),
+    "lmplot-facet": (
+        lambda show_metrics=None, encode=None: fm.lmplot(
+            df, x="v", y="y", col="g", show_metrics=show_metrics, encode=encode
+        ),
+        "lmplot",
+    ),
+}
+
+#: Per entry: the doors it is built under. Composition doors (the rebuild
+#: mechanism, generic over every entry) are exercised for every entry --
+#: every entry here routes through Smooth, residplot and regplot included
+#: (regplot forwards its whole body into lmplot); every entry gets the
+#: direct and post-hoc single-operand doors, where the fix's per-method
+#: gating lives. The faceted entry's `+right` door also drops its own
+#: facet with the generic "primary layer wins" composition warning,
+#: pinned on its own below rather than skipped.
+_METRICS_WARN_DOORS: dict[str, tuple[str, ...]] = {
+    "residplot": ("encode=", ".encode", "+left", "+right", "nested"),
+    "lmplot-lm": ("encode=", ".encode", "+left", "+right", "nested"),
+    "residplot-lowess": ("encode=", ".encode", "+left", "+right", "nested"),
+    "lmplot-loess": ("encode=", ".encode", "+left", "+right", "nested"),
+    "lmplot-robust": ("encode=", ".encode", "+left", "+right", "nested"),
+    "regplot": ("encode=", ".encode", "+left", "+right", "nested"),
+    "lmplot-facet": ("encode=", ".encode", "+left", "+right", "nested"),
+}
+
+
+def _metrics_warn_build(entry: str, door: str, show_metrics: bool | None) -> Callable[[], fm.Chart]:
+    make, _voice = _METRICS_WARN_ENTRIES[entry]
+    if door == "encode=":
+        return lambda: make(show_metrics=show_metrics, encode={"color": "c"})
+    if door == ".encode":
+        return lambda: make(show_metrics=show_metrics).encode(color="c")
+    if door == "+left":
+        return lambda: (make(show_metrics=show_metrics) + P()).encode(color="c")
+    if door == "+right":
+        return lambda: (P() + make(show_metrics=show_metrics)).encode(color="c")
+    return lambda: ((make(show_metrics=show_metrics) + P()) + _rug()).encode(color="c")
+
+
+_METRICS_WARN_CASES: list[tuple[str, str]] = [
+    (entry, door) for entry, doors in _METRICS_WARN_DOORS.items() for door in doors
+]
+_METRICS_WARN_IDS = [f"{entry}/{door}" for entry, door in _METRICS_WARN_CASES]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", _METRICS_WARN_CASES, ids=_METRICS_WARN_IDS)
+def test_a_figures_default_metrics_never_warns_under_a_grouping(case, output):
+    """Left unset, ``show_metrics`` drops a single-fit corner silently on every door.
+
+    Rejects the rebuild door warning about a layer the caller never asked
+    for while the direct ``encode=`` door, which groups the identical
+    statistic, stays silent -- one chart, one voice, whatever door bound
+    the grouping.
+    """
+    entry, door = case
+    build = _metrics_warn_build(entry, door, None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg() if output == "static" else chart.interactive().scene_json
+    messages = [
+        str(w.message)
+        for w in caught
+        if "corner is not drawn" in str(w.message) or "layer was dropped" in str(w.message)
+    ]
+    assert messages == []
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", _METRICS_WARN_CASES, ids=_METRICS_WARN_IDS)
+def test_a_figures_explicit_metrics_warns_once_on_every_door_the_same_way(case, output):
+    """``show_metrics=True`` with no single fit warns once, the same voice whatever door bound it.
+
+    Rejects warning only on the post-hoc doors while the direct ``encode=``
+    door, which groups the identical statistic, stays silent (the voice
+    the removed ``_redrawn_layers`` warning had). The rendered chart is the
+    one the default renders: only the warning differs.
+    """
+    entry, door = case
+    _make, voice = _METRICS_WARN_ENTRIES[entry]
+    default_build = _metrics_warn_build(entry, door, None)
+    true_build = _metrics_warn_build(entry, door, True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = true_build()
+        rendered = chart.to_svg() if output == "static" else chart.interactive().scene_json
+    messages = [str(w.message) for w in caught if "corner is not drawn" in str(w.message)]
+    assert messages == [
+        f"{voice}: show_metrics=True has no single fit to describe: the fit is computed "
+        "per group of 'c', so the R²/RMSE/MAE corner is not drawn"
+    ]
+    if output == "static":
+        assert rendered == _quiet(lambda: default_build().to_svg())
+    else:
+        assert rendered == _quiet(lambda: default_build().interactive().scene_json)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("show_metrics", [None, True])
+def test_lmplot_facet_plus_right_drops_its_facet_with_a_primary_layer_wins_warning(
+    show_metrics, output
+):
+    """``P() + lmplot(col='g')`` drops the facet operand's own facet/theme; the warning is pinned.
+
+    The `+right` door makes ``lmplot``'s faceted chart the secondary
+    operand, which the generic composition rule always drops in favor of
+    the primary layer's theme/facet, whatever ``show_metrics`` is. Rejects
+    silently skipping this door's own warning in the generic metrics
+    tables above, which filter it out by design (it names neither "corner
+    is not drawn" nor "layer was dropped").
+    """
+    build = _metrics_warn_build("lmplot-facet", "+right", show_metrics)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg() if output == "static" else chart.interactive().scene_json
+    primary_layer_wins = [str(w.message) for w in caught if "primary layer wins" in str(w.message)]
+    assert primary_layer_wins == [
+        "Layered chart `+`: secondary layer's theme/facet is ignored; primary layer wins."
+    ]
+
+
+#: Charts a later grouping never reaches, and the SVG and interactive scene
+#: digests they render on the tree before figures carried a rebuild record.
+_REGROUP_CONTROLS: dict[str, tuple[Callable[[], Any], tuple[str, str]]] = {
+    "residplot+P": (
+        lambda: _resid() + P(),
+        (
+            "fd49e8c120af904fad68873e0c1d3eb12d2bde65dcfdea252367c879f4c941d4",
+            "5b315590754e83b5082714a3cb82b5da37b98a8e4b6149611a77b75f7e1cc894",
+        ),
+    ),
+    "lmplot+P": (
+        lambda: fm.lmplot(df, x="v", y="y") + P(),
+        (
+            "7947575162b432e08b6c869276319844f89c056c6f928f5cf3d5addc5a0f1144",
+            "5adbe7a9cbb2dee7c2b4650ab68c46a64552bdb2425f4ffaf654272bcb203e43",
+        ),
+    ),
+    "smooth-tick-pre-attach": (
+        lambda: _smooth(color="c").layer(layer("tick")),
+        (
+            "29f975a0714ba420631e7eb407d53fefd9bf2897aacc0b8b7f71f70074e6d9a4",
+            "c26bdbb2ce0872f8e52e3f744054d630ac4788c6740c5afff51f62ef604e9f78",
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REGROUP_CONTROLS))
+def test_a_chart_no_later_grouping_reaches_renders_as_it_did(case):
+    """A figure under a composition binding no grouping channel, and a host bound before the attach."""
+    import hashlib
+
+    build, (svg_digest, scene_digest) = _REGROUP_CONTROLS[case]
+    assert hashlib.sha256(_quiet(lambda: build().to_svg()).encode()).hexdigest() == svg_digest
+    scene = _quiet(lambda: build().interactive().scene_json)
+    assert hashlib.sha256(scene.encode()).hexdigest() == scene_digest
+
+
+def test_a_regrouped_figure_leaves_the_callers_chart_as_it_was():
+    """Lowering a composition holding a figure never rewrites the figure the caller holds."""
+    figure = _resid()
+    chart = (figure + P()).encode(color="c")
+    transforms, layers = list(figure._transforms), list(figure._layers)
+    operands = chart._operands
+    _quiet(chart.to_svg)
+    assert figure._transforms == transforms and figure._layers == layers
+    assert chart._operands is operands
+
+
+# ---------------------------------------------------------------------------
+# A detail no mark draws is reported ignored only when no statistic grouped by it
+# ---------------------------------------------------------------------------
+
+_IGNORED_DETAIL = "encode(detail=...) is accepted but ignored by mark_"
+
+
+def _detail_warnings(build: Callable[[], Any], output: str) -> list[str]:
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg() if output == "static" else chart.interactive().scene_json
+    return [str(w.message) for w in caught if _IGNORED_DETAIL in str(w.message)]
+
+
+#: Charts whose detail groups a statistic, though no mark draws detail.
+_DETAIL_GROUPS: dict[str, Callable[[], Any]] = {
+    "histogram": lambda: mk("histogram", x="v", detail="c"),
+    "boxplot": lambda: mk("boxplot", x="g", y="y", detail="c"),
+    "violin": lambda: mk("violin", x="g", y="y", detail="c"),
+    "qq": lambda: mk("qq", x="z", detail="c"),
+    "density-2d": lambda: mk("density", x="v", y="y", detail="c"),
+    "residplot": lambda: _resid(encode={"detail": "c"}),
+    "errorbar": lambda: mk("errorbar", x="g", y="y", detail="c"),
+    "bar-mean": lambda: bar_mean(detail="c"),
+    "+text-label": lambda: (
+        bar_mean(color="c", detail="z") + mk("text", x="g", y="mean(y)", text="mean(y)")
+    ),
+}
+
+#: Charts whose detail does nothing: no mark draws it and no statistic groups by it.
+_DETAIL_IGNORED: dict[str, tuple[Callable[[], Any], str]] = {
+    "point": (lambda: P(detail="c"), "point"),
+    "bar-raw": (lambda: mk("bar", x="g", y="y", detail="c"), "bar"),
+    "+point-operand": (lambda: P(detail="c") + P(y="z"), "point"),
+    "user-step": (
+        lambda: (
+            fm.Chart(df)
+            .transform(fm.Aggregate([fm.AggregateOp("y", "mean", "m")], groupby=["g", "c"]))
+            .mark_bar()
+            .encode(x="g", y="m", detail="c")
+        ),
+        "bar",
+    ),
+    "point-aggregate": (
+        lambda: mk("point", x="c", y="m", detail="c").transform(
+            fm.Aggregate([fm.AggregateOp("y", "mean", "m")], groupby=["c"])
+        ),
+        "point",
+    ),
+    "point-window": (
+        lambda: P(detail="c").transform(
+            fm.transform_window({"op": "row_number", "as": "rk"}, groupby=["c"])
+        ),
+        "point",
+    ),
+    "point-join-aggregate": (
+        lambda: P(detail="c").transform(
+            fm.transform_join_aggregate({"field": "y", "fn": "mean", "as": "ym"}, groupby=["c"])
+        ),
+        "point",
+    ),
+    "point-plus-aggregate-branch": (
+        lambda: (
+            mk("point", x="c", y="m", detail="c").transform(
+                fm.Aggregate([fm.AggregateOp("y", "mean", "m")], groupby=["c"])
+            )
+            + P(y="z")
+        ),
+        "point",
+    ),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_DETAIL_GROUPS))
+def test_a_detail_a_statistic_groups_by_is_never_reported_ignored(case, output):
+    """Rejects the ignored-detail warning on a statistic split per detail value.
+
+    It fired at aliasing, before any statistic was lowered, so every
+    composite, figure, encoding aggregate and label grouped by detail was
+    told its detail did nothing.
+    """
+    assert _detail_warnings(_DETAIL_GROUPS[case], output) == []
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_DETAIL_IGNORED))
+def test_a_detail_nothing_draws_or_groups_by_is_reported_ignored_once(case, output):
+    """The control: a detail no mark draws and no statistic groups by still warns, once.
+
+    Includes a caller-written ``Aggregate``/``Window``/``JoinAggregate`` step
+    that groups by the detail field for its own reason, before any mark
+    resolved a statistic: the field is reported ignored anyway, on the flat
+    chart and inside a ``+`` operand's own branch prefix. Rejects reading
+    any step's ``groupby`` on the wire, not only a lowered statistic's.
+    """
+    build, mark = _DETAIL_IGNORED[case]
+    (message,) = _detail_warnings(build, output)
+    assert message.startswith(f"{_IGNORED_DETAIL}{mark};")
+
+
+# ---------------------------------------------------------------------------
+# A boxen palette is refused under a color the bands draw, on every spelling and door
+# ---------------------------------------------------------------------------
+
+_BOXEN_DF = pl.DataFrame(
+    {"group": ["a"] * 200 + ["b"] * 200, "val": list(range(200)) + list(range(100, 300))}
+).with_columns(c=pl.Series(["p", "q"] * 200))
+_PALETTE = ["#111111", "#222222"]
+_PALETTE_REFUSAL = (
+    "mark_boxen(palette=...) cannot be combined with a color the bands draw (color=, fill= or "
+    "stroke=, on the chart or on a composition it is part of): the color overrides every "
+    "band's fill, so the palette would have no visible effect. Drop the color binding or drop "
+    "palette="
+)
+
+
+def _boxen(**encoding: Any) -> fm.Chart:
+    chart = fm.Chart(_BOXEN_DF).mark_boxen(palette=_PALETTE)
+    return chart.encode(**{"x": "group", "y": "val", **encoding})
+
+
+def _boxen_points(**encoding: Any) -> fm.Chart:
+    return fm.Chart(_BOXEN_DF).mark_point().encode(**{"x": "group", "y": "val", **encoding})
+
+
+_PALETTE_CONFLICTS: dict[str, Callable[[], Any]] = {
+    "color": lambda: _boxen(color="c"),
+    "fill": lambda: _boxen(fill="c"),
+    "stroke": lambda: _boxen(stroke="c"),
+    "+e": lambda: (_boxen() + _boxen_points()).encode(color="c"),
+    "+e-fill": lambda: (_boxen_points() + _boxen()).encode(fill="c"),
+    "nested": lambda: ((_boxen() + _boxen_points()) + _boxen_points()).encode(color="c"),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_PALETTE_CONFLICTS))
+def test_a_boxen_palette_under_a_color_the_bands_draw_is_refused(case, output):
+    """Every spelling and door of a color the bands group by and draw refuses the palette.
+
+    Rejects reading only the chart's literal ``color`` key: ``fill=``,
+    ``stroke=`` and a composition's color drew the bands in the group
+    colors and silently discarded the palette.
+    """
+    chart = _PALETTE_CONFLICTS[case]()
+    with pytest.raises(ValueError) as refused:
+        _quiet(chart.to_svg if output == "static" else lambda: chart.interactive().scene_json)
+    assert str(refused.value) == _PALETTE_REFUSAL
+
+
+_PALETTE_CONTROLS: dict[str, Callable[[], Any]] = {
+    "no-color": lambda: (
+        fm.Chart(_BOXEN_DF.drop("c")).mark_boxen(palette=_PALETTE).encode(x="group", y="val")
+    ),
+    "color_field": lambda: (
+        fm.Chart(_BOXEN_DF.drop("c"))
+        .mark_boxen(palette=_PALETTE, color_field="group")
+        .encode(x="group", y="val")
+    ),
+}
+#: The SVG and scene digests both render on the tree before the refusal read the
+#: effective color.
+_PALETTE_CONTROL_DIGESTS = (
+    "913791d61cd343decbb2d1ed4b6e28c3d6addbe9146d3f1a48a71c12a817bf1a",
+    "0d475e208cc304ed3c961d67ca592cce613562cde74b7fd27c0dcfc170e1d17a",
+)
+
+
+@pytest.mark.parametrize("case", sorted(_PALETTE_CONTROLS))
+def test_a_boxen_palette_without_a_drawn_color_renders_as_it_did(case):
+    import hashlib
+
+    chart = _PALETTE_CONTROLS[case]()
+    svg = _quiet(chart.to_svg)
+    scene = _quiet(lambda: chart.interactive().scene_json)
+    assert (
+        hashlib.sha256(svg.encode()).hexdigest(),
+        hashlib.sha256(scene.encode()).hexdigest(),
+    ) == _PALETTE_CONTROL_DIGESTS
+
+
+# ---------------------------------------------------------------------------
+# Error bars and error bands group like the box: by every grouping channel
+# ---------------------------------------------------------------------------
+
+#: Per spelling: the errorbar or errorband, and the groupby its ErrorExtent carries.
+_ERROR_GROUPED: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
+    **{
+        f"errorbar/{channel}": (
+            lambda channel=channel: mk("errorbar", x="g", y="y", **{channel: "c"}),
+            ["g", "c"],
+        )
+        for channel in ("color", "fill", "stroke", "detail", "shape", "stroke_dash")
+    },
+    **{
+        f"errorband/{channel}": (
+            lambda channel=channel: mk("errorband", x="v", y="y", **{channel: "c"}),
+            ["v", "c"],
+        )
+        for channel in ("color", "fill", "stroke", "detail", "shape", "stroke_dash")
+    },
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ERROR_GROUPED))
+def test_an_error_extent_groups_by_each_grouping_channel(case):
+    """Rejects ``ErrorExtent`` grouping by the hue only, so detail, shape and stroke_dash pooled."""
+    build, expected = _ERROR_GROUPED[case]
+    assert _statistic_groupby(_quiet(build), "error_extent") == [expected]
+    _svg, dropped = _dropped_warnings(build)
+    assert dropped == []
+
+
+#: Four rows per (t, c): an error band needs several values at each x.
+_BAND_DF = pl.DataFrame(
+    {
+        "t": [1.0, 2.0, 3.0] * 8,
+        "v": [float((7 * i) % 11) for i in range(24)],
+        "c": (["p"] * 3 + ["q"] * 3) * 4,
+    }
+)
+
+
+def _band(**encoding: Any) -> fm.Chart:
+    return mk("errorband", _BAND_DF, **{"x": "t", "y": "v", **encoding})
+
+
+#: Per case: the chart, and the chart drawing the same marks through color.
+_ERROR_DRAWN: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart], str, int]] = {
+    "errorbar/detail": (
+        lambda: mk("errorbar", x="g", y="y", detail="c"),
+        lambda: mk("errorbar", x="g", y="y", color="c"),
+        "line",
+        12,
+    ),
+    "errorbar/shape": (
+        lambda: mk("errorbar", x="g", y="y", shape="c"),
+        lambda: mk("errorbar", x="g", y="y", color="c"),
+        "line",
+        12,
+    ),
+    "errorband/detail": (lambda: _band(detail="c"), lambda: _band(color="c"), "path", 2),
+    "errorband/shape": (lambda: _band(shape="c"), lambda: _band(color="c"), "path", 2),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ERROR_DRAWN))
+def test_an_error_extent_grouped_without_color_draws_one_bar_or_band_per_group(case):
+    """One bar per (category, group) and one band per group, static and interactive.
+
+    Rejects one bar or band through every group's rows.
+    """
+    build, colored, tag, count = _ERROR_DRAWN[case]
+    assert tag_counts(_quiet(lambda: build().to_svg())).get(tag) == count
+    assert tag_counts(_quiet(lambda: colored().to_svg())).get(tag) == count
+    drawn = sum(_quiet(lambda: interactive_census(build())).values())
+    assert drawn == sum(_quiet(lambda: interactive_census(colored())).values())
+
+
+#: Error bars and bands no grouping reaches, and the SVG and scene digests they
+#: render on the tree before ErrorExtent took the chart's grouping.
+_ERROR_CONTROLS: dict[str, tuple[Callable[[], fm.Chart], tuple[str, str]]] = {
+    "errorbar": (
+        lambda: mk("errorbar", x="g", y="y"),
+        (
+            "13ab1cb5ea2f7337c3063235468ad2f92df0d3f1e8107345ee49ff295acc127f",
+            "4ff88913bea2466e0c8d6b5384948974f42bb7a7cbd2af3fc2bbbe682a4793bf",
+        ),
+    ),
+    "errorbar/detail-equal-to-x": (
+        lambda: mk("errorbar", x="g", y="y", detail="g"),
+        (
+            "13ab1cb5ea2f7337c3063235468ad2f92df0d3f1e8107345ee49ff295acc127f",
+            "4ff88913bea2466e0c8d6b5384948974f42bb7a7cbd2af3fc2bbbe682a4793bf",
+        ),
+    ),
+    "errorbar/color": (
+        lambda: mk("errorbar", x="g", y="y", color="c"),
+        (
+            "86ffe24333c552b4da76f5d91050f6c1cfedbc11d2d4ce043193fd13e1ccf39b",
+            "5dc64029914fcaacb79f4e94d7e002c85377ec2d1ee9cdf6ff53d9a5ea1dea0a",
+        ),
+    ),
+    "errorband": (
+        lambda: mk("errorband", x="v", y="y"),
+        (
+            "3a6f6f9f0abd135801fd7abea060c9d3be24013f00f8ba004b20fe1bf505053d",
+            "53209cdbea9de0af9363149deb1a37bd4941e9e53d81213c34af230557d41363",
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ERROR_CONTROLS))
+def test_an_error_extent_no_new_grouping_reaches_renders_as_it_did(case):
+    """No grouping channel, an existing hue, and a grouping field equal to x (deduplicated)."""
+    import hashlib
+
+    build, (svg_digest, scene_digest) = _ERROR_CONTROLS[case]
+    assert hashlib.sha256(_quiet(lambda: build().to_svg()).encode()).hexdigest() == svg_digest
+    scene = _quiet(lambda: build().interactive().scene_json)
+    assert hashlib.sha256(scene.encode()).hexdigest() == scene_digest
+
+
+# ---------------------------------------------------------------------------
+# lmplot fits every method per group of its hue and every grouping channel
+# ---------------------------------------------------------------------------
+
+_LM_RNG = np.random.default_rng(0)
+_LM_X = np.linspace(-3.0, 3.0, 120)
+_LM_DF = pl.DataFrame(
+    {
+        "x": _LM_X,
+        "y": 2 * _LM_X + _LM_RNG.normal(0, 1, 120),
+        "b": (_LM_RNG.uniform(size=120) < 1 / (1 + np.exp(-2 * _LM_X))).astype(float),
+        "g": ["a", "b"] * 60,
+    }
+)
+_LM_METHODS = ("lm", "loess", "logistic", "glm", "robust")
+_LM_STEP = {"lm": "smooth", "loess": "smooth", "logistic": "logistic", "glm": "glm"}
+_LM_SPELLINGS: dict[str, dict[str, Any]] = {
+    "hue": {"hue": "g"},
+    "color": {"color": "g"},
+    "fill": {"fill": "g"},
+    "encode-color": {"encode": {"color": "g"}},
+    "encode-detail": {"encode": {"detail": "g"}},
+}
+
+
+def _lmplot(method: str, **kwargs: Any) -> fm.Chart:
+    y = "b" if method == "logistic" else "y"
+    return fm.lmplot(_LM_DF, x="x", y=y, method=method, **kwargs)
+
+
+@pytest.mark.parametrize("spelling", sorted(_LM_SPELLINGS))
+@pytest.mark.parametrize("method", _LM_METHODS)
+def test_lmplot_fits_each_method_per_group_of_every_grouping_spelling(method, spelling):
+    """One fit line and band per group, static and interactive, in the group's color when colored.
+
+    Rejects the pooled fit over every group (one line, a neutral stroke)
+    that ``logistic``, ``glm`` and ``robust`` drew under ``hue=``, and that
+    every method drew under ``color=``, ``fill=`` or an ``encode=`` grouping.
+    """
+    chart = _lmplot(method, **_LM_SPELLINGS[spelling])
+    step = _LM_STEP.get(method, method)
+    assert _statistic_groupby(chart, step) == [["g"]]
+    svg = _quiet(chart.to_svg)
+    assert tag_counts(svg).get("polyline") == 2
+    assert tag_counts(svg).get("path") == 2
+    batches = Counter(
+        batch["kind"]
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+        for _node in batch["nodes"]
+    )
+    assert (batches["line"], batches["ribbon"]) == (2, 2)
+    if spelling != "encode-detail":
+        strokes = set(re.findall(r'<polyline[^>]*stroke="([^"]+)"', svg))
+        fills = set(re.findall(r'<circle[^>]*fill="([^"]+)"', svg))
+        assert len(strokes) == 2 and strokes <= fills
+
+
+#: Ungrouped dedicated fits, and the SVG and scene digests they render on the
+#: tree before lmplot passed a grouping to every method.
+_LM_CONTROLS: dict[str, tuple[str, str]] = {
+    "logistic": (
+        "9d01c587dfe98a80e44bbf2d4ce91e7bebfae318fe20abb53a3b7b816244bec3",
+        "b67775cdcf8daad0354e56d374b0e97b1aacf0fec4cb7fb04286497d4fbbabf6",
+    ),
+    "glm": (
+        "7684275e841b008430028dfcdf05f35e2b044179f5aefeecc95a439535f3a8fa",
+        "fcef1074e4d8fa85f5296edcb618d977455eed4fbdcb527f68c0c1284d0943ac",
+    ),
+    "robust": (
+        "137e9e41ef5e22b0ba446e2f4cbd1f78ade7c9ca499da90f24536752747a428d",
+        "b02e9b72f37c40068ad09f36fcc04a9128932a8ab4b15af105a44df69847319b",
+    ),
+}
+
+
+@pytest.mark.parametrize("method", sorted(_LM_CONTROLS))
+def test_an_ungrouped_lmplot_renders_as_it_did(method):
+    import hashlib
+
+    chart = _lmplot(method)
+    svg_digest, scene_digest = _LM_CONTROLS[method]
+    assert hashlib.sha256(_quiet(chart.to_svg).encode()).hexdigest() == svg_digest
+    scene = _quiet(lambda: chart.interactive().scene_json)
+    assert hashlib.sha256(scene.encode()).hexdigest() == scene_digest
+
+
+# ---------------------------------------------------------------------------
+# An explicit groupby= wins over the chart's grouping: what the user then gets
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_groupby_grouping_by_the_drawn_color_draws_and_warns_the_undrawn_shape():
+    """``groupby=["c"]`` with ``color="c", shape="c"``: two histograms, and shape reported ignored.
+
+    The counts group by the explicit ``["c"]`` only, the bars draw what
+    the same chart without shape draws, and shape, which no mark draws and
+    the explicit groupby took no part from, warns that it did nothing.
+    """
+    grouped = fm.Chart(df).mark_histogram(groupby=["c"]).encode(x="v", color="c", shape="c")
+    plain = fm.Chart(df).mark_histogram(groupby=["c"]).encode(x="v", color="c")
+    assert _statistic_groupby(grouped, "bin") == [["c"]]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = grouped.to_svg()
+    assert census(svg) == census(_quiet(plain.to_svg))
+    assert _quiet(lambda: interactive_census(grouped)) == _quiet(lambda: interactive_census(plain))
+    assert [str(w.message) for w in caught if "shape 'c'" in str(w.message)] == [
+        "mark_histogram: shape 'c' has no effect: no layer's mark draws shape (this bar mark "
+        "does not), so it gets no scale and no legend; it was ignored"
+    ]

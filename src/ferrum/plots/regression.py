@@ -35,13 +35,14 @@ from ferrum import (
 from ferrum._coerce import to_polars
 from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
+from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
-from ferrum.encoding._aliases import resolve_channel_alias
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.encoding._resolve import channel_for_value
+from ferrum.marks._desugar_helpers import nominal_color_channel, with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
@@ -547,7 +548,6 @@ def _fit_chart_from_named_transform(
     chart_y: Any,
     x_title: str,
     y_title: str,
-    neutral_stroke: bool = False,
     metrics: bool = False,
 ) -> Chart:
     """Build a layered ``Chart`` around a named fit-family transform.
@@ -568,17 +568,6 @@ def _fit_chart_from_named_transform(
     scatter layer will be composed beside the fit: the layer shape it builds
     is the one that binds every layer to the NAMED transform output, which is
     what keeps the scatter reading the raw rows. See that call site.
-
-    ``neutral_stroke``: a POOLED fit -- ``Logistic``/``Glm``, which take no
-    ``groupby`` at all, and ``Robust``, which has one that ``lmplot`` does
-    not yet wire ``hue=`` into. When any channel that resolves to ``color``
-    is active on the sibling scatter layer -- ``hue=``, or any of
-    ``color=``/``fill=``/``stroke=`` in keyword or ``encode=`` dict form,
-    resolved once as ``lmplot``'s ``color_active`` through
-    ``ferrum.encoding._aliases.resolve_channel_alias`` so a future alias needs
-    no change here -- that pooled fit must not visually impersonate one color
-    level, so its band and line take the neutral theme token instead. See
-    ``build_fit_layers``.
 
     ``metrics`` appends the corner-statistics text layer, only meaningful
     when ``transform`` was itself built with ``inject_metrics=True`` (only
@@ -620,7 +609,6 @@ def _fit_chart_from_named_transform(
             x_title=x_title,
             y_title=y_title,
             line_kwargs=line_kwargs,
-            neutral_stroke=neutral_stroke,
             metrics=metrics,
         )
     ]
@@ -639,6 +627,10 @@ class _FitRequest:
 
     ``x``/``y`` are the caller's channels (``x`` already carries ``logx``'s
     log scale); ``x_field``/``y_field`` are their resolved column names.
+    ``grouping`` is the fields the fit groups by (spec §6.4's composite
+    grouping of the hue and every grouping channel the caller binds), and
+    ``grouping_bindings`` the bindings of those channels, which the fit
+    chart binds itself so each per-group curve draws its group's color.
     ``has_scatter`` says whether a scatter layer will be composed beside the
     fit, which decides the smooth path's layer shape.
     """
@@ -648,7 +640,8 @@ class _FitRequest:
     y: Any
     x_field: str
     y_field: str
-    hue: Any
+    grouping: tuple[str, ...]
+    grouping_bindings: dict
     ci: float | None
     line_kwargs: dict
     x_bins: Any
@@ -656,7 +649,6 @@ class _FitRequest:
     order: int | None
     x_range: list[float] | None
     metrics: bool
-    color_active: bool
     has_scatter: bool
 
 
@@ -675,9 +667,10 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
       the engine decide.
     - ``order`` forwards as ``degree=`` via ``_smooth_degree_kwargs``, whose
       docstring holds the per-method acceptance matrix.
-    - ``groupby=hue`` fits per hue level and colors each fit by it.
+    - ``groupby=`` the request's grouping fits one curve per group, and the
+      fit binds the grouping channels, so each curve draws its group's color.
     - ``show_metrics`` needs no gate here: ``req.metrics`` is already False
-      whenever ``hue`` is set (and for logistic/glm), computed in ``lmplot``.
+      under any grouping (and for logistic/glm), computed in ``lmplot``.
     """
     lkw = req.line_kwargs
     smooth_kwargs: dict = dict(
@@ -686,7 +679,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         x_bins=req.x_bins,
         x_estimator=req.x_estimator,
         show_metrics=req.metrics,
-        **({"groupby": _field_name(req.hue)} if req.hue is not None else {}),
+        **_grouped(req),
         **_smooth_degree_kwargs(method, req.order, "lmplot"),
         **({"x_range": req.x_range} if req.x_range is not None else {}),
     )
@@ -708,11 +701,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         fit = Chart(req.data).mark_smooth(
             **smooth_kwargs, layer_kwargs={"line": lkw} if lkw else None
         )
-        if req.hue is not None:
-            # Same Nominal typing as `lmplot`'s scatter (`nominal_color_channel`
-            # is pure, so re-typing here binds an equal channel).
-            return fit.encode(x=req.x, y=req.y, color=nominal_color_channel(req.hue))
-        return fit.encode(x=req.x, y=req.y)
+        return fit.encode(x=req.x, y=req.y, **req.grouping_bindings)
     # A scatter layer will be composed beside this fit, so the fit's
     # transform must be a NAMED fan-out its own layers read through
     # `data_source=` -- never a chain-advancing transform, which would
@@ -752,29 +741,32 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         y_title=req.y_field,
         metrics=req.metrics,
     )
-    if req.hue is not None:
-        # The fit groups by the hue, and composed beside the scatter it
-        # draws only its own bindings, so it binds the hue itself (the same
-        # channel the no-scatter branch above binds).
-        return fit.encode(color=nominal_color_channel(req.hue))
-    return fit
+    return _with_grouping_bindings(fit, req)
+
+
+def _with_grouping_bindings(fit: Chart, req: _FitRequest) -> Chart:
+    """*fit* binding the grouping channels its statistic groups by.
+
+    Composed beside the scatter, the fit draws only its own bindings, so it
+    binds the hue and every grouping channel itself, each curve and band
+    drawing its group's color.
+    """
+    return fit.encode(**req.grouping_bindings) if req.grouping_bindings else fit
+
+
+def _grouped(req: _FitRequest) -> dict:
+    """Return the ``groupby=`` keyword every fit transform takes for *req*'s grouping."""
+    return {"groupby": list(req.grouping)} if req.grouping else {}
 
 
 def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
     """Build the chart around one of the three dedicated fit-family transforms.
 
-    ``Logistic``/``Glm``/``Robust`` are all called WITHOUT a ``groupby``, so
-    exactly one pooled fit is produced regardless of whether a color encoding
-    is active. ``neutral_stroke=color_active`` is what stops that pooled fit
-    from rendering in a color level's palette color beside a full legend -- a
-    materially wrong statistical chart, drawn silently, and the same failure
-    class ``nominal_color_channel`` names for a mistyped hue column. ``Robust``
-    did gain a Rust-side ``groupby`` in batch F (``residplot(color=)``
-    consumes it), so wiring ``hue=`` through to per-group robust fits is a
-    Python-side change; ``Logistic``/``Glm`` still need the Rust capability
-    first. Both tracked as batch-close follow-ups.
+    Each transform was built with the request's grouping as its ``groupby``
+    (:func:`_grouped`), so it fits one curve per group, and the chart binds
+    the grouping channels so each curve and band draws its group's color.
     """
-    return _fit_chart_from_named_transform(
+    fit = _fit_chart_from_named_transform(
         req.data,
         transform,
         kind=kind,
@@ -784,20 +776,28 @@ def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
         chart_y=req.y,
         x_title=req.x_field,
         y_title=req.y_field,
-        neutral_stroke=req.color_active,
         # False for logistic/glm: `lmplot` never sets `metrics` for them.
         metrics=req.metrics,
     )
+    return _with_grouping_bindings(fit, req)
 
 
 def _build_logistic_fit(method: str, req: _FitRequest) -> Chart:
-    transform = Logistic(x=req.x_field, y=req.y_field, n_grid=200, ci=req.ci, name="logistic")
+    transform = Logistic(
+        x=req.x_field, y=req.y_field, n_grid=200, ci=req.ci, name="logistic", **_grouped(req)
+    )
     return _dedicated_fit_chart("logistic", transform, req)
 
 
 def _build_glm_fit(method: str, req: _FitRequest) -> Chart:
     transform = Glm(
-        x=req.x_field, y=req.y_field, family="gaussian", n_grid=200, ci=req.ci, name="glm"
+        x=req.x_field,
+        y=req.y_field,
+        family="gaussian",
+        n_grid=200,
+        ci=req.ci,
+        name="glm",
+        **_grouped(req),
     )
     return _dedicated_fit_chart("glm", transform, req)
 
@@ -812,6 +812,7 @@ def _build_robust_fit(method: str, req: _FitRequest) -> Chart:
         name="robust",
         inject_metrics=req.metrics,
         **({"x_range": req.x_range} if req.x_range is not None else {}),
+        **_grouped(req),
     )
     return _dedicated_fit_chart("robust", transform, req)
 
@@ -871,7 +872,7 @@ def lmplot(
     x_estimator: Any = None,
     x_jitter: Any = None,
     logx: bool = False,
-    show_metrics: bool = True,
+    show_metrics: bool | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
@@ -889,19 +890,16 @@ def lmplot(
       explicit ``order=`` (forwarded uniformly as ``degree=``, see ``order``
       below); a bare call (``order`` left at its ``None`` default) uses each
       method's own default degree concept.
-    * ``"logistic"`` -- ``Logistic`` transform + pooled fit line + CI band.
-    * ``"glm"``      -- ``Glm`` transform + pooled fit line + CI band.
-    * ``"robust"``   -- ``Robust`` transform + pooled fit line + CI band.
+    * ``"logistic"`` -- ``Logistic`` transform + fit line + CI band.
+    * ``"glm"``      -- ``Glm`` transform + fit line + CI band.
+    * ``"robust"``   -- ``Robust`` transform + fit line + CI band.
 
-    ``"logistic"``/``"glm"``/``"robust"`` fit **one pooled curve across the
-    whole dataset**, unlike ``mark_smooth``'s ``"lm"``/``"loess"``/etc.
-    ``Logistic`` and ``Glm`` take no ``groupby`` at all; ``Robust`` gained one
-    (``residplot(color=)`` uses it), so its pooling is a wiring gap here
-    rather than a missing capability -- tracked as a follow-up. When any
-    channel that resolves to ``color`` is active -- ``hue=``, a bare ``color=``/
-    ``fill=``/``stroke=`` keyword, or the ``encode=`` dict equivalent -- the
-    scatter is still colored per level, but the fit line and CI band render
-    in a neutral stroke/fill (see ``hue`` below), not a level's color.
+    Every method fits one curve per group of the chart's grouping: the
+    ``hue`` and every grouping channel the caller binds (``color``,
+    ``fill``, ``stroke``, ``detail``, ``shape``, ``stroke_dash``, as a
+    keyword or through ``encode=``), each curve and band drawn in its
+    group's color, as a composite statistic groups by its chart's grouping
+    channels. Without a grouping the fit is one curve over every row.
 
     Parameters
     ----------
@@ -912,23 +910,12 @@ def lmplot(
     y : str
         Column name for the vertical (response) axis (required).
     hue : str or encoding, optional
-        Column name to map to color. For every ``mark_smooth``-routed
-        ``method`` (see ``method`` below), the fit is refit per hue level via
-        ``groupby``, so each level gets its own fit line and CI band in that
-        level's scatter color. For ``"logistic"``, ``"glm"``, ``"robust"``,
-        the scatter is colored per hue level but the fit is a single curve
-        pooled across every group,
-        rendered in a neutral stroke/fill distinct from the palette -- it
-        does not represent any one group's fit. This pooled-neutral behavior
-        for the three dedicated methods is not specific to ``hue=`` -- it
-        applies identically whenever any channel that resolves to ``color``
-        reaches the chart (``hue=``, a bare ``color=``/``fill=``/``stroke=``
-        keyword, or ``encode={"color": ...}``/``encode={"fill": ...}``/
-        ``encode={"stroke": ...}``), since all are the same "one pooled fit,
-        colored scatter" situation. Per-group fits are not built for any of
-        the three: ``"logistic"``/``"glm"`` need ``groupby`` support on the
-        underlying Rust transform first, while ``"robust"`` has it already
-        and needs only the wiring here. Both tracked as follow-ups.
+        Column name to map to color. For every ``method``, the fit is refit
+        per hue level via its transform's ``groupby``, so each level gets its
+        own fit line and CI band in that level's scatter color. Any other
+        grouping channel the caller binds (``color=``/``fill=``/``stroke=``,
+        ``detail``, ``shape`` or ``stroke_dash``, as a keyword or through
+        ``encode=``) groups the fit the same way.
     col : str, optional
         Column name for faceting across columns.
     row : str, optional
@@ -1021,16 +1008,21 @@ def lmplot(
         scatter layer.
     logx : bool, default False
         Apply a ``log`` scale to the x-axis on both scatter and fit layers.
-    show_metrics : bool, default True
+    show_metrics : bool or None, default None
         Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
         ``MAE`` computed from the fit. ``inject_metrics`` is a generic
         ``Smooth``/``Robust`` transform kwarg (computed against the raw
         input regardless of fit shape), so this applies to every
-        ``mark_smooth``-routed method and to ``method="robust"``. Not supported for
-        ``method="logistic"``/``"glm"`` (neither transform exposes
-        ``inject_metrics``) -- skipped for those two regardless of this
-        flag. Also skipped whenever ``hue`` is set, for every method
-        (per-group corners would crowd).
+        ``mark_smooth``-routed method and to ``method="robust"``. Not
+        supported for ``method="logistic"``/``"glm"`` (neither transform
+        exposes ``inject_metrics``) -- skipped for those two regardless of
+        this flag, and never warned about. Left unset (``None``), the
+        corner is drawn for one ungrouped fit and dropped silently under
+        any grouping (``hue`` or a grouping channel, as a keyword or
+        through ``encode=``), since one corner describes one fit, not one
+        per group. Passed explicitly as ``True``, a grouping that leaves
+        no single fit to describe warns instead of silently drawing
+        nothing. ``False`` never draws it and never warns.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -1077,8 +1069,7 @@ def lmplot(
     >>> import ferrum as fm
     >>> fm.lmplot(df, x="total_bill", y="tip")
 
-    Logistic regression, scatter colored per sex (the fit is pooled across
-    both sexes -- ``Logistic`` has no per-group ``groupby``):
+    Logistic regression, one fit per sex, each in its scatter's color:
 
     >>> fm.lmplot(df, x="total_bill", y="smoker_int", method="logistic", hue="sex")
 
@@ -1134,9 +1125,8 @@ def lmplot(
     # uniformly to every smooth-routed method and to ``"robust"``.
     # ``"logistic"``/``"glm"`` expose no ``inject_metrics`` param at all
     # (``transform_registry`` lists none), so those two stay excluded
-    # regardless of ``show_metrics=``. Restricted to hue=None across every
-    # method: per-group corners would crowd.
-    metrics_applied = show_metrics and hue is None and method not in ("logistic", "glm")
+    # regardless of ``show_metrics=``. Computed below, once the grouping is
+    # known: a per-group fit has no single corner to report.
 
     # truncate: True = clip to data range (current Smooth/Robust default).
     # False = extend fit line to the full x-axis domain boundary via
@@ -1230,19 +1220,27 @@ def lmplot(
         enc["color"] = hue_ch
     enc.update(encode_kwargs)
 
-    # A pooled dedicated-fit method (logistic/glm/robust) can impersonate a
-    # color level through every channel the repo's own alias policy resolves
-    # onto `color`, not just the literal `color=` spelling:
-    # `ferrum.encoding._aliases._ENCODING_ALIASES` is the single table of
-    # which channels drive `color` (`fill` -- keep_target, `stroke` --
-    # warn_drop), and `hue=`/`color=`/`fill=`/`stroke=` each reach this chart
-    # two ways (a bare keyword via `**encode_kwargs`, merged into `enc`
-    # above, or the separate `encode=` dict `_finalize_chart` applies later).
-    # Resolving through `resolve_channel_alias` over the merged effective
-    # encoding -- the same alias table every "what would color resolve to"
-    # question reads -- covers a future alias automatically, with no
-    # enumeration here to fall behind.
-    color_active = resolve_channel_alias({**enc, **(encode or {})}, "color") is not None
+    # Every fit method groups by the hue and by every grouping channel the
+    # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
+    # as a bare keyword (merged into `enc` above) or through the `encode=`
+    # dict `_finalize_chart` applies later: spec §6.4's composite grouping,
+    # computed once here, so each method fits one curve per group as a
+    # composite statistic does. The fit binds the same channels, so each
+    # curve draws its group's color.
+    bound = {**enc, **(encode or {})}
+    grouping = tuple(_encode_grouping(bound))
+    grouping_bindings = {
+        channel: value
+        for channel, value in bound.items()
+        if channel in COMPOSITE_GROUPING_CHANNELS and value is not None
+    }
+    # One R²/RMSE/MAE corner describes one fit: none under any grouping.
+    # "logistic"/"glm" expose no single-fit corner at all (neither transform
+    # has `inject_metrics`), excluded before `_metrics_applied` so neither
+    # warns under `show_metrics=True`, matching their docs above.
+    metrics_applied = method not in ("logistic", "glm") and _metrics_applied(
+        "lmplot", show_metrics, list(grouping)
+    )
 
     # ---- Scatter layer (optional) --------------------------------------
     scatter_layer = None
@@ -1273,7 +1271,8 @@ def lmplot(
             y=y,
             x_field=x_field,
             y_field=y_field,
-            hue=hue,
+            grouping=grouping,
+            grouping_bindings=grouping_bindings,
             ci=ci_frac,
             line_kwargs=lkw,
             x_bins=x_bins,
@@ -1281,7 +1280,6 @@ def lmplot(
             order=order,
             x_range=x_range,
             metrics=metrics_applied,
-            color_active=color_active,
             has_scatter=scatter_layer is not None,
         ),
     )
@@ -1313,6 +1311,50 @@ def lmplot(
     )
 
 
+def _encode_grouping(bindings: dict) -> list[str]:
+    """Return the composite grouping fields (spec §6.4) the caller's own *bindings* bind.
+
+    Each grouping channel's value is read as ``encode()`` reads it
+    (shorthand included), so ``"c:N"`` groups by ``c``; ``None`` binds
+    nothing.
+    """
+    channels = {
+        name: channel_for_value(name, value, declare=f"encode({name}=...)")
+        for name, value in bindings.items()
+        if name in COMPOSITE_GROUPING_CHANNELS and value is not None
+    }
+    return _composite_groupby(channels, None)
+
+
+def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str]) -> bool:
+    """Whether *entry*'s single-fit metrics corner is drawn, given its *grouping* fields.
+
+    ``show_metrics`` left unset (``None``) draws the corner for one
+    ungrouped fit and drops it silently under any grouping, the same as
+    every other unset style default. ``True`` draws it ungrouped and, when
+    *grouping* leaves no single fit to describe, warns once rather than
+    drawing nothing silently. ``False`` never draws it and never warns.
+    Callers exclude a method with no single fit to begin with (lmplot's
+    ``"logistic"``/``"glm"``) before calling this, so that exclusion stays
+    silent regardless of ``show_metrics`` or *grouping*.
+    """
+    if not grouping:
+        return show_metrics is not False
+    if show_metrics is True:
+        import warnings
+
+        from ferrum._compose import _quoted
+        from ferrum._warn import user_stacklevel
+
+        warnings.warn(
+            f"{entry}: show_metrics=True has no single fit to describe: the fit is "
+            f"computed per group of {_quoted(grouping)}, so the R²/RMSE/MAE corner "
+            "is not drawn",
+            stacklevel=user_stacklevel(),
+        )
+    return False
+
+
 @_figure_entry
 def residplot(
     data: Any,
@@ -1323,7 +1365,7 @@ def residplot(
     order: int = 1,
     robust: bool = False,
     dropna: bool = True,
-    show_metrics: bool = True,
+    show_metrics: bool | None = None,
     zero_line: bool = True,
     label: Any = None,
     color: Any = None,
@@ -1362,16 +1404,21 @@ def residplot(
         transform's same opt-in kwargs).
     dropna : bool, default True
         Drop rows where ``x`` or ``y`` is null before fitting.
-    show_metrics : bool, default True
+    show_metrics : bool or None, default None
         Schwabish SB-followup (2026-05-12): overlay a top-right corner
         annotation with ``R^2`` / ``RMSE`` / ``MAE`` computed inside the
         Rust Smooth/Robust transform via the ``inject_metrics=True``
         kwarg -- same single execution model as fitted residuals, no
-        Python-side regression duplication. Suppressed when ``color=``
-        names a column, mirroring ``lmplot``'s ``hue`` exclusion: those
-        residuals are refit per group, so there is no single corner value
-        to report. ``label=`` does not suppress it -- that grouping has
-        one level by construction, so the corner stays correct.
+        Python-side regression duplication. Left unset (``None``), the
+        corner is drawn and dropped silently when ``color=`` names a
+        column or a grouping channel is bound through ``encode=``,
+        mirroring ``lmplot``'s ``hue`` exclusion: those residuals are
+        refit per group, so there is no single corner value to report.
+        Passed explicitly as ``True``, such a grouping warns instead of
+        silently drawing nothing; ``False`` never draws it and never
+        warns. ``label=`` does not suppress it either way -- that
+        grouping has one level by construction, so the corner stays
+        correct.
     zero_line : bool, default True
         Schwabish SB-followup: draw a dashed horizontal reference at
         ``y=0`` via the Rust transform's ``inject_zero_ref=True`` opt-in.
@@ -1510,6 +1557,12 @@ def residplot(
         groupby.append("_label")
     if color_arg.group_field is not None:
         groupby.append(color_arg.group_field)
+    # A grouping channel the caller binds through `encode=` or a keyword
+    # (`encode={"color": "c"}`, `shape="c"`) groups the residuals too, as
+    # every composite statistic groups by its chart's grouping fields: each
+    # group is refit on its own rows, which carry the field its marks draw.
+    encode_grouping = _encode_grouping({**(encode or {}), **encode_kwargs})
+    groupby = with_grouping(groupby, encode_grouping)
 
     # `residplot` passes `degree=order` straight to `Smooth` below, so it
     # needs the same typed refusal `lmplot` gets from `_smooth_degree_kwargs`
@@ -1542,7 +1595,8 @@ def residplot(
     # single corner to render, and labelling one group's metrics as the
     # chart's would be wrong rather than crowded.
     #
-    # Gated on the `color=` grouping ONLY, not on `groupby` as a whole. A
+    # Gated on the data groupings (`color=` and the encoded grouping
+    # channels) ONLY, not on `groupby` as a whole. A
     # `label=` grouping is one level by construction (`pl.lit`), so the
     # transform emits exactly one corner for it and the reason above simply
     # does not apply -- suppressing there would take the R²/RMSE/MAE away
@@ -1551,7 +1605,10 @@ def residplot(
     #
     # It gates the transform's `inject_metrics` too, so the columns the
     # metrics layer reads exist exactly when that layer is built.
-    metrics_applied = show_metrics and color_arg.group_field is None
+    metrics_grouping = with_grouping(
+        [color_arg.group_field] if color_arg.group_field is not None else [], encode_grouping
+    )
+    metrics_applied = _metrics_applied("residplot", show_metrics, metrics_grouping)
 
     # Both residual transforms take the same residual-mode arguments; only
     # the fit family differs (and `degree`, which Robust has no analogue for).
@@ -1572,7 +1629,7 @@ def residplot(
     # A literal `color=` paints the residual points through the point mark's
     # own kwargs -- never through `encode(color=)`, which would fabricate a
     # one-level color scale and a legend for what the caller asked to be a
-    # constant. Same neutral-paint idiom `build_fit_layers` uses.
+    # constant.
     point_kwargs: dict = {} if color_arg.paint is None else {"fill": color_arg.paint}
 
     chart = Chart(data)._with_statistics(resid_transform).mark_point(**point_kwargs)
@@ -1599,15 +1656,26 @@ def residplot(
     # Build the layered chart when any overlay is requested (zero rule,
     # metrics text, or lowess smoother). The augmented-DataFrame pattern
     # works because all overlays reference columns the Rust transform
-    # already emitted into the same residuals batch.
-    layered = lowess or zero_line or metrics_applied
+    # already emitted into the same residuals batch. Requested, not drawn:
+    # a grouping suppresses the metrics layer, and the chart keeps its
+    # named layers either way, so a grouping bound after the call rebuilds
+    # it layer for layer (`ferrum._compose.regrouped`). `show_metrics` is
+    # requested whenever it is not explicitly `False` (unset still asks
+    # for the corner when there is one fit to describe).
+    layered = lowess or zero_line or show_metrics is not False
     if layered:
         chart = chart._clone()
         internal_layers: list = [
             _Layer(
                 name="point",
                 mark="point",
-                encoding=dict(enc),
+                # Binds every `encode=` binding as its own, the same
+                # overlay the chart's own encoding gets (`_finalize_chart`
+                # applies `encode=` to the chart, not to this layer): the
+                # point layer is this figure's primary mark, so it draws
+                # what `encode=` binds and its tooltip lists it, instead
+                # of losing it to the per-layer own-fields-shadow rule.
+                encoding={**enc, **(encode or {})},
                 mark_kwargs=point_kwargs or None,
             )
         ]
@@ -1703,7 +1771,7 @@ def regplot(
     x_estimator: Any = None,
     x_jitter: Any = None,
     logx: bool = False,
-    show_metrics: bool = True,
+    show_metrics: bool | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
@@ -1732,12 +1800,10 @@ def regplot(
         Column name for the vertical (response) axis (required).
     hue : str or encoding, optional
         Column name to map to color, forwarded to ``lmplot`` -- see
-        ``lmplot``'s ``hue`` parameter: fit lines are drawn per hue level
-        for ``mark_smooth``-routed methods, but pooled (neutral stroke, not
-        a color) for ``method="logistic"``/``"glm"``/``"robust"`` -- pooled
-        whenever any channel that resolves to ``color`` reaches the chart
-        (``hue=``, ``color=``/``fill=``/``stroke=``, or their ``encode=``
-        dict equivalents).
+        ``lmplot``'s ``hue`` parameter: every method fits one line and band
+        per hue level, as it does per level of any grouping channel
+        (``color=``/``fill=``/``stroke=``, ``detail``, ``shape``,
+        ``stroke_dash``, or their ``encode=`` dict equivalents).
     method : str, default "lm"
         Fitting method forwarded to ``lmplot`` -- see ``lmplot``'s ``method``
         parameter for the full accepted set.
@@ -1776,11 +1842,12 @@ def regplot(
     logx : bool, default False
         Apply a ``log`` scale to the x-axis on both scatter and fit layers,
         forwarded to ``lmplot`` -- see ``lmplot``'s ``logx`` parameter.
-    show_metrics : bool, default True
+    show_metrics : bool or None, default None
         Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
         ``MAE`` computed from the fit, forwarded to ``lmplot`` -- see
         ``lmplot``'s ``show_metrics`` parameter for the method/``hue``
-        exclusions.
+        exclusions and the warning an explicit ``True`` raises under a
+        grouping.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional

@@ -30,7 +30,7 @@ use pyo3::PyResult;
 use crate::transform::branch::{self, BranchSpec};
 use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, StepBins};
 use crate::transform::composed::{ComposedRuns, ComposedSpec, ComposedState};
-use crate::transform::context::TransformContext;
+use crate::transform::context::{RowsOrigin, StepInstance, TransformContext};
 use crate::transform::core::{spec_name, TransformSpec};
 use crate::transform::swarm::SwarmSpec;
 
@@ -71,6 +71,10 @@ pub(crate) struct OutputLineage {
     pub(crate) statistic_input: Option<RecordBatch>,
     /// The lowered steps the lineage passed, in order.
     pub(crate) lowered: Vec<LoweredStep>,
+    /// The `groupby` fields of the user's own steps the lineage passed (the
+    /// steps a chart's statistics marker does not lower, and a
+    /// composition's steps), in order, each once.
+    pub(crate) written_groupby: Vec<String>,
     /// The schema of the rows the lineage started from: the pipeline's
     /// source, or an operand's framed rows.
     pub(crate) source: SchemaRef,
@@ -177,7 +181,25 @@ struct Lineage<'s> {
     swarm: Option<SwarmSpec>,
     statistic_input: Option<RecordBatch>,
     lowered: Vec<LoweredStep>,
+    written_groupby: Vec<String>,
     source: SchemaRef,
+    /// The identity of these rows, read into [`TransformContext::rows`] by
+    /// every step or copy that reads them next: the run's source and a
+    /// framed branch's own rows carry [`RowsOrigin::output`] `None` with
+    /// [`StepInstance::Unplaced`] and [`StepInstance::Chain`]`(path)`
+    /// respectively; an unnamed step's tail is `{Chain(id), None}`; a named
+    /// step's published output is `{Chain(id), Some(name)}`; a secondary
+    /// output is `{Chain(id), Some(key)}`; an unnamed composition copy's
+    /// output is `{Composed(group), None}`; a named copy's published
+    /// output is `{Composed(group), Some(name)}`. The `output` slot is what
+    /// tells a named step's own tail apart from its secondary output, or a
+    /// named copy's published output apart from the rows it ran over — both
+    /// pairs come from the SAME step, so [`StepInstance`] alone cannot name
+    /// both. Two calls sharing one `origin` read the identical rows, which
+    /// is how [`crate::transform::context::merge_null_key_reports`] tells a
+    /// composite's own several lowered steps over one tail (reporting the
+    /// same rows twice) from two lowerings over genuinely different rows.
+    origin: RowsOrigin,
     /// Which composition steps ran on these rows and which still wait for a
     /// column ([`ComposedState`]).
     composed: ComposedState<'s>,
@@ -186,11 +208,36 @@ struct Lineage<'s> {
 impl Lineage<'_> {
     /// The lineage of rows nothing has run on yet.
     fn over(batch: &RecordBatch) -> Self {
-        Self { swarm: None, statistic_input: None, lowered: Vec::new(), source: batch.schema(), composed: ComposedState::default() }
+        Self {
+            swarm: None,
+            statistic_input: None,
+            lowered: Vec::new(),
+            written_groupby: Vec::new(),
+            source: batch.schema(),
+            origin: RowsOrigin::default(),
+            composed: ComposedState::default(),
+        }
     }
 
     fn recorded(self) -> OutputLineage {
-        OutputLineage { swarm: self.swarm, statistic_input: self.statistic_input, lowered: self.lowered, source: self.source }
+        OutputLineage {
+            swarm: self.swarm,
+            statistic_input: self.statistic_input,
+            lowered: self.lowered,
+            written_groupby: self.written_groupby,
+            source: self.source,
+        }
+    }
+
+    /// This lineage after `spec`, one of the user's own steps: its `groupby`
+    /// fields join [`OutputLineage::written_groupby`].
+    fn written(mut self, spec: &TransformSpec) -> Self {
+        for field in spec.groupby().unwrap_or_default() {
+            if !self.written_groupby.contains(field) {
+                self.written_groupby.push(field.clone());
+            }
+        }
+        self
     }
 }
 
@@ -265,6 +312,18 @@ impl<'s> Run<'s, '_> {
     /// Run `specs`, the chain at `path`, starting from `start`, publishing
     /// named, secondary and branch outputs into `published`; returns the
     /// chain tail. `source` is the rows a `Branch` with no `input` reads.
+    ///
+    /// `lowering` tracks the id of the statistics marker this chain last
+    /// met: each marker opens a new lowering, overwriting whatever the
+    /// chain's own PRIOR marker (if any) had opened, so a chain carrying
+    /// several markers — one per lowering, the wire shape a chart with
+    /// several statistics (two `Chart.layer` statistics, a figure statistic
+    /// beside its mark's) writes — gives each marker's own steps their own
+    /// lowering id rather than all sharing the chain's first one. Threaded
+    /// into [`Self::step`] only for a step the marker actually lowers (the
+    /// same condition `own` already gates on); a step before any marker, a
+    /// branch's own steps with no marker of its own, and every
+    /// [`Self::run_copy`] call carry `None`.
     fn chain(
         &mut self,
         specs: &'s [TransformSpec],
@@ -275,6 +334,7 @@ impl<'s> Run<'s, '_> {
     ) -> PyResult<Rows<'s>> {
         let mut current = start;
         let mut lowered = false;
+        let mut lowering: Option<StepId> = None;
         let statistic_columns = statistic_columns(specs);
         for (index, spec) in specs.iter().enumerate() {
             let id: StepId = [path, &[index]].concat();
@@ -290,14 +350,16 @@ impl<'s> Run<'s, '_> {
                 }
                 marker if is_statistics_marker(marker) => {
                     lowered = true;
+                    lowering = Some(id.clone());
                     current
                 }
                 step => {
                     if !lowered {
                         refuse_a_statistic_read(step, &current, &statistic_columns)?;
                     }
-                    let lowered = (lowered && !matches!(step, TransformSpec::Identity(_))).then_some(id);
-                    self.step(step, lowered, current, published)?
+                    let own = (lowered && !matches!(step, TransformSpec::Identity(_))).then(|| id.clone());
+                    let step_lowering = own.is_some().then(|| lowering.clone()).flatten();
+                    self.step(step, &id, own, step_lowering, current, published)?
                 }
             };
         }
@@ -305,12 +367,16 @@ impl<'s> Run<'s, '_> {
     }
 
     /// Run one row step over `current`: publish its secondary outputs and,
-    /// when it is named, its output; return the chain's new tail. `lowered`
-    /// is the step's id when it is a lowered step.
+    /// when it is named, its output; return the chain's new tail. `id` is
+    /// the step's position, `lowered` is that id when it is a lowered step,
+    /// and `step_lowering` is the id of the marker that opened its lowering
+    /// (always `None` when `lowered` is `None`; see [`Self::chain`]'s doc).
     fn step(
         &mut self,
         spec: &'s TransformSpec,
+        id: &StepId,
         lowered: Option<StepId>,
+        step_lowering: Option<StepId>,
         mut current: Rows<'s>,
         published: &mut Published<'s>,
     ) -> PyResult<Rows<'s>> {
@@ -323,30 +389,39 @@ impl<'s> Run<'s, '_> {
         // context, which `Reorder(from=...)` reads.
         let mut step_ctx = self.ctx.clone();
         step_ctx.named_outputs = published.outputs.clone();
+        step_ctx.step = StepInstance::Chain(id.clone());
+        step_ctx.rows = current.lineage.origin.clone();
+        step_ctx.lowering = step_lowering;
         step_ctx.color_bins = (!fields.is_empty())
             .then(|| Rc::new(StepBins { fields: fields.to_vec(), edges: self.edges.clone() }));
         let result = spec.apply_with_context(&current.batch, &step_ctx)?;
         let own = lowered.map(|id| LoweredStep { id, groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(), shared: false });
+        // A user's own step records its grouping on every output it makes.
+        let written = own.is_none();
+        let after = |lineage: Lineage<'s>| if written { lineage.written(spec) } else { lineage };
         // Secondary outputs first, so a named step's explicit `name` wins a
         // key collision. A secondary output descends from no Swarm.
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
-            let lineage = Lineage { swarm: None, ..forked(&current, own.clone()) };
+            let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone()) });
+            lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(key.clone()) };
             let rows = self.fork(&mut current, Rows { batch, lineage }, published)?;
             published.insert(key, rows);
         }
         match spec_name(spec) {
             Some(name) => {
-                let lineage = with_swarm(forked(&current, own), spec);
+                let mut lineage = after(with_swarm(forked(&current, own), spec));
+                lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(name.to_string()) };
                 let rows = self.fork(&mut current, Rows { batch: result, lineage }, published)?;
                 published.insert(name.to_string(), rows);
                 Ok(current)
             }
             None => {
-                let mut lineage = current.lineage.clone();
+                let mut lineage = after(current.lineage.clone());
                 if let Some(own) = own {
                     lineage.statistic_input.get_or_insert_with(|| current.batch.clone());
                     lineage.lowered.push(own);
                 }
+                lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: None };
                 self.settle(Rows { batch: result, lineage: with_swarm(lineage, spec) }, published)
             }
         }
@@ -395,17 +470,24 @@ impl<'s> Run<'s, '_> {
     fn run_copy(&mut self, copy: &'s ComposedSpec, rows: Rows<'s>, published: &mut Published<'s>) -> PyResult<Rows<'s>> {
         let mut step_ctx = self.ctx.clone();
         step_ctx.named_outputs = published.outputs.clone();
+        step_ctx.step = StepInstance::Composed(copy.group.clone());
+        step_ctx.rows = rows.lineage.origin.clone();
         let out = copy.step.apply_with_context(&rows.batch, &step_ctx)?;
         self.composed.ran(&copy.group);
         let Rows { batch, mut lineage } = rows;
         match spec_name(&copy.step) {
             Some(name) => {
                 lineage.composed.ran(copy, None);
-                published.insert(name.to_string(), Rows { batch: out, lineage: lineage.clone() });
+                let mut published_lineage = lineage.clone().written(&copy.step);
+                published_lineage.origin =
+                    RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: Some(name.to_string()) };
+                published.insert(name.to_string(), Rows { batch: out, lineage: published_lineage });
                 Ok(Rows { batch, lineage })
             }
             None => {
                 lineage.composed.ran(copy, Some((&batch.schema(), &out.schema())));
+                let mut lineage = lineage.written(&copy.step);
+                lineage.origin = RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: None };
                 Ok(Rows { batch: out, lineage })
             }
         }
@@ -458,7 +540,11 @@ impl<'s> Run<'s, '_> {
             None => self.chain(&spec.transforms, path, start, source, &mut child)?,
             Some(frame) => {
                 let batch = frame.rows(&spec.name, &start.batch, &self.ctx.facet_fields)?;
-                let lineage = Lineage { source: batch.schema(), ..start.lineage };
+                let lineage = Lineage {
+                    source: batch.schema(),
+                    origin: RowsOrigin { step: StepInstance::Chain(path.to_vec()), output: None },
+                    ..start.lineage
+                };
                 let framed = Rows { batch, lineage };
                 self.chain(&spec.transforms, path, framed.clone(), &framed, &mut child)?
             }

@@ -935,6 +935,11 @@ pub enum RenderError {
     /// naming is a property of where the refusal arose, not of its variant.
     /// `Display` prefixes `layer {i}: ` and voices `source` as `entry`.
     InLayer { layer: Option<usize>, entry: String, source: Box<RenderError> },
+    /// A refusal raised after the render had already warned: the binding
+    /// delivers `warnings` before it raises `source`, so a refusal never
+    /// hides what the run reported on the way to it (the null-key drop that
+    /// left a statistic nothing to draw). `Display` is `source`'s.
+    Warned { warnings: Vec<RenderWarning>, source: Box<RenderError> },
     /// A stroke node's `widths` breaks the scene contract the static SVG
     /// outline needs: misaligned with its vertices, a width that is not
     /// finite and `> 0`, or a closed path. The line mark never writes such a
@@ -1187,6 +1192,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // A layer context corrects the refusal it carries.
         RenderError::InLayer { layer, entry, source } => {
             RenderError::InLayer { layer, entry, source: Box::new(with_coord_flipped(*source, coord_flipped)) }
+        }
+        RenderError::Warned { warnings, source } => {
+            RenderError::Warned { warnings, source: Box::new(with_coord_flipped(*source, coord_flipped)) }
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
@@ -1766,6 +1774,7 @@ impl std::fmt::Display for RenderError {
                 }
                 source.fmt_as(entry, f)
             }
+            Self::Warned { source, .. } => source.fmt(f),
             Self::TaperedStrokeMalformed { source } => {
                 write!(f, "the scene's tapered stroke cannot be drawn: {source}")
             }
@@ -1898,12 +1907,22 @@ impl RenderError {
         }
     }
 
-    /// The refusal inside any [`Self::InLayer`] context.
+    /// The refusal inside any [`Self::InLayer`] or [`Self::Warned`] context.
     #[cfg(test)]
     pub(crate) fn root(&self) -> &Self {
         match self {
-            Self::InLayer { source, .. } => source.root(),
+            Self::InLayer { source, .. } | Self::Warned { source, .. } => source.root(),
             other => other,
+        }
+    }
+
+    /// The warnings a [`Self::Warned`] refusal carries, at any depth of
+    /// [`Self::InLayer`] context; empty for every other refusal.
+    pub(crate) fn carried_warnings(&self) -> &[RenderWarning] {
+        match self {
+            Self::Warned { warnings, .. } => warnings,
+            Self::InLayer { source, .. } => source.carried_warnings(),
+            _ => &[],
         }
     }
 
@@ -2439,7 +2458,11 @@ pub enum RenderWarning {
     /// the public call that built it, `mark` its mark; `channel` is the wire
     /// name and `field` the bound column. `cells` is the field a raster
     /// image's cells hold when the layer is one: it colors by that field and
-    /// draws a `color` naming it, so the message names it.
+    /// draws a `color` naming it, so the message names it. `grouped` is set
+    /// when a statistic the chart planned grouped by `field`
+    /// (`prepare::SeriesGrouping::by_channel`): the binding did split the
+    /// statistic, and its groups are drawn alike, so the message says that
+    /// instead of calling the binding ignored.
     ChannelNotDrawn {
         layer: Option<usize>,
         entry: String,
@@ -2447,6 +2470,8 @@ pub enum RenderWarning {
         channel: String,
         field: String,
         cells: Option<String>,
+        #[serde(default)]
+        grouped: bool,
     },
 }
 
@@ -2710,7 +2735,7 @@ impl std::fmt::Display for RenderWarning {
                      does not carry '{field}', so it draws without {channel}"
                 )
             }
-            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells } => {
+            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells, grouped } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
@@ -2731,11 +2756,19 @@ impl std::fmt::Display for RenderWarning {
                         } else {
                             format!("this {mark} mark does not")
                         };
-                        write!(
-                            f,
-                            "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
-                             ({why}), so it gets no scale and no legend; it was ignored"
-                        )
+                        match grouped {
+                            true => write!(
+                                f,
+                                "{entry}: {channel} '{field}' groups the statistic by '{field}', one per value, \
+                                 but no layer's mark draws {channel} ({why}), so the groups are drawn alike \
+                                 with no scale and no legend; bind color= to tell them apart"
+                            ),
+                            false => write!(
+                                f,
+                                "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
+                                 ({why}), so it gets no scale and no legend; it was ignored"
+                            ),
+                        }
                     }
                 }
             }

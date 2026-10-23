@@ -301,12 +301,17 @@ pub fn build_scene(
         // panel, frame and axes over the empty batches, and says so once.
         // This is distinct from ONE layer's batch coming back empty while
         // another draws (`build_panel_mark_batches`'s per-layer skip), which
-        // stays silent for its own reason (see that skip's comment).
+        // stays silent for its own reason (see that skip's comment). A facet
+        // panel a statistic's null-key drop emptied is not such a cell: it
+        // draws empty, beside the drop's warning.
         if layer_batches.iter().all(|b| b.num_rows() == 0) {
             if spec.facet.is_some() {
-                continue;
+                if !prep.panel_emptied_by_drop(facet_keys) {
+                    continue;
+                }
+            } else {
+                warnings.push(RenderWarning::NoRowsToDraw { faceted: false });
             }
-            warnings.push(RenderWarning::NoRowsToDraw { faceted: false });
         }
         any_panel_resolved = true;
 
@@ -1635,8 +1640,14 @@ fn resolve_layer_styles(
         .iter()
         .enumerate()
         .map(|(li, layer)| {
-            draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)
-                .map_err(|e| in_layer_voice(e, spec, li, layer.mark, &layer_entry(spec, li, layer.mark)))
+            let mut style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)
+                .map_err(|e| in_layer_voice(e, spec, li, layer.mark, &layer_entry(spec, li, layer.mark)))?;
+            // Only a series mark splits into series; another mark draws its
+            // statistic's groups as the statistic emitted them.
+            if matches!(layer.mark, crate::spec::mark::Mark::Line | crate::spec::mark::Mark::Area | crate::spec::mark::Mark::Ribbon) {
+                style.group.series = layer.grouping_series.fields();
+            }
+            Ok(style)
         })
         .collect()
 }
@@ -4153,6 +4164,7 @@ mod tests {
             coord: None,
             dropped_reads: Vec::new(),
             raster_value_field: None,
+            grouping_series: crate::render::prepare::SeriesGrouping::default(),
         }
     }
 

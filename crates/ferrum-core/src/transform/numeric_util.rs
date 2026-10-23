@@ -139,7 +139,9 @@ pub(crate) fn numeric_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyRe
         .collect())
 }
 
-/// Coerce a paired `(x, y)` column pair into jointly-clean `f64` vectors.
+/// Coerce a paired `(x, y)` column pair into jointly-clean `f64` vectors,
+/// over every row (`only_indices` `None`) or only the rows at `only_indices`
+/// (one groupby partition's).
 ///
 /// Both columns are resolved by name, coerced through [`coerce_to_float64`] (so
 /// any integer/unsigned/float dtype is accepted and anything else raises), then
@@ -149,26 +151,10 @@ pub(crate) fn numeric_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyRe
 ///
 /// `ctx` is the transform-name prefix used in every error message, so each
 /// caller keeps its own error voice. This is the single ingestion path for the
-/// two-column fit family (`logistic`, `glm`, `robust`); a caller that needs the
-/// index-restricted variant (grouped per-partition fits) should use
-/// [`coerce_xy_pairs_at`] instead of duplicating this walk. `smooth.rs::extract_xy`
-/// remains a separate walk — it isn't routed through this helper.
-pub(crate) fn coerce_xy_pairs(
-    batch: &RecordBatch,
-    x_field: &str,
-    y_field: &str,
-    ctx: &str,
-) -> PyResult<(Vec<f64>, Vec<f64>)> {
-    coerce_xy_pairs_at(batch, x_field, y_field, ctx, None)
-}
-
-/// [`coerce_xy_pairs`], restricted to `only_indices` when given.
-///
-/// When `only_indices` is `Some(ixs)`, only the rows at those positions are
-/// considered (used by groupby partitioning — each group's fit ingests only
-/// its own rows). When it is `None`, all rows are scanned, and this is
-/// byte-identical to [`coerce_xy_pairs`]. Mirrors the `only_indices` pattern
-/// already established by [`clean_float64_values`] in this module.
+/// two-column fit family (`logistic`, `glm`, `robust`), grouped or not.
+/// `smooth.rs::extract_xy` remains a separate walk — it isn't routed through
+/// this helper. Mirrors the `only_indices` pattern already established by
+/// [`clean_float64_values`] in this module.
 pub(crate) fn coerce_xy_pairs_at(
     batch: &RecordBatch,
     x_field: &str,
@@ -754,7 +740,7 @@ mod tests {
         }
     }
 
-    // ---------- coerce_xy_pairs ----------
+    // ---------- coerce_xy_pairs_at ----------
 
     fn xy_batch(x: ArrayRef, y: ArrayRef) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -770,7 +756,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
             Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
         );
-        let (xs, ys) = coerce_xy_pairs(&b, "x", "y", "Glm").unwrap();
+        let (xs, ys) = coerce_xy_pairs_at(&b, "x", "y", "Glm", None).unwrap();
         assert_eq!(xs, vec![1.0, 2.0, 3.0]);
         assert_eq!(ys, vec![4.0, 5.0, 6.0]);
     }
@@ -786,8 +772,8 @@ mod tests {
             Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
         );
         assert_eq!(
-            coerce_xy_pairs(&ints, "x", "y", "Glm").unwrap(),
-            coerce_xy_pairs(&floats, "x", "y", "Glm").unwrap()
+            coerce_xy_pairs_at(&ints, "x", "y", "Glm", None).unwrap(),
+            coerce_xy_pairs_at(&floats, "x", "y", "Glm", None).unwrap()
         );
     }
 
@@ -809,7 +795,7 @@ mod tests {
                 Some(50.0),
             ])),
         );
-        let (xs, ys) = coerce_xy_pairs(&b, "x", "y", "Robust").unwrap();
+        let (xs, ys) = coerce_xy_pairs_at(&b, "x", "y", "Robust", None).unwrap();
         assert_eq!(xs, vec![1.0, 5.0]);
         assert_eq!(ys, vec![10.0, 50.0]);
     }
@@ -821,7 +807,7 @@ mod tests {
             Arc::new(StringArray::from(vec!["a", "b"])),
             Arc::new(Float64Array::from(vec![1.0, 2.0])),
         );
-        let msg = coerce_xy_pairs(&b, "x", "y", "Logistic")
+        let msg = coerce_xy_pairs_at(&b, "x", "y", "Logistic", None)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("Logistic"), "err: {msg}");
@@ -830,18 +816,6 @@ mod tests {
     }
 
     // ---------- coerce_xy_pairs_at (only_indices) ----------
-
-    #[test]
-    fn coerce_xy_pairs_at_none_matches_coerce_xy_pairs() {
-        let b = xy_batch(
-            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
-            Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
-        );
-        assert_eq!(
-            coerce_xy_pairs_at(&b, "x", "y", "Test", None).unwrap(),
-            coerce_xy_pairs(&b, "x", "y", "Test").unwrap()
-        );
-    }
 
     #[test]
     fn coerce_xy_pairs_at_restricts_to_only_indices() {
@@ -883,7 +857,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![1.0])),
             Arc::new(Float64Array::from(vec![2.0])),
         );
-        let msg = coerce_xy_pairs(&b, "x", "ghost", "data_loess")
+        let msg = coerce_xy_pairs_at(&b, "x", "ghost", "data_loess", None)
             .unwrap_err()
             .to_string();
         assert!(msg.contains("data_loess: column 'ghost' not found"), "err: {msg}");

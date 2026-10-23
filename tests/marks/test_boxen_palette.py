@@ -323,11 +323,11 @@ def test_mark_boxen_palette_conflicts_with_chart_level_color_encoding():
     is deferred until ``.encode()`` is fully known, regardless of whether
     ``mark_boxen()`` or ``.encode(color=...)`` came first in the chain."""
     df = _boxen_df_multi_band()
-    with pytest.raises(ValueError, match="color encoding"):
+    with pytest.raises(ValueError, match="a color the bands draw"):
         ferrum.Chart(df).mark_boxen(palette=["#111111", "#222222"]).encode(
             x="group", y="val", color="group"
         ).to_svg()
-    with pytest.raises(ValueError, match="color encoding"):
+    with pytest.raises(ValueError, match="a color the bands draw"):
         ferrum.Chart(df).encode(x="group", y="val", color="group").mark_boxen(
             palette=["#111111", "#222222"]
         ).to_svg()

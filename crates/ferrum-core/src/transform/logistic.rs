@@ -16,7 +16,14 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::numeric_util::coerce_xy_pairs;
+use crate::transform::context::{TransformContext, Unfittable};
+use crate::transform::context::describe_group_keys;
+use crate::transform::group_key::{
+    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
+    stack_grouped_batches, FitRows, KeyValue,
+    NullKeyPolicy,
+};
+use crate::transform::numeric_util::coerce_xy_pairs_at;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -28,30 +35,109 @@ pub(crate) struct LogisticSpec {
     pub ci: Option<f64>,
     pub max_iter: usize,
     pub tol: f64,
+    /// When non-empty, partition the input by these columns and fit each
+    /// group on its own rows, appending the group-key columns (with their
+    /// original dtypes) to the output, as `Robust(groupby=)` does. A null key
+    /// belongs to no group; a batch whose every key is null is fit whole.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
+/// Entry point with no render context: [`apply_with_context`] with a
+/// default context.
 pub(crate) fn apply(spec: &LogisticSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Logistic")?;
-    validate_binary_y(&ys)?;
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Fit the whole batch, or, under `spec.groupby`, each group on its own rows
+/// and stack the per-group curves with the group columns appended, as
+/// `robust::apply_grouped` does. `SkipWithWholeBatchFallback` is the
+/// partition's policy: a batch whose every key is null is fit whole, and the
+/// partition's warning says so.
+pub(crate) fn apply_with_context(
+    spec: &LogisticSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    if spec.groupby.is_empty() {
+        return fit(spec, batch, None, ctx);
+    }
+    let partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "Logistic",
+        NullKeyPolicy::SkipWithWholeBatchFallback,
+        ctx,
+    )?;
+    let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
+    for (key, rows) in &partition.groups {
+        let group = FitRows { indices: rows, label: describe_group_keys(&spec.groupby, key) };
+        per_group_batches.push((key.clone(), fit(spec, batch, Some(&group), ctx)?));
+    }
+    if per_group_batches.is_empty() {
+        // Every group key was null: the pooled fit IS the null-keyed group,
+        // stacked with a key that nulls only the `groupby` column(s)
+        // actually all-null (`pooled_group_key`'s doc), so a facet field
+        // folded into `spec.groupby` keeps its value, as
+        // `robust::apply_grouped`'s fallback does.
+        let pooled = fit(spec, batch, None, ctx)?;
+        let key = pooled_group_key(batch, &spec.groupby)?;
+        return stack_grouped_batches("Logistic", &[(key, pooled)], &spec.groupby, &partition.dtypes);
+    }
+    stack_grouped_batches("Logistic", &per_group_batches, &spec.groupby, &partition.dtypes)
+}
+
+/// Fit `batch`'s rows, or only one group's (`group`). Rows that cannot be fit
+/// refuse the whole frame and degrade a group to its empty fit, with a
+/// warning ([`TransformContext::degrade_group_or_refuse`]).
+fn fit(
+    spec: &LogisticSpec,
+    batch: &RecordBatch,
+    group: Option<&FitRows<'_>>,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    let only_indices = group.map(|group| group.indices);
+    let unfittable = |failure: Unfittable| -> PyResult<RecordBatch> {
+        ctx.degrade_group_or_refuse("Logistic", group.map(|group| group.label.as_str()), failure)?;
+        let nans = vec![f64::NAN; spec.n_grid.max(1)];
+        build_logistic_batch(nans.clone(), nans.clone(), nans.clone(), nans)
+    };
+    let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Logistic", only_indices)?;
+    if let Some(y) = ys.iter().find(|&&y| y != 0.0 && y != 1.0) {
+        return unfittable(Unfittable {
+            reason: format!("y is not binary (found {y})"),
+            refusal: format!("Logistic: y must be binary (only 0 or 1); found value {y}"),
+        });
+    }
 
     if xs.len() < 2 {
-        return Err(PyValueError::new_err(
-            "Logistic: need at least 2 non-null observations",
-        ));
+        return unfittable(Unfittable {
+            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            refusal: "Logistic: need at least 2 non-null observations".into(),
+        });
     }
 
     // Singular design: zero variance in x => X'WX is singular.
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
     if !(x_max > x_min) {
-        return Err(PyValueError::new_err(
-            "Logistic: singular design (X'WX has zero determinant); x has zero variance",
-        ));
+        return unfittable(Unfittable {
+            reason: "zero x variance".into(),
+            refusal: "Logistic: singular design (X'WX has zero determinant); x has zero variance".into(),
+        });
     }
 
-    let (beta, cov) = fit_irls(&xs, &ys, spec.max_iter, spec.tol)?;
+    let (beta, cov) = match fit_irls(&xs, &ys, spec.max_iter, spec.tol) {
+        Ok(fit) => fit,
+        Err(failure) => return unfittable(failure),
+    };
 
     let n_grid = spec.n_grid.max(1);
     let grid: Vec<f64> = (0..n_grid)
@@ -90,17 +176,6 @@ pub(crate) fn apply(spec: &LogisticSpec, batch: &RecordBatch) -> PyResult<Record
     build_logistic_batch(grid, y_fit, lo, hi)
 }
 
-fn validate_binary_y(ys: &[f64]) -> PyResult<()> {
-    for &y in ys {
-        if y != 0.0 && y != 1.0 {
-            return Err(PyValueError::new_err(format!(
-                "Logistic: y must be binary (only 0 or 1); found value {y}",
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn sigmoid(z: f64) -> f64 {
     // Stable sigmoid: avoid overflow for large |z|.
     if z >= 0.0 {
@@ -112,13 +187,14 @@ fn sigmoid(z: f64) -> f64 {
     }
 }
 
-/// Fit logistic regression β = (β₀, β₁) by IRLS. Returns (β, Σ̂).
+/// Fit logistic regression β = (β₀, β₁) by IRLS. Returns (β, Σ̂), or why
+/// the rows cannot be fit (a singular weighted design, perfect separation).
 fn fit_irls(
     xs: &[f64],
     ys: &[f64],
     max_iter: usize,
     tol: f64,
-) -> PyResult<([f64; 2], [[f64; 2]; 2])> {
+) -> Result<([f64; 2], [[f64; 2]; 2]), Unfittable> {
     let n = xs.len();
     let mut beta = [0.0_f64, 0.0_f64];
     let mut eta = vec![0.0_f64; n];
@@ -143,9 +219,8 @@ fn fit_irls(
             wxtz[1] += w * xi * z;
         }
 
-        let inv = invert_2x2(wxtx).ok_or_else(|| PyValueError::new_err(
-            "Logistic: singular design (X'WX has zero determinant)"
-        ))?;
+        let inv = invert_2x2(wxtx)
+            .ok_or_else(|| Unfittable::new("Logistic", "singular design (X'WX has zero determinant)"))?;
 
         let b0 = inv[0][0] * wxtz[0] + inv[0][1] * wxtz[1];
         let b1 = inv[1][0] * wxtz[0] + inv[1][1] * wxtz[1];
@@ -154,9 +229,7 @@ fn fit_irls(
 
         // Perfect-separation guard: blow-up in coefficients.
         if beta[0].abs() > 1e3 || beta[1].abs() > 1e3 {
-            return Err(PyValueError::new_err(
-                "Logistic: perfect separation detected (coefficients diverged)",
-            ));
+            return Err(Unfittable::new("Logistic", "perfect separation detected (coefficients diverged)"));
         }
 
         // Update η, μ.
@@ -169,8 +242,9 @@ fn fit_irls(
         if it < 5 {
             let saturated = mu.iter().all(|&p| p < 1e-6 || p > 1.0 - 1e-6);
             if saturated {
-                return Err(PyValueError::new_err(
-                    "Logistic: perfect separation detected (fitted probabilities saturated)",
+                return Err(Unfittable::new(
+                    "Logistic",
+                    "perfect separation detected (fitted probabilities saturated)",
                 ));
             }
         }
@@ -193,7 +267,7 @@ fn fit_irls(
 /// `y * μ + (1-y) * (1-μ)` is the probability the model assigns to the
 /// observed label; this is ≥ 1 - 1e-3 for every i iff the fit perfectly
 /// separates the classes.
-fn check_separation_at_convergence(ys: &[f64], mu: &[f64]) -> PyResult<()> {
+fn check_separation_at_convergence(ys: &[f64], mu: &[f64]) -> Result<(), Unfittable> {
     if ys.is_empty() { return Ok(()); }
     let mut all_perfect = true;
     for (&y, &p) in ys.iter().zip(mu.iter()) {
@@ -204,8 +278,9 @@ fn check_separation_at_convergence(ys: &[f64], mu: &[f64]) -> PyResult<()> {
         }
     }
     if all_perfect {
-        return Err(PyValueError::new_err(
-            "Logistic: perfect separation detected (model classifies every observation with probability > 0.999)",
+        return Err(Unfittable::new(
+            "Logistic",
+            "perfect separation detected (model classifies every observation with probability > 0.999)",
         ));
     }
     Ok(())
@@ -335,8 +410,10 @@ impl PyLogistic {
         ci = None,
         max_iter = 25,
         tol = 1e-8,
+        groupby = None,
         name = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         x: &str,
         y: &str,
@@ -344,6 +421,7 @@ impl PyLogistic {
         ci: Option<f64>,
         max_iter: usize,
         tol: f64,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -363,6 +441,7 @@ impl PyLogistic {
                 return Err(PyValueError::new_err("Logistic: ci must be in (0, 1)"));
             }
         }
+        let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyLogistic(TransformSpec::Logistic(LogisticSpec {
             x: x.to_string(),
             y: y.to_string(),
@@ -370,6 +449,7 @@ impl PyLogistic {
             ci,
             max_iter,
             tol,
+            groupby,
             name,
         })))
     }
@@ -377,8 +457,8 @@ impl PyLogistic {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Logistic(s) => format!(
-                "Logistic(x='{}', y='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, name={:?})",
-                s.x, s.y, s.n_grid, s.ci, s.max_iter, s.tol, s.name,
+                "Logistic(x='{}', y='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, groupby={:?}, name={:?})",
+                s.x, s.y, s.n_grid, s.ci, s.max_iter, s.tol, s.groupby, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -413,7 +493,7 @@ mod tests {
     fn default_spec(n_grid: usize, ci: Option<f64>) -> LogisticSpec {
         LogisticSpec {
             x: "x".into(), y: "y".into(),
-            n_grid, ci, max_iter: 25, tol: 1e-8, name: None,
+            n_grid, ci, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         }
     }
 
@@ -421,7 +501,7 @@ mod tests {
     fn test_logistic_round_trip_json() {
         let original = LogisticSpec {
             x: "x".into(), y: "y".into(),
-            n_grid: 100, ci: Some(0.95), max_iter: 25, tol: 1e-8, name: None,
+            n_grid: 100, ci: Some(0.95), max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: LogisticSpec = serde_json::from_str(&json).unwrap();
@@ -467,7 +547,7 @@ mod tests {
         let batch = xy_batch(xs, ys);
         let spec = LogisticSpec {
             x: "x".into(), y: "y".into(),
-            n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, name: None,
+            n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let yf = col(&out, "y");
@@ -576,7 +656,7 @@ mod tests {
         let batch = xy_batch(xs, ys);
         let spec = LogisticSpec {
             x: "x".into(), y: "y".into(),
-            n_grid: 10, ci: None, max_iter: 100, tol: 1e-14, name: None,
+            n_grid: 10, ci: None, max_iter: 100, tol: 1e-14, groupby: Vec::new(), name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let yf = col(&out, "y");
@@ -602,5 +682,184 @@ mod tests {
         let arr = b.column(b.schema().index_of(name).unwrap())
             .as_any().downcast_ref::<Float64Array>().unwrap();
         (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    /// `x`, `y` and a Utf8 group `g` (nullable).
+    fn grouped_batch(x: Vec<f64>, y: Vec<f64>, g: Vec<Option<&str>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(arrow::array::StringArray::from(g)),
+        ]).unwrap()
+    }
+
+    fn str_col(b: &RecordBatch, name: &str) -> Vec<String> {
+        let arr = b.column(b.schema().index_of(name).unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+    }
+
+    /// Under `groupby`, each group is fit on its own rows: the grouped
+    /// output is each group's ungrouped fit stacked, with the group column
+    /// appended. Rejects one pooled fit over both groups.
+    #[test]
+    fn grouped_fit_is_each_groups_own_fit() {
+        pyo3::Python::initialize();
+        let (xa, ya, xb, yb): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0], vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0], vec![0.0, 1.0, 0.0, 1.0, 1.0, 1.0]);
+        let n = xa.len();
+        let mut grouped = default_spec(10, None);
+        grouped.groupby = vec!["g".into()];
+        let batch = grouped_batch(
+            xa.iter().chain(&xb).copied().collect(),
+            ya.iter().chain(&yb).copied().collect(),
+            std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), xb.len())).collect(),
+        );
+        let out = apply(&grouped, &batch).unwrap();
+        let ungrouped = default_spec(10, None);
+        let a = apply(&ungrouped, &xy_batch(xa, ya)).unwrap();
+        let b = apply(&ungrouped, &xy_batch(xb, yb)).unwrap();
+        let expected: Vec<f64> = col(&a, "y").into_iter().chain(col(&b, "y")).collect();
+        assert_eq!(col(&out, "y"), expected);
+        let groups = str_col(&out, "g");
+        assert_eq!(groups.iter().filter(|g| *g == "a").count(), a.num_rows());
+        assert_eq!(groups.iter().filter(|g| *g == "b").count(), b.num_rows());
+    }
+
+    /// A null key belongs to no group; a batch whose every key is null is
+    /// fit whole, as the ungrouped fit, and the partition says so. The
+    /// pooled fit IS the null-keyed group: its output ALSO carries `g`, all
+    /// null at its original dtype, rather than lacking it.
+    #[test]
+    fn all_null_keys_fit_the_whole_batch_and_warn() {
+        pyo3::Python::initialize();
+        let (xa, ya, _, _): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0], vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0], vec![0.0, 1.0, 0.0, 1.0, 1.0, 1.0]);
+        let mut grouped = default_spec(10, None);
+        grouped.groupby = vec!["g".into()];
+        let batch = grouped_batch(xa.clone(), ya.clone(), vec![None; xa.len()]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&grouped, &batch, &ctx).unwrap();
+        let whole = apply(&default_spec(10, None), &xy_batch(xa, ya)).unwrap();
+        assert_eq!(col(&out, "y"), col(&whole, "y"));
+
+        let g = out.column(out.schema().index_of("g").unwrap());
+        assert_eq!(g.data_type(), &DataType::Utf8, "the groupby column keeps its original dtype");
+        assert_eq!(g.null_count(), g.len(), "the pooled fit IS the null-keyed group");
+
+        let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            said,
+            ["Logistic: every row has a null in its groupby key (g), so the data could not be split into groups; \
+              the whole batch was used as one ungrouped computation instead"]
+        );
+    }
+
+    /// The PyO3 constructor and the wire both accept `groupby`.
+    #[test]
+    fn groupby_round_trips_on_the_wire() {
+        let mut grouped = default_spec(10, None);
+        grouped.groupby = vec!["g".into()];
+        let json = serde_json::to_string(&grouped).unwrap();
+        assert!(json.contains("\"groupby\":[\"g\"]"), "{json}");
+        let parsed: LogisticSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, grouped);
+        let ungrouped = serde_json::to_string(&default_spec(10, None)).unwrap();
+        assert!(!ungrouped.contains("groupby"), "an ungrouped spec serializes as before: {ungrouped}");
+    }
+
+    /// A group that cannot be fit draws no fit (its curve is all NaN) and a
+    /// warning names it and the reason, while the other group fits as it
+    /// does alone, as `Smooth`'s and `Robust`'s groups degrade. The same rows
+    /// ungrouped still refuse.
+    #[test]
+    fn a_group_that_cannot_be_fit_degrades_with_a_warning_and_the_others_draw() {
+        pyo3::Python::initialize();
+        let (gx, gy): (Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+        let n = gx.len();
+        let mut grouped = default_spec(10, None);
+        grouped.groupby = vec!["g".into()];
+        let cases: Vec<(&str, Vec<f64>, Vec<f64>, &str)> = vec![
+            ("one point", vec![1.0], vec![gy[0]], "fewer than 2 usable (non-null/non-NaN) x/y points"),
+            ("constant x", vec![2.0, 2.0, 2.0], vec![gy[0], gy[1], gy[2]], "zero x variance"),
+            ("non-binary y", vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 1.0], "y is not binary (found 2)"),
+        ];
+        for (label, bx, by, reason) in cases {
+            let batch = grouped_batch(
+                gx.iter().chain(&bx).copied().collect(),
+                gy.iter().chain(&by).copied().collect(),
+                std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), bx.len())).collect(),
+            );
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&grouped, &batch, &ctx).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let alone = apply(&default_spec(10, None), &xy_batch(gx.clone(), gy.clone())).unwrap();
+            let ys = col(&out, "y");
+            let groups = str_col(&out, "g");
+            let a: Vec<f64> = ys.iter().zip(&groups).filter(|(_, g)| *g == "a").map(|(y, _)| *y).collect();
+            assert_eq!(a, col(&alone, "y"), "{label}: the good group fits as alone");
+            assert!(ys.iter().zip(&groups).filter(|(_, g)| *g == "b").all(|(y, _)| y.is_nan()), "{label}: no fit for b");
+            let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+            assert_eq!(
+                said,
+                [format!("Logistic: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
+                "{label}"
+            );
+            assert!(apply(&default_spec(10, None), &xy_batch(bx, by)).is_err(), "{label}: ungrouped still refuses");
+        }
+    }
+
+    /// Every way one group's fit can fail degrades that group alone: no fit
+    /// for it, a warning naming it and the reason, and the other group fits
+    /// as it does alone. The same rows ungrouped refuse with the reason's
+    /// own message.
+    #[test]
+    fn every_per_group_fit_failure_degrades_the_group_and_refuses_ungrouped() {
+        pyo3::Python::initialize();
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(&str, LogisticSpec, (Vec<f64>, Vec<f64>), (Vec<f64>, Vec<f64>), &str)> = vec![
+            (
+                "perfect separation",
+                default_spec(10, None),
+                (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0]),
+                (vec![-100.0, -90.0, -80.0, 80.0, 90.0, 100.0], vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                "perfect separation detected (model classifies every observation with probability > 0.999)",
+            ),
+            (
+                "singular weighted design",
+                default_spec(10, None),
+                (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0]),
+                (vec![0.0, 1e-9, 2e-9], vec![0.0, 1.0, 0.0]),
+                "singular design (X'WX has zero determinant)",
+            ),
+        ];
+        for (label, spec, (gx, gy), (bx, by), reason) in cases {
+            let mut grouped = spec.clone();
+            grouped.groupby = vec!["g".into()];
+            let n = gx.len();
+            let batch = grouped_batch(
+                gx.iter().chain(&bx).copied().collect(),
+                gy.iter().chain(&by).copied().collect(),
+                std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), bx.len())).collect(),
+            );
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&grouped, &batch, &ctx).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let alone = apply(&spec, &xy_batch(gx, gy)).unwrap();
+            let ys = col(&out, "y");
+            let groups = str_col(&out, "g");
+            let a: Vec<f64> = ys.iter().zip(&groups).filter(|(_, g)| *g == "a").map(|(y, _)| *y).collect();
+            assert_eq!(a, col(&alone, "y"), "{label}: the good group fits as alone");
+            assert!(ys.iter().zip(&groups).filter(|(_, g)| *g == "b").all(|(y, _)| y.is_nan()), "{label}: no fit for b");
+            let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+            assert_eq!(
+                said,
+                [format!("Logistic: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
+                "{label}"
+            );
+            let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
+            assert_eq!(refused, format!("ValueError: Logistic: {reason}"), "{label}: ungrouped refuses");
+        }
     }
 }

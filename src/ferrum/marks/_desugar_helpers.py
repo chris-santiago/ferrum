@@ -590,6 +590,7 @@ def resolve_color_groupby(
     cat_field: str | None,
     color_field: str | None,
     base_groupby: list[str | None],
+    grouping: Sequence[str] = (),
 ) -> tuple[list[str], bool]:
     """Return (groupby, split_hue) for a composite mark that groups by a categorical field.
 
@@ -605,11 +606,15 @@ def resolve_color_groupby(
         Typically ``[cat_field]`` but callers may pass a pre-built list (e.g.
         for multi-field grouping).  ``None`` entries are silently dropped so
         callers can safely pass ``[cat_field]`` even when ``cat_field`` is None.
+    grouping:
+        The chart's composite grouping fields, appended after the hue by
+        :func:`with_grouping`.
 
     Returns
     -------
     groupby : list[str]
-        The groupby list with the color field appended when ``split_hue`` is True.
+        The groupby list with the color field appended when ``split_hue`` is True,
+        then every grouping field it does not already name.
     split_hue : bool
         True when ``color_field`` is non-None AND distinct from ``cat_field``
         (i.e. it names a genuinely different column that should split the groups).
@@ -619,4 +624,20 @@ def resolve_color_groupby(
     split_hue = color_field is not None and color_field != cat_field
     raw = base_groupby + ([color_field] if split_hue else [])
     groupby: list[str] = [g for g in raw if g is not None]
-    return groupby, split_hue
+    return with_grouping(groupby, grouping), split_hue
+
+
+def with_grouping(groupby: list[str], grouping: Sequence[str]) -> list[str]:
+    """*groupby* followed by each field of *grouping* it does not already name.
+
+    *grouping* is the chart's composite grouping (the fields its color,
+    detail, shape and stroke_dash bind, plus its facet fields), injected by
+    the composite-mark expansion. A field already in *groupby* (the
+    categorical axis, or the hue) is not repeated, since Rust refuses a
+    repeated group key.
+    """
+    out = list(groupby)
+    for name in grouping:
+        if name not in out:
+            out.append(name)
+    return out

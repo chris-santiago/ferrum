@@ -25,7 +25,7 @@ use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     batch_with_groupby_columns, deserialize_groupby_vec, group_partition_multi,
     refuse_groupby_output_collision, refuse_repeated_groupby_names,
-    warn_null_groupby_rows_dropped, KeyValue, NullKeyPolicy,
+    KeyValue, NullKeyPolicy,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -273,9 +273,10 @@ fn output_column_names() -> Vec<String> {
 /// An empty `groupby` partitions every row into one group, so the ungrouped
 /// call computes exactly the one whole-column statistic it always has. A field
 /// with no plottable value refuses, grouped or not; so does a whole-frame call
-/// whose null-key drop removed at least one row and left no plottable value,
-/// which inside a facet panel (`TransformContext::is_partition`) degrades to
-/// an empty panel instead. A group with none emits no points.
+/// whose null-key drop removed at least one row and left no plottable value;
+/// inside a facet panel that drop empties the panel instead
+/// ([`TransformContext::refuse_unless_partition`]). A group with none emits
+/// no points.
 pub(crate) fn apply_with_context(
     spec: &QQSpec,
     batch: &RecordBatch,
@@ -297,17 +298,11 @@ pub(crate) fn apply_with_context(
     let v_arr = coerce_to_float64(batch.column(v_idx), "stat_qq", &spec.field)?;
 
     refuse_groupby_output_collision("stat_qq", &spec.groupby, &output_column_names())?;
-    // The partition's all-null warning would repeat what the per-field drop
-    // warning reports (every row dropped) in other words, once per facet
-    // panel; the drop warning alone speaks for null keys.
-    let partition = group_partition_multi(
-        batch,
-        &spec.groupby,
-        "stat_qq",
-        NullKeyPolicy::Skip,
-        &TransformContext::default(),
-    )?;
-    warn_null_groupby_rows_dropped(batch, &spec.groupby, "stat_qq", ctx);
+    // The partition counts the null-key rows it drops, per field; a batch
+    // the drop leaves with nothing to plot is refused below, which those
+    // counts explain.
+    let partition =
+        group_partition_multi(batch, &spec.groupby, "stat_qq", NullKeyPolicy::SkipRefusingEmpty, ctx)?;
 
     // Null/NaN sample values are not plotted.
     let clean = |i: usize| -> Option<f64> {
@@ -324,10 +319,8 @@ pub(crate) fn apply_with_context(
     let dropped_rows = batch.num_rows().saturating_sub(kept_rows);
     let plottable_kept =
         partition.groups.iter().flat_map(|(_, rows)| rows).any(|&i| clean(i).is_some());
-    // One facet panel the drop emptied degrades to an empty panel (the drop
-    // warning already names it); the whole frame left empty refuses.
-    if dropped_rows > 0 && !plottable_kept && !ctx.is_partition {
-        return Err(PyValueError::new_err("stat_qq: empty input after filter"));
+    if dropped_rows > 0 && !plottable_kept {
+        ctx.refuse_unless_partition(PyValueError::new_err("stat_qq: empty input after filter"))?;
     }
 
     let mut theoretical: Vec<f64> = Vec::new();

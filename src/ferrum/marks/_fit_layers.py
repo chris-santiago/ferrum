@@ -8,8 +8,7 @@ optional confidence band under the same schema -- ``x, y, ci_lower, ci_upper``
 methods that construct their fit transform directly. They built the same three
 layers, over the same four registry columns, with the same magic constants --
 the band's ``opacity: 0.3`` and the metrics text's ``align``/``dx``/``dy`` --
-which meant the two agreed only by coincidence of copied literals, and
-``neutral_stroke`` had already landed in one of them alone.
+which meant the two agreed only by coincidence of copied literals.
 
 This module owns the shape; both callers ask it for the layers and keep their
 own job (transform construction, chart assembly). ``tests/
@@ -21,13 +20,6 @@ from __future__ import annotations
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum.encoding import X, Y
-
-#: The theme token that keeps a POOLED fit from impersonating a color level.
-#: ``marks/composite.py``'s boxplot whisker/median layers use the same one;
-#: ``resolve_paint_color`` (``crates/ferrum-core/src/render/draw.rs``) resolves
-#: it to the theme's label color, never a scale/palette lookup, so it cannot
-#: collide with a color level the way the theme's default accent can.
-_NEUTRAL_PAINT = "theme:label"
 
 #: Columns the metrics layer reads. Not a registry lookup: they come from the
 #: transform's conditional ``inject_metrics=True`` output, which the registry
@@ -45,7 +37,6 @@ def build_fit_layers(
     x_title: str,
     y_title: str,
     line_kwargs: dict | None = None,
-    neutral_stroke: bool = False,
     metrics: bool = False,
 ) -> list[_Layer]:
     """Build the fit-family layer triple for one fitted-curve transform.
@@ -90,12 +81,6 @@ def build_fit_layers(
         ``line_kws``). Recorded on the line layer's ``caller_style_keys`` as
         well as its ``mark_kwargs``, so the chart-level catch-all
         ``**mark_kwargs`` cannot override them.
-    neutral_stroke : bool, default False
-        Paint the band and the line with the neutral theme token instead of
-        the chart's color resolution. Set when the transform produces ONE
-        POOLED fit while a color encoding is active on a sibling layer, so
-        the pooled curve cannot visually impersonate one color level. A
-        caller-supplied ``line_kwargs["stroke"]`` still wins.
     metrics : bool, default False
         Append the corner R²/RMSE/MAE text layer. Only meaningful when the
         transform was itself built with ``inject_metrics=True``; the columns
@@ -112,8 +97,6 @@ def build_fit_layers(
 
     if ci is not None:
         ribbon_kwargs: dict = {"opacity": 0.3}
-        if neutral_stroke:
-            ribbon_kwargs["fill"] = _NEUTRAL_PAINT
         layers.append(
             _Layer(
                 name="ribbon",
@@ -129,16 +112,9 @@ def build_fit_layers(
         )
 
     resolved_line_kwargs = dict(line_kwargs) if line_kwargs else {}
-    # Recorded BEFORE the neutral-stroke default below, so it names the
-    # caller's keys and only those: the two precedences this layer is subject
-    # to run in opposite directions, and both fall out of that distinction.
-    # `setdefault` lets a caller-supplied `stroke` beat the library's neutral
-    # token, and `caller_style_keys` lets it beat the chart-level catch-all
-    # `**mark_kwargs` (see `_Layer.caller_style_keys`). A key the caller did
-    # not name is a library default on both counts.
+    # The caller's keys, recorded so they beat the chart-level catch-all
+    # `**mark_kwargs` (see `_Layer.caller_style_keys`).
     caller_named = frozenset(line_kwargs) if line_kwargs else frozenset()
-    if neutral_stroke:
-        resolved_line_kwargs.setdefault("stroke", _NEUTRAL_PAINT)
     layers.append(
         _Layer(
             name="line",

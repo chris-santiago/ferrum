@@ -294,7 +294,7 @@ pub fn render_composite_interactive<'py>(
 }
 
 fn composite_render_err_to_py(e: super::composite_render::CompositeRenderError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    refusal_to_py(e.to_string(), e.carried_warnings())
 }
 
 /// Collect every payload reader into one Arrow batch each (same per-batch
@@ -1690,7 +1690,17 @@ fn validate_break_axis_gaps_value(item_dict: &Bound<'_, PyDict>, item_section: &
 }
 
 fn render_err_to_py(e: RenderError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    refusal_to_py(e.to_string(), e.carried_warnings())
+}
+
+/// The `ValueError` a refusal raises, after delivering the warnings it
+/// carries ([`RenderError::Warned`]) as a finished render delivers its own;
+/// a warning the caller's filter turns into an exception is raised instead.
+fn refusal_to_py(message: String, warnings: &[super::RenderWarning]) -> PyErr {
+    if let Err(raised) = Python::attach(|py| emit_warnings(py, warnings)) {
+        return raised;
+    }
+    PyValueError::new_err(message)
 }
 
 /// Shared decode preamble for the three PyO3 render entry points

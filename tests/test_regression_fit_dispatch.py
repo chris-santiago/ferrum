@@ -34,7 +34,8 @@ def _request() -> regression._FitRequest:
         y="y",
         x_field="x",
         y_field="y",
-        hue=None,
+        grouping=(),
+        grouping_bindings={},
         ci=0.95,
         line_kwargs={},
         x_bins=None,
@@ -42,7 +43,6 @@ def _request() -> regression._FitRequest:
         order=None,
         x_range=None,
         metrics=False,
-        color_active=False,
         has_scatter=True,
     )
 

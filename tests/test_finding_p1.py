@@ -339,8 +339,8 @@ class TestPerLayerDetailAlias:
         chart = base + overlay
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            resolved = chart._resolve_pending()
-            layers = resolved._build_layers_list()
+            chart.to_spec()
+            layers = chart._resolve_pending()._build_layers_list()
         detail_warnings = _user_warnings(caught, contains="detail")
         assert len(detail_warnings) == 1
         assert "mark_point" in str(detail_warnings[0].message)
@@ -686,8 +686,8 @@ class TestLayerStringEncodings:
         chart = self._layered_chart({"x": "x", "y": "y", "detail": "g"}, layer_mark="point")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            resolved = chart._resolve_pending()
-            layers = resolved._build_layers_list()
+            chart.to_spec()
+            layers = chart._resolve_pending()._build_layers_list()
         detail_warnings = _user_warnings(caught, contains="detail")
         assert len(detail_warnings) == 1
         assert "mark_point" in str(detail_warnings[0].message)

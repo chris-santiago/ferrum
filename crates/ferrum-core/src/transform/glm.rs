@@ -31,7 +31,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::logistic::inv_normal_cdf;
-use crate::transform::numeric_util::coerce_xy_pairs;
+use crate::transform::context::{TransformContext, Unfittable};
+use crate::transform::context::describe_group_keys;
+use crate::transform::group_key::{
+    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
+    stack_grouped_batches, FitRows, KeyValue,
+    NullKeyPolicy,
+};
+use crate::transform::numeric_util::coerce_xy_pairs_at;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +74,17 @@ pub(crate) struct GlmSpec {
     pub ci: Option<f64>,
     pub max_iter: usize,
     pub tol: f64,
+    /// When non-empty, partition the input by these columns and fit each
+    /// group on its own rows, appending the group-key columns (with their
+    /// original dtypes) to the output, as `Robust(groupby=)` does. A null key
+    /// belongs to no group; a batch whose every key is null is fit whole.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -258,58 +276,93 @@ fn erf(x: f64) -> f64 {
 
 // ---------- Main apply ----------
 
+/// Entry point with no render context: [`apply_with_context`] with a
+/// default context.
 pub(crate) fn apply(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Fit the whole batch, or, under `spec.groupby`, each group on its own rows
+/// and stack the per-group curves with the group columns appended, as
+/// `robust::apply_grouped` does. `SkipWithWholeBatchFallback` is the
+/// partition's policy: a batch whose every key is null is fit whole, and the
+/// partition's warning says so.
+pub(crate) fn apply_with_context(
+    spec: &GlmSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    if spec.groupby.is_empty() {
+        return fit(spec, batch, None, ctx);
+    }
+    let partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "Glm",
+        NullKeyPolicy::SkipWithWholeBatchFallback,
+        ctx,
+    )?;
+    let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
+    for (key, rows) in &partition.groups {
+        let group = FitRows { indices: rows, label: describe_group_keys(&spec.groupby, key) };
+        per_group_batches.push((key.clone(), fit(spec, batch, Some(&group), ctx)?));
+    }
+    if per_group_batches.is_empty() {
+        // Every group key was null: the pooled fit IS the null-keyed group,
+        // stacked with a key that nulls only the `groupby` column(s)
+        // actually all-null (`pooled_group_key`'s doc), so a facet field
+        // folded into `spec.groupby` keeps its value, as
+        // `robust::apply_grouped`'s fallback does.
+        let pooled = fit(spec, batch, None, ctx)?;
+        let key = pooled_group_key(batch, &spec.groupby)?;
+        return stack_grouped_batches("Glm", &[(key, pooled)], &spec.groupby, &partition.dtypes);
+    }
+    stack_grouped_batches("Glm", &per_group_batches, &spec.groupby, &partition.dtypes)
+}
+
+/// Fit `batch`'s rows, or only one group's (`group`). Rows that cannot be fit
+/// refuse the whole frame and degrade a group to its empty fit, with a
+/// warning ([`TransformContext::degrade_group_or_refuse`]).
+fn fit(
+    spec: &GlmSpec,
+    batch: &RecordBatch,
+    group: Option<&FitRows<'_>>,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    let only_indices = group.map(|group| group.indices);
+    let unfittable = |failure: Unfittable| -> PyResult<RecordBatch> {
+        ctx.degrade_group_or_refuse("Glm", group.map(|group| group.label.as_str()), failure)?;
+        let nans = vec![f64::NAN; spec.n_grid.max(1)];
+        build_glm_batch(nans.clone(), nans.clone(), nans.clone(), nans)
+    };
     validate_pair(spec.family, spec.link)?;
-    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Glm")?;
+    let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Glm", only_indices)?;
 
     if xs.len() < 2 {
-        return Err(PyValueError::new_err(
-            "Glm: need at least 2 non-null observations",
-        ));
+        return unfittable(Unfittable {
+            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            refusal: "Glm: need at least 2 non-null observations".into(),
+        });
     }
 
     // Family-specific input validation.
-    match spec.family {
-        GlmFamily::Binomial => {
-            for &y in &ys {
-                if y != 0.0 && y != 1.0 {
-                    return Err(PyValueError::new_err(format!(
-                        "Glm: binomial family requires binary y (0 or 1); found {y}",
-                    )));
-                }
-            }
-        }
-        GlmFamily::Poisson => {
-            for &y in &ys {
-                if y < 0.0 || y.fract() != 0.0 {
-                    return Err(PyValueError::new_err(format!(
-                        "Glm: poisson family requires non-negative integer y; found {y}",
-                    )));
-                }
-            }
-        }
-        GlmFamily::Gamma | GlmFamily::InverseGaussian => {
-            for &y in &ys {
-                if y <= 0.0 {
-                    return Err(PyValueError::new_err(format!(
-                        "Glm: {} family requires strictly positive y; found {y}",
-                        family_name(spec.family),
-                    )));
-                }
-            }
-        }
-        GlmFamily::Gaussian => {}
+    if let Some(failure) = family_y_failure(spec.family, &ys) {
+        return unfittable(failure);
     }
 
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
     if !(x_max > x_min) {
-        return Err(PyValueError::new_err(
-            "Glm: singular design (X'WX has zero determinant); x has zero variance",
-        ));
+        return unfittable(Unfittable {
+            reason: "zero x variance".into(),
+            refusal: "Glm: singular design (X'WX has zero determinant); x has zero variance".into(),
+        });
     }
 
-    let (beta, cov) = fit_irls(&xs, &ys, spec.family, spec.link, spec.max_iter, spec.tol)?;
+    let (beta, cov) = match fit_irls(&xs, &ys, spec.family, spec.link, spec.max_iter, spec.tol) {
+        Ok(fit) => fit,
+        Err(failure) => return unfittable(failure),
+    };
 
     let n_grid = spec.n_grid.max(1);
     let grid: Vec<f64> = (0..n_grid)
@@ -374,7 +427,24 @@ fn initial_mu(family: GlmFamily, ys: &[f64]) -> Vec<f64> {
     }).collect()
 }
 
-/// Fit GLM β = (β₀, β₁) by IRLS. Returns (β, Σ̂ = (X'WX)⁻¹).
+/// The first `y` value outside `family`'s domain, as why the rows cannot be
+/// fit: binomial needs 0 or 1, poisson a non-negative integer, gamma and
+/// inverse-gaussian a strictly positive value.
+fn family_y_failure(family: GlmFamily, ys: &[f64]) -> Option<Unfittable> {
+    let (outside, needs): (fn(f64) -> bool, String) = match family {
+        GlmFamily::Binomial => (|y| y != 0.0 && y != 1.0, "binomial family requires binary y (0 or 1)".into()),
+        GlmFamily::Poisson => (|y| y < 0.0 || y.fract() != 0.0, "poisson family requires non-negative integer y".into()),
+        GlmFamily::Gamma | GlmFamily::InverseGaussian => {
+            (|y| y <= 0.0, format!("{} family requires strictly positive y", family_name(family)))
+        }
+        GlmFamily::Gaussian => return None,
+    };
+    let y = ys.iter().find(|&&y| outside(y))?;
+    Some(Unfittable::new("Glm", format!("{needs}; found {y}")))
+}
+
+/// Fit GLM β = (β₀, β₁) by IRLS. Returns (β, Σ̂ = (X'WX)⁻¹), or why the rows
+/// cannot be fit (a singular weighted design, divergence).
 pub(crate) fn fit_irls(
     xs: &[f64],
     ys: &[f64],
@@ -382,7 +452,7 @@ pub(crate) fn fit_irls(
     link: GlmLink,
     max_iter: usize,
     tol: f64,
-) -> PyResult<([f64; 2], [[f64; 2]; 2])> {
+) -> Result<([f64; 2], [[f64; 2]; 2]), Unfittable> {
     let n = xs.len();
     let mut mu = initial_mu(family, ys);
     // Clip μ to the link's domain for stability.
@@ -417,9 +487,8 @@ pub(crate) fn fit_irls(
             wxtz[1] += w * xi * z;
         }
 
-        let inv = invert_2x2(wxtx).ok_or_else(|| PyValueError::new_err(
-            "Glm: singular design (X'WX has zero determinant)"
-        ))?;
+        let inv = invert_2x2(wxtx)
+            .ok_or_else(|| Unfittable::new("Glm", "singular design (X'WX has zero determinant)"))?;
 
         let b0 = inv[0][0] * wxtz[0] + inv[0][1] * wxtz[1];
         let b1 = inv[1][0] * wxtz[0] + inv[1][1] * wxtz[1];
@@ -427,9 +496,7 @@ pub(crate) fn fit_irls(
         last_cov = Some(inv);
 
         if !beta[0].is_finite() || !beta[1].is_finite() {
-            return Err(PyValueError::new_err(
-                "Glm: IRLS diverged (non-finite coefficients)",
-            ));
+            return Err(Unfittable::new("Glm", "IRLS diverged (non-finite coefficients)"));
         }
 
         // Update η, μ.
@@ -615,8 +682,10 @@ impl PyGlm {
         ci = None,
         max_iter = 25,
         tol = 1e-8,
+        groupby = None,
         name = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         x: &str,
         y: &str,
@@ -626,6 +695,7 @@ impl PyGlm {
         ci: Option<f64>,
         max_iter: usize,
         tol: f64,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -652,6 +722,7 @@ impl PyGlm {
             None => canonical_link(family),
         };
         validate_pair(family, link)?;
+        let groupby = parse_groupby_pyany(groupby)?;
 
         Ok(PyGlm(TransformSpec::Glm(GlmSpec {
             x: x.to_string(),
@@ -662,6 +733,7 @@ impl PyGlm {
             ci,
             max_iter,
             tol,
+            groupby,
             name,
         })))
     }
@@ -669,9 +741,9 @@ impl PyGlm {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Glm(s) => format!(
-                "Glm(x='{}', y='{}', family='{}', link='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, name={:?})",
+                "Glm(x='{}', y='{}', family='{}', link='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, groupby={:?}, name={:?})",
                 s.x, s.y, family_name(s.family), link_name(s.link),
-                s.n_grid, s.ci, s.max_iter, s.tol, s.name,
+                s.n_grid, s.ci, s.max_iter, s.tol, s.groupby, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -707,7 +779,7 @@ mod tests {
         GlmSpec {
             x: "x".into(), y: "y".into(),
             family, link, n_grid, ci,
-            max_iter: 50, tol: 1e-9, name: None,
+            max_iter: 50, tol: 1e-9, groupby: Vec::new(), name: None,
         }
     }
 
@@ -721,7 +793,7 @@ mod tests {
             let s = GlmSpec {
                 x: "x".into(), y: "y".into(),
                 family: fam, link, n_grid: 50,
-                ci: Some(0.95), max_iter: 25, tol: 1e-8, name: None,
+                ci: Some(0.95), max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
             };
             let json = serde_json::to_string(&s).unwrap();
             let parsed: GlmSpec = serde_json::from_str(&json).unwrap();
@@ -882,5 +954,205 @@ mod tests {
         assert_eq!(canonical_link(GlmFamily::Poisson), GlmLink::Log);
         assert_eq!(canonical_link(GlmFamily::Gamma), GlmLink::Inverse);
         assert_eq!(canonical_link(GlmFamily::InverseGaussian), GlmLink::InverseSquared);
+    }
+
+    /// `x`, `y` and a Utf8 group `g` (nullable).
+    fn grouped_batch(x: Vec<f64>, y: Vec<f64>, g: Vec<Option<&str>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(arrow::array::StringArray::from(g)),
+        ]).unwrap()
+    }
+
+    fn str_col(b: &RecordBatch, name: &str) -> Vec<String> {
+        let arr = b.column(b.schema().index_of(name).unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+    }
+
+    /// Under `groupby`, each group is fit on its own rows: the grouped
+    /// output is each group's ungrouped fit stacked, with the group column
+    /// appended. Rejects one pooled fit over both groups.
+    #[test]
+    fn grouped_fit_is_each_groups_own_fit() {
+        pyo3::Python::initialize();
+        let (xa, ya, xb, yb): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0], vec![0.0, 1.0, 2.0, 3.0], vec![10.0, 9.0, 8.0, 7.0]);
+        let n = xa.len();
+        let mut grouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
+        grouped.groupby = vec!["g".into()];
+        let batch = grouped_batch(
+            xa.iter().chain(&xb).copied().collect(),
+            ya.iter().chain(&yb).copied().collect(),
+            std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), xb.len())).collect(),
+        );
+        let out = apply(&grouped, &batch).unwrap();
+        let ungrouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
+        let a = apply(&ungrouped, &xy_batch(xa, ya)).unwrap();
+        let b = apply(&ungrouped, &xy_batch(xb, yb)).unwrap();
+        let expected: Vec<f64> = col(&a, "y").into_iter().chain(col(&b, "y")).collect();
+        assert_eq!(col(&out, "y"), expected);
+        let groups = str_col(&out, "g");
+        assert_eq!(groups.iter().filter(|g| *g == "a").count(), a.num_rows());
+        assert_eq!(groups.iter().filter(|g| *g == "b").count(), b.num_rows());
+    }
+
+    /// A null key belongs to no group; a batch whose every key is null is
+    /// fit whole, as the ungrouped fit, and the partition says so. The
+    /// pooled fit IS the null-keyed group: its output ALSO carries `g`, all
+    /// null at its original dtype, rather than lacking it.
+    #[test]
+    fn all_null_keys_fit_the_whole_batch_and_warn() {
+        pyo3::Python::initialize();
+        let (xa, ya, _, _): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0], vec![0.0, 1.0, 2.0, 3.0], vec![10.0, 9.0, 8.0, 7.0]);
+        let mut grouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
+        grouped.groupby = vec!["g".into()];
+        let batch = grouped_batch(xa.clone(), ya.clone(), vec![None; xa.len()]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&grouped, &batch, &ctx).unwrap();
+        let whole = apply(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &xy_batch(xa, ya)).unwrap();
+        assert_eq!(col(&out, "y"), col(&whole, "y"));
+
+        let g = out.column(out.schema().index_of("g").unwrap());
+        assert_eq!(g.data_type(), &DataType::Utf8, "the groupby column keeps its original dtype");
+        assert_eq!(g.null_count(), g.len(), "the pooled fit IS the null-keyed group");
+
+        let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            said,
+            ["Glm: every row has a null in its groupby key (g), so the data could not be split into groups; \
+              the whole batch was used as one ungrouped computation instead"]
+        );
+    }
+
+    /// The PyO3 constructor and the wire both accept `groupby`.
+    #[test]
+    fn groupby_round_trips_on_the_wire() {
+        let mut grouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
+        grouped.groupby = vec!["g".into()];
+        let json = serde_json::to_string(&grouped).unwrap();
+        assert!(json.contains("\"groupby\":[\"g\"]"), "{json}");
+        let parsed: GlmSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, grouped);
+        let ungrouped = serde_json::to_string(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None)).unwrap();
+        assert!(!ungrouped.contains("groupby"), "an ungrouped spec serializes as before: {ungrouped}");
+    }
+
+    /// A group that cannot be fit draws no fit (its curve is all NaN) and a
+    /// warning names it and the reason, while the other group fits as it
+    /// does alone, as `Smooth`'s and `Robust`'s groups degrade. The same rows
+    /// ungrouped still refuse.
+    #[test]
+    fn a_group_that_cannot_be_fit_degrades_with_a_warning_and_the_others_draw() {
+        pyo3::Python::initialize();
+        let (gx, gy): (Vec<f64>, Vec<f64>) = (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0]);
+        let n = gx.len();
+        let mut grouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
+        grouped.groupby = vec!["g".into()];
+        let cases: Vec<(&str, Vec<f64>, Vec<f64>, &str)> = vec![
+            ("one point", vec![1.0], vec![gy[0]], "fewer than 2 usable (non-null/non-NaN) x/y points"),
+            ("constant x", vec![2.0, 2.0, 2.0], vec![gy[0], gy[1], gy[2]], "zero x variance"),
+            
+        ];
+        for (label, bx, by, reason) in cases {
+            let batch = grouped_batch(
+                gx.iter().chain(&bx).copied().collect(),
+                gy.iter().chain(&by).copied().collect(),
+                std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), bx.len())).collect(),
+            );
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&grouped, &batch, &ctx).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let alone = apply(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &xy_batch(gx.clone(), gy.clone())).unwrap();
+            let ys = col(&out, "y");
+            let groups = str_col(&out, "g");
+            let a: Vec<f64> = ys.iter().zip(&groups).filter(|(_, g)| *g == "a").map(|(y, _)| *y).collect();
+            assert_eq!(a, col(&alone, "y"), "{label}: the good group fits as alone");
+            assert!(ys.iter().zip(&groups).filter(|(_, g)| *g == "b").all(|(y, _)| y.is_nan()), "{label}: no fit for b");
+            let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+            assert_eq!(
+                said,
+                [format!("Glm: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
+                "{label}"
+            );
+            assert!(apply(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &xy_batch(bx, by)).is_err(), "{label}: ungrouped still refuses");
+        }
+    }
+
+    /// Every way one group's fit can fail degrades that group alone: no fit
+    /// for it, a warning naming it and the reason, and the other group fits
+    /// as it does alone. The same rows ungrouped refuse with the reason's
+    /// own message.
+    #[test]
+    fn every_per_group_fit_failure_degrades_the_group_and_refuses_ungrouped() {
+        pyo3::Python::initialize();
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(&str, GlmSpec, (Vec<f64>, Vec<f64>), (Vec<f64>, Vec<f64>), &str)> = vec![
+            (
+                "binomial y outside 0 or 1",
+                spec(GlmFamily::Binomial, GlmLink::Logit, 10, None),
+                (vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0]),
+                (vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 1.0]),
+                "binomial family requires binary y (0 or 1); found 2",
+            ),
+            (
+                "poisson y negative",
+                spec(GlmFamily::Poisson, GlmLink::Log, 10, None),
+                (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 2.0, 4.0, 7.0]),
+                (vec![0.0, 1.0, 2.0], vec![1.0, -1.0, 2.0]),
+                "poisson family requires non-negative integer y; found -1",
+            ),
+            (
+                "gamma y not positive",
+                spec(GlmFamily::Gamma, GlmLink::Inverse, 10, None),
+                (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 2.0, 4.0, 7.0]),
+                (vec![0.0, 1.0, 2.0], vec![1.0, 0.0, 2.0]),
+                "gamma family requires strictly positive y; found 0",
+            ),
+            (
+                "singular weighted design",
+                spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None),
+                (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0]),
+                (vec![0.0, 1e-9, 2e-9], vec![1.0, 2.0, 3.0]),
+                "singular design (X'WX has zero determinant)",
+            ),
+            (
+                "divergence",
+                spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None),
+                (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0]),
+                (vec![0.0, 1.0, 2.0], vec![1e308, -1e308, 1e308]),
+                "IRLS diverged (non-finite coefficients)",
+            ),
+        ];
+        for (label, spec, (gx, gy), (bx, by), reason) in cases {
+            let mut grouped = spec.clone();
+            grouped.groupby = vec!["g".into()];
+            let n = gx.len();
+            let batch = grouped_batch(
+                gx.iter().chain(&bx).copied().collect(),
+                gy.iter().chain(&by).copied().collect(),
+                std::iter::repeat_n(Some("a"), n).chain(std::iter::repeat_n(Some("b"), bx.len())).collect(),
+            );
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&grouped, &batch, &ctx).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let alone = apply(&spec, &xy_batch(gx, gy)).unwrap();
+            let ys = col(&out, "y");
+            let groups = str_col(&out, "g");
+            let a: Vec<f64> = ys.iter().zip(&groups).filter(|(_, g)| *g == "a").map(|(y, _)| *y).collect();
+            assert_eq!(a, col(&alone, "y"), "{label}: the good group fits as alone");
+            assert!(ys.iter().zip(&groups).filter(|(_, g)| *g == "b").all(|(y, _)| y.is_nan()), "{label}: no fit for b");
+            let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+            assert_eq!(
+                said,
+                [format!("Glm: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
+                "{label}"
+            );
+            let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
+            assert_eq!(refused, format!("ValueError: Glm: {reason}"), "{label}: ungrouped refuses");
+        }
     }
 }

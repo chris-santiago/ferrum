@@ -38,7 +38,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
 use crate::render::marks::curve::{StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
@@ -220,10 +220,11 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // skips subdivision entirely — byte-identical grouping.
     let dash_cols = stroke_dash_column_loader(ctx);
 
+    let grouping = grouping_series_values(ctx);
     let mut groups = build_color_detail_groups(
         color_values,
         detail_values.as_ref(),
-        dash_cols.categorical.as_ref(),
+        dash_cols.categorical.iter().chain(&grouping),
         ctx.scales.color.is_some(),
         n_rows,
     );

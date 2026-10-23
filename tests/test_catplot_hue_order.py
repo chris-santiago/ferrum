@@ -640,14 +640,14 @@ def test_mark_errorband_color_sort_none_byte_identical():
 # ---------------------------------------------------------------------------
 # boxen / swarm omit `_prep_color_field` / per-layer color threading
 # (documented load-bearing, _desugar.py). Swarm's points carry the hue column,
-# so hue_order still acts through the color scale they establish. Boxen's
-# bands and outlier points read letter-value statistic rows with no hue
-# column: no layer draws the hue, so there is no color scale for hue_order to
-# order, and each statistic layer warns that it dropped the hue.
+# so hue_order acts through the color scale they establish. Boxen's
+# letter-value statistic groups by the hue (the chart's grouping), so its
+# bands and outlier points carry the hue column and hue_order acts through
+# the color scale they establish, with no layer dropping the hue.
 # ---------------------------------------------------------------------------
 
 
-def test_catplot_boxen_hue_order_has_nothing_to_order():
+def test_catplot_boxen_hue_order_swap_still_changes_output():
     df = _tips_df()
     renders = []
     for order in (["Female", "Male"], ["Male", "Female"]):
@@ -656,13 +656,8 @@ def test_catplot_boxen_hue_order_has_nothing_to_order():
             renders.append(
                 fm.catplot(df, x="day", y="tip", hue="sex", kind="boxen", hue_order=order).to_svg()
             )
-        assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == [
-            f"catplot: color 'sex' was dropped: the statistic this {mark} mark draws does "
-            "not carry 'sex', so it draws without color"
-            for mark in ("rect", "point")
-        ]
-    assert renders[0] == renders[1]
-    assert renders[0] == fm.catplot(df, x="day", y="tip", kind="boxen").to_svg()
+        assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == []
+    assert renders[0] != renders[1]
 
 
 def test_catplot_swarm_hue_order_swap_still_changes_output():

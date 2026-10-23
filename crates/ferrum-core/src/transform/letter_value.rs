@@ -23,7 +23,8 @@
 //! dropped-row count; a `groupby` field equal to `group` is `group`'s own
 //! dimension and keeps its pooling. A whole-frame call whose drop removed at
 //! least one row and left no plottable value refuses; inside a facet panel
-//! (`TransformContext::is_partition`) it degrades to an empty panel instead.
+//! that drop empties the panel instead
+//! (`TransformContext::refuse_unless_partition`).
 //! A call that dropped nothing returns whatever it computes, an empty batch
 //! included, exactly as the ungrouped call does.
 //!
@@ -574,10 +575,8 @@ fn compute_depths(
     }
     // Only the null-key drop refuses: a call that dropped nothing returns
     // what it computed, an empty batch included, as the ungrouped call does.
-    // One facet panel the drop emptied degrades to an empty panel (the drop
-    // warning already names it); the whole frame left empty refuses.
-    if dropped_rows > 0 && groups.is_empty() && !ctx.is_partition {
-        return Err(PyValueError::new_err("stat_letter_value: empty input after filter"));
+    if dropped_rows > 0 && groups.is_empty() {
+        ctx.refuse_unless_partition(PyValueError::new_err("stat_letter_value: empty input after filter"))?;
     }
     let order = group_order(&spec.sort, &groups);
 

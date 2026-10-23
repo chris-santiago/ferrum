@@ -216,13 +216,13 @@ impl FieldsRead for LetterValueSpec {
 
 impl FieldsRead for LogisticSpec {
     fn fields_read(&self) -> BTreeSet<String> {
-        set([&self.x, &self.y])
+        set([&self.x, &self.y].into_iter().chain(&self.groupby))
     }
 }
 
 impl FieldsRead for GlmSpec {
     fn fields_read(&self) -> BTreeSet<String> {
-        set([&self.x, &self.y])
+        set([&self.x, &self.y].into_iter().chain(&self.groupby))
     }
 }
 

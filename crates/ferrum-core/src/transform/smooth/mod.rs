@@ -122,7 +122,7 @@ use serde::{Deserialize, Serialize};
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::gam;
 use crate::transform::group_key::{
-    deserialize_groupby_vec, group_partition_multi, stack_grouped_batches,
+    deserialize_groupby_vec, group_partition_multi, pooled_group_key, stack_grouped_batches,
     NullKeyPolicy,
     KeyValue,
 };
@@ -530,8 +530,15 @@ fn apply_grouped(
         // is not the `Some(ixs)` shape every other `apply_grouped` call
         // produces, so it forwards `is_partition` too — a rank-deficient
         // `Poly` here degrades like a group when this batch is itself a
-        // facet panel, rather than always refusing.
-        return apply_one_group(spec, batch, None, is_partition, ctx, None);
+        // facet panel, rather than always refusing. The pooled fit IS the
+        // null-keyed group: stack it through the same template every real
+        // group uses. The key nulls only the `groupby` column(s) that are
+        // themselves all-null (`pooled_group_key`'s doc) — a facet field
+        // folded into `group_cols` is never null and keeps its real value,
+        // so a faceted panel still gets a group it can assign.
+        let pooled = apply_one_group(spec, batch, None, is_partition, ctx, None)?;
+        let key = pooled_group_key(batch, group_cols)?;
+        return stack_grouped_batches("stat_smooth", &[(key, pooled)], group_cols, &partition.dtypes);
     }
 
     // Reconcile the per-group fit batches and append the group columns via

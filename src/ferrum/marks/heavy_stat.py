@@ -5,7 +5,7 @@ Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
 """
 
 from __future__ import annotations
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ferrum import (
     BoxStats,
@@ -30,8 +30,12 @@ from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
     typed_positional_channel,
+    with_grouping,
 )
 from ferrum.marks.base import check_constant_size
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def desugar_contour(
@@ -43,7 +47,8 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = True,
     cmap: str | None = None,
-    groupby: str | None = None,
+    groupby: str | Sequence[str] | None = None,
+    grouping: Sequence[str] = (),
 ) -> MarkDesugarResult:
     """Bivariate-density contour mark desugar.
 
@@ -101,13 +106,19 @@ def desugar_contour(
     cmap : str or None, default None
         Colormap name applied to the polygon layer.  ``None`` defers to the
         theme's sequential scheme.  Ignored when ``groupby`` is set.
-    groupby : str or None, default None
-        Group-key column (any groupby-supported dtype — string, integer,
+    groupby : str, sequence of str, or None, default None
+        Group-key column(s) (any groupby-supported dtype — string, integer,
         float, or boolean — preserved at its original dtype). When set,
         ``Kde2D`` computes one surface per group and ``Contour``
-        propagates the group column.  The layer
-        uses segment marks and colors by the group field so each group's
-        contour lines are a distinct categorical color.
+        propagates the group columns.  The layer
+        uses segment marks and colors by the first group field so each
+        group's contour lines are a distinct categorical color.
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. They join the groupby after *groupby*'s
+        own, so the surfaces split per group as with ``groupby=``; the layer
+        draws them through the bindings it inherits from the chart.
 
     Returns
     -------
@@ -132,14 +143,16 @@ def desugar_contour(
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
     # downstream layer can route through data_source="contour".
+    own_groups = [groupby] if isinstance(groupby, str) else list(groupby or [])
+    groups = with_grouping(own_groups, grouping)
     kde_kwargs: dict = dict(x=x_field, y=y_field, bandwidth=bandwidth, n=128)
-    if groupby is not None:
-        kde_kwargs["groupby"] = groupby
+    if groups:
+        kde_kwargs["groupby"] = groups
     transforms = [
         Kde2D(**kde_kwargs),
         Contour(
             thresholds=thresholds,
-            fill=False if groupby is not None else fill,
+            fill=False if groups else fill,
             smooth=smooth,
             name="contour",
         ),
@@ -156,7 +169,7 @@ def desugar_contour(
         ["contour_x", "contour_y", "contour_x2", "contour_y2", "level_id", "level_value"],
     )
 
-    if groupby is not None:
+    if groups:
         # Grouped contour: use isoline (segment) mode so each row is an
         # independent line segment — no polygon grouping needed, no cross-group
         # level_id collision.  Color by the group column for categorical hue —
@@ -165,17 +178,22 @@ def desugar_contour(
         # bare string drew both groups' isolines in one colour with no warning.
         # The Contour transform outputs isoline columns:
         #   level_id, level_value, contour_x, contour_y, contour_x2, contour_y2, <groupby>
+        # Only a caller's own `groupby=` binds that color here; a field the
+        # chart's grouping adds is drawn through the binding the layer
+        # inherits from the chart.
+        segment_encoding: dict = {
+            "x": X(_contour_cols["contour_x"], title=x_field),
+            "y": Y(_contour_cols["contour_y"], title=y_field),
+            "x2": _contour_cols["contour_x2"],
+            "y2": _contour_cols["contour_y2"],
+        }
+        if own_groups:
+            segment_encoding["color"] = nominal_color_channel(own_groups[0])
         layers = [
             _Layer(
                 name="segment",
                 mark="segment",
-                encoding={
-                    "x": X(_contour_cols["contour_x"], title=x_field),
-                    "y": Y(_contour_cols["contour_y"], title=y_field),
-                    "x2": _contour_cols["contour_x2"],
-                    "y2": _contour_cols["contour_y2"],
-                    "color": nominal_color_channel(groupby),
-                },
+                encoding=segment_encoding,
                 mark_kwargs=None,
                 data_source="contour",
             )
@@ -282,6 +300,7 @@ def desugar_violin(
     color_sort: Any = None,
     shared_extent: bool = False,
     horizontal: bool = False,
+    grouping: Sequence[str] = (),
 ) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
@@ -352,6 +371,13 @@ def desugar_violin(
         Explicit hue-level order for the color channel, injected by the
         composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
         channel (F-L09-04). Ignored when there is no color split.
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. The ``Violin`` and every inner summary
+        group by each one the category and hue do not already name, so each
+        group gets its own violin and its rows carry the field the layers
+        inherit from the chart.
     shared_extent : bool, default False
         When ``True``, all groups within the violin share the same KDE
         evaluation range (the cross-group global min/max), making the value
@@ -436,7 +462,7 @@ def desugar_violin(
     # Add the hue field to the groupby only when it is a distinct column; when
     # color encodes the same field as cat the KDE is already split per category
     # and the body just colors by the surviving cat column.
-    groupby, split_hue = resolve_color_groupby(cat_field, color_field, [cat_field])
+    groupby, split_hue = resolve_color_groupby(cat_field, color_field, [cat_field], grouping)
 
     # Body encoding: for vertical violin x=cat, y=violin_y (value grid points).
     # For horizontal violin y=cat, x=violin_y (value grid points on x-axis).
@@ -567,6 +593,7 @@ def desugar_violin(
         y_type=y_type,
         color_field=color_field if split_hue else None,
         color_sort=color_sort if split_hue else None,
+        grouping=grouping,
     )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
@@ -615,6 +642,7 @@ def desugar_qq(
     distribution: str = "normal",
     dequantize: bool = False,
     line: bool = True,
+    grouping: Sequence[str] = (),
 ) -> MarkDesugarResult:
     """Q-Q (quantile-quantile) plot mark desugar.
 
@@ -655,6 +683,12 @@ def desugar_qq(
         Whether to jitter duplicate quantile values slightly.
     line : bool, default True
         Whether to add the Q-Q reference line.
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. ``QQ`` computes each group's quantiles and
+        reference line on its own rows, and both batches carry the fields
+        the layers inherit from the chart.
 
     Returns
     -------
@@ -679,6 +713,7 @@ def desugar_qq(
             distribution=distribution,
             dequantize=dequantize,
             emit_line=line,
+            groupby=list(grouping),
             name=_QQ_TRANSFORM_NAME,
         )
     ]

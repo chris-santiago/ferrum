@@ -33,7 +33,8 @@ use std::sync::Arc;
 
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
-    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
+    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
+    stack_grouped_batches,
     NullKeyPolicy,
     KeyValue,
 };
@@ -340,8 +341,13 @@ fn apply_grouped(
     if per_group_batches.is_empty() {
         // Every group key was null: there is no per-group output to stack.
         // Fall back to the full batch on `None` indices, mirroring
-        // `smooth::apply_grouped`'s identical fallback.
-        return apply_one_group(spec, batch, None, ctx, None);
+        // `smooth::apply_grouped`'s identical fallback — the pooled fit IS
+        // the null-keyed group, stacked with a key that nulls only the
+        // `groupby` column(s) actually all-null (`pooled_group_key`'s
+        // doc), so a facet field folded into `group_cols` keeps its value.
+        let pooled = apply_one_group(spec, batch, None, ctx, None)?;
+        let key = pooled_group_key(batch, group_cols)?;
+        return stack_grouped_batches("Robust", &[(key, pooled)], group_cols, &partition.dtypes);
     }
 
     stack_grouped_batches("Robust", &per_group_batches, group_cols, &partition.dtypes)
@@ -1318,8 +1324,11 @@ mod tests {
     /// GH #197 EXEMPTION: an all-null `groupby` column leaves this transform
     /// with nothing to partition, and its documented answer is the pooled
     /// whole-batch fit rather than an empty output — the degraded-but-
-    /// meaningful render. The fit is unchanged; what is new is that it SAYS so,
-    /// with its own disposition text rather than a claim of emptiness.
+    /// meaningful render. The fit's own columns equal the ungrouped fit's;
+    /// what is new is that the output ALSO carries its `groupby` column, all
+    /// null at its original dtype — the pooled fit IS the null-keyed group —
+    /// and that it SAYS so, with its own disposition text rather than a
+    /// claim of emptiness.
     #[test]
     fn robust_all_null_group_keys_pool_the_whole_batch_and_warn() {
         pyo3::Python::initialize();
@@ -1328,11 +1337,13 @@ mod tests {
             Field::new("y", DataType::Float64, true),
             Field::new("g", DataType::Utf8, true),
         ]));
+        let x = vec![0.0, 1.0, 2.0, 3.0];
+        let y = vec![1.0, 3.0, 5.0, 7.0];
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
-                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 7.0])),
+                Arc::new(Float64Array::from(x.clone())),
+                Arc::new(Float64Array::from(y.clone())),
                 Arc::new(StringArray::from(vec![None, None, None, None] as Vec<Option<&str>>)),
             ],
         )
@@ -1341,6 +1352,20 @@ mod tests {
         let ctx = TransformContext::default();
         let out = apply_with_context(&s, &batch, &ctx).unwrap();
         assert_eq!(out.num_rows(), 10, "the pooled whole-batch fit still renders");
+
+        let g = out.column(out.schema().index_of("g").unwrap());
+        assert_eq!(g.data_type(), &DataType::Utf8, "the groupby column keeps its original dtype");
+        assert_eq!(g.null_count(), g.len(), "the pooled fit IS the null-keyed group");
+
+        let ungrouped = apply(&spec(10, None, 1.345, SmoothOutput::Fitted), &xy_batch(x, y)).unwrap();
+        for field in ungrouped.schema().fields() {
+            assert_eq!(
+                out.column_by_name(field.name()),
+                ungrouped.column_by_name(field.name()),
+                "the pooled fit's own column '{}' equals the ungrouped fit's",
+                field.name()
+            );
+        }
 
         let warnings = ctx.warnings.borrow();
         let all_null: Vec<&TransformWarning> = warnings

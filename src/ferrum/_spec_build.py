@@ -966,8 +966,8 @@ class SpecBuildMixin:
         column is gone, and a ``Bin`` replaces the batch schema with its own
         columns. It runs after every step the caller wrote with
         ``.transform(...)``, whether written before or after ``encode()``,
-        behind the chain's statistics marker and after any statistic the
-        chart's mark lowered. The ``aggregate=``/``bin=`` sentinels
+        as its own lowering behind its own statistics marker, after any
+        statistic the chart's mark lowered. The ``aggregate=``/``bin=`` sentinels
         ``encode()`` put on the transform list are dropped; the plan
         computes what the encoding asks for, and a sentinel a later
         ``encode()`` left behind asks for nothing.
@@ -992,8 +992,8 @@ class SpecBuildMixin:
         plan = _statistic_plan(enc, resolved._facet)
         own, lowered = _split_chain(effective_transforms)
         if plan.computes:
-            lowered = (*lowered, plan.step())
-        return _ResolvedStatistic([*own, *_with_statistics_marker(list(lowered))], plan.encoding)
+            lowered = (*lowered, *_with_statistics_marker([plan.step()]))
+        return _ResolvedStatistic([*own, *lowered], plan.encoding)
 
     @staticmethod
     def _collect_params(resolved, enc: dict) -> list:

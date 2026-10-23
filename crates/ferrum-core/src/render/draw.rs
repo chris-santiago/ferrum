@@ -370,11 +370,16 @@ pub struct PointStyle {
 
 /// Data-grouping overrides. `detail` is a grouping column shared by
 /// line/area/polygon (split a single mark into one path per detail value);
-/// `cmap` is the polygon-mark continuous colormap name.
+/// `cmap` is the polygon-mark continuous colormap name. `series` are the
+/// fields the statistics that produced a series mark's rows grouped them
+/// by beyond the channels the mark draws
+/// (`prepare::LayerPrepared::grouping_series`), which split its series as
+/// `detail` does.
 #[derive(Debug, Clone, Default)]
 pub struct GroupStyle {
     pub detail: Option<String>,
     pub cmap: Option<String>,
+    pub series: Vec<String>,
 }
 
 /// `mark_segment`-only overrides: whether to draw a filled triangle

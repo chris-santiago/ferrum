@@ -3,10 +3,13 @@
 //! - **Membership.** A value gets a panel when some drawing layer draws rows
 //!   carrying it: each layer's own rows (its named output, or the chart's
 //!   rows for a layer with no `data_source`), the chart's rows for an
-//!   unlayered spec. Rows no layer draws never make a panel.
+//!   unlayered spec. Rows no layer draws never make a panel, with one
+//!   exception: a partition a statistic's `groupby` null-key drop emptied
+//!   keeps its panel, drawn empty beside the drop's warning
+//!   ([`FacetPartitions::emptied_by_drop`]).
 //! - **Order.** Unsorted, the panels follow the order the pipeline
-//!   partitioned the facet's input in, filtered to the values a layer draws;
-//!   in grid mode the column and row dimensions each take their own
+//!   partitioned the facet's input in, filtered to the values that get a
+//!   panel; in grid mode the column and row dimensions each take their own
 //!   partition order. A value a layer draws that no partition holds follows,
 //!   in first appearance over the layers in layer order.
 //! - **Data-aware sort.** A sort object or an `x`/`-x`/`y`/`-y` shorthand
@@ -32,7 +35,7 @@ use crate::transform::run::OutputLineages;
 
 use super::super::scale_resolve::{apply_sort_to_domain, layer_sort_rows, SortContext, SortRows};
 use super::super::{RenderError, RenderWarning};
-use super::FacetPartitionKey;
+use super::FacetPartitions;
 
 /// The assembled sort batch's columns for a shorthand's x and y values.
 const SORT_X: &str = "__facet_sort_x";
@@ -45,11 +48,11 @@ pub(super) struct FacetLayerRows<'a> {
     pub(super) sort: SortRows<'a>,
 }
 
-/// Every drawing layer's rows, in layer order, and the pipeline's partition
-/// keys, in the order it ran them.
+/// Every drawing layer's rows, in layer order, and the pipeline's
+/// partitions.
 pub(super) struct FacetRows<'a> {
     pub(super) layers: Vec<FacetLayerRows<'a>>,
-    pub(super) partitions: &'a [FacetPartitionKey],
+    pub(super) partitions: &'a FacetPartitions,
     pub(super) coord_flipped: bool,
 }
 
@@ -65,7 +68,7 @@ impl<'a> FacetRows<'a> {
         transform_outputs: &'a HashMap<String, RecordBatch>,
         lineages: &'a OutputLineages,
         layer_batches: &[&'a RecordBatch],
-        partitions: &'a [FacetPartitionKey],
+        partitions: &'a FacetPartitions,
         chart_fields: (Option<&'a str>, Option<&'a str>),
         coord_flipped: bool,
     ) -> Self {
@@ -94,8 +97,10 @@ pub(super) fn facet_groups(
     fspec: &FacetSpec,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<FacetGroup>, RenderError> {
+    let partitions = &rows.partitions.order;
+    let emptied = &rows.partitions.emptied_by_drop;
     let col_held = held_values(rows, &fspec.field)?;
-    let mut cols = panel_order(rows.partitions.iter().map(|(col, _)| col), &col_held);
+    let mut cols = panel_order(partitions.iter().map(|(col, _)| col), emptied.iter().map(|(col, _)| col), &col_held);
     sort_panels(&mut cols, &fspec.field, fspec.sort.as_ref(), rows, &col_held, warnings)?;
     let Some(row_field) = &fspec.row else {
         let counts = value_counts(rows, &[&fspec.field])?;
@@ -109,7 +114,11 @@ pub(super) fn facet_groups(
             .collect());
     };
     let row_held = held_values(rows, row_field)?;
-    let mut row_values = panel_order(rows.partitions.iter().filter_map(|(_, row)| row.as_ref()), &row_held);
+    let mut row_values = panel_order(
+        partitions.iter().filter_map(|(_, row)| row.as_ref()),
+        emptied.iter().filter_map(|(_, row)| row.as_ref()),
+        &row_held,
+    );
     sort_panels(&mut row_values, row_field, fspec.row_sort.as_ref(), rows, &row_held, warnings)?;
     let counts = value_counts(rows, &[&fspec.field, row_field])?;
     let mut groups = Vec::with_capacity(row_values.len() * cols.len());
@@ -150,9 +159,14 @@ fn held_values(rows: &FacetRows<'_>, field: &str) -> Result<Held, RenderError> {
 }
 
 /// The partition order of `partition_values`, deduplicated and filtered to
-/// the values a layer draws, then any drawn value no partition holds.
-fn panel_order<'v>(partition_values: impl Iterator<Item = &'v String>, held: &'v Held) -> Vec<String> {
-    let drawn: HashSet<&String> = held.appearance.iter().collect();
+/// the values a layer draws or a null-key drop emptied (`emptied`), then
+/// any drawn value no partition holds.
+fn panel_order<'v>(
+    partition_values: impl Iterator<Item = &'v String>,
+    emptied: impl Iterator<Item = &'v String>,
+    held: &'v Held,
+) -> Vec<String> {
+    let drawn: HashSet<&String> = held.appearance.iter().chain(emptied).collect();
     let mut placed: HashSet<&String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     for value in partition_values.filter(|value| drawn.contains(value)).chain(&held.appearance) {
@@ -279,8 +293,9 @@ fn sort_batch(
     let mut read_anywhere = false;
     if !matches!(reads, SortReads::Nothing) {
         for value in domain {
+            // A panel a null-key drop emptied has no rows any layer draws: it
+            // sorts as a value with no rows, and the drop's warning names it.
             let Some(layer) = held.per_layer.iter().position(|values| values.contains(value)) else {
-                unsortable.push(value.clone());
                 continue;
             };
             let source = &rows.layers[layer].sort;
@@ -350,6 +365,7 @@ fn sort_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::FacetPartitionKey;
     use crate::layout::FacetMode;
 
     /// Rows over a facet field `f`, an optional row field `r`, and `y`.
@@ -384,8 +400,13 @@ mod tests {
         }
     }
 
-    fn wrap_keys(partitions: &[&str]) -> Vec<FacetPartitionKey> {
-        partitions.iter().map(|value| (value.to_string(), None)).collect()
+    fn wrap_keys(partitions: &[&str]) -> FacetPartitions {
+        keys(partitions.iter().map(|value| (value.to_string(), None)).collect())
+    }
+
+    /// Partitions in `order`, none emptied by a null-key drop.
+    fn keys(order: Vec<FacetPartitionKey>) -> FacetPartitions {
+        FacetPartitions { order, emptied_by_drop: HashSet::new() }
     }
 
     fn values(groups: &[FacetGroup]) -> Vec<&str> {
@@ -467,10 +488,12 @@ mod tests {
     /// drawing layer.
     #[test]
     fn grid_column_and_row_sorts_read_each_values_first_drawing_layer() {
-        let partitions: Vec<FacetPartitionKey> = [("a", "p"), ("b", "p"), ("a", "q"), ("b", "q")]
-            .iter()
-            .map(|(c, r)| (c.to_string(), Some(r.to_string())))
-            .collect();
+        let partitions = keys(
+            [("a", "p"), ("b", "p"), ("a", "q"), ("b", "q")]
+                .iter()
+                .map(|(c, r)| (c.to_string(), Some(r.to_string())))
+                .collect(),
+        );
         let points = rows(&["a"], Some(&["p"]), &[1.0]);
         let line = rows(&["a", "b", "a", "b"], Some(&["p", "p", "q", "q"]), &[1.0, 5.0, 7.0, 9.0]);
         let facet_rows = FacetRows {
@@ -523,7 +546,7 @@ mod tests {
     #[test]
     fn grid_cells_cover_the_drawn_product_and_wrap_has_no_row_key() {
         let cells = [("c1", "r1"), ("c2", "r1"), ("c1", "r2"), ("c2", "r2")];
-        let partitions: Vec<FacetPartitionKey> = cells.iter().map(|(c, r)| (c.to_string(), Some(r.to_string()))).collect();
+        let partitions = keys(cells.iter().map(|(c, r)| (c.to_string(), Some(r.to_string()))).collect());
         let f: Vec<&str> = cells.iter().flat_map(|(c, _)| [*c, *c]).collect();
         let r: Vec<&str> = cells.iter().flat_map(|(_, r)| [*r, *r]).collect();
         let batch = rows(&f, Some(&r), &[0.0; 8]);
@@ -534,5 +557,57 @@ mod tests {
         let wrap = facet_groups(&facet_rows, &spec(false, None, None), &mut Vec::new()).unwrap();
         assert_eq!(values(&wrap), ["c1", "c2"]);
         assert!(wrap.iter().all(|g| g.row_key.is_none()));
+    }
+
+    /// A partition a null-key drop emptied keeps its panel in partition
+    /// order, drawn with no rows, while a value no layer draws for any other
+    /// reason still gets none. The rejected alternative builds panels from
+    /// drawn rows alone, so the emptied panel vanishes.
+    #[test]
+    fn a_panel_the_null_key_drop_emptied_is_drawn_empty_in_partition_order() {
+        let mut partitions = wrap_keys(&["a", "b", "c"]);
+        partitions.emptied_by_drop.insert(("b".to_string(), None));
+        let drawn = rows(&["a", "c"], None, &[1.0, 2.0]);
+        let facet_rows = FacetRows { layers: vec![layer(&drawn)], partitions: &partitions, coord_flipped: false };
+        let groups = facet_groups(&facet_rows, &spec(false, None, None), &mut Vec::new()).unwrap();
+        assert_eq!(values(&groups), ["a", "b", "c"]);
+        assert_eq!(groups.iter().map(|g| g.n_rows).collect::<Vec<_>>(), [1, 0, 1]);
+
+        let filtered = wrap_keys(&["a", "b", "c"]);
+        let facet_rows = FacetRows { layers: vec![layer(&drawn)], partitions: &filtered, coord_flipped: false };
+        let groups = facet_groups(&facet_rows, &spec(false, None, None), &mut Vec::new()).unwrap();
+        assert_eq!(values(&groups), ["a", "c"], "a value emptied by anything but the drop gets no panel");
+    }
+
+    /// In grid mode an emptied cell keeps both its column and its row.
+    #[test]
+    fn an_emptied_grid_cell_keeps_its_column_and_row() {
+        let mut partitions = keys(
+            [("a", "p"), ("b", "q")].iter().map(|(c, r)| (c.to_string(), Some(r.to_string()))).collect(),
+        );
+        partitions.emptied_by_drop.insert(("b".to_string(), Some("q".to_string())));
+        let drawn = rows(&["a"], Some(&["p"]), &[1.0]);
+        let facet_rows = FacetRows { layers: vec![layer(&drawn)], partitions: &partitions, coord_flipped: false };
+        let groups = facet_groups(&facet_rows, &spec(true, None, None), &mut Vec::new()).unwrap();
+        let cells: Vec<(&str, &str, u64)> = groups
+            .iter()
+            .map(|g| (g.key.value.as_str(), g.row_key.as_ref().map_or("", |k| k.value.as_str()), g.n_rows))
+            .collect();
+        assert_eq!(cells, [("a", "p", 1), ("b", "p", 0), ("a", "q", 0), ("b", "q", 0)]);
+    }
+
+    /// A data-aware sort orders an emptied panel as a value with no rows
+    /// and does not name it as left unsorted: it has no rows to read, and
+    /// the drop's own warning names it.
+    #[test]
+    fn a_sort_orders_an_emptied_panel_as_one_with_no_rows_without_naming_it() {
+        let mut partitions = wrap_keys(&["a", "b", "c"]);
+        partitions.emptied_by_drop.insert(("a".to_string(), None));
+        let drawn = rows(&["b", "c"], None, &[1.0, 5.0]);
+        let facet_rows = FacetRows { layers: vec![layer(&drawn)], partitions: &partitions, coord_flipped: false };
+        let mut warnings = Vec::new();
+        let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("-y")), None), &mut warnings).unwrap();
+        assert_eq!(values(&groups), ["c", "b", "a"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

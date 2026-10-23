@@ -4,14 +4,14 @@
 
 Quality-review REVISE, cycle 3 (all findings from the cycle-2 ramp fix):
 
-1. **Grouping mechanism** (S3, blocking): the prep used to resolve its
-   grouping column as ``color_field or ctx._color_field() or cat`` -- the
-   ``ctx._color_field()`` term consulted the chart-level ``.encode(color=)``
-   channel, which ``desugar_boxen`` itself never groups by (`group =
-   color_field if color_field else cat`, see ``composite.py``). This module
-   pins the FOUR shapes where that could have diverged: a plain chart, a
-   chart-level color encoding (must be ignored), the ``color_field=`` mark
-   kwarg (must be honored), and ``palette=`` (must skip the prep entirely).
+1. **Grouping mechanism** (S3, blocking): the prep estimates depth over
+   the groups ``desugar_boxen``'s ``LetterValue`` really computes: its
+   category (``color_field if color_field else cat``, see
+   ``composite.py``) and its ``groupby``, the chart's grouping fields. This
+   module pins the FOUR shapes where the two could diverge: a plain chart,
+   a chart-level color encoding (groups the letter values, so the ramp
+   reads its groups), the ``color_field=`` mark kwarg (must be honored),
+   and ``palette=`` (must skip the prep entirely).
 2. **`_k_for_depth` suite guard** (S3): a parametrized sweep -- the same
    4-strategy x 10-``n`` grid the spec reviewer ran by hand in cycle 2 --
    now lives in the suite instead of a one-off manual check, comparing the
@@ -52,9 +52,9 @@ def _rendered_opacities(svg: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# 1. Grouping mechanism: the prep's group_field must equal desugar_boxen's
-#    own `color_field if color_field else cat`, across every shape where a
-#    chart-level color channel could tempt a different resolution.
+# 1. Grouping mechanism: the prep's groups must equal desugar_boxen's own
+#    (`color_field if color_field else cat`, then the chart's grouping
+#    fields), across every shape where the two could diverge.
 # ---------------------------------------------------------------------------
 
 
@@ -65,13 +65,12 @@ def _grouping_fixture() -> pl.DataFrame:
 
     * ``g`` (the categorical axis): 2 categories, 300/100 rows -- tukey
       depth 5 (n=300) / 3 (n=100), materialized max 5.
-    * ``c`` (a chart-level ``.encode(color=...)`` column, unrelated to
-      grouping): 8 categories of 50 rows each -- tukey depth 2, chosen to
-      differ sharply from ``g``'s 5 so a wrong resolution is unmistakable
-      (an earlier fixture used a 2-category ``c`` split whose depth
-      happened to coincide with ``g``'s, which passed even with the buggy
-      ``ctx._color_field()`` fallback still present -- a false negative
-      this shape closes).
+    * ``c`` (a chart-level ``.encode(color=...)`` column, which the
+      letter values group by within each category): 8 categories of 50
+      rows each -- tukey depth 2, chosen to differ sharply from ``g``'s 5
+      so a ramp estimated without it is unmistakable (a 2-category ``c``
+      split whose depth coincided with ``g``'s could not tell the two
+      apart).
     * ``hue`` (the ``color_field=`` mark kwarg's target): a different
       8-small-groups split, independently verifying the same depth-2
       shape via the *correct* mechanism (the kwarg) rather than the
@@ -88,29 +87,27 @@ def _grouping_fixture() -> pl.DataFrame:
     return pl.DataFrame({"g": g, "v": v, "c": c, "hue": hue})
 
 
-def test_boxen_ramp_prep_ignores_chart_level_color_encoding():
-    """Shape 2: a bare ``.encode(color=...)`` (no ``palette=``) is legal and
-    common, and must leave the ramp byte-for-byte unchanged -- boxen's own
-    grouping never reads the chart-level color channel (`desugar_boxen`'s
-    docstring: "`palette` does not interact with `color_field`"), and
-    boxen's `_PENDING_PREP` tuple deliberately omits `_prep_color_field`.
-    RED pre-fix: the deleted `ctx._color_field()` fallback made this
-    diverge whenever the color column's category sizes differed from the
-    categorical axis's."""
+def test_boxen_ramp_prep_reads_the_chart_level_color_grouping():
+    """Shape 2: a bare ``.encode(color=...)`` (no ``palette=``) groups
+    boxen's ``LetterValue`` by the hue within each category, so the ramp
+    is normalized by the depth those (``g``, ``c``) groups materialize
+    (depth 2, from at most 50 rows each), not by ``g`` alone (depth 5).
+    Rejects estimating the depth from the category alone, which normalizes
+    the ramp against bands no group draws."""
     df = _grouping_fixture()
     svg_plain = fm.Chart(df).mark_boxen().encode(x="g", y="v").to_svg()
     svg_colored = fm.Chart(df).mark_boxen().encode(x="g", y="v", color="c").to_svg()
-    assert _rendered_opacities(svg_plain) == _rendered_opacities(svg_colored)
+    assert set(_rendered_opacities(svg_plain)) != set(_rendered_opacities(svg_colored))
+    assert {round(o, 2) for o in _rendered_opacities(svg_colored)} == {0.85, 0.3}
 
 
 def test_boxen_ramp_prep_uses_color_field_kwarg_like_the_real_transform():
-    """Shape 3: `mark_boxen(color_field=...)` DOES change boxen's real
-    `LetterValue` grouping (unlike the chart-level color encoding above),
-    so the ramp must reflect grouping by `hue` (materialized depth 2, from
-    8x50-row groups) rather than by the categorical axis `g` (materialized
-    depth 5, from 300/100-row groups) -- proving the prep's `color_field`
-    priority actually matches the transform's, not merely that it ignores
-    chart-level color."""
+    """Shape 3: `mark_boxen(color_field=...)` replaces boxen's real
+    `LetterValue` category, so the ramp must reflect grouping by `hue`
+    (materialized depth 2, from 8x50-row groups) rather than by the
+    categorical axis `g` (materialized depth 5, from 300/100-row groups) --
+    proving the prep's `color_field` priority actually matches the
+    transform's."""
     df = _grouping_fixture()
     svg_by_cat = fm.Chart(df).mark_boxen().encode(x="g", y="v").to_svg()
     svg_by_hue = fm.Chart(df).mark_boxen(color_field="hue").encode(x="g", y="v").to_svg()

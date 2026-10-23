@@ -32,13 +32,14 @@ from ferrum._encode_lowering import (
     _statistic_plan,
     _theta_axis,
 )
-from ferrum.encoding._aliases import layered_chart_detail, resolved_channel
+from ferrum.encoding._aliases import resolved_channel
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, _POLAR_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer import (
     _Layer,
     draws_inherited_color,
     inherited_positional_taken,
+    layer_draws,
     layer_mark,
     reads_named_output,
 )
@@ -213,11 +214,59 @@ def _statistics_start(transforms: list) -> int:
     return len(transforms)
 
 
+def _wire_statistic_grouped_fields(steps: list[dict]) -> set[str]:
+    """Every field a lowered statistic of the pipeline wire *steps* groups by.
+
+    Walks one chain in order and reads a step's ``groupby`` only when the
+    step runs after that chain's own statistics marker (a step equal to
+    :data:`_STATISTICS_MARKER_WIRE`): a caller-written step's own ``groupby``
+    (``Aggregate``, ``Window``, ``Bin``, ...) never counts, even when it
+    shares a field with the chart's own bindings, because it groups rows for
+    its own reason, not because some drawn statistic needs the split. Every
+    branch step's own ``transforms`` is read as a chain of its own, with its
+    own marker deciding, so an operand's own branch prefix is excluded the
+    same way and only its lowered statistics count. A composed step (a
+    composition's written step) is read for neither, since it carries no
+    statistic of its own.
+    """
+    fields: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            fields.add(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    def walk_chain(chain: list) -> None:
+        marker_at = next(
+            (i for i, step in enumerate(chain) if step == _STATISTICS_MARKER_WIRE), None
+        )
+        for i, step in enumerate(chain):
+            if not isinstance(step, dict):
+                continue
+            if step.get("type") == "branch":
+                walk_chain(step.get("transforms") or [])
+                continue
+            if marker_at is not None and i > marker_at:
+                collect(step.get("groupby"))
+
+    walk_chain(list(steps))
+    return fields
+
+
 def _split_chain(transforms: list) -> tuple[tuple, tuple]:
-    """*transforms* as ``(the caller's steps, the statistics its mark lowered)``, sentinels and markers dropped."""
+    """*transforms* as ``(the caller's steps, the statistics its marks lowered)``, sentinels dropped.
+
+    The statistics may hold several lowerings, each opened by its own
+    :class:`_StatisticsMarker`: the first lowering's marker is kept, as is
+    every later one, so the result starts with a marker exactly when it is
+    non-empty and callers that append another lowering behind it (``+``
+    operand statistics, a figure's own) never collapse two into one.
+    """
     steps = _chain_steps(transforms)
     at = _statistics_start(list(steps))
-    return steps[:at], tuple(s for s in steps[at:] if not isinstance(s, _StatisticsMarker))
+    return steps[:at], steps[at:]
 
 
 def _same_step(a: object, b: object) -> bool:
@@ -397,31 +446,38 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
         for channel, value in inherited.items()
         if channel not in offered or channel in taken
     }
+    grouped = set()
     if not draws_inherited_color(layer.mark) and "color" not in own:
-        inherited = _color_as_grouping(inherited)
+        grouped.add("color")
+    if "detail" not in own and not layer_draws(layer.mark, "detail"):
+        grouped.add("detail")
+    if grouped:
+        inherited = _as_grouping(inherited, grouped)
     return {**inherited, **bound}
 
 
-def _color_as_grouping(inherited: dict) -> dict:
-    """*inherited* with its color bindings replaced by one grouping-only key.
+def _as_grouping(inherited: dict, channels: set) -> dict:
+    """*inherited* with its bindings on *channels* replaced by one grouping-only key.
 
-    A layer whose mark draws only a color it binds itself still computes its
-    statistic per group of every inherited color spelling, so its labels
-    stay one per colored mark. The non-aggregated spellings become one
+    A layer whose mark draws only a color it binds itself, or no detail,
+    still computes its statistic per group of every inherited color
+    spelling and every inherited detail, so its labels stay one per colored
+    mark and at the grain its parent's detail gives. The non-aggregated
+    bindings whose resolved channel is in *channels* become one
     :class:`~ferrum._encode_lowering._GroupingOnly` at the place of the first
     of them, in the parent's order; an aggregated color is a value, not a
-    group, and joins none. No member, no key. Called only when the layer
-    binds no color under any spelling, so none of them is shadowed.
+    group, and joins none. No member, no key. Called only for channels the
+    layer binds under no spelling, so none of them is shadowed.
     """
     members = tuple(
         (channel, value)
         for channel, value in inherited.items()
-        if resolved_channel(channel) == "color"
+        if resolved_channel(channel) in channels
         and not (isinstance(value, ChannelBase) and value.option("aggregate"))
     )
     out: dict = {}
     for channel, value in inherited.items():
-        if resolved_channel(channel) != "color":
+        if resolved_channel(channel) not in channels:
             out[channel] = value
         elif members and GROUPING_KEY not in out:
             out[GROUPING_KEY] = _GroupingOnly(members)
@@ -481,26 +537,18 @@ def _scoped_to_layers(layers: list, encoding: dict) -> list:
     the layer does not bind itself (:func:`_effective_encoding`), except the
     channels that stay with the composition (:func:`_composition_encoding`),
     and lists each as inherited (:func:`_with_carried`).
-    A ``detail`` reaches only the layers binding none whose mark draws it,
-    as a chart-level one does
-    (:func:`~ferrum.encoding._aliases.layered_chart_detail`).
+    A ``detail`` reaches every layer binding none, as a chart-level one
+    does: a layer whose mark draws it splits by it, and every other layer
+    groups its statistic by it (:func:`_effective_encoding`), so a label
+    stays at its bars' grain. A detail no layer draws and no statistic
+    groups by is reported when the chart is lowered
+    (:func:`~ferrum.encoding._aliases.warn_ignored_details`), as a
+    chart-level one is.
     """
     parent = {
-        channel: value
-        for channel, value in encoding.items()
-        if channel not in _CHART_CHANNELS and channel != "detail"
+        channel: value for channel, value in encoding.items() if channel not in _CHART_CHANNELS
     }
-    details: list = [None] * len(layers)
-    unbound = [i for i, layer in enumerate(layers) if "detail" not in layer.encoding]
-    if "detail" in encoding and unbound:
-        reached = layered_chart_detail(encoding["detail"], [layers[i].mark for i in unbound])
-        for i, detail in zip(unbound, reached, strict=True):
-            details[i] = detail
-    out = []
-    for layer, detail in zip(layers, details, strict=True):
-        own_parent = parent if detail is None else {**parent, "detail": detail}
-        out.append(_with_carried(layer, _effective_encoding(layer, own_parent)))
-    return out
+    return [_with_carried(layer, _effective_encoding(layer, parent)) for layer in layers]
 
 
 def _carried_bindings(layer: _Layer, parent: dict, drawn: dict) -> dict:

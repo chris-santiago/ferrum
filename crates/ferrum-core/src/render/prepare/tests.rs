@@ -9942,6 +9942,7 @@ fn null_key_facet_run(
     h: Vec<Option<&str>>,
     v: Vec<f64>,
 ) -> Result<TransformRun, RenderError> {
+    pyo3::Python::initialize();
     let json = format!(
         r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},
         "transforms":[{transform}],
@@ -9978,7 +9979,7 @@ const NULL_KEY_TRANSFORMS: [(&str, &str); 2] = [
 #[test]
 fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
     for (name, transform) in NULL_KEY_TRANSFORMS {
-        let (outputs, warnings, _, _) = null_key_facet_run(
+        let (outputs, warnings, _, partitions) = null_key_facet_run(
             transform,
             vec!["p", "p", "p", "q", "q"],
             vec![Some("x"), Some("x"), Some("x"), None, None],
@@ -9988,6 +9989,11 @@ fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
         let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
         assert!(out.num_rows() > 0, "{name}: panel p renders");
         assert!(str_col(out, "f").iter().all(|f| f == "p"), "{name}: only panel p has rows");
+        assert_eq!(
+            partitions.emptied_by_drop,
+            HashSet::from([("q".to_string(), None)]),
+            "{name}: the run records the panel the drop emptied, so it keeps its panel"
+        );
         assert_eq!(
             warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
             [format!(
@@ -10021,6 +10027,940 @@ fn the_null_key_drop_count_sums_across_facet_panels() {
             "{name}"
         );
     }
+}
+
+/// When the null-key drop empties every panel, the faceted chart refuses
+/// with the statistic's own empty-input refusal, exactly as the unfaceted
+/// chart does, and the refusal carries the drop's warning with the whole
+/// frame's count. The rejected alternative renders a chart with no panel.
+#[test]
+fn the_null_key_drop_emptying_every_panel_refuses_with_the_drop_warning() {
+    for ((name, transform), refusal) in NULL_KEY_TRANSFORMS.into_iter().zip(["stat_letter_value", "stat_qq"]) {
+        let err = null_key_facet_run(transform, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
+            .err()
+            .unwrap_or_else(|| panic!("{name}: a chart the drop emptied refuses"));
+        assert_eq!(err.to_string(), format!("transform failed: ValueError: {refusal}: empty input after filter"), "{name}");
+        assert_eq!(
+            err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: 3 rows have a null 'h' and belong to no group, so they were dropped; \
+                 fill or filter the nulls in 'h'"
+            )],
+            "{name}: the refusal keeps the drop warning"
+        );
+    }
+}
+
+/// The unfaceted chart the drop empties refuses in the same words and
+/// carries the same warning, so the facet changes neither.
+#[test]
+fn an_unfaceted_chart_the_null_key_drop_empties_refuses_with_the_drop_warning() {
+    for ((name, transform), refusal) in NULL_KEY_TRANSFORMS.into_iter().zip(["stat_letter_value", "stat_qq"]) {
+        let json = format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},"transforms":[{transform}]}}"#
+        );
+        let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+        pyo3::Python::initialize();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("h", DataType::Utf8, true), Field::new("v", DataType::Float64, true)])),
+            vec![Arc::new(StringArray::from(vec![None::<&str>, None])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+        )
+        .expect("schema and columns agree");
+        let theme = crate::layout::ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let err = run_transforms_with_facet(&spec, &batch, viewport, &theme, None).err().expect("refuses");
+        assert_eq!(err.to_string(), format!("transform failed: ValueError: {refusal}: empty input after filter"), "{name}");
+        assert_eq!(err.carried_warnings().len(), 1, "{name}: {:?}", err.carried_warnings());
+    }
+}
+
+/// Two named steps that read the SAME rows under the SAME key, with no
+/// statistics marker opening a lowering for EITHER — named steps never
+/// advance the chain, so "a" and "b" both read the chain's original rows —
+/// are two independent user-written steps, not one lowering's own several
+/// grouped steps: each reports its own drop apart. The per-panel sum still
+/// runs first (each step's own count is 2, never summed with the other's
+/// into 4).
+#[test]
+fn two_named_steps_with_no_lowering_report_apart() {
+    let two = r#"{"type":"qq","field":"v","groupby":["h"],"emit_line":false,"name":"a"},
+                 {"type":"qq","field":"v","groupby":["h"],"emit_line":false,"name":"b"}"#;
+    let (_, warnings, _, _) = null_key_facet_run(
+        two,
+        vec!["p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    .expect("renders");
+    let drop = "QQ: 2 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'";
+    assert_eq!(
+        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        [drop, drop],
+        "neither step belongs to a lowering, so neither collapses into the other's report"
+    );
+}
+
+/// Two lowerings — each opened by its own statistics marker — over the SAME
+/// rows and the SAME key report apart: the dedup key is `(lowering, rows,
+/// key, field)`, not `(rows, key, field)` alone, so the wire shape a chart
+/// with several statistics writes (two `Chart.layer` statistics, a figure
+/// statistic beside its mark's) never collapses one lowering's drop into
+/// another's just because neither advances the chain.
+#[test]
+fn two_lowerings_over_the_same_rows_and_key_report_apart() {
+    let two = r#"{"type":"identity","statistics":true},
+                 {"type":"aggregate","ops":[{"field":"v","fn":"mean","as":"mean_v"}],"groupby":["h"],"name":"agg1"},
+                 {"type":"identity","statistics":true},
+                 {"type":"aggregate","ops":[{"field":"v","fn":"mean","as":"mean_v2"}],"groupby":["h"],"name":"agg2"}"#;
+    let drop = "Aggregate: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+                 fill or filter the nulls in 'h'";
+    let (_, warnings, _, _) = null_key_facet_run(
+        two,
+        vec!["p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    .expect("renders, faceted");
+    assert_eq!(null_key_warnings(&warnings), [drop, drop], "faceted: two lowerings, two reports");
+
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},"transforms":[{two}]}}"#
+    );
+    let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    pyo3::Python::initialize();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("h", DataType::Utf8, true), Field::new("v", DataType::Float64, true)])),
+        vec![
+            Arc::new(StringArray::from(vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (_, warnings, _, _) =
+        run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect("renders, unfaceted");
+    assert_eq!(null_key_warnings(&warnings), [drop, drop], "unfaceted: two lowerings, two reports");
+}
+
+/// A grouped step over rows a DIFFERENT step produced (not the same rows)
+/// keeps its own count apart, even though it reports the same field and the
+/// same per-panel count: the merge dedups by rows identity, not by text.
+/// The no-op `filter` step between the two named `qq`s advances the chain
+/// (a new `origin`) without changing the columns either reads.
+#[test]
+fn two_steps_over_different_rows_keep_their_own_counts_apart() {
+    let different = r#"{"type":"qq","field":"v","groupby":["h"],"emit_line":false,"name":"a"},
+                        {"type":"filter","predicate":"true"},
+                        {"type":"qq","field":"v","groupby":["h"],"emit_line":false,"name":"b"}"#;
+    let (_, warnings, _, _) = null_key_facet_run(
+        different,
+        vec!["p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    .expect("renders");
+    let drop = "QQ: 2 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'";
+    assert_eq!(warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(), [drop, drop], "'a' and 'b' read different rows");
+}
+
+/// `null_key_warnings` keeps only the null-key family — the warnings a
+/// composite statistic's own degenerate-input or bandwidth clamps never
+/// belong to, so a test about the null-key drop is not fragile to a
+/// transform's own unrelated degrade warnings.
+fn null_key_warnings(warnings: &[TransformWarning]) -> Vec<String> {
+    warnings
+        .iter()
+        .filter(|w| {
+            matches!(w, TransformWarning::NullKeyRowsDropped { .. } | TransformWarning::GroupKeyAllNull { .. })
+        })
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// `mark_boxplot`'s own multi-step lowering — `BoxStats` and `Outliers`,
+/// both named steps reading the chain's statistics-marked tail with the
+/// same `groupby` — reports its null-key drop once, flat and faceted;
+/// naming the FIRST step (`BoxStats`), not `Outliers`.
+#[test]
+fn a_boxplot_shaped_lowering_reports_its_null_key_drop_once() {
+    let two = r#"{"type":"identity","statistics":true},
+                 {"type":"box_stats","field":"v","groupby":["h"],"name":"box"},
+                 {"type":"outliers","field":"v","groupby":["h"],"extent":1.5,"name":"outliers"}"#;
+    let drop = "BoxStats: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+                 fill or filter the nulls in 'h'";
+    let (_, warnings, _, _) = null_key_facet_run(
+        two,
+        vec!["p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    .expect("renders, faceted");
+    assert_eq!(null_key_warnings(&warnings), [drop], "faceted");
+
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},"transforms":[{two}]}}"#
+    );
+    let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    pyo3::Python::initialize();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("h", DataType::Utf8, true), Field::new("v", DataType::Float64, true)])),
+        vec![
+            Arc::new(StringArray::from(vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (_, warnings, _, _) =
+        run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect("renders, unfaceted");
+    assert_eq!(null_key_warnings(&warnings), [drop], "unfaceted");
+}
+
+/// Default `mark_violin`'s own multi-step lowering — `Violin` and
+/// `BoxStats`, both reading the same tail and `groupby` — reports once too,
+/// naming `Violin` (its own first step), not `BoxStats`.
+#[test]
+fn a_violin_shaped_lowering_reports_its_null_key_drop_once() {
+    let two = r#"{"type":"identity","statistics":true},
+                 {"type":"violin","field":"v","groupby":["h"],"name":"violin"},
+                 {"type":"box_stats","field":"v","groupby":["h"],"name":"box"}"#;
+    let (_, warnings, _, _) = null_key_facet_run(
+        two,
+        vec!["p", "p", "p", "p", "q", "q", "q", "q"],
+        vec![Some("x"), Some("x"), None, None, Some("x"), Some("x"), None, None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    )
+    .expect("renders");
+    assert_eq!(
+        null_key_warnings(&warnings),
+        ["Violin: 4 rows have a null 'h' and belong to no group, so they were dropped; fill or \
+          filter the nulls in 'h'"]
+    );
+}
+
+/// The same multi-step collapse applies when the null key empties every
+/// panel: one `GroupKeyAllNull`, not two.
+#[test]
+fn an_all_null_boxplot_shaped_lowering_reports_once() {
+    let two = r#"{"type":"identity","statistics":true},
+                 {"type":"box_stats","field":"v","groupby":["h"],"name":"box"},
+                 {"type":"outliers","field":"v","groupby":["h"],"extent":1.5,"name":"outliers"}"#;
+    let (_, warnings, _, partitions) = null_key_facet_run(
+        two,
+        vec!["p", "p", "q", "q"],
+        vec![None, None, None, None],
+        vec![1.0, 2.0, 3.0, 4.0],
+    )
+    .expect("every panel's drop empties it, drawn empty beside the drop warning");
+    assert_eq!(partitions.emptied_by_drop.len(), 2, "every panel draws empty");
+    assert_eq!(
+        null_key_warnings(&warnings),
+        ["BoxStats: every row has a null in its groupby key (h), so the data could not be split \
+          into groups; the grouped output is empty"]
+    );
+}
+
+/// A whole-batch-fallback fit pooled in SOME panels, not all, names the
+/// panels it pooled; the panel with real keys still draws its per-group
+/// fits, undisturbed.
+#[test]
+fn a_whole_batch_fallback_pooled_in_some_panels_names_them() {
+    let (_, warnings, _, partitions) = null_key_facet_run(
+        r#"{"type":"smooth","x":"v","y":"v","method":"lm","bandwidth":0.75,"degree":1,"n":10,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["h"]}"#,
+        vec!["p", "p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), Some("y"), Some("y"), None, None, None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    )
+    .expect("panel p's per-group fits render; panel q's pooled fit renders");
+    assert!(partitions.emptied_by_drop.is_empty(), "a pooled panel still draws its fit");
+    assert_eq!(
+        null_key_warnings(&warnings),
+        ["Smooth: every row in facet panel f=q has a null in its groupby key (h), so that \
+          panel's rows could not be split into groups; in that panel, the whole batch was \
+          used as one ungrouped computation instead"]
+    );
+}
+
+/// The same, pooled in two of three panels: the panel list joins with
+/// `"; "` and the text pluralizes "panel"/"panels'"/"those panels".
+#[test]
+fn a_whole_batch_fallback_pooled_in_two_of_three_panels_names_both() {
+    let (_, warnings, _, _) = null_key_facet_run(
+        r#"{"type":"smooth","x":"v","y":"v","method":"lm","bandwidth":0.75,"degree":1,"n":10,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["h"]}"#,
+        vec!["p", "p", "p", "p", "q", "q", "r", "r"],
+        vec![Some("x"), Some("x"), Some("y"), Some("y"), None, None, None, None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    )
+    .expect("panel p's per-group fits render; q and r's pooled fits render");
+    assert_eq!(
+        null_key_warnings(&warnings),
+        ["Smooth: every row in facet panels f=q; f=r has a null in its groupby key (h), so \
+          those panels' rows could not be split into groups; in those panels, the whole batch \
+          was used as one ungrouped computation instead"]
+    );
+}
+
+/// A frame faceted on `f` whose grouped FIT (`Smooth`, `Robust`, `Logistic`,
+/// `Glm`) drops null `h` keys, like [`null_key_facet_run`] but with `x` and
+/// `y` as separate columns — the fit transforms need genuine x/y variance
+/// (and, for `Logistic`, a binary `y`), which one shared `v` column cannot
+/// give them.
+fn null_key_facet_fit_run(
+    transform: &str,
+    f: Vec<&str>,
+    h: Vec<Option<&str>>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+) -> Result<TransformRun, RenderError> {
+    pyo3::Python::initialize();
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"x"}},"y":{{"field":"y"}}}},
+        "transforms":[{transform}],
+        "facet":{{"field":"f","mode":{{"kind":"wrap","ncols":2}}}}}}"#
+    );
+    let spec: crate::spec::chart::ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("f", DataType::Utf8, true),
+        Field::new("h", DataType::Utf8, true),
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(f)),
+            Arc::new(StringArray::from(h)),
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+        ],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+}
+
+const NULL_KEY_FIT_TRANSFORMS: [(&str, &str); 4] = [
+    ("Smooth", r#"{"type":"smooth","x":"x","y":"y","method":"lm","bandwidth":0.75,"degree":1,"n":4,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["h"]}"#),
+    ("Robust", r#"{"type":"robust","x":"x","y":"y","n_grid":4,"huber_c":1.345,"max_iter":10,"tol":0.0001,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["h"]}"#),
+    ("Logistic", r#"{"type":"logistic","x":"x","y":"y","n_grid":4,"max_iter":10,"tol":0.0001,"groupby":["h"]}"#),
+    ("Glm", r#"{"type":"glm","x":"x","y":"y","family":"gaussian","link":"identity","n_grid":4,"max_iter":10,"tol":0.0001,"groupby":["h"]}"#),
+];
+
+/// Every fit transform (`Smooth`, `Robust`, `Logistic`,
+/// `Glm`) counts a PARTLY null `groupby` key's drop exactly as `Skip`
+/// does: the shared partitioner's all-null whole-batch
+/// fallback must not share `SkipWithWholeBatchFallback`'s silent arm with
+/// `Impute`'s row-preserving exemption, so a genuine partial drop went
+/// uncounted for every fit. Now only an all-null batch is silent (`Impute`'s
+/// own `FillFromWholeBatch`); a partial drop counts, flat and faceted,
+/// summed over panels, by each fit's own Python-facing name.
+#[test]
+fn every_fit_counts_a_partly_null_groupby_drop_flat_and_faceted() {
+    for (name, transform) in NULL_KEY_FIT_TRANSFORMS {
+        let f = vec!["p", "p", "p", "q", "q", "q"];
+        let h = vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None];
+        let x: Vec<f64> = (0..6).map(f64::from).collect();
+        let y: Vec<f64> = match name {
+            "Logistic" => vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            _ => x.iter().map(|v| v + 1.0).collect(),
+        };
+        let drop = format!(
+            "{name}: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+             fill or filter the nulls in 'h'"
+        );
+
+        let (_, warnings, _, _) = null_key_facet_fit_run(transform, f.clone(), h.clone(), x.clone(), y.clone())
+            .unwrap_or_else(|e| panic!("{name}: faceted: {e}"));
+        assert_eq!(null_key_warnings(&warnings), [drop.clone()], "{name}: faceted");
+
+        let json = format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"x"}},"y":{{"field":"y"}}}},"transforms":[{transform}]}}"#
+        );
+        let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+        pyo3::Python::initialize();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("h", DataType::Utf8, true),
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(h)),
+                Arc::new(Float64Array::from(x)),
+                Arc::new(Float64Array::from(y)),
+            ],
+        )
+        .expect("schema and columns agree");
+        let theme = crate::layout::ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let (_, warnings, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+            .unwrap_or_else(|e| panic!("{name}: unfaceted: {e}"));
+        assert_eq!(null_key_warnings(&warnings), [drop], "{name}: unfaceted");
+    }
+}
+
+/// A faceted statistic's own `groupby` folds the facet field in
+/// beside the color field (`_statistic_groupby`, `src/ferrum/_encode_lowering.py`),
+/// so `mark_smooth(color='h').facet('f')` wires `groupby=["h","f"]`, not
+/// `["h"]` alone. With `h` null in every row of ONE panel, that panel's
+/// fallback must pool `h` alone — `f` is never null, it is the constant
+/// value this partition was already filtered to — so the panel keeps its
+/// real facet value and still renders, flat per-group fits in the other
+/// panel undisturbed. The rejected (buggy) shape nulls `f` too, so the
+/// panel's rows belong to no facet value and the chart draws it empty.
+#[test]
+fn every_fit_pools_a_faceted_all_null_colored_group_without_nulling_the_facet_column() {
+    for (name, transform_tpl) in NULL_KEY_FIT_TRANSFORMS {
+        let faceted_groupby = transform_tpl.replacen(r#""groupby":["h"]"#, r#""groupby":["h","f"]"#, 1);
+        assert!(
+            faceted_groupby != transform_tpl,
+            "{name}: expected to find \"groupby\":[\"h\"] in {transform_tpl}"
+        );
+        let (outputs, warnings, _, partitions) = null_key_facet_fit_run(
+            &faceted_groupby,
+            vec!["p", "p", "p", "p", "q", "q", "q", "q"],
+            vec![Some("x"), Some("x"), Some("y"), Some("y"), None, None, None, None],
+            (0..8).map(f64::from).collect(),
+            match name {
+                "Logistic" => vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                _ => (0..8).map(|v| v as f64 + 1.0).collect(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{name}: the all-null panel must still render its pooled fit: {e}"));
+        assert!(partitions.emptied_by_drop.is_empty(), "{name}: the pooled panel draws its fit, not empty");
+        let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
+        assert!(
+            str_col(out, "f").iter().any(|f| f == "q"),
+            "{name}: panel q's rows keep their real facet value, not nulled along with h: {:?}",
+            str_col(out, "f")
+        );
+        assert_eq!(
+            null_key_warnings(&warnings).len(),
+            1,
+            "{name}: one GroupKeyAllNull for the pooled panel, nothing else: {warnings:?}"
+        );
+    }
+}
+
+/// A SECOND grouping column that varies — never null itself, but
+/// not the same value on every row — must null out too in the pooled
+/// fallback: being non-null everywhere is necessary but not sufficient to
+/// keep a value, since the pooled fit covers every one of that column's
+/// values and none of them alone describes the group. `mark_smooth(color='g', detail='h')`
+/// with `h` all null and `g` holding both `A` and `B` must not draw a
+/// one-entry `A` legend for a fit that pools rows from both groups.
+#[test]
+fn every_fit_pools_without_a_false_label_on_a_varying_second_column() {
+    for (name, transform_tpl) in NULL_KEY_FIT_TRANSFORMS {
+        let two_col_groupby = transform_tpl.replacen(r#""groupby":["h"]"#, r#""groupby":["h","g"]"#, 1);
+        assert!(
+            two_col_groupby != transform_tpl,
+            "{name}: expected to find \"groupby\":[\"h\"] in {transform_tpl}"
+        );
+        let json = format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"x"}},"y":{{"field":"y"}}}},"transforms":[{two_col_groupby}]}}"#
+        );
+        let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+        pyo3::Python::initialize();
+        let x: Vec<f64> = (0..8).map(f64::from).collect();
+        let y: Vec<f64> = match name {
+            "Logistic" => vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            _ => x.iter().map(|v| v + 1.0).collect(),
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("h", DataType::Utf8, true),
+                Field::new("g", DataType::Utf8, true),
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![None::<&str>; 8])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "A", "B", "B", "B", "B"])),
+                Arc::new(Float64Array::from(x)),
+                Arc::new(Float64Array::from(y)),
+            ],
+        )
+        .expect("schema and columns agree");
+        let theme = crate::layout::ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let (outputs, _, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let out = outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published");
+        let g = out.column(out.schema().index_of("g").unwrap());
+        assert_eq!(
+            g.null_count(),
+            g.len(),
+            "{name}: 'g' varies across the pooled rows (A and B), so it must null out, not falsely keep 'A': {:?}",
+            str_col(out, "g")
+        );
+    }
+}
+
+/// The Python wire of `Chart(df).mark_qq().encode(x="val", color="h").facet("f")`.
+const FACETED_GROUPED_QQ: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"val"},"color":{"field":"h"}},"transforms":[{"type":"identity","statistics":true},{"type":"qq","field":"val","distribution":"normal","dequantize":false,"emit_line":true,"seed":0,"groupby":["h","f"],"name":"qq_main"}],"facet":{"field":"f","mode":{"kind":"wrap","ncols":1}},"layers":[{"mark":"point","encoding":{"x":{"field":"theoretical","title":"Theoretical Quantiles"},"y":{"field":"sample","title":"Sample Quantiles"}},"data_source":"qq_main","name":"point","entry":"mark_qq"},{"mark":"rule","encoding":{"x":{"field":"qq_line_x_start"},"y":{"field":"qq_line_y_start"},"x2":{"field":"qq_line_x_end"},"y2":{"field":"qq_line_y_end"}},"data_source":"qq_main_qq_line","name":"reference","entry":"mark_qq"}]}"#;
+
+/// Eight `val` rows over facet panels `F1` and `F2` with hue `h`.
+fn faceted_hue_rows(h: Vec<Option<&str>>) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("val", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+            Field::new("f", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from((0..8).map(f64::from).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(h)),
+            Arc::new(StringArray::from(vec!["F1", "F1", "F1", "F1", "F2", "F2", "F2", "F2"])),
+        ],
+    )
+    .expect("schema and columns agree")
+}
+
+/// A grouped qq panel whose every hue is null draws empty beside the drawn
+/// panel, with the drop warning, and the scene draws both panels; when
+/// every panel's hue is null the chart refuses with the drop warning.
+#[test]
+fn a_grouped_qq_facet_panel_the_drop_emptied_draws_empty_and_all_emptied_refuses() {
+    pyo3::Python::initialize();
+    let spec: ChartSpec = serde_json::from_str(FACETED_GROUPED_QQ).expect("the qq wire deserializes");
+    let rows = faceted_hue_rows(vec![Some("a"), Some("b"), Some("a"), Some("b"), None, None, None, None]);
+    let p = prep(&spec, &rows);
+    let panels: Vec<(&str, u64)> = p.facet_groups.iter().map(|g| (g.key.value.as_str(), g.n_rows)).collect();
+    assert_eq!(panels.len(), 2, "{panels:?}");
+    assert_eq!(panels[1], ("F2", 0), "F2 draws empty: {panels:?}");
+    let drop = "QQ: 4 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'";
+    assert!(p.warnings.iter().any(|w| w.to_string() == drop), "{:?}", p.warnings);
+    let (scene, _) = gate_render(&spec, &rows);
+    assert_eq!(scene.expect("renders").panels.len(), 2, "both panels are drawn");
+
+    let err = prepare_with(&spec, &faceted_hue_rows(vec![None; 8])).err().expect("every panel emptied refuses");
+    assert_eq!(err.to_string(), "transform failed: ValueError: stat_qq: empty input after filter");
+    assert_eq!(
+        err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["QQ: 8 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'"]
+    );
+}
+
+/// Thirty rows over three interleaved `c` groups (`a`, `b`, `c` in turn),
+/// whose `v` and `y` vary within each group, and an ordinal `t` with a
+/// two-valued `o` (and its numeric twin `w`) beside it: one series through
+/// every group zigzags.
+fn grouped_series_rows() -> RecordBatch {
+    let n = 30;
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+            Field::new("t", DataType::Float64, false),
+            Field::new("o", DataType::Utf8, false),
+            Field::new("w", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from((0..n).map(|i| f64::from(i % 7) + 0.1 * f64::from(i)).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| f64::from((i * 37) % 11)).collect::<Vec<_>>())),
+            Arc::new(StringArray::from((0..n).map(|i| ["a", "b", "c"][i as usize % 3]).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| f64::from(i / 3)).collect::<Vec<_>>())),
+            Arc::new(StringArray::from((0..n).map(|i| ["p", "q"][i as usize % 2]).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| f64::from(i % 2 + 1)).collect::<Vec<_>>())),
+        ],
+    )
+    .expect("schema and columns agree")
+}
+
+/// The Python wire of `mark_density().encode(x="v", <channel>="c")`.
+fn density_grouped_by(channel: &str) -> ChartSpec {
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"area","encoding":{{"x":{{"field":"value","type":"quantitative","title":"v"}},"y":{{"field":"density","type":"quantitative"}},"{channel}":{{"field":"c"}}}},"transforms":[{{"type":"identity","statistics":true}},{{"type":"kde","field":"v","bandwidth":{{"kind":"scott"}},"bw_adjust":1.0,"n":512,"cumulative":false,"shared_extent":false,"kernel":"gaussian","groupby":["c"]}}],"entry":"mark_density"}}"#
+    );
+    serde_json::from_str(&json).expect("the density wire deserializes")
+}
+
+/// The Python wire of `mark_smooth().encode(x="v", y="y", shape="c")`.
+const SMOOTH_GROUPED_BY_SHAPE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"x","type":"quantitative","title":"v"},"y":{"field":"y","type":"quantitative"},"shape":{"field":"c"}},"transforms":[{"type":"identity","statistics":true},{"type":"smooth","x":"v","y":"y","method":"loess","bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["c"]}],"entry":"mark_smooth"}"#;
+
+/// The Python wire of `mark_smooth(ci=0.95).encode(x="v", y="y", detail="c")`:
+/// the ribbon draws `detail`, so it carries `c` on its own style.
+const SMOOTH_CI_GROUPED_BY_DETAIL: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"v"},"y":{"field":"y"}},"transforms":[{"type":"identity","statistics":true},{"type":"smooth","x":"v","y":"y","method":"loess","ci":0.95,"bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["c"],"name":"smooth"}],"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x","title":"v"},"y":{"field":"ci_lower","title":"y"},"y2":{"field":"ci_upper"}},"mark_style":{"opacity":0.3,"detail":"c"},"data_source":"smooth","name":"ribbon","entry":"mark_smooth"},{"mark":"line","encoding":{"x":{"field":"x","title":"v"},"y":{"field":"y","title":"y"}},"mark_style":{"detail":"c"},"data_source":"smooth","name":"line","entry":"mark_smooth"}]}"#;
+
+/// The Python wire of `mark_smooth(ci=0.95).encode(x="v", y="y", shape="c")`.
+const SMOOTH_CI_GROUPED_BY_SHAPE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"v"},"y":{"field":"y"},"shape":{"field":"c"}},"transforms":[{"type":"identity","statistics":true},{"type":"smooth","x":"v","y":"y","method":"loess","ci":0.95,"bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["c"],"name":"smooth"}],"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x","title":"v"},"y":{"field":"ci_lower","title":"y"},"y2":{"field":"ci_upper"}},"mark_style":{"opacity":0.3},"data_source":"smooth","name":"ribbon","entry":"mark_smooth"},{"mark":"line","encoding":{"x":{"field":"x","title":"v"},"y":{"field":"y","title":"y"}},"data_source":"smooth","name":"line","entry":"mark_smooth"}]}"#;
+
+fn channel_not_drawn(warnings: &[RenderWarning]) -> Vec<String> {
+    warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(|w| w.to_string()).collect()
+}
+
+/// The undrawn-channel text for a binding a planned statistic grouped by.
+fn grouped_text(entry: &str, channel: &str, mark: &str) -> String {
+    format!(
+        "{entry}: {channel} 'c' groups the statistic by 'c', one per value, but no layer's mark draws {channel} \
+         (this {mark} mark does not), so the groups are drawn alike with no scale and no legend; bind color= to \
+         tell them apart"
+    )
+}
+
+/// A density grouped by a `shape` or `stroke_dash` the area does not draw
+/// draws one area per group, as a `detail` does, and the warning says the
+/// statistic grouped by the field and the groups are drawn alike. Rejects
+/// the one area joining every group, and calling the binding ignored.
+#[test]
+fn a_density_grouped_by_an_undrawn_channel_draws_one_area_per_group() {
+    let rows = grouped_series_rows();
+    for channel in ["shape", "stroke_dash"] {
+        let spec = density_grouped_by(channel);
+        let (scene, warnings) = gate_render(&spec, &rows);
+        let bands = area_bands(&scene.expect(channel));
+        assert_eq!(bands.len(), 3, "{channel}: one area per group");
+        for (_, points) in &bands {
+            assert!(points.len() > 512, "{channel}: each area traces its own curve: {}", points.len());
+        }
+        assert_eq!(channel_not_drawn(&warnings), [grouped_text("mark_density", channel, "area")], "{channel}");
+    }
+}
+
+/// A smooth grouped by a `shape` the line does not draw draws one fit line
+/// per group, each running along x. Rejects the one line zigzagging
+/// through every group's fitted rows.
+#[test]
+fn a_smooth_grouped_by_shape_draws_one_line_per_group() {
+    let spec: ChartSpec = serde_json::from_str(SMOOTH_GROUPED_BY_SHAPE).expect("the smooth wire deserializes");
+    let (scene, warnings) = gate_render(&spec, &grouped_series_rows());
+    let series = open_series(&scene.expect("renders").panels[0]);
+    assert_eq!(series.len(), 3, "one fit line per group");
+    for (_, points) in &series {
+        assert!(points.windows(2).all(|w| w[0].0 <= w[1].0), "each fit runs along x");
+    }
+    assert_eq!(channel_not_drawn(&warnings), [grouped_text("mark_smooth", "shape", "line")]);
+}
+
+/// A smooth with a confidence band grouped by a `detail` (which both the
+/// ribbon and the line draw) or a `shape` (which neither draws) draws one
+/// band and one fit line per group. Rejects the one band over every group.
+#[test]
+fn a_smooth_ci_grouped_by_detail_or_shape_draws_one_band_and_line_per_group() {
+    let rows = grouped_series_rows();
+    for (label, wire) in [("detail", SMOOTH_CI_GROUPED_BY_DETAIL), ("shape", SMOOTH_CI_GROUPED_BY_SHAPE)] {
+        let spec: ChartSpec = serde_json::from_str(wire).expect("the smooth ci wire deserializes");
+        let (scene, warnings) = gate_render(&spec, &rows);
+        let scene = scene.expect(label);
+        assert_eq!(area_bands(&scene).len(), 3, "{label}: one band per group");
+        assert_eq!(open_series(&scene.panels[0]).len(), 3, "{label}: one fit line per group");
+        let expected = match label {
+            "shape" => vec![grouped_text("mark_smooth", "shape", "ribbon")],
+            _ => Vec::new(),
+        };
+        assert_eq!(channel_not_drawn(&warnings), expected, "{label}");
+    }
+}
+
+/// An aggregated line splits by a grouping channel its aggregate grouped
+/// by (`shape`, one line per `o`), and only by one: an `opacity` the
+/// aggregate grouped by (`w`), a value channel, leaves one line, as a line
+/// with no statistic under a `shape` does, which still warns that the shape
+/// was ignored.
+#[test]
+fn a_line_splits_only_by_a_grouping_channel_its_statistic_grouped_by() {
+    let rows = grouped_series_rows();
+    let aggregated = |channel: &str, field: &str| -> ChartSpec {
+        let json = format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"line","encoding":{{"x":{{"field":"t"}},"y":{{"field":"mean_v"}},"{channel}":{{"field":"{field}"}}}},"transforms":[{{"type":"identity","statistics":true}},{{"type":"aggregate","ops":[{{"field":"v","fn":"mean","as":"mean_v"}}],"groupby":["t","{field}"]}}]}}"#
+        );
+        serde_json::from_str(&json).expect("the aggregated line wire deserializes")
+    };
+    let series_count = |spec: &ChartSpec| open_series(&gate_render(spec, &rows).0.expect("renders").panels[0]).len();
+    assert_eq!(series_count(&aggregated("shape", "o")), 2, "one line per shape value");
+    assert_eq!(series_count(&aggregated("opacity", "w")), 1, "a value channel splits nothing");
+
+    let raw: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"v"},"y":{"field":"y"},"shape":{"field":"c"}}}"#,
+    )
+    .expect("the raw line wire deserializes");
+    let (scene, warnings) = gate_render(&raw, &rows);
+    assert_eq!(open_series(&scene.expect("renders").panels[0]).len(), 1, "no statistic, no split");
+    assert_eq!(channel_not_drawn(&warnings).len(), 1, "{warnings:?}");
+}
+
+/// The Python wire of `Chart(df).transform(Smooth("v", "y", groupby=<groupby>))
+/// .mark_line().encode(x="x", y="y", **extra)`, `extra` merged into the
+/// chart's own keys (an `encoding` channel, or `mark_style`).
+fn user_fit_line(groupby: Option<&str>, extra: serde_json::Value) -> ChartSpec {
+    let mut fit = serde_json::json!({"type":"smooth","x":"v","y":"y","method":"loess","ci":0.95,"bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false});
+    if let Some(field) = groupby {
+        fit["groupby"] = serde_json::json!([field]);
+    }
+    let mut spec = serde_json::json!({"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}},"transforms":[fit]});
+    for (key, value) in extra.as_object().expect("extra is an object") {
+        match key.as_str() {
+            "encoding" => {
+                for (channel, binding) in value.as_object().expect("channels") {
+                    spec["encoding"][channel] = binding.clone();
+                }
+            }
+            _ => spec[key] = value.clone(),
+        }
+    }
+    serde_json::from_value(spec).expect("the user fit wire deserializes")
+}
+
+/// A line drawing a step the user wrote with `groupby=` draws one series per
+/// group with no channel asking for it, static and interactive; the same
+/// fit with no `groupby` draws one. Rejects the one line zigzagging through
+/// every group's fitted rows.
+#[test]
+fn a_line_over_a_user_grouped_step_draws_one_series_per_group() {
+    let rows = grouped_series_rows();
+    let render = |spec: &ChartSpec| {
+        let (scene, warnings) = gate_render(spec, &rows);
+        (open_series(&scene.expect("renders").panels[0]), warnings)
+    };
+    let (grouped, warnings) = render(&user_fit_line(Some("c"), serde_json::json!({})));
+    assert_eq!(grouped.len(), 3, "one fit line per group");
+    for (_, points) in &grouped {
+        assert!(points.windows(2).all(|w| w[0].0 <= w[1].0), "each fit runs along x");
+    }
+    assert_eq!(channel_not_drawn(&warnings), Vec::<String>::new());
+    let (ungrouped, _) = render(&user_fit_line(None, serde_json::json!({})));
+    assert_eq!(ungrouped.len(), 1, "an ungrouped fit draws one line");
+}
+
+/// Under a `shape` on the grouped field, the line still splits per group,
+/// and the shape, which a line does not draw, is still reported ignored.
+#[test]
+fn a_shape_beside_a_user_grouped_step_splits_and_still_warns_ignored() {
+    let spec = user_fit_line(Some("c"), serde_json::json!({"encoding": {"shape": {"field": "c"}}}));
+    let (scene, warnings) = gate_render(&spec, &grouped_series_rows());
+    assert_eq!(open_series(&scene.expect("renders").panels[0]).len(), 3);
+    assert_eq!(channel_not_drawn(&warnings).len(), 1, "{warnings:?}");
+}
+
+/// A `stroke_dash` or `detail` on the grouped field splits once: three
+/// series, not nine, so the step's grouping and the channel's coincide.
+#[test]
+fn a_detail_or_stroke_dash_on_the_user_grouped_field_splits_once() {
+    let rows = grouped_series_rows();
+    for (label, extra) in [
+        ("stroke_dash", serde_json::json!({"encoding": {"stroke_dash": {"field": "c"}}})),
+        ("detail", serde_json::json!({"mark_style": {"detail": "c"}})),
+    ] {
+        let (scene, _) = gate_render(&user_fit_line(Some("c"), extra), &rows);
+        assert_eq!(open_series(&scene.expect(label).panels[0]).len(), 3, "{label}");
+    }
+}
+
+/// An area over a user-grouped density and a ribbon over a user-grouped
+/// fit's band each draw one per group.
+#[test]
+fn an_area_or_ribbon_over_a_user_grouped_step_draws_one_per_group() {
+    let rows = grouped_series_rows();
+    let area: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"area","encoding":{"x":{"field":"value"},"y":{"field":"density"}},"transforms":[{"type":"kde","field":"v","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":512,"cumulative":false,"shared_extent":false,"kernel":"gaussian","groupby":["c"]}]}"#,
+    )
+    .expect("the area wire deserializes");
+    let ribbon: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"ci_lower"},"y2":{"field":"ci_upper"}},"transforms":[{"type":"smooth","x":"v","y":"y","method":"loess","ci":0.95,"bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["c"]}],"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"ci_lower"},"y2":{"field":"ci_upper"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"name":"ribbon","entry":"mark_ribbon"}]}"#,
+    )
+    .expect("the ribbon wire deserializes");
+    for (label, spec) in [("area", area), ("ribbon", ribbon)] {
+        let (scene, _) = gate_render(&spec, &rows);
+        assert_eq!(area_bands(&scene.expect(label)).len(), 3, "{label}");
+    }
+}
+
+/// A user step's grouping on the field the line runs along does not split
+/// it: an aggregate grouped by `t` and `o` drawn along `t` draws one line
+/// per `o`, never one per `t`.
+#[test]
+fn a_user_grouped_step_never_splits_a_line_along_its_own_axis() {
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"t"},"y":{"field":"mean_v"}},"transforms":[{"type":"aggregate","ops":[{"field":"v","fn":"mean","as":"mean_v"}],"groupby":["t","o"]}]}"#,
+    )
+    .expect("the aggregate wire deserializes");
+    let (scene, _) = gate_render(&spec, &grouped_series_rows());
+    let series = open_series(&scene.expect("renders").panels[0]);
+    assert_eq!(series.len(), 2, "one line per o");
+    assert!(series.iter().all(|(_, points)| points.len() == 10), "each line spans every t");
+}
+
+/// A layered chart whose line draws a planned mean of `v` per `t` grouped
+/// by `o` too (the grain a parent's grouping gives every layer's statistic),
+/// beside a sibling layer `sibling`; the chart encoding adds `chart`.
+fn line_beside_sibling(sibling: serde_json::Value, chart: serde_json::Value) -> ChartSpec {
+    let mut encoding = serde_json::json!({"x": {"field": "t"}, "y": {"field": "v"}});
+    for (channel, binding) in chart.as_object().expect("chart channels") {
+        encoding[channel] = binding.clone();
+    }
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "line",
+        "encoding": encoding,
+        "transforms": [
+            {"type": "identity", "statistics": true},
+            {"type": "aggregate", "ops": [{"field": "v", "fn": "mean", "as": "mean_v"}], "groupby": ["t", "o"], "name": "agg"}
+        ],
+        "layers": [
+            {"mark": "line", "encoding": {"x": {"field": "t"}, "y": {"field": "mean_v"}}, "data_source": "agg"},
+            sibling
+        ]
+    }))
+    .expect("the layered wire deserializes")
+}
+
+/// The series layer 0 draws: its own panel's open series from the first
+/// mark batch.
+fn first_layer_series(scene: &ferrum_scene::SceneGraph) -> usize {
+    scene.panels[0].marks[0].nodes.iter().filter(|node| matches!(node, ferrum_scene::SceneNode::Polyline { .. } | ferrum_scene::SceneNode::Path { closed: false, .. })).count()
+}
+
+/// A sibling layer's `shape`, `stroke_dash` or `detail` never splits another
+/// layer's line, even when that line's statistic grouped by the same field:
+/// the split reads the layer's own bindings over its parent's. The sibling
+/// line under `detail` splits itself. Rejects reading every layer's
+/// bindings, which split the first line by its sibling's channel.
+#[test]
+fn a_siblings_grouping_channel_never_splits_another_layers_series() {
+    let rows = grouped_series_rows();
+    let point = |channel: &str| serde_json::json!({"mark": "point", "encoding": {"x": {"field": "t"}, "y": {"field": "v"}, channel: {"field": "o"}}});
+    for (label, sibling) in [
+        ("shape", point("shape")),
+        ("stroke_dash", point("stroke_dash")),
+        ("detail", serde_json::json!({"mark": "line", "encoding": {"x": {"field": "t"}, "y": {"field": "v"}}, "mark_style": {"detail": "o"}})),
+    ] {
+        let (scene, _) = gate_render(&line_beside_sibling(sibling, serde_json::json!({})), &rows);
+        let scene = scene.expect(label);
+        assert_eq!(first_layer_series(&scene), 1, "{label}: the sibling's channel does not split the line");
+        if label == "detail" {
+            assert_eq!(open_series(&scene.panels[0]).len(), 3, "the sibling line splits by its own detail");
+        }
+    }
+}
+
+/// A `shape` the line inherits from its parent (the chart encoding) is its
+/// own binding over its parent's, so it splits the line's grouped
+/// statistic.
+#[test]
+fn a_parents_shape_splits_its_layers_grouped_series() {
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "t"}, "y": {"field": "v"}}});
+    let spec = line_beside_sibling(point, serde_json::json!({"shape": {"field": "o"}}));
+    let (scene, _) = gate_render(&spec, &grouped_series_rows());
+    assert_eq!(first_layer_series(&scene.expect("renders")), 2, "one line per o");
+}
+
+/// A ribbon draws `detail` as the area does: one band per value.
+#[test]
+fn a_ribbon_splits_by_its_own_detail() {
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"},"y2":{"field":"y"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"t"},"y":{"field":"v"},"y2":{"field":"y"}},"mark_style":{"stroke":"none","opacity":0.3,"detail":"o","interpolate":"linear"},"name":"ribbon","entry":"mark_ribbon"}]}"#,
+    )
+    .expect("the ribbon wire deserializes");
+    let (scene, warnings) = gate_render(&spec, &grouped_series_rows());
+    assert_eq!(area_bands(&scene.expect("renders")).len(), 2);
+    assert!(!warnings.iter().any(|w| w.to_string().contains("detail")), "{warnings:?}");
+}
+
+/// A shape or stroke_dash a planned statistic grouped by, on a mark that
+/// does not draw it, warns that the statistic grouped by it and the groups
+/// are drawn alike, on every mark: a histogram's bars, a violin's bodies,
+/// an aggregated bar. A raw line under `shape` (no statistic) is still
+/// reported ignored.
+#[test]
+fn an_undrawn_channel_a_planned_statistic_grouped_by_says_so_on_every_mark() {
+    let rows = grouped_series_rows();
+    let histogram = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"v"},"y":{"field":"count","type":"quantitative","scale":{"type":"linear","clamp":false,"nice":false,"zero":true,"systemInjected":true}},"shape":{"field":"c"},"x2":{"field":"bin_end","type":"quantitative"}},"transforms":[{"type":"identity","statistics":true},{"type":"bin","field":"v","nice":true,"cumulative":false,"shared_extent":false,"groupby":["c"]}],"entry":"mark_histogram"}"#;
+    let violin = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"o"},"y":{"field":"y"},"shape":{"field":"c"}},"transforms":[{"type":"identity","statistics":true},{"type":"violin","field":"y","groupby":["o","c"],"bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":256,"width":0.4,"shared_extent":false,"name":"violin","horizontal":false}],"layers":[{"mark":"polygon","encoding":{"x":{"field":"o","type":"nominal"},"y":{"field":"violin_y","title":"y"}},"mark_style":{"detail":"group_id"},"data_source":"violin","name":"body","entry":"mark_violin"}]}"#;
+    let bar = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"o"},"y":{"field":"mean_y","scale":{"type":"linear","clamp":false,"nice":false,"zero":true,"systemInjected":true}},"shape":{"field":"c"}},"transforms":[{"type":"identity","statistics":true},{"type":"aggregate","ops":[{"field":"y","fn":"mean","as":"mean_y"}],"groupby":["o","c"]}]}"#;
+    for (label, wire, expected) in [
+        ("histogram", histogram, grouped_text("mark_histogram", "shape", "bar")),
+        ("violin", violin, grouped_text("mark_violin", "shape", "polygon")),
+        ("bar", bar, grouped_text("mark_bar", "shape", "bar")),
+    ] {
+        let spec: ChartSpec = serde_json::from_str(wire).expect("the wire deserializes");
+        let (scene, warnings) = gate_render(&spec, &rows);
+        scene.expect(label);
+        assert_eq!(channel_not_drawn(&warnings), [expected], "{label}");
+    }
+    let raw: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"v"},"y":{"field":"y"},"shape":{"field":"c"}}}"#,
+    )
+    .expect("the raw line wire deserializes");
+    let (_, warnings) = gate_render(&raw, &rows);
+    assert_eq!(
+        channel_not_drawn(&warnings),
+        ["mark_line: shape 'c' has no effect: no layer's mark draws shape (this line mark does not), so it gets no \
+          scale and no legend; it was ignored"]
+    );
+}
+
+/// Every grouped statistic shares the null-key rule through the one
+/// partitioner: a facet panel whose every hue is null draws empty for box
+/// statistics, bins, densities, violins and error extents too, with the
+/// count of dropped rows over the whole frame. Rejects the per-panel
+/// all-null warning naming the facet field and the panel vanishing.
+#[test]
+fn every_grouped_statistic_keeps_a_panel_its_null_key_drop_emptied() {
+    let transforms = [
+        ("BoxStats", r#"{"type":"box_stats","field":"v","groupby":["h"]}"#),
+        ("Bin", r#"{"type":"bin","field":"v","nice":true,"cumulative":false,"shared_extent":false,"groupby":["h"]}"#),
+        ("Kde", r#"{"type":"kde","field":"v","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":32,"cumulative":false,"shared_extent":false,"kernel":"gaussian","groupby":["h"]}"#),
+        ("Violin", r#"{"type":"violin","field":"v","groupby":["h"],"bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":32,"width":0.4,"shared_extent":false,"horizontal":false}"#),
+        ("ErrorExtent", r#"{"type":"error_extent","field":"v","groupby":["h"],"method":"ci","seed":0,"n_boot":50}"#),
+    ];
+    for (name, transform) in transforms {
+        let (_, warnings, _, partitions) = null_key_facet_run(
+            transform,
+            vec!["p", "p", "p", "p", "q", "q"],
+            vec![Some("x"), Some("x"), Some("y"), Some("y"), None, None],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(partitions.emptied_by_drop, HashSet::from([("q".to_string(), None)]), "{name}");
+        assert_eq!(
+            warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: 2 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'"
+            )],
+            "{name}"
+        );
+    }
+}
+
+/// A statistic whose every key is null in every panel draws every panel
+/// empty and says so once, naming only its own key, as the unfaceted chart
+/// says it once; a whole-batch-fallback fit (Smooth) null-keyed in only
+/// ONE of two panels fits that panel pooled and names it, since the other
+/// panel's keys are real.
+#[test]
+fn an_all_null_key_in_every_panel_is_reported_once_per_step() {
+    let (_, warnings, _, partitions) = null_key_facet_run(
+        r#"{"type":"bin","field":"v","nice":true,"cumulative":false,"shared_extent":false,"groupby":["h","f"]}"#,
+        vec!["p", "p", "q", "q"],
+        vec![None, None, None, None],
+        vec![1.0, 2.0, 3.0, 4.0],
+    )
+    .expect("an all-null grouped bin renders empty panels");
+    assert_eq!(partitions.emptied_by_drop.len(), 2, "every panel draws empty");
+    assert_eq!(
+        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["Bin: every row has a null in its groupby key (h), so the data could not be split into groups; the grouped output is empty"]
+    );
+    let (_, warnings, _, partitions) = null_key_facet_run(
+        r#"{"type":"smooth","x":"v","y":"v","method":"lm","bandwidth":0.75,"degree":1,"n":10,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false,"groupby":["h","f"]}"#,
+        vec!["p", "p", "p", "q", "q", "q"],
+        vec![Some("x"), Some("x"), Some("x"), None, None, None],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    )
+    .expect("the pooled fit renders");
+    assert!(partitions.emptied_by_drop.is_empty(), "the pooled panel draws its fit");
+    assert_eq!(
+        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["Smooth: every row in facet panel f=q has a null in its groupby key (h), so that \
+          panel's rows could not be split into groups; in that panel, the whole batch was \
+          used as one ungrouped computation instead"],
+        "only panel q is all-null, so it is named, not claimed as the whole frame"
+    );
 }
 
 /// Rows whose binned color `v` puts two distinct values in each of four

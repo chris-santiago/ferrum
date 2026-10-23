@@ -124,11 +124,13 @@ _DOORS: dict[str, _Door] = {
         0.3,
         0.8,
     ),
+    # The fit line carries no library-set style, so `None` here must leave
+    # the stroke unset, as the unset chart draws it.
     "a figure's line_kws=": _Door(
-        lambda v: fm.lmplot(_DF, x="x", y="b", hue="g", method="logistic", line_kws={"stroke": v}),
-        lambda: fm.lmplot(_DF, x="x", y="b", hue="g", method="logistic"),
+        lambda v: fm.lmplot(_DF, x="x", y="y", line_kws={"stroke": v}),
+        lambda: fm.lmplot(_DF, x="x", y="y"),
         lambda c: _layer(c, "line", "stroke"),
-        "theme:label",
+        None,
         "#ff0000",
     ),
     "mark_function(**style) on its own layer": _Door(

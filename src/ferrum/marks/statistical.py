@@ -94,10 +94,11 @@ def desugar_density(
         per-group normalization instead of a position adjustment.
     fill : bool, default True
         If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
-    groupby : str, optional
-        Optional grouping column forwarded to the ``Kde`` transform.  When
-        set, the density is computed per group and the output retains the
-        group column so a downstream ``color=`` encoding can map to it.
+    groupby : str or list of str, optional
+        Optional grouping column(s) forwarded to the ``Kde`` transform (and
+        to ``desugar_contour`` on the bivariate path).  When set, the
+        density is computed per group and the output retains the group
+        columns so a downstream ``color=`` encoding can map to them.
     orientation : {"vertical", "horizontal"}, default "vertical"
         Axis along which the density curve is drawn.  ``"vertical"`` (the
         default) puts the kernel value on the x-axis and the density on the
@@ -158,7 +159,7 @@ def desugar_density(
                 thresholds=thresholds,
                 smooth=smooth,
                 cmap=cmap,
-                groupby=groupby if isinstance(groupby, str) else None,
+                groupby=groupby,
             )
 
     if kernel is not None:
@@ -550,11 +551,13 @@ def desugar_smooth(
     show_metrics : bool, default False
         When ``True``, emit a ``"metrics"`` layer annotating the fit with
         regression statistics (e.g. R²).
-    groupby : str or None, default None
-        Optional grouping column forwarded to the ``Smooth`` transform.
+    groupby : str, list of str, or None, default None
+        Optional grouping column(s) forwarded to the ``Smooth`` transform.
         When set, the smoothing is computed per group and the output
-        retains the group column so a downstream ``color=`` encoding
-        can map to it.
+        retains the group columns so a downstream ``color=`` encoding
+        can map to them. Unset, the chart's grouping fields (its color,
+        detail, shape and stroke_dash fields, then its facet fields) are
+        used.
     name : str or None, default None
         Optional name for the ``Smooth`` transform output, used to wire
         downstream layers to its emitted columns.

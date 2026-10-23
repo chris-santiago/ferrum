@@ -592,13 +592,13 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "logistic" => TransformRegistryEntry {
             outputs: fit_outputs(),
             secondary_outputs: vec![],
-            params: vec!["x", "y", "n_grid", "ci", "max_iter", "tol", "name"],
+            params: vec!["x", "y", "n_grid", "ci", "max_iter", "tol", "groupby", "name"],
             ..Default::default()
         },
         "glm" => TransformRegistryEntry {
             outputs: fit_outputs(),
             secondary_outputs: vec![],
-            params: vec!["x", "y", "family", "link", "n_grid", "ci", "max_iter", "tol", "name"],
+            params: vec!["x", "y", "family", "link", "n_grid", "ci", "max_iter", "tol", "groupby", "name"],
             ..Default::default()
         },
         "robust" => TransformRegistryEntry {

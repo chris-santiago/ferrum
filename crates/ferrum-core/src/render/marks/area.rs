@@ -25,7 +25,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, BinnedColorSeries};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, BinnedColorSeries};
 use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
@@ -232,12 +232,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let n_rows = xs.len();
+    // area does not consume the `stroke_dash` channel (T12 scope: line,
+    // rule, point, bar, rect only); only a statistic's grouping splits further.
+    let grouping = grouping_series_values(ctx);
     let mut groups = build_color_detail_groups(
         color_values,
         detail_values.as_ref(),
-        // area does not consume the `stroke_dash` channel (T12 scope: line,
-        // rule, point, bar, rect only) — grouping stays byte-identical.
-        None,
+        &grouping,
         ctx.scales.color.is_some(),
         n_rows,
     );

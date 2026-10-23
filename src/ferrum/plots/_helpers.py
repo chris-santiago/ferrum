@@ -6,11 +6,13 @@ Shared by the ``ferrum.plots.*`` domain modules.
 from __future__ import annotations
 
 import functools
+import inspect
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
+from ferrum._compose import figure_recorded
 from ferrum._entry import EntryRefusal, _voiced, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
@@ -641,12 +643,28 @@ def _figure_entry(fn: _F) -> _F:
     A malformed ``mark=`` (keyword-only on every figure function) refuses
     before *fn* runs, so before anything is computed from the model
     (:func:`ferrum._overrides.refuse_malformed_mark`).
+
+    The chart it returns carries the record that builds its statistics again
+    (:func:`ferrum._compose.figure_recorded`): a grouping bound after the
+    call (the chart's own ``.encode(color=...)``, or a composition's it
+    becomes an operand of) calls the figure again with that binding in its
+    ``encode=``, so its statistics group by it as for the same ``encode=``
+    passed to the call.
     """
+    regroups = "encode" in inspect.signature(fn).parameters
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         refuse_malformed_mark(fn.__name__, kwargs.get("mark"))
-        return speak_as(fn.__name__, fn, *args, **kwargs)
+        chart = speak_as(fn.__name__, fn, *args, **kwargs)
+        if not regroups:
+            return chart
+
+        def call(extra: dict) -> Any:
+            encode = {**(kwargs.get("encode") or {}), **extra}
+            return wrapper(*args, **{**kwargs, "encode": encode})
+
+        return figure_recorded(chart, call)
 
     return wrapper  # type: ignore[return-value]
 

@@ -12,14 +12,14 @@
 //! implicit group holding every row, in original order — which is why the
 //! ungrouped path below is byte-identical to the pre-groupby implementation:
 //! it is the SAME per-group computation, just over the one group that
-//! happens to be the whole batch). A row whose groupby key is null belongs
-//! to no group under that helper's null-key policy; since this transform
-//! must still emit a row for it, such a row falls back to the whole-column
-//! statistic instead (a case that never arises when `groupby` is unset).
-//! That fallback is GH #197's stated exemption for this transform — the
-//! call site passes `NullKeyPolicy::SkipWithWholeBatchFallback`, so the
-//! all-null warning names THIS disposition rather than claiming an empty
-//! output this transform can never produce.
+//! happens to be the whole batch). A row whose groupby key is null still
+//! needs a value, since this transform is row-preserving; it falls back to
+//! the whole-column statistic instead (a case that never arises when
+//! `groupby` is unset). That fallback is GH #197's stated exemption for
+//! this transform — the call site passes `NullKeyPolicy::FillFromWholeBatch`,
+//! the one variant that keeps and fills every null-keyed row rather than
+//! dropping it, so the all-null warning names THIS disposition rather than
+//! claiming an empty output this transform can never produce.
 //! The same whole-column statistic is also the fallback for a group whose
 //! own cleaned value set is empty (every value in that group is null/NaN):
 //! without it, `mean`/`median` would silently fill with `0.0` and `min`/`max`
@@ -157,16 +157,16 @@ pub(crate) fn apply_with_context(
     // module doc for why the ungrouped path is byte-identical by
     // construction rather than a separate branch.
     let groupby: &[String] = spec.groupby.as_deref().unwrap_or(&[]);
-    // `SkipWithWholeBatchFallback` is #197's stated exemption for this
-    // transform: a null-keyed row belongs to no group, but `Impute` is
-    // row-preserving by contract, so it still gets the whole column's
-    // statistic (below) rather than being dropped — and the all-null warning
-    // says so instead of claiming an empty output.
+    // `FillFromWholeBatch` is #197's stated exemption for this transform:
+    // `Impute` is row-preserving by contract, so a null-keyed row is kept
+    // and gets the whole column's statistic (below) rather than being
+    // dropped — nothing to count — and the all-null warning says so instead
+    // of claiming an empty output.
     let partition = group_partition_multi(
         batch,
         groupby,
         "data_impute",
-        NullKeyPolicy::SkipWithWholeBatchFallback,
+        NullKeyPolicy::FillFromWholeBatch,
         ctx,
     )?;
     let groupby_col_indices: Vec<usize> = groupby
@@ -253,7 +253,7 @@ pub(crate) fn apply_with_context(
     // the PARTIAL case (some, not all, rows null-keyed): when EVERY row is
     // null-keyed (`null_keyed_rows == n_rows`), `group_partition_multi`
     // already pushed `TransformWarning::GroupKeyAllNull` for this exact
-    // condition, whose `SkipWithWholeBatchFallback` disposition text ("the
+    // condition, whose `FillFromWholeBatch` disposition text ("the
     // whole batch was used as one ungrouped computation instead") already
     // says what this rollup would restate — reporting both reads as two
     // problems for the one condition (wave-1 close remediation, reviewer
@@ -1566,6 +1566,41 @@ mod tests {
             TransformWarning::FallbackApplied { transform, group, reason }
                 if transform == "Impute" && group.is_none() && reason.contains("2 row")
         ));
+    }
+
+    /// `Impute` grouped by a partly null key pushes
+    /// `FallbackApplied` and no [`TransformWarning::NullKeyRowsDropped`] —
+    /// `FillFromWholeBatch` is Impute's own exemption from the fit family's
+    /// (`Smooth`/`Robust`/`Logistic`/`Glm`) `SkipWithWholeBatchFallback`:
+    /// row-preserving, it keeps and fills every null-keyed row rather than
+    /// dropping it, so there is no drop to count.
+    #[test]
+    fn impute_partly_null_groupby_key_pushes_fallback_applied_and_no_drop_count() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("h", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), None, None])),
+                Arc::new(Float64Array::from(vec![Some(10.0), Some(20.0), None, None])),
+            ],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, Some(vec!["h"]), None, None);
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&s, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(&warnings[0], TransformWarning::FallbackApplied { transform, .. } if transform == "Impute"),
+            "{:?}", warnings[0]
+        );
+        assert!(
+            !warnings.iter().any(|w| matches!(w, TransformWarning::NullKeyRowsDropped { .. })),
+            "Impute's row-preserving fill drops no row to count: {warnings:?}"
+        );
     }
 
     /// A well-supported group must not warn.

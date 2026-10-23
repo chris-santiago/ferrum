@@ -297,7 +297,7 @@ impl Mark {
         ];
         const RIBBON: &[StyleField] = &[
             drawn("stroke"), drawn("fill"), drawn("opacity"), drawn_with("stroke_width", Stroke),
-            drawn("interpolate"), drawn_with("stroke_join", Stroke), drawn("clip"), drawn("blend"),
+            drawn("detail"), drawn("interpolate"), drawn_with("stroke_join", Stroke), drawn("clip"), drawn("blend"),
         ];
         const SEGMENT: &[StyleField] = &[
             drawn("stroke"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),

@@ -28,10 +28,18 @@ it).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ferrum._encode_lowering import _encoding_statistics, _expand_grouping, _statistic_plan
+from ferrum._encode_lowering import (
+    COMPOSITE_GROUPING_CHANNELS,
+    _encoding_statistics,
+    _expand_grouping,
+    _grouping_bindings,
+    _over,
+    _statistic_plan,
+)
 from ferrum._layer import _Layer
 from ferrum._layer_transforms import (
     _Branch,
@@ -57,6 +65,188 @@ _PASS_THROUGH = {"type": "identity"}
 
 
 @dataclass(frozen=True)
+class _CompositeSource:
+    """The rebuild record of a chart's statistics, built before its grouping was known. Never serialized.
+
+    A composite mark resolves when its chart becomes an operand or takes an
+    attached layer, and a figure builds its statistics when it is called;
+    either can come before the bindings its statistics should group by
+    (a host's later ``.encode()``, a composition's encoding). The record
+    builds them again under new ones.
+
+    Attributes
+    ----------
+    own :
+        The grouping bindings (:func:`~ferrum._encode_lowering._grouping_bindings`)
+        the statistics were built with as the chart's own, as ``(channel,
+        binding)`` pairs.
+    grouping :
+        The parent grouping bindings they were built with, as ``(channel,
+        binding)`` pairs; empty outside any composition.
+    layers :
+        The layers the build drew, before any merge rewrote them.
+    steps :
+        The statistics the build lowered, by identity in the chain.
+    rebuild :
+        ``rebuild(own, parent, facet)``: the record of the same build under
+        own grouping bindings *own* and parent grouping bindings *parent*,
+        within *facet*'s panels.
+    """
+
+    own: tuple
+    grouping: tuple
+    layers: tuple
+    steps: tuple
+    rebuild: Callable[[dict, dict, Any], "_CompositeSource"]
+
+
+def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _CompositeSource:
+    """The record of *pre*'s pending mark resolving to *resolved* under parent grouping *parent*.
+
+    Its rebuild resolves *pre*'s pending mark again
+    (:func:`ferrum._desugar._resolve_pending_impl`, the one place a
+    composite's statistics are built), *pre*'s grouping bindings replaced by
+    the new own ones.
+    """
+    from ferrum._desugar import _resolve_pending_impl
+    from ferrum.composition import _expand_layers
+
+    def rebuild(own: dict, parent: dict, facet: Any) -> _CompositeSource:
+        chart = _with_grouping_bindings(pre, own)
+        return composite_source(
+            pre, _resolve_pending_impl(chart, parent=parent, facet=facet), parent
+        )
+
+    before = len(_split_chain(list(pre._transforms or []))[1])
+    lowered = _split_chain(list(resolved._transforms or []))[1]
+    return _CompositeSource(
+        own=tuple(_grouping_bindings(resolved._encoding).items()),
+        grouping=tuple((parent or {}).items()),
+        layers=tuple(_expand_layers(resolved)[0]),
+        steps=tuple(lowered[before:]),
+        rebuild=rebuild,
+    )
+
+
+def _with_grouping_bindings(chart: Any, own: dict) -> Any:
+    """A clone of *chart* whose grouping bindings are *own*, its other bindings unchanged."""
+    new = chart._clone()
+    new._encoding = {
+        **{
+            channel: binding
+            for channel, binding in chart._encoding.items()
+            if channel not in COMPOSITE_GROUPING_CHANNELS
+        },
+        **own,
+    }
+    return new
+
+
+def figure_recorded(chart: Any, call: Callable[[dict], Any]) -> Any:
+    """*chart*, a figure's result, carrying the record that builds its statistics again.
+
+    *call* calls the figure again with the given bindings merged into its
+    ``encode=`` (the caller's other arguments unchanged). A rebuild adds the
+    own grouping bindings that changed since the figure was built (an
+    unbound one as ``None``), and each parent binding on a channel the
+    figure binds under no spelling, on its chart or any of its layers, so
+    the figure groups by them as for its own ``encode=``: a figure under a
+    composition's color regroups as a composite mark does. A chart of one
+    operand carries the record itself; a composition's operands each carry
+    one that reads their own statistics and layers from the rebuilt figure.
+    A chart that is no figure chart (a pending mark records itself when it
+    resolves), or whose operands lowered no statistic, is returned as is.
+    """
+    from dataclasses import replace
+
+    from ferrum.encoding._aliases import resolved_channel
+
+    if not hasattr(chart, "_operands") or chart._pending_stat_mark is not None:
+        return chart
+    built = _grouping_bindings(chart._encoding)
+    bound = {resolved_channel(channel) for channel in built} | {
+        resolved_channel(channel)
+        for layer in chart._layers or []
+        for channel in _grouping_bindings(layer.encoding)
+    }
+
+    def rebuilt(own: dict, parent: dict) -> Any:
+        taken = bound | {resolved_channel(channel) for channel in own}
+        extra = {
+            **{channel: None for channel in built if channel not in own},
+            **{
+                channel: binding
+                for channel, binding in own.items()
+                if channel not in built or built[channel] is not binding
+            },
+            **{
+                channel: binding
+                for channel, binding in parent.items()
+                if resolved_channel(channel) not in taken
+            },
+        }
+        return call(extra)
+
+    grouping = tuple(built.items())
+    new = chart._clone()
+    if not chart._operands:
+        if not _split_chain(list(chart._transforms or []))[1]:
+            return chart
+        new._composite_source = _figure_source(chart, None, built, (), rebuilt)
+        return new
+    if not any(op.statistics for op in chart._operands):
+        return chart
+    new._operands = tuple(
+        replace(op, source=_figure_source(chart, i, built, grouping, rebuilt))
+        if op.statistics
+        else op
+        for i, op in enumerate(chart._operands)
+    )
+    return new
+
+
+def _figure_source(
+    chart: Any,
+    operand: int | None,
+    own: dict,
+    grouping: tuple,
+    rebuilt: Callable[[dict, dict], Any],
+) -> _CompositeSource:
+    """The record of a figure's chart, or of its *operand* when the figure is a composition."""
+    from ferrum.composition import _expand_layers
+
+    if (operand is None) != (not chart._operands):
+        raise RuntimeError(
+            "a figure changed between one chart and a composition when its statistics "
+            "were grouped by a binding made after it was built; it cannot be rebuilt"
+        )
+    if operand is None:
+        layers = tuple(_expand_layers(chart)[0])
+        steps = _split_chain(list(chart._transforms or []))[1]
+    else:
+        if operand >= len(chart._operands):
+            raise RuntimeError(
+                "a figure drew fewer operands when its statistics were grouped by a "
+                "binding made after it was built; its operands cannot be rebuilt"
+            )
+        layers = tuple(layer for layer in chart._layers or [] if layer.operand == operand)
+        steps = chart._operands[operand].statistics
+
+    def rebuild(own: dict, parent: dict, facet: Any) -> _CompositeSource:
+        # A figure takes no facet: its statistics run inside each panel's
+        # rows, as they do when the caller facets the figure itself.
+        return _figure_source(rebuilt(own, parent), operand, own, tuple(parent.items()), rebuilt)
+
+    return _CompositeSource(
+        own=tuple(own.items()),
+        grouping=grouping,
+        layers=layers,
+        steps=tuple(steps),
+        rebuild=rebuild,
+    )
+
+
+@dataclass(frozen=True)
 class _Operand:
     """One operand of a chart drawn from layers. Never serialized.
 
@@ -71,17 +261,27 @@ class _Operand:
         the operand came from.
     statistics :
         The statistics its mark lowered when it resolved (a composite mark's
-        bins, density grid or fitted curve), without the statistics marker.
+        bins, density grid or fitted curve), each lowering led by its own
+        statistics marker (:func:`~ferrum._layer_transforms._split_chain`).
     composed :
         The steps written on a composition this operand is reached by, each
         the :class:`~ferrum._layer_transforms._ComposedStep` every reached
         operand shares, innermost composition first.
+    source :
+        The pending composite mark its statistics came from, or ``None``.
+    carried :
+        The grouping bindings of the compositions it was an operand of that
+        are now themselves operands, nearest first, as ``(channel,
+        binding)`` pairs: their encodings moved onto their layers, and stay
+        the parent of this operand's statistics.
     """
 
     frame: int
     own: tuple
     statistics: tuple
     composed: tuple = ()
+    source: _CompositeSource | None = None
+    carried: tuple = ()
 
 
 def chart_operands(chart: Any) -> tuple[_Operand, ...]:
@@ -89,7 +289,228 @@ def chart_operands(chart: Any) -> tuple[_Operand, ...]:
     if chart._operands:
         return chart._operands
     own, statistics = _split_chain(list(chart._transforms or []))
-    return (_Operand(0, own, statistics),)
+    return (_Operand(0, own, statistics, source=chart._composite_source),)
+
+
+def carried_by(operands: tuple[_Operand, ...], encoding: dict) -> tuple[_Operand, ...]:
+    """*operands* of a composition that becomes an operand, carrying its *encoding*'s grouping.
+
+    The composition's encoding moves onto its layers (``_scoped_to_layers``)
+    and stays the parent of its operands' statistics, farther than any
+    composition nested inside it.
+    """
+    from dataclasses import replace
+
+    shared = _grouping_bindings(encoding)
+    if not shared:
+        return operands
+    return tuple(
+        replace(op, carried=tuple(_over(dict(op.carried), shared).items()))
+        if op.source is not None
+        else op
+        for op in operands
+    )
+
+
+def regrouped(chart: Any) -> Any:
+    """*chart* with its statistics built under the grouping bindings it and its parents now bind.
+
+    Statistics built before their grouping was known (a composite mark that
+    resolved when its chart took an attached layer or became an operand, a
+    figure's statistics) are built again from their record
+    (:class:`_CompositeSource`) whenever the grouping they would be built
+    with differs from the one they were built with:
+
+    - a chart of one operand, by its own grouping bindings, so a host's
+      ``.encode(color="c")`` after ``.layer(...)`` fits per ``c`` as the
+      same binding written before it does;
+    - each operand of a composition, by the grouping bindings of every
+      composition it is an operand of, the nearest winning, on each channel
+      its own chart binds under no spelling (spec §6.4 over the effective
+      encoding), so ``(fit + points).encode(color="c")`` fits per ``c`` as
+      its points color.
+
+    The rebuilt statistics take the old ones' place in the chain, and each
+    layer the build drew takes every field the rebuild draws differently
+    (:func:`_redrawn_layers`). Returns *chart* itself when nothing changes,
+    else a clone: the caller's chart is never mutated.
+    """
+    if not chart._operands:
+        return _regrouped_alone(chart)
+    from dataclasses import replace
+
+    shared = _grouping_bindings(chart._encoding)
+    operands = list(chart._operands)
+    layers = list(chart._layers or [])
+    changed = False
+    for i, op in enumerate(operands):
+        if op.source is None:
+            continue
+        parent = tuple(_over(dict(op.carried), shared).items())
+        if parent == op.source.grouping:
+            continue
+        source = op.source.rebuild(dict(op.source.own), dict(parent), chart._facet)
+        operands[i] = replace(
+            op,
+            statistics=_with_run_replaced(op.statistics, op.source.steps, source.steps),
+            source=source,
+        )
+        positions = [k for k, layer in enumerate(layers) if layer.operand == i]
+        layers = _redrawn_layers(layers, positions, op.source, source)
+        changed = True
+    if not changed:
+        return chart
+    new = chart._clone()
+    new._operands = tuple(operands)
+    new._layers = layers
+    return new
+
+
+def _regrouped_alone(chart: Any) -> Any:
+    """:func:`regrouped` for a chart of one operand, under its own grouping bindings."""
+    from dataclasses import replace
+
+    record = chart._composite_source
+    if record is None:
+        return chart
+    own = _grouping_bindings(chart._encoding)
+    if own == dict(record.own):
+        return chart
+    source = record.rebuild(own, {}, chart._facet)
+    new = chart._clone()
+    new._transforms = list(_with_run_replaced(tuple(chart._transforms), record.steps, source.steps))
+    new._composite_source = source
+    if chart._layers is not None:
+        new._layers = _redrawn_layers(
+            list(chart._layers), list(range(len(chart._layers))), record, source
+        )
+        return new
+    # A flat chart draws its one mark from its own fields, which the rebuild
+    # may change only in the bindings the caller already wrote on it.
+    if len(source.layers) != 1 or replace(record.layers[0], encoding={}) != replace(
+        source.layers[0], encoding={}
+    ):
+        raise RuntimeError(
+            "a chart drew a different mark when its statistics were grouped by a "
+            "binding made after it was built; it cannot be rebuilt"
+        )
+    return new
+
+
+def _with_run_replaced(statistics: tuple, old: tuple, new: tuple) -> tuple:
+    """*statistics* with the run of steps *old* (by identity) replaced by *new*."""
+    n = len(old)
+    for k in range(len(statistics) - n + 1):
+        if all(a is b for a, b in zip(statistics[k : k + n], old)):
+            return (*statistics[:k], *new, *statistics[k + n :])
+    raise RuntimeError(
+        "an operand's statistics no longer hold the steps its composite mark lowered; "
+        "they cannot be rebuilt"
+    )
+
+
+def _redrawn_layers(
+    layers: list, positions: list[int], record: _CompositeSource, source: _CompositeSource
+) -> list:
+    """*layers* with the build's layers at *positions* redrawn as the rebuild *source* draws them.
+
+    The first ``len(record.layers)`` layers at *positions* are the build's,
+    in its order; each is paired with the rebuilt layer of its name
+    (:func:`_redrawn`), or by position when the build's layers are not
+    uniquely named. A build layer the rebuild no longer draws (a figure's
+    single-fit corner metrics with no single value once the fit is per
+    group) is removed silently: the rebuild calls the figure again
+    (:func:`figure_recorded`), and the figure's own call already reports a
+    dropped layer when it was asked to, the same voice whatever door bound
+    the grouping. A rebuilt layer the build never drew cannot be placed.
+    """
+    built = positions[: len(record.layers)]
+    if len(built) < len(record.layers):
+        raise RuntimeError(
+            "a chart lost layers its statistics drew before they were grouped by a "
+            "binding made after it was built; its layers cannot be rebuilt"
+        )
+    pairs = _paired(record.layers, source.layers)
+    out = list(layers)
+    dropped: list[int] = []
+    for k, before, after in zip(built, record.layers, pairs):
+        if after is None:
+            dropped.append(k)
+        else:
+            out[k] = _redrawn(out[k], before, after)
+    return [layer for k, layer in enumerate(out) if k not in dropped]
+
+
+def _paired(before: tuple, after: tuple) -> list:
+    """Each *before* layer's rebuilt counterpart in *after*, ``None`` where the rebuild draws none.
+
+    Layers pair by name. The build's layers the rebuild draws under no name
+    of theirs pair, in order, with the rebuilt layers whose names the build
+    never drew, when there are as many of each (a grouped filled density
+    draws its one layer as isoline segments); otherwise each is no longer
+    drawn. Layers that are not uniquely named pair by position.
+    """
+
+    def named(layers: tuple) -> bool:
+        names = [layer.name for layer in layers]
+        return None not in names and len(set(names)) == len(names)
+
+    if not (named(before) and named(after)):
+        if len(before) != len(after):
+            raise RuntimeError(
+                "a composite mark drew a different number of layers when its statistics "
+                "were grouped by a binding made after it was built; its layers cannot be "
+                "rebuilt"
+            )
+        return list(after)
+    by_name = {layer.name: layer for layer in after}
+    unmatched = [layer.name for layer in before if layer.name not in by_name]
+    added = [layer for layer in after if layer.name not in {b.name for b in before}]
+    if added and len(added) != len(unmatched):
+        raise RuntimeError(
+            "a chart drew a layer its statistics never drew before they were grouped by a "
+            "binding made after it was built; its layers cannot be rebuilt"
+        )
+    by_name.update(zip(unmatched, added))
+    return [by_name.get(layer.name) for layer in before]
+
+
+def _quoted(fields: list[str]) -> str:
+    """*fields* as quoted prose: ``'c'``, ``'c' and 'g'``."""
+    quoted = [repr(field) for field in fields]
+    return (
+        " and ".join(quoted) if len(quoted) <= 2 else ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
+    )
+
+
+def _redrawn(layer: _Layer, before: _Layer, after: _Layer) -> _Layer:
+    """*layer*, built as *before*, with every field *after* draws differently from *before*.
+
+    What a merge wrote onto *layer* (its operand's bindings, positional
+    fill, provenance) is kept; an encoding key *after* drops is removed.
+    """
+    from dataclasses import fields, replace
+
+    if before == after:
+        return layer
+    changes = {
+        f.name: getattr(after, f.name)
+        for f in fields(_Layer)
+        if f.name != "encoding" and getattr(before, f.name) != getattr(after, f.name)
+    }
+    encoding = {
+        channel: value
+        for channel, value in layer.encoding.items()
+        if channel not in before.encoding or channel in after.encoding
+    }
+    encoding.update(
+        {
+            channel: value
+            for channel, value in after.encoding.items()
+            if channel not in before.encoding or before.encoding[channel] != value
+        }
+    )
+    return replace(layer, encoding=encoding, **changes)
 
 
 def chart_frames(chart: Any) -> tuple:
@@ -313,24 +734,27 @@ def attach_to_rows(layers: list, chart: Any) -> list:
 
 
 def _operand_chain(op: _Operand, layers: list, statistics: list) -> list:
-    """*op*'s chain as its *layers* read it: ``[own][composed][rows][marker][statistics]``.
+    """*op*'s chain as its *layers* read it: ``[own][composed][rows][op.statistics][layer statistics]``.
 
-    *statistics* holds each layer's ``_LayerStatistic`` (or ``None``): every
-    aggregate, then every bin, after the operand's mark statistics. The rows
-    snapshot is published only when a layer, or a layer's statistic, reads
-    it.
+    *statistics* holds each layer's ``_LayerStatistic`` (or ``None``):
+    *op.statistics* (the operand's mark statistics, already its own
+    lowering, or several) comes first, then every aggregate layer statistic
+    opens its own lowering, then every bin layer statistic opens its own,
+    so two layers computing independently each report their own null-key
+    drop rather than sharing the mark's. The rows snapshot is published
+    only when a layer, or a layer's statistic, reads it.
     """
     computed = [s for s in statistics if s is not None]
     lowered = [
         *op.statistics,
-        *(s.step for s in computed if not s.bins),
-        *(s.step for s in computed if s.bins),
+        *(step for s in computed if not s.bins for step in _with_statistics_marker([s.step])),
+        *(step for s in computed if s.bins for step in _with_statistics_marker([s.step])),
     ]
     reads_rows = any(layer.data_source == ROWS_KEY for layer in layers) or any(
         isinstance(s.step, _Branch) and s.step.input == ROWS_KEY for s in computed
     )
     rows = [_source_identity(ROWS_KEY)] if reads_rows else []
-    return [*op.own, *op.composed, *rows, *_with_statistics_marker(lowered)]
+    return [*op.own, *op.composed, *rows, *lowered]
 
 
 def _chain_key(op: _Operand) -> str:

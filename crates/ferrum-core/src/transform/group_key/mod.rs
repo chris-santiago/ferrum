@@ -356,9 +356,9 @@ pub(crate) struct GroupPartition {
 /// warning says happened when EVERY row is null-keyed.
 ///
 /// The adjudicated policy is [`NullKeyPolicy::Skip`]: a null-keyed row belongs
-/// to no group, so an all-null key column yields the empty group set. The other
-/// two variants are the policy's stated exemptions, spelled at the call site
-/// that takes them rather than hidden in a hand-rolled loop.
+/// to no group, so an all-null key column yields the empty group set. The
+/// other variants are the policy's stated exemptions, spelled at the call
+/// site that takes them rather than hidden in a hand-rolled loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NullKeyPolicy {
     /// Drop null-keyed rows from every group. With no surviving row the
@@ -366,13 +366,34 @@ pub(crate) enum NullKeyPolicy {
     /// policy for every transform that appends the group key as an output
     /// column: a row with no key has no row to be written to.
     Skip,
-    /// Drop them from the groups as [`NullKeyPolicy::Skip`] does, but the
-    /// transform still computes a value for them from the whole batch —
-    /// `Impute`'s whole-column fill and `Smooth`/`Robust`'s pooled whole-batch
-    /// fit. Both contracts pre-date this policy and are load-bearing (row
-    /// preservation; "the pooled fit IS the degraded-but-meaningful render"),
-    /// so they are exempt from the empty-output arm and say so in the warning.
+    /// Drop them from the groups as [`NullKeyPolicy::Skip`] does — a partly
+    /// null-keyed batch's dropped rows are counted exactly as under `Skip` —
+    /// for the fit transforms (`Smooth`, `Robust`, `Logistic`, `Glm`) whose
+    /// all-null exemption is to fit the WHOLE batch pooled instead of
+    /// emitting nothing: the pooled fit IS the degraded-but-meaningful
+    /// render this policy exists to produce, and only the all-null case
+    /// takes it. The warning says so, and the pooled output carries each
+    /// `groupby` column at its original dtype, every value null — the
+    /// pooled fit IS the null-keyed group, stacked through
+    /// [`stack_grouped_batches`] like any other group rather than returned
+    /// bare, so a chart whose grouping column renders from this output (a
+    /// `color=` on `mark_smooth`, say) draws it in the null color with no
+    /// legend entry instead of refusing for a column the output never had.
     SkipWithWholeBatchFallback,
+    /// Keep every null-keyed row and compute it from the WHOLE batch,
+    /// dropping none: `Impute`'s contract is row-preserving, so a row whose
+    /// key is null still needs a value, which the whole column's statistic
+    /// supplies — reported by `Impute` itself (`FallbackApplied`), not by a
+    /// per-row drop count, since no row was dropped. An all-null key column
+    /// takes the same all-null disposition as
+    /// [`NullKeyPolicy::SkipWithWholeBatchFallback`]: every row still gets
+    /// the whole-column statistic, and the warning says so.
+    FillFromWholeBatch,
+    /// Drop them as [`NullKeyPolicy::Skip`] does, for a transform that
+    /// refuses the input a drop leaves with nothing to compute (`QQ`): the
+    /// drop's per-field counts explain that refusal, so no all-null warning
+    /// is pushed beside it.
+    SkipRefusingEmpty,
     /// Keep null-keyed rows as one pooled null-keyed group. For the transforms
     /// whose contract is one output value per INPUT row (`data_stack`,
     /// `data_join_aggregate`) and which therefore append no group column:
@@ -403,7 +424,10 @@ impl NullKeyPolicy {
     /// the warning describes.
     fn degraded_to_no_grouping(self, any_null: usize, fully_null: usize, n_rows: usize) -> bool {
         match self {
-            NullKeyPolicy::Skip | NullKeyPolicy::SkipWithWholeBatchFallback => any_null == n_rows,
+            NullKeyPolicy::Skip
+            | NullKeyPolicy::SkipWithWholeBatchFallback
+            | NullKeyPolicy::SkipRefusingEmpty
+            | NullKeyPolicy::FillFromWholeBatch => any_null == n_rows,
             NullKeyPolicy::Pool => fully_null == n_rows,
         }
     }
@@ -413,7 +437,8 @@ impl NullKeyPolicy {
     fn all_null_disposition(self) -> &'static str {
         match self {
             NullKeyPolicy::Skip => "the grouped output is empty",
-            NullKeyPolicy::SkipWithWholeBatchFallback => {
+            NullKeyPolicy::SkipRefusingEmpty => "the transform refuses its empty input",
+            NullKeyPolicy::SkipWithWholeBatchFallback | NullKeyPolicy::FillFromWholeBatch => {
                 "the whole batch was used as one ungrouped computation instead"
             }
             NullKeyPolicy::Pool => "all rows were treated as one unlabeled group",
@@ -648,18 +673,80 @@ pub(crate) fn group_partition_multi(
         }
     }
 
-    warn_if_group_keys_all_null(
-        label,
-        group_cols,
-        null_keys,
-        NullKeyCounts { any_null: any_null_rows, fully_null: fully_null_rows, n_rows },
-        warn_ctx,
-    );
+    let counts = NullKeyCounts { any_null: any_null_rows, fully_null: fully_null_rows, n_rows };
+    match null_keys {
+        NullKeyPolicy::Pool => warn_if_group_keys_all_null(label, group_cols, null_keys, counts, warn_ctx),
+        _ => report_skipped_null_keys(batch, group_cols, label, null_keys, counts, warn_ctx),
+    }
 
     Ok(GroupPartition {
         groups,
         dtypes: reader.dtypes(),
     })
+}
+
+/// Report what a skipping [`NullKeyPolicy`] did with null-keyed rows, in one
+/// voice for every grouped transform and every door:
+///
+/// - Rows dropped from every group are counted once per `groupby` field
+///   ([`warn_null_groupby_rows_dropped`]), on the whole frame and in each
+///   facet partition alike; the facet run sums a step's partitions into the
+///   whole frame's count. The facet fields are never named: they are
+///   constant and non-null within a panel. Every policy that drops a row
+///   from its groups counts this way, [`NullKeyPolicy::SkipWithWholeBatchFallback`]
+///   included: a partly null-keyed batch's dropped rows ARE missing from
+///   every group's fit, even though its all-null case fits the whole batch
+///   pooled instead of emitting nothing. [`NullKeyPolicy::FillFromWholeBatch`]
+///   drops no row at all (`Impute` keeps and fills a null-keyed row from the
+///   whole column, and says so itself), so it counts none.
+/// - A whole frame whose every row was null-keyed reports
+///   [`TransformWarning::GroupKeyAllNull`] in place of the counts (no
+///   warning under [`NullKeyPolicy::SkipRefusingEmpty`], whose refusal the
+///   counts explain).
+/// - A facet partition whose every row was null-keyed pushes no per-panel
+///   all-null warning: it records the case ([`TransformContext::record_all_null`])
+///   so the facet run decides once per step. Under
+///   [`NullKeyPolicy::Skip`] the partition is emptied (counted, and drawn
+///   empty); under [`NullKeyPolicy::SkipWithWholeBatchFallback`] and
+///   [`NullKeyPolicy::FillFromWholeBatch`] its rows are fit (or filled)
+///   pooled, not dropped, so they are not counted. A refusing transform
+///   records its own refusal.
+fn report_skipped_null_keys(
+    batch: &RecordBatch,
+    group_cols: &[String],
+    label: &str,
+    null_keys: NullKeyPolicy,
+    counts: NullKeyCounts,
+    warn_ctx: &TransformContext,
+) {
+    use crate::transform::context::AllNullOutcome;
+    let reported: Vec<String> = group_cols.iter().filter(|field| !warn_ctx.facet_fields.contains(field)).cloned().collect();
+    if reported.is_empty() || counts.any_null == 0 {
+        return;
+    }
+    let all_null = counts.any_null == counts.n_rows;
+    let all_null_warning = || TransformWarning::GroupKeyAllNull {
+        transform: display_name_for_label(label).to_string(),
+        columns: reported.join(", "),
+        disposition: null_keys.all_null_disposition().to_string(),
+        rows: warn_ctx.rows.clone(),
+        lowering: warn_ctx.lowering.clone(),
+        panels: Vec::new(),
+    };
+    match (warn_ctx.is_partition, all_null, null_keys) {
+        (true, true, NullKeyPolicy::SkipWithWholeBatchFallback | NullKeyPolicy::FillFromWholeBatch) => {
+            warn_ctx.record_all_null(AllNullOutcome::Pooled(all_null_warning()));
+        }
+        (true, true, NullKeyPolicy::Skip) => {
+            warn_null_groupby_rows_dropped(batch, &reported, label, warn_ctx);
+            warn_ctx.record_all_null(AllNullOutcome::Emptied(all_null_warning()));
+        }
+        (false, true, NullKeyPolicy::Skip | NullKeyPolicy::SkipWithWholeBatchFallback | NullKeyPolicy::FillFromWholeBatch) => {
+            warn_ctx.warn(all_null_warning());
+        }
+        (_, _, NullKeyPolicy::FillFromWholeBatch) => {}
+        _ => warn_null_groupby_rows_dropped(batch, &reported, label, warn_ctx),
+    }
 }
 
 /// How one step reads its groupby keys: each column's [`groupby_key_at`]
@@ -794,6 +881,9 @@ fn display_name_for_label(label: &str) -> &str {
         // (unlike its sixteen siblings, which pass the wire tag) — identity,
         // not a gap in this table.
         "Robust" => "Robust",
+        // `Logistic` and `Glm` pass their Python-facing names too.
+        "Logistic" => "Logistic",
+        "Glm" => "Glm",
         // Unmapped labels (a future grouped transform whose call site was
         // added here but not to this table) fall back to the raw label
         // rather than panicking — display-only, so degrading to the wire
@@ -834,6 +924,9 @@ pub(crate) fn warn_if_group_keys_all_null(
         transform: display_name_for_label(label).to_string(),
         columns: group_cols.join(", "),
         disposition: null_keys.all_null_disposition().to_string(),
+        rows: warn_ctx.rows.clone(),
+        lowering: warn_ctx.lowering.clone(),
+        panels: Vec::new(),
     });
 }
 
@@ -841,10 +934,16 @@ pub(crate) fn warn_if_group_keys_all_null(
 /// that field dropped from every group, as
 /// [`TransformWarning::NullKeyRowsDropped`] in the `groupby` scope: the same
 /// warning, in the same words, the facet partition gives a null facet value.
-/// For the grouped transforms whose `groupby` drops a null key with a warning
-/// rather than silently (`LetterValue`, `QQ`); call it with the fields whose
-/// null rows the transform actually drops. A field absent from `batch` counts
-/// nothing: the partition has already refused it.
+/// Called by the shared partitioner for every skipping policy
+/// ([`report_skipped_null_keys`]), and by `LetterValue`, whose partition
+/// pools a null `group` and drops the combinations holding a null on its
+/// `groupby` fields itself; call it with the fields whose null rows the
+/// transform actually drops. A field absent from `batch` counts nothing: the
+/// partition has already refused it. `fields` is also the scope's `key`
+/// (the full `groupby` field list the caller is reporting against), read
+/// by [`crate::transform::context::merge_null_key_reports`]'s cross-step
+/// dedup together with [`TransformContext::rows`], so a composite's own
+/// several lowered steps over the same rows and key report once.
 pub(crate) fn warn_null_groupby_rows_dropped(
     batch: &RecordBatch,
     fields: &[String],
@@ -857,6 +956,10 @@ pub(crate) fn warn_null_groupby_rows_dropped(
             warn_ctx.warn(TransformWarning::NullKeyRowsDropped {
                 scope: crate::transform::context::NullKeyScope::Groupby {
                     transform: display_name_for_label(label).to_string(),
+                    step: warn_ctx.step.clone(),
+                    rows: warn_ctx.rows.clone(),
+                    lowering: warn_ctx.lowering.clone(),
+                    key: fields.to_vec(),
                 },
                 field: field.clone(),
                 rows,
@@ -951,6 +1054,79 @@ pub(crate) fn grouped_two_column_fit(
 
     RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_cols)
         .map_err(|e| PyValueError::new_err(format!("{label}: {e}")))
+}
+
+/// One `groupby` group handed to a per-group fit: its row indices and its
+/// label ([`crate::transform::context::describe_group_keys`]), which a
+/// degenerate group's warning names.
+pub(crate) struct FitRows<'r> {
+    pub(crate) indices: &'r [usize],
+    pub(crate) label: String,
+}
+
+/// The key a [`NullKeyPolicy::SkipWithWholeBatchFallback`] (or
+/// [`NullKeyPolicy::FillFromWholeBatch`]) all-null fallback assigns its one
+/// pooled group, read from `batch` ONE `groupby` column at a time: that
+/// column's own value when it is NON-null and the SAME on every row of
+/// `batch` — the shape a facet field takes inside one facet partition, the
+/// constant value this very partition was already filtered to — and
+/// [`KeyValue::Null`] otherwise.
+///
+/// "Otherwise" is the load-bearing half: a column that is only PARTLY null,
+/// or that holds more than one distinct non-null value, is not a fact
+/// about this pooled group — the pooled fit covers every row regardless of
+/// what any of them say in that column, so labelling it with one row's
+/// value (or one column's value while another column's null rows are
+/// ignored) would claim a group the data never formed. Both only a
+/// column entirely null across the batch AND a column genuinely constant
+/// may keep their all-or-nothing answer; anything in between nulls out.
+///
+/// This matters because a faceted statistic's `groupby` folds the facet
+/// field in beside the user's own grouping field
+/// (`_statistic_groupby`, `src/ferrum/_encode_lowering.py`), so the SAME
+/// `group_cols` list that names the all-null column (e.g. `h`) also names
+/// the facet column (e.g. `f`), which is never null and is constant within
+/// one partition — it keeps its real value here, while `h` nulls out, so a
+/// faceted panel's pooled fit still belongs to its own panel. A SECOND
+/// grouping column that varies (e.g. `color='g', detail='h'` with `h` all
+/// null and `g` holding both `A` and `B`) must null out too, even though
+/// it is never itself null: `g`'s own values disagree across the pooled
+/// rows, so no single value of it describes them.
+pub(crate) fn pooled_group_key(batch: &RecordBatch, group_cols: &[String]) -> PyResult<Vec<KeyValue>> {
+    let schema = batch.schema();
+    group_cols
+        .iter()
+        .map(|col| {
+            let idx = schema.index_of(col).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "internal error: groupby column '{col}' missing while pooling an all-null fallback"
+                ))
+            })?;
+            let arr = batch.column(idx);
+            let dt = arr.data_type();
+            let mut constant: Option<KeyValue> = None;
+            for row in 0..arr.len() {
+                let kv = groupby_key_at(arr.as_ref(), dt, row).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "internal error: could not read groupby column '{col}' while pooling an all-null fallback"
+                    ))
+                })?;
+                match (&constant, kv) {
+                    (_, KeyValue::Null) => {
+                        constant = None;
+                        break;
+                    }
+                    (None, kv) => constant = Some(kv),
+                    (Some(prev), kv) if *prev == kv => {}
+                    (Some(_), _) => {
+                        constant = None;
+                        break;
+                    }
+                }
+            }
+            Ok(constant.unwrap_or(KeyValue::Null))
+        })
+        .collect()
 }
 
 /// Stack a transform's already-computed per-group output batches into one

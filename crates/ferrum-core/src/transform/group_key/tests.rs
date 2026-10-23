@@ -7,7 +7,7 @@
 //! 864), which is the documented trigger for a directory module. What lives
 //! here is everything that exercises `mod.rs`: key extraction and
 //! materialization round-trips (FA-3/FA-9), the partitioner's ordering, null,
-//! repeat and dtype policies across all three `NullKeyPolicy` variants, the
+//! repeat and dtype policies across every `NullKeyPolicy` variant, the
 //! two grouped-execution templates, and the wire/PyO3 `groupby` parsers.
 
 use super::*;
@@ -698,6 +698,8 @@ fn all_null_warning_disposition_follows_the_policy() {
     assert!(mk(NullKeyPolicy::Skip).contains("the grouped output is empty"));
     assert!(mk(NullKeyPolicy::SkipWithWholeBatchFallback)
         .contains("the whole batch was used as one ungrouped computation instead"));
+    assert!(mk(NullKeyPolicy::FillFromWholeBatch)
+        .contains("the whole batch was used as one ungrouped computation instead"));
     assert!(mk(NullKeyPolicy::Pool).contains("all rows were treated as one unlabeled group"));
 }
 
@@ -760,17 +762,41 @@ fn group_key_all_null_warning_uses_the_python_facing_name_not_the_wire_tag() {
     }
 }
 
-/// The warning is for the ALL-null case only: a column with even one usable
-/// key produced groups, so nothing degraded and nothing is said.
+/// A column with even one usable key produced groups, so no all-null
+/// warning: the rows its null keys dropped are counted instead, once per
+/// field — under EVERY skipping policy, [`NullKeyPolicy::SkipWithWholeBatchFallback`]
+/// included: a partly null-keyed batch's dropped rows are genuinely missing
+/// from every group's fit, even though an all-null batch is fit pooled
+/// instead of emitting nothing.
 #[test]
-fn partially_null_group_keys_do_not_warn() {
+fn partially_null_group_keys_count_the_dropped_rows_under_every_skipping_policy() {
     pyo3::Python::initialize();
     let col: ArrayRef = Arc::new(Int64Array::from(vec![None, Some(1_i64)]));
     let batch = batch_with_group(col);
     let ctx = TransformContext::default();
-    group_partition_multi(&batch, &["g".to_string()], "T", NullKeyPolicy::Skip, &ctx)
+    group_partition_multi(&batch, &["g".to_string()], "stat_bin", NullKeyPolicy::Skip, &ctx)
         .unwrap();
-    assert!(ctx.warnings.borrow().is_empty(), "a partially-null key column is not a degrade");
+    let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+    assert_eq!(said, ["Bin: 1 row has a null 'g' and belongs to no group, so it was dropped; fill or filter the nulls in 'g'"]);
+    let fallback = TransformContext::default();
+    group_partition_multi(&batch, &["g".to_string()], "Smooth", NullKeyPolicy::SkipWithWholeBatchFallback, &fallback)
+        .unwrap();
+    let said: Vec<String> = fallback.warnings.borrow().iter().map(|w| w.to_string()).collect();
+    assert_eq!(said, ["Smooth: 1 row has a null 'g' and belongs to no group, so it was dropped; fill or filter the nulls in 'g'"]);
+}
+
+/// `Impute`'s own [`NullKeyPolicy::FillFromWholeBatch`] is the one
+/// exemption: it keeps and fills a null-keyed row rather than dropping it,
+/// so a partly null-keyed batch pushes no count.
+#[test]
+fn fill_from_whole_batch_counts_no_partial_drop() {
+    pyo3::Python::initialize();
+    let col: ArrayRef = Arc::new(Int64Array::from(vec![None, Some(1_i64)]));
+    let batch = batch_with_group(col);
+    let ctx = TransformContext::default();
+    group_partition_multi(&batch, &["g".to_string()], "data_impute", NullKeyPolicy::FillFromWholeBatch, &ctx)
+        .unwrap();
+    assert!(ctx.warnings.borrow().is_empty());
 }
 
 /// MULTI-COLUMN, the shape that separates the policies (review finding
@@ -817,6 +843,101 @@ fn multi_column_all_null_dimension_warns_only_when_grouping_really_failed() {
         ctx.warnings.borrow().is_empty(),
         "grouping succeeded, so nothing degraded; got {:?}",
         ctx.warnings.borrow()
+    );
+}
+
+/// `smooth`/`robust`/`logistic`/`glm`'s all-null fallback
+/// pools the whole batch into one group, keyed by [`pooled_group_key`].
+/// The dimension that is itself entirely null (`a`) is nulled; a dimension
+/// that is CONSTANT across the whole batch (`b`, every row the SAME real
+/// value `"q"`) keeps that value. This is the shape a faceted statistic's
+/// `groupby` takes once Python folds the facet field in beside the color
+/// field (`_statistic_groupby`): the facet field is never actually null —
+/// it is the one constant value this partition was filtered to — so it
+/// must not be nulled along with the color field, or the pooled group's
+/// facet value would match no panel. A column that VARIES, even though it
+/// is never null, is a different case `pooled_group_key_nulls_a_varying_column`
+/// covers below: being non-null everywhere is necessary but not sufficient
+/// to keep a value.
+#[test]
+fn pooled_group_key_keeps_a_genuinely_constant_dimension() {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Utf8, true),
+        Field::new("b", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![None, None, None] as Vec<Option<&str>>)) as ArrayRef,
+            Arc::new(StringArray::from(vec!["q", "q", "q"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let key = pooled_group_key(&batch, &["a".to_string(), "b".to_string()]).unwrap();
+    assert_eq!(
+        key,
+        vec![KeyValue::Null, KeyValue::Str("q".into())],
+        "only 'a' (genuinely all-null) is nulled; 'b' is constant, so it keeps its real value"
+    );
+}
+
+/// A column that VARIES — never null itself, but not the same value on
+/// every row — must null out too: the pooled fit covers every row whatever
+/// `b` says for it, so no single value of `b` (not even its first) is a
+/// fact about the pooled group: `mark_smooth(color='g', detail='h')` with
+/// `h` all null and `g` holding both `"A"` and `"B"` must not draw a
+/// one-entry `"A"` legend for a fit that pools rows from both groups.
+#[test]
+fn pooled_group_key_nulls_a_varying_column() {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Utf8, true),
+        Field::new("b", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![None, None, None, None] as Vec<Option<&str>>)) as ArrayRef,
+            Arc::new(StringArray::from(vec!["A", "A", "B", "B"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let key = pooled_group_key(&batch, &["a".to_string(), "b".to_string()]).unwrap();
+    assert_eq!(
+        key,
+        vec![KeyValue::Null, KeyValue::Null],
+        "'b' varies (A and B both appear), so it must null out rather than keep 'A'"
+    );
+}
+
+/// Alternating nulls across TWO columns: `h` is null on even rows and real
+/// on odd rows; `k` is the opposite. Neither column is entirely null, so
+/// the old (cycle-6b) rule kept each one's first non-null value — `h`'s
+/// from row 1, `k`'s from row 0 — stamping the pooled fit `(h="P", k="Q")`,
+/// a combination no row in the batch actually has. Both must null out: `h`
+/// is null on SOME rows (not constant, and not entirely null either), and
+/// so is `k`.
+#[test]
+fn pooled_group_key_nulls_both_columns_under_alternating_nulls() {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("h", DataType::Utf8, true),
+        Field::new("k", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![None, Some("P"), None, Some("P")])) as ArrayRef,
+            Arc::new(StringArray::from(vec![Some("Q"), None, Some("Q"), None])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let key = pooled_group_key(&batch, &["h".to_string(), "k".to_string()]).unwrap();
+    assert_eq!(
+        key,
+        vec![KeyValue::Null, KeyValue::Null],
+        "neither column is constant or entirely null, so neither may keep a value: (P, Q) matches no row"
     );
 }
 

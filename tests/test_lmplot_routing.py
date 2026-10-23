@@ -50,9 +50,10 @@ only shape that forwards nothing
 `order` raises a typed `ValueError`, not an untyped PyO3 `OverflowError`
 (`test_negative_order_raises_typed_value_error`).
 
-A dedicated method's pooled fit stays neutral whatever door colors the
-scatter: `test_dedicated_method_hue_pools_fit_but_colors_scatter` pins `hue=`,
-and `test_dedicated_method_color_channel_pools_fit_but_colors_scatter` is one
+A dedicated method fits one curve per group of the scatter's color, in that
+group's color, whatever door colors it:
+`test_dedicated_method_hue_fits_each_group_in_its_color` pins `hue=`, and
+`test_dedicated_method_color_channel_fits_each_group_in_its_color` is one
 matrix over every channel `ferrum.encoding._aliases._ENCODING_ALIASES`
 resolves onto `color` (`color` directly, `fill`/`stroke` via the alias table)
 x both doors (bare keyword, `encode={...}` dict) x all three dedicated
@@ -214,39 +215,36 @@ def test_regplot_routes_dedicated_methods_through_lmplot(binary_xy_df, curved_xy
 
 
 # ---------------------------------------------------------------------------
-# hue= on a dedicated method: scatter is colored per group, the pooled fit is
-# NOT (commit d787dbc0). The assertion reads the fit's stroke color, since a
-# `polyline count == 1` check passes equally whether that color is honest or
-# misleading.
+# hue= on a dedicated method: one fit per group, each in its group's scatter
+# color. The assertion reads each fit's stroke color, since a polyline count
+# alone passes whether the fits are colored honestly or not.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("method", _DEDICATED_FIT_METHODS)
-def test_dedicated_method_hue_pools_fit_but_colors_scatter(binary_xy_df, curved_xy_df, method):
-    """`logistic`/`glm`/`robust` have no `groupby` on their Rust transform,
-    so `hue=` must still color the scatter per group (real capability) while
-    the fit line renders in a neutral stroke distinct from every hue-level
-    color (honest disclosure of the pooled fit -- not a per-group fit
-    impersonating one group's color)."""
-    df = binary_xy_df if method == "logistic" else curved_xy_df
-    df = df.with_columns(pl.Series("g", ["a" if i % 2 == 0 else "b" for i in range(df.height)]))
-    svg = fm.lmplot(df, x="x", y="y", method=method, hue="g").to_svg()
+def _grouped(df: pl.DataFrame) -> pl.DataFrame:
+    """*df* with a two-level group ``g`` alternating over its rows."""
+    return df.with_columns(pl.Series("g", ["a" if i % 2 == 0 else "b" for i in range(df.height)]))
+
+
+def _assert_one_fit_per_group_in_its_color(svg: str) -> None:
     assert "NaN" not in svg
-    assert svg.count("<polyline") == 1, "exactly one pooled fit line, not one per group"
-
+    assert svg.count("<polyline") == 2, "one fit line per group"
     scatter_fills = _circle_fills(svg)
-    assert len(scatter_fills) == 2, (
-        f"expected 2 distinct hue-level scatter colors, got {scatter_fills}"
-    )
+    assert len(scatter_fills) == 2, f"expected 2 group colors on the scatter, got {scatter_fills}"
+    assert _polyline_strokes(svg) == scatter_fills, "each fit draws its group's scatter color"
 
-    fit_strokes = _polyline_strokes(svg)
-    assert len(fit_strokes) == 1
-    (fit_stroke,) = fit_strokes
-    assert fit_stroke not in scatter_fills, (
-        f"pooled fit stroke {fit_stroke!r} must not equal any hue-level "
-        f"scatter color {scatter_fills} -- that would misrepresent the "
-        "pooled fit as one group's fit"
-    )
+
+@pytest.mark.parametrize("method", _DEDICATED_FIT_METHODS)
+def test_dedicated_method_hue_fits_each_group_in_its_color(binary_xy_df, curved_xy_df, method):
+    """`logistic`/`glm`/`robust` fit one curve per hue level, each drawn in
+    that level's scatter color, as the `mark_smooth`-routed methods do.
+
+    Rejects one pooled fit over every group (one polyline) and a fit drawn
+    in a color no group has."""
+    df = _grouped(binary_xy_df if method == "logistic" else curved_xy_df)
+    chart = fm.lmplot(df, x="x", y="y", method=method, hue="g")
+    _assert_one_fit_per_group_in_its_color(chart.to_svg())
+    assert '"groupby":["g"]' in chart.to_spec().to_json().replace(" ", "")
 
 
 def test_dedicated_method_hue_absent_keeps_default_accent_stroke(curved_xy_df):
@@ -259,51 +257,30 @@ def test_dedicated_method_hue_absent_keeps_default_accent_stroke(curved_xy_df):
 
 # ---------------------------------------------------------------------------
 # color= / fill= / stroke=, each via a keyword or an encode={...} dict, on a
-# dedicated method: the SAME pooled-fit impersonation as hue= reaches through
-# every channel `ferrum.encoding._aliases._ENCODING_ALIASES` resolves onto
-# `color` (commit d787dbc0). The population is derived from the alias table,
-# not hand-listed keys, so an alias door (`fill=`, `stroke=`) cannot be missed.
-# One parametrized matrix over {color, fill, stroke} x {keyword, encode=} --
-# `hue=`
-# keeps its own dedicated test above since it has no `encode=` counterpart
-# (`hue` is not a `Chart.encode()` channel; `encode={"hue": ...}` would hit
-# the unbucketed-channel warn_once safety net, not set color).
+# dedicated method: every channel `ferrum.encoding._aliases._ENCODING_ALIASES`
+# resolves onto `color` groups the fit as `hue=` does. The population is
+# derived from the alias table, not hand-listed keys, so an alias door
+# (`fill=`, `stroke=`) cannot be missed. `hue=` keeps its own test above
+# since it has no `encode=` counterpart (`hue` is not a `Chart.encode()`
+# channel).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("method", _DEDICATED_FIT_METHODS)
 @pytest.mark.parametrize("form", ["keyword", "encode"])
 @pytest.mark.parametrize("channel", ["color", "fill", "stroke"])
-def test_dedicated_method_color_channel_pools_fit_but_colors_scatter(
+def test_dedicated_method_color_channel_fits_each_group_in_its_color(
     binary_xy_df, curved_xy_df, channel, form, method
 ):
-    """Same contract as `test_dedicated_method_hue_pools_fit_but_colors_scatter`
+    """Same contract as `test_dedicated_method_hue_fits_each_group_in_its_color`
     for every (channel, form) door the alias policy resolves onto `color`:
-    `color` renders directly; `fill`/`stroke` resolve via
-    `_ENCODING_ALIASES`. Each channel is exercised both as a bare keyword
-    (arrives via `**encode_kwargs`, merged into `enc`) and as
-    `encode={channel: ...}` (a separate dict `_finalize_chart` applies
-    later) -- neither form sets `hue is not None` or the literal `"color"`
-    key round 3's gate tested."""
-    df = binary_xy_df if method == "logistic" else curved_xy_df
-    df = df.with_columns(pl.Series("g", ["a" if i % 2 == 0 else "b" for i in range(df.height)]))
+    a bare keyword (merged into the scatter's encoding) and
+    `encode={channel: ...}` (applied to the whole figure) both group the
+    fit, so neither door leaves one pooled curve beside a colored scatter."""
+    df = _grouped(binary_xy_df if method == "logistic" else curved_xy_df)
     kwargs = {"encode": {channel: "g"}} if form == "encode" else {channel: "g"}
-    svg = fm.lmplot(df, x="x", y="y", method=method, **kwargs).to_svg()
-    assert "NaN" not in svg
-    assert svg.count("<polyline") == 1, "exactly one pooled fit line, not one per group"
-
-    scatter_fills = _circle_fills(svg)
-    assert len(scatter_fills) == 2, (
-        f"expected 2 distinct {channel}-level scatter colors via {form} "
-        f"{channel}=, got {scatter_fills}"
-    )
-    fit_strokes = _polyline_strokes(svg)
-    assert len(fit_strokes) == 1
-    (fit_stroke,) = fit_strokes
-    assert fit_stroke not in scatter_fills, (
-        f"pooled fit stroke {fit_stroke!r} (via {form} {channel}=) must not "
-        f"equal any {channel}-level scatter color {scatter_fills} -- that "
-        "would misrepresent the pooled fit as one group's fit"
+    _assert_one_fit_per_group_in_its_color(
+        fm.lmplot(df, x="x", y="y", method=method, **kwargs).to_svg()
     )
 
 

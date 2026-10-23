@@ -639,15 +639,18 @@ class StatisticalMarksMixin:
             any palette longer than the actual number of categories
             elsewhere; ``colors[0]`` itself is visible for any dataset
             with at least one real depth level.  This is depth-band
-            coloring, not a seaborn-style hue mapping -- **boxen has no
-            hue channel today** (hue-vs-palette support is tracked
-            frontier work, out of scope here), and ``palette`` does not
-            interact with ``color_field`` (which only changes the
-            groupby, not color).  A chart-level ``.encode(color=...)``
-            channel does conflict with ``palette`` (the color encoding
-            always overrides a layer's fill), so combining the two raises
-            ``ValueError`` -- drop the color encoding, or drop
-            ``palette=``.  ``None`` (the default) keeps the opacity-ramp
+            coloring, not a seaborn-style hue mapping, and ``palette``
+            does not interact with ``color_field`` (which only changes the
+            category, not color).  The chart's color, under any
+            spelling (``color=``, ``fill=`` or ``stroke=``) and whether
+            bound on the chart or on a composition it is part of, is the
+            hue: the letter values are computed per category and hue, and
+            each hue's bands and outliers draw in its color, placed within
+            the category as ``mark_boxplot`` places its hue boxes (a
+            ``Dodge`` position dodges both alike).  It conflicts with
+            ``palette`` (the color encoding always overrides a layer's
+            fill), so combining the two raises ``ValueError`` -- drop the
+            color binding, or drop ``palette=``.  ``None`` (the default) keeps the opacity-ramp
             shading applied to the ordinary mark-color resolution (an
             explicit ``fill=`` override, else the chart's ``color``
             encoding through the theme's categorical palette, else the

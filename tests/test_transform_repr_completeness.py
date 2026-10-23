@@ -573,6 +573,7 @@ ROWS: list[Row] = [
             ci=0.83,
             max_iter=37,
             tol=3e-5,
+            groupby=["lo_g"],
             name="lo_nm",
         ),
         dict(
@@ -582,6 +583,7 @@ ROWS: list[Row] = [
             ci="ci=Some(0.83)",
             max_iter="max_iter=37",
             tol="tol=0.00003",
+            groupby='groupby=["lo_g"]',
             name='name=Some("lo_nm")',
         ),
     ),
@@ -596,6 +598,7 @@ ROWS: list[Row] = [
             ci=0.83,
             max_iter=37,
             tol=3e-5,
+            groupby=["gl_g"],
             name="gl_nm",
         ),
         dict(
@@ -607,6 +610,7 @@ ROWS: list[Row] = [
             ci="ci=Some(0.83)",
             max_iter="max_iter=37",
             tol="tol=0.00003",
+            groupby='groupby=["gl_g"]',
             name='name=Some("gl_nm")',
         ),
     ),

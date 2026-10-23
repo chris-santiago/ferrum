@@ -1803,7 +1803,7 @@ ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
               method="lm",           # "lm" | "loess" | "quadratic" | "cubic" | "log" | "sqrt" | "gam" | "logistic" | "glm" | "robust"
               ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,
               truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
-              logx=False, show_metrics=True,
+              logx=False, show_metrics=None,
               mark=None, encode=None, properties=None, layers=None,
               theme=None, **encode_kwargs)
 
@@ -1811,12 +1811,12 @@ ferrum.regplot(data, *, x, y, hue=None,
                method="lm",          # same as lmplot
                ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,
                truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
-               logx=False, show_metrics=True,
+               logx=False, show_metrics=None,
                mark=None, encode=None, properties=None, layers=None,
                theme=None, **encode_kwargs)
 
 ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
-                 dropna=True, show_metrics=True, zero_line=True,
+                 dropna=True, show_metrics=None, zero_line=True,
                  label=None, color=None,
                  mark=None, encode=None, properties=None, layers=None,
                  theme=None, **encode_kwargs)
@@ -1832,7 +1832,7 @@ ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
 - `x_bins=`/`x_estimator=` pre-aggregate the fit input on every `mark_smooth`-routed method (`x_estimator` defaults to the transform's `"mean"` and is checked against `fm.Smooth`'s vocabulary). The three dedicated methods refuse either one alone: `lmplot(method='robust', x_bins=...) is not supported -- the 'robust' transform has no x_bins/x_estimator binning parameters ...`.
 - `x_jitter=` jitters the scatter along x; an integer predictor is widened to float first, so it works on any numeric dtype.
 - `logx=True` puts a log scale on the x channel every layer shares. A channel that already carries its own `scale=` refuses: `lmplot(logx=True, x=<channel with its own scale=>): two instructions for one x scale. Keep your scale= and drop logx=True, or pass x as a column name and let logx set the log scale.`
-- `show_metrics=True` adds a top-right corner annotation with `R²` / `RMSE` / `MAE`, computed in Rust, for every `mark_smooth`-routed method and `"robust"`. It is skipped for `"logistic"`/`"glm"` and whenever `hue=` is set.
+- `show_metrics=None` (the default, unset) adds a top-right corner annotation with `R²` / `RMSE` / `MAE`, computed in Rust, for every `mark_smooth`-routed method and `"robust"`, for one ungrouped fit, and drops it silently under any grouping (`hue=`, or a grouping channel bound as a keyword or through `encode=`); it is always skipped for `"logistic"`/`"glm"`, which expose no metrics. `show_metrics=True` draws it ungrouped the same way and, under a grouping that leaves no single fit to describe, warns instead of silently drawing nothing. `show_metrics=False` never draws it and never warns.
 - `x=` and `y=` take a column name or an encoding object wrapping one, on every method; the channel's `title=`/`scale=` survive. `None` raises `lmplot(x=None): x names the column to fit and has no default. Pass a column name, or an encoding object wrapping one.`
 
 **Hue and pooled fits.** For the `mark_smooth`-routed methods, `hue=` (typed nominal) refits per level, each fit and band in its level's color. `"logistic"`, `"glm"` and `"robust"` fit one curve pooled across all rows; when any channel that resolves to `color` is active (`hue=`, or `color=`/`fill=`/`stroke=` as a keyword or in `encode=`), the scatter is colored per level and the pooled fit and band draw in a neutral color.
@@ -1841,7 +1841,7 @@ ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
 
 **`regplot`** is `lmplot` without faceting: every other parameter is forwarded to `lmplot` unchanged, and its refusals read as `lmplot`'s. `col=` or `row=` raises `TypeError: regplot(col=...) is not supported -- regplot is the axes-level regression plot and does not facet. Use lmplot(..., col=...) instead.` The grammar-level `facet=` encoding channel stays available, as on any `Chart`.
 
-**`residplot`** fits `Smooth(method="lm", degree=order)` (or `Robust` with `robust=True`) in residual mode and plots `(x, residual)` with `mark_point`. Its axes are titled with the caller's x column and `"<y> residual"`. `dropna=True` drops rows null in `x` or `y` first. `zero_line=True` adds a dashed rule at 0; `lowess=True` overlays a LOESS curve of the residuals; `show_metrics=True` adds the corner `R²` / `RMSE` / `MAE`. Layer names are `"point"`, `"reference"`, `"metrics"` and `"lowess"`. `x=`/`y=` take a column name or an encoding object and refuse `None` as `lmplot` does, voiced `residplot`.
+**`residplot`** fits `Smooth(method="lm", degree=order)` (or `Robust` with `robust=True`) in residual mode and plots `(x, residual)` with `mark_point`. Its axes are titled with the caller's x column and `"<y> residual"`. `dropna=True` drops rows null in `x` or `y` first. `zero_line=True` adds a dashed rule at 0; `lowess=True` overlays a LOESS curve of the residuals; `show_metrics=` (`None`/`True`/`False`, same semantics as `lmplot`'s) adds the corner `R²` / `RMSE` / `MAE`. The chart is layered whenever any of these overlays is requested, so a grouping bound after the call (`.encode(color=...)`, or a composition it becomes part of) rebuilds it layer for layer; the point layer binds every `encode=` binding itself, so its interactive tooltip keeps them. Layer names are `"point"`, `"reference"`, `"metrics"` and `"lowess"`. `x=`/`y=` take a column name or an encoding object and refuse `None` as `lmplot` does, voiced `residplot`.
 
 - **`color=`** is checked against the input frame's columns first. A column name groups the residuals: the fit is refit per group, the points and the lowess overlay (one curve per group) color by it, and the corner metrics are suppressed. Otherwise the value is parsed as a literal color (CSS name, hex, `rgb()`/`rgba()`, RGB tuple) and painted as the points' `fill`, never as a color encoding. A value that is neither raises `residplot(color='x'): not a column of the data and not a parseable color. As a column name it would group the data, ...; as a literal color it would paint the marks, but the color parser refused it (...)`.
 - **`label=`** adds a single legend entry through a private `_label` column. It composes with `robust=True`, with a grouping `color=`, and with a literal `color=` (the swatch and the points take that color). It keeps the corner metrics. A frame that already has a `_label` column refuses: `residplot(label=...) needs a private '_label' column, but the data already has one -- the label would overwrite it silently. ...`

@@ -103,16 +103,6 @@ def _contour_twin(dtype: pl.DataType) -> pl.DataFrame:
     ).with_columns(pl.col("grp").cast(dtype))
 
 
-# boxen's bands and outlier points draw the letter-value statistic's rows,
-# which do not carry the hue column, so each drops the hue with a warning and
-# no layer draws it (an independent fact of boxen, not of hue typing).
-_CATPLOT_BOXEN_HUE_WARNINGS = [
-    f"catplot: color 'grp' was dropped: the statistic this {mark} mark draws "
-    "does not carry 'grp', so it draws without color"
-    for mark in ("rect", "point")
-]
-
-
 def _assert_dtype_parity(build, *, frame=_twin, expected_warnings=()) -> str:
     """Render *build* over the Int64 and Utf8 twins and require agreement.
 
@@ -180,7 +170,6 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
             "category's center and are not dodged per hue group; use "
             'Chart.mark_violin(inner="none") to drop the inner mark'
         ],
-        "boxen": _CATPLOT_BOXEN_HUE_WARNINGS,
     }.get(kind, [])
     _assert_dtype_parity(build, expected_warnings=expected_warnings)
 
@@ -341,9 +330,10 @@ def test_relplot_line_hue_renders_one_polyline_per_group() -> None:
     ("figure", "kwargs"),
     [
         ("catplot", {"x": "cat", "y": "y", "kind": "bar"}),
+        ("catplot", {"x": "cat", "y": "y", "kind": "boxen"}),
         ("displot", {"x": "x", "kind": "hist"}),
     ],
-    ids=["catplot-bar", "displot-hist"],
+    ids=["catplot-bar", "catplot-boxen", "displot-hist"],
 )
 def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs: dict) -> None:
     """A two-value group column gets two swatches, never a 0..1 colorbar.
@@ -356,16 +346,6 @@ def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs
     assert len(legend_labels(svg)) == 2, (
         f"expected a two-entry swatch legend, got {legend_labels(svg)}"
     )
-
-
-def test_a_boxen_hue_no_layer_draws_gets_neither_a_swatch_legend_nor_a_colorbar() -> None:
-    """No boxen layer draws the hue, so neither dtype draws a legend of any kind."""
-    svg = _assert_dtype_parity(
-        lambda df: fm.catplot(df, x="cat", y="y", kind="boxen", hue="grp"),
-        expected_warnings=_CATPLOT_BOXEN_HUE_WARNINGS,
-    )
-    assert legend_labels(svg) == []
-    assert not has_colorbar(svg)
 
 
 # ---------------------------------------------------------------------------

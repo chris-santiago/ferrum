@@ -545,7 +545,7 @@ fn logistic_outputs_match_shared_fit_schema() {
     pyo3::Python::initialize();
     use crate::transform::logistic::LogisticSpec;
     let spec =
-        LogisticSpec { x: "x".into(), y: "y".into(), n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, name: None };
+        LogisticSpec { x: "x".into(), y: "y".into(), n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None };
     // Non-separable y (not monotone in x) — a perfectly-separable fixture
     // trips `fit_irls`'s perfect-separation guard and errors instead of
     // fitting, which isn't what this schema check is after.
@@ -568,6 +568,7 @@ fn glm_outputs_match_shared_fit_schema() {
         ci: None,
         max_iter: 25,
         tol: 1e-8,
+        groupby: Vec::new(),
         name: None,
     };
     let batch = f64_batch(&[("x", &[0.0, 1.0, 2.0, 3.0, 4.0]), ("y", &[0.0, 2.0, 4.0, 6.0, 8.0])]);
@@ -919,11 +920,11 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
             name: None, sort: None,
         })),
         ("logistic", Logistic(LogisticSpec {
-            x: "x".into(), y: "y".into(), n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, name: None,
+            x: "x".into(), y: "y".into(), n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         })),
         ("glm", Glm(GlmSpec {
             x: "x".into(), y: "y".into(), family: GlmFamily::Gaussian, link: GlmLink::Identity,
-            n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, name: None,
+            n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         })),
         ("robust", Robust(RobustSpec {
             x: "x".into(), y: "y".into(), n_grid: 10, ci: None, huber_c: 1.345, max_iter: 25,

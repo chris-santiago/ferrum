@@ -152,6 +152,7 @@ def desugar_boxplot(
     y_sort: Any = None,
     x_type: str | None = None,
     y_type: str | None = None,
+    grouping: Sequence[str] = (),
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Box-plot composite mark desugar.
@@ -226,6 +227,13 @@ def desugar_boxplot(
         composite-mark expansion. ``None`` means they declared none, in which
         case the categorical channel defaults to Nominal so an ``Int64``
         category column bands exactly as its ``Utf8`` equivalent does (#171).
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. ``BoxStats`` and ``Outliers`` group by
+        each one the categorical axis and hue do not already name, so each
+        group gets its own box and its rows carry the field the layers
+        inherit from the chart.
 
     Returns
     -------
@@ -265,7 +273,7 @@ def desugar_boxplot(
     # categorical axis. When color encodes the same field as cat (e.g.
     # color="cat:N"), adding it to groupby would create a duplicate entry
     # that the Rust BoxStats transform rejects.
-    groupby, split_hue = resolve_color_groupby(cat, color_field, [cat])
+    groupby, split_hue = resolve_color_groupby(cat, color_field, [cat], grouping)
 
     transforms = [
         BoxStats(
@@ -418,6 +426,7 @@ def desugar_errorbar(
     color_sort: Any = None,
     x_sort: Any = None,
     x_type: str | None = None,
+    grouping: Sequence[str] = (),
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-bar composite mark desugar.
@@ -480,6 +489,13 @@ def desugar_errorbar(
         category column bands exactly as its ``Utf8`` equivalent does (#171).
         There is no ``y_type``, for the same reason there is no ``y_sort``:
         this mark's categorical axis is always x.
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. ``ErrorExtent`` groups by each one the
+        categorical axis and hue do not already name, so each group gets
+        its own bar and its rows carry the field the layers inherit from
+        the chart, as ``mark_boxplot`` groups its boxes.
 
     Returns
     -------
@@ -507,7 +523,7 @@ def desugar_errorbar(
     # Errorbar always uses x_field as the categorical grouping axis.
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
-    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field], grouping)
     # Typed Nominal unless the caller declared otherwise (#171): the two
     # endpoint `tick` layers below size their cap against the category band,
     # which a numeric category column's inferred Quantitative scale gives them
@@ -583,6 +599,7 @@ def desugar_errorband(
     color_field: Optional[str] = None,
     color_sort: Any = None,
     x_type: str | None = None,
+    grouping: Sequence[str] = (),
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
@@ -641,6 +658,12 @@ def desugar_errorband(
         aggregates by, and the ribbon it draws needs no band geometry. So a
         caller who declares ``"x:N"`` gets an ordinal axis, and a caller who
         declares nothing gets exactly the binding this mark emitted before.
+    grouping : sequence of str, default ()
+        The chart's grouping fields (its color, detail, shape and
+        stroke_dash fields, then its facet fields), injected by the
+        composite-mark expansion. ``ErrorExtent`` groups by each one x and
+        the hue do not already name, so each group gets its own band and
+        its rows carry the field the layers inherit from the chart.
 
     Returns
     -------
@@ -667,7 +690,7 @@ def desugar_errorband(
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
-    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field], grouping)
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
@@ -1102,6 +1125,7 @@ def desugar_boxen(
     y_type: str | None = None,
     boxen_agg_sort: dict | None = None,
     materialized_depth: int | None = None,
+    grouping: Sequence[str] = (),
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Letter-value (boxen) composite mark.
@@ -1164,23 +1188,30 @@ def desugar_boxen(
     top) -- the only way the nesting stays visible once the alpha-blended
     ramp is gone; the ``palette=None`` branch below keeps its original
     ascending-``k`` layer order untouched (and stays byte-identical). This
-    is depth-band coloring, not a seaborn-style hue mapping -- boxen has
-    **no hue channel today** (hue-vs-palette support is the tracked
-    violin-hue frontier work, out of scope here), and ``palette`` does not
-    interact with ``color_field`` (which only changes the ``LetterValue``
-    groupby, not color -- every band still renders in one theme color at
-    ramp opacities, or the flat palette fill, regardless of
-    ``color_field``). A chart-level ``.encode(color=...)`` channel *does*
-    conflict with ``palette``: the renderer's color-encoding resolution
+    is depth-band coloring, not a seaborn-style hue mapping, and
+    ``palette`` does not interact with ``color_field`` (which only changes
+    the ``LetterValue`` category, not color -- every band still renders in
+    one theme color at ramp opacities, or the flat palette fill,
+    regardless of ``color_field``).
+
+    ``grouping`` is the chart's grouping fields (its color, detail, shape
+    and stroke_dash fields, then its facet fields), injected by the
+    composite-mark expansion. ``LetterValue`` computes one set of letter
+    values per category and group (its ``groupby``), and every batch it
+    publishes carries each grouping field under its own name, so the
+    chart's color (any spelling, on the chart or on a composition it is
+    part of) colors each group's bands and outliers, placed within the
+    category as ``mark_boxplot`` places its hue boxes (a ``Dodge``
+    position dodges both alike). That color *does* conflict with
+    ``palette``: the renderer's color-encoding resolution
     always overrides a layer's ``fill=`` kwarg (the same precedence a
     plain ``fill=`` has under any encoded channel), so combining the two
     would silently drop every band's palette color while still forcing
     opacity to 1.0 -- ``ferrum._desugar._prep_boxen_palette_color_conflict``
     raises a ``ValueError`` for that combination instead of rendering a
     chart where ``palette`` had no visible effect (drop the color
-    encoding, or drop ``palette=``; boxen has no hue channel to fall back
-    to). ``palette=None`` (the default) keeps the opacity-ramp shading
-    applied to the ordinary mark-color resolution (an explicit ``fill=``
+    binding, or drop ``palette=``). ``palette=None`` (the default) keeps
+    the opacity-ramp shading applied to the ordinary mark-color resolution (an explicit ``fill=``
     override, else the chart's ``color`` encoding through the theme's
     categorical palette, else the theme's default ``mark_color``). An
     explicit user ``fill=`` or ``opacity=`` mark kwarg still wins over
@@ -1258,6 +1289,7 @@ def desugar_boxen(
         LetterValue(
             value=val,
             group=group,
+            groupby=list(grouping),
             k_depth=k_depth,
             k_proportion=k_proportion,
             outlier_threshold=outlier_threshold,

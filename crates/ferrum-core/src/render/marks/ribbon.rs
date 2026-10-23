@@ -18,7 +18,8 @@
 //! rows are first partitioned by color category and each group emits its own
 //! closed polygon (mirroring `line.rs`); a binned color (`Color(bin=...)`)
 //! partitions them by bin instead, one band per bin in its bin's color
-//! ([`BinnedColorSeries`]); otherwise all rows form one polygon.
+//! ([`BinnedColorSeries`]); a `detail` (`mark_style.detail`) splits each
+//! color's band further, as the area's; otherwise all rows form one polygon.
 //! Without per-color grouping, multi-series CI bands (e.g. train vs test
 //! learning curves) collapse into a single zigzag polygon stitching across
 //! categories.
@@ -28,7 +29,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
 use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
@@ -163,9 +164,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n = n.min(shared_pixels.len());
 
     let cf = color_field(ctx, spec);
-    // Ribbon only uses color (no detail channel); the helper's detail=None path
-    // resolves to the color-only or fallback arm as appropriate.
-    //
     // col_as_ordinal_category_str (not col_as_str), gated on the resolved
     // color scale being category-keyed (Categorical) or absent — mirrors
     // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
@@ -194,6 +192,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }
     });
     let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
+    // A `detail` splits each color's band as it splits the area's.
+    let detail_values = ctx.mark_style.group.detail.as_deref()
+        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
     // T12 fix round (spec §4.3, amended 2026-09-01): a categorical `stroke_dash`
     // field extends ribbon's series partition key from (color) to (color,
     // stroke_dash-field) — mirrors line.rs's `dash_cols.categorical` wiring
@@ -207,10 +208,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // this round authorizes).
     let dash_cols = stroke_dash_column_loader(ctx);
 
+    let grouping = grouping_series_values(ctx);
     let mut groups = build_color_detail_groups(
         color_values,
-        None,
-        dash_cols.categorical.as_ref(),
+        detail_values.as_ref(),
+        dash_cols.categorical.iter().chain(&grouping),
         ctx.scales.color.is_some(),
         n,
     );

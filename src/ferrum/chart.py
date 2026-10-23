@@ -21,15 +21,19 @@ from ferrum._desugar import _resolve_pending_impl
 from ferrum._layer import _Layer, _PendingMark, inherited_positional_taken
 from ferrum._compose import (
     attach_to_rows,
+    carried_by,
     chart_frames,
     chart_operands,
+    composite_source,
     combined_frames,
     known_chart_data_columns,
     lower_operands,
     merged_frames,
     reached_by_composition,
     refuse_missing_statistic_inputs,
+    regrouped,
 )
+from ferrum._encode_lowering import GROUPING_KEY
 from ferrum._layer_transforms import (
     _Branch,
     _ComposedStep,
@@ -47,6 +51,8 @@ from ferrum._layer_transforms import (
     _statistic_columns,
     _statistics_start,
     _transforms_to_json_list_named,
+    _wire_statistic_grouped_fields,
+    _with_statistics_marker,
 )
 from ferrum._configure_mixin import ConfigureMixin
 from ferrum.marks._chart_methods_diagnostic import DiagnosticMarksMixin
@@ -172,6 +178,47 @@ def _attach_host(chart: "Chart") -> "Chart":
     if any(_advances_chain(t) for t in statistics) and new._written_positional is None:
         new._written_positional = _written_bindings(pre)
     return new
+
+
+def _warn_ignored_details(
+    chart: "Chart",
+    chart_detail: Any,
+    layers: list | None,
+    kw: dict,
+    transforms: list,
+) -> None:
+    """Report each ``detail`` field of *chart* that no mark draws and no statistic groups by.
+
+    Decided once the chart's statistics are lowered, after any composition
+    regrouped its operands, so a detail that groups a composite, an
+    encoding aggregate, a figure's statistic or a label's aggregate is
+    never reported, whatever the call order. *chart_detail* is a layered
+    chart's own detail, *layers* the lowered layers and *kw* the spec
+    keywords built for them (``mark_style`` / ``layers``), and
+    *transforms* the lowered pipeline.
+    """
+    from ferrum.encoding._aliases import _channel_field, warn_ignored_details
+
+    if layers is None:
+        details = [(_channel_field(chart._encoding.get("detail")), chart._mark)]
+        drawn = {kw.get("mark_style", {}).get("detail")}
+    else:
+        details = [(_channel_field(chart_detail), layers[0].mark if layers else None)]
+        for layer in layers:
+            details.append((_channel_field(layer.encoding.get("detail")), layer.mark))
+            grouping = layer.encoding.get(GROUPING_KEY)
+            if grouping is not None:
+                details += [
+                    (_channel_field(binding), layer.mark)
+                    for channel, binding in grouping.bindings
+                    if channel == "detail"
+                ]
+        drawn = {(entry.get("mark_style") or {}).get("detail") for entry in kw.get("layers", [])}
+    details = [(field, mark) for field, mark in details if isinstance(field, str)]
+    if not details:
+        return
+    grouped = _wire_statistic_grouped_fields(_transforms_to_json_list_named(list(transforms)))
+    warn_ignored_details(details, drawn, grouped)
 
 
 def _fill_chart_positional(layers: list, chart: "Chart") -> list:
@@ -1175,6 +1222,10 @@ class Chart(
         "_operands",  # tuple of _Operand — a + composition's operands, left first
         # (ferrum._compose); () on a chart of one operand, read through
         # chart_operands.
+        "_composite_source",  # _CompositeSource or None — the rebuild record of
+        # statistics built before their grouping was known (a composite mark
+        # that resolved early, a figure's), kept so a later .encode() or a
+        # composition it becomes an operand of regroups them (ferrum._compose.regrouped).
         "_frames",  # tuple of frames — the composition's frame registry, each
         # operand frame once, the composition's own first; () on a chart of
         # one operand, read through chart_frames.
@@ -1232,6 +1283,7 @@ class Chart(
         self._figure_caption: Optional[str] = None
         self._written_positional: Optional[dict[str, Any]] = None
         self._operands: tuple = ()
+        self._composite_source = None
         self._frames: tuple = ()
         self._frame_selectors: tuple = ()
 
@@ -1288,18 +1340,28 @@ class Chart(
         On a ``+`` composition, whose data is its left operand's, the
         statistics the mark lowers join that operand's chain, after its own
         statistics, and the layers the mark adds read inside it.
+
+        A chart of one operand keeps the record of its pending mark
+        (``_composite_source``), so a later ``.encode()`` on it, or a
+        composition it becomes an operand of, can build its statistics again
+        under the grouping it binds. Every call ends by regrouping the
+        statistics built before that grouping was known: a chart of one
+        operand under its own grouping bindings, a composition's operands
+        under the composition's (:func:`ferrum._compose.regrouped`).
         """
         resolved = _resolve_pending_impl(self)
-        if resolved is self or not self._operands:
+        if resolved is not self and not self._operands:
+            resolved._composite_source = composite_source(self, resolved)
             return resolved
-        own, lowered = _split_chain(list(resolved._transforms))
-        left = self._operands[0]
-        resolved._operands = (
-            replace(left, statistics=left.statistics + lowered),
-            *self._operands[1:],
-        )
-        resolved._transforms = list(own)
-        return resolved
+        if resolved is not self:
+            own, lowered = _split_chain(list(resolved._transforms))
+            left = self._operands[0]
+            resolved._operands = (
+                replace(left, statistics=left.statistics + lowered),
+                *self._operands[1:],
+            )
+            resolved._transforms = list(own)
+        return regrouped(resolved)
 
     def _has_independent_y_layer(self) -> bool:
         """Return whether any of this chart's layers carry ``independent_y=True``.
@@ -1345,6 +1407,7 @@ class Chart(
         # left for _resolve_pending to run against a mark this call already
         # replaced.
         new._pending_stat_mark = None
+        new._composite_source = None
         # _composite_kind is the other half of that same composite state
         # (_set_composite_mark sets both together); left stale it would
         # still read the replaced composite's name, e.g. _apply_auto_raster
@@ -1395,6 +1458,7 @@ class Chart(
             # and `+` concatenation (chart.py:1516, 1749).
             new._data = data_transform(to_polars(new._data))
         new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
+        new._composite_source = None
         new._position = position
         new._composite_kind = name
         return new
@@ -2510,43 +2574,38 @@ class Chart(
     def _with_statistics(self, *steps, reading: Literal["tail", "rows"] = "tail") -> "Chart":
         """Return a clone running *steps*, statistics a figure lowers for its own layers.
 
-        They run behind the chain's statistics marker, after every step the
-        caller wrote, whether written before or after this call, as a
-        composite mark's statistics do: the rows before them are the
-        caller's, so ``.transform(...)`` and a binned color act on the figure
-        as on a hand-built chart, and a layer reading their output reads a
-        statistic. With ``reading="tail"`` they follow the statistics already
-        there and read their output; with ``"rows"`` they sit right after
-        the marker, so a named step among them reads the caller's rows. On a
-        ``+`` composition, whose data is its left operand's, they join that
-        operand's statistics, as a later pending mark's do. A pending
-        composite mark resolves first, as it does for ``.layer(...)`` and
-        ``+``, so the steps take their place among its statistics by
-        *reading* on every door.
+        They open their own lowering, behind their own statistics marker,
+        as a composite mark's statistics do: with ``reading="rows"`` it sits
+        right after every step the caller wrote, before any marker already
+        in the chain, so a named step among *steps* still reads the
+        caller's rows and acts on the figure as on a hand-built chart; with
+        ``"tail"`` it is appended after every lowering already there, so
+        *steps* read that tail's output. On a ``+`` composition, whose data
+        is its left operand's, they join that operand's statistics the same
+        way, as a later pending mark's do. A pending composite mark resolves
+        first, as it does for ``.layer(...)`` and ``+``, so the steps take
+        their place among its statistics by *reading* on every door.
         """
         if self._pending_stat_mark is not None:
             self = _attach_host(self)
         new = self._clone()
         if self._operands:
             left = self._operands[0]
-            statistics = (
-                (*steps, *left.statistics)
+            at = (
+                _statistics_start(list(left.statistics))
                 if reading == "rows"
-                else (
-                    *left.statistics,
-                    *steps,
-                )
+                else len(left.statistics)
+            )
+            statistics = (
+                *left.statistics[:at],
+                *_with_statistics_marker(list(steps)),
+                *left.statistics[at:],
             )
             new._operands = (replace(left, statistics=statistics), *self._operands[1:])
             return new
         transforms = list(self._transforms)
-        at = _statistics_start(transforms)
-        if at == len(transforms):
-            transforms.append(_StatisticsMarker())
-        if reading == "rows":
-            transforms[at + 1 : at + 1] = steps
-        else:
-            transforms.extend(steps)
+        at = _statistics_start(transforms) if reading == "rows" else len(transforms)
+        transforms[at:at] = _with_statistics_marker(list(steps))
         new._transforms = transforms
         return new
 
@@ -2671,6 +2730,8 @@ class Chart(
         lhs = lhs_in._resolve_pending()
         rhs = rhs_in._resolve_pending()
         new = lhs._clone()
+        # The composition's statistics are its operands'.
+        new._composite_source = None
         # Read before resolution, so a pending composite's written x/y are kept
         # and a composed left passes its own record on.
         new._written_positional = _written_bindings(lhs_in)
@@ -2792,10 +2853,17 @@ class Chart(
         lhs_layers = _reading_operand_tail(lhs_layers)
         # The operands: the LHS's, then the RHS's over the merged frame
         # registry, each RHS layer naming its operand's new place.
+        # A composed operand's encoding, moved onto its layers above, stays
+        # the parent of its operands' composite statistics.
         lhs_operands = chart_operands(lhs)
+        if not host and lhs._operands:
+            lhs_operands = carried_by(lhs_operands, lhs._encoding)
+        rhs_operands = chart_operands(rhs)
+        if rhs._operands:
+            rhs_operands = carried_by(rhs_operands, rhs._encoding)
         frames, moved = merged_frames(chart_frames(lhs_in), chart_frames(rhs_in))
         new._operands = lhs_operands + tuple(
-            replace(op, frame=moved[op.frame]) for op in chart_operands(rhs)
+            replace(op, frame=moved[op.frame]) for op in rhs_operands
         )
         rhs_layers = [replace(l, operand=l.operand + len(lhs_operands)) for l in rhs_layers]
         new._frames = frames
@@ -3714,6 +3782,7 @@ class Chart(
                 ),
                 override=_override_payload,
             )
+        _warn_ignored_details(resolved, chart_detail, serialized_layers, kw, effective_transforms)
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()
         if resolved._title is not None:

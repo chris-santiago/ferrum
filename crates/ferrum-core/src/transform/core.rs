@@ -335,8 +335,6 @@ impl TransformSpec {
                     | Self::Hex(_)
                     | Self::Unpivot(_)
                     | Self::ReferenceLine(_)
-                    | Self::Logistic(_)
-                    | Self::Glm(_)
                     | Self::Identity(_)
                     | Self::Filter(_)
                     | Self::Calculate(_)
@@ -353,6 +351,8 @@ impl TransformSpec {
             Violin => violin,
             Smooth => smooth,
             Robust => robust,
+            Logistic => logistic,
+            Glm => glm,
             RegressionData => regression_data,
             LoessData => loess_data,
             Kde => kde,
@@ -454,6 +454,8 @@ impl TransformSpec {
             Self::Qq(s) => Some(&s.groupby),
             Self::LetterValue(s) => Some(&s.groupby),
             Self::Robust(s) => Some(&s.groupby),
+            Self::Logistic(s) => Some(&s.groupby),
+            Self::Glm(s) => Some(&s.groupby),
             Self::DataStack(s) => Some(&s.groupby),
             Self::Pivot(s) => s.groupby.as_deref(),
             Self::JoinAggregate(s) => s.groupby.as_deref(),
@@ -473,8 +475,6 @@ impl TransformSpec {
             | Self::Unpivot(_)
             | Self::Reorder(_)
             | Self::ReferenceLine(_)
-            | Self::Logistic(_)
-            | Self::Glm(_)
             | Self::Identity(_)
             | Self::Filter(_)
             | Self::Calculate(_)

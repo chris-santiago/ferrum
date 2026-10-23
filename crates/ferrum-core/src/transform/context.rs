@@ -100,10 +100,33 @@ pub(crate) enum TransformWarning {
     /// [`crate::transform::group_key::NullKeyPolicy::all_null_disposition`]'s
     /// text for the policy that call site chose, so what the message says and
     /// what the transform did cannot drift apart.
+    ///
+    /// `rows` is the identity of the rows this call read
+    /// ([`TransformContext::rows`]), not serialized into the Display text —
+    /// it is read only by [`merge_null_key_reports`], together with
+    /// `lowering`, so a composite's own multiple lowered steps over the
+    /// SAME rows (`BoxStats` and `Outliers`, `Violin` and `BoxStats`) report
+    /// once. `lowering` is the id of the statistics marker that opened the
+    /// lowering this call's step belongs to
+    /// ([`TransformContext::lowering`]), `None` for a user-written step or
+    /// any step of a chain or branch with no marker — those never collapse
+    /// against another step, whatever rows they share. `panels` names the
+    /// facet panels a
+    /// [`crate::transform::group_key::NullKeyPolicy::SkipWithWholeBatchFallback`]
+    /// or [`crate::transform::group_key::NullKeyPolicy::FillFromWholeBatch`]
+    /// step pooled, when that is fewer than every panel; empty (the serde
+    /// default) means the whole frame, or every panel, and keeps the
+    /// original whole-frame text.
     GroupKeyAllNull {
         transform: String,
         columns: String,
         disposition: String,
+        #[serde(default)]
+        rows: RowsOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lowering: Option<crate::transform::run::StepId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        panels: Vec<String>,
     },
     /// `rows` rows have a null value in the key `field` and belong to no
     /// panel or group, so the partition `scope` names dropped them.
@@ -115,8 +138,9 @@ pub(crate) enum TransformWarning {
     /// (`layout::FacetRepeat`). For [`NullKeyScope::Groupby`], pushed once
     /// per `groupby` field by
     /// [`crate::transform::group_key::warn_null_groupby_rows_dropped`], for
-    /// the grouped transforms whose `groupby` drops a null key with a
-    /// warning (`LetterValue`, `QQ`).
+    /// every grouped transform whose null-key policy drops a row (`Skip`,
+    /// `SkipWithWholeBatchFallback`, `SkipRefusingEmpty`), plus `LetterValue`'s
+    /// own call.
     NullKeyRowsDropped {
         scope: NullKeyScope,
         field: String,
@@ -124,25 +148,50 @@ pub(crate) enum TransformWarning {
     },
 }
 
-/// Sum the `groupby`-scope [`TransformWarning::NullKeyRowsDropped`] counts
-/// that one transform pushed once per facet panel into one warning per
-/// (transform, field), at the first one's position, so the count the user
-/// reads is the whole frame's, as the facet scope's own count is. Every other
-/// warning passes through unchanged and in order.
-pub(crate) fn merge_partition_null_key_counts(
-    warnings: Vec<TransformWarning>,
-) -> Vec<TransformWarning> {
+/// Fold every `groupby`-scope null-key report into the one voice a facet or
+/// refusal drain reports:
+///
+/// 1. Sum the [`TransformWarning::NullKeyRowsDropped`] counts one transform
+///    STEP pushed once per facet panel into one warning per (step, field),
+///    at the first one's position, so the count the user reads is the whole
+///    frame's, as the facet scope's own count is. Two steps of the same kind
+///    keep their own counts here, as they do on an unfaceted chart.
+/// 2. Collapse the reports of several STEPS of ONE LOWERING that read the
+///    SAME rows under the SAME key — one lowering's own multiple grouped
+///    steps, e.g. `mark_boxplot`'s `BoxStats` and `Outliers`, or
+///    `mark_violin`'s `Violin` and `BoxStats` — keeping the first and
+///    dropping the later steps' identical reports in order: the first
+///    [`TransformWarning::NullKeyRowsDropped`] per
+///    `(lowering, rows, key, field)`, the first
+///    [`TransformWarning::GroupKeyAllNull`] per
+///    `(lowering, rows, columns, disposition, panels)`. `lowering` is
+///    [`TransformContext::lowering`], the id of the statistics marker that
+///    opened the step's lowering; a report whose `lowering` is `None` —
+///    every user-written step, and any step of a chain or branch with no
+///    marker — always passes through, never collapsing against another
+///    report, however its `rows` and `key` compare: two `+` operands' own
+///    statistics, two `Chart.layer` statistics sharing one branch, and two
+///    hand-written named steps sharing a `groupby` over one unadvanced tail
+///    are different lowerings (or none), not one lowering reporting twice.
+///    `rows` is [`TransformContext::rows`], the identity of the rows each
+///    call read — two steps of the SAME lowering producing the SAME
+///    dropped-row count or the SAME all-null condition over DIFFERENT rows
+///    are never collapsed either.
+///
+/// Every other warning passes through unchanged and in order. Called once
+/// per drain, after every all-null settlement for that drain has replaced or
+/// appended its own warnings, so stage 2 sees the final set.
+pub(crate) fn merge_null_key_reports(warnings: Vec<TransformWarning>) -> Vec<TransformWarning> {
     let mut merged: Vec<TransformWarning> = Vec::with_capacity(warnings.len());
-    let mut at: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::new();
+    let mut at: HashMap<(StepInstance, String), usize> = HashMap::new();
     for warning in warnings {
         if let TransformWarning::NullKeyRowsDropped {
-            scope: NullKeyScope::Groupby { transform },
+            scope: NullKeyScope::Groupby { step, .. },
             field,
             rows,
         } = &warning
         {
-            let key = (transform.clone(), field.clone());
+            let key = (step.clone(), field.clone());
             if let Some(&i) = at.get(&key) {
                 if let Some(TransformWarning::NullKeyRowsDropped { rows: total, .. }) =
                     merged.get_mut(i)
@@ -155,6 +204,26 @@ pub(crate) fn merge_partition_null_key_counts(
         }
         merged.push(warning);
     }
+    let mut seen_dropped: std::collections::HashSet<(crate::transform::run::StepId, RowsOrigin, Vec<String>, String)> =
+        std::collections::HashSet::new();
+    let mut seen_all_null: std::collections::HashSet<(crate::transform::run::StepId, RowsOrigin, String, String, Vec<String>)> =
+        std::collections::HashSet::new();
+    merged.retain(|warning| match warning {
+        TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby { lowering: None, .. },
+            ..
+        } => true,
+        TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby { rows, key, lowering: Some(lowering), .. },
+            field,
+            ..
+        } => seen_dropped.insert((lowering.clone(), rows.clone(), key.clone(), field.clone())),
+        TransformWarning::GroupKeyAllNull { lowering: None, .. } => true,
+        TransformWarning::GroupKeyAllNull {
+            columns, disposition, rows, panels, lowering: Some(lowering), ..
+        } => seen_all_null.insert((lowering.clone(), rows.clone(), columns.clone(), disposition.clone(), panels.clone())),
+        _ => true,
+    });
     merged
 }
 
@@ -165,8 +234,122 @@ pub(crate) enum NullKeyScope {
     /// The facet partition: a null facet value belongs to no panel.
     Facet,
     /// A transform's `groupby` partition: a null key belongs to no group.
-    /// `transform` is the transform's Python-facing name.
-    Groupby { transform: String },
+    /// `transform` is the transform's Python-facing name; `step` is the
+    /// pipeline step that dropped the rows, read by
+    /// [`merge_null_key_reports`]'s per-step sum. `rows` is the identity of
+    /// the rows the step read ([`TransformContext::rows`]), `lowering` is
+    /// the id of the marker that opened the step's lowering
+    /// ([`TransformContext::lowering`], `None` outside one), and `key` is
+    /// the full `groupby` field list the step reported against — together
+    /// (`lowering`, `rows`, `key`) the cross-step dedup key: a composite's
+    /// own several grouped steps of ONE lowering, over the same rows and
+    /// key, collapse to the first's report; a step with no `lowering` never
+    /// collapses.
+    Groupby {
+        transform: String,
+        step: StepInstance,
+        #[serde(default)]
+        rows: RowsOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lowering: Option<crate::transform::run::StepId>,
+        #[serde(default)]
+        key: Vec<String>,
+    },
+}
+
+/// Which written step of a pipeline run a transform call belongs to
+/// ([`TransformContext::step`]), so what one step reports in every facet
+/// panel is told apart from what another step of the same kind reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "at", rename_all = "snake_case")]
+pub(crate) enum StepInstance {
+    /// A call outside a pipeline run.
+    #[default]
+    Unplaced,
+    /// The step at this position of its chain; a branch's steps nest under
+    /// the branch's own position.
+    Chain(crate::transform::run::StepId),
+    /// Every copy of one composition step, named by the step's identity
+    /// ([`crate::transform::composed::ComposedSpec::group`]).
+    Composed(String),
+}
+
+/// The identity of a set of rows one call reads: the step that produced
+/// them, and which of that step's outputs — `None` for the step's own tail
+/// or a framed branch's own rows, `Some(name)` for a named step's published
+/// output, a secondary output's own key, or a named composition copy's
+/// published output. Two calls sharing one `RowsOrigin` read the identical
+/// rows; two calls over two DIFFERENT outputs of the SAME step (a named
+/// step's tail and its own secondary output, say) do not, because `output`
+/// tells them apart.
+///
+/// [`crate::transform::run::Lineage::origin`] is the only writer; every
+/// reader (`TransformContext::rows`, [`NullKeyScope::Groupby::rows`],
+/// [`TransformWarning::GroupKeyAllNull::rows`]) just carries the value
+/// forward. `output` is omitted from the wire when absent, so this stays
+/// invisible on every warning variant's own serialization footprint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RowsOrigin {
+    pub(crate) step: StepInstance,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) output: Option<String>,
+}
+
+/// A facet partition in which a step's every `groupby` key was null, so its
+/// null-key drop left no group: the step, and what the same drop gives the
+/// whole frame ([`AllNullOutcome`]). Recorded by the shared partitioner
+/// (`group_key::group_partition_multi`) and by
+/// [`TransformContext::refuse_unless_partition`]; read back by
+/// `render::prepare::run_transforms_with_facet`.
+#[derive(Debug)]
+pub(crate) struct AllNullPartition {
+    pub(crate) step: StepInstance,
+    pub(crate) outcome: AllNullOutcome,
+}
+
+/// Why one fit's rows could not be fit: the reason a degraded group's
+/// warning gives, and the refusal the same rows raise as the whole frame
+/// ([`TransformContext::degrade_group_or_refuse`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Unfittable {
+    pub(crate) reason: String,
+    pub(crate) refusal: String,
+}
+
+impl Unfittable {
+    /// A failure whose refusal is `"{transform}: {reason}"`.
+    pub(crate) fn new(transform: &str, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self { refusal: format!("{transform}: {reason}"), reason }
+    }
+}
+
+impl From<Unfittable> for pyo3::PyErr {
+    fn from(failure: Unfittable) -> Self {
+        pyo3::exceptions::PyValueError::new_err(failure.refusal)
+    }
+}
+
+/// What a step whose every `groupby` key is null gives the whole frame.
+#[derive(Debug)]
+pub(crate) enum AllNullOutcome {
+    /// The transform refuses (QQ, LetterValue): the panel draws empty, and
+    /// the facet run raises the refusal when every panel was emptied.
+    Refused(pyo3::PyErr),
+    /// The grouped output is empty: the panel draws empty, and the facet
+    /// run reports the warning once when every panel was emptied.
+    Emptied(TransformWarning),
+    /// The step fit the panel's whole batch instead (the whole-batch
+    /// fallback): the panel draws that fit, and the facet run reports the
+    /// warning once.
+    Pooled(TransformWarning),
+}
+
+impl AllNullOutcome {
+    /// Whether the partition draws nothing for the step.
+    pub(crate) fn empties(&self) -> bool {
+        !matches!(self, Self::Pooled(_))
+    }
 }
 
 impl std::fmt::Display for TransformWarning {
@@ -206,17 +389,35 @@ impl std::fmt::Display for TransformWarning {
                 Some(g) => write!(f, "{transform}: group {g} {reason}"),
                 None => write!(f, "{transform}: {reason}"),
             },
-            TransformWarning::GroupKeyAllNull { transform, columns, disposition } => write!(
-                f,
-                "{transform}: every row has a null in its groupby key ({columns}), so the data \
-                 could not be split into groups; {disposition}"
-            ),
+            TransformWarning::GroupKeyAllNull { transform, columns, disposition, panels, .. } => {
+                match panels.len() {
+                    0 => write!(
+                        f,
+                        "{transform}: every row has a null in its groupby key ({columns}), so \
+                         the data could not be split into groups; {disposition}"
+                    ),
+                    1 => write!(
+                        f,
+                        "{transform}: every row in facet panel {} has a null in its groupby key \
+                         ({columns}), so that panel's rows could not be split into groups; in \
+                         that panel, {disposition}",
+                        panels[0]
+                    ),
+                    _ => write!(
+                        f,
+                        "{transform}: every row in facet panels {} has a null in its groupby key \
+                         ({columns}), so those panels' rows could not be split into groups; in \
+                         those panels, {disposition}",
+                        panels.join("; ")
+                    ),
+                }
+            }
             TransformWarning::NullKeyRowsDropped { scope, field, rows } => {
                 let (noun, verb, belong, pronoun) =
                     if *rows == 1 { ("row", "has", "belongs", "it was") } else { ("rows", "have", "belong", "they were") };
                 let (speaker, home) = match scope {
                     NullKeyScope::Facet => (format!("facet '{field}'"), "panel"),
-                    NullKeyScope::Groupby { transform } => (transform.clone(), "group"),
+                    NullKeyScope::Groupby { transform, .. } => (transform.clone(), "group"),
                 };
                 write!(
                     f,
@@ -410,6 +611,37 @@ pub struct TransformContext {
     /// ([`crate::transform::group_key::GroupKeyReader`]). `None` keys every
     /// groupby column by its raw values.
     pub(crate) color_bins: Option<Rc<crate::transform::color_bin_group::StepBins>>,
+    /// The pipeline step this context is handed to, set per step by the
+    /// pipeline runner; [`StepInstance::Unplaced`] outside a run.
+    pub(crate) step: StepInstance,
+    /// The identity of the ROWS this call reads, set beside [`Self::step`]
+    /// by the pipeline runner from the input's own lineage (`run::Lineage::origin`).
+    /// Two calls sharing one `rows` value read the identical rows: a
+    /// composite's several lowered steps over one chain tail (`BoxStats`
+    /// and `Outliers`, `Violin` and `BoxStats`) share it, so
+    /// [`merge_null_key_reports`] can tell "one lowering reported twice"
+    /// from "two lowerings over different rows happened to report the same
+    /// count" — together with [`Self::lowering`], since rows identity alone
+    /// cannot tell two DIFFERENT lowerings apart when neither advances the
+    /// chain (two `+` operands over one frame, two `Chart.layer`
+    /// statistics, two hand-written named steps). Defaults to the
+    /// [`RowsOrigin`] of [`StepInstance::Unplaced`] outside a run.
+    pub(crate) rows: RowsOrigin,
+    /// The id of the statistics marker that opened the LOWERING this call's
+    /// step belongs to, set beside [`Self::rows`] by the pipeline runner:
+    /// `Run::chain` records the id of the marker it last met, and
+    /// `Run::step` carries that id into this field only for a step the
+    /// marker actually lowers (the same `lowered` flag `Self::step` already
+    /// gates on). `None` for a user-written step, any step of a chain or
+    /// branch with no marker, and a composition copy
+    /// ([`crate::transform::run::Run::run_copy`]) — these never collapse
+    /// against another step in [`merge_null_key_reports`], whatever rows
+    /// and key they share.
+    pub(crate) lowering: Option<crate::transform::run::StepId>,
+    /// The facet partitions in which a step's every `groupby` key was null,
+    /// shared across every clone of a run's context as [`Self::warnings`]
+    /// is, and read back by `render::prepare::run_transforms_with_facet`.
+    pub(crate) all_null_partitions: Rc<RefCell<Vec<AllNullPartition>>>,
 }
 
 impl TransformContext {
@@ -418,6 +650,47 @@ impl TransformContext {
     /// for why `Rc<RefCell<_>>` is load-bearing here).
     pub(crate) fn warn(&self, warning: TransformWarning) {
         self.warnings.borrow_mut().push(warning);
+    }
+
+    /// Raise `refusal`, the refusal a `groupby` null-key drop that left
+    /// nothing to draw gives the whole frame. Inside a facet partition
+    /// ([`Self::is_partition`]) the call instead records that the drop
+    /// emptied this panel and returns `Ok`, so the step returns its empty
+    /// output: the panel draws empty, and the facet run raises `refusal`
+    /// itself when the step's drop emptied every panel.
+    pub(crate) fn refuse_unless_partition(&self, refusal: pyo3::PyErr) -> pyo3::PyResult<()> {
+        if !self.is_partition {
+            return Err(refusal);
+        }
+        self.record_all_null(AllNullOutcome::Refused(refusal));
+        Ok(())
+    }
+
+    /// One fit's rows cannot be fit ([`Unfittable`]). The whole frame
+    /// (`group` `None`) refuses with the failure's refusal, as an ungrouped
+    /// fit always has; a `groupby` group degrades as `Smooth`'s and
+    /// `Robust`'s groups do: a [`TransformWarning::DegenerateFit`] names the
+    /// group and the reason, and the caller emits that group's empty
+    /// (all-NaN) fit, so the other groups still draw.
+    pub(crate) fn degrade_group_or_refuse(
+        &self,
+        transform: &str,
+        group: Option<&str>,
+        failure: Unfittable,
+    ) -> pyo3::PyResult<()> {
+        let Some(group) = group else { return Err(failure.into()) };
+        self.warn(TransformWarning::DegenerateFit {
+            transform: transform.to_string(),
+            group: Some(group.to_string()),
+            reason: failure.reason,
+        });
+        Ok(())
+    }
+
+    /// Record that this facet partition's every `groupby` key was null for
+    /// the current step, and what the step gives in that case.
+    pub(crate) fn record_all_null(&self, outcome: AllNullOutcome) {
+        self.all_null_partitions.borrow_mut().push(AllNullPartition { step: self.step.clone(), outcome });
     }
 }
 
@@ -433,7 +706,13 @@ mod tests {
                 rows: 1,
             },
             TransformWarning::NullKeyRowsDropped {
-                scope: NullKeyScope::Groupby { transform: "QQ".into() },
+                scope: NullKeyScope::Groupby {
+                    transform: "QQ".into(),
+                    step: StepInstance::Chain(vec![1]),
+                    rows: RowsOrigin { step: StepInstance::Chain(vec![0]), output: None },
+                    lowering: Some(vec![0]),
+                    key: vec!["h".into()],
+                },
                 field: "h".into(),
                 rows: 3,
             },
@@ -479,6 +758,25 @@ mod tests {
                 transform: "Aggregate".into(),
                 columns: "g".into(),
                 disposition: "the grouped output is empty".into(),
+                rows: RowsOrigin::default(),
+                lowering: None,
+                panels: Vec::new(),
+            },
+            TransformWarning::GroupKeyAllNull {
+                transform: "Smooth".into(),
+                columns: "h".into(),
+                disposition: "the whole batch was used as one ungrouped computation instead".into(),
+                rows: RowsOrigin { step: StepInstance::Chain(vec![0]), output: None },
+                lowering: Some(vec![0]),
+                panels: vec!["f=F2".into()],
+            },
+            TransformWarning::GroupKeyAllNull {
+                transform: "Smooth".into(),
+                columns: "h".into(),
+                disposition: "the whole batch was used as one ungrouped computation instead".into(),
+                rows: RowsOrigin { step: StepInstance::Chain(vec![0]), output: Some("fitted".into()) },
+                lowering: Some(vec![0]),
+                panels: vec!["f=F2".into(), "f=F3".into()],
             },
         ]
     }
@@ -587,6 +885,165 @@ mod tests {
         });
         assert_eq!(a.warnings.borrow().len(), 1);
         assert_eq!(b.warnings.borrow().len(), 0, "independent contexts must not share a sink");
+    }
+
+    /// One step's per-panel null-key counts sum into one warning; a second
+    /// step of the same kind, over rows of its own, keeps its own count,
+    /// beside the first. The rejected alternative keys the sum by the
+    /// transform's name and folds both steps into one warning.
+    #[test]
+    fn null_key_counts_merge_per_step_never_per_transform_name() {
+        let dropped = |step: usize, rows: usize| TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby {
+                transform: "QQ".into(),
+                step: StepInstance::Chain(vec![step]),
+                rows: RowsOrigin { step: StepInstance::Chain(vec![step]), output: None },
+                lowering: None,
+                key: vec!["h".into()],
+            },
+            field: "h".into(),
+            rows,
+        };
+        let merged = merge_null_key_reports(vec![dropped(1, 2), dropped(2, 3), dropped(1, 4), dropped(2, 5)]);
+        assert_eq!(merged, [dropped(1, 6), dropped(2, 8)]);
+    }
+
+    /// Two steps of ONE lowering (the same marker's id) that read the SAME
+    /// rows under the SAME key — one lowering's own several grouped steps,
+    /// e.g. `BoxStats` and `Outliers` — report once, keeping the first
+    /// (even though its own `transform` name and per-panel step id differ
+    /// from the second's).
+    #[test]
+    fn merge_collapses_two_steps_reporting_the_same_rows_and_key() {
+        let rows = RowsOrigin { step: StepInstance::Chain(vec![0]), output: None };
+        let box_stats = TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby {
+                transform: "BoxStats".into(),
+                step: StepInstance::Chain(vec![1]),
+                rows: rows.clone(),
+                lowering: Some(vec![0]),
+                key: vec!["h".into()],
+            },
+            field: "h".into(),
+            rows: 2,
+        };
+        let outliers = TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby {
+                transform: "Outliers".into(),
+                step: StepInstance::Chain(vec![2]),
+                rows,
+                lowering: Some(vec![0]),
+                key: vec!["h".into()],
+            },
+            field: "h".into(),
+            rows: 2,
+        };
+        let merged = merge_null_key_reports(vec![box_stats.clone(), outliers]);
+        assert_eq!(merged, [box_stats], "the first step's report wins, not a sum of both");
+    }
+
+    /// Two steps reporting the identical count and field over DIFFERENT
+    /// rows are two separate facts, not a duplicate, even sharing one
+    /// lowering: dedup reads `rows` too, not the lowering or the count or
+    /// the field alone.
+    #[test]
+    fn merge_keeps_two_steps_reporting_different_rows_apart() {
+        let dropped = |step: usize| TransformWarning::NullKeyRowsDropped {
+            scope: NullKeyScope::Groupby {
+                transform: "QQ".into(),
+                step: StepInstance::Chain(vec![step]),
+                rows: RowsOrigin { step: StepInstance::Chain(vec![step]), output: None },
+                lowering: Some(vec![0]),
+                key: vec!["h".into()],
+            },
+            field: "h".into(),
+            rows: 2,
+        };
+        let merged = merge_null_key_reports(vec![dropped(1), dropped(2)]);
+        assert_eq!(merged, [dropped(1), dropped(2)]);
+    }
+
+    /// The same cross-step collapse applies to [`TransformWarning::GroupKeyAllNull`]:
+    /// two steps of one lowering, over the same rows, that both pooled the
+    /// same columns under the same disposition and the same (empty, i.e.
+    /// whole-frame) panel list report once.
+    #[test]
+    fn merge_collapses_two_all_null_reports_over_the_same_rows() {
+        let all_null = |transform: &str| TransformWarning::GroupKeyAllNull {
+            transform: transform.into(),
+            columns: "h".into(),
+            disposition: "the whole batch was used as one ungrouped computation instead".into(),
+            rows: RowsOrigin { step: StepInstance::Chain(vec![0]), output: None },
+            lowering: Some(vec![0]),
+            panels: Vec::new(),
+        };
+        let merged = merge_null_key_reports(vec![all_null("Smooth"), all_null("Robust")]);
+        assert_eq!(merged, [all_null("Smooth")]);
+    }
+
+    /// The dedup key is `(lowering, rows, key, field)`, not `(rows, key,
+    /// field)` alone: two reports of the SAME lowering over the SAME rows
+    /// collapse; two DIFFERENT lowerings over the SAME rows — the shape a
+    /// `+` operand's own branch or a `Chart.layer` statistic beside another
+    /// takes, since neither advances the chain — never do; and a report
+    /// with NO lowering (a user-written step, or any step of a chain or
+    /// branch with no marker) never collapses either, whatever rows and key
+    /// it shares with another report.
+    #[test]
+    fn merge_needs_lowering_and_rows_together() {
+        let rows = RowsOrigin { step: StepInstance::Chain(vec![0]), output: None };
+        let dropped = |transform: &str, step: usize, lowering: Option<crate::transform::run::StepId>| {
+            TransformWarning::NullKeyRowsDropped {
+                scope: NullKeyScope::Groupby {
+                    transform: transform.into(),
+                    step: StepInstance::Chain(vec![step]),
+                    rows: rows.clone(),
+                    lowering,
+                    key: vec!["h".into()],
+                },
+                field: "h".into(),
+                rows: 2,
+            }
+        };
+
+        let a = dropped("BoxStats", 1, Some(vec![0]));
+        let b = dropped("Outliers", 2, Some(vec![0]));
+        assert_eq!(merge_null_key_reports(vec![a.clone(), b]), [a], "same lowering, same rows: one");
+
+        let c = dropped("Bin", 1, Some(vec![0]));
+        let d = dropped("Kde", 2, Some(vec![1]));
+        assert_eq!(
+            merge_null_key_reports(vec![c.clone(), d.clone()]),
+            [c, d],
+            "two lowerings over the same rows: two"
+        );
+
+        let e = dropped("QQ", 1, None);
+        let f = dropped("QQ", 2, None);
+        assert_eq!(merge_null_key_reports(vec![e.clone(), f.clone()]), [e, f], "no lowering: never collapsed");
+    }
+
+    /// A whole-frame call raises the refusal; a facet partition records the
+    /// step whose drop emptied it and carries on.
+    #[test]
+    fn refuse_unless_partition_refuses_the_whole_frame_and_records_a_partition() {
+        pyo3::Python::initialize();
+        let refusal = || pyo3::exceptions::PyValueError::new_err("stat_qq: empty input after filter");
+        let whole = TransformContext::default();
+        assert!(whole.refuse_unless_partition(refusal()).is_err());
+        assert!(whole.all_null_partitions.borrow().is_empty());
+
+        let panel = TransformContext { is_partition: true, step: StepInstance::Chain(vec![1]), ..TransformContext::default() };
+        assert!(panel.refuse_unless_partition(refusal()).is_ok());
+        let recorded = panel.all_null_partitions.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
+        match &recorded[0].outcome {
+            AllNullOutcome::Refused(refusal) => {
+                assert_eq!(refusal.to_string(), "ValueError: stat_qq: empty input after filter");
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        }
     }
 
     fn make_batch_with_group_cols() -> (RecordBatch, Vec<String>) {

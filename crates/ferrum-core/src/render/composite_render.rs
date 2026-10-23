@@ -187,6 +187,17 @@ pub(crate) enum CompositeRenderError {
     SelectionUnreadable { kind: &'static str, name: String, message: String },
 }
 
+impl CompositeRenderError {
+    /// The warnings a leaf's refusal carries
+    /// ([`RenderError::carried_warnings`]); empty for every other refusal.
+    pub(crate) fn carried_warnings(&self) -> &[crate::render::RenderWarning] {
+        match self {
+            Self::LeafRender { source, .. } => source.carried_warnings(),
+            _ => &[],
+        }
+    }
+}
+
 /// One field two same-named selection declarations disagree on, with each
 /// declaration's value as a Python literal.
 #[derive(Debug)]

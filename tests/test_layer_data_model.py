@@ -915,13 +915,19 @@ _JSON_DIGESTS = {
     "composition-transform": "1cbe1ae047b86c92c20d4999d0880fd955858c988ab5d49e7db0f8887cd1caca",
     "same-frame-composition-transform": "cab22b75964ad0cb84897be582b99ee5c950980505533b638273c8bef09a6fad",
     "flat-mean-bar": "2d162c1ff7e599abcb6e4880d6b6edd1c05829847402650c6a16da1317a6e0d4",
-    "mean-bar+mean-point": "1aee8ae29a47aa292be1d571d327729e54d6037489efac8bde22dae25f8bc48e",
+    # Each operand's own encoding aggregate opens its own lowering, behind
+    # its own statistics marker, instead of sharing one marker across both
+    # operands' branches: the wire reshapes, the render stays the control's.
+    "mean-bar+mean-point": "0568e0ee42cf08064bbc2f03500f84a8873f32665cdc47f5c4f5e4bcb4325208",
     # The spec carries no selection fields in its tooltip: the render's
     # tooltip reader adds them where the rows hold them.
     "plus-each-own-conditional": "1eac3e0ab559a6ced86598eca5dfdb6fb03c6153e2138e6215c168652dc288cb",
     "ungrouped-binned-count": "74ff073ed84e9a1416e76addcba55b61060cdbb75126878303a502f5f3d44233",
-    # The y-only rule takes no binned x: an aggregate, not a second bin.
-    "ungrouped-binned-count-layer-rule": "c5669a521646f12a78dd6fc3f799bcfedcfdacef9b4ad88c326c8ae4b98096e0",
+    # The y-only rule takes no binned x: an aggregate, not a second bin. The
+    # rule's own aggregate opens its own lowering behind its own statistics
+    # marker, beside the chart's Bin lowering, so the wire reshapes; the
+    # render stays the control's.
+    "ungrouped-binned-count-layer-rule": "010e436ba01d29f7d632a8425124789a30f224315459fe2b150da6bc59b6c840",
     "no-data-host-data-layer": "e9efaf8931203b579be8a46e221aa8fcbfcbf35c89319637170f3ae2dac2f232",
 }
 

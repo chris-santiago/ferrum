@@ -2134,6 +2134,7 @@ mod tests {
             swarm: Some(declared.clone()),
             statistic_input: None,
             lowered: Vec::new(),
+            written_groupby: Vec::new(),
             source: batch_xyg().schema(),
         };
         let lineages = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), lineage)]);

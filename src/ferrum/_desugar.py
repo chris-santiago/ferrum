@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from ferrum._layer import (
@@ -52,11 +52,11 @@ from ferrum._layer import (
     set_style,
     titled_encoding,
 )
-from ferrum._encode_lowering import _rebind_channel
-from ferrum._layer_transforms import _statistics_start, _with_statistics_marker
+from ferrum._encode_lowering import _composite_groupby, _over, _rebind_channel
+from ferrum._layer_transforms import _with_statistics_marker
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
-from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
+from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, with_grouping
 from ferrum._entry import EntryRefusal, voiced_as
 from ferrum._warn import user_stacklevel
 from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws, resolve_layer_style
@@ -601,6 +601,14 @@ class _ResolveContext:
     #: Never an inferred type -- see :func:`_prep_cat_axis_types`.
     x_type: str | None
     y_type: str | None
+    #: The chart's composite grouping (spec §6.4): the fields its color,
+    #: detail, shape and stroke_dash bind, then its facet fields
+    #: (:func:`~ferrum._encode_lowering._composite_groupby`).
+    grouping: tuple[str, ...] = ()
+    #: The grouping bindings of the compositions the chart is an operand of,
+    #: nearest first (:func:`_resolve_pending_impl`'s *parent*); empty for
+    #: the chart's own resolution.
+    parent: dict = field(default_factory=dict)
 
     def _color_field(self) -> str | None:
         color_enc = self.chart._encoding.get("color")
@@ -654,41 +662,39 @@ def _prep_boxen_agg_sort(ctx: _ResolveContext) -> None:
 
 
 def _prep_boxen_palette_color_conflict(ctx: _ResolveContext) -> None:
-    """Reject ``mark_boxen(palette=...)`` combined with a chart-level
-    ``.encode(color=...)`` channel.
+    """Refuse ``mark_boxen(palette=...)`` under a color the bands draw.
 
-    ``palette`` colors each depth band via a per-layer ``fill=`` style
-    kwarg (design spec §4.4, #91). A chart-level color *encoding* always
-    overrides a layer's ``fill=`` -- the same precedence a plain ``fill=``
-    mark kwarg has under any encoded channel, true for every mark, not
-    boxen-specific. Under ``palette=None`` that precedence is harmless (the
-    ramp still shows through as varying opacity); under ``palette=...``
-    every band would render the *same* encoded color at the palette path's
-    fixed opacity=1.0, silently discarding the palette and collapsing the
-    letter-value nesting into one flat block per group. This runs at
-    ``_resolve_pending_impl`` time, after ``.encode()`` is fully known
-    regardless of call order (``mark_boxen()`` before or after
-    ``.encode(color=...)``), so it catches both.
+    ``palette`` colors each depth band through a per-layer ``fill=`` style
+    kwarg (design spec §4.4, #91). The chart's color, under any spelling
+    (``color=``, ``fill=`` or ``stroke=``) and whether written on the chart
+    or on a composition it is an operand of, is boxen's hue, as it is
+    ``mark_boxplot``'s: the bands group by it and draw it, and an encoded
+    color always overrides a layer's ``fill=``. Under ``palette=None`` that
+    is the hue (the ramp still shows as varying opacity); under
+    ``palette=...`` every band would draw its group's color at the palette
+    path's fixed opacity, silently discarding the palette. The check reads
+    the effective color (the chart's own over its compositions', the one
+    the bands group by) when the pending mark resolves, after every
+    ``.encode()`` is known whatever the call order, and again whenever a
+    composition's encoding rebuilds the bands (``ferrum._compose.regrouped``).
 
-    ``color_field=`` (boxen's own per-group grouping kwarg, resolved
-    entirely inside the transform) is unaffected -- this only inspects the
-    chart-level ``color`` *encoding* channel, a different mechanism, and
-    ``color_field=`` grants no hue: it only changes which column the
-    ``LetterValue`` transform groups by, so every band still renders in
-    one theme color at ramp opacities (or the flat palette fill). boxen
-    has no hue channel at all today (violin-hue is the tracked frontier
-    work, out of scope here) -- the error below must not imply one exists.
+    An aggregated color draws a value, not a group, and is no hue here.
+    ``color_field=`` (boxen's own grouping kwarg, resolved inside the
+    ``LetterValue`` transform) is no color the bands draw and is unaffected.
     """
     if ctx.transform_kwargs.get("palette") is None:
         return
-    if ctx._color_field() is not None:
-        raise ValueError(
-            "mark_boxen(palette=...) cannot be combined with a chart-level "
-            "color encoding (.encode(color=...)): the color channel "
-            "overrides every band's fill, so the palette would have no "
-            "visible effect. boxen has no hue channel -- drop the color "
-            "encoding, or drop palette=."
-        )
+    from ferrum.encoding._aliases import resolve_channel_alias
+
+    color = resolve_channel_alias(_over(ctx.chart._encoding, ctx.parent), "color")
+    if color is None or (isinstance(color, ChannelBase) and color.option("aggregate")):
+        return
+    raise ValueError(
+        "mark_boxen(palette=...) cannot be combined with a color the bands draw "
+        "(color=, fill= or stroke=, on the chart or on a composition it is part of): "
+        "the color overrides every band's fill, so the palette would have no visible "
+        "effect. Drop the color binding or drop palette="
+    )
 
 
 def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
@@ -708,20 +714,15 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
     the quantile math; a `palette=` chart skips this entirely since it
     never uses the opacity ramp.
 
-    ``group_field`` MUST mirror ``desugar_boxen``'s own ``group =
-    color_field if color_field else cat`` exactly (spec-review cycle-2
-    finding: the fallback used to also consult ``ctx._color_field()`` --
-    the chart-level ``.encode(color=...)`` channel -- which is not a
-    grouping boxen ever uses. ``desugar_boxen``'s own docstring is explicit
-    that ``palette`` "does not interact with ``color_field`` (which only
-    changes the ``LetterValue`` groupby, not color", i.e. the *only*
-    grouping input is the ``color_field=`` mark kwarg, never the chart-level
-    color encoding -- boxen's ``_PENDING_PREP`` tuple deliberately omits
-    ``_prep_color_field`` for exactly this reason. Estimating depth from the
-    wrong grouping reproduces the cycle-1 symptom (a ramp normalized
-    against a depth the chart doesn't render) through a new mechanism, on
-    any chart that merely adds a cosmetic ``.encode(color=...)`` without
-    ``palette=``.
+    The groups MUST mirror the ``LetterValue`` ``desugar_boxen`` builds
+    exactly: its category ``group = color_field if color_field else cat``
+    (the ``color_field=`` mark kwarg, never the chart-level color encoding,
+    which is why boxen's ``_PENDING_PREP`` tuple omits
+    ``_prep_color_field``), then its ``groupby``, the chart's grouping
+    fields (``ctx.grouping``, which a chart-level ``.encode(color=...)``
+    joins). Estimating depth from other groups reproduces the cycle-1
+    symptom (a ramp normalized against a depth the chart doesn't render)
+    through a new mechanism.
 
     The chart's facet field(s), when present (``ctx.chart._facet``), are
     folded into :func:`_boxen_materialized_depth`'s groupby (batch-E close
@@ -805,7 +806,7 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
         group_field=group_field,
         k_depth=ctx.transform_kwargs["k_depth"],
         k_proportion=ctx.transform_kwargs["k_proportion"],
-        extra_groupby_fields=tuple(f for f in facet_fields if f),
+        extra_groupby_fields=(*ctx.grouping, *(f for f in facet_fields if f)),
     )
     if depth is not None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "materialized_depth": depth}
@@ -905,12 +906,36 @@ def _prep_color_field(ctx: _ResolveContext) -> None:
 
 
 def _prep_groupby_from_color(ctx: _ResolveContext) -> None:
-    """density/histogram: auto-set groupby from color encoding when not explicit."""
+    """density/histogram: group by the color field and the grouping fields unless groupby= was given.
+
+    The color field leads as written, aggregated or not, as it always has;
+    the chart's other grouping fields follow it (:func:`with_grouping`).
+    """
     if "groupby" in ctx.transform_kwargs:
         return
     color_field = ctx._color_field()
-    if color_field:
-        ctx.transform_kwargs = {**ctx.transform_kwargs, "groupby": color_field}
+    groupby = with_grouping([color_field] if color_field else [], ctx.grouping)
+    if groupby:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "groupby": groupby}
+
+
+def _prep_groupby_from_grouping(ctx: _ResolveContext) -> None:
+    """smooth: fit one curve per group of the chart's grouping fields unless groupby= was given."""
+    if "groupby" in ctx.transform_kwargs or not ctx.grouping:
+        return
+    ctx.transform_kwargs = {**ctx.transform_kwargs, "groupby": list(ctx.grouping)}
+
+
+def _prep_grouping(ctx: _ResolveContext) -> None:
+    """Hand a box, violin, errorbar, errorband, boxen, qq or contour desugar the chart's grouping.
+
+    The desugar adds the grouping fields to its statistic's groupby, so each
+    group gets its own statistic and its rows carry the field every layer
+    inherits from the chart. Absent when the chart binds no grouping field, so the
+    desugar runs exactly as it does without one.
+    """
+    if ctx.grouping:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "grouping": ctx.grouping}
 
 
 def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
@@ -1099,18 +1124,27 @@ _PENDING_PREP: dict[str, _KindPrep] = {
             _prep_cat_axis_sorts,
             _prep_cat_axis_types,
             _prep_boxen_palette_color_conflict,
+            _prep_grouping,
             _prep_boxen_ramp_depth,
         ),
     ),
-    "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
-    "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
-    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
+    "boxplot": _KindPrep(
+        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+    ),
+    "errorbar": _KindPrep(
+        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+    ),
+    "violin": _KindPrep(
+        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+    ),
     "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types)),
-    "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field)),
+    "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field, _prep_grouping)),
     "density": _KindPrep(pre=(_prep_groupby_from_color,)),
     "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
     "hex": _KindPrep(pre=(_prep_hex_field_from_color,)),
-    "smooth": _KindPrep(pre=(_prep_smooth_force_name,)),
+    "smooth": _KindPrep(pre=(_prep_smooth_force_name, _prep_groupby_from_grouping)),
+    "qq": _KindPrep(pre=(_prep_grouping,)),
+    "contour": _KindPrep(pre=(_prep_grouping,)),
     "discrimination_threshold": _KindPrep(pre=(_prep_discrimination_threshold_sentinels,)),
 }
 
@@ -1124,18 +1158,18 @@ def _binned_color_of(encoding: dict) -> ChannelBase | None:
 
 
 def _with_mark_statistics(transforms: list, steps: list) -> list:
-    """*transforms*, a chart's chain, followed by its composite mark's *steps* behind the marker.
+    """*transforms*, a chart's chain, followed by its composite mark's *steps* as their own lowering.
 
-    The marker is where the caller's own steps end (``_StatisticsMarker``):
-    a ``.transform(...)`` written after the mark resolved runs before it,
-    and Rust reads the rows at the marker as the caller's (a statistic
-    grouped by a binned color groups by its bins only after it). A chain
-    already holding statistics behind a marker keeps that one marker and the
-    mark's steps follow them, so the chain carries one marker.
+    The first marker in the chain is where the caller's own steps end
+    (``_StatisticsMarker``): a ``.transform(...)`` written after the mark
+    resolved runs before it, and Rust reads the rows at that first marker as
+    the caller's (a statistic grouped by a binned color groups by its bins
+    only after it). *steps* always open their own lowering, behind their own
+    marker, after whatever statistics the chain already carries, so a
+    second composite's drop and a figure's beside it never share one
+    report.
     """
     chain = list(transforms)
-    if _statistics_start(chain) < len(chain):
-        return [*chain, *steps]
     return [*chain, *_with_statistics_marker(list(steps))]
 
 
@@ -1163,7 +1197,9 @@ def _with_binned_color(layers: list, encoding: dict) -> list:
     return out
 
 
-def _resolve_pending_impl(chart: "Chart") -> "Chart":
+def _resolve_pending_impl(
+    chart: "Chart", *, parent: dict | None = None, facet: Any = None
+) -> "Chart":
     """Resolve a pending statistical mark desugar once encoding is known.
 
     Body of ``Chart._resolve_pending`` — extracted here as a free function so
@@ -1184,16 +1220,35 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     the caller invoked: the figure function or visualizer stamped on the
     pending mark, which may resolve after that call has returned, or
     ``mark_<kind>`` for a mark method called directly.
+
+    *parent* is the grouping bindings of the compositions the chart is an
+    operand of, nearest first (``ferrum._compose.regrouped``), and *facet*
+    their facet. The mark's statistics group by the chart's own grouping
+    bindings, then each parent binding on a channel the chart binds under
+    no spelling (spec §6.4's composite grouping over the effective
+    encoding), within *facet*'s panels; without a *parent*, by the chart's
+    own bindings within its own facet.
     """
     if chart._pending_stat_mark is None:
         return chart
     entry = chart._pending_stat_mark.entry or f"mark_{chart._pending_stat_mark.kind}"
+    grouping = (
+        _composite_groupby(chart._encoding, chart._facet)
+        if parent is None
+        else _composite_groupby(_over(chart._encoding, parent), facet)
+    )
     with voiced_as(entry):
-        return _resolve_pending_as(chart, entry)
+        return _resolve_pending_as(chart, entry, tuple(grouping), dict(parent or {}))
 
 
-def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
-    """:func:`_resolve_pending_impl`'s resolution of a pending mark, voiced as *entry*."""
+def _resolve_pending_as(
+    chart: "Chart", entry: str, grouping: tuple[str, ...], parent: dict
+) -> "Chart":
+    """:func:`_resolve_pending_impl`'s resolution of a pending mark, voiced as *entry*.
+
+    *grouping* is the composite grouping its statistics group by, and
+    *parent* the compositions' grouping bindings it was computed over.
+    """
     kind = chart._pending_stat_mark.kind
     # Copied because `layer_kwargs` is popped out below and the pending mark
     # belongs to `chart`, which a caller may resolve more than once.
@@ -1275,6 +1330,8 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
         color_sort=color_sort,
         x_type=x_type,
         y_type=y_type,
+        grouping=grouping,
+        parent=parent,
     )
     prep = _PENDING_PREP.get(kind)
     if prep is not None:

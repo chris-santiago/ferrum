@@ -964,6 +964,59 @@ fn test_smooth_grouped_utf8_group_unchanged() {
     assert_eq!(groups.value(out.num_rows() - 1), "B");
 }
 
+/// GH #197 EXEMPTION: an all-null `groupby` column leaves this transform
+/// with nothing to partition, so it fits the whole batch pooled instead of
+/// emitting nothing. The pooled fit IS the null-keyed group: its output
+/// carries the `groupby` column too, all null at its original dtype, and
+/// its own columns equal the ungrouped fit's — the fit itself is unchanged.
+#[test]
+fn test_smooth_all_null_group_pools_the_whole_batch_with_a_null_group_column() {
+    use arrow::array::StringArray;
+    pyo3::Python::initialize();
+    let x: Vec<f64> = (0..6).map(|i| i as f64).collect();
+    let y: Vec<f64> = x.iter().map(|&v| v + 1.0).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x.clone())),
+            Arc::new(Float64Array::from(y.clone())),
+            Arc::new(StringArray::from(vec![None::<&str>; 6])),
+        ],
+    )
+    .unwrap();
+    let grouped = SmoothSpec {
+        x: "x".into(), y: "y".into(),
+        method: SmoothMethod::Lm,
+        ci: None,
+        bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
+        x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+        inject_zero_ref: false, inject_metrics: false, x_range: None,
+        groupby: vec!["g".into()],
+        name: None,
+    };
+    let out = apply(&grouped, &batch).unwrap();
+
+    let g = out.column(out.schema().index_of("g").unwrap());
+    assert_eq!(g.data_type(), &DataType::Utf8, "the groupby column keeps its original dtype");
+    assert_eq!(g.null_count(), g.len(), "the pooled fit IS the null-keyed group");
+
+    let ungrouped = SmoothSpec { groupby: Vec::new(), ..grouped };
+    let whole = apply(&ungrouped, &xy_batch(x, y)).unwrap();
+    for field in whole.schema().fields() {
+        assert_eq!(
+            out.column_by_name(field.name()),
+            whole.column_by_name(field.name()),
+            "the pooled fit's own column '{}' equals the ungrouped fit's",
+            field.name()
+        );
+    }
+}
+
 /// Unknown method aliases must return an error.
 #[test]
 fn test_unknown_method_alias_returns_error() {

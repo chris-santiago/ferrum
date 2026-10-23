@@ -6,7 +6,7 @@
 //!   5. Build LegendEntry list (if color encoding).
 //!   6. (Phase 8a) Build per-layer prepared inputs; swap x↔y if CoordFlip.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray};
@@ -14,12 +14,12 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
-    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, LegendEntry,
+    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
     TickProjection,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::color_bin_group::{BinDemand, ColorBinPlan};
-use crate::transform::context::TransformContext;
+use crate::transform::context::{AllNullOutcome, AllNullPartition, StepInstance, TransformContext, TransformWarning};
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 use crate::transform::run::{OutputLineage, OutputLineages};
 
@@ -142,6 +142,11 @@ pub struct LayerPrepared {
     /// set by `prepare_render_inputs` once the layer's batch is resolved: the
     /// color binding such an image draws. `None` for every other layer.
     pub(in crate::render) raster_value_field: Option<String>,
+    /// The fields this layer's series split by beyond the channels its mark
+    /// draws ([`statistic_series_fields`]), set by `prepare_render_inputs`
+    /// once the layer's rows are resolved. Empty for every layer whose rows
+    /// no statistic grouped by such a field.
+    pub(in crate::render) grouping_series: SeriesGrouping,
 }
 
 /// The position adjustment `layer` of `spec` draws with, resolved once at
@@ -169,6 +174,74 @@ fn layer_position(
     (!yields).then(|| inherited.clone())
 }
 
+/// The fields the statistics that produced a layer's rows grouped them by
+/// beyond the channels its mark draws ([`statistic_series_fields`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(in crate::render) struct SeriesGrouping {
+    /// Fields a statistic the chart planned grouped by because the layer
+    /// binds them on `shape` or `stroke_dash`. Recorded for every mark: a
+    /// mark that does not draw the channel still draws the statistic's
+    /// groups, and the undrawn-channel warning says so.
+    pub(in crate::render) by_channel: Vec<String>,
+    /// Fields a step the user wrote grouped by, whether or not a channel
+    /// binds them; recorded for a series mark only.
+    pub(in crate::render) by_step: Vec<String>,
+}
+
+impl SeriesGrouping {
+    /// Every field the series splits by, each once, the planned ones first.
+    pub(in crate::render) fn fields(&self) -> Vec<String> {
+        let mut fields = self.by_channel.clone();
+        fields.extend(self.by_step.iter().filter(|field| !self.by_channel.contains(field)).cloned());
+        fields
+    }
+}
+
+/// What the statistics that produced `layer`'s rows grouped them by, read
+/// from the layer's own completed encoding (its bindings over its parent's)
+/// and never from a sibling's:
+///
+/// - `by_channel`: each field a statistic the chart planned grouped by
+///   ([`OutputLineage::lowered`]) that the layer binds on `shape` or
+///   `stroke_dash`. A planned statistic groups by every encoded field, value
+///   channels and the axis included, so only these channels' fields count.
+///   A `detail` needs no entry: every series mark splits by its own
+///   `mark_style.detail`.
+/// - `by_step`, on a series mark (line, area, ribbon): each field a step the
+///   user wrote grouped by ([`OutputLineage::written_groupby`]), but the
+///   layer's positional fields, along which the series runs.
+///
+/// The layer's own color, binned or not, and its grouping-only `group` key
+/// split through the color path and stay out of both.
+fn statistic_series_fields(layer: &LayerPrepared, lineage: Option<&OutputLineage>) -> SeriesGrouping {
+    use crate::spec::mark::Mark;
+    let Some(lineage) = lineage else { return SeriesGrouping::default() };
+    let encoding = &layer.encoding;
+    fn field(binding: Option<&crate::spec::encoding::EncodingSpec>) -> Option<&str> {
+        binding.map(|b| b.field.as_str())
+    }
+    let grouping: HashSet<&str> = [field(encoding.shape.as_ref()), field(encoding.stroke_dash.as_ref())].into_iter().flatten().collect();
+    let colored: HashSet<&str> = [field(encoding.color.as_ref()), field(encoding.group.as_ref())].into_iter().flatten().collect();
+    let positional: HashSet<&str> =
+        [encoding.x.as_ref(), encoding.y.as_ref(), encoding.x2.as_ref(), encoding.y2.as_ref()].into_iter().filter_map(field).collect();
+    let mut by_channel: Vec<String> = Vec::new();
+    for field in lineage.lowered.iter().flat_map(|step| &step.groupby) {
+        if grouping.contains(field.as_str()) && !colored.contains(field.as_str()) && !by_channel.contains(field) {
+            by_channel.push(field.clone());
+        }
+    }
+    let by_step = match layer.mark {
+        Mark::Line | Mark::Area | Mark::Ribbon => lineage
+            .written_groupby
+            .iter()
+            .filter(|field| !colored.contains(field.as_str()) && !positional.contains(field.as_str()))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
+    SeriesGrouping { by_channel, by_step }
+}
+
 impl LayerPrepared {
     /// Build a single layer from chart-level fields (single-layer mode).
     pub(crate) fn from_chart_only(spec: &crate::spec::chart::ChartSpec) -> Self {
@@ -188,6 +261,7 @@ impl LayerPrepared {
             coord: spec.coord.clone(),
             dropped_reads: Vec::new(),
             raster_value_field: None,
+            grouping_series: SeriesGrouping::default(),
         }
     }
 
@@ -240,6 +314,7 @@ impl LayerPrepared {
             coord: layer.effective_coord(spec.coord.as_ref()).cloned(),
             dropped_reads: Vec::new(),
             raster_value_field: None,
+            grouping_series: SeriesGrouping::default(),
         }
     }
 
@@ -662,6 +737,10 @@ pub struct PreparedInputs {
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
+    /// The facet partitions a statistic's `groupby` null-key drop emptied
+    /// ([`FacetPartitions::emptied_by_drop`]): their panels draw empty, frame
+    /// and axes over no marks, where a cell no layer has rows for is skipped.
+    pub(in crate::render) facet_emptied_by_drop: HashSet<FacetPartitionKey>,
     pub legend_entries: Vec<LegendEntry>,
     /// Legend title (Themes-T2.5b). Defaults to the color encoding's field
     /// name; None when no categorical color encoding drives a legend.
@@ -806,6 +885,14 @@ pub struct LegendPreparedOverrides {
 }
 
 impl PreparedInputs {
+    /// Whether the facet panel at `keys` (its column key, then its row key
+    /// in grid mode) is one a statistic's null-key drop emptied
+    /// ([`Self::facet_emptied_by_drop`]).
+    pub(in crate::render) fn panel_emptied_by_drop(&self, keys: (Option<&FacetKey>, Option<&FacetKey>)) -> bool {
+        let (Some(col), row) = keys else { return false };
+        self.facet_emptied_by_drop.contains(&(col.value.clone(), row.map(|row| row.value.clone())))
+    }
+
     /// The chart's rendering encoding: the `rendering_encoding` field this
     /// struct already carries (see that field's doc for what it holds).
     pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
@@ -1380,6 +1467,8 @@ pub fn prepare_render_inputs(
         if layer.mark == crate::spec::mark::Mark::Image && crate::render::marks::image::url_tile_field(url).is_none() {
             layer.raster_value_field = crate::render::marks::image::raster_value_field(batch).map(str::to_string);
         }
+        let key = layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY);
+        layer.grouping_series = statistic_series_fields(layer, transform_lineages.get(key));
     }
 
     // Every column each layer of a layered spec draws is checked against its
@@ -1686,6 +1775,7 @@ pub fn prepare_render_inputs(
         provisional_scales,
         axes,
         facet_groups,
+        facet_emptied_by_drop: facet_partitions.emptied_by_drop,
         legend_entries,
         legend_title,
         colorbar,
@@ -1790,15 +1880,24 @@ fn binned_color_edges(
 
 /// What [`run_transforms_with_facet`] produces: every published output batch,
 /// the transform warnings drained from the run, each output's lineage
-/// ([`PreparedInputs::transform_lineages`]), and a faceted run's partition
-/// keys in the order it ran them (empty unfaceted), which order the facet's
-/// panels.
+/// ([`PreparedInputs::transform_lineages`]), and a faceted run's partitions
+/// (none unfaceted), which order and complete the facet's panels.
 type TransformRun = (
     HashMap<String, RecordBatch>,
     Vec<crate::transform::context::TransformWarning>,
     OutputLineages,
-    Vec<FacetPartitionKey>,
+    FacetPartitions,
 );
+
+/// A faceted run's partitions: every key in the order the run partitioned
+/// the facet's input, and the keys a step's `groupby` null-key drop emptied
+/// ([`crate::transform::context::TransformContext::refuse_unless_partition`]),
+/// whose panels draw empty rather than vanish.
+#[derive(Debug, Default)]
+pub(super) struct FacetPartitions {
+    pub(super) order: Vec<FacetPartitionKey>,
+    pub(super) emptied_by_drop: HashSet<FacetPartitionKey>,
+}
 
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
 ///
@@ -1846,14 +1945,18 @@ fn run_transforms_with_facet(
             ..TransformContext::default()
         };
         let (mut outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
-            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+            .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
         apply_impute_to_final(&mut outputs, spec);
         // #162: drain whatever this run's (possibly per-step-cloned, but
         // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
-        // `ctx.clone()` in `apply_transforms_named`.
-        let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-        return Ok((normalize_transform_outputs(outputs)?, warnings, normalize_transform_lineages(lineages)?, Vec::new()));
+        // `ctx.clone()` in `apply_transforms_named`. `merge_null_key_reports`
+        // collapses a composite's own several lowered steps over the same
+        // rows and key into one report, as the faceted return does.
+        let warnings = crate::transform::context::merge_null_key_reports(
+            ctx.warnings.borrow_mut().drain(..).collect(),
+        );
+        return Ok((normalize_transform_outputs(outputs)?, warnings, normalize_transform_lineages(lineages)?, FacetPartitions::default()));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1952,10 +2055,21 @@ fn run_transforms_with_facet(
     // rows its statistics consumed are merged across the panels as the
     // outputs are.
     let mut merged_lineages: HashMap<String, (OutputLineage, Vec<RecordBatch>)> = HashMap::new();
-    for ((col_value, row_value), partition_batch) in &partitions {
+    // The partitions in which each step's every `groupby` key was null, by
+    // step in the order they first reported one.
+    let mut all_null_steps: Vec<StepAllNull<'_>> = Vec::new();
+    for (key, partition_batch) in &partitions {
+        let (col_value, row_value) = key;
         let (mut panel_outputs, panel_lineages) =
             apply_transforms_named(&effective_transforms, partition_batch, &ctx)
-                .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+                .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
+        for AllNullPartition { step, outcome } in ctx.all_null_partitions.borrow_mut().drain(..) {
+            let index = all_null_steps.iter().position(|seen| seen.step == step).unwrap_or_else(|| {
+                all_null_steps.push(StepAllNull { step, outcome, partitions: HashSet::new() });
+                all_null_steps.len() - 1
+            });
+            all_null_steps[index].partitions.insert(key);
+        }
         for (key, mut lineage) in panel_lineages {
             let consumed = lineage.statistic_input.take().map(|rows| {
                 let rows = inject_facet_column(&rows, &fspec.field, col_value);
@@ -2002,13 +2116,29 @@ fn run_transforms_with_facet(
             combined.insert(key, merged_batch);
         }
     }
+    let order: Vec<FacetPartitionKey> = partitions.iter().map(|(key, _)| key.clone()).collect();
+    let AllNullSettled { emptied_by_drop, replaced_counts, warnings: all_null_warnings } =
+        settle_all_null_partitions(all_null_steps, &order, fspec, &ctx)?;
     // #162: `ctx` is the SAME context across every partition in the loop
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
-    // A transform's per-panel null-key drop counts sum to the frame's count.
-    let warnings = crate::transform::context::merge_partition_null_key_counts(
-        ctx.warnings.borrow_mut().drain(..).collect(),
-    );
+    // A transform's per-panel null-key drop counts sum to the frame's count,
+    // except a step whose every key was null in every panel, which says so
+    // once instead, as on the whole frame. The retain removes a replaced
+    // step's own per-panel counts BEFORE the one final merge — which runs
+    // AFTER `all_null_warnings` joins the set, so a cross-step dedup (one
+    // lowering's several grouped steps over the same rows and key) sees the
+    // whole frame's warnings, not just the per-panel counts.
+    let mut warnings: Vec<TransformWarning> = ctx.warnings.borrow_mut().drain(..).collect();
+    warnings.retain(|warning| match warning {
+        TransformWarning::NullKeyRowsDropped {
+            scope: crate::transform::context::NullKeyScope::Groupby { step, .. },
+            ..
+        } => !replaced_counts.contains(step),
+        _ => true,
+    });
+    warnings.extend(all_null_warnings);
+    let warnings = crate::transform::context::merge_null_key_reports(warnings);
     let mut lineages = OutputLineages::new();
     for (key, (lineage, batches)) in merged_lineages {
         let statistic_input = match batches.is_empty() {
@@ -2017,8 +2147,108 @@ fn run_transforms_with_facet(
         };
         lineages.insert(key, OutputLineage { statistic_input, ..lineage });
     }
-    let partition_keys = partitions.into_iter().map(|(key, _)| key).collect();
-    Ok((normalize_transform_outputs(combined)?, warnings, normalize_transform_lineages(lineages)?, partition_keys))
+    let partitions = FacetPartitions { order, emptied_by_drop };
+    Ok((normalize_transform_outputs(combined)?, warnings, normalize_transform_lineages(lineages)?, partitions))
+}
+
+/// One step's facet partitions whose every `groupby` key was null, and what
+/// the step gives in that case ([`AllNullOutcome`]).
+struct StepAllNull<'k> {
+    step: StepInstance,
+    outcome: AllNullOutcome,
+    partitions: HashSet<&'k FacetPartitionKey>,
+}
+
+/// What a facet run's all-null partitions come to.
+struct AllNullSettled {
+    /// The partitions whose panels draw empty.
+    emptied_by_drop: HashSet<FacetPartitionKey>,
+    /// The steps whose per-panel null-key counts one all-null warning
+    /// replaces.
+    replaced_counts: Vec<StepInstance>,
+    /// The warnings the run reports once per step.
+    warnings: Vec<TransformWarning>,
+}
+
+/// Settle each step's all-null facet partitions as the whole frame settles
+/// a step whose every key is null:
+///
+/// - a refusing step that emptied every panel raises its refusal, with the
+///   run's warnings ([`transform_refusal`]);
+/// - a step whose grouped output is empty in every panel reports its
+///   all-null warning once, in place of its counts, and every panel draws
+///   empty, as the unfaceted chart draws its one panel empty;
+/// - a step that fit a panel's whole batch reports its all-null warning
+///   once, naming the panels it pooled when that is fewer than every one
+///   (`order`/`fspec` build each pooled panel's label, in partition order);
+///   pooling every panel keeps the whole-frame text;
+///
+/// and every panel a step left with nothing to draw is drawn empty.
+fn settle_all_null_partitions(
+    steps: Vec<StepAllNull<'_>>,
+    order: &[FacetPartitionKey],
+    fspec: &crate::layout::FacetSpec,
+    ctx: &TransformContext,
+) -> Result<AllNullSettled, RenderError> {
+    let mut settled = AllNullSettled { emptied_by_drop: HashSet::new(), replaced_counts: Vec::new(), warnings: Vec::new() };
+    for StepAllNull { step, outcome, partitions } in steps {
+        let every_panel = partitions.len() == order.len();
+        if outcome.empties() {
+            settled.emptied_by_drop.extend(partitions.iter().map(|key| (*key).clone()));
+        }
+        match outcome {
+            AllNullOutcome::Refused(refusal) if every_panel => {
+                return Err(transform_refusal(refusal.to_string(), ctx));
+            }
+            AllNullOutcome::Refused(_) => {}
+            AllNullOutcome::Emptied(warning) if every_panel => {
+                settled.replaced_counts.push(step);
+                settled.warnings.push(warning);
+            }
+            AllNullOutcome::Emptied(_) => {}
+            AllNullOutcome::Pooled(mut warning) => {
+                if !every_panel {
+                    if let TransformWarning::GroupKeyAllNull { panels, .. } = &mut warning {
+                        *panels = order
+                            .iter()
+                            .filter(|key| partitions.contains(*key))
+                            .map(|key| facet_partition_label(fspec, key))
+                            .collect();
+                    }
+                }
+                settled.warnings.push(warning);
+            }
+        }
+    }
+    Ok(settled)
+}
+
+/// One pooled partition's label for [`TransformWarning::GroupKeyAllNull`]'s
+/// `panels` field: `"f=F2"`, or `"f=F2, r=R1"` in grid mode — the same
+/// `col=value` shape [`crate::transform::context::describe_group_keys`]
+/// uses for a groupby key.
+fn facet_partition_label(fspec: &crate::layout::FacetSpec, (col, row): &FacetPartitionKey) -> String {
+    match (&fspec.row, row) {
+        (Some(row_field), Some(row_val)) => format!("{}={col}, {row_field}={row_val}", fspec.field),
+        _ => format!("{}={col}", fspec.field),
+    }
+}
+
+/// The refusal a transform run raises, `refusal` as
+/// [`RenderError::TransformFailed`], carrying the warnings the run reported
+/// before it ([`RenderError::Warned`]): the null-key drop that left a
+/// statistic nothing to draw is reported beside the refusal it caused.
+fn transform_refusal(refusal: String, ctx: &TransformContext) -> RenderError {
+    let source = RenderError::TransformFailed(refusal);
+    let warnings: Vec<RenderWarning> =
+        crate::transform::context::merge_null_key_reports(ctx.warnings.borrow_mut().drain(..).collect())
+            .into_iter()
+            .map(RenderWarning::Transform)
+            .collect();
+    match warnings.is_empty() {
+        true => source,
+        false => RenderError::Warned { warnings, source: Box::new(source) },
+    }
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
@@ -2221,9 +2451,11 @@ fn establishing_binding(
 /// counts as bound and not drawn)
 /// ([`crate::spec::mark::Mark::draws_channel`]; a raster image draws only a
 /// `color` naming the field its cells hold,
-/// [`crate::render::marks::image::image_draws_color`]): the channel builds no scale and
-/// no legend ([`establishing_binding`]), so the binding has no effect. It
-/// names the first layer binding the channel. A channel a drawing mark's
+/// [`crate::render::marks::image::image_draws_color`]): the channel builds no
+/// scale and no legend ([`establishing_binding`]). It names the first layer
+/// binding the channel, and says whether a statistic the chart planned
+/// grouped by the binding's field ([`SeriesGrouping::by_channel`]): then the
+/// groups are drawn, alike, rather than the binding having no effect. A channel a drawing mark's
 /// statistic drops is not this case: the column gate warns about that one.
 fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<RenderWarning> {
     let mut warnings = Vec::new();
@@ -2262,6 +2494,7 @@ fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<R
             channel: channel.name.to_string(),
             field: enc.field.clone(),
             cells: layer.raster_value_field.clone().filter(|_| channel.name == "color"),
+            grouped: !declined && layer.grouping_series.by_channel.contains(&enc.field),
         });
     }
     warnings

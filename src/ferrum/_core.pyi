@@ -779,6 +779,7 @@ class Logistic:
         ci: Optional[float] = None,
         max_iter: int = 25,
         tol: float = 1e-8,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -794,6 +795,7 @@ class Glm:
         ci: Optional[float] = None,
         max_iter: int = 25,
         tol: float = 1e-8,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

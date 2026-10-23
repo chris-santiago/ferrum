@@ -4427,6 +4427,29 @@ parameter is forwarded to `lmplot` unchanged.
 > support land in `crates/ferrum-core/src/render/prepare.rs` and
 > `…/marks/text.rs` respectively.
 
+> **2026-10-22.** `lmplot`, `regplot` and `residplot`'s `show_metrics`
+> defaults to `None` (was `True`), the None-is-unset convention every
+> other style default on these functions already follows. Left unset, the
+> corner is drawn for one ungrouped fit and dropped silently under any
+> grouping — the same as before for the common case, since `True` and
+> `None` behave alike when there is one fit. Passed explicitly as `True`,
+> a grouping that leaves no single fit to describe now warns (`"<entry>:
+> show_metrics=True has no single fit to describe: the fit is computed
+> per group of <fields>, so the R²/RMSE/MAE corner is not drawn"`) instead
+> of silently dropping a corner the caller asked for; `False` is
+> unaffected. The warning is the same one voice whichever door bound the
+> grouping — the figure's own call, `.encode(color=...)` afterward, or a
+> `+` composition it becomes part of — because every door reaches it by
+> calling the same figure function again with the grouping merged into
+> `encode=`. `residplot`'s point layer now binds every `encode=` binding
+> as its own (mirroring how its lowess overlay already binds its grouping
+> color itself), so a layered `residplot`'s interactive point tooltip
+> keeps an `encode=`-bound field it previously lost to the per-layer
+> tooltip rule's own-fields-shadow behavior; the flat (unlayered) path was
+> unaffected, since `encode=` already lands on its own chart-level
+> encoding there. No SVG byte moves; `scene_json` gains the field on the
+> point layer's tooltip entries.
+
 ## 3.15 Sklearn-Protocol Visualizers
 
 > **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`

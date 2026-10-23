@@ -9,8 +9,6 @@ to the underlying primitives.
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import polars as pl
 import pytest
@@ -81,12 +79,9 @@ COMPOSITE_MARK_CONFIGS = {
         "base_encoding": {"x": "cat:N", "y": "val:Q"},
         "channels": ["color"],
     },
-    # qq: the QQ statistic's points and reference line carry no source column,
-    # so a chart-level color is dropped from both with a warning and draws no
-    # scale or legend (pinned by test_mark_qq_color_is_dropped_from_every_layer).
     "mark_qq": {
         "base_encoding": {"x": "val:Q"},
-        "channels": [],
+        "channels": ["color"],
     },
     # hex: the cells are always colored by Hex's per-cell aggregate, so a
     # chart-level color is either the aggregated column (it then supplies
@@ -145,16 +140,3 @@ def test_all_channels_no_crash(df, mark_method):
     chart = getattr(fm.Chart(df), mark_method)().encode(**all_encodings)
     svg = chart.to_svg()
     assert "<svg" in svg
-
-
-def test_mark_qq_color_is_dropped_from_every_layer(df):
-    """No qq layer draws ``cat``: the chart renders as it does uncolored, warning per layer."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        colored = fm.Chart(df).mark_qq().encode(x="val:Q", color="cat:N").to_svg()
-    assert [str(w.message) for w in caught if "was dropped" in str(w.message)] == [
-        f"mark_qq: color 'cat' was dropped: the statistic this {mark} mark draws does not "
-        "carry 'cat', so it draws without color"
-        for mark in ("point", "rule")
-    ]
-    assert colored == fm.Chart(df).mark_qq().encode(x="val:Q").to_svg()

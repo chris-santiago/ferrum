@@ -245,6 +245,67 @@ def _statistic_groupby(encoding: dict, facet) -> list[str]:
     return fields
 
 
+#: The channels a composite mark's statistic groups by (spec §6.4): color under
+#: every spelling that draws as it, detail, shape and stroke_dash.
+COMPOSITE_GROUPING_CHANNELS = frozenset(
+    ("color", "fill", "stroke", "detail", "shape", "stroke_dash")
+)
+
+
+def _composite_groupby(encoding: dict, facet) -> list[str]:
+    """The fields a composite mark's statistic groups by (spec §6.4's composite grouping).
+
+    :func:`_statistic_groupby` restricted to the grouping channels
+    (:data:`COMPOSITE_GROUPING_CHANNELS`, a :class:`_GroupingOnly`'s members
+    included) plus the facet fields, so a histogram, density, box, violin,
+    boxen, qq, contour or smooth computes one statistic per group, exactly as
+    the same transform built by hand with ``groupby=`` does. An aggregated
+    grouping channel draws a value, not a group, and joins none.
+
+    Empty when no grouping channel binds a field: a faceted panel's rows are
+    already its own (the source is partitioned before any statistic runs),
+    so the facet fields alone add no group, and the composite's transforms
+    stay exactly as they are without a grouping channel.
+    """
+    grouping = {
+        channel: binding
+        for channel, binding in _expand_grouping(encoding).items()
+        if channel in COMPOSITE_GROUPING_CHANNELS
+    }
+    if not _statistic_groupby(grouping, None):
+        return []
+    return _statistic_groupby(grouping, facet)
+
+
+def _grouping_bindings(encoding: dict) -> dict:
+    """The bindings of *encoding* on a grouping channel (:data:`COMPOSITE_GROUPING_CHANNELS`)."""
+    return {
+        channel: binding
+        for channel, binding in encoding.items()
+        if channel in COMPOSITE_GROUPING_CHANNELS and binding is not None
+    }
+
+
+def _over(nearer: dict, farther: dict) -> dict:
+    """*nearer*'s bindings, then each of *farther*'s on a channel *nearer* binds under no spelling.
+
+    Channel identity is the resolved channel (``fill`` and ``stroke`` draw
+    as ``color``), so a nearer ``fill`` shadows a farther ``color``, as an
+    own binding shadows its parent's (spec §6.3).
+    """
+    from ferrum.encoding._aliases import resolved_channel
+
+    bound = {resolved_channel(channel) for channel, value in nearer.items() if value is not None}
+    return {
+        **nearer,
+        **{
+            channel: value
+            for channel, value in farther.items()
+            if resolved_channel(channel) not in bound
+        },
+    }
+
+
 def _polar_channel_targets(coord) -> tuple[tuple[str, str], ...]:
     """The ``(polar, cartesian)`` channel pairs *coord* draws, or ``()`` when not polar.
 

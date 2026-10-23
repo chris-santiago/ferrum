@@ -14,6 +14,8 @@ that already populated the target wins over a later one (the later one then sees
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from ferrum._layer import layer_draws, marks_drawing
 
 # The alias TABLE itself lives in the sibling routing module
@@ -196,8 +198,9 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
 
     Only a mark whose row of Rust's style table draws ``detail``
     (:func:`ferrum._layer.layer_draws`) gets it written into *mk*; any other
-    mark warns once instead, and its style is left without the field the
-    renderer would refuse. No-op when
+    mark's style is left without the field the renderer would refuse.
+    Whether such a detail did nothing is decided once the chart's
+    statistics are lowered (:func:`warn_ignored_details`). No-op when
     ``detail`` is absent or carries no concrete field -- string-valued
     (``Layer(encoding={"detail": "g"})``) and ``ChannelBase``-valued
     ``detail`` are both concrete fields, handled identically via
@@ -216,8 +219,6 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
         return mk
     if layer_draws(mark, "detail"):
         mk.setdefault("detail", field)
-    else:
-        _warn_detail_ignored(mark)
     return mk
 
 
@@ -262,12 +263,30 @@ def layered_chart_detail(detail_ch: object, layer_marks: list) -> list[object | 
     channel for every layer whose mark draws ``detail`` (Rust's style table)
     and ``None`` for the rest. A
     layer's own ``detail`` still wins (``_build_layers_list`` only fills an
-    absent one). When no layer's mark reads ``detail``, the flat chart's
-    "accepted but ignored" warning fires once and nothing is inherited.
+    absent one). Whether a detail no layer draws did nothing is decided once
+    the chart's statistics are lowered (:func:`warn_ignored_details`).
     """
     if _channel_field(detail_ch) is None:
         return [None] * len(layer_marks)
-    inherits = [layer_draws(mark, "detail") for mark in layer_marks]
-    if not any(inherits):
-        _warn_detail_ignored(layer_marks[0] if layer_marks else None)
-    return [detail_ch if inherit else None for inherit in inherits]
+    return [detail_ch if layer_draws(mark, "detail") else None for mark in layer_marks]
+
+
+def warn_ignored_details(
+    details: Iterable[tuple[str, str | None]], drawn: set[str], grouped: set[str]
+) -> None:
+    """Warn once per detail field that no mark draws and no statistic groups by.
+
+    *details* holds each ``(field, mark)`` a chart binds on ``detail``: its
+    own, each layer's own, and each layer's grouping-only member, with the
+    mark that binds it. *drawn* is the fields a mark's ``mark_style.detail``
+    names, and *grouped* every field a step of the chart's pipeline groups
+    by. Detail is the grouping channel: a field a line splits by, or a
+    statistic computed one per value of, did what it was bound for, so only
+    a field that did neither is reported as ignored.
+    """
+    reported: set[str] = set()
+    for field, mark in details:
+        if field in drawn or field in grouped or field in reported:
+            continue
+        reported.add(field)
+        _warn_detail_ignored(mark)
