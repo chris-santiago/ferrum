@@ -11162,6 +11162,123 @@ fn a_text_only_chart_with_a_parent_color_warns_it_is_not_drawn() {
     assert!(!prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
 }
 
+// ── `"theme:contrast"` sentinel: a contrast-ink text binds color without
+// drawing it (spec §6.5) ──────────────────────────────────────────────────
+
+/// A hand-built contrast-ink text layer over [`column_gate_batch`]: its own
+/// `color` on `field`, `text` on `g`, and `fill="theme:contrast"`.
+fn contrast_text_layer(field: &str) -> serde_json::Value {
+    serde_json::json!({
+        "mark": "text",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": field}, "text": {"field": "g"}},
+        "mark_style": {"fill": "theme:contrast"},
+    })
+}
+
+/// A rect over [`column_gate_batch`], with `color` on `field` when given.
+fn rect_layer(color_field: Option<&str>) -> serde_json::Value {
+    let mut layer = serde_json::json!({"mark": "rect", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}});
+    if let Some(field) = color_field {
+        layer["encoding"]["color"] = serde_json::json!({"field": field});
+    }
+    layer
+}
+
+/// A contrast-ink text is the chart's only color reader (a rect with no
+/// color of its own beside it): no color scale, no colorbar, no legend, and
+/// one `ChannelNotDrawn` warning. The message is pinned verbatim, naming
+/// the mark-color judgment an unresolved row actually gets
+/// (`resolve_contrast_fill_color`'s fallback) rather than the plain theme
+/// font color, so a future reword of either side is caught here.
+#[test]
+fn a_contrast_text_as_the_only_continuous_color_reader_builds_no_scale_and_warns_against_the_mark_color() {
+    let spec = column_gate_spec(serde_json::json!([]), serde_json::json!([rect_layer(None), contrast_text_layer("z")]));
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert!(prep.provisional_scales.color.is_none(), "a contrast-ink text alone builds no color scale");
+    assert!(prep.colorbar.is_none(), "and no colorbar");
+    assert!(prep.legend_entries.is_empty(), "and no legend entries");
+    let undrawn: Vec<String> =
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(ToString::to_string).collect();
+    assert_eq!(
+        undrawn,
+        ["layer 1: mark_text: color 'z' has no effect: the labels read color only to pick an ink against the \
+          cells under them, no layer draws that color, so it gets no scale and no legend; each label is \
+          judged against the theme mark color, the fill an unstyled cell paints"]
+    );
+}
+
+/// The same only-reader shape with a categorical field: no legend entries
+/// either, and still exactly one warning.
+#[test]
+fn a_contrast_text_as_the_only_categorical_color_reader_builds_no_legend() {
+    let spec = column_gate_spec(serde_json::json!([]), serde_json::json!([rect_layer(None), contrast_text_layer("g")]));
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert!(prep.provisional_scales.color.is_none(), "no color scale for hues nothing paints");
+    assert!(prep.legend_entries.is_empty(), "no legend entries");
+    assert_eq!(
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).count(),
+        1,
+        "exactly one warning, not one per channel pass"
+    );
+}
+
+/// A contrast-ink text listed BEFORE the rect that actually draws color
+/// never establishes the scale: the rect's field, title and categorical
+/// domain are what the chart renders, whichever layer the caller wrote
+/// first. The text reads field `k` (four distinct values the rect never
+/// has); the rect reads `g` (`"a"`/`"b"`). If the text had established,
+/// the domain would be `k`'s four values and the warning count would be
+/// nonzero; neither holds.
+#[test]
+fn a_contrast_text_listed_before_the_rect_does_not_establish_the_scale() {
+    let spec = column_gate_spec(serde_json::json!([]), serde_json::json!([contrast_text_layer("k"), rect_layer(Some("g"))]));
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert_eq!(
+        prep.rendering_encoding().color.as_ref().map(|c| c.field.as_str()),
+        Some("g"),
+        "the rect establishes the rendering encoding's color, not the text listed first"
+    );
+    let color_scale = prep.provisional_scales.color.as_ref().expect("the rect draws color");
+    let domain: Vec<&str> = color_scale.categorical_domain().expect("categorical").iter().map(String::as_str).collect();
+    assert_eq!(domain, ["a", "b"], "the domain is the rect's g, not the text's k");
+    assert!(
+        !prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })),
+        "the rect draws color, so nothing warns even though the contrast text is listed first"
+    );
+}
+
+/// The unlayered branch of `establishing_binding`: a chart with no `layers`
+/// array whose sole mark is a contrast-ink text establishes no color
+/// binding, the same `reads_color_for_contrast` exclusion the layered
+/// branch applies through `aux_reads`. The control (no sentinel) shows the
+/// plain text establishing its own color normally.
+#[test]
+fn establishing_binding_unlayered_contrast_text_establishes_nothing() {
+    use crate::spec::mark_style::MarkKwargsSpec;
+    let batch = column_gate_batch();
+    let spec = ChartSpec {
+        mark: Mark::Text,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+            ..Default::default()
+        },
+        mark_style: Some(MarkKwargsSpec { fill: Some("theme:contrast".into()), ..Default::default() }),
+        ..Default::default()
+    };
+    let channel = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+    let outputs = HashMap::new();
+    let layer = LayerPrepared::from_chart_only(&spec);
+    let binding = establishing_binding(&spec, std::slice::from_ref(&layer), channel, &batch, &outputs);
+    assert!(binding.is_none(), "an unlayered contrast-only chart establishes no color binding");
+
+    let plain = ChartSpec { mark_style: None, ..spec.clone() };
+    let plain_layer = LayerPrepared::from_chart_only(&plain);
+    let plain_binding = establishing_binding(&plain, std::slice::from_ref(&plain_layer), channel, &batch, &outputs);
+    assert!(plain_binding.is_some(), "control: a plain text establishes its own color normally");
+}
+
 /// A column only another `+` operand's rows hold is no statistic: a layer
 /// whose rows are its operand's own (a branch over the snapshot its framed
 /// branch publishes) refuses with the plain message, though the other

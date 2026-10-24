@@ -211,6 +211,16 @@ pub enum PaintSource {
     /// byte-identically (T8 quality-review c2, spec §4.1 2026-09-01 amendment,
     /// spec §7).
     UserClear,
+    /// Resolved from the `"theme:contrast"` sentinel (spec §6.5): an internal
+    /// paint token, matched in [`resolve_mark_style`] (not in
+    /// [`resolve_paint_color`]) ahead of parsing, valid only as a `Mark::Text`
+    /// layer's own `fill=`, that asks for a per-row contrast ink instead of a
+    /// constant color. A text layer whose fill carries this provenance never
+    /// paints the constant [`resolve_mark_style`] wrote alongside it — the
+    /// per-row reader (`marks::text::build`) recomputes the ink for each row
+    /// from that row's own color-channel value, composed over the theme
+    /// background.
+    Contrast,
 }
 
 impl PaintSource {
@@ -218,7 +228,13 @@ impl PaintSource {
     /// the [`resolve_paint_color`] that resolves the same string's *value*, so
     /// value and provenance are written in one place and cannot drift.
     pub(in crate::render) fn from_override(value: &str) -> Self {
-        if is_paint_clear_sentinel(value) { Self::UserClear } else { Self::UserColor }
+        if value == CONTRAST_SENTINEL {
+            Self::Contrast
+        } else if is_paint_clear_sentinel(value) {
+            Self::UserClear
+        } else {
+            Self::UserColor
+        }
     }
 
     /// `true` for either explicit-override variant. Rule/segment renderers read
@@ -484,6 +500,18 @@ impl MarkStyle {
     }
 }
 
+/// The `"theme:contrast"` sentinel (spec §6.5): an internal paint token with
+/// the same status as `"theme:label"`, emitted verbatim by ferrum's own
+/// figure desugars, never something a user types. Not part of the public
+/// color vocabulary, and valid in exactly one slot: a `Mark::Text` layer's
+/// own `fill=`, matched in [`resolve_mark_style`] before this value ever
+/// reaches [`resolve_paint_color`]. Every other slot — any other mark's
+/// `fill=`, or `stroke=` on any mark including text — has no reader for it,
+/// so it falls through to [`resolve_paint_color`]'s ordinary parsing and is
+/// refused as [`RenderError::InvalidColor`], the same refusal any other
+/// unknown paint string gets.
+pub(crate) const CONTRAST_SENTINEL: &str = "theme:contrast";
+
 /// Resolve one user-supplied `fill=` / `stroke=` string to a paint color.
 ///
 /// Three shapes are accepted, checked in this order:
@@ -505,6 +533,13 @@ impl MarkStyle {
 /// Anything `parse_color` rejects is a typed [`RenderError::InvalidColor`]
 /// naming the accepted forms, never a silent skip: an unparseable `fill=` used
 /// to leave the mark painted in its theme default with no diagnostic at all.
+///
+/// [`CONTRAST_SENTINEL`] is NOT one of these shapes: it has no reader here.
+/// [`resolve_mark_style`] matches it before calling this function, only for a
+/// text layer's own `fill=`; every other caller of this function (every other
+/// mark's `fill=`, and `stroke=` on any mark) reaches `parse_color` with the
+/// literal string `"theme:contrast"` and is refused as `InvalidColor`, exactly
+/// as any other unrecognized paint string is.
 fn resolve_paint_color(value: &str, theme: &ThemeInputs) -> Result<Color, RenderError> {
     if value == "theme:label" {
         return Ok(theme.colors.label_color);
@@ -733,8 +768,18 @@ pub fn resolve_mark_style(
         style.paint.stroke_source = PaintSource::from_override(value);
     }
     if let Some(ref value) = o.fill {
-        style.paint.fill = resolve_paint_color(value, theme)?;
-        style.paint.fill_source = PaintSource::from_override(value);
+        // `theme:contrast` is valid in exactly this one slot: a text's own
+        // `fill=`. Matched here, ahead of `resolve_paint_color`, so every
+        // other mark's `fill=` (and text's own `stroke=`, above) falls
+        // through to `resolve_paint_color`'s ordinary parsing and is refused
+        // as `InvalidColor` — the sentinel has no reader anywhere else.
+        if *mark == Mark::Text && value == CONTRAST_SENTINEL {
+            style.paint.fill = theme.colors.font_color;
+            style.paint.fill_source = PaintSource::from_override(value);
+        } else {
+            style.paint.fill = resolve_paint_color(value, theme)?;
+            style.paint.fill_source = PaintSource::from_override(value);
+        }
     }
 
     // Text-mark-specific fields
@@ -1521,15 +1566,45 @@ pub(crate) fn resolve_fill_color(
     num_value: Option<f64>,
     fallback: ClearablePaint,
 ) -> ClearablePaint {
-    let Some(s) = scale else { return fallback };
-    let looked_up = match s.input() {
-        ColorInput::Numeric => num_value.filter(|v| v.is_finite()).and_then(|v| s.lookup_f64(v)),
-        ColorInput::Category => cat_value.and_then(|v| s.lookup(v)),
-    };
-    match looked_up {
+    match lookup_color(scale, cat_value, num_value) {
         Some(c) => fallback.cleared_or(c),
         None => fallback,
     }
+}
+
+/// Look up one row's color-channel value against `scale`'s one input kind
+/// (a numeric lookup for a continuous/discretizing scale, a category lookup
+/// for a categorical one), with no fallback: `None` for no scale, no value of
+/// the kind the scale reads, or a miss. The shared "did this row's color
+/// resolve" read [`resolve_fill_color`] and [`resolve_contrast_fill_color`]
+/// both build on, so the two cannot answer that question differently.
+fn lookup_color(scale: Option<&ColorScale>, cat_value: Option<&str>, num_value: Option<f64>) -> Option<Color> {
+    let s = scale?;
+    match s.input() {
+        ColorInput::Numeric => num_value.filter(|v| v.is_finite()).and_then(|v| s.lookup_f64(v)),
+        ColorInput::Category => cat_value.and_then(|v| s.lookup(v)),
+    }
+}
+
+/// Resolve one row's `"theme:contrast"` ink (spec §6.5): the row's own
+/// color-channel value, read the same way [`resolve_fill_color`] reads it,
+/// painted through [`color::contrast_ink`](super::color::contrast_ink)
+/// against the theme's font color and background. A row whose color does
+/// not resolve — no scale, no value, or an out-of-domain lookup — is not a
+/// row the cell layer leaves undrawn: an unstyled cell (rect or bar) still
+/// paints its theme-default fill, the theme mark color, for that row. So
+/// the label is judged against THAT color, through the same
+/// [`color::contrast_ink`] rule every resolved row uses, rather than
+/// against the theme font color plainly (which can read below WCAG AA on
+/// the mark-colored cell an unresolved row actually sits on).
+pub(crate) fn resolve_contrast_fill_color(
+    scale: Option<&ColorScale>,
+    cat_value: Option<&str>,
+    num_value: Option<f64>,
+    theme: &ThemeInputs,
+) -> ClearablePaint {
+    let cell = lookup_color(scale, cat_value, num_value).unwrap_or(theme.colors.mark_color);
+    ClearablePaint::Paint(super::color::contrast_ink(cell, theme.colors.font_color, theme.colors.background_color))
 }
 
 /// [`resolve_fill_color`] for a mark that resolves one paint per **group**
@@ -2130,6 +2205,211 @@ mod tests {
         assert_eq!(style.paint.fill.red,   0x44, "sentinel fill.red must be label_color.red");
         assert_eq!(style.paint.fill.green, 0x55, "sentinel fill.green must be label_color.green");
         assert_eq!(style.paint.fill.blue,  0x66, "sentinel fill.blue must be label_color.blue");
+    }
+
+    // --- `theme:contrast` sentinel (spec §6.5) ──────────────────────────────
+
+    use crate::render::color::{contrast_ink, from_rgb, from_rgba};
+    use crate::render::scale_resolve::ColorScale;
+
+    /// Matched exactly like `"theme:label"`, before `parse_color` ever sees
+    /// it: a dispatch-order regression would turn it into an `InvalidColor`
+    /// refusal instead of the `Contrast` provenance.
+    #[test]
+    fn contrast_sentinel_is_not_a_parseable_color() {
+        assert!(crate::render::color::parse_color(CONTRAST_SENTINEL).is_err());
+    }
+
+    /// `PaintSource::from_override` records `Contrast` for the sentinel and
+    /// nothing else — an ordinary color string, and the paint-clear
+    /// sentinels, must still resolve to their own provenance, not get
+    /// reclassified by the new branch.
+    #[test]
+    fn paint_source_from_override_recognizes_the_contrast_sentinel_and_only_it() {
+        assert_eq!(PaintSource::from_override(CONTRAST_SENTINEL), PaintSource::Contrast);
+        assert_eq!(PaintSource::from_override("#ff0000"), PaintSource::UserColor);
+        assert_eq!(PaintSource::from_override("none"), PaintSource::UserClear);
+        assert_eq!(PaintSource::from_override("transparent"), PaintSource::UserClear);
+    }
+
+    /// `resolve_mark_style(fill="theme:contrast")` must not refuse (the
+    /// sentinel is matched ahead of parsing) and must record the `Contrast`
+    /// provenance on the layer-resolved style — the flag `marks::text::build`
+    /// reads to switch a row's fill from the ordinary color-channel lookup to
+    /// the per-row contrast ink.
+    ///
+    /// Written against literal `"theme:contrast"` (not the named constant)
+    /// and checking only that the call does not refuse: at the pre-fix
+    /// code this is the one assertion the RED proof can make without
+    /// referencing a symbol that does not exist yet (`CONTRAST_SENTINEL`,
+    /// `PaintSource::Contrast`) — the sentinel used to fall through to
+    /// `parse_color`, which rejects it, so this failed before the fix.
+    #[test]
+    fn resolve_mark_style_fill_contrast_sentinel_does_not_refuse() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some("theme:contrast".into()), ..Default::default() };
+        let result = resolve_mark_style(Some(&overrides), &theme, &Mark::Text);
+        assert!(result.is_ok(), "'theme:contrast' must not refuse on mark_text: {:?}", result.err());
+    }
+
+    #[test]
+    fn resolve_mark_style_fill_contrast_sentinel_sets_contrast_provenance() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some(CONTRAST_SENTINEL.into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text)
+            .unwrap_or_else(|e| panic!("'{CONTRAST_SENTINEL}' must not refuse: {e}"));
+        assert_eq!(style.paint.fill_source, PaintSource::Contrast);
+    }
+
+    /// The sentinel is valid in exactly one slot (a text's own `fill=`); on
+    /// every other mark's `fill=` it has no reader and is refused exactly
+    /// as any other unrecognized paint string is — never a silent constant
+    /// font-color paint. Marks that draw no `fill` at all (`Mark::style_fields`: line, rule,
+    /// segment, image) refuse earlier, for an unrelated reason
+    /// (`MarkStyleNotDrawn`); this test is scoped to marks that draw `fill`,
+    /// so every case reaches the color resolution this fix changes.
+    #[test]
+    fn resolve_mark_style_fill_contrast_sentinel_refuses_on_every_non_text_mark() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some(CONTRAST_SENTINEL.into()), ..Default::default() };
+        let expected = RenderError::InvalidColor(crate::render::color::primitive::ColorParseError(CONTRAST_SENTINEL.into()));
+        for mark in [
+            Mark::Rect, Mark::Bar, Mark::Point, Mark::Area, Mark::Tick, Mark::Polygon, Mark::Arc, Mark::Label,
+        ] {
+            let err = resolve_mark_style(Some(&overrides), &theme, &mark)
+                .expect_err(&format!("{mark} must refuse fill='{CONTRAST_SENTINEL}', not paint it silently"));
+            assert_eq!(err, expected, "{mark}: refusal text must match an ordinary unrecognized color");
+        }
+    }
+
+    /// The sentinel has no reader on `stroke=` either, not even on a mark
+    /// that draws it: every such mark refuses it the same way. `Mark::Text`
+    /// draws no `stroke` at all (`Mark::style_fields`), so it is excluded
+    /// here for the same reason line/rule/segment/image are excluded from
+    /// the `fill=` test above — this test is scoped to marks the color
+    /// resolution this fix changes is actually reachable through.
+    #[test]
+    fn resolve_mark_style_stroke_contrast_sentinel_refuses_on_every_mark() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { stroke: Some(CONTRAST_SENTINEL.into()), ..Default::default() };
+        let expected = RenderError::InvalidColor(crate::render::color::primitive::ColorParseError(CONTRAST_SENTINEL.into()));
+        for mark in [Mark::Point, Mark::Rect, Mark::Rule] {
+            let err = resolve_mark_style(Some(&overrides), &theme, &mark)
+                .expect_err(&format!("{mark} must refuse stroke='{CONTRAST_SENTINEL}'"));
+            assert_eq!(err, expected, "{mark}: refusal text must match an ordinary unrecognized color");
+        }
+    }
+
+    fn gray_categorical_scale() -> ColorScale {
+        ColorScale::Categorical {
+            domain: vec!["light".into(), "dark".into()],
+            palette: std::borrow::Cow::Owned(vec![from_rgb(0xff, 0xff, 0xff), from_rgb(0x00, 0x00, 0x00)]),
+        }
+    }
+
+    /// A categorical row's own color: "light" reads better against the dark
+    /// font color, "dark" reads better against the light background — the
+    /// same two outcomes [`contrast_ink`]'s own unit tests pin, reached here
+    /// through the per-row reader instead of calling the primitive directly.
+    #[test]
+    fn resolve_contrast_fill_color_categorical_lookup() {
+        let theme = ThemeInputs::default();
+        let scale = gray_categorical_scale();
+        let light = resolve_contrast_fill_color(Some(&scale), Some("light"), None, &theme);
+        let dark = resolve_contrast_fill_color(Some(&scale), Some("dark"), None, &theme);
+        assert_eq!(light, ClearablePaint::Paint(contrast_ink(from_rgb(0xff, 0xff, 0xff), theme.colors.font_color, theme.colors.background_color)));
+        assert_eq!(dark, ClearablePaint::Paint(contrast_ink(from_rgb(0x00, 0x00, 0x00), theme.colors.font_color, theme.colors.background_color)));
+        assert_ne!(light, dark, "the two categories must not resolve to the same ink");
+    }
+
+    /// A continuous row's own color goes through the scale's `lookup_f64`,
+    /// exactly like [`resolve_fill_color`]'s continuous branch, then into
+    /// [`contrast_ink`] — the oracle this test checks the reader against is
+    /// the same scale object the reader itself consulted.
+    #[test]
+    fn resolve_contrast_fill_color_continuous_lookup() {
+        use crate::render::color::ContinuousScheme;
+        let theme = ThemeInputs::default();
+        let scale = ColorScale::Continuous {
+            domain: (0.0, 10.0),
+            scheme: ContinuousScheme::Named(crate::render::color::NamedContinuous::Viridis),
+            midpoint: None,
+            transform: crate::render::scale_resolve::ColorTransform::Linear,
+        };
+        let v = 3.5;
+        let resolved = resolve_contrast_fill_color(Some(&scale), None, Some(v), &theme);
+        let cell = scale.lookup_f64(v).expect("3.5 is inside the domain");
+        let expected = contrast_ink(cell, theme.colors.font_color, theme.colors.background_color);
+        assert_eq!(resolved, ClearablePaint::Paint(expected));
+    }
+
+    /// No value to contrast against — no scale, a category outside the
+    /// resolved domain, or a non-finite numeric value — is judged against
+    /// the theme MARK color (`#2563eb`, the fill an unstyled rect or bar
+    /// cell paints for that row), not the font color plainly: on the
+    /// default theme the background `#faf7f2` wins at 4.84:1, where the
+    /// font color would read only 2.84:1 against that same fallback fill —
+    /// a fixed expected value, not `contrast_ink` used as its own oracle.
+    #[test]
+    fn resolve_contrast_fill_color_null_or_out_of_domain_judges_against_the_theme_mark_color() {
+        let theme = ThemeInputs::default();
+        let background = ClearablePaint::Paint(from_rgb(0xfa, 0xf7, 0xf2));
+        assert_eq!(resolve_contrast_fill_color(None, Some("light"), None, &theme), background, "no scale at all");
+        let scale = gray_categorical_scale();
+        assert_eq!(resolve_contrast_fill_color(Some(&scale), Some("nope"), None, &theme), background, "a category outside the domain");
+        assert_eq!(resolve_contrast_fill_color(Some(&scale), None, None, &theme), background, "no category string on a categorical scale");
+        let continuous = ColorScale::Continuous {
+            domain: (0.0, 10.0),
+            scheme: crate::render::color::ContinuousScheme::Named(crate::render::color::NamedContinuous::Viridis),
+            midpoint: None,
+            transform: crate::render::scale_resolve::ColorTransform::Linear,
+        };
+        assert_eq!(resolve_contrast_fill_color(Some(&continuous), None, Some(f64::NAN), &theme), background, "a non-finite numeric value");
+        assert_eq!(resolve_contrast_fill_color(Some(&continuous), None, None, &theme), background, "no numeric value on a continuous scale");
+    }
+
+    /// A theme whose mark color is LIGHT flips the fallback ink to the font
+    /// color — the same rule, the other branch, pinned with another fixed
+    /// value rather than re-deriving it from `contrast_ink`.
+    #[test]
+    fn resolve_contrast_fill_color_null_judges_against_a_light_theme_mark_color() {
+        let mut theme = ThemeInputs::default();
+        theme.colors.mark_color = from_rgb(0xff, 0xff, 0xff);
+        let resolved = resolve_contrast_fill_color(None, None, None, &theme);
+        assert_eq!(resolved, ClearablePaint::Paint(theme.colors.font_color));
+    }
+
+    /// Below WCAG AA against both the theme font color and background, the
+    /// reader falls to whichever of black/white contrasts better — the same
+    /// rule [`contrast_ink`]'s own test pins, reached here through a custom
+    /// theme whose font/background are both mid-gray.
+    #[test]
+    fn resolve_contrast_fill_color_below_aa_falls_back_to_black_or_white() {
+        let mut theme = ThemeInputs::default();
+        theme.colors.font_color = from_rgb(0xa0, 0xa0, 0xa0);
+        theme.colors.background_color = from_rgb(0x60, 0x60, 0x60);
+        let scale = ColorScale::Categorical {
+            domain: vec!["mid".into()],
+            palette: std::borrow::Cow::Owned(vec![from_rgb(0x80, 0x80, 0x80)]),
+        };
+        let resolved = resolve_contrast_fill_color(Some(&scale), Some("mid"), None, &theme);
+        assert_eq!(resolved, ClearablePaint::Paint(from_rgb(0, 0, 0)));
+    }
+
+    /// A row's own color with alpha is composed over the theme background
+    /// before the contrast check, not read by its raw channel values — the
+    /// per-row reader must inherit [`contrast_ink`]'s compositing, not
+    /// bypass it.
+    #[test]
+    fn resolve_contrast_fill_color_composites_a_translucent_cell() {
+        let theme = ThemeInputs::default();
+        let scale = ColorScale::Categorical {
+            domain: vec!["half".into()],
+            palette: std::borrow::Cow::Owned(vec![from_rgba(0x00, 0x00, 0x00, 0x80)]),
+        };
+        let resolved = resolve_contrast_fill_color(Some(&scale), Some("half"), None, &theme);
+        let expected = contrast_ink(from_rgba(0x00, 0x00, 0x00, 0x80), theme.colors.font_color, theme.colors.background_color);
+        assert_eq!(resolved, ClearablePaint::Paint(expected));
     }
 
     // --- `MarkPaint::fill_source` (Task 4 remediation, spec §4.4,

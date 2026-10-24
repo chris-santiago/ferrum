@@ -36,8 +36,8 @@
 use crate::layout::TextAnchor;
 use crate::render::arrow_cast::col_as_ordinal_category_str;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
-    ClearablePaint, DrawCtx,
+    col_as_f64, col_as_positional_category_str, col_as_str, resolve_contrast_fill_color,
+    resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, PaintSource,
 };
 use crate::render::format::{format_numeric, format_value_with_spec, Temporality};
 use crate::render::mark_nodes::MarkNodes;
@@ -331,6 +331,24 @@ fn cartesian_anchors(ctx: &DrawCtx<'_>) -> Option<LabelAnchors> {
     Some(LabelAnchors { anchors, fallback_labels })
 }
 
+/// Whether a layer of `mark` with mark-kwargs `style` binds `color` to read
+/// a scale without drawing a hue from it: a text whose fill is the
+/// `"theme:contrast"` sentinel ([`crate::render::draw::CONTRAST_SENTINEL`]).
+/// Such a layer's column is still read by its builder (`drawn_encoding` and
+/// the column gate keep it) — this is the one answer `scale_resolve::domain`'s
+/// scale reads and `prepare`'s establishing-binding and undrawn-channel
+/// warning ask, so a layer that reads color only to pick an ink against the
+/// cells it labels never builds a scale, a legend, or a domain no mark paints,
+/// the same way [`crate::render::marks::image::image_draws_color`] answers
+/// the parallel "bound but not drawn" question for a raster's cells.
+pub(crate) fn reads_color_for_contrast(
+    mark: crate::spec::mark::Mark,
+    style: Option<&crate::spec::mark_style::MarkKwargsSpec>,
+) -> bool {
+    mark == crate::spec::mark::Mark::Text
+        && style.and_then(|s| s.fill.as_deref()) == Some(crate::render::draw::CONTRAST_SENTINEL)
+}
+
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
@@ -461,11 +479,21 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // provenance: `fill="none"` is `Cleared`, which `resolve_fill_color` keeps
     // cleared over a color-channel hit and which reaches the scene as
     // `TextStyle.color: None` — the same `#110` rule every filled mark follows.
+    //
+    // One exception to the whole precedence above: `fill="theme:contrast"`
+    // (spec §6.5) binds its own `color` channel not to draw a hue but to name
+    // the cell a row's label sits on, so its per-row paint is computed
+    // separately below (`contrast_fill`) instead of through this constant.
     let base_text_paint = if ctx.mark_style.paint.fill_source.is_user_set() {
         ctx.mark_style.paint.fill_paint()
     } else {
         ClearablePaint::Paint(ctx.theme.colors.font_color)
     };
+    // `fill="theme:contrast"` asks for a per-row contrast ink instead of
+    // the ordinary channel-or-constant paint above — `base_text_paint` is
+    // left unused on this branch, since there is no constant fallback to
+    // read against a varying, per-row background.
+    let contrast_fill = ctx.mark_style.paint.fill_source == PaintSource::Contrast;
     let (color_values_str, color_values_f64) = color_column_loader(ctx);
 
     let meta = MetadataColumns::from_ctx(ctx);
@@ -530,15 +558,27 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .filter(|v| v.is_finite())
             .unwrap_or(base_angle);
 
-        // Resolve per-row fill paint: color channel wins when bound, else the
-        // resolved constant (`base_text_paint`, see above) — unless that
-        // constant is a clear, which outranks the channel.
-        let row_paint = resolve_fill_color(
-            ctx.scales.color.as_ref(),
-            color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
-            color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            base_text_paint,
-        );
+        // Resolve per-row fill paint: under `theme:contrast` every row reads
+        // its own color-channel value as a cell to paint against (spec
+        // §6.5), never as the hue itself; otherwise the color channel wins
+        // when bound, else the resolved constant (`base_text_paint`, see
+        // above) — unless that constant is a clear, which outranks the
+        // channel.
+        let row_paint = if contrast_fill {
+            resolve_contrast_fill_color(
+                ctx.scales.color.as_ref(),
+                color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+                color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+                ctx.theme,
+            )
+        } else {
+            resolve_fill_color(
+                ctx.scales.color.as_ref(),
+                color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+                color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+                base_text_paint,
+            )
+        };
 
         acc.push(SceneNode::Text {
             x: px + dx,
@@ -1219,6 +1259,119 @@ pub(crate) mod tests {
             "a bound color channel must override fill='#ff0000'; got {colors:?}");
         assert_ne!(colors[0], colors[1],
             "channel-resolved colors must still vary per category; got {colors:?}");
+    }
+
+    // ── `fill="theme:contrast"` sentinel (spec §6.5) ─────────────────────────
+
+    /// `reads_color_for_contrast` is true for exactly one shape: a
+    /// `Mark::Text` whose raw `fill` is the literal sentinel string. The
+    /// same fill on a non-text mark, no mark-kwargs at all, a text with an
+    /// ordinary fill, and a text with no `fill` set all answer false.
+    #[test]
+    fn reads_color_for_contrast_is_true_only_for_a_contrast_filled_text() {
+        use crate::spec::mark::Mark;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let contrast = MarkKwargsSpec { fill: Some("theme:contrast".into()), ..Default::default() };
+        let plain = MarkKwargsSpec { fill: Some("#ff0000".into()), ..Default::default() };
+        assert!(reads_color_for_contrast(Mark::Text, Some(&contrast)));
+        assert!(!reads_color_for_contrast(Mark::Rect, Some(&contrast)), "a non-text mark never reads for contrast");
+        assert!(!reads_color_for_contrast(Mark::Text, None), "no mark-kwargs at all is not the sentinel");
+        assert!(!reads_color_for_contrast(Mark::Text, Some(&plain)), "an ordinary fill is not the sentinel");
+        assert!(!reads_color_for_contrast(Mark::Text, Some(&MarkKwargsSpec::default())), "no fill set is not the sentinel");
+    }
+
+    /// A numeric `color` channel bound alongside `fill="theme:contrast"`:
+    /// the same end-to-end `DrawCtx` → `build()` pipeline
+    /// `color_precedence_ctx_colors` exercises, but returning the resolved
+    /// `ColorScale` and theme too, so a test reads the SAME scale object the
+    /// engine consulted as its own oracle instead of guessing the scheme.
+    /// `None` rows pin the null case; every other row is placed in `[0, n)`
+    /// so the color domain always has two or more distinct values.
+    fn contrast_ctx(values: Vec<Option<f64>>) -> (Vec<ferrum_scene::Color>, crate::render::scale_resolve::ColorScale, ThemeInputs) {
+        let n = values.len();
+        let overrides = MarkKwargsSpec { fill: Some("theme:contrast".into()), ..Default::default() };
+        let spec = ChartSpec {
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(overrides.clone()),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(values)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let colors = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { style, .. } = n { style.color } else { None }
+        }).collect();
+        let color_scale = scales.color.clone().expect("a bound numeric color channel resolves a color scale");
+        (colors, color_scale, theme)
+    }
+
+    /// Every row's painted color equals the engine's own `contrast_ink`
+    /// answer for that row's looked-up cell color — not the raw hue the
+    /// SAME scale would paint for an ordinary (non-sentinel) text layer
+    /// (`text_color_channel_sets_per_row_color`'s shape), which is the
+    /// rejected alternative this test discriminates against. Two of the
+    /// rows are also checked against a FIXED expected color, independent
+    /// of `contrast_ink`: with no explicit `scale=`, ferrum's default
+    /// continuous scheme over the data domain `(1.0, 9.0)` samples `v=1.0`
+    /// to a near-white light blue, `rgb(239, 246, 255)`, and `v=9.0` to a
+    /// dark navy, `rgb(30, 58, 138)` (read back directly off the resolved
+    /// `ColorScale` below, not asserted as a literal in this doc comment,
+    /// since the scheme is an implementation default this test does not
+    /// own). Against the default theme (font `#1f2937`, background
+    /// `#faf7f2`), WCAG contrast ratio by hand gives: the light cell reads
+    /// 13.49:1 against the font color and 1.02:1 against the background,
+    /// so the font color wins; the dark cell reads 1.42:1 against the font
+    /// color and 9.69:1 against the background, so the background wins —
+    /// both clear AA outright, with no black/white fallback in play.
+    #[test]
+    fn text_contrast_sentinel_continuous_lookup_paints_the_engine_ink_not_the_raw_hue() {
+        let (colors, scale, theme) = contrast_ctx(vec![Some(1.0), Some(9.0)]);
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors[0], to_scene_color(theme.colors.font_color), "v=1.0's light cell must read the theme font color");
+        assert_eq!(colors[1], to_scene_color(theme.colors.background_color), "v=9.0's dark cell must read the theme background");
+        for (i, v) in [1.0_f64, 9.0].into_iter().enumerate() {
+            let cell = scale.lookup_f64(v).expect("value is inside the domain");
+            let expected = to_scene_color(crate::render::color::contrast_ink(
+                cell,
+                theme.colors.font_color,
+                theme.colors.background_color,
+            ));
+            assert_eq!(colors[i], expected, "row {i} (v={v}) must paint the engine's own contrast ink");
+            let raw_hue = to_scene_color(cell);
+            assert_ne!(colors[i], raw_hue, "row {i} (v={v}) must not paint the raw per-row hue");
+        }
+    }
+
+    /// A row with no resolvable color (a null value here) is judged against
+    /// the theme MARK color (`#2563eb`, the fill an unstyled cell paints for
+    /// that row — spec §6.5), not the font color plainly: on the default
+    /// theme the background wins at 4.84:1 (the font color only reads
+    /// 2.84:1 against that same fallback fill), a fixed expected value
+    /// independent of `contrast_ink`.
+    #[test]
+    fn text_contrast_sentinel_null_value_judges_against_the_theme_mark_color() {
+        let (colors, _scale, theme) = contrast_ctx(vec![Some(1.0), None]);
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors[1], to_scene_color(theme.colors.background_color));
     }
 
     // ── NF-A3: ordinal positional reads key off the scale, not the dtype ─────

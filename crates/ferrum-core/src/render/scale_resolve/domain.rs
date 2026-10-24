@@ -815,6 +815,16 @@ pub(in crate::render) fn aux_reads<'a>(
         if !layer.owns(drawn) && !layer.mark.draws_inherited(drawn) {
             continue;
         }
+        // A contrast-ink text binds `color` to read the scale, not to paint
+        // it: skipped here exactly as a declined inherited color is, so it
+        // never establishes the scale, widens its domain, or contributes to
+        // its legend (`undrawn_channel_warnings` separately counts it as
+        // bound-but-undrawn).
+        if drawn == crate::spec::layer::InheritedChannel::Color
+            && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref())
+        {
+            continue;
+        }
         let Some(binding) = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())
         else {
             continue;
@@ -5199,6 +5209,53 @@ mod tests {
         let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
         let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
         assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [2]);
+    }
+
+    /// A contrast-ink text's color read never reaches the reads list, even
+    /// when its own rows (a separate `data_source`) hold a category the
+    /// drawing layer's cells lack: the domain `aux_category_union` builds
+    /// from these reads is the drawing layer's alone, so the text's wider
+    /// rows cannot widen it.
+    #[test]
+    fn aux_reads_excludes_a_contrast_text_even_when_its_rows_hold_a_wider_category() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let color = |field: &str| Encoding { color: Some(EncodingSpec { field: field.into(), ..Default::default() }), ..Default::default() };
+        let contrast_fill = Some(MarkKwargsSpec { fill: Some("theme:contrast".into()), ..Default::default() });
+        let layers = vec![
+            Layer { mark: Mark::Rect, encoding: color("c"), ..Default::default() },
+            Layer {
+                mark: Mark::Text,
+                encoding: color("c"),
+                mark_style: contrast_fill,
+                data_source: Some("labels".into()),
+                ..Default::default()
+            },
+        ];
+        let chart = color("c");
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["A", "B"]))],
+        )
+        .unwrap();
+        // The contrast text's own rows hold "Z", a category the cells
+        // (the rect, over `rows`) never draw.
+        let mut outputs = HashMap::new();
+        outputs.insert(
+            "labels".to_string(),
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(vec!["Z"]))],
+            )
+            .unwrap(),
+        );
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert_eq!(
+            reads.iter().map(AuxRead::layer).collect::<Vec<_>>(),
+            [0],
+            "only the rect's read reaches the domain; the contrast text's wider rows are excluded"
+        );
     }
 
     /// A faceted-SHARED (`include_final: true`) read of

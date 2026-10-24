@@ -22,6 +22,6 @@ pub(crate) mod primitive;
 // (`from_hex_str`) is deliberately absent: it is private to `primitive`, so no
 // call site can accept a narrower vocabulary than
 // [`primitive::ACCEPTED_COLOR_FORMS`] advertises (batch-A Task 8 sweep).
-pub use primitive::{fmt_svg, from_rgb, from_rgba, parse_color, with_opacity, Color, TRANSPARENT};
+pub use primitive::{contrast_ink, fmt_svg, from_rgb, from_rgba, parse_color, with_opacity, Color, TRANSPARENT};
 
 pub use continuous::{ContinuousScheme, NamedContinuous};

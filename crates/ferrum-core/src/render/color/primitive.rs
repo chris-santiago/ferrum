@@ -292,6 +292,105 @@ pub fn with_opacity(c: Color, opacity_0_1: f64) -> Color {
     Srgba::new(c.red, c.green, c.blue, a)
 }
 
+/// The WCAG 2.x "AA" contrast threshold (4.5:1) [`contrast_ink`] reads a
+/// row's own color against before falling back to black/white.
+const CONTRAST_AA: f64 = 4.5;
+
+/// Alpha-composite `fg` over `bg` ("source-over"), read as if `bg` were
+/// fully opaque, so only `fg`'s alpha ever shapes the blend. The result is
+/// always fully opaque: WCAG contrast is defined for a color actually
+/// painted on a background, not for the paint and the background read
+/// apart. [`contrast_ink`] is this crate's one caller, and calls it only
+/// with an opaque `bg` (the composed cell, or an already-opaque theme
+/// background) — it does not call this function at all when a theme
+/// background is itself translucent, since there is then no known opaque
+/// base to blend against.
+fn composite_over(fg: Color, bg: Color) -> Color {
+    let fa = fg.alpha as f64 / 255.0;
+    let blend = |f: u8, b: u8| -> u8 {
+        ((f as f64 * fa) + (b as f64 * (1.0 - fa))).round().clamp(0.0, 255.0) as u8
+    };
+    Srgba::new(blend(fg.red, bg.red), blend(fg.green, bg.green), blend(fg.blue, bg.blue), 0xFF)
+}
+
+/// WCAG 2.x relative luminance of `c` (<https://www.w3.org/TR/WCAG21/#dfn-relative-luminance>),
+/// in `[0, 1]`. Alpha is ignored: every caller reads the luminance of an
+/// already-opaque color ([`composite_over`]'s result, or a theme's own solid
+/// paint).
+fn relative_luminance(c: Color) -> f64 {
+    fn channel(v: u8) -> f64 {
+        let s = v as f64 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(c.red) + 0.7152 * channel(c.green) + 0.0722 * channel(c.blue)
+}
+
+/// WCAG 2.x contrast ratio between `a` and `b`, in `[1, 21]`: the lighter
+/// relative luminance plus `0.05` over the darker plus `0.05`, order-free in
+/// its two arguments.
+fn contrast_ratio(a: Color, b: Color) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The spec's contrast-ink rule for a text label sitting on a colored cell:
+/// paint whichever of `font_color`/`background` reads better against the
+/// cell as it actually shows at [`CONTRAST_AA`], or whichever of black/white
+/// does when neither clears it.
+///
+/// Two colors in this rule can themselves be translucent — a theme's
+/// `background` (a chart commonly sits on a page of unknown color, so a
+/// translucent or fully transparent background is ordinary, not malformed)
+/// and a theme's `font_color` — and judging either as if it were opaque
+/// would let an ink win a comparison it does not actually paint: a
+/// transparent background composited as if solid can read as the better
+/// choice and then paint nothing (alpha 0), an invisible label. So every
+/// comparison here is of the color a candidate actually LEAVES on the cell,
+/// never of a candidate's own raw channel values:
+///
+/// - **The cell as shown.** When `background` is opaque, the cell is
+///   [`composite_over`]'s blend of `cell` over `background`, as always. When
+///   `background` is translucent, what lies beneath it is outside the
+///   chart and unknowable, so the cell is read at its own RGB and full
+///   alpha instead of guessing an underlay — the same "judge the cell
+///   alone" answer seaborn and plotly give an annotation.
+/// - **Each candidate's paint.** `font_color` and `background` are each
+///   judged by [`contrast_ratio`] between the composed cell and the color
+///   that candidate actually leaves on it ([`composite_over`] of the
+///   candidate over the composed cell), not the candidate's raw value. A
+///   fully transparent `background` then always leaves the cell unchanged
+///   (contrast 1:1 against itself) and can never win; a translucent
+///   `font_color` competes as the blend it paints. The WINNING candidate is
+///   still returned as its own (possibly translucent) color, so it paints
+///   on the scene exactly the blend it was judged by.
+/// - **The black/white tier** is unchanged: both are already opaque, so
+///   judging them by their raw value and by what they paint agree.
+pub fn contrast_ink(cell: Color, font_color: Color, background: Color) -> Color {
+    let composed = if background.alpha == 0xFF {
+        composite_over(cell, background)
+    } else {
+        from_rgb(cell.red, cell.green, cell.blue)
+    };
+    let font_contrast = contrast_ratio(composite_over(font_color, composed), composed);
+    let background_contrast = contrast_ratio(composite_over(background, composed), composed);
+    let (best, best_ratio) = if font_contrast >= background_contrast {
+        (font_color, font_contrast)
+    } else {
+        (background, background_contrast)
+    };
+    if best_ratio >= CONTRAST_AA {
+        return best;
+    }
+    let black = from_rgb(0, 0, 0);
+    let white = from_rgb(255, 255, 255);
+    if contrast_ratio(black, composed) >= contrast_ratio(white, composed) { black } else { white }
+}
+
 pub fn fmt_svg(c: Color) -> String {
     if c.alpha == 0xFF {
         to_hex_string(c)
@@ -906,5 +1005,160 @@ mod tests {
                 assert_eq!(rgba_msg, expected, "{input:?} parse_color_to_rgba refusal text");
             }
         });
+    }
+
+    // ── WCAG contrast primitives (spec §6.5) ─────────────────────────────
+
+    #[test]
+    fn relative_luminance_of_black_and_white_are_the_scale_endpoints() {
+        assert_eq!(relative_luminance(from_rgb(0, 0, 0)), 0.0);
+        assert!((relative_luminance(from_rgb(255, 255, 255)) - 1.0).abs() < 1e-9);
+    }
+
+    /// Black-on-white is WCAG's maximum, 21:1, independent of argument order.
+    #[test]
+    fn contrast_ratio_black_white_is_21_and_order_free() {
+        let black = from_rgb(0, 0, 0);
+        let white = from_rgb(255, 255, 255);
+        assert!((contrast_ratio(black, white) - 21.0).abs() < 1e-6);
+        assert_eq!(contrast_ratio(black, white), contrast_ratio(white, black));
+    }
+
+    #[test]
+    fn contrast_ratio_of_a_color_with_itself_is_one() {
+        let gray = from_rgb(0x80, 0x80, 0x80);
+        assert!((contrast_ratio(gray, gray) - 1.0).abs() < 1e-9);
+    }
+
+    /// A fully opaque `fg` ignores `bg` entirely.
+    #[test]
+    fn composite_over_opaque_fg_ignores_background() {
+        let fg = from_rgb(0x11, 0x22, 0x33);
+        let bg = from_rgb(0xff, 0xff, 0xff);
+        assert_eq!(composite_over(fg, bg), fg);
+    }
+
+    /// A half-alpha white over a black background lands at mid-gray — proof
+    /// the blend actually reads `fg`'s alpha rather than discarding it.
+    #[test]
+    fn composite_over_blends_by_alpha() {
+        let half_white = from_rgba(0xff, 0xff, 0xff, 0x80);
+        let black = from_rgb(0, 0, 0);
+        let composed = composite_over(half_white, black);
+        assert_eq!(composed.alpha, 0xff, "a composited color is always opaque");
+        // 0x80 / 255 ≈ 0.502 of the way from black (0) to white (255).
+        assert!((composed.red as i32 - 128).abs() <= 1, "got {composed:?}");
+        assert_eq!(composed.red, composed.green);
+        assert_eq!(composed.green, composed.blue);
+    }
+
+    /// A light cell (white) reads better against the dark font color than
+    /// against the (also light) background, and that contrast clears AA, so
+    /// the ink is the font color — the ordinary "dark label on a light cell"
+    /// heatmap-annotation shape.
+    #[test]
+    fn contrast_ink_picks_font_color_over_a_light_cell() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let background = from_rgb(0xff, 0xff, 0xff);
+        let cell = from_rgb(0xff, 0xff, 0xff);
+        assert_eq!(contrast_ink(cell, font_color, background), font_color);
+    }
+
+    /// A dark cell (black) reads better against the light background than
+    /// against the (also dark) font color, so the ink is the background —
+    /// "light label on a dark cell".
+    #[test]
+    fn contrast_ink_picks_background_over_a_dark_cell() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let background = from_rgb(0xff, 0xff, 0xff);
+        let cell = from_rgb(0x00, 0x00, 0x00);
+        assert_eq!(contrast_ink(cell, font_color, background), background);
+    }
+
+    /// Neither `font_color` (#A0A0A0) nor `background` (#606060) clears AA
+    /// against the mid-gray cell (#808080) — both sit around a 1.5:1 ratio —
+    /// so the rule falls back to whichever of black/white contrasts better:
+    /// black at ≈5.3:1 beats white's ≈4.0:1.
+    #[test]
+    fn contrast_ink_falls_back_to_black_or_white_below_the_aa_bar() {
+        let font_color = from_rgb(0xa0, 0xa0, 0xa0);
+        let background = from_rgb(0x60, 0x60, 0x60);
+        let cell = from_rgb(0x80, 0x80, 0x80);
+        assert!(contrast_ratio(font_color, cell) < CONTRAST_AA);
+        assert!(contrast_ratio(background, cell) < CONTRAST_AA);
+        assert_eq!(contrast_ink(cell, font_color, background), from_rgb(0, 0, 0));
+    }
+
+    /// A composited cell with alpha feeds into the same bar check as an
+    /// opaque one: a half-transparent cell is read as the color it actually
+    /// paints (blended with the background), never its raw, unblended
+    /// channel values. Half-alpha black over a white background composites
+    /// to mid-gray (≈0.21 luminance): against that, `background` (white)
+    /// only reaches ≈4.0:1 — short of AA — so the rule falls to the
+    /// black/white tie-break, which picks black (≈5.2:1 beats white's
+    /// ≈4.0:1 against the composited gray). Read the RAW cell instead (true
+    /// black, luminance 0) and `background` clears AA outright at 21:1,
+    /// painting white — the wrong answer this test discriminates against.
+    #[test]
+    fn contrast_ink_reads_the_composited_color_not_the_raw_cell() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let background = from_rgb(0xff, 0xff, 0xff);
+        let half_black = from_rgba(0x00, 0x00, 0x00, 0x80);
+        assert_eq!(contrast_ink(half_black, font_color, background), from_rgb(0, 0, 0));
+    }
+
+    /// A fully transparent background, under either common spelling
+    /// (`"#ffffff00"` / `"rgba(0,0,0,0)"`), can never win: composited over
+    /// itself it always reads 1:1 (`composite_over` of an alpha-0 color
+    /// returns the base unchanged), so neither spelling's own RGB leaks
+    /// through, and the ink is always one of font_color/black/white —
+    /// never the transparent background, which would paint an invisible
+    /// label. A black cell has nothing else to contrast with and falls to
+    /// white; a white cell reads well against the font color directly.
+    #[test]
+    fn contrast_ink_with_a_fully_transparent_background_never_returns_a_transparent_ink() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let black_cell = from_rgb(0, 0, 0);
+        let white_cell = from_rgb(255, 255, 255);
+        for background in [from_rgba(0xff, 0xff, 0xff, 0), from_rgba(0, 0, 0, 0)] {
+            let ink = contrast_ink(black_cell, font_color, background);
+            assert_eq!(ink.alpha, 0xff, "never a transparent ink: {ink:?}");
+            assert_eq!(ink, from_rgb(0xff, 0xff, 0xff), "background {background:?}: a black cell with nothing else to contrast falls to white");
+
+            let ink = contrast_ink(white_cell, font_color, background);
+            assert_eq!(ink.alpha, 0xff, "never a transparent ink: {ink:?}");
+            assert_eq!(ink, font_color, "background {background:?}: a white cell reads well against the font color with no background to compete");
+        }
+    }
+
+    /// A translucent font color (`"#1f293780"`) is judged by the color it
+    /// actually paints (its blend over the cell), not by its raw channel
+    /// values read as if opaque. Against a white cell and the real default
+    /// background `#faf7f2`: the blend reads only ≈3.05:1 against the cell
+    /// (below AA), where the raw, wrongly-opaque value would read ≈14.68:1
+    /// (clears AA) — a different branch entirely. The background manages
+    /// only ≈1.07:1 against the same white cell, so the correctly-judged
+    /// font is still the better of the two, but neither clears AA, so the
+    /// answer falls to the black/white tier and lands on black (21:1 beats
+    /// white's 1:1 against a white cell). The rejected, raw-value reading
+    /// would instead return the translucent font color directly.
+    #[test]
+    fn contrast_ink_judges_a_translucent_font_color_by_its_blend() {
+        let font_color = from_rgba(0x1f, 0x29, 0x37, 0x80);
+        let background = from_rgb(0xfa, 0xf7, 0xf2);
+        let cell = from_rgb(0xff, 0xff, 0xff);
+        assert_eq!(contrast_ink(cell, font_color, background), from_rgb(0, 0, 0));
+    }
+
+    /// The real default theme (font `#1f2937`, background `#faf7f2`) on a
+    /// black cell returns the background: `#faf7f2` reads ≈19.65:1 against
+    /// black, decisively clearing AA, where the font itself reads only
+    /// ≈1.43:1.
+    #[test]
+    fn contrast_ink_default_theme_on_a_black_cell_gives_the_background() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let background = from_rgb(0xfa, 0xf7, 0xf2);
+        let cell = from_rgb(0, 0, 0);
+        assert_eq!(contrast_ink(cell, font_color, background), background);
     }
 }

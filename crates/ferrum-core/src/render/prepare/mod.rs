@@ -2473,7 +2473,11 @@ fn establishing_binding(
             let reads = crate::render::scale_resolve::aux_reads(raw, &spec.encoding, channel, primary_batch, transform_outputs);
             layers.get(reads.first()?.layer())?
         }
-        None => layers.first().filter(|layer| layer.mark.draws_channel(channel.drawn_as()))?,
+        None => layers.first().filter(|layer| {
+            layer.mark.draws_channel(channel.drawn_as())
+                && !(channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
+                    && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref()))
+        })?,
     };
     channel.binding(&drawer.encoding).clone()
 }
@@ -2481,7 +2485,9 @@ fn establishing_binding(
 /// One [`RenderWarning::ChannelNotDrawn`] per auxiliary-scale channel some
 /// layer binds but no binding layer's mark draws (a color a layer inherits
 /// but its mark does not take, [`crate::spec::mark::Mark::draws_inherited`],
-/// counts as bound and not drawn)
+/// or a color a contrast-ink text binds to read, not paint,
+/// [`crate::render::marks::text::reads_color_for_contrast`], both count as
+/// bound and not drawn)
 /// ([`crate::spec::mark::Mark::draws_channel`]; a raster image draws only a
 /// `color` naming the field its cells hold,
 /// [`crate::render::marks::image::image_draws_color`]): the channel builds no
@@ -2493,13 +2499,17 @@ fn establishing_binding(
 fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<RenderWarning> {
     let mut warnings = Vec::new();
     for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
-        // Each layer's binding of the channel, and whether it is one the
-        // layer's mark declined: a color it inherits but does not draw
-        // (`Mark::draws_inherited`), held as its `group` key or left on the
-        // chart, which its completed encoding no longer carries.
+        // Each layer's binding of the channel, whether it is one the layer's
+        // mark declined (a color it inherits but does not draw,
+        // `Mark::draws_inherited`, held as its `group` key or left on the
+        // chart, which its completed encoding no longer carries), and
+        // whether it is a contrast-ink text's own color (bound to read the
+        // scale, not to paint a hue from it).
         let mut binding = layers.iter().enumerate().filter_map(|(i, layer)| {
             if let Some(enc) = channel.binding(&layer.encoding).as_ref() {
-                return Some((i, layer, enc, false));
+                let contrast_ink = channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
+                    && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref());
+                return Some((i, layer, enc, false, contrast_ink));
             }
             let declined = channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
                 && spec.layers.is_some()
@@ -2507,17 +2517,20 @@ fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<R
             declined
                 .then(|| layer.encoding.group.as_ref().or(spec.encoding.color.as_ref()))
                 .flatten()
-                .map(|enc| (i, layer, enc, true))
+                .map(|enc| (i, layer, enc, true, false))
         });
-        let Some((first, layer, enc, declined)) = binding.next() else { continue };
-        let drawn = |layer: &LayerPrepared, declined: bool| {
+        let Some((first, layer, enc, declined, contrast_ink)) = binding.next() else { continue };
+        let drawn = |layer: &LayerPrepared, declined: bool, contrast_ink: bool| {
             !declined
+                && !contrast_ink
                 && match layer.raster_value_field.is_some() && channel.name == "color" {
                     true => layer.draws_raster_color(),
                     false => layer.mark.draws_channel(channel.drawn_as()),
                 }
         };
-        if drawn(layer, declined) || binding.any(|(_, layer, _, declined)| drawn(layer, declined)) {
+        if drawn(layer, declined, contrast_ink)
+            || binding.any(|(_, layer, _, declined, contrast_ink)| drawn(layer, declined, contrast_ink))
+        {
             continue;
         }
         warnings.push(RenderWarning::ChannelNotDrawn {
@@ -2527,7 +2540,8 @@ fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<R
             channel: channel.name.to_string(),
             field: enc.field.clone(),
             cells: layer.raster_value_field.clone().filter(|_| channel.name == "color"),
-            grouped: !declined && layer.grouping_series.by_channel.contains(&enc.field),
+            grouped: !declined && !contrast_ink && layer.grouping_series.by_channel.contains(&enc.field),
+            contrast_ink,
         });
     }
     warnings

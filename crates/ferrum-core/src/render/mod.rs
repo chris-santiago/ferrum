@@ -2600,6 +2600,14 @@ pub enum RenderWarning {
         cells: Option<String>,
         #[serde(default)]
         grouped: bool,
+        /// Set instead of `grouped` (the two never both hold) when the first
+        /// binding layer is a contrast-ink text
+        /// ([`crate::render::marks::text::reads_color_for_contrast`]): it
+        /// reads the channel only to pick an ink against the cells it
+        /// labels, so the message says that rather than calling the
+        /// binding ignored.
+        #[serde(default)]
+        contrast_ink: bool,
     },
 }
 
@@ -2877,7 +2885,7 @@ impl std::fmt::Display for RenderWarning {
                      does not carry '{field}', so it draws without {channel}"
                 )
             }
-            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells, grouped } => {
+            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells, grouped, contrast_ink } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
@@ -2887,6 +2895,13 @@ impl std::fmt::Display for RenderWarning {
                         "{entry}: {channel} '{field}' has no effect: the image colors its cells by their \
                          '{cells}' values (field=) and does not read {channel}='{field}', so it gets no \
                          scale and no legend; it was ignored"
+                    ),
+                    None if *contrast_ink => write!(
+                        f,
+                        "{entry}: {channel} '{field}' has no effect: the labels read {channel} only to pick \
+                         an ink against the cells under them, no layer draws that {channel}, so it gets no \
+                         scale and no legend; each label is judged against the theme mark color, the fill \
+                         an unstyled cell paints"
                     ),
                     None => {
                         // A mark that draws the channel only when it binds it

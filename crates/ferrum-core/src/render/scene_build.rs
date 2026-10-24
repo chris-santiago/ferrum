@@ -5168,6 +5168,61 @@ mod tests {
             "the text layer's own color channel must not fall back to theme font color; got {colors:?}");
     }
 
+    /// The `heatmap(annot=True)` shape (spec §6.5): a colored-cell (bar)
+    /// layer drawing the chart's `cat` color, and a text layer that binds
+    /// its OWN `color="cat"` too — same field, same shared scale — but with
+    /// `fill="theme:contrast"`. The own-color exemption
+    /// (`own_color_exemption_leaves_an_own_declared_color_alone`) already
+    /// keeps that own binding through the merge; this test pins the two
+    /// consequences specific to the sentinel: each label paints the
+    /// contrast ink against its OWN cell's rendered color, never that
+    /// cell's raw hue, and the text layer's binding adds no second legend
+    /// entry beside the bar's.
+    #[test]
+    fn layered_text_contrast_sentinel_reads_the_cells_color_without_drawing_a_second_hue_or_legend() {
+        let (spec, batch) = bar_text_layered_spec(None, Some("theme:contrast"), None, Some("cat"), Some("cat"));
+        let scene = build_scene_for(&spec, &batch);
+        let theme = ThemeInputs::default();
+
+        let bar_colors: Vec<ferrum_scene::Color> = scene.panels[0]
+            .marks
+            .iter()
+            .find(|m| m.kind == ferrum_scene::MarkBatchKind::Bar)
+            .expect("the bar layer draws")
+            .nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Rect { style, .. } = n { style.fill } else { None })
+            .collect();
+        let text_colors = text_node_colors(&scene);
+        assert_eq!(bar_colors.len(), 2);
+        assert_eq!(text_colors.len(), 2);
+        assert_ne!(bar_colors[0], bar_colors[1], "test fixture sanity: the two categories must resolve distinct cell colors");
+        // Fixed expected values, independent of `contrast_ink`: the default
+        // categorical palette's first two colors are `#2563eb` (a == the
+        // theme's own mark blue) and `#dc2626` (a saturated red). WCAG
+        // contrast by hand against the default theme (font `#1f2937`,
+        // background `#faf7f2`) gives the background the win on both —
+        // 4.84:1 and 4.52:1 respectively against the font color's 2.84:1
+        // and 3.04:1 — so every label reads the theme background.
+        let expected_background = to_scene_color(theme.colors.background_color);
+        assert_eq!(text_colors[0], expected_background, "category \"a\"'s (#2563eb) label must read the theme background");
+        assert_eq!(text_colors[1], expected_background, "category \"b\"'s (#dc2626) label must read the theme background");
+
+        for i in 0..2 {
+            let cell = crate::render::color::from_rgba(bar_colors[i].r, bar_colors[i].g, bar_colors[i].b, bar_colors[i].a);
+            let expected = to_scene_color(crate::render::color::contrast_ink(cell, theme.colors.font_color, theme.colors.background_color));
+            assert_eq!(text_colors[i], expected, "row {i}'s label must paint the engine's contrast ink against its own cell");
+            assert_ne!(text_colors[i], bar_colors[i], "row {i}'s label must not draw its cell's raw hue");
+        }
+
+        let mut legend = Vec::new();
+        text_contents(&scene.legend, &mut legend);
+        for category in ["a", "b"] {
+            let occurrences = legend.iter().filter(|t| *t == category).count();
+            assert_eq!(occurrences, 1, "the text layer's own color binding must add no second legend entry for {category:?}; got {legend:?}");
+        }
+    }
+
     // ── Batch-A T5d: the own-color exemption widened to every mark ─────────
     // Root-caused against `fm.roc_chart`: the desugar's `reference` (chance-
     // diagonal) `line` layer declares no `color` of its own and a literal
@@ -5589,19 +5644,25 @@ mod tests {
             .map(|batch| batch.nodes.len())
             .sum();
         assert_eq!(bars, 3, "one bar per category");
-        fn texts(nodes: &[ferrum_scene::SceneNode], out: &mut Vec<String>) {
-            for node in nodes {
-                match node {
-                    ferrum_scene::SceneNode::Text { content, .. } => out.push(content.clone()),
-                    ferrum_scene::SceneNode::Group { children, .. } => texts(children, out),
-                    _ => {}
-                }
-            }
-        }
         let mut legend = Vec::new();
-        texts(&scene.legend, &mut legend);
+        text_contents(&scene.legend, &mut legend);
         for category in ["a", "b", "c"] {
             assert!(legend.iter().any(|t| t == category), "legend {legend:?} lists {category}");
+        }
+    }
+
+    /// Every `SceneNode::Text`'s content under `nodes`, depth first through
+    /// any `Group` wrapper — the recursive collector shared by every test
+    /// that reads a scene's rendered label strings (legend entries, axis
+    /// tick/title labels), so a label buried inside a `Group` is found the
+    /// same way on every slice it is asked of.
+    fn text_contents(nodes: &[ferrum_scene::SceneNode], out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                SceneNode::Text { content, .. } => out.push(content.clone()),
+                SceneNode::Group { children, .. } => text_contents(children, out),
+                _ => {}
+            }
         }
     }
 
@@ -8595,6 +8656,101 @@ mod tests {
         );
     }
 
+    // ── A span rule beside a classed scatter (spec §6.9) ─────────────────
+    //
+    // `fm.scatter(color="class") + fm.rule(y=...)`'s Rust-level shape: a `+`
+    // operand's own bindings stay on its own layers, so the point layer owns
+    // `color` and the rule layer carries no color anywhere, neither on its
+    // own encoding nor at the chart level. There is nothing inherited for
+    // `layer_geometry_encoding`'s own-color exemption to clear here — this
+    // pins the already-shipped shape, not a new engine rule.
+
+    /// A point layer owning `color="class"` beside a span rule (`y` only, no
+    /// color anywhere), exactly as Python's `+` lowers
+    /// `scatter(color="class") + rule(y=...)`.
+    fn scatter_class_plus_span_rule_spec() -> (ChartSpec, RecordBatch) {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "class".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rule_layer = Layer {
+            mark: Mark::Rule,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            layers: Some(vec![point_layer, rule_layer]),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("class", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// The rule draws its own theme reference-line style — gray, dashed,
+    /// 1.5px — never the scatter's per-class colors, and the scatter's own
+    /// class legend survives beside it.
+    #[test]
+    fn span_rule_beside_a_classed_scatter_keeps_its_own_style_and_the_scatter_legend() {
+        let (spec, batch) = scatter_class_plus_span_rule_spec();
+        let scene = build_scene_for(&spec, &batch);
+        let theme = ThemeInputs::default();
+        let gray = to_scene_color(theme.colors.reference_line_color);
+
+        let rule_batch = scene
+            .panels[0]
+            .marks
+            .iter()
+            .find(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
+            .expect("the rule layer draws a batch");
+        assert!(!rule_batch.nodes.is_empty(), "the rule must draw at least one line");
+        for node in &rule_batch.nodes {
+            let SceneNode::Line { style, .. } = node else { panic!("a rule batch must hold only Line nodes") };
+            assert_eq!(style.color, Some(gray), "a span rule beside a classed scatter must keep its own gray, not the scatter's class colors");
+            assert_eq!(style.dash, Some(vec![4.0, 4.0]), "the rule must keep its own dash");
+            assert_eq!(style.width, theme.sizes.line_stroke_width, "the rule must keep its own width");
+        }
+
+        let mut legend = Vec::new();
+        text_contents(&scene.legend, &mut legend);
+        for category in ["alpha", "beta", "gamma"] {
+            assert!(legend.iter().any(|t| t == category), "the scatter's class legend must survive beside the rule; got {legend:?}");
+        }
+    }
+
     // ── `inherited_positional` ────────────────────────────────────────────
     //
     // The end-to-end rendered-geometry consequence of
@@ -9601,17 +9757,8 @@ mod tests {
 
     /// Every text a panel's axes draw, depth first.
     fn panel_axis_texts(panel: &ferrum_scene::Panel) -> Vec<String> {
-        fn texts(nodes: &[SceneNode], out: &mut Vec<String>) {
-            for node in nodes {
-                match node {
-                    SceneNode::Text { content, .. } => out.push(content.clone()),
-                    SceneNode::Group { children, .. } => texts(children, out),
-                    _ => {}
-                }
-            }
-        }
         let mut out = Vec::new();
-        texts(&panel.axes, &mut out);
+        text_contents(&panel.axes, &mut out);
         out
     }
 
