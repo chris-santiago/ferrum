@@ -311,7 +311,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let mut row_indices: Vec<usize> = Vec::new();
         for i in rows {
             let (xv, yv) = match (xs[i], ys[i]) {
-                (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
+                (Some(a), Some(b)) if ctx.scales.x.admits_for_pixel(a) && ctx.scales.y.admits_for_pixel(b) => (a, b),
                 _ => continue,
             };
             // Every positional read in this loop goes through `DrawCtx::
@@ -334,7 +334,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     // x-parameterized (see `BottomEdge::axis`).
                     let by = y2s.get(i)
                         .and_then(|v| *v)
-                        .filter(|v| v.is_finite())
+                        .filter(|v| ctx.scales.y.admits_for_pixel(*v))
                         .and_then(|v| ctx.to_pixel(&ctx.scales.y, v))
                         .unwrap_or(baseline_y);
                     bottom.push((cx, by + yo));

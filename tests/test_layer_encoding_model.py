@@ -38,6 +38,7 @@ promoted to the chart).
 from __future__ import annotations
 
 import json
+import math
 import re
 import warnings
 import xml.etree.ElementTree as ET
@@ -50,6 +51,9 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._aux_scale_oracle import log_map, niced_log_domain, pow_map
+from tests._svg_extents import axis_tick_labels
+from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
 from tests._wire_steps import all_steps, operand_branches
 
 SY = fm.SecondaryY
@@ -1324,8 +1328,10 @@ def test_size_reverse_swaps_the_areas_and_the_legend_with_them():
     assert swatches == sorted(swatches, reverse=True)
 
 
+# Linear, Log, Pow and Sqrt each map through their own transform; "ordinal"
+# takes the still-unsupported-type slot the table always needs one of.
 _MALFORMED_DOOR_SCALES: dict[str, tuple[dict, str]] = {
-    "log": ({"type": "log"}, "type 'log' is not supported"),
+    "ordinal": ({"type": "ordinal"}, "type 'ordinal' is not supported"),
     "padding": ({"padding": 0.1}, "padding is not supported"),
     "scheme": ({"scheme": "blues"}, "scheme is not supported"),
     "domain-3": ({"domain": [1.0, 2.0, 3.0]}, "domain must have length 2; got 3"),
@@ -1388,6 +1394,1560 @@ def test_a_wire_spec_is_refused_at_render_with_the_construction_text(channel, sc
     with pytest.raises(ValueError) as rendered:
         renderer(fm.ChartSpec.from_json(json.dumps(wire)), df.to_arrow(), viewport=(400.0, 300.0))
     assert str(rendered.value).endswith(str(built.value))
+
+
+# ---------------------------------------------------------------------------
+# Log, Pow and Sqrt map the five numeric auxiliary channels
+# ---------------------------------------------------------------------------
+#
+# Size, the opacity family and stroke width take a ``LogScale``,
+# ``PowScale`` or ``SqrtScale`` through the identical gate and transform the
+# positional resolver gives x/y. Every numeric auxiliary channel clamps an
+# out-of-domain value to the nearer range end on every scale kind (a
+# positional axis defaults to not clamping): x/y and the auxiliary channels
+# agree only on the transform itself and on a ``Log`` value's side -- a
+# value on the far side of zero from the domain is left out of the channel
+# (dropped on x/y, drawn at the channel default on an auxiliary channel),
+# not clamped. ``tests._aux_scale_oracle`` mirrors ``LogScaleData::scale``/
+# ``PowScaleData::scale``'s in-domain mapping in Python, so each cell
+# asserts the exact mapped value and legend swatch -- never merely that
+# the render changed.
+
+_LOG_BASE = 3.0
+_POW_EXPONENT = 3.0
+_TRANSFORM_DOMAIN = (5.0, 50.0)  # positive and away from df["z"]'s 10..45 extent
+
+
+# ``build_size_scale``/``build_stroke_width_scale`` nice a data-derived domain
+# by default (``nice_data_domain=true``, auxiliary.rs); the opacity family's
+# builder passes ``false``, so it never nices even under Log.
+_AUX_NICES_DATA_DOMAIN = frozenset({"size", "stroke_width"})
+
+
+def _data_derived_domain(channel: str, kind: str, lo: float, hi: float) -> tuple[float, float]:
+    # A degenerate domain (a constant column) nices to itself: LogScaleData::
+    # nice returns the domain unchanged when its two magnitudes are equal,
+    # the same early return LinearScaleData::nice and PowScaleData::nice take.
+    if lo == hi:
+        return (lo, hi)
+    if kind == "log" and channel in _AUX_NICES_DATA_DOMAIN:
+        return niced_log_domain(lo, hi, _LOG_BASE)
+    return (lo, hi)
+
+
+_TRANSFORM_SCALES: dict[str, Callable[..., Any]] = {
+    "log": lambda **kw: fm.LogScale(base=_LOG_BASE, **kw),
+    "pow": lambda **kw: fm.PowScale(exponent=_POW_EXPONENT, **kw),
+    "sqrt": fm.SqrtScale,
+}
+
+_TRANSFORM_MAP: dict[str, Callable[[float, tuple[float, float], tuple[float, float]], float]] = {
+    "log": lambda x, d, r: log_map(x, d, r, base=_LOG_BASE),
+    "pow": lambda x, d, r: pow_map(x, d, r, exponent=_POW_EXPONENT),
+    "sqrt": lambda x, d, r: pow_map(x, d, r, exponent=0.5),
+}
+
+
+def _drawn_value(channel: str, mapped: float) -> float:
+    """The literal drawn attribute for a range-space *mapped* value.
+
+    Size maps onto an area; the mark draws its radius
+    (``sqrt(area / pi)``, ``render/marks/point.rs``). Every other numeric
+    auxiliary channel draws its mapped value directly.
+    """
+    if channel == "size":
+        return math.sqrt(mapped / math.pi) if mapped > 0.0 else 0.0
+    return mapped
+
+
+def _default_band(channel: str) -> tuple[float, float]:
+    """The channel's default output band: an explicit ``[0, 100]`` domain's two
+    endpoints, read directly off two rows at ``z=0`` and ``z=100`` under
+    ``LinearScale``'s unset range -- the theme band every numeric auxiliary
+    channel defaults to, whatever kind later maps onto it.
+    """
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    probe = pl.DataFrame({"v": [1.0, 2.0], "y": [1.0, 2.0], "z": [0.0, 100.0]})
+    chart = mk(
+        "point",
+        probe,
+        x="v",
+        y="y",
+        **{channel: cls("z", scale=fm.LinearScale(domain=[0.0, 100.0]))},
+    )
+    values = _quiet(lambda: _mark_values(chart, channel))
+    if channel == "size":
+        values = [math.pi * v * v for v in values]
+    return (values[0], values[1])
+
+
+def _transform_doors(
+    channel: str, kind: str, domain: tuple[float, float], range_: tuple[float, float]
+) -> dict[str, Callable[[], Any]]:
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    scale = _TRANSFORM_SCALES[kind](domain=list(domain), range=list(range_))
+    return _binding_doors(lambda: {channel: cls("z", scale=scale)})
+
+
+def _assert_transform_matches_oracle(
+    chart: Any,
+    channel: str,
+    kind: str,
+    domain: tuple[float, float],
+    range_: tuple[float, float],
+    zs: list[float],
+) -> None:
+    """Every mark and every legend entry maps through *kind*'s own oracle transform.
+
+    Checks both surfaces against one independently computed mapping, not
+    merely that the marks and the legend agree with each other.
+    """
+    mapper = _TRANSFORM_MAP[kind]
+    expected = [_drawn_value(channel, mapper(z, domain, range_)) for z in zs]
+    values = _quiet(lambda: _mark_values(chart, channel))
+    assert values == pytest.approx(expected, abs=1e-6)
+    ((_, entries),) = _quiet(lambda: interactive_legend(chart, channel)).items()
+    for label, swatch in entries:
+        expected_swatch = _drawn_value(channel, mapper(float(label), domain, range_))
+        # The legend's displayed label is the tick's true position rounded
+        # to display precision; re-deriving the oracle from that rounded
+        # text recovers the swatch only to the same precision -- tighter
+        # near a narrow niced domain's steep slope would false-fail on
+        # rounding alone, not on a wrong mapping.
+        assert swatch == pytest.approx(expected_swatch, rel=2e-3, abs=2e-3)
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_transform_scale_maps_each_row_and_legend_entry_through_its_own_math(channel, kind):
+    """Log(base=3)/Pow(exponent=3)/Sqrt map size, stroke_width and the opacity
+    family through the same per-kind transform the positional resolver gives
+    x/y, not a linear fallback, under an explicit domain and range.
+
+    Rejects a gate that resolves every kind as ``linear``: the oracle
+    mirrors ``LogScaleData``/``PowScaleData``'s own ``scale()`` directly,
+    so a row's drawn value, and every legend swatch (not only the ones
+    a data row happens to land on), must equal that formula's output.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN), range=list(range_))
+    chart = P(**{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)})
+    _assert_transform_matches_oracle(
+        chart, channel, kind, _TRANSFORM_DOMAIN, range_, df["z"].to_list()
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_data_derived_domain_nices_for_log_and_stays_raw_for_pow_and_sqrt(channel, kind):
+    """No ``domain=``: on size and stroke_width, Log nices the data extent to
+    the enclosing power of its base, as a data-derived positional Log axis
+    would; the opacity family's own builder never nices, Log included; Pow
+    and Sqrt carry no ``nice`` parameter at all and always keep the raw
+    10..45 extent.
+
+    Rejects a data-derived domain resolved as if it were explicit (the
+    unrounded 10..45 for a nicing channel's Log), and a Pow/Sqrt domain, or
+    the opacity family's Log domain, silently niced to round numbers they
+    never ask for.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    zs = df["z"].to_list()
+    domain = _data_derived_domain(channel, kind, min(zs), max(zs))
+    scale = _TRANSFORM_SCALES[kind](range=list(range_))
+    chart = P(**{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)})
+    _assert_transform_matches_oracle(chart, channel, kind, domain, range_, zs)
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_the_default_range_feeds_the_same_band_a_linear_scale_uses(channel, kind):
+    """No ``range=``: Log/Pow/Sqrt map onto the exact same theme band
+    ``LinearScale``'s default range would use for this channel.
+
+    Rejects a kind-specific default band: the three kinds would draw
+    differently-ranged legends from the same unset ``range=``.
+    """
+    band = _default_band(channel)
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN))
+    chart = P(**{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)})
+    _assert_transform_matches_oracle(
+        chart, channel, kind, _TRANSFORM_DOMAIN, band, df["z"].to_list()
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_reverse_swaps_the_mapped_values(channel, kind):
+    """``reverse=True`` swaps the range endpoints before the transform maps
+    through them, on every kind -- the largest ``z`` draws the smallest
+    value, matching ``reverse``'s existing linear-scale contract
+    (``test_size_reverse_swaps_the_areas_and_the_legend_with_them``).
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    scale = _TRANSFORM_SCALES[kind](
+        domain=list(_TRANSFORM_DOMAIN), range=list(range_), reverse=True
+    )
+    chart = P(**{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)})
+    _assert_transform_matches_oracle(
+        chart, channel, kind, _TRANSFORM_DOMAIN, (range_[1], range_[0]), df["z"].to_list()
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_constant_column_maps_to_the_range_midpoint(channel, kind):
+    """A constant column is a zero-width domain: every kind maps it to the
+    range midpoint (2026-10-16 ruling), never NaN -- ``degenerate_ratio``
+    resolves the same way under a non-linear transform as under Linear,
+    and ``LogScaleData::nice`` leaves a degenerate domain's two equal
+    magnitudes unchanged rather than widening them to a full decade.
+
+    The domain must stay data-derived: ``LogScale``/``PowScale``/
+    ``SqrtScale`` all refuse an explicit zero-width domain at construction
+    (``domain endpoints must differ``), the same refusal a positional
+    channel gets.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    domain = _data_derived_domain(channel, kind, 0.3, 0.3)
+    scale = _TRANSFORM_SCALES[kind](range=list(range_))
+    chart = mk(
+        "point",
+        _CONSTANT,
+        x="v",
+        y="y",
+        **{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)},
+    )
+    _assert_transform_matches_oracle(chart, channel, kind, domain, range_, _CONSTANT["z"].to_list())
+
+
+# Positive out-of-domain values for Log (a non-positive value is left out,
+# not clamped -- its own cells below); for Pow/Sqrt, -5 is below the
+# stated domain but still on the transform's own (sign-preserving) domain.
+_OUT_OF_DOMAIN_Z: dict[str, list[float]] = {
+    "log": [1.0, 20.0, 500.0],
+    "pow": [-5.0, 20.0, 500.0],
+    "sqrt": [-5.0, 20.0, 500.0],
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_an_out_of_domain_value_clamps_to_the_nearer_range_end(channel, kind):
+    """A value below the domain clamps to the lower range end; one above
+    clamps to the upper end -- the numeric auxiliary channels' own clamp
+    contract: every scale kind clamps on these five channels, where a
+    positional axis defaults to not clamping.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    out_of_domain = pl.DataFrame(
+        {"v": [1.0, 2.0, 3.0], "y": [2.0, 3.0, 4.0], "z": _OUT_OF_DOMAIN_Z[kind]}
+    )
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN), range=list(range_))
+    chart = mk(
+        "point",
+        out_of_domain,
+        x="v",
+        y="y",
+        **{channel: _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)},
+    )
+    values = _quiet(lambda: _mark_values(chart, channel))
+    assert len(values) == 3
+    assert values[0] == pytest.approx(_drawn_value(channel, range_[0]), abs=1e-6)
+    assert values[2] == pytest.approx(_drawn_value(channel, range_[1]), abs=1e-6)
+
+
+_TRANSFORM_DOORS = ("+", "L-own", "LCm", "Fc")
+
+
+@pytest.mark.parametrize("door", _TRANSFORM_DOORS)
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_a_transform_scale_draws_one_legend_alike_on_every_door(channel, kind, door):
+    """Log/Pow/Sqrt draw the flat chart's one legend on ``+``, ``Chart.layer``,
+    ``LayerChart`` and a facet, static and interactive alike -- the same
+    door coverage V10 pins for the linear scale.
+
+    Rejects a door that resolves the auxiliary scale independently per
+    layer or per panel: the legend or a mark's swatch would disagree with
+    the flat chart's own oracle-verified mapping, pinned above.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    doors = _transform_doors(channel, kind, _TRANSFORM_DOMAIN, range_)
+    reference = _quiet(lambda: interactive_legend(doors["F"](), channel))
+    ((title, entries),) = reference.items()
+
+    chart = _quiet(doors[door])
+    svg = _quiet(chart.to_svg)
+    assert legend_set(svg) == {title: tuple(label for label, _ in entries)}
+    assert _legend_title_count(svg, title) == 1
+    assert _quiet(lambda: interactive_legend(chart, channel)) == reference
+
+
+def test_a_log_legends_ticks_are_the_scales_own_decades():
+    """The size legend's labels under ``LogScale(base=3)`` are themselves
+    powers of 3 within the domain, not ``LinearScale``'s evenly spaced
+    ``nice_ticks`` over the same domain -- the legend reads the Log
+    scale's own tick algorithm, not a second, scale-blind generator.
+    """
+    domain = [3.0, 243.0]  # 3**1 .. 3**5
+    log_chart = P(size=fm.Size("z", scale=fm.LogScale(base=3.0, domain=domain)))
+    ((_, log_entries),) = _quiet(lambda: interactive_legend(log_chart, "size")).items()
+    log_labels = [float(label) for label, _ in log_entries]
+    for label in log_labels:
+        exponent = math.log(label, 3.0)
+        assert abs(exponent - round(exponent)) < 1e-6, log_labels
+
+    linear_chart = P(size=fm.Size("z", scale=fm.LinearScale(domain=domain)))
+    ((_, linear_entries),) = _quiet(lambda: interactive_legend(linear_chart, "size")).items()
+    linear_labels = [float(label) for label, _ in linear_entries]
+    assert log_labels != linear_labels
+
+
+def test_log_scale_ticks_follow_the_decade_then_multiple_then_linear_ladder():
+    """``LogScale.ticks(count)`` feeds every axis and legend of a Log scale:
+    whole powers of the base first, then 1-3/1-2-5/1-9-style multiples when
+    the powers alone fall short, then linear ``nice_ticks`` for a span
+    under one decade or a non-integer base. A degenerate domain's own
+    single-value ticks are covered by the constant-column cells above.
+    """
+    assert fm.LogScale(domain=[1.0, 1000.0]).ticks(5) == [1.0, 10.0, 100.0, 1000.0]
+    assert fm.LogScale(domain=[1.0, 1000.0]).ticks(10) == [
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        50.0,
+        100.0,
+        200.0,
+        500.0,
+        1000.0,
+    ]
+    assert fm.LogScale(domain=[1.0, 50.0]).ticks(5) == [1.0, 3.0, 10.0, 30.0]
+    assert fm.LogScale(base=3.0, domain=[3.0, 243.0]).ticks(5) == [3.0, 9.0, 27.0, 81.0, 243.0]
+    assert fm.LogScale(domain=[-1000.0, -1.0]).ticks(5) == [-1000.0, -100.0, -10.0, -1.0]
+    # A span under one decade has no decade structure to round to; it falls
+    # to the same linear nice_ticks a LinearScale over the same domain uses.
+    narrow_log = fm.LogScale(domain=[3.0, 7.0]).ticks(5)
+    narrow_linear = fm.LinearScale(domain=[3.0, 7.0]).ticks(5)
+    assert narrow_log == narrow_linear
+
+
+# ---------------------------------------------------------------------------
+# A Log scale maps only its admitted side; the other side is left out of
+# the channel (dropped on x/y, drawn at the channel default on an
+# auxiliary channel) and warned once, naming the row count. With no
+# stated domain the side is always the positive one -- never inferred
+# from the data. A channel with nothing left on its side refuses, naming
+# the remedy; a stated negative domain admits the negative side instead.
+# ---------------------------------------------------------------------------
+
+_LOG_WARN_CHANNELS = ("x", "y", *sorted(_NUMERIC_AUX_CLASSES))
+
+# Each scenario has exactly one off-side row among three on-side ones.
+_LOG_LEFT_OUT_SCENARIOS: dict[str, list[float]] = {
+    "negative": [-5.0, 1.0, 10.0, 100.0],
+    "zero": [0.0, 1.0, 10.0, 100.0],
+}
+
+
+def _log_channel_chart(channel: str, data: pl.DataFrame, scale: Any) -> fm.Chart:
+    """A point chart binding *scale* to *channel* ("x", "y", or a numeric
+    auxiliary channel), reading the test column "v"."""
+    if channel == "x":
+        return fm.Chart(data).mark_point().encode(x=fm.X("v", scale=scale), y="y")
+    if channel == "y":
+        return fm.Chart(data).mark_point().encode(x="y", y=fm.Y("v", scale=scale))
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    return fm.Chart(data).mark_point().encode(x="y", y="y", **{channel: cls("v", scale=scale)})
+
+
+def _log_left_out_warning(channel: str, field: str, rows: int, side: str = "positive") -> str:
+    """Mirrors ``RenderWarning::LogScaleRowsLeftOut``'s Display."""
+    excluded = "zero or negative" if side == "positive" else "zero or positive"
+    if channel in ("x", "y"):
+        return (
+            f"{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale "
+            "cannot place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+            "data that reaches zero"
+        )
+    return (
+        f"{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale cannot "
+        f"map, so they are not drawn; filter them, or use fm.SqrtScale()"
+    )
+
+
+@pytest.mark.parametrize("scenario", sorted(_LOG_LEFT_OUT_SCENARIOS))
+@pytest.mark.parametrize("channel", _LOG_WARN_CHANNELS)
+def test_a_log_scale_leaves_an_off_side_row_out_and_warns_once(channel, scenario):
+    """A value on the far side of zero from a Log scale's domain (here, no
+    stated domain, so the positive side) is left out of the channel --
+    not drawn, on x/y or on an auxiliary channel alike, static and
+    interactive -- and the chart warns once, naming the row count.
+
+    Rejects a row silently dropped with no warning, and a row drawn at
+    the auxiliary channel's default as if it were merely out-of-domain
+    rather than off-side.
+    """
+    vs = _LOG_LEFT_OUT_SCENARIOS[scenario]
+    data = pl.DataFrame({"v": vs, "y": [1.0, 2.0, 3.0, 4.0]})
+    range_ = None if channel in ("x", "y") else tuple(float(v) for v in _ALT_RANGE[channel])
+    scale = fm.LogScale(**({} if range_ is None else {"range": list(range_)}))
+    chart = _log_channel_chart(channel, data, scale)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    messages = [str(w.message) for w in caught]
+    assert messages == [_log_left_out_warning(channel, "v", 1)]
+    # Static: the off-side row builds no mark at all.
+    assert tag_counts(svg).get("circle", 0) == 3
+
+    if channel in ("x", "y"):
+        return
+
+    # Interactive: the remaining three rows map through the Log transform
+    # onto the data-derived domain (the off-side row contributes nothing
+    # to it), not merely "not the default".
+    on_side = [v for v in vs if v > 0.0]
+    domain = (min(on_side), max(on_side))
+    expected = [_drawn_value(channel, log_map(v, domain, range_, base=10.0)) for v in on_side]
+    values = _quiet(lambda: _mark_values(chart, channel))
+    assert values == pytest.approx(expected, abs=1e-6)
+
+
+def test_an_off_side_log_aux_row_keeps_every_other_rows_data_index_and_key():
+    """A row the Log aux drop removes does not renumber the survivors: each
+    surviving node's ``data_indices`` entry (and its ``key``) still names
+    its own source row, exactly as an off-side x/y row's drop already
+    does -- not its position in the filtered batch.
+
+    Rejects data_indices renumbered by position in the filtered batch
+    (``[0, 1, 2, 3]``), which would point a WASM selection or transition
+    at the wrong row in a sibling layer.
+    """
+    data = pl.DataFrame(
+        {"k": ["a", "b", "c", "d", "e"], "v": [1.0, -5.0, 10.0, None, 100.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+    aux_chart = fm.Chart(data).mark_point().encode(
+        x="y", y="y", size=fm.Size("v", scale=fm.LogScale()), key="k"
+    )
+    x_chart = fm.Chart(data).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="y", key="k")
+
+    aux_svg = _quiet(aux_chart.to_svg)
+    assert tag_counts(aux_svg).get("circle", 0) == 4
+
+    ((aux_batch,),) = [
+        (b,) for p in _quiet(lambda: _scene(aux_chart))["panels"] for b in p["marks"]
+    ]
+    assert aux_batch["data_indices"] == [0, 2, 3, 4]
+    assert aux_batch["keys"] == ["a", "c", "d", "e"]
+
+    ((x_batch,),) = [(b,) for p in _quiet(lambda: _scene(x_chart))["panels"] for b in p["marks"]]
+    assert x_batch["data_indices"] == [0, 2, 4]
+    assert x_batch["keys"] == ["a", "c", "e"]
+
+
+def test_a_layered_log_aux_drop_keeps_each_layers_source_rows():
+    """A Log aux drop on one layer never renumbers a sibling layer that
+    draws the same frame without dropping anything -- each layer's own
+    ``data_indices`` names its own source rows, on both the ``+`` door
+    and ``Chart.layer``.
+    """
+    data = pl.DataFrame({"v": [1.0, -5.0, 10.0, 100.0], "y": [1.0, 2.0, 3.0, 4.0]})
+
+    def sized() -> fm.Chart:
+        return fm.Chart(data).mark_point().encode(x="y", y="y", size=fm.Size("v", scale=fm.LogScale()))
+
+    def ticked() -> fm.Chart:
+        return fm.Chart(data).mark_tick().encode(x="v", y="y")
+
+    plus_chart = _quiet(lambda: sized() + ticked())
+    layer_chart = _quiet(lambda: sized().layer(layer("tick", x="v", y="y")))
+
+    for chart in (plus_chart, layer_chart):
+        batches = [b for p in _quiet(lambda: _scene(chart))["panels"] for b in p["marks"]]
+        indices_by_kind = {b["kind"]: b["data_indices"] for b in batches}
+        assert indices_by_kind["point"] == [0, 2, 3]
+        assert indices_by_kind["tick"] == [0, 1, 2, 3]
+
+
+_LOG_WARN_DOOR_CHANNELS = ("size", "x", "y")
+
+
+def _log_warn_doors(channel: str, data: pl.DataFrame, scale: Any) -> dict[str, Callable[[], Any]]:
+    """Every door that can carry one Log-scaled *channel* through one
+    shared frame -- flat, ``+``, ``Chart.layer``, static and interactive
+    ``LayerChart``, a faceted chart under shared and independent facet
+    scale resolution, and a faceted ``Chart.layer``.
+
+    For a positional channel, the host layer of the ``Chart.layer`` and
+    faceted-``Chart.layer`` doors is a ``mark_rule`` bound only to the
+    *other* position: ``mark_point`` refuses a layer with no positional
+    channel of its own, so the host cannot simply omit *channel* the way
+    an auxiliary channel's host omits size/opacity/stroke_width.
+    """
+    is_pos = channel in ("x", "y")
+
+    def binder() -> fm.Chart:
+        return _log_channel_chart(channel, data, scale)
+
+    def partner() -> fm.Chart:
+        # Draws through the scale *binder* establishes (a bare field, no
+        # restated scale), reading the same column, so the whole-frame
+        # tally counts it once rather than as a second distinct read.
+        if channel == "x":
+            return mk("point", data, x="v", y="y")
+        if channel == "y":
+            return mk("point", data, x="y", y="v")
+        return mk("point", data, x="y", y="y")
+
+    def host_and_layer() -> fm.Chart:
+        if channel == "x":
+            return mk("rule", data, y="y").layer(layer("point", x=fm.X("v", scale=scale), y="y"))
+        if channel == "y":
+            return mk("rule", data, x="y").layer(layer("point", x="y", y=fm.Y("v", scale=scale)))
+        cls = _NUMERIC_AUX_CLASSES[channel]
+        return mk("point", data, x="y", y="y").layer(
+            layer("point", **{channel: cls("v", scale=scale)})
+        )
+
+    doors: dict[str, Callable[[], Any]] = {
+        "F": binder,
+        "+": lambda: binder() + partner(),
+        "L": host_and_layer,
+        "LCs": lambda: fm.LayerChart(binder(), partner()),
+        "LCi": lambda: fm.LayerChart(binder(), partner()).interactive(),
+        "LCm": lambda: fm.LayerChart(binder(), partner())._build_merged(),
+        "Fc-shared": lambda: binder().facet("c"),
+        "L-Fc": lambda: host_and_layer().facet("c"),
+    }
+    if is_pos:
+        # Facet scale resolution has no "independent" mode for an
+        # auxiliary channel (``Chart.share_scale`` takes only x/y): an
+        # auxiliary scale always resolves over the whole frame regardless
+        # of faceting, so this door exists only for x/y.
+        doors["Fc-independent"] = lambda: binder().facet("c").share_scale(**{channel: "independent"})
+    return doors
+
+
+@pytest.mark.parametrize("channel", _LOG_WARN_DOOR_CHANNELS)
+def test_a_log_channel_warns_once_for_the_whole_frame_on_every_door(channel):
+    """A Log channel -- ``size`` or a positional ``x``/``y`` -- carried by
+    one ``+`` operand, one ``Chart.layer`` layer, one static or interactive
+    ``LayerChart`` member, or a faceted chart's shared or independent
+    scale still warns exactly once, with the whole frame's row count --
+    not once per layer and not once per facet panel.
+    """
+    data = pl.DataFrame(
+        {"v": [-5.0, 1.0, 10.0, 100.0], "y": [1.0, 2.0, 3.0, 4.0], "c": ["p", "p", "q", "q"]}
+    )
+    doors = _log_warn_doors(channel, data, fm.LogScale())
+    expected = [_log_left_out_warning(channel, "v", 1)]
+    for door, build in doors.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            # LCi's ``.interactive()`` builds the scene eagerly at
+            # construction, so *build* itself (not just the render call
+            # that follows) must run inside the capture for its warning
+            # to be caught.
+            chart = build()
+            if door == "LCi":
+                json.loads(chart.scene_json)
+            else:
+                chart.to_svg()
+        messages = [str(w.message) for w in caught if "LogScale cannot" in str(w.message)]
+        assert messages == expected, f"{channel}/{door}: got {messages}"
+
+
+def test_log_warns_identically_on_plus_and_layer_chart_for_two_frames_combined_count():
+    """``b + v`` and ``fm.LayerChart(b, v)`` warn identically when ``b`` and
+    ``v`` are two different frames, each contributing its own off-side row
+    to the one whole-frame count -- parity between the ``+`` sugar and its
+    ``LayerChart`` equivalent, not just within a single frame.
+    """
+    scale = fm.LogScale()
+    b_data = pl.DataFrame({"v": [-5.0, 1.0, 10.0], "y": [1.0, 2.0, 3.0]})
+    v_data = pl.DataFrame({"v": [-2.0, 4.0, 8.0], "y": [1.0, 2.0, 3.0]})
+
+    def b() -> fm.Chart:
+        return mk("point", b_data, x="y", y="y", size=fm.Size("v", scale=scale))
+
+    def v() -> fm.Chart:
+        return mk("point", v_data, x="y", y="y", size=fm.Size("v", scale=scale))
+
+    expected = [_log_left_out_warning("size", "v", 2)]
+
+    with warnings.catch_warnings(record=True) as caught_plus:
+        warnings.simplefilter("always")
+        (b() + v()).to_svg()
+    assert [str(w.message) for w in caught_plus] == expected
+
+    with warnings.catch_warnings(record=True) as caught_layer_chart:
+        warnings.simplefilter("always")
+        fm.LayerChart(b(), v()).to_svg()
+    assert [str(w.message) for w in caught_layer_chart] == expected
+
+
+@pytest.mark.parametrize("channel", ("x", "y"))
+def test_an_all_off_side_member_beside_an_on_side_one_draws_and_warns_on_every_door(channel):
+    """An overlay member whose Log channel has nothing on its side draws
+    nothing beside a sibling that does, on every door -- it does not
+    refuse the whole chart, and the single whole-frame warning carries
+    the combined count.
+    """
+    pos = pl.DataFrame({"x": [1.0, 2.0, 3.0], "v": [1.0, 10.0, 100.0]})
+    neg = pl.DataFrame({"x": [1.5, 2.5], "v": [-5.0, -7.0]})
+
+    def chart(data: pl.DataFrame) -> fm.Chart:
+        if channel == "x":
+            return fm.Chart(data).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="x")
+        return fm.Chart(data).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+
+    def a() -> fm.Chart:
+        return chart(pos)
+
+    def b() -> fm.Chart:
+        return chart(neg)
+
+    expected = [_log_left_out_warning(channel, "v", 2)]
+
+    static_doors: dict[str, Callable[[], fm.Chart]] = {
+        "+": lambda: a() + b(),
+        "+rev": lambda: b() + a(),
+        "LCs": lambda: fm.LayerChart(a(), b()),
+        "LCsrev": lambda: fm.LayerChart(b(), a()),
+    }
+    for door, build in static_doors.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = build().to_svg()
+        assert tag_counts(svg).get("circle", 0) == 3, f"{channel}/{door}"
+        assert [str(w.message) for w in caught] == expected, f"{channel}/{door}"
+
+    with warnings.catch_warnings(record=True) as caught_interactive:
+        warnings.simplefilter("always")
+        json.loads(fm.LayerChart(a(), b()).interactive().scene_json)
+    assert [str(w.message) for w in caught_interactive] == expected, f"{channel}/LCi"
+
+
+@pytest.mark.parametrize("channel", ("x", "y"))
+def test_a_stated_log_domain_warns_once_on_every_door(channel):
+    """A stated Log domain's off-side row warns exactly once, on every
+    door, not once per member that happens to read it.
+    """
+    one = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "v": [1.0, 10.0, -5.0, 100.0]})
+    scale = fm.LogScale(domain=[1.0, 100.0])
+
+    def a() -> fm.Chart:
+        if channel == "x":
+            return fm.Chart(one).mark_point().encode(x=fm.X("v", scale=scale), y="x")
+        return fm.Chart(one).mark_point().encode(x="x", y=fm.Y("v", scale=scale))
+
+    def b() -> fm.Chart:
+        if channel == "x":
+            return fm.Chart(one).mark_line().encode(x="v", y="x")
+        return fm.Chart(one).mark_line().encode(x="x", y="v")
+
+    expected = [_log_left_out_warning(channel, "v", 1)]
+
+    static_doors: dict[str, Callable[[], fm.Chart]] = {
+        "+": lambda: a() + b(),
+        "L": lambda: a().layer(
+            layer("line", **({"x": "v", "y": "x"} if channel == "x" else {"x": "x", "y": "v"}))
+        ),
+        "LCs": lambda: fm.LayerChart(a(), b()),
+    }
+    for door, build in static_doors.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            build().to_svg()
+        assert [str(w.message) for w in caught] == expected, f"{channel}/{door}"
+
+    with warnings.catch_warnings(record=True) as caught_interactive:
+        warnings.simplefilter("always")
+        json.loads(fm.LayerChart(a(), b()).interactive().scene_json)
+    assert [str(w.message) for w in caught_interactive] == expected, f"{channel}/LCi"
+
+
+def _rust_float(v: float) -> str:
+    """Formats *v* the way Rust's ``{}`` Display does for ``f64``: an
+    integer-valued float prints with no trailing ``.0``."""
+    return str(int(v)) if v == int(v) else repr(v)
+
+
+def _log_no_value_reason(
+    channel: str,
+    field: str,
+    rows: int,
+    side: str,
+    has_zero: bool,
+    opposite: tuple[float, float] | None,
+) -> str:
+    """Mirrors ``log_no_value_on_side_reason`` (``crates/ferrum-core/src/
+    render/mod.rs``), the ``RenderError::LogScaleNoValueOnSide`` text a
+    channel with nothing left on its side refuses with."""
+    maps_word = side
+    sign_word = "negative" if side == "positive" else "positive"
+    alt_scale = (
+        "fm.SymlogScale()" if channel in ("x", "y") else "fm.SqrtScale() or fm.LinearScale()"
+    )
+    if not has_zero and opposite is not None:
+        lo, hi = opposite
+        reason = (
+            f"every value of '{field}' ({rows} rows) is {sign_word}, and a LogScale with no "
+            f"domain maps only {maps_word} values; pass an explicit {sign_word} domain, e.g. "
+            f"fm.LogScale(domain=[{_rust_float(lo)}, {_rust_float(hi)}]), to draw a mirrored "
+            "log scale"
+        )
+    else:
+        excluded = "zero or negative" if side == "positive" else "zero or positive"
+        if opposite is not None:
+            lo, hi = opposite
+            reason = (
+                f"{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain "
+                f"maps only {maps_word} values; use {alt_scale}, or pass an explicit "
+                f"{sign_word} domain, e.g. fm.LogScale(domain=[{_rust_float(lo)}, {_rust_float(hi)}])"
+            )
+        else:
+            reason = (
+                f"{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain "
+                f"maps only {maps_word} values; use {alt_scale}"
+            )
+    return f"{channel} scale: {reason}"
+
+
+# Each scenario's ``v`` column, with the shape ``log_no_value_on_side_reason``
+# reads from it: every non-null, finite value is off-side (none positive).
+_LOG_NO_VALUE_SCENARIOS: dict[str, tuple[list[float], int, bool, tuple[float, float] | None]] = {
+    "all-negative": ([-1000.0, -100.0, -10.0, -1.0], 4, False, (-1000.0, -1.0)),
+    "all-zero": ([0.0, 0.0, 0.0, 0.0], 4, True, None),
+    "zero-and-negative": ([-5.0, 0.0, -10.0], 3, True, (-10.0, -5.0)),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_LOG_NO_VALUE_SCENARIOS))
+@pytest.mark.parametrize("channel", _LOG_WARN_CHANNELS)
+def test_a_log_channel_with_nothing_on_its_side_refuses_naming_the_remedy(channel, scenario):
+    """A Log channel with no stated domain refuses when every one of its
+    values is off the positive side -- naming the row count and, when any
+    value is strictly negative, the explicit domain that would draw it
+    mirrored.
+
+    Rejects a mirrored negative axis drawn from data alone (x/y) and
+    every mark drawn at one end with no word about it (an auxiliary
+    channel) -- the side is never inferred from the data.
+    """
+    vs, rows, has_zero, opposite = _LOG_NO_VALUE_SCENARIOS[scenario]
+    data = pl.DataFrame({"v": vs, "y": [float(i) for i in range(len(vs))]})
+    chart = _log_channel_chart(channel, data, fm.LogScale())
+    expected = _log_no_value_reason(channel, "v", rows, "positive", has_zero, opposite)
+    with pytest.raises(ValueError) as refused:
+        chart.to_svg()
+    assert str(refused.value) == expected
+
+
+def test_a_flipped_layer_charts_log_refusal_names_the_written_channel():
+    """Under ``CoordFlip``, a ``LayerChart`` whose members' x channel has
+    nothing on its Log side refuses naming ``x`` -- the channel the user
+    actually wrote -- not the post-flip resolved axis.
+    """
+    data = pl.DataFrame({"v": [-5.0, -7.0], "y": [1.0, 2.0]})
+
+    def flipped() -> fm.Chart:
+        return (
+            fm.Chart(data)
+            .mark_point()
+            .encode(x=fm.X("v", scale=fm.LogScale()), y="y")
+            .coord(fm.CoordFlip())
+        )
+
+    with pytest.raises(ValueError) as refused:
+        fm.LayerChart(flipped(), flipped()).to_svg()
+    message = str(refused.value)
+    assert "x scale" in message or "shared x domain" in message
+    assert "shared y" not in message
+
+
+_LOG_DOMAIN_REFUSALS: dict[str, tuple[list[float], str]] = {
+    "zero": ([0.0, 100.0], "log scale domain must not contain 0"),
+    "sign-mismatch": ([-10.0, 1000.0], "log scale domain endpoints must have the same sign"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LOG_DOMAIN_REFUSALS))
+def test_an_explicit_log_domain_touching_or_crossing_zero_refuses_on_x_at_render(case):
+    """A wire spec that states a Log domain with a zero endpoint or
+    endpoints of different signs refuses at render -- the same text
+    ``fm.LogScale(domain=...)`` itself gives at construction -- even
+    though this door reaches the render without a channel class to
+    refuse it first.
+    """
+    domain, reason = _LOG_DOMAIN_REFUSALS[case]
+    from ferrum._core import render_svg
+
+    wire = _wire(P())
+    wire["encoding"]["x"]["scale"] = {"type": "log", "domain": domain}
+    with pytest.raises(ValueError, match=rf"^x scale: {re.escape(reason)}$"):
+        render_svg(fm.ChartSpec.from_json(json.dumps(wire)), df.to_arrow(), viewport=(400.0, 300.0))
+
+
+@pytest.mark.parametrize("case", sorted(_LOG_DOMAIN_REFUSALS))
+@pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
+def test_an_explicit_log_domain_touching_or_crossing_zero_refuses_at_aux_construction(
+    channel, case
+):
+    """Every numeric auxiliary channel refuses the same malformed Log
+    domain at construction, through the dict door that bypasses
+    ``fm.LogScale``'s own eager validation.
+    """
+    domain, reason = _LOG_DOMAIN_REFUSALS[case]
+    cls = _NUMERIC_AUX_CLASSES[channel]
+    with pytest.raises(ValueError, match=rf"^{channel} scale: {re.escape(reason)}$"):
+        cls("v", scale={"type": "log", "domain": domain})
+
+
+_NEGATIVE_DOMAIN: tuple[float, float] = (-1000.0, -1.0)
+
+
+def _negative_domain_scale(channel: str) -> Any:
+    range_ = None if channel in ("x", "y") else tuple(float(v) for v in _ALT_RANGE[channel])
+    kwargs: dict[str, Any] = {"domain": list(_NEGATIVE_DOMAIN)}
+    if range_ is not None:
+        kwargs["range"] = list(range_)
+    return fm.LogScale(**kwargs), range_
+
+
+@pytest.mark.parametrize("channel", _LOG_WARN_CHANNELS)
+def test_a_stated_negative_domain_renders_every_row_mirrored(channel):
+    """A Log scale whose stated domain is strictly negative draws an
+    all-negative column mirrored -- the domain the earlier refusal's
+    remedy suggests actually renders -- on x, y, and every numeric
+    auxiliary channel alike: mirrored ticks (or, on an auxiliary channel,
+    mirrored mapped values and a mirrored legend), with no row left out.
+    """
+    vs = [-1000.0, -100.0, -10.0, -1.0]
+    data = pl.DataFrame({"v": vs, "y": [1.0, 2.0, 3.0, 4.0]})
+    scale, range_ = _negative_domain_scale(channel)
+    chart = _log_channel_chart(channel, data, scale)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    assert caught == []
+    assert tag_counts(svg).get("circle", 0) == 4
+
+    if channel in ("x", "y"):
+        labels = axis_tick_labels(svg, axis=channel)
+        for decade in ("-1000", "-100", "-10", "-1"):
+            assert decade in labels, f"{channel}: missing decade label {decade!r}: {labels}"
+        return
+
+    expected = [_drawn_value(channel, log_map(v, _NEGATIVE_DOMAIN, range_, base=10.0)) for v in vs]
+    values = _quiet(lambda: _mark_values(chart, channel))
+    assert values == pytest.approx(expected, abs=1e-6)
+
+    static_tol = 0.005 if channel == "opacity" else 1e-3
+    static_values = _static_mark_values(svg, channel)
+    assert static_values == pytest.approx(expected, abs=static_tol)
+
+    ((title, entries),) = _quiet(lambda: interactive_legend(chart, channel)).items()
+    assert title == "v"
+    assert sorted(float(label) for label, _ in entries) == sorted(vs)
+
+    legend_labels = legend_set(svg)["v"]
+    assert sorted(float(label) for label in legend_labels) == sorted(vs)
+
+
+@pytest.mark.parametrize("channel", _LOG_WARN_CHANNELS)
+def test_a_positive_row_under_a_stated_negative_domain_is_left_out_and_warned(channel):
+    """Under a stated negative Log domain, a row on the positive side (or
+    zero) is left out -- not drawn, per the off-side rule, on x, y, and
+    every numeric auxiliary channel alike -- and the chart warns once,
+    "zero or positive": the mirror image of the default positive side's
+    "zero or negative".
+    """
+    vs = [-1000.0, -100.0, -10.0, 5.0]
+    data = pl.DataFrame({"v": vs, "y": [1.0, 2.0, 3.0, 4.0]})
+    scale, range_ = _negative_domain_scale(channel)
+    chart = _log_channel_chart(channel, data, scale)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    messages = [str(w.message) for w in caught]
+    assert messages == [_log_left_out_warning(channel, "v", 1, side="negative")]
+    assert tag_counts(svg).get("circle", 0) == 3
+
+    if channel in ("x", "y"):
+        return
+
+    on_side = [v for v in vs if v < 0.0]
+    expected = [_drawn_value(channel, log_map(v, _NEGATIVE_DOMAIN, range_, base=10.0)) for v in on_side]
+    values = _quiet(lambda: _mark_values(chart, channel))
+    assert values == pytest.approx(expected, abs=1e-6)
+
+    static_tol = 0.005 if channel == "opacity" else 1e-3
+    static_values = _static_mark_values(svg, channel)
+    assert static_values == pytest.approx(expected, abs=static_tol)
+
+
+# ---------------------------------------------------------------------------
+# A transform scale maps every mark that draws stroke_width or the opacity
+# family, not only a point -- the one table Mark::draws_channel answers
+# from, read through ferrum._core.mark_drawn_channels so this matrix
+# cannot drift from it.
+# ---------------------------------------------------------------------------
+
+# fill_opacity/stroke_opacity/stroke_width each have one literal style
+# key across every mark that draws them. Plain "opacity" has none of its
+# own: a mark bakes its mapped value into whichever paint it actually
+# has -- its fill's alpha on a fill-painted mark with no fill_opacity of
+# its own (point, area), a literal fill-opacity attribute where it
+# shares that attribute with fill_opacity (bar), its stroke's alpha on a
+# stroke-only mark with no stroke_opacity of its own (line, rule), or a
+# literal stroke-opacity attribute where it shares that attribute with
+# stroke_opacity (tick, segment) -- so this matrix checks it too, table-
+# driven per mark rather than hand-excluded to a subset.
+_AUX_STYLE_CHANNELS = ("stroke_width", "fill_opacity", "stroke_opacity", "opacity")
+
+_CHANNEL_MARK_POSITIONS: dict[str, dict[str, str]] = {
+    "point": {"x": "v", "y": "y"},
+    "line": {"x": "v", "y": "y"},
+    "area": {"x": "v", "y": "y"},
+    "bar": {"x": "k", "y": "y"},
+    "tick": {"x": "v", "y": "y"},
+    "rule": {"y": "y"},
+    "segment": {"x": "v", "y": "y", "x2": "v", "y2": "z"},
+}
+
+# line/area draw one node (a polyline/path) for the whole series, at the
+# first row's resolved value.
+_SINGLE_NODE_MARKS = frozenset({"line", "area"})
+
+# Marks whose plain "opacity" bakes into a paint's 8-bit alpha byte,
+# both in the interactive scene (_INTERACTIVE_OPACITY_READ) and in the
+# static SVG's rgba() fallback (_color_alpha) -- unlike bar/tick/segment,
+# which carry it as a literal float attribute.
+_BYTE_QUANTIZED_OPACITY_MARKS = frozenset({"point", "line", "area", "rule"})
+
+# A segment's fill_opacity fills its arrowheads, drawn only with
+# arrow=True (Mark::draws_opacity_channel's doc) -- plain `mk("segment",
+# ...)` carries no arrowhead to map it onto, so this one (mark, channel)
+# pair needs its own chart, built by `_mark_chart` below.
+_SEGMENT_ARROW_CHANNELS = frozenset({"fill_opacity"})
+
+
+def _marks_drawing(channel: str) -> list[str]:
+    """Every mark in ``_CHANNEL_MARK_POSITIONS`` that draws *channel*, per
+    ``ferrum._core.mark_drawn_channels`` (``Mark::draws_channel``'s own answer)."""
+    from ferrum._core import mark_drawn_channels
+
+    return [m for m in _CHANNEL_MARK_POSITIONS if channel in mark_drawn_channels(m)]
+
+
+def _mark_chart(
+    mark: str,
+    channel: str,
+    value: Any,
+    data: pl.DataFrame = df,
+    positions: dict[str, str] | None = None,
+) -> fm.Chart:
+    """*mark* bound to *channel* = *value* (left unbound when *value* is
+    ``None``) over *positions* (``_CHANNEL_MARK_POSITIONS[mark]`` by
+    default) and *data* (the module's own ``df`` by default)."""
+    if positions is None:
+        positions = _CHANNEL_MARK_POSITIONS[mark]
+    encoding = {} if value is None else {channel: value}
+    if mark == "segment" and channel in _SEGMENT_ARROW_CHANNELS:
+        return fm.Chart(data).mark_segment(arrow=True).encode(**positions, **encoding)
+    return mk(mark, data, **positions, **encoding)
+
+
+# Where plain "opacity" lands in the interactive scene, per mark: a
+# literal `style["opacity"]` whenever the scene also writes the mapped
+# value there (point, tick, segment -- each ALSO echoes it into the
+# paint alpha or stroke_opacity, so reading `style["opacity"]` directly
+# is the one read that is never double-applied); otherwise baked into
+# the paint's own alpha, with `style["opacity"]` left inert at 1.0
+# (line, rule: `color.a`; area: `fill.a`), or into a literal
+# `fill_opacity` that shares bar's own fill_opacity slot.
+_INTERACTIVE_OPACITY_READ: dict[str, Callable[[dict], float]] = {
+    "point": lambda s: s["opacity"],
+    "line": lambda s: (s.get("color") or {}).get("a", 255) / 255,
+    "area": lambda s: (s.get("fill") or {}).get("a", 255) / 255,
+    "bar": lambda s: s.get("fill_opacity", 1.0),
+    "tick": lambda s: s["opacity"],
+    "rule": lambda s: (s.get("color") or {}).get("a", 255) / 255,
+    "segment": lambda s: s["opacity"],
+}
+
+
+def _style_values(chart: Any, mark: str, channel: str) -> list[Any]:
+    """Each interactive node's drawn *channel* value, across every mark kind
+    that draws it in one node per row.
+
+    A circle/rect-family node keys its outline width ``stroke_width``; a
+    line-family node (line/tick/rule/segment/area) has only one width,
+    keyed ``width``. A node whose style carries no key for *channel* at
+    all -- a segment's shaft, when *channel* is ``fill_opacity`` (only
+    its arrowhead carries that key) -- is skipped rather than counted as
+    a null row: the two are different node *kinds*, not one row with a
+    missing value. Plain ``opacity`` routes through ``_INTERACTIVE_
+    OPACITY_READ`` instead, since its value is not always under a
+    literal ``"opacity"`` key.
+    """
+    out = []
+    for panel in _scene(chart)["panels"]:
+        for batch in panel["marks"]:
+            for node in batch["nodes"]:
+                style = node.get("style") or {}
+                if channel == "opacity":
+                    out.append(_INTERACTIVE_OPACITY_READ[mark](style))
+                    continue
+                if channel == "stroke_width":
+                    if "stroke_width" not in style and "width" not in style:
+                        continue
+                    out.append(style.get("stroke_width", style.get("width")))
+                    continue
+                if channel not in style:
+                    continue
+                out.append(style[channel])
+    return out
+
+
+_RGBA_ALPHA_RE = re.compile(r"rgba\([\d.]+,[\d.]+,[\d.]+,([\d.]+)\)")
+
+
+def _color_alpha(color: str | None) -> float:
+    """The alpha fraction baked into a color attribute by
+    ``render/color/primitive.rs``'s ``fmt_svg``: 1.0 for a fully opaque
+    ``#rrggbb`` (or no color/``"none"`` at all), the parsed fraction for
+    its ``rgba(r,g,b,a)`` fallback (alpha < 1.0)."""
+    if not color or color == "none":
+        return 1.0
+    m = _RGBA_ALPHA_RE.match(color)
+    return float(m.group(1)) if m else 1.0
+
+
+_MARK_SVG_TAG = {
+    "point": "circle",
+    "line": "polyline",
+    "area": "path",
+    "bar": "rect",
+    "tick": "line",
+    "rule": "line",
+    "segment": "line",
+}
+
+# fill-opacity/stroke-opacity/stroke-width each have their own SVG
+# attribute (render/svg.rs's push_fill_stroke), read directly; absence
+# means the unscaled default.
+_STATIC_ATTR = {"fill_opacity": "fill-opacity", "stroke_opacity": "stroke-opacity"}
+_STATIC_ATTR_DEFAULT = {"fill_opacity": 1.0, "stroke_opacity": 1.0}
+
+# Where plain "opacity" lands statically, per mark: a literal attribute
+# it shares with fill_opacity (bar) or stroke_opacity (tick, segment,
+# via push_fill_stroke), or baked into the paint color's own alpha
+# (render/color/primitive.rs's fmt_svg) on a mark with no opacity-family
+# attribute of its own to share (point, area: fill; line, rule: stroke).
+# This is Rust's own per-mark choice of representation, not a
+# discriminator this test enforces.
+_STATIC_OPACITY_READ: dict[str, Callable[[dict[str, str]], float]] = {
+    "point": lambda a: _color_alpha(a.get("fill")),
+    "line": lambda a: _color_alpha(a.get("stroke")),
+    "area": lambda a: _color_alpha(a.get("fill")),
+    "bar": lambda a: float(a.get("fill-opacity", "1.0")),
+    "tick": lambda a: float(a.get("stroke-opacity", "1.0")),
+    "rule": lambda a: _color_alpha(a.get("stroke")),
+    "segment": lambda a: float(a.get("stroke-opacity", "1.0")),
+}
+
+
+def _static_style_values(svg: str, mark: str, channel: str) -> list[float]:
+    """Each static mark element's drawn *channel* value, in document order
+    within the plot's clip groups -- the static-SVG counterpart to
+    ``_style_values``."""
+    layer = mark_layer(svg)
+    if mark == "segment" and channel in _SEGMENT_ARROW_CHANNELS:
+        # fill_opacity paints the arrowhead, a filled triangle <path>;
+        # the shaft stays a plain <line>, carrying no fill at all.
+        elements = svg_elements(layer, "path", lambda a: True)
+    else:
+        tag = _MARK_SVG_TAG[mark]
+        keep = (lambda a: a.get("stroke") not in THEME_CHROME_STROKES) if tag == "line" else (
+            lambda a: True
+        )
+        elements = svg_elements(layer, tag, keep)
+    if channel == "opacity":
+        return [_STATIC_OPACITY_READ[mark](a) for a in elements]
+    if channel == "stroke_width":
+        return [float(a.get("stroke-width", "0.0")) for a in elements]
+    attr, default = _STATIC_ATTR[channel], _STATIC_ATTR_DEFAULT[channel]
+    return [float(a.get(attr, str(default))) for a in elements]
+
+
+def _static_mark_values(svg: str, channel: str, mark: str = "point") -> list[float]:
+    """The static SVG's drawn *channel* value per *mark* (a point, by
+    default -- the stated-negative-domain cells' only caller shape),
+    mirroring ``_mark_values``'s interactive reader: ``size`` reads each
+    circle's own ``r`` attribute directly (``_static_style_values`` has
+    no size rule -- a point's radius is not one of the literal/baked
+    style channels that function covers); every other aux channel
+    routes through ``_static_style_values``.
+    """
+    if channel == "size":
+        return [float(a["r"]) for a in svg_elements(mark_layer(svg), "circle", lambda a: True)]
+    return _static_style_values(svg, mark, channel)
+
+
+_MARK_CHANNEL_PAIRS = [
+    (mark, channel) for channel in _AUX_STYLE_CHANNELS for mark in _marks_drawing(channel)
+]
+
+_OFF_SIDE_MARK_CHANNEL_PAIRS = [*_MARK_CHANNEL_PAIRS, ("point", "size"), ("line", "size")]
+
+
+def _off_side_data() -> pl.DataFrame:
+    """The module's own ``df`` with row 0 forced negative (off-side) and
+    row 1 forced null, over the ``z`` column every pair in this matrix
+    binds its channel to."""
+    zs = df["z"].to_list()
+    return df.with_columns(pl.Series("z", [-5.0, None, *zs[2:]]))
+
+
+def _off_side_positions(mark: str) -> dict[str, str]:
+    """``_CHANNEL_MARK_POSITIONS[mark]``, with segment's ``y2`` moved off
+    ``'z'``: segment is the one mark whose position encoding reuses the
+    same field this matrix binds its channel to, which would conflate a
+    dropped/defaulted AUX row with a dropped/defaulted POSITION row.
+    """
+    positions = dict(_CHANNEL_MARK_POSITIONS[mark])
+    if positions.get("y2") == "z":
+        positions["y2"] = "r"
+    return positions
+
+
+def _off_side_chart(mark: str, channel: str, value: Any, data: pl.DataFrame) -> fm.Chart:
+    return _mark_chart(mark, channel, value, data=data, positions=_off_side_positions(mark))
+
+
+def _off_side_unbound_chart(mark: str, channel: str, data: pl.DataFrame) -> fm.Chart:
+    """The same chart *_off_side_chart* builds, with *channel* left unbound."""
+    return _mark_chart(mark, channel, None, data=data, positions=_off_side_positions(mark))
+
+
+def _unbound_default(mark: str, channel: str, data: pl.DataFrame) -> float:
+    """The value *channel* draws when left unbound on *mark* -- the value
+    a null row still draws at, interactively."""
+    chart = _off_side_unbound_chart(mark, channel, data)
+    if channel == "size" and mark in _SINGLE_NODE_MARKS:
+        node = next(n for p in _quiet(lambda: _scene(chart))["panels"] for b in p["marks"] for n in b["nodes"])
+        return node["style"]["width"]
+    return _off_side_interactive_values(chart, mark, channel)[0]
+
+
+def _expected_off_side_value(mark: str, channel: str, mapped: float) -> float:
+    """The drawn value *mapped* (a scale's raw range-space output) becomes
+    on *mark*: size converts area to a point's radius or a line's
+    diameter (twice the radius); every other channel is drawn directly.
+    """
+    if channel != "size":
+        return mapped
+    radius = _drawn_value("size", mapped)
+    return 2.0 * radius if mark in _SINGLE_NODE_MARKS else radius
+
+
+def _off_side_interactive_values(chart: Any, mark: str, channel: str) -> list[float]:
+    """Each surviving row's drawn *channel* value, from the interactive
+    scene.
+
+    Unlike ``_style_values`` (which skips a node whose style carries no
+    key for *channel* at all, to separate a segment's shaft from its
+    arrowhead), a null row's node -- or an entirely unbound channel's --
+    omits a literal ``fill_opacity``/``stroke_opacity`` key the same way,
+    so this reader defaults a missing key to 1.0 instead of skipping the
+    node. A segment's shaft and arrowhead are told apart structurally
+    instead (a ``"fill"`` paint key, present only on the arrowhead),
+    which holds whether or not *channel* happens to be bound.
+    """
+    nodes = [n for p in _scene(chart)["panels"] for b in p["marks"] for n in b["nodes"]]
+    if mark == "segment" and channel in _SEGMENT_ARROW_CHANNELS:
+        nodes = [n for n in nodes if "fill" in n["style"]]
+    if channel == "size":
+        if mark in _SINGLE_NODE_MARKS:
+            return nodes[0]["widths"]
+        return [n["r"] for n in nodes]
+    styles = [n["style"] for n in nodes]
+    if channel == "stroke_width":
+        return [s.get("stroke_width", s.get("width")) for s in styles]
+    if channel == "opacity":
+        return [_INTERACTIVE_OPACITY_READ[mark](s) for s in styles]
+    return [s.get(channel, 1.0) for s in styles]
+
+
+def _unbound_default_static(mark: str, channel: str, data: pl.DataFrame) -> float:
+    """The static-SVG counterpart to ``_unbound_default``."""
+    chart = _off_side_unbound_chart(mark, channel, data)
+    svg = _quiet(chart.to_svg)
+    return _static_mark_values(svg, channel, mark)[0]
+
+
+def _tapered_line_widths(d: str, n: int) -> list[float]:
+    """Each of *n* vertices' stroke width, decoded from a tapered line's
+    outline path geometry.
+
+    The first ``n - 1`` ``M...Z`` subpaths are the per-segment quads
+    between consecutive vertices: 4 points in order (this vertex's near
+    offset, the next vertex's near offset, the next vertex's far
+    offset, this vertex's far offset) -- the segment's own two ends,
+    each as a pair of points straddling the centerline perpendicular to
+    the segment direction. A vertex's width is the distance between its
+    own pair of offset points: its near/far pair for the first vertex
+    of the first segment, or the next-vertex pair of each segment in
+    turn for every vertex after it.
+    """
+    segments = re.findall(r"M[^Z]*Z", d)[: n - 1]
+    points = [
+        [(nums[i], nums[i + 1]) for i in range(0, 8, 2)]
+        for nums in (list(map(float, re.findall(r"-?[\d.]+", seg))) for seg in segments)
+    ]
+
+    def dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    return [dist(points[0][0], points[0][3])] + [dist(seg[1], seg[2]) for seg in points]
+
+
+@pytest.mark.parametrize("mark,channel", _OFF_SIDE_MARK_CHANNEL_PAIRS)
+def test_a_log_off_side_row_is_absent_on_every_mark_that_draws_the_channel(mark, channel):
+    """An off-side Log row is absent on every (mark, channel) pair this
+    module's mark-coverage matrix covers, not only on a point: a drop
+    that preserves row identity holds for every mark and every numeric
+    channel, statically and interactively, with the surviving rows'
+    values and the dropped and null rows' ``data_indices`` entries all
+    correct.
+
+    A single-node mark (line, area) draws one node for the whole series,
+    representing only its FIRST surviving row's value for every channel
+    but ``size`` (which alone tapers per vertex) -- in this fixture,
+    that first survivor is the null row, so only the unbound-default
+    check applies there; the "every other row maps" claim is only
+    representable, and only checked, where there is more than one node
+    (or, for ``size`` on a line, more than one tapered width) to read.
+
+    Rejects a row silently drawn at the default (not dropped), a
+    survivor renumbered by its position in the filtered batch rather
+    than its source row, and a null row read as off-side instead of
+    drawn at the unbound default.
+    """
+    data = _off_side_data()
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    scale = fm.LogScale(range=list(range_))
+    value = _NUMERIC_AUX_CLASSES[channel]("z", scale=scale)
+    chart = _off_side_chart(mark, channel, value, data)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    assert [str(w.message) for w in caught] == [_log_left_out_warning(channel, "z", 1)]
+
+    is_segment_arrow = mark == "segment" and channel in _SEGMENT_ARROW_CHANNELS
+    is_single_node = mark in _SINGLE_NODE_MARKS
+    # A single-node mark's static form only tapers per vertex for
+    # `size` (an outline <path>); every other channel on it (and `size`
+    # itself on every other mark) stays a literal/baked scalar this
+    # test's generic static reader (_static_mark_values) covers. Size
+    # on a line gets its own dedicated static check below instead.
+    size_on_line = channel == "size" and mark in _SINGLE_NODE_MARKS
+
+    batches = [b for p in _quiet(lambda: _scene(chart))["panels"] for b in p["marks"]]
+    if is_single_node:
+        assert sum(len(b["nodes"]) for b in batches) == 1
+        assert [idx for b in batches for idx in b["data_indices"]] == [1]
+    elif is_segment_arrow:
+        # Each surviving row draws two nodes (shaft, arrowhead), both
+        # naming that row's own source index.
+        assert sum(len(b["nodes"]) for b in batches) == 14
+        assert [idx for b in batches for idx in b["data_indices"]] == [
+            i for i in range(1, 8) for _ in range(2)
+        ]
+    else:
+        assert sum(len(b["nodes"]) for b in batches) == 7
+        assert [idx for b in batches for idx in b["data_indices"]] == list(range(1, 8))
+
+    # Static: the same row counts, read off the SVG directly.
+    layer = mark_layer(svg)
+    if size_on_line:
+        # A tapered line's outline is one closed <path>, not a plain
+        # <polyline>: each of the N-1 segments between consecutive
+        # points is a 4-vertex (M + 3L) quad, and each of the N-2
+        # interior points gets a 3-vertex (M + 2L) join triangle, so a
+        # path over N points has M count 2N-3 and L count 5N-7 (derived
+        # by rendering a known N and counting; confirmed for N=8: M=13,
+        # L=33). For the 7 surviving rows here, that is M=11, L=28.
+        elements = svg_elements(layer, "path", lambda a: True)
+        assert len(elements) == 1
+        assert elements[0]["d"].count("M") == 2 * 7 - 3
+        assert elements[0]["d"].count("L") == 5 * 7 - 7
+    elif is_single_node:
+        tag = _MARK_SVG_TAG[mark]
+        elements = svg_elements(layer, tag, lambda a: True)
+        assert len(elements) == 1
+        if tag == "polyline":
+            assert len(elements[0]["points"].split()) == 7
+        else:
+            # An area's outline: M + (N-1) L's for the data (top)
+            # edge, plus 2 more L's closing the fill to the baseline.
+            assert 1 + elements[0]["d"].count("L") - 2 == 7
+    elif is_segment_arrow:
+        assert len(svg_elements(layer, "path", lambda a: True)) == 7
+    else:
+        tag = _MARK_SVG_TAG[mark]
+        keep = (
+            (lambda a: a.get("stroke") not in THEME_CHROME_STROKES) if tag == "line" else (lambda a: True)
+        )
+        assert len(svg_elements(layer, tag, keep)) == 7
+
+    # The null row (source index 1, the first survivor) draws at the
+    # same value the chart draws with *channel* unbound.
+    default = _unbound_default(mark, channel, data)
+    byte_quantized = channel == "opacity" and mark in _BYTE_QUANTIZED_OPACITY_MARKS
+    interactive_tol = 0.005 if byte_quantized else 1e-6
+
+    interactive_values = _off_side_interactive_values(chart, mark, channel)
+    assert interactive_values[0] == pytest.approx(default, abs=interactive_tol)
+
+    # Every other (on-side) row maps through the Log transform -- only
+    # representable where there is more than one value to read. size
+    # and stroke_width nice a data-derived Log domain to the enclosing
+    # power of the base (niced_log_domain); the opacity family does not.
+    if not (is_single_node and channel != "size"):
+        on_side_zs = [10.0, 30.0, 25.0, 35.0, 40.0, 45.0]
+        raw_domain = (min(on_side_zs), max(on_side_zs))
+        domain = niced_log_domain(*raw_domain, 10.0) if channel in _AUX_NICES_DATA_DOMAIN else raw_domain
+        expected = [default] + [
+            _expected_off_side_value(mark, channel, log_map(z, domain, range_, base=10.0))
+            for z in on_side_zs
+        ]
+        assert interactive_values == pytest.approx(expected, abs=interactive_tol)
+
+    if size_on_line:
+        # The null row's default and every on-side row's mapped value,
+        # decoded directly from the tapered outline's own geometry
+        # (each per-segment quad's two offset points at a vertex are
+        # `width` apart) rather than reconstructed through a second
+        # chart: a twin built from a 7-row subset of *data* shifts the
+        # path's very first join (its start cap differs depending on
+        # whether a dropped neighbour row ever existed positionally),
+        # so comparing two charts' paths byte-for-byte is the wrong
+        # tool here -- measuring the ONE path this chart drew is not.
+        path_values = _tapered_line_widths(elements[0]["d"], n=7)
+        assert path_values == pytest.approx(interactive_values, abs=1e-3)
+    else:
+        static_tol = 0.005 if byte_quantized else 1e-3
+        static_default = _unbound_default_static(mark, channel, data)
+        static_values = _static_mark_values(svg, channel, mark)
+        assert static_values[0] == pytest.approx(static_default, abs=static_tol)
+        if not (is_single_node and channel != "size"):
+            static_expected = [static_default] + [
+                _expected_off_side_value(mark, channel, log_map(z, domain, range_, base=10.0))
+                for z in on_side_zs
+            ]
+            assert static_values == pytest.approx(static_expected, abs=static_tol)
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+@pytest.mark.parametrize("mark,channel", _MARK_CHANNEL_PAIRS)
+def test_a_transform_scale_maps_every_mark_that_draws_the_channel(mark, channel, kind):
+    """stroke_width and the opacity family (including plain ``opacity``)
+    map through Log/Pow/Sqrt on every mark that draws them, not only a
+    point, in both the interactive scene and the static SVG.
+
+    Rejects a gate keyed on mark kind: the same per-kind math point cells
+    already pin must hold for a line's width, a bar's fill, a rule's
+    stroke and the rest; rejects a static/interactive divergence, since
+    each representation must carry the same mapped value.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE[channel])
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN), range=list(range_))
+    chart = _mark_chart(mark, channel, _NUMERIC_AUX_CLASSES[channel]("z", scale=scale))
+    mapper = _TRANSFORM_MAP[kind]
+    zs = df["z"].to_list()
+    expected = (
+        [mapper(zs[0], _TRANSFORM_DOMAIN, range_)]
+        if mark in _SINGLE_NODE_MARKS
+        else [mapper(z, _TRANSFORM_DOMAIN, range_) for z in zs]
+    )
+    # Plain "opacity" on point/line/area/rule bakes into a paint's 8-bit
+    # alpha byte, round-tripping to the nearest 1/255 rather than the
+    # exact fraction fill_opacity/stroke_opacity/stroke_width (and bar's/
+    # tick's/segment's literal opacity attribute) carry. Every static
+    # attribute, byte-quantized or not, also passes through the SVG
+    # writer's 3-decimal-place formatting (render/mod.rs's
+    # FLOAT_PRECISION, used by svg.rs's fmt_f/fmt_svg).
+    byte_quantized = channel == "opacity" and mark in _BYTE_QUANTIZED_OPACITY_MARKS
+    interactive_tol = 0.005 if byte_quantized else 1e-6
+    static_tol = 0.005 if byte_quantized else 1e-3
+
+    values = _quiet(lambda: _style_values(chart, mark, channel))
+    assert values == pytest.approx(expected, abs=interactive_tol)
+
+    static_values = _static_style_values(_quiet(chart.to_svg), mark, channel)
+    assert static_values == pytest.approx(expected, abs=static_tol)
+
+
+def _first_path_d(svg: str) -> str:
+    match = re.search(r'<path[^>]*\bd="([^"]+)"', mark_layer(svg))
+    assert match is not None, "no <path> in the plot's clip group"
+    return match.group(1)
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+def test_a_transform_scale_maps_size_on_a_line_as_a_tapered_stroke_width(kind):
+    """``size`` maps through Log/Pow/Sqrt on a ``line``, not only a point:
+    a per-vertex stroke width, each the diameter of the circle the same
+    mapped area would draw on a point (``_drawn_value``'s radius,
+    doubled -- a line's thickness spans both sides of its center point).
+
+    A varying line width is one tapered outline ``<path>`` whose
+    thickness is baked into its boundary geometry rather than exposed as
+    a per-vertex attribute -- decoding that geometry directly would mean
+    re-deriving taper math this codebase already verifies through golden
+    and pixel-capture tests (``test_golden_tapered_line.py``,
+    ``test_tapered_line_pixels.py``). Instead, an identity-scale twin
+    chart -- the SAME per-vertex widths, inverted back to the raw mapped
+    area ``LinearScale(domain=range_, range=range_)`` leaves untouched,
+    then re-mapped through the renderer's own area-to-diameter formula
+    -- must draw the byte-identical outline path: if the renderer's
+    taper geometry is a pure function of the per-vertex widths (and
+    nothing else), feeding it the same widths through any scale must
+    produce the same path. ``legend=None`` on both charts keeps a
+    differently-formatted legend label from shifting the plot area's
+    width by a few pixels, which would move every coordinate uniformly
+    and mask the comparison this test exists to make.
+    """
+    range_ = tuple(float(v) for v in _ALT_RANGE["size"])
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN), range=list(range_))
+    chart = mk("line", x="v", y="y", size=fm.Size("z", scale=scale, legend=None))
+    mapper = _TRANSFORM_MAP[kind]
+    zs = df["z"].to_list()
+    expected = [2.0 * _drawn_value("size", mapper(z, _TRANSFORM_DOMAIN, range_)) for z in zs]
+
+    nodes = [n for p in _scene(chart)["panels"] for b in p["marks"] for n in b["nodes"]]
+    ((widths,),) = [(n["widths"],) for n in nodes]
+    assert widths == pytest.approx(expected, abs=1e-6)
+
+    mapped_area = [math.pi * (w / 2.0) ** 2 for w in widths]
+    twin_data = df.with_columns(pl.Series("z", mapped_area))
+    identity_scale = fm.LinearScale(domain=list(range_), range=list(range_))
+    twin = mk("line", data=twin_data, x="v", y="y", size=fm.Size("z", scale=identity_scale, legend=None))
+    assert _first_path_d(_quiet(chart.to_svg)) == _first_path_d(_quiet(twin.to_svg))
+
+
+# ---------------------------------------------------------------------------
+# An auxiliary channel's transform fraction, and its Log side rule, match
+# a real positional render of the same column under the same scale --
+# not merely a claim that they do.
+# ---------------------------------------------------------------------------
+
+
+def _x_pixel_fractions(chart: Any) -> list[float]:
+    """Each drawn circle's x position as a fraction of the plot's own pixel
+    width, in document order. The scale must carry no explicit ``range=``:
+    on a positional channel, ``range=`` sets literal pixel coordinates, not
+    a fraction of the plot -- the auto-filled full-width range is what
+    makes this fraction comparable to an auxiliary channel's own fraction
+    of *its* range.
+    """
+    svg = _quiet(chart.to_svg)
+    root = _svg_root(svg)
+    (x0, _y0, x1, _y1) = next(iter(_clip_rects(root).values()))
+    return [(float(c.get("cx")) - x0) / (x1 - x0) for c in root.iter() if _tag(c) == "circle"]
+
+
+@pytest.mark.parametrize("kind", sorted(_TRANSFORM_SCALES))
+def test_an_aux_fraction_equals_the_positional_pixel_fraction_for_in_domain_rows(kind):
+    """A column's fraction of its range under Log/Pow/Sqrt is the same
+    number whether it is drawn on ``x`` (a pixel fraction of the plot) or
+    on an auxiliary channel (a fraction of its own range) -- the
+    transform parity the aux docstrings claim, shown against a real
+    render of BOTH sides, not merely the oracle on one side. Mapping onto
+    ``range=[0, 1]`` makes the oracle's own output literally that
+    fraction.
+    """
+    scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN))
+    zs = df["z"].to_list()
+
+    x_chart = mk("point", x=fm.X("z", scale=scale), y="y")
+    x_fractions = _x_pixel_fractions(x_chart)
+
+    mapper = _TRANSFORM_MAP[kind]
+    aux_fractions = [mapper(z, _TRANSFORM_DOMAIN, (0.0, 1.0)) for z in zs]
+    assert x_fractions == pytest.approx(aux_fractions, abs=1e-3)
+
+    aux_scale = _TRANSFORM_SCALES[kind](domain=list(_TRANSFORM_DOMAIN), range=[0.0, 1.0])
+    aux_chart = mk("point", x="y", y="y", opacity=fm.Opacity("z", scale=aux_scale))
+    aux_values = _quiet(lambda: _mark_values(aux_chart, "opacity"))
+    assert aux_values == pytest.approx(x_fractions, abs=1e-3)
+
+    static_values = _static_style_values(_quiet(aux_chart.to_svg), "point", "opacity")
+    assert static_values == pytest.approx(x_fractions, abs=0.005)
+
+
+def test_log_drops_the_same_rows_on_x_and_the_aux_channel_with_the_same_warning():
+    """A mixed-sign column under the identical, undomained ``LogScale()``
+    leaves out the same row on ``x`` and on ``size``, and both warn with
+    the same row count.
+    """
+    data = pl.DataFrame({"v": [-5.0, 1.0, 10.0, 100.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    scale = fm.LogScale()
+
+    x_chart = _log_channel_chart("x", data, scale)
+    with warnings.catch_warnings(record=True) as caught_x:
+        warnings.simplefilter("always")
+        x_svg = x_chart.to_svg()
+    assert [str(w.message) for w in caught_x] == [_log_left_out_warning("x", "v", 1)]
+    assert tag_counts(x_svg).get("circle", 0) == 3
+
+    size_chart = _log_channel_chart("size", data, scale)
+    with warnings.catch_warnings(record=True) as caught_size:
+        warnings.simplefilter("always")
+        size_svg = size_chart.to_svg()
+    assert [str(w.message) for w in caught_size] == [_log_left_out_warning("size", "v", 1)]
+    assert tag_counts(size_svg).get("circle", 0) == 3
+    size_values = _quiet(lambda: _mark_values(size_chart, "size"))
+    assert len(size_values) == 3
+
+
+@pytest.mark.parametrize("kind", ["pow", "sqrt"])
+def test_pow_and_sqrt_map_a_negative_value_with_the_same_fraction_on_x_and_aux(kind):
+    """Pow and Sqrt's sign-preserving power maps a negative value to the
+    same fraction of its range on ``x`` and on an auxiliary channel --
+    neither drops nor refuses it, unlike Log -- shown on a real aux
+    render, and against a LinearScale twin that must NOT match (the
+    sign-preserving power is actually in effect, not a linear fallback).
+    """
+    domain = (-50.0, 50.0)
+    vs = [-40.0, -10.0, 0.0, 10.0, 40.0]
+    data = pl.DataFrame({"v": vs, "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    scale = _TRANSFORM_SCALES[kind](domain=list(domain))
+
+    x_chart = fm.Chart(data).mark_point().encode(x=fm.X("v", scale=scale), y="y")
+    x_fractions = _x_pixel_fractions(x_chart)
+
+    mapper = _TRANSFORM_MAP[kind]
+    aux_fractions = [mapper(v, domain, (0.0, 1.0)) for v in vs]
+    assert x_fractions == pytest.approx(aux_fractions, abs=1e-3)
+
+    aux_scale = _TRANSFORM_SCALES[kind](domain=list(domain), range=[0.0, 1.0])
+    aux_chart = fm.Chart(data).mark_point().encode(x="y", y="y", opacity=fm.Opacity("v", scale=aux_scale))
+    aux_values = _quiet(lambda: _mark_values(aux_chart, "opacity"))
+    assert aux_values == pytest.approx(x_fractions, abs=1e-3)
+
+    linear_twin = fm.Chart(data).mark_point().encode(
+        x="y", y="y", opacity=fm.Opacity("v", scale=fm.LinearScale(domain=list(domain), range=[0.0, 1.0]))
+    )
+    linear_values = _quiet(lambda: _mark_values(linear_twin, "opacity"))
+    assert linear_values != pytest.approx(aux_values, abs=1e-3)
 
 
 _V11: dict[str, Case] = {

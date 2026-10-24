@@ -7,18 +7,135 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::ThemeInputs;
 use crate::scale::linear::LinearScale;
+use crate::scale::log::LogScale;
+use crate::scale::pow::PowScale;
 
 use ferrum_scene::{categorical_slot_dash, STROKE_DASH_LEGACY_SLOTS};
 
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
-use super::domain::{admitted_aux_reads, aux_category_union, aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, AuxRead, SortContext};
-use super::{column_min_max_f64, distinct_values_in_order, infer_spec_type, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
+use super::domain::{admitted_aux_reads, aux_category_union, sided_aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, AuxRead, SortContext};
+use super::{distinct_values_in_order, infer_spec_type, shared_categorical_batch, sided_min_max_f64, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
 
-/// The channels whose scale maps a quantitative field linearly onto a
-/// bounded output interval: the one gate [`numeric_aux_scale`] answers for.
+/// The channels whose scale maps a quantitative field onto a bounded output
+/// interval: the one gate [`numeric_aux_scale`] answers for.
 pub(crate) const NUMERIC_AUX_CHANNELS: [&str; 5] = ["size", "opacity", "fill_opacity", "stroke_opacity", "stroke_width"];
+
+/// [`log_aux_drawn_rows`]'s result: the Log-filtered batch, and the SOURCE
+/// row (an index into the batch `log_aux_drawn_rows` was given) of every row
+/// the filtered batch kept, in the filtered batch's own order — the mapping
+/// `scene_build::restore_source_rows` uses to un-renumber a mark builder's
+/// `data_indices`/`vertex_rows` back to source rows.
+pub(in crate::render) struct LogAuxFiltered {
+    pub(in crate::render) batch: RecordBatch,
+    pub(in crate::render) source_rows: Vec<usize>,
+}
+
+/// Drop a row an off-side `Log` numeric auxiliary scale cannot map: a row whose
+/// `size`/`opacity`/`fill_opacity`/`stroke_opacity`/`stroke_width` binding
+/// reads a FINITE value `v` with `!LogScale::admits(v)` is not drawn — the
+/// same treatment an off-side `x`/`y` row already gets
+/// (`ScaleKind::to_pixel_f64`'s `None`), now on every numeric auxiliary
+/// channel too, since `to_pixel_f64`'s `None` cannot express "not drawn" on
+/// an aux reader (every one of them folds `None` into the channel's
+/// default). A null or NaN value is kept (it draws at the default,
+/// unchanged) — only a value the scale has actually REJECTED for being on
+/// the excluded side is dropped. A row rejected on ANY bound Log aux
+/// channel is dropped once, not once per channel: the whole row is absent
+/// from every mark it would have drawn, mirroring how a single off-side x/y
+/// row removes the whole row rather than one channel's worth of it.
+///
+/// `encoding` is the layer's own DRAWN encoding
+/// (`LayerPrepared::drawn_encoding`), so only a channel this layer's mark
+/// actually draws is checked — a channel the mark does not draw, or that
+/// resolved to no scale at all, contributes nothing. `scales` is this
+/// layer's resolved `ResolvedScales` (the y-slot clone for an independent
+/// layer, same as every other read in `scene_build::build_panel_mark_batches`'s
+/// loop).
+///
+/// Returns `None` when no numeric auxiliary channel this layer draws
+/// resolved to a `Log` scale, or none of its rows are off-side on one: the
+/// caller keeps borrowing its batch unchanged, so every chart without a
+/// `Log` numeric auxiliary channel renders byte-identically. Otherwise
+/// `Some(LogAuxFiltered)`: `arrow::compute::filter_record_batch` with one
+/// combined mask (mirroring `render::filter_batch_by_facet` and
+/// `transform::swarm::drop_null_dodge_rows`) paired with the kept rows'
+/// own source indices, so the caller can un-renumber a mark builder's
+/// `data_indices`/`vertex_rows` back to them afterward.
+pub(in crate::render) fn log_aux_drawn_rows(
+    encoding: &Encoding,
+    scales: &super::ResolvedScales,
+    batch: &RecordBatch,
+) -> Result<Option<LogAuxFiltered>, RenderError> {
+    let channels: [(Option<&EncodingSpec>, Option<&ScaleKind>); 5] = [
+        (encoding.size.as_ref(), scales.size.as_ref().map(|s| &s.inner)),
+        (encoding.opacity.as_ref(), scales.opacity.as_ref().map(|s| &s.inner)),
+        (encoding.fill_opacity.as_ref(), scales.fill_opacity.as_ref().map(|s| &s.inner)),
+        (encoding.stroke_opacity.as_ref(), scales.stroke_opacity.as_ref().map(|s| &s.inner)),
+        (encoding.stroke_width.as_ref(), scales.stroke_width.as_ref().map(|s| &s.inner)),
+    ];
+    let mut keep: Option<Vec<bool>> = None;
+    for (enc, scale) in channels {
+        let (Some(enc), Some(ScaleKind::Log(log))) = (enc, scale) else { continue };
+        if batch.column_by_name(&enc.field).is_none() {
+            continue;
+        }
+        let Ok(values) = crate::render::arrow_cast::col_as_f64(batch, &enc.field) else { continue };
+        // A row is kept when it is null, `NaN` (drawn at the channel's own
+        // default, unchanged) or on this scale's side —
+        // `on_side` is the sign alone, so an
+        // on-side infinity is kept (and clamps downstream, like `Linear`)
+        // and an off-side infinity is dropped here, same as a finite one.
+        let admits_row: Vec<bool> = values
+            .iter()
+            .map(|v| match v {
+                Some(v) if v.is_nan() => true,
+                Some(v) => log.on_side(*v),
+                None => true,
+            })
+            .collect();
+        keep = Some(match keep {
+            None => admits_row,
+            Some(existing) => existing.into_iter().zip(admits_row).map(|(a, b)| a && b).collect(),
+        });
+    }
+    let Some(keep) = keep else { return Ok(None) };
+    if keep.iter().all(|&k| k) {
+        return Ok(None);
+    }
+    let source_rows: Vec<usize> = keep.iter().enumerate().filter(|&(_, &k)| k).map(|(i, _)| i).collect();
+    let mask: arrow::array::BooleanArray = keep.into_iter().map(Some).collect();
+    let filtered = arrow::compute::filter_record_batch(batch, &mask)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("filter: {e}")))?;
+    Ok(Some(LogAuxFiltered { batch: filtered, source_rows }))
+}
+
+/// The continuous scale kinds a numeric auxiliary channel's `scale=` may
+/// select, each carrying the one extra parameter it needs beyond the
+/// domain/range/reverse every kind shares ([`NumericAuxOverrides`]).
+///
+/// Mirrors [`super::positional::build_from_scale_spec`]'s `Linear`/`Log`/
+/// `Pow`/`Sqrt` arms exactly: `Sqrt` resolves here too, as `Pow { exponent:
+/// 0.5 }` (the same `ScaleKind::Pow(0.5)` the positional resolver produces
+/// for it). `Pow` (and so `Sqrt`) carries no `nice` field at all —
+/// `ScaleSpec::Pow`/`Sqrt` have none, and `PowScale::new_internal` never
+/// nices — so there is nothing to thread for that variant, matching the
+/// positional resolver's `Pow`/`Sqrt` arms, which never call `.nice()`.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::render) enum NumericAuxKind {
+    Linear { nice: bool, zero: bool },
+    Log { base: f64, nice: bool },
+    Pow { exponent: f64 },
+}
+
+impl Default for NumericAuxKind {
+    /// No `scale=` at all resolves through the plain linear path, as before
+    /// this type existed.
+    fn default() -> Self {
+        NumericAuxKind::Linear { nice: false, zero: false }
+    }
+}
 
 /// What a numeric auxiliary channel (size, the opacity family, stroke width)
 /// takes from its `scale=`, once [`numeric_aux_scale`] has admitted it.
@@ -33,21 +150,52 @@ pub(in crate::render) struct NumericAuxOverrides {
     range: Option<(f64, f64)>,
     /// `reverse=`: the range endpoints swap, after the drawable-interval clamp.
     reverse: bool,
-    /// `nice=`: the domain is niced, on top of the channel's own default.
-    nice: bool,
-    /// `zero=`: the domain widens to include zero.
-    zero: bool,
+    /// Which continuous scale kind this channel's `scale=` selected, and the
+    /// kind-specific parameter(s) it carries.
+    kind: NumericAuxKind,
+}
+
+impl NumericAuxOverrides {
+    /// This channel's `Log` side ([`crate::scale::log::LogSide::of`] over
+    /// `domain`), or `None` for every other kind — the one place this is
+    /// computed, read by the three builders before their
+    /// [`numeric_aux_extent`] call and by [`numeric_aux_scale_kind`]'s own
+    /// `Log` arm, so both agree on which side a stated domain names.
+    fn log_side(&self) -> Option<crate::scale::log::LogSide> {
+        match self.kind {
+            NumericAuxKind::Log { .. } => {
+                let domain = self.domain.map(|(d0, d1)| [d0, d1]);
+                Some(crate::scale::log::LogSide::of(domain.as_ref().map(|a| a.as_slice())))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The one gate a numeric auxiliary channel's `scale=` passes. These scales
-/// map linearly onto a bounded interval, so a scale of another type, a
-/// `padding` (an axis inset) or a `scheme` (a color scheme) is something this
-/// resolution would ignore or misread, and refuses with
-/// [`RenderError::AuxiliaryScaleUnsupported`]; a domain or range that is not
-/// `[lo, hi]` refuses with the positional sentence
+/// map a quantitative field onto a bounded interval through the same
+/// continuous transform a positional axis would use, so a scale of a
+/// non-continuous or not-yet-supported type, a `padding` (an axis inset) or a
+/// `scheme` (a color scheme) is something this resolution would ignore or
+/// misread, and refuses with [`RenderError::AuxiliaryScaleUnsupported`]
+/// naming the supported types; a domain or range that is not `[lo, hi]`
+/// refuses with the positional sentence
 /// ([`super::positional::validate_explicit_continuous_shape`]). Every other
-/// `linear` field is honored ([`NumericAuxOverrides`]). `channel` is the
-/// channel's wire name. No `scale=` admits the channel's defaults.
+/// field of a supported type is honored ([`NumericAuxOverrides`]). `channel`
+/// is the channel's wire name. No `scale=` admits the channel's defaults.
+///
+/// `linear`, `log`, `pow` and `sqrt` are supported — the same four continuous
+/// shapes [`super::positional::build_from_scale_spec`] resolves on x/y, read
+/// through the identical `LinearScale`/`LogScale`/`PowScale` constructors in
+/// [`numeric_aux_scale_kind`], so an in-domain value lands at the same
+/// fraction of its range as it would there. The channels diverge on what an
+/// out-of-domain value draws: a numeric auxiliary channel always clamps to
+/// the nearer range end (positional axes default to `clamp=False` and do
+/// not draw the row at all), while a `Log` value on the far side of zero is
+/// not drawn on EITHER channel class — the aux clamp
+/// stays the rule for an in-range-sign, out-of-domain value; only a value
+/// the scale cannot map at all (the wrong sign) is dropped, at the draw
+/// seam ([`log_aux_drawn_rows`]), not clamped.
 ///
 /// Published to Python as `ferrum._core.validate_numeric_aux_scale`, so a
 /// channel class refuses at construction with the text the wire refuses with
@@ -60,8 +208,17 @@ pub(in crate::render) fn numeric_aux_scale(
         return Ok(NumericAuxOverrides::default());
     };
     let unsupported = |reason: String| RenderError::AuxiliaryScaleUnsupported { channel: channel.to_string(), reason };
-    let ScaleSpec::Linear { common, nice, zero, system_injected: _ } = spec else {
-        return Err(unsupported(format!("type '{}' is not supported", spec.tag())));
+    let (common, kind) = match spec {
+        ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
+            (common, NumericAuxKind::Linear { nice: *nice, zero: *zero })
+        }
+        ScaleSpec::Log { base, common, nice } => {
+            super::positional::validate_explicit_log_domain(channel, common.domain.as_deref())?;
+            (common, NumericAuxKind::Log { base: *base, nice: *nice })
+        }
+        ScaleSpec::Pow { exponent, common } => (common, NumericAuxKind::Pow { exponent: *exponent }),
+        ScaleSpec::Sqrt { common } => (common, NumericAuxKind::Pow { exponent: 0.5 }),
+        other => return Err(unsupported(format!("type '{}' is not supported", other.tag()))),
     };
     if common.padding.is_some() {
         return Err(unsupported("padding is not supported (it insets an axis)".to_string()));
@@ -75,8 +232,7 @@ pub(in crate::render) fn numeric_aux_scale(
         domain: pair(&common.domain),
         range: pair(&common.range),
         reverse: common.reverse,
-        nice: *nice,
-        zero: *zero,
+        kind,
     })
 }
 
@@ -101,27 +257,96 @@ impl DrawableInterval {
     }
 }
 
-/// The linear scale of a numeric auxiliary channel: `extent` (the data's, or
-/// a composite's shared one) unless the scale states a domain, widened to
-/// zero when asked, onto `band` unless the scale states a range, that range
-/// clamped into `interval` and then reversed when asked. A data-derived
-/// domain is niced when `nice_data_domain` (the channel's default) or the
-/// scale's `nice` says so; an explicit one only when the scale says so.
-fn numeric_aux_linear(
-    extent: (f64, f64),
+/// The continuous scale of a numeric auxiliary channel: `extent` (the data's,
+/// or a composite's shared one) unless the scale states a domain, widened to
+/// zero when asked (`Linear` only — the one variant with a `zero=` field),
+/// onto `band` unless the scale states a range, that range clamped into
+/// `interval` and then reversed when asked. `overrides.kind` picks which
+/// scale this builds, through the SAME `LinearScale`/`LogScale`/`PowScale`
+/// constructors [`super::positional::build_from_scale_spec`] uses for x/y, so
+/// an in-domain value lands at the same fraction of its range it would
+/// there. `clamp` is always `true` here (every numeric auxiliary channel's
+/// own contract: see [`numeric_aux_scale`]'s doc) — a positional axis
+/// defaults to `false` and does not draw an out-of-domain row at all, where
+/// this clamps it to the nearer range end on every kind but `Log`, whose
+/// off-side value is left out instead, handled before
+/// this function ever builds the scale — see `extent`'s own doc below).
+///
+/// A data-derived domain is niced when `nice_data_domain` (the channel's
+/// default) or the scale's own `nice=` says so, on `Linear` and `Log` alike;
+/// an explicit domain only when the scale says so. `Pow` (and `Sqrt`, which
+/// resolves as `Pow { exponent: 0.5 }`) carries no `nice` parameter at all —
+/// mirroring `build_from_scale_spec`'s `Pow`/`Sqrt` arms, which never call
+/// `.nice()` — so `nice_data_domain` has nothing to apply to for that kind.
+///
+/// `extent` is sided: for `Log`, `channel`/`field` and `warnings` feed
+/// [`positional::resolve_log_extent`](super::positional::resolve_log_extent)
+/// — the drop-and-warn step shared with x/y — before
+/// the domain is built, so a row on the wrong side of zero is counted (one
+/// [`RenderWarning::LogScaleRowsLeftOut`] for the WHOLE frame) and
+/// left out of this SCALE's domain, and a channel with nothing left on its
+/// side refuses with [`RenderError::LogScaleNoValueOnSide`]. The row itself
+/// is removed at the draw seam ([`log_aux_drawn_rows`]), not here:
+/// this function only resolves the domain/range the IN-range rows map
+/// through. Every other kind reads `extent` unsided (`left_out` is always
+/// `0` there), byte-identical to before this function could fail or warn at
+/// all.
+#[allow(clippy::too_many_arguments)]
+fn numeric_aux_scale_kind(
+    channel: &'static str,
+    field: &str,
+    extent: super::SidedExtent,
+    tally: &super::LeftOutTally,
     overrides: NumericAuxOverrides,
     band: (f64, f64),
     interval: DrawableInterval,
     nice_data_domain: bool,
-) -> ScaleKind {
-    let (mut lo_d, mut hi_d) = overrides.domain.unwrap_or(extent);
-    if overrides.zero {
-        (lo_d, hi_d) = super::positional::extend_extent_to_zero(lo_d, hi_d);
-    }
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<ScaleKind, RenderError> {
     let (lo, hi) = interval.clamp(overrides.range.unwrap_or(band));
     let (lo, hi) = if overrides.reverse { (hi, lo) } else { (lo, hi) };
-    let nice = overrides.nice || (nice_data_domain && overrides.domain.is_none());
-    ScaleKind::Linear(LinearScale::new_internal(vec![lo_d, hi_d], vec![lo, hi], true, nice))
+    Ok(match overrides.kind {
+        NumericAuxKind::Linear { nice, zero } => {
+            let (mut lo_d, mut hi_d) = overrides.domain.unwrap_or((extent.lo, extent.hi));
+            if zero {
+                (lo_d, hi_d) = super::positional::extend_extent_to_zero(lo_d, hi_d);
+            }
+            let nice = nice || (nice_data_domain && overrides.domain.is_none());
+            ScaleKind::Linear(LinearScale::new_internal(vec![lo_d, hi_d], vec![lo, hi], true, nice))
+        }
+        NumericAuxKind::Log { base, nice } => {
+            let domain_arr = overrides.domain.map(|(d0, d1)| [d0, d1]);
+            let side = crate::scale::log::LogSide::of(domain_arr.as_ref().map(|a| a.as_slice()));
+            // Asked even under an explicit domain, so the rows the other
+            // side leaves out are counted; its returned `(lo, hi)` is the
+            // DATA's own on-side extent, used only when no domain is
+            // stated — an explicit domain's bounds, below, are never
+            // replaced by it, mirroring `resolve_log_scale`'s identical
+            // split (`resolve_continuous_domain_and_range` reads the
+            // explicit domain directly and never calls its own data-extent
+            // closure when one is stated).
+            let resolved = super::positional::resolve_log_extent(
+                channel,
+                field,
+                overrides.domain.is_some(),
+                side,
+                (extent.lo, extent.hi),
+                tally,
+                base,
+                // An auxiliary channel is never flipped (CoordFlip only
+                // swaps x/y), mirroring LogScaleRowsLeftOut's own doc.
+                false,
+                warnings,
+            )?;
+            let (lo_d, hi_d) = overrides.domain.unwrap_or(resolved);
+            let nice = nice || (nice_data_domain && overrides.domain.is_none());
+            ScaleKind::Log(LogScale::new_internal(vec![lo_d, hi_d], vec![lo, hi], base, true, nice))
+        }
+        NumericAuxKind::Pow { exponent } => {
+            let (lo_d, hi_d) = overrides.domain.unwrap_or((extent.lo, extent.hi));
+            ScaleKind::Pow(PowScale::new_internal(vec![lo_d, hi_d], vec![lo, hi], exponent, true))
+        }
+    })
 }
 
 /// Shared prelude for a *sorted categorical domain*: resolve the (possibly
@@ -190,13 +415,28 @@ fn sorted_categorical_domain(
 
 /// The data extent of a numeric auxiliary channel (size, the opacity family)
 /// bound to `field`. On a layered spec (`layer_reads` non-empty) it is the
-/// union over every drawing layer's own column ([`aux_numeric_union`]) that
-/// reads as numbers: the scale is continuous, so a later layer's categorical
+/// union over every drawing layer's own column ([`sided_aux_numeric_union`])
+/// that reads as numbers: the scale is continuous, so a later layer's categorical
 /// column stays out, with one `LayerScaleExcluded` in `warnings`
 /// ([`admitted_aux_reads`]). On an unlayered spec, `field` read from `batch`,
 /// unioned on a faceted chart with the all-panels batch so marks scale
 /// through the same domain as the legend. `channel` names the channel in a
 /// dtype refusal and an exclusion.
+///
+/// `side`: a `Log` channel's side of zero (`None` for every other scale
+/// type, byte-identical to before this parameter existed). Every path —
+/// unlayered, unlayered-faceted, and layered alike — reads its
+/// `left_out`/`left_out_zero`/`left_out_opposite` from the same sided fold
+/// the positional union uses: the facet-shared case counts from the
+/// all-panels batch ALONE when it carries the field (the whole frame's
+/// count, not panel-plus-global), falling back to the panel's own count
+/// exactly as the unsided path falls back to the panel's own extent; the
+/// layered case folds EVERY drawing layer's own column through
+/// [`sided_aux_numeric_union`], so a `Log` layered channel's left-out rows
+/// are counted once, over the whole layer set, not per layer and not
+/// dropped — the same whole-frame accounting x/y's
+/// `numeric_domain_union_over` already gives a flat chart's layers.
+#[allow(clippy::too_many_arguments)]
 fn numeric_aux_extent(
     field: &str,
     channel: &'static str,
@@ -204,25 +444,55 @@ fn numeric_aux_extent(
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     layer_reads: &[AuxRead<'_>],
+    side: Option<crate::scale::log::LogSide>,
     warnings: &mut Vec<crate::render::RenderWarning>,
-) -> Result<(f64, f64), RenderError> {
+) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError> {
     let layer_reads = admitted_aux_reads(layer_reads, channel, false, batch, transform_outputs, warnings)?;
-    let extent = |col: &dyn arrow::array::Array, field: &str| {
-        column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+    let sided = |col: &dyn arrow::array::Array, field: &str| {
+        sided_min_max_f64(col, side).map_err(|_| RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!("{:?}", col.data_type()),
             context: Some(channel),
         })
     };
+    let tally_of = |col: &dyn arrow::array::Array, extent: super::SidedExtent| {
+        let mut tally = super::LeftOutTally::new();
+        if col.null_count() != col.len() {
+            tally.count(col, extent);
+        }
+        tally
+    };
     if !layer_reads.is_empty() {
-        return aux_numeric_union(&layer_reads, batch, transform_outputs, facet_shared, extent)?
+        return sided_aux_numeric_union(&layer_reads, batch, transform_outputs, facet_shared, side, channel)?
             .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() });
     }
     let col = batch
         .column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let panel = extent(col.as_ref(), field)?;
-    Ok(if facet_shared { union_panel_with_global_extent(panel, field, transform_outputs) } else { panel })
+    let panel = sided(col.as_ref(), field)?;
+    if !facet_shared {
+        return Ok((panel, tally_of(col.as_ref(), panel)));
+    }
+    // The all-panels batch already contains every panel's rows, so it ALONE
+    // (not panel-plus-global, and NOT `union_panel_with_global_extent`,
+    // which unions the two) is the shared extent — the same reading
+    // `numeric_domain_union_over`'s facet-shared contributions give the
+    // positional union. This is a deliberate behavior change from
+    // `union_panel_with_global_extent`'s own rule, not a restatement of it:
+    // an all-null faceted column now builds no scale and draws no legend,
+    // exactly as the same column renders unfaceted, on every route
+    // (unlayered-faceted here, and a layered-then-faceted chart through
+    // `AuxRead::extent`'s identical global-alone read) — where
+    // `union_panel_with_global_extent` fabricated a `(0.0, 1.0)` legend for
+    // a column with no value anywhere, because its own all-null default
+    // lives in `numeric_extent`, which this function never calls. Falls
+    // back to the panel's own extent only when the global batch or the
+    // field is absent (an unfaceted call, or a field not yet in `FINAL`).
+    use crate::transform::core::FINAL_OUTPUT_KEY;
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else { return Ok((panel, tally_of(col.as_ref(), panel))) };
+    let Some(global_col) = global_batch.column_by_name(field) else { return Ok((panel, tally_of(col.as_ref(), panel))) };
+    let extent = sided(global_col.as_ref(), field)?;
+    Ok((extent, tally_of(global_col.as_ref(), extent)))
 }
 
 /// Whether a [`numeric_aux_extent`] holds any value. A column whose every
@@ -235,12 +505,14 @@ fn extent_has_values((lo, hi): (f64, f64)) -> bool {
 
 /// Build a SizeScale if `encoding.size` is present.
 ///
-/// A linear map from the data extent (niced) onto
+/// A linear (or, under an explicit `LogScale`/`PowScale`/`SqrtScale`, that
+/// scale's own) map from the data extent (niced) onto
 /// `[theme.sizes.point_size_min, theme.sizes.point_size_max]`, through the
 /// [`numeric_aux_scale`] gate: an explicit `scale=` domain replaces the extent,
 /// an explicit range replaces the band (clamped to a non-negative area), and
-/// `reverse`/`nice`/`zero` are honored. The scale clamps, so a value outside
-/// an explicit domain draws at the nearer end of the range.
+/// `reverse`/`nice`/`zero` are honored (`zero` only on `LinearScale`, its own
+/// field). The scale clamps, so a value outside an explicit domain draws at
+/// the nearer end of the range.
 ///
 /// `facet_shared`: when `true` (chart is faceted with no independent option for
 /// size), unions `batch`'s extent with the global `FINAL_OUTPUT_KEY` batch so
@@ -259,7 +531,7 @@ fn extent_has_values((lo, hi): (f64, f64)) -> bool {
 ///
 /// `layer_reads` are a layered spec's reads of this channel ([`AuxRead`]): the
 /// data extent is then the union over every layer's own column
-/// ([`aux_numeric_union`]). Empty for an unlayered spec, which reads `batch`.
+/// ([`sided_aux_numeric_union`]). Empty for an unlayered spec, which reads `batch`.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -274,24 +546,39 @@ pub fn build_size_scale(
     };
     let overrides = numeric_aux_scale("size", &size_enc.scale)?;
     let mut warnings = Vec::new();
-    let (min, max) = numeric_aux_extent(
+    let (extent, tally) = numeric_aux_extent(
         &size_enc.field,
         "size",
         batch,
         transform_outputs,
         facet_shared,
         layer_reads,
+        overrides.log_side(),
         &mut warnings,
     )?;
     // 10-pre-b: a composite shared size domain (unioned across the composition's
     // leaves) overrides the per-leaf extent. The union already subsumes this
-    // leaf's own extent, so overriding is correct.
-    let (min, max) = match composite_domain {
-        Some(SharedDomain::Numeric { lo, hi }) => (*lo, *hi),
-        _ => (min, max),
+    // leaf's own extent (and, for a shared `Log` domain, already counted its
+    // own off-side rows when it was built), so overriding with an empty
+    // tally — like an imposed positional member — is correct.
+    let (extent, tally) = match composite_domain {
+        Some(SharedDomain::Numeric { lo, hi }) => (
+            super::SidedExtent { lo: *lo, hi: *hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+            super::LeftOutTally::new(),
+        ),
+        _ => (extent, tally),
     };
+    // The guard `build_opacity_channel_scale`/
+    // `build_stroke_width_scale` already have — a column with no value
+    // anywhere in the frame (and nothing left out, so this is a genuinely
+    // all-null column, not a `Log` channel that needs `numeric_aux_scale_kind`
+    // to refuse it) builds no scale, matching `LinearScale`'s own no-value
+    // path and every other numeric auxiliary channel.
+    if !extent_has_values((extent.lo, extent.hi)) && tally.rows() == 0 {
+        return Ok((None, warnings));
+    }
     let band = (theme.sizes.point_size_min, theme.sizes.point_size_max);
-    let inner = numeric_aux_linear((min, max), overrides, band, DrawableInterval::NonNegative, true);
+    let inner = numeric_aux_scale_kind("size", &size_enc.field, extent, &tally, overrides, band, DrawableInterval::NonNegative, true, &mut warnings)?;
     Ok((Some(SizeScale { inner }), warnings))
 }
 
@@ -439,12 +726,14 @@ impl OpacityChannel {
 /// explicit-scale bypass). Range: the theme opacity band
 /// `[sizes.opacity_min, sizes.opacity_max]`, unless `scale=` carries an explicit
 /// `[lo, hi]` range (spec §4.3), clamped to a legal alpha. The `scale=` passes
-/// the [`numeric_aux_scale`] gate, so `reverse`/`nice`/`zero` are honored and a
-/// non-linear scale refuses.
+/// the [`numeric_aux_scale`] gate, which also accepts `LogScale`/`PowScale`/
+/// `SqrtScale` (resolved through that scale's own transform instead of
+/// linear), so `reverse`/`nice` are honored (`zero` only on `LinearScale`)
+/// and a scale of any other type refuses.
 ///
 /// `layer_reads`: a layered spec's reads of this channel ([`AuxRead`]), whose
 /// union over every layer's own column is the data extent
-/// ([`aux_numeric_union`]); empty for an unlayered spec, which reads `batch`.
+/// ([`sided_aux_numeric_union`]); empty for an unlayered spec, which reads `batch`.
 ///
 /// `facet_shared`: when `true` (chart is faceted — these channels have no
 /// independent option), unions `batch`'s extent with the global
@@ -474,16 +763,23 @@ pub fn build_opacity_channel_scale(
     };
     let overrides = numeric_aux_scale(channel.context(), &op_enc.scale)?;
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
-    let (min, max) = numeric_aux_extent(
+    let (extent, tally) = numeric_aux_extent(
         &op_enc.field,
         channel.context(),
         batch,
         transform_outputs,
         facet_shared,
         layer_reads,
+        overrides.log_side(),
         &mut warnings,
     )?;
-    if !extent_has_values((min, max)) {
+    // Genuinely no value anywhere (every row null, nothing left out either):
+    // no scale, the channel's default draws. A `Log` channel whose on-side
+    // extent is empty but the whole-frame tally left rows out falls through
+    // instead, so `numeric_aux_scale_kind` can refuse it with
+    // `RenderError::LogScaleNoValueOnSide` rather than silently taking this
+    // no-scale path.
+    if !extent_has_values((extent.lo, extent.hi)) && tally.rows() == 0 {
         return Ok((None, warnings));
     }
     // An explicit `scale=` range is honored as an alpha, so its endpoints are
@@ -492,7 +788,7 @@ pub fn build_opacity_channel_scale(
     // while svg.rs omits the attribute at >= 1.0, and the two backends would
     // disagree.
     let band = (theme.sizes.opacity_min, theme.sizes.opacity_max);
-    let inner = numeric_aux_linear((min, max), overrides, band, DrawableInterval::Alpha, false);
+    let inner = numeric_aux_scale_kind(channel.context(), &op_enc.field, extent, &tally, overrides, band, DrawableInterval::Alpha, false, &mut warnings)?;
     Ok((Some(OpacityScale { inner }), warnings))
 }
 
@@ -587,18 +883,20 @@ pub fn build_stroke_dash_scale(
 
 /// Build the [`StrokeWidthScale`] if `encoding.stroke_width` is bound.
 ///
-/// A linear map from the data extent onto the theme width band
+/// A linear (or, under an explicit `LogScale`/`PowScale`/`SqrtScale`, that
+/// scale's own) map from the data extent onto the theme width band
 /// `[sizes.line_stroke_width_min, sizes.line_stroke_width_max]`, as
 /// [`build_size_scale`] maps onto `[sizes.point_size_min,
 /// sizes.point_size_max]`: through the [`numeric_aux_scale`] gate, an explicit
 /// `scale=` range overrides the band (clamped to a non-negative width), an
 /// explicit domain overrides the extent, and `reverse`/`nice`/`zero` are
-/// honored. The scale clamps, so a value outside an explicit domain draws at
-/// the nearer end of the range. A data-derived domain is niced as the size
-/// scale's is; an explicit one is kept as written unless `nice` says so. A constant column maps
-/// every row to the middle of the range (the degenerate-domain rule the size
-/// scale follows), and a column with no value builds no scale, so every mark
-/// draws at its default width.
+/// honored (`zero` only on `LinearScale`). The scale clamps, so a value
+/// outside an explicit domain draws at the nearer end of the range. A
+/// data-derived domain is niced as the size scale's is (on `LinearScale` and
+/// `LogScale` alike); an explicit one is kept as written unless `nice` says
+/// so. A constant column maps every row to the middle of the range (the
+/// degenerate-domain rule the size scale follows), and a column with no
+/// value builds no scale, so every mark draws at its default width.
 ///
 /// `facet_shared` and `layer_reads` read the extent exactly as they do for
 /// the size scale ([`numeric_aux_extent`]): a later layer whose column reads
@@ -617,19 +915,24 @@ pub fn build_stroke_width_scale(
     };
     let overrides = numeric_aux_scale("stroke_width", &width_enc.scale)?;
     let mut warnings = Vec::new();
-    let extent = numeric_aux_extent(
+    let (extent, tally) = numeric_aux_extent(
         &width_enc.field,
         "stroke_width",
         batch,
         transform_outputs,
         facet_shared,
         layer_reads,
+        overrides.log_side(),
         &mut warnings,
     )?;
-    if !extent_has_values(extent) {
+    // See `build_opacity_channel_scale`'s identical guard: a `Log` channel
+    // that left rows out falls through to `numeric_aux_scale_kind` instead
+    // of taking this no-scale path, so it can refuse instead of silently
+    // drawing every mark at its default width.
+    if !extent_has_values((extent.lo, extent.hi)) && tally.rows() == 0 {
         return Ok((None, warnings));
     }
     let band = (theme.sizes.line_stroke_width_min, theme.sizes.line_stroke_width_max);
-    let inner = numeric_aux_linear(extent, overrides, band, DrawableInterval::NonNegative, true);
+    let inner = numeric_aux_scale_kind("stroke_width", &width_enc.field, extent, &tally, overrides, band, DrawableInterval::NonNegative, true, &mut warnings)?;
     Ok((Some(StrokeWidthScale { inner }), warnings))
 }

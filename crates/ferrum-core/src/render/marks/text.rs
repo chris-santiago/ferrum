@@ -198,7 +198,7 @@ fn value_angles(ctx: &DrawCtx<'_>, placement: &PolarLabels<'_>) -> Option<RowAng
         let values = col_as_f64(ctx.batch, placement.theta_field).ok()?;
         let angles = values
             .iter()
-            .map(|v| scale.to_pixel_f64(v.filter(|v| v.is_finite())?).map(&turn))
+            .map(|v| scale.to_pixel_f64(v.filter(|v| scale.admits_for_pixel(*v))?).map(&turn))
             .collect();
         Some(RowAngles { angles, fallback_labels: numeric_labels(&values) })
     }
@@ -312,12 +312,12 @@ fn cartesian_anchors(ctx: &DrawCtx<'_>) -> Option<LabelAnchors> {
     let anchors = (0..n_x)
         .map(|i| {
             let px = if let Some(xs) = &xs_f {
-                ctx.scales.x.to_pixel_f64(xs[i].filter(|v| v.is_finite())?)?
+                ctx.scales.x.to_pixel_f64(xs[i].filter(|v| ctx.scales.x.admits_for_pixel(*v))?)?
             } else {
                 ctx.scales.x.to_pixel_str(xs_s.as_ref()?[i].as_deref()?)?
             };
             let py = if let Some(ys) = &ys_f {
-                ctx.scales.y.to_pixel_f64(ys[i].filter(|v| v.is_finite())?)?
+                ctx.scales.y.to_pixel_f64(ys[i].filter(|v| ctx.scales.y.admits_for_pixel(*v))?)?
             } else {
                 ctx.scales.y.to_pixel_str(ys_s.as_ref()?[i].as_deref()?)?
             };

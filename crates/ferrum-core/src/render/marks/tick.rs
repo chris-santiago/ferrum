@@ -245,7 +245,7 @@ fn build_geometry(
             // on — see tick.rs's mode-A comment above for the same reasoning).
             let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
             for i in 0..ys.len() {
-                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let yv = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let py = py + y_offsets[i];
                 let bx = baseline_x + x_offsets[i];
@@ -316,7 +316,7 @@ fn build_geometry(
             let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
-                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let yv = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
                 let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let cx = cx + x_offsets[i];
@@ -366,7 +366,7 @@ fn build_geometry(
             // both exact — symmetric around `cy` along y already.
             let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
             for i in 0..xs.len() {
-                let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let xv = match xs[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
                 let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
                 let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
                 let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
@@ -491,7 +491,7 @@ fn build_geometry(
     // chrome, not data — a y-break has nothing real to anchor a rug on).
     let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
     for (i, xopt) in xs.iter().enumerate() {
-        let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
+        let xv = match xopt { Some(v) if ctx.scales.x.admits_for_pixel(*v) => *v, _ => continue };
         let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
         let px = px + x_offsets[i];
         let by = baseline_y + y_offsets[i];

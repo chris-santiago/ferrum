@@ -1245,6 +1245,7 @@ fn plan_overlay_auxiliary(
             configured,
             layers,
             left_to_members: *left_to_members,
+            pending: false,
         });
         for (member, i) in members.clone().enumerate() {
             contexts[i].overlay = Some(OverlayMembership { group: std::sync::Arc::clone(&group), member });
@@ -3376,6 +3377,26 @@ mod tests {
     use std::sync::Arc;
 
     // -- builders -------------------------------------------------------------
+
+    /// A continuous scale's shared fields with no explicit `domain` (data-
+    /// derived) and every other field at its default — `ContinuousScaleCommon`
+    /// has no `Default` impl, so every caller spells out all seven fields.
+    fn no_domain_common() -> crate::spec::encoding::ContinuousScaleCommon {
+        crate::spec::encoding::ContinuousScaleCommon {
+            domain: None,
+            range: None,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        }
+    }
+
+    /// [`no_domain_common`] with an explicit `domain`.
+    fn stated_domain_common(domain: Vec<f64>) -> crate::spec::encoding::ContinuousScaleCommon {
+        crate::spec::encoding::ContinuousScaleCommon { domain: Some(domain), ..no_domain_common() }
+    }
 
     fn scatter_spec() -> ChartSpec {
         ChartSpec {
@@ -6044,6 +6065,464 @@ mod tests {
             scene.panels[0].plot_area, scene.panels[1].plot_area,
             "overlay children share one rect; only vec order encodes z-order"
         );
+    }
+
+    /// An overlay member spec of `mark` drawing `v` on `channel` under a
+    /// Log scale, over `v = values` (x = row index).
+    fn overlay_log_spec(channel: &'static str, values: &[f64]) -> (ChartSpec, RecordBatch) {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log {
+            base: 10.0,
+            common: no_domain_common(),
+            nice: false,
+        };
+        let mut encoding = Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() };
+        let bound = EncodingSpec { field: "v".into(), scale: Some(log_scale), ..Default::default() };
+        match channel {
+            "y" => encoding.y = Some(bound),
+            "size" => {
+                encoding.y = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+                encoding.size = Some(bound);
+            }
+            other => panic!("{other}: not wired for this helper"),
+        }
+        let spec = ChartSpec { mark: Mark::Point, encoding, ..Default::default() };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(values.to_vec())),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// The fix case): a static composite's
+    /// pass one prepared every leaf standalone, before the group resolved,
+    /// so an all-off-side member's own Log resolve refused the WHOLE
+    /// overlay — a leaf with nothing on-side must draw nothing beside a
+    /// sibling that does, exactly as the flat `+`/`Chart.layer` doors do.
+    #[test]
+    fn an_overlay_member_with_nothing_on_side_draws_nothing_beside_one_that_does() {
+        for channel in ["y", "size"] {
+            let (pos_spec, pos_batch) = overlay_log_spec(channel, &[1.0, 10.0, 100.0]);
+            let (neg_spec, neg_batch) = overlay_log_spec(channel, &[-5.0, -7.0]);
+            for (first, second) in [(0, 1), (1, 0)] {
+                let specs = [pos_spec.clone(), neg_spec.clone()];
+                let batches = [pos_batch.clone(), neg_batch.clone()];
+                let holds = [
+                    LeafHold { spec: specs[first].clone(), batch: batches[first].clone(), ..hold() },
+                    LeafHold { spec: specs[second].clone(), batch: batches[second].clone(), ..hold() },
+                ];
+                let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+                if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                    resolve.x = crate::layout::facet::ResolveMode::Shared;
+                    resolve.y = crate::layout::facet::ResolveMode::Shared;
+                }
+                let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+                let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+                    .unwrap_or_else(|e| panic!("{channel} order ({first},{second}): expected to render, refused with {e}"));
+                let pos_panel = if first == 0 { 0 } else { 1 };
+                let neg_panel = 1 - pos_panel;
+                assert_eq!(scene.panels[pos_panel].marks[0].nodes.len(), 3, "{channel} order ({first},{second})");
+                assert_eq!(scene.panels[neg_panel].marks[0].nodes.len(), 0, "{channel} order ({first},{second})");
+                let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { rows: 2, .. })).collect();
+                assert_eq!(left_out.len(), 1, "{channel} order ({first},{second}): {warnings:?}");
+            }
+        }
+    }
+
+    /// Nothing on side ANYWHERE refuses once, naming the GROUP's whole
+    /// count — not one member's own, truncated count.
+    #[test]
+    fn an_overlay_with_nothing_on_side_anywhere_refuses_once_with_the_group_count() {
+        let (spec0, batch0) = overlay_log_spec("y", &[-5.0, -7.0]);
+        let (spec1, batch1) = overlay_log_spec("y", &[-3.0, -9.0]);
+        let holds = [
+            LeafHold { spec: spec0, batch: batch0, ..hold() },
+            LeafHold { spec: spec1, batch: batch1, ..hold() },
+        ];
+        let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+            resolve.y = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("nothing on side anywhere refuses");
+        assert!(err.to_string().contains("4 row"), "{err}");
+    }
+
+    /// A stated Log domain group warns ONCE for the whole frame, whether one
+    /// frame or two carry the off-side rows.
+    #[test]
+    fn a_stated_log_domain_overlay_warns_once_for_the_whole_frame() {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log {
+            base: 10.0,
+            common: stated_domain_common(vec![1.0, 100.0]),
+            nice: false,
+        };
+        let point = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), scale: Some(log_scale), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let line = ChartSpec {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // One frame carrying both members' rows.
+        let one_frame = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 10.0, -5.0, 100.0])),
+            ],
+        )
+        .unwrap();
+        let holds = [
+            LeafHold { spec: point.clone(), batch: one_frame.clone(), ..hold() },
+            LeafHold { spec: line.clone(), batch: one_frame, ..hold() },
+        ];
+        let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+            resolve.y = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 1, .. }), "{left_out:?}");
+    }
+
+    /// A stated Log domain overlay group with one all-off-side member beside
+    /// one that draws: guard --
+    /// renders every on-side row and warns once with the WHOLE group's count.
+    #[test]
+    fn a_stated_log_domain_overlay_with_an_all_off_side_member_draws() {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log { base: 10.0, common: stated_domain_common(vec![1.0, 100.0]), nice: false };
+        let leaf0 = |values: &[f64]| -> (ChartSpec, RecordBatch) {
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "v".into(), scale: Some(log_scale.clone()), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("v", DataType::Float64, false)])),
+                vec![
+                    Arc::new(Float64Array::from((0..values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(values.to_vec())),
+                ],
+            )
+            .unwrap();
+            (spec, batch)
+        };
+        let (spec0, batch0) = leaf0(&[1.0, 10.0, 100.0]);
+        let (spec1, batch1) = leaf0(&[-5.0, -7.0]);
+        let holds = [LeafHold { spec: spec0, batch: batch0, ..hold() }, LeafHold { spec: spec1, batch: batch1, ..hold() }];
+        let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+            resolve.y = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        assert_eq!(scene.panels[0].marks[0].nodes.len(), 3);
+        assert_eq!(scene.panels[1].marks[0].nodes.len(), 0);
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 2, .. }), "{left_out:?}");
+    }
+
+    /// A Log channel warns once on every layered route (flat layered spec
+    /// and composite overlay tree alike): one frame drawn by two layers (one
+    /// warning, the frame's own left-out count); two different fields each
+    /// with their own left-out rows (one warning, the SUM); two different
+    /// frames each with their own left-out row (one warning, the SUM). On
+    /// `y` (positional) and `size` (auxiliary) alike, and on every case's
+    /// flat layered route, not only its composite overlay tree -- (iii)'s
+    /// flat route mirrors `+`'s own two-operand lowering (the frame-marked
+    /// combined batch and per-operand `branch` transforms
+    /// `a_column_only_another_operands_rows_hold_gets_the_plain_message`
+    /// uses), since a flat layered spec's two layers otherwise share one
+    /// primary batch.
+    #[test]
+    fn a_log_channel_warns_once_on_every_layered_route() {
+        let log_scale = || crate::spec::encoding::ScaleSpec::Log { base: 10.0, common: no_domain_common(), nice: false };
+        // A point spec binding `channel` (`"y"` or `"size"`) to `field`
+        // under a Log scale; the other positional channel (and, for
+        // `size`, `y` too) binds to a plain finite column so only the
+        // tested channel's own Log resolution is exercised.
+        let point_on = |field: &str, channel: &str| {
+            let mut encoding = Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() };
+            let bound = EncodingSpec { field: field.into(), scale: Some(log_scale()), ..Default::default() };
+            match channel {
+                "y" => encoding.y = Some(bound),
+                "size" => {
+                    encoding.y = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+                    encoding.size = Some(bound);
+                }
+                other => panic!("{other}: not wired for this helper"),
+            }
+            ChartSpec { mark: Mark::Point, encoding, ..Default::default() }
+        };
+        // The same binding as JSON, for the flat spec's `layers` key.
+        let point_on_json = |field: &str, channel: &str| -> serde_json::Value {
+            match channel {
+                "y" => serde_json::json!({"x": {"field": "x"}, "y": {"field": field, "scale": {"type": "log", "base": 10.0, "nice": false}}}),
+                "size" => serde_json::json!({
+                    "x": {"field": "x"}, "y": {"field": "x"},
+                    "size": {"field": field, "scale": {"type": "log", "base": 10.0, "nice": false}},
+                }),
+                other => panic!("{other}: not wired for this helper"),
+            }
+        };
+        let batch_v = |v: &[f64]| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("v", DataType::Float64, false)])),
+                vec![Arc::new(Float64Array::from((0..v.len()).map(|i| i as f64).collect::<Vec<_>>())), Arc::new(Float64Array::from(v.to_vec()))],
+            )
+            .unwrap()
+        };
+        let batch_vw = |v: &[f64], w: &[f64]| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("x", DataType::Float64, false),
+                    Field::new("v", DataType::Float64, false),
+                    Field::new("w", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from((0..v.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(v.to_vec())),
+                    Arc::new(Float64Array::from(w.to_vec())),
+                ],
+            )
+            .unwrap()
+        };
+
+        let count_left_out = |warnings: &[RenderWarning]| -> Vec<usize> {
+            warnings.iter().filter_map(|w| match w { RenderWarning::LogScaleRowsLeftOut { rows, .. } => Some(*rows), _ => None }).collect()
+        };
+        // The flat layered route: a bare `{"layers": [...]}` spec (no
+        // top-level `transforms`/`data_source`) over one combined `batch`.
+        let flat_route_counts = |layers: serde_json::Value, batch: &RecordBatch| -> Vec<usize> {
+            let flat: ChartSpec = serde_json::from_value(serde_json::json!({
+                "mark": "point",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "x"}},
+                "layers": layers,
+            }))
+            .expect("the flat layered spec deserializes");
+            pyo3::Python::initialize();
+            let chart_config = crate::render::chart_config::ChartConfig::default();
+            let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+                &flat,
+                batch,
+                &ThemeInputs::default(),
+                crate::layout::Viewport { width: 300.0, height: 200.0 },
+                &chart_config,
+                None,
+            )
+            .expect("the flat spec prepares");
+            crate::render::scene_build::build_scene(&flat, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+                .expect("the flat spec builds a scene");
+            count_left_out(&warnings)
+        };
+
+        for channel in ["y", "size"] {
+            // (i) one frame v=[-5,1,10] drawn by two layers of the SAME field.
+            {
+                let batch = batch_v(&[-5.0, 1.0, 10.0]);
+                let spec0 = point_on("v", channel);
+                let spec1 = point_on("v", channel);
+                let holds = [
+                    LeafHold { spec: spec0, batch: batch.clone(), ..hold() },
+                    LeafHold { spec: spec1, batch: batch.clone(), ..hold() },
+                ];
+                let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+                if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                    resolve.x = crate::layout::facet::ResolveMode::Shared;
+                    resolve.y = crate::layout::facet::ResolveMode::Shared;
+                }
+                let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+                let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+                assert_eq!(count_left_out(&warnings), vec![1], "(i) {channel} composite: {warnings:?}");
+
+                let layers = serde_json::json!([
+                    {"mark": "point", "encoding": point_on_json("v", channel)},
+                    {"mark": "point", "encoding": point_on_json("v", channel)},
+                ]);
+                assert_eq!(flat_route_counts(layers, &batch), vec![1], "(i) {channel} flat");
+            }
+
+            // (ii) one frame, two DIFFERENT fields each with their own left-out rows.
+            {
+                let batch = batch_vw(&[-5.0, 1.0, 10.0], &[-7.0, 2.0, 20.0]);
+                let spec0 = point_on("v", channel);
+                let spec1 = point_on("w", channel);
+                let holds = [
+                    LeafHold { spec: spec0, batch: batch.clone(), ..hold() },
+                    LeafHold { spec: spec1, batch: batch.clone(), ..hold() },
+                ];
+                let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+                if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                    resolve.x = crate::layout::facet::ResolveMode::Shared;
+                    resolve.y = crate::layout::facet::ResolveMode::Shared;
+                }
+                let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+                let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+                assert_eq!(count_left_out(&warnings), vec![2], "(ii) {channel} composite: {warnings:?}");
+
+                let layers = serde_json::json!([
+                    {"mark": "point", "encoding": point_on_json("v", channel)},
+                    {"mark": "point", "encoding": point_on_json("w", channel)},
+                ]);
+                assert_eq!(flat_route_counts(layers, &batch), vec![2], "(ii) {channel} flat");
+            }
+
+            // (iii) two different frames each with their own left-out row.
+            {
+                let batch0 = batch_v(&[-5.0, 1.0, 10.0]);
+                let batch1 = batch_v(&[-3.0, 4.0, 40.0]);
+                let spec0 = point_on("v", channel);
+                let spec1 = point_on("v", channel);
+                let holds = [
+                    LeafHold { spec: spec0, batch: batch0.clone(), ..hold() },
+                    LeafHold { spec: spec1, batch: batch1.clone(), ..hold() },
+                ];
+                let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+                if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                    resolve.x = crate::layout::facet::ResolveMode::Shared;
+                    resolve.y = crate::layout::facet::ResolveMode::Shared;
+                }
+                let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+                let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+                assert_eq!(count_left_out(&warnings), vec![2], "(iii) {channel} composite: {warnings:?}");
+
+                // Flat layered route: a `+`-style combined batch (`is_a`/
+                // `is_b` frame markers) with one `branch` transform per
+                // frame, each layer's own `data_source` reading its own
+                // frame -- the real mechanism a flat layered spec has for
+                // "two different frames" (its two layers otherwise share
+                // one primary batch).
+                let combined = RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![
+                        Field::new("x", DataType::Float64, false),
+                        Field::new("v", DataType::Float64, false),
+                        Field::new("is_a", DataType::Boolean, false),
+                        Field::new("is_b", DataType::Boolean, false),
+                    ])),
+                    vec![
+                        Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+                        Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0, -3.0, 4.0, 40.0])),
+                        Arc::new(arrow::array::BooleanArray::from(vec![true, true, true, false, false, false])),
+                        Arc::new(arrow::array::BooleanArray::from(vec![false, false, false, true, true, true])),
+                    ],
+                )
+                .unwrap();
+                let transforms = serde_json::json!([
+                    {"type": "branch", "name": "a", "frame": {"marker": "is_a", "columns": ["x", "v"]}, "transforms": [{"type": "identity", "name": "a_rows"}]},
+                    {"type": "branch", "name": "b", "frame": {"marker": "is_b", "columns": ["x", "v"]}, "transforms": [{"type": "identity", "name": "b_rows"}]},
+                ]);
+                let layers = serde_json::json!([
+                    {"mark": "point", "data_source": "a", "encoding": point_on_json("v", channel)},
+                    {"mark": "point", "data_source": "b", "encoding": point_on_json("v", channel)},
+                ]);
+                let flat: ChartSpec = serde_json::from_value(serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "x"}, "y": {"field": "x"}},
+                    "transforms": transforms,
+                    "layers": layers,
+                }))
+                .expect("the flat two-frame spec deserializes");
+                pyo3::Python::initialize();
+                let chart_config = crate::render::chart_config::ChartConfig::default();
+                let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+                    &flat,
+                    &combined,
+                    &ThemeInputs::default(),
+                    crate::layout::Viewport { width: 300.0, height: 200.0 },
+                    &chart_config,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("(iii) {channel} flat: expected to prepare, refused with {e}"));
+                crate::render::scene_build::build_scene(&flat, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+                    .unwrap_or_else(|e| panic!("(iii) {channel} flat: expected to build a scene, refused with {e}"));
+                assert_eq!(count_left_out(&warnings), vec![2], "(iii) {channel} flat: {warnings:?}");
+            }
+        }
+    }
+
+    /// Choice A's source-row remap on TWO more doors beside the plain/
+    /// layered ones [`a_log_aux_drop_keeps_source_rows_on_every_mark`] and
+    /// [`a_layered_log_aux_drop_keeps_each_layers_source_rows`] already pin
+    /// (`crates/ferrum-core/src/render/prepare/tests.rs`): a composite
+    /// overlay leaf's own `data_indices` name ITS OWN source rows (not
+    /// renumbered within the leaf's filtered batch), and a faceted panel's
+    /// `data_indices` name that PANEL's own source rows (panel-local
+    /// numbering, exactly as the x/y drop already numbers a panel batch).
+    #[test]
+    fn a_log_aux_drop_keeps_source_rows_in_a_composite_leaf_and_a_facet_panel() {
+        // Composite leaf.
+        let (spec0, batch0) = overlay_log_spec("size", &[1.0, -5.0, 10.0, 100.0]);
+        let (spec1, batch1) = overlay_log_spec("size", &[1.0, 2.0, 3.0, 4.0]);
+        let holds = [LeafHold { spec: spec0, batch: batch0, ..hold() }, LeafHold { spec: spec1, batch: batch1, ..hold() }];
+        let tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        assert!(warnings.iter().any(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { rows: 1, .. })), "{warnings:?}");
+        assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0, 2, 3]), "leaf 0's own source rows");
+
+        // Faceted panel.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false), Field::new("c", DataType::Float64, false)])),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, -5.0, 10.0, -7.0])),
+            ],
+        )
+        .unwrap();
+        let facet_spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {"x": {"field": "c", "scale": {"type": "log", "base": 10.0}}, "y": {"field": "c"}},
+            "facet": {"field": "g", "mode": {"kind": "wrap", "ncols": 2}},
+        }))
+        .unwrap();
+        pyo3::Python::initialize();
+        let chart_config = crate::render::chart_config::ChartConfig::default();
+        let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+            &facet_spec,
+            &batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &chart_config,
+            None,
+        )
+        .expect("the faceted spec prepares");
+        let scene = crate::render::scene_build::build_scene(&facet_spec, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+            .expect("the faceted spec builds a scene");
+        assert_eq!(scene.panels.len(), 2);
+        assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0]), "panel a's own panel-local source row");
+        assert_eq!(scene.panels[1].marks[0].data_indices, Some(vec![0]), "panel b's own panel-local source row");
     }
 
     /// A bar's `zero` on an overlay leaf warns inert exactly when the
@@ -10272,9 +10751,9 @@ mod tests {
             spec.fill_opacity.as_mut().unwrap().scale = Some(serde_json::from_value(scale).unwrap());
             aux_member(Mark::Point, spec)
         };
-        let remedy = "pass fm.LinearScale(domain=[...], range=[...]) or drop scale=";
+        let remedy = "pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale=";
         for (scale, reason) in [
-            (serde_json::json!({"type": "log"}), "type 'log' is not supported".to_string()),
+            (serde_json::json!({"type": "time"}), "type 'time' is not supported".to_string()),
             (serde_json::json!({"type": "ordinal"}), "type 'ordinal' is not supported".to_string()),
         ] {
             let pair = [(scaled(scale), batch.clone()), (AuxChannel::FillOpacity.member(true), batch.clone())];

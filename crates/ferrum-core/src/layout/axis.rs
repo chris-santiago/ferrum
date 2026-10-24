@@ -652,6 +652,15 @@ pub struct AxisInput {
     /// see; the wrapper puts the two back together.
     pub title: Claimed<Option<String>>,
     pub tick_labels: Vec<String>,
+    /// Which of `tick_labels` are `Log` decades — in the
+    /// same index order, from `ScaleKind::tick_anchors`. Empty for every
+    /// non-`Log` axis (and for a `Log` axis whose breaks are all decades,
+    /// no multiples in play): `layout_x_axis`'s collision cascade reads it
+    /// through `anchored_visibility`, which reduces to plain
+    /// `stride_visibility` when empty, so every existing caller that leaves
+    /// this at its `AxisInput::new` default (`Vec::new()`) culls
+    /// byte-identically to before this field existed.
+    pub tick_anchors: Vec<bool>,
     /// Optional d3-format string applied to each tick label before layout
     /// (D12: `encoding.format` on x/y axes). `None` → use the scale's own
     /// default formatter (existing behavior).
@@ -734,6 +743,7 @@ impl AxisInput {
             orient,
             title: Claimed::new(title),
             tick_labels,
+            tick_anchors: Vec::new(),
             tick_format: None,
             tick_format_type: None,
             tick_projection: None,
@@ -746,6 +756,29 @@ impl AxisInput {
                 ..AxisStyleOverrides::default()
             },
         }
+    }
+
+    /// The one place `tick_labels` and `tick_anchors` are replaced together:
+    /// a producer that builds a fresh label
+    /// ladder for an axis calls this instead of assigning the two fields
+    /// separately, so the pair can never drift out of lockstep by one
+    /// assignment being added without the other. No panic/`debug_assert` on
+    /// a mismatch — `anchors` degrades to empty
+    /// when its length disagrees with `labels`', the same "no anchors"
+    /// sentinel [`anchored_visibility`] already treats as "fall back to
+    /// plain `stride_visibility`", so a producer bug here is silently safe
+    /// rather than ever observably misaligned.
+    ///
+    /// `adjust_axis_ticks`'s `tick_min_step`/`tick_extra` passes and
+    /// `config_apply::sync_tick_placement_to_tick_values`'s `tick_values=`
+    /// resync are CORRECTIVE updates to an already-paired axis (thinning or
+    /// re-deriving `tick_anchors` from the SAME values that just changed
+    /// `tick_labels`), not a fresh replacement, so they keep mutating the
+    /// two fields directly in their own lockstep.
+    pub(crate) fn set_ticks(&mut self, labels: Vec<String>, anchors: Vec<bool>) {
+        let anchors = if anchors.is_empty() || anchors.len() == labels.len() { anchors } else { Vec::new() };
+        self.tick_labels = labels;
+        self.tick_anchors = anchors;
     }
 
     /// Assert the two tick-placement invariants `layout_*_axis` relies on.
@@ -1327,6 +1360,7 @@ fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayou
             culled: false,
             label_font_size: None,
             is_major: false,
+            anchor: false,
         })
         .collect()
 }
@@ -1348,6 +1382,33 @@ pub struct TickLayout {
     /// Defaults to `true` so previously serialized layouts deserialize as majors.
     #[serde(default = "default_true")]
     pub is_major: bool,
+    /// Whether `AxisInput.tick_anchors` protects this tick (a `Log` decade)
+    /// — layout-internal only: its one
+    /// consumer is `layout::thins_x_labels_evenly`'s even-cull classifier,
+    /// which needs to tell an anchored cull apart from an irregular one.
+    /// `#[serde(skip)]` so no scene JSON ever carries it; every `TickLayout`
+    /// literal defaults it to `false` and `layout_x_axis`/`layout_y_axis`
+    /// stamp the real value onto every MAJOR tick once, at the end
+    /// (`stamp_tick_anchors`), after whichever presentation path (the flat
+    /// cascade, an explicit-angle stamp, or a stride-culled survivor
+    /// expansion) built it — so no builder needs to carry the flag through
+    /// itself.
+    #[serde(skip)]
+    pub anchor: bool,
+}
+
+/// [`TickLayout::anchor`]'s one producer: tag each of `ticks` with whether
+/// `input.tick_anchors` protects the label at its index — read off the
+/// position the generated label occupies within `AxisInput.tick_labels`,
+/// the same index space the cull already reads anchors in. One seam after
+/// every presentation path (the flat cascade, an explicit-angle stamp, a
+/// stride-culled survivor expansion) corrects the placeholder `anchor:
+/// false` every `TickLayout` literal above is built with, instead of
+/// threading the flag through each of them.
+fn stamp_tick_anchors(ticks: &mut [TickLayout], anchors: &[bool]) {
+    for (i, tick) in ticks.iter_mut().enumerate() {
+        tick.anchor = anchors.get(i).copied().unwrap_or(false);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2013,12 +2074,17 @@ pub fn layout_y_axis(
     // "no policy" must keep meaning "draw every label". That is why `None`
     // and `Greedy` differ HERE and not on x — on y, `Greedy` is an explicit
     // request for the fit-based culling y otherwise never does.
+    // Greedy judges distance on the real
+    // positions labels draw at, not `cascade_slot_h` slots (which
+    // understates every gap but a Log axis's tightest, the 9-to-10 one).
+    let tick_positions: Vec<f64> = (0..n).map(tick_position).collect();
     let overlap_visible = resolve_y_overlap(
         input.overrides.labels.overlap,
         &input.tick_labels,
-        cascade_slot_h,
+        &tick_positions,
         label_font_size,
         metrics,
+        &input.tick_anchors,
     );
     // `label_overlap = "rotate"` supplies the angle when the caller set none,
     // so the two knobs compose instead of one silently shadowing the other:
@@ -2060,6 +2126,7 @@ pub fn layout_y_axis(
                 culled: false,
                 label_font_size: None,
                 is_major: true,
+                anchor: false,
             })
             .collect();
         (ticks, None)
@@ -2138,6 +2205,10 @@ pub fn layout_y_axis(
         }
     });
 
+    // stamp `anchor` once, after whichever
+    // presentation path above built `ticks`, instead of threading the flag
+    // through each of them.
+    stamp_tick_anchors(&mut ticks, &input.tick_anchors);
     // 385: single construction site for the 22-field AxisLayout (shared with
     // layout_x_axis via `AxisLayout::from_input`).
     let layout = AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title);
@@ -2157,42 +2228,94 @@ pub fn layout_y_axis(
 ///   as on x.
 /// - [`LabelOverlap::Greedy`] — keep a label only if its line box clears the
 ///   last kept one's; on x this is the default cascade's behavior, on y it is
-///   an explicit request, since y has never culled on its own.
+///   an explicit request, since y has never culled on its own. Decades (an
+///   anchored mask) are greedy among THEMSELVES first, then every
+///   non-anchor is kept only when it clears both its nearest kept neighbour
+///   (anchor or non-anchor) to each side, judged on the
+///   real pixel positions labels draw at, not slot counts: a Log axis's
+///   tightest adjacent gap, the 9-to-10 one, understated every other gap
+///   when distance was counted in `cascade_slot_h` slots.
 /// - [`LabelOverlap::Rotate`] — no culling here; the caller turns this into
 ///   the steepest cascade angle, mirroring x's rotate stage.
 ///
-/// `slot_h` is the per-tick vertical budget `layout_y_axis` already computes
-/// (the tightest adjacent gap on a projected axis, `slot_h` on a uniform one).
+/// `positions` are the real pixel position `layout_y_axis` places each
+/// label at (`tick_position(i)`), collected once into a slice in label order.
 fn resolve_y_overlap(
     policy: Option<LabelOverlap>,
     labels: &[String],
-    slot_h: f64,
+    positions: &[f64],
     label_font_size: f64,
     metrics: &dyn TextMetrics,
+    anchors: &[bool],
 ) -> Option<Vec<bool>> {
     match policy? {
         LabelOverlap::ShowAll | LabelOverlap::Rotate => Some(vec![true; labels.len()]),
-        LabelOverlap::Parity => Some(stride_visibility(labels.len(), 2)),
+        LabelOverlap::Parity => Some(anchored_visibility(labels.len(), 2, anchors)),
         LabelOverlap::Greedy => {
             let line_h = metrics.line_height(label_font_size);
-            let mut visible = Vec::with_capacity(labels.len());
-            // Positions are evenly spaced by `slot_h`, so "does this label
-            // clear the last kept one" reduces to counting slots since the
-            // last keep — the vertical analogue of x's stride.
-            let mut slots_since_kept = f64::INFINITY;
-            for _ in labels {
-                // The `INFINITY` seed means "no label kept yet, so the next one
-                // always clears" — but `INFINITY * 0.0` (a zero-height slot) is
-                // `NaN`, and `NaN >= line_h` is false, silently dropping the
-                // first label instead of keeping it. Test the seed explicitly
-                // rather than relying on the arithmetic to carry that meaning.
-                let keep = slots_since_kept.is_infinite() || slots_since_kept * slot_h >= line_h;
-                visible.push(keep);
-                slots_since_kept = if keep { 1.0 } else { slots_since_kept + 1.0 };
-            }
-            Some(visible)
+            Some(greedy_y_visibility(positions, line_h, anchors))
         }
     }
+}
+
+/// [`resolve_y_overlap`]'s `Greedy` policy:
+/// two passes over the real tick positions. Pass 1 keeps
+/// each anchor (a Log decade) greedily among the anchors alone, in index
+/// order. Pass 2 keeps each non-anchor only when it clears BOTH the nearest
+/// already-kept label to its left (an anchor or an earlier-kept non-anchor)
+/// and the nearest upcoming KEPT anchor to its right — a later non-anchor's
+/// own clearance from this one is checked symmetrically when ITS turn comes,
+/// via the same left-hand test, so checking only the upcoming anchors on the
+/// right is enough: no two survivors, anchor or non-anchor, ever end up
+/// closer than `line_h`. With no anchors (or every position an anchor),
+/// pass 1 runs the classic single-pass greedy and pass 2 is a no-op (or vice
+/// versa), which is exactly today's slot-count greedy on a uniform axis.
+fn greedy_y_visibility(positions: &[f64], line_h: f64, anchors: &[bool]) -> Vec<bool> {
+    let n = positions.len();
+    let mut keep = vec![false; n];
+
+    // Pass 1: anchors greedy among themselves.
+    let mut last_anchor: Option<f64> = None;
+    for i in 0..n {
+        if anchors.get(i).copied().unwrap_or(false) {
+            let clears = last_anchor.is_none_or(|p| (positions[i] - p).abs() >= line_h);
+            if clears {
+                keep[i] = true;
+                last_anchor = Some(positions[i]);
+            }
+        }
+    }
+
+    // The nearest KEPT anchor strictly after each index, scanned backward
+    // once, so pass 2 can test a non-anchor against an upcoming anchor
+    // before that anchor's own (already-decided) turn arrives.
+    let mut next_kept_anchor: Vec<Option<f64>> = vec![None; n];
+    let mut running: Option<f64> = None;
+    for i in (0..n).rev() {
+        next_kept_anchor[i] = running;
+        if keep[i] && anchors.get(i).copied().unwrap_or(false) {
+            running = Some(positions[i]);
+        }
+    }
+
+    // Pass 2: non-anchors, in index order.
+    let mut last_kept: Option<f64> = None;
+    for i in 0..n {
+        if anchors.get(i).copied().unwrap_or(false) {
+            if keep[i] {
+                last_kept = Some(positions[i]);
+            }
+            continue;
+        }
+        let clears_left = last_kept.is_none_or(|p| (positions[i] - p).abs() >= line_h);
+        let clears_right = next_kept_anchor[i].is_none_or(|p| (p - positions[i]).abs() >= line_h);
+        if clears_left && clears_right {
+            keep[i] = true;
+            last_kept = Some(positions[i]);
+        }
+    }
+
+    keep
 }
 
 use crate::layout::text_metrics::measure_multiline_width;
@@ -2638,6 +2761,7 @@ fn stamp_override_angle_with_elide(
                 culled: false,
                 label_font_size: None,
                 is_major: true,
+                anchor: false,
             }
         })
         .collect();
@@ -2847,12 +2971,74 @@ pub(super) fn stride_visibility(n: usize, stride: usize) -> Vec<bool> {
     (0..n).map(|i| i % stride == 0).collect()
 }
 
+/// [`stride_visibility`], but a `Log` axis's decade ticks (`anchors[i] ==
+/// true`) always survive — ggplot2's/d3's "always label the powers" rule,
+/// enforced at the cull so no width drops a decade in
+/// favor of a non-decade multiple. `anchors` is `ScaleKind::tick_anchors`'s
+/// mask, in the same index order as the labels being culled; empty (every
+/// non-`Log` axis, and a `Log` axis whose powers alone already met its tick
+/// budget with no multiples in play) or all-`true` reduces to plain
+/// `stride_visibility`, so this is byte-identical there. A length mismatch
+/// (defensive only — the caller always pairs `anchors` with its own label
+/// count) also falls back to `stride_visibility`.
+///
+/// With `p` the smallest index gap between consecutive anchors:
+/// - `stride >= p`: keep only anchors, every `ceil(stride / p)`-th from the
+///   first — consecutive survivors are `ceil(stride / p) * p >= stride`
+///   slots apart, so the caller's `stride * slot_w` budget still holds.
+/// - `stride < p`: keep every anchor, plus each non-anchor whose offset
+///   from the preceding anchor (or from index `0`, for one before the
+///   first) is a multiple of `stride` AND whose gap to the next anchor is
+///   at least `stride` — the same "every stride-th slot survives" rule
+///   `stride_visibility` applies, restarted at each anchor so an anchor is
+///   never skipped waiting for its own turn.
+pub(super) fn anchored_visibility(n: usize, stride: usize, anchors: &[bool]) -> Vec<bool> {
+    if anchors.is_empty() || anchors.len() != n || anchors.iter().all(|&a| a) {
+        return stride_visibility(n, stride);
+    }
+    let anchor_idx: Vec<usize> = anchors.iter().enumerate().filter(|&(_, &a)| a).map(|(i, _)| i).collect();
+    if anchor_idx.is_empty() {
+        return stride_visibility(n, stride);
+    }
+    let p = anchor_idx.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(n.max(1));
+    let mut keep = vec![false; n];
+    if stride >= p {
+        let k = stride.div_ceil(p);
+        for (count, &idx) in anchor_idx.iter().enumerate() {
+            if count % k == 0 {
+                keep[idx] = true;
+            }
+        }
+    } else {
+        for &idx in &anchor_idx {
+            keep[idx] = true;
+        }
+        let non_anchor_survivors: Vec<usize> = (0..n)
+            .filter(|&i| {
+                if keep[i] {
+                    return false;
+                }
+                let preceding = anchor_idx.iter().rev().find(|&&a| a < i).copied().unwrap_or(0);
+                let next = anchor_idx.iter().find(|&&a| a > i).copied();
+                let offset_ok = (i - preceding) % stride == 0;
+                let gap_ok = next.is_none_or(|na| na - i >= stride);
+                offset_ok && gap_ok
+            })
+            .collect();
+        for i in non_anchor_survivors {
+            keep[i] = true;
+        }
+    }
+    keep
+}
+
 /// The x tick labels' cull stage: for each stride in `strides`, in order,
-/// keep every `stride`-th label ([`stride_visibility`]), lay the survivors out
-/// with `present` against the `stride · slot_w` each survivor now spans, and
-/// accept the first presentation that `fits`. Returns the accepted stride,
-/// its visibility mask and its presentation, or `None` when no stride is both
-/// presentable and fitting.
+/// keep every `stride`-th label, decades of a `Log` axis always surviving
+/// ([`anchored_visibility`]), lay the survivors out with `present` against
+/// the `stride · slot_w` each survivor now spans, and accept the first
+/// presentation that `fits`. Returns the accepted stride, its visibility
+/// mask and its presentation, or `None` when no stride is both presentable
+/// and fitting.
 ///
 /// The collision cascade's S4 tries the one stride it sized from the -90°
 /// footprint and accepts it unconditionally; an axis whose drawn band is over
@@ -2862,11 +3048,12 @@ fn cull_by_stride<P>(
     labels: &[String],
     slot_w: f64,
     strides: impl IntoIterator<Item = usize>,
+    anchors: &[bool],
     mut present: impl FnMut(&[String], f64) -> Option<P>,
     fits: impl Fn(&P) -> bool,
 ) -> Option<(usize, Vec<bool>, P)> {
     strides.into_iter().find_map(|stride| {
-        let visible = stride_visibility(labels.len(), stride);
+        let visible = anchored_visibility(labels.len(), stride, anchors);
         let survivor_labels: Vec<String> = labels
             .iter()
             .zip(&visible)
@@ -2931,6 +3118,7 @@ fn cascade_collision_recovery(
     label_gap: LabelGapPolicy,
     label_overlap: Option<LabelOverlap>,
     metrics: &dyn TextMetrics,
+    anchors: &[bool],
 ) -> CascadeResult {
     let n = labels.len();
     let all_visible = vec![true; n];
@@ -2956,7 +3144,7 @@ fn cascade_collision_recovery(
                 labels: labels.to_vec(),
                 angle: 0.0,
                 font_size: None,
-                visible: stride_visibility(n, 2),
+                visible: anchored_visibility(n, 2, anchors),
                 strategy: CascadeStrategy::Culled { stride: 2 },
             };
         }
@@ -3060,6 +3248,7 @@ fn cascade_collision_recovery(
                 labels,
                 slot_w,
                 [stride as usize],
+                anchors,
                 |survivors, survivor_w| {
                     Some(resolve_presentation(
                         survivors,
@@ -3073,7 +3262,7 @@ fn cascade_collision_recovery(
             );
             let (visible, presentation) = match culled {
                 Some((_, visible, presentation)) => (visible, presentation),
-                None => (stride_visibility(n, stride as usize), None),
+                None => (anchored_visibility(n, stride as usize, anchors), None),
             };
             let (final_labels, angle, font_size) = match presentation {
                 Some(presentation) => (
@@ -3283,6 +3472,7 @@ pub(super) fn lay_out_x_tick_labels(
             label_gap,
             input.overrides.labels.overlap,
             metrics,
+            &input.tick_anchors,
         );
         let is_elision_strategy = matches!(cascade.strategy, CascadeStrategy::Elided { .. });
         let ticks: Vec<TickLayout> = cascade
@@ -3297,6 +3487,7 @@ pub(super) fn lay_out_x_tick_labels(
                 culled: !cascade.visible[i],
                 label_font_size: cascade.font_size,
                 is_major: true,
+                anchor: false,
             })
             .collect();
         let warning = match cascade.strategy {
@@ -3360,6 +3551,7 @@ pub(super) fn lay_out_x_tick_labels(
                     culled: false,
                     label_font_size: p.font_size,
                     is_major: true,
+                    anchor: false,
                 })
                 .collect();
             Some((survivors, None))
@@ -3368,7 +3560,7 @@ pub(super) fn lay_out_x_tick_labels(
     let fits_budget = |(survivors, _): &(Vec<TickLayout>, Option<AxisLabelWarning>)| {
         drawn_x_label_band(survivors, input, ctx) <= ctx.band_budget
     };
-    match cull_by_stride(labels, cascade_slot_w, 2..=n, present, fits_budget) {
+    match cull_by_stride(labels, cascade_slot_w, 2..=n, &input.tick_anchors, present, fits_budget) {
         Some((_, visible, (survivors, warning))) => {
             (expand_survivor_ticks(labels, &visible, &survivors, &tick_position), warning)
         }
@@ -3402,6 +3594,7 @@ fn expand_survivor_ticks(
                 culled: true,
                 label_font_size: None,
                 is_major: true,
+                anchor: false,
             },
         })
         .collect()
@@ -3428,7 +3621,7 @@ pub fn layout_x_axis(
         ..
     } = *ctx;
     input.debug_assert_placement_invariants();
-    let (ticks, warning) = lay_out_x_tick_labels(input, panel_area.x, panel_area.w, ctx);
+    let (mut ticks, warning) = lay_out_x_tick_labels(input, panel_area.x, panel_area.w, ctx);
 
     // Orient: Bottom (default) places the axis at the panel's bottom edge; Top
     // at the top edge. Any other orient is rejected upstream (`prepare.rs`
@@ -3505,6 +3698,10 @@ pub fn layout_x_axis(
     // projection of `v`.
     let minor_ticks = build_minor_ticks(input, (panel_area.x, panel_area.x + panel_area.w));
 
+    // stamp `anchor` once, after whichever
+    // presentation path above built `ticks`, instead of threading the flag
+    // through each of them.
+    stamp_tick_anchors(&mut ticks, &input.tick_anchors);
     // 385: single construction site for the 22-field AxisLayout (shared with
     // layout_y_axis via `AxisLayout::from_input`).
     let layout = AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title);
@@ -3514,6 +3711,103 @@ pub fn layout_x_axis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── `anchored_visibility`: a `Log` axis keeps its decades through a cull ──
+
+    /// Empty anchors reduce to plain `stride_visibility`, for every stride —
+    /// every non-`Log` axis culls byte-identically to before `anchored_visibility`
+    /// existed.
+    #[test]
+    fn anchored_visibility_empty_anchors_is_the_stride_identity() {
+        for stride in [1, 2, 3, 5, 9] {
+            assert_eq!(
+                anchored_visibility(7, stride, &[]),
+                stride_visibility(7, stride),
+                "stride {stride}"
+            );
+        }
+    }
+
+    /// Every tick an anchor (a wide-domain ladder of pure powers) also
+    /// reduces to plain `stride_visibility`.
+    #[test]
+    fn anchored_visibility_all_anchors_is_the_stride_identity() {
+        let anchors = [true; 7];
+        for stride in [1, 2, 3, 5, 9] {
+            assert_eq!(
+                anchored_visibility(7, stride, &anchors),
+                stride_visibility(7, stride),
+                "stride {stride}"
+            );
+        }
+    }
+
+    /// The `{1, 2, 5}` ladder over `[1, 100]`: `[1, 2, 5, 10, 20, 50, 100]`,
+    /// decades (powers of 10) at indices 0, 3, 6 — `p = 3`. At every tested
+    /// stride, every surviving decade is kept, and `1` (index 0) always
+    /// survives.
+    #[test]
+    fn anchored_visibility_1_2_5_ladder_keeps_decades() {
+        let anchors = [true, false, false, true, false, false, true];
+        let n = anchors.len();
+        // stride 2 < p(3): every anchor, plus in-stride non-anchors whose
+        // gap to the next anchor is still >= stride.
+        assert_eq!(
+            anchored_visibility(n, 2, &anchors),
+            vec![true, false, false, true, false, false, true]
+        );
+        // stride 3 == p: every anchor (ceil(3/3) = every 1st).
+        assert_eq!(
+            anchored_visibility(n, 3, &anchors),
+            vec![true, false, false, true, false, false, true]
+        );
+        // stride 5 > p: ceil(5/3) = 2nd anchor kept — indices 0 and 6 (10 is
+        // the 2nd of 3 anchors, dropped; 100 is the 3rd, kept).
+        assert_eq!(
+            anchored_visibility(n, 5, &anchors),
+            vec![true, false, false, false, false, false, true]
+        );
+        // stride 9 > p: ceil(9/3) = 3rd anchor kept — only index 0.
+        assert_eq!(
+            anchored_visibility(n, 9, &anchors),
+            vec![true, false, false, false, false, false, false]
+        );
+    }
+
+    /// Decades at indices 0, 9, 19 of a 20-entry `{1..9}` ladder (`p = 9`
+    /// and `10`, min `9`) — the DENSEST ladder, so the widest range of
+    /// strides to probe the `stride < p` non-anchor-offset rule against.
+    #[test]
+    fn anchored_visibility_dense_ladder_keeps_decades_at_every_stride() {
+        let n = 20;
+        let mut anchors = vec![false; n];
+        anchors[0] = true;
+        anchors[9] = true;
+        anchors[19] = true;
+        for stride in [1, 2, 3, 5, 9] {
+            let mask = anchored_visibility(n, stride, &anchors);
+            assert!(mask[0] && mask[9] && mask[19], "stride {stride}: decades dropped: {mask:?}");
+        }
+    }
+
+    /// The fix case:
+    /// `set_ticks` is the one place that replaces `tick_labels` and
+    /// `tick_anchors` together, and degrades a length mismatch to empty
+    /// anchors rather than panicking — the same safe "no anchors" sentinel
+    /// `anchored_visibility` already reduces to plain `stride_visibility`
+    /// for, now enforced at the one place that writes the pair instead of
+    /// trusted by every caller. A matching length is carried through
+    /// untouched.
+    #[test]
+    fn axis_input_set_ticks_degrades_a_length_mismatch_to_empty_anchors() {
+        let mut input = axis_input(AxisOrient::Bottom, None, vec!["a".into(), "b".into()], None);
+        input.set_ticks(vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()], vec![true, false]);
+        assert_eq!(input.tick_labels.len(), 5);
+        assert_eq!(input.tick_anchors, Vec::<bool>::new(), "a mismatched length degrades to empty, not a panic");
+
+        input.set_ticks(vec!["1".into(), "2".into(), "3".into()], vec![true, false, true]);
+        assert_eq!(input.tick_anchors, vec![true, false, true], "a matching length is carried through");
+    }
 
     /// [`estimate_x_label_band`] for a scale-less (uniform-slot) x axis with
     /// `labels`, an optional explicit `angle` and `label_padding`, and its
@@ -3718,6 +4012,7 @@ mod tests {
                 culled: false,
                 label_font_size: None,
                 is_major: true,
+                anchor: false,
             }],
             minor_ticks: vec![],
             title: Some(AxisTitleLayout {
@@ -5631,7 +5926,7 @@ mod tests {
         // "AAAA"=4*10=40 <= 90 -> no collision -> S0 flat.
         let labels: Vec<String> = vec!["AAAA".into(), "BBBB".into(), "CCCC".into(), "DDDD".into()];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Flat);
@@ -5655,7 +5950,7 @@ mod tests {
             "minimal_context".into(),
         ];
         let m = mock(6.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Wrapped);
@@ -5683,7 +5978,7 @@ mod tests {
             measure: |text: &str, font_size: f64| text.chars().count() as f64 * font_size * 0.5,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 60.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 60.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(result.angle, 0.0);
         assert_eq!(result.strategy, CascadeStrategy::FontReduced);
         let expected_fs = 11.0 * 0.82;
@@ -5710,7 +6005,7 @@ mod tests {
             "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -60.0 });
         assert_eq!(result.angle, -60.0);
         assert!(result.font_size.is_none());
@@ -5741,7 +6036,7 @@ mod tests {
             "STUVWX".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m);
+        let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m, &[]);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
         assert_eq!(result.angle, -45.0);
     }
@@ -5762,7 +6057,7 @@ mod tests {
         // "LONGCATEGORY00".."LONGCATEGORY19" = 14 chars * 10px/char = 140px each.
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[]);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 // max footprint at -90 ~= line_h = 13.2; stride is the additive
@@ -5788,7 +6083,7 @@ mod tests {
     fn cascade_cull_threshold_zero_never_culls() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[]);
         assert!(
             !matches!(result.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=0 must never cull; got {:?}",
@@ -5811,7 +6106,7 @@ mod tests {
     fn cascade_genuinely_fitting_rotation_wins_over_culling() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 22.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 22.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -5838,7 +6133,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[]);
         // 20 > 8 (cull_threshold) -> culling eligible.
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
@@ -5868,14 +6163,14 @@ mod tests {
         };
         let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
 
-        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
+        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[]);
         assert!(
             matches!(disabled.strategy, CascadeStrategy::Elided { .. }),
             "cull_threshold=0 must disable culling entirely; expected Elided, got {:?}",
             disabled.strategy
         );
 
-        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(1), None, &m);
+        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(1), None, &m, &[]);
         assert!(
             matches!(enabled.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=1 must enable culling; expected Culled, got {:?}",
@@ -5971,7 +6266,7 @@ mod tests {
         let slot_w = 40.0;
 
         // `{gap: 0, cull: false}`: 36px of budget for a 20px label -> S0 flat.
-        let no_gap = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(0), None, &m);
+        let no_gap = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(0), None, &m, &[]);
         assert!(
             matches!(no_gap.strategy, CascadeStrategy::Flat),
             "no gap requirement must resolve flat here; got {:?}",
@@ -5980,7 +6275,7 @@ mod tests {
         assert!(no_gap.visible.iter().all(|v| *v));
 
         // `{gap: 30, cull: true}`: 6px of budget -> every stage fails -> S4 culls.
-        let gap_cull = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(30), None, &m);
+        let gap_cull = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(30), None, &m, &[]);
         assert!(
             matches!(gap_cull.strategy, CascadeStrategy::Culled { .. }),
             "a 30px gap with culling allowed must cull; got {:?}",
@@ -6000,6 +6295,7 @@ mod tests {
             LabelGapPolicy::from_cull_threshold(30).with_overrides(None, Some(false)),
             None,
             &m,
+            &[],
         );
         assert!(
             gap_no_cull.visible.iter().all(|v| *v),
@@ -6029,7 +6325,7 @@ mod tests {
         let policy = LabelGapPolicy::from_cull_threshold(0).with_overrides(None, Some(true));
         assert_eq!(policy.gap_px(), 0);
 
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, policy, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, policy, None, &m, &[]);
         assert!(
             matches!(result.strategy, CascadeStrategy::Culled { .. }),
             "culling permitted at gap 0 must still cull a genuinely overlapping axis; \
@@ -6082,7 +6378,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[]);
         match result.strategy {
             CascadeStrategy::Elided { count } => {
                 assert!(count > 0, "expected some labels elided");
@@ -6116,7 +6412,7 @@ mod tests {
     fn cascade_s5_realistic_widths_falls_back_to_rotated_not_elision() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[]);
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -6158,7 +6454,7 @@ mod tests {
         .map(String::from)
         .collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 12.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 12.0, 11.0, legacy_gap(8), None, &m, &[]);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 2, "expected stride 2, got {stride}");
@@ -6198,7 +6494,7 @@ mod tests {
     fn cascade_culled_survivors_stay_rotated_when_still_too_wide() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[]);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 3, "expected stride 3, got {stride}");
@@ -6231,7 +6527,7 @@ mod tests {
         let label_pad_eff = 2.0;
 
         let cascade_result =
-            cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m);
+            cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m, &[]);
         assert_eq!(cascade_result.angle, 0.0);
         assert!(cascade_result.visible.iter().any(|v| !v), "fixture assumption: culled");
 
@@ -6290,7 +6586,7 @@ mod tests {
         ];
         let m = mock(5.0); // fixed_width: chars * 5
         let slot_w = 600.0 / 9.0; // ~66.67
-        let result = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(8), None, &m);
+        let result = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(8), None, &m, &[]);
         // Verify: no elision.
         assert!(
             !matches!(result.strategy, CascadeStrategy::Elided { .. }),
@@ -7505,6 +7801,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::ShowAll),
             &m,
+        &[],
         );
         assert_eq!(result.strategy, CascadeStrategy::Flat);
         assert_eq!(result.angle, 0.0);
@@ -7530,6 +7827,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Parity),
             &m,
+        &[],
         );
         assert_eq!(result.strategy, CascadeStrategy::Culled { stride: 2 });
         let visible: Vec<bool> = result.visible;
@@ -7553,6 +7851,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Rotate),
             &m,
+        &[],
         );
         let steepest = *ANGLE_CASCADE.last().unwrap();
         assert_eq!(
@@ -7578,18 +7877,24 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Greedy),
             &m,
+        &[],
         );
-        let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m);
+        let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m, &[]);
         assert_eq!(greedy.strategy, default.strategy);
         assert_eq!(greedy.angle, default.angle);
         assert_eq!(greedy.visible, default.visible);
         assert_eq!(greedy.labels, default.labels);
     }
 
-    /// S1 (batch B design review): a zero-height slot made the Greedy arm's
-    /// `slots_since_kept * slot_h` product `NaN` on the very first label
-    /// (`INFINITY * 0.0`), and `NaN >= line_h` is `false` — silently dropping
-    /// the first label instead of always keeping it as the cascade's anchor.
+    /// S1 (batch B design review): a zero-height slot used to make the
+    /// Greedy arm's `slots_since_kept * slot_h` product `NaN` on the very
+    /// first label (`INFINITY * 0.0`), and `NaN >= line_h` is `false` —
+    /// silently dropping the first label instead of always keeping it as
+    /// the cascade's anchor. Positions no
+    /// longer multiply by a slot height at all — the first label's "clears
+    /// the last kept one" test is `last_kept.is_none()`, true regardless of
+    /// position — so three equal (zero-height-slot) positions still keep
+    /// the first.
     #[test]
     fn resolve_y_overlap_greedy_zero_slot_height_keeps_first_label() {
         let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -7597,9 +7902,69 @@ mod tests {
             measure: |_, _| 10.0,
             line_h_factor: 1.2,
         };
-        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, 0.0, 11.0, &m)
+        let positions = [0.0, 0.0, 0.0];
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, &positions, 11.0, &m, &[])
             .expect("Greedy always returns Some");
         assert!(visible[0], "the first label must always be kept");
+    }
+
+    /// Anchors must be kept greedy among THEMSELVES, then each non-anchor
+    /// kept only when it clears both its nearest kept neighbours. A naive
+    /// single-pass cascade that keeps every anchor unconditionally and
+    /// tests a non-anchor only against the previous KEPT label lets a
+    /// non-anchor just before an anchor overlap it.
+    #[test]
+    fn resolve_y_overlap_greedy_keeps_decades_greedily_then_clears_both_neighbours() {
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let l = m.line_height(11.0);
+        let positions = [0.0, 0.5 * l, 1.0 * l, 1.6 * l, 2.1 * l, 2.6 * l, 3.2 * l];
+        let anchors = [true, false, false, true, false, false, true];
+        let labels: Vec<String> = (0..7).map(|i| i.to_string()).collect();
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, &positions, 11.0, &m, &anchors)
+            .expect("Greedy always returns Some");
+        assert_eq!(visible, vec![true, false, false, true, false, false, true]);
+    }
+
+    /// Anchors greedy among themselves: a decade too close to the last KEPT
+    /// decade is culled, even though it is itself an anchor.
+    #[test]
+    fn resolve_y_overlap_greedy_culls_a_clashing_decade() {
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let l = m.line_height(11.0);
+        let positions = [0.0, 0.5 * l, 1.2 * l];
+        let anchors = [true, true, true];
+        let labels: Vec<String> = (0..3).map(|i| i.to_string()).collect();
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, &positions, 11.0, &m, &anchors)
+            .expect("Greedy always returns Some");
+        assert_eq!(visible, vec![true, false, true]);
+    }
+
+    /// A non-decade that clears both of its neighbouring decades is kept
+    /// (guard: this shape was already correct before and after the fix).
+    #[test]
+    fn resolve_y_overlap_greedy_keeps_non_decades_that_clear_both_decades() {
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let l = m.line_height(11.0);
+        let positions = [0.0, 1.2 * l, 2.4 * l, 3.6 * l];
+        let anchors = [true, false, false, true];
+        let labels: Vec<String> = (0..4).map(|i| i.to_string()).collect();
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, &positions, 11.0, &m, &anchors)
+            .expect("Greedy always returns Some");
+        assert_eq!(visible, vec![true, true, true, true]);
+    }
+
+    /// With no anchors, the two-pass rule reduces to the classic single-
+    /// pass greedy over positions (guard: byte-identical to the pre-fix
+    /// slot-count greedy on a uniform axis).
+    #[test]
+    fn resolve_y_overlap_greedy_without_anchors_matches_the_slot_greedy() {
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let l = m.line_height(11.0);
+        let positions = [0.0, 0.6 * l, 1.2 * l, 1.8 * l, 2.4 * l];
+        let labels: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, &positions, 11.0, &m, &[])
+            .expect("Greedy always returns Some");
+        assert_eq!(visible, vec![true, false, true, false, true]);
     }
 
     #[test]

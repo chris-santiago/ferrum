@@ -203,7 +203,7 @@ fn positional_pixels(
             let vals = col_as_f64(ctx.batch, field)?;
             Ok(vals
                 .into_iter()
-                .map(|v| v.filter(|x| x.is_finite()).and_then(|x| scale.to_pixel_f64(x)))
+                .map(|v| v.filter(|x| scale.admits_for_pixel(*x)).and_then(|x| scale.to_pixel_f64(x)))
                 .collect())
         }
     }

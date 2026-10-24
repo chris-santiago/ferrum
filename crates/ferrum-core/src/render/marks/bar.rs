@@ -375,7 +375,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     for i in 0..x_strs.len() {
         let xs = match &x_strs[i] { Some(s) => s.as_str(), None => continue };
-        let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let yv = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
         let cx = match ctx.scales.x.to_pixel_str(xs) { Some(p) => p, None => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
         // Priority: explicit y2 column > stacking baseline > axis baseline.
@@ -383,13 +383,13 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // y2 present: use the y2 data value mapped through the y-scale.
             // Handle mixed-sign (y2 may be above or below y in data space):
             // the rect always spans [min_pixel, max_pixel] in screen coords.
-            match y2s.get(i).and_then(|v| *v).filter(|v| v.is_finite()) {
+            match y2s.get(i).and_then(|v| *v).filter(|v| ctx.scales.y.admits_for_pixel(*v)) {
                 Some(y2v) => ctx.scales.y.to_pixel_f64(y2v).unwrap_or(baseline_y),
                 None => baseline_y,
             }
         } else {
             match y_bases.as_ref().and_then(|v| v[i]) {
-                Some(b) if b.is_finite() => {
+                Some(b) if ctx.scales.y.admits_for_pixel(b) => {
                     ctx.scales.y.to_pixel_f64(b).unwrap_or(baseline_y)
                 }
                 _ => baseline_y,
@@ -524,7 +524,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     for i in 0..y_strs.len() {
         let ys = match &y_strs[i] { Some(s) => s.as_str(), None => continue };
-        let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let xv = match xs[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
         let cy = match ctx.scales.y.to_pixel_str(ys) { Some(p) => p, None => continue };
         let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
 
@@ -532,7 +532,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let px = px + x_offsets[i];
 
         let (left_x, width) = if let Some(x2s) = &x2s_opt {
-            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let x2v = match x2s[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
             let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
             let px2 = px2 + x_offsets[i];
             (px.min(px2), (px - px2).abs())
@@ -544,7 +544,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let row_base_x = x_bases
                 .as_ref()
                 .and_then(|v| v.get(i).copied().flatten())
-                .filter(|v| v.is_finite())
+                .filter(|v| ctx.scales.x.admits_for_pixel(*v))
                 .and_then(|b| ctx.scales.x.to_pixel_f64(b))
                 .map(|p| p + x_offsets[i])
                 .unwrap_or(baseline_x);
@@ -688,8 +688,8 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let mut zero_band_drops = 0usize;
 
     for i in 0..xs.len() {
-        let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let xv = match xs[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
+        let yv = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
         let top_y = top_y + y_offsets[i];
 
@@ -700,7 +700,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let bottom_y = y_bases
             .as_ref()
             .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
+            .filter(|v| ctx.scales.y.admits_for_pixel(*v))
             .and_then(|b| ctx.scales.y.to_pixel_f64(b))
             .map(|p| p + y_offsets[i])
             .unwrap_or(baseline_y);
@@ -711,7 +711,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let (rect_x, width) = if let Some(ref x2s) = x2s_opt {
             // x2 present: bin-style rect from x to x2 (histogram path).
-            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let x2v = match x2s[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
             let px_left = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
             let px_right = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
             let px_left = px_left + x_offsets[i];
@@ -812,9 +812,9 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     let mut zero_band_drops = 0usize;
 
     for i in 0..xs.len() {
-        let xv  = match xs[i]  { Some(v) if v.is_finite() => v, _ => continue };
-        let yv  = match ys[i]  { Some(v) if v.is_finite() => v, _ => continue };
-        let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let xv  = match xs[i]  { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
+        let yv  = match ys[i]  { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
+        let y2v = match y2s[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
         let px_right  = match ctx.scales.x.to_pixel_f64(xv)  { Some(p) => p, None => continue };
         let py_top    = match ctx.scales.y.to_pixel_f64(yv)  { Some(p) => p, None => continue };
         let py_bottom = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
@@ -830,7 +830,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let row_base_x = stack_bases
             .as_ref()
             .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
+            .filter(|v| ctx.scales.x.admits_for_pixel(*v))
             .and_then(|b| ctx.scales.x.to_pixel_f64(b))
             .map(|p| p + x_offsets[i])
             .unwrap_or(baseline_x);

@@ -124,7 +124,7 @@ def _stroke_dash_df(n_cat: int, *, groups: tuple[str, ...] | None = None) -> pl.
 
 
 def _opacity_scale_channel(field: str):
-    return fm.FillOpacity(field, scale=fm.LogScale())
+    return fm.FillOpacity(field, scale=fm.SymlogScale())
 
 
 def _shape_overflow_chart():
@@ -192,8 +192,8 @@ def _unknown_color_scheme_chart():
 
 
 _REFUSAL_TEXT = (
-    "fill_opacity scale: type 'log' is not supported; "
-    "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+    "fill_opacity scale: type 'symlog' is not supported; "
+    "pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
 )
 _SHAPE_TEXT = "shape palette has fewer entries than the 9 categories; shapes were recycled"
 _DASH_TEXT = "stroke dash palette has fewer entries than the 5 categories; dashes were recycled"
@@ -270,7 +270,9 @@ def test_no_auxiliary_warning_is_vacuity_control():
 
 
 def test_a_non_linear_opacity_scale_refuses():
-    """A ``fill_opacity`` column under a non-linear ``scale=`` refuses with the
-    gate's text, whether the channel class or the render refuses it."""
+    """A ``fill_opacity`` column under a still-unsupported ``scale=`` type
+    refuses with the gate's text, whether the channel class or the render
+    refuses it (Log, Pow and Sqrt each map through their own transform;
+    Symlog is not supported)."""
     with pytest.raises(ValueError, match=re.escape(_REFUSAL_TEXT)):
         _opacity_constant_column_chart().to_svg()

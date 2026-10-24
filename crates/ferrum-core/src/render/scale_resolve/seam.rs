@@ -63,6 +63,19 @@ pub(crate) struct LeafResolveInput<'a> {
     pub(crate) transform_lineages: &'a crate::transform::run::OutputLineages,
 }
 
+impl LeafResolveInput<'_> {
+    /// Whether this leaf's AUTHORED spec declares `CoordFlip` — `spec` is
+    /// the leaf's ORIGINAL `ChartSpec`
+    /// (untouched by `prepare::build_layers`'s encoding swap), so this
+    /// answers the question every refusal that names a channel the user
+    /// wrote needs: un-flip the resolved token back to what they typed.
+    /// The one place that question is asked, replacing three identical
+    /// inline `matches!(leaf.spec.coord, Some(CoordKind::Flip))` copies.
+    pub(crate) fn coord_flipped(&self) -> bool {
+        matches!(self.spec.coord, Some(crate::spec::coord::CoordKind::Flip))
+    }
+}
+
 /// The auxiliary channels an overlay group leaves to its members: those an
 /// explicit composite resolve names (`resolve.color`/`resolve.size`, or a
 /// `legend` override of either) on the overlay or an enclosing composite,
@@ -163,6 +176,16 @@ pub(crate) struct OverlayAuxiliary {
     /// legends describe.
     pub(crate) layers: Vec<crate::render::prepare::LayerPrepared>,
     pub(crate) left_to_members: MemberChannels,
+    /// `true` only from [`Self::unresolved`] — pass one's placeholder, read
+    /// by every member before the group has resolved anything. A
+    /// positional Log channel's `build_axis_scale`
+    /// checks this through the member's `OverlayMembership` to decide
+    /// whether to defer its own count/refusal to the group's later resolve
+    /// (`composite::resolve_caller_scale_group`) instead of deciding it
+    /// standalone, from this one leaf's own rows — the SAME deferral the
+    /// group's auxiliary (color/size) channels already get here, extended
+    /// to x/y.
+    pub(crate) pending: bool,
 }
 
 impl OverlayAuxiliary {
@@ -176,6 +199,7 @@ impl OverlayAuxiliary {
             configured: ConfiguredAuxiliary::default(),
             layers: Vec::new(),
             left_to_members,
+            pending: true,
         }
     }
 }

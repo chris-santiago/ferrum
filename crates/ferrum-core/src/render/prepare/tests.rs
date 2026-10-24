@@ -4424,7 +4424,7 @@ fn old_independent_y(
 #[test]
 fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
     let scale = linear_scale(0.0, 100.0);
-    let (labels, proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, proj, threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4445,7 +4445,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
 #[test]
 fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
     let scale = linear_scale(0.0, 1.0);
-    let (labels, proj, _t) = build_axis_tick_inputs(
+    let (labels, _anchors, proj, _t) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {
@@ -4466,7 +4466,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
 #[test]
 fn build_axis_tick_inputs_y_matches_old_independent_reversed() {
     let scale = linear_scale(-50.0, 50.0);
-    let (labels, proj, _t) = build_axis_tick_inputs(
+    let (labels, _anchors, proj, _t) = build_axis_tick_inputs(
         &scale,
         8,
         TickFormatMode::Immediate {
@@ -4496,7 +4496,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
         vec![0.0, 30.0],
         DiscreteLayout::band(0.1, 0.0, DEFAULT_ALIGN),
     ));
-    let (x_labels, x_proj, _t) = build_axis_tick_inputs(
+    let (x_labels, _anchors, x_proj, _t) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4508,7 +4508,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
     )
     .unwrap();
     assert!(x_proj.is_none(), "ordinal scale yields no tick projection");
-    let (y_labels, y_proj, _t) = build_axis_tick_inputs(
+    let (y_labels, _anchors, y_proj, _t) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4537,7 +4537,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
     // Shared/global path: numeric format threads forward (not applied here),
     // and a non-empty minor vec is carried into the projection.
     let shared_minor = vec![0.1_f64, 0.3, 0.7];
-    let (shared_labels, shared_proj, shared_threaded) = build_axis_tick_inputs(
+    let (shared_labels, _anchors, shared_proj, shared_threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Thread {
@@ -4550,7 +4550,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
     .unwrap();
 
     // Independent/per-panel path: format applied immediately, minor empty.
-    let (indep_labels, indep_proj, indep_threaded) = build_axis_tick_inputs(
+    let (indep_labels, _anchors, indep_proj, indep_threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4623,7 +4623,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
     let default_labels = scale.tick_labels(6);
 
     for format_type in [None, Some("time")] {
-        let (immediate, _proj, threaded) = build_axis_tick_inputs(
+        let (immediate, _anchors, _proj, threaded) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Immediate {
@@ -4644,7 +4644,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
             "every label must be rendered through {pattern}, got {immediate:?}"
         );
 
-        let (thread, _proj, _t) = build_axis_tick_inputs(
+        let (thread, _anchors, _proj, _t) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Thread {
@@ -4670,7 +4670,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
 #[test]
 fn build_axis_tick_inputs_immediate_still_applies_a_numeric_format_itself() {
     let scale = linear_scale(0.0, 1.0);
-    let (labels, _proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {
@@ -4762,7 +4762,7 @@ fn build_axis_tick_inputs_immediate_refuses_time_format_on_non_temporal_scale() 
 #[test]
 fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal_scale() {
     let scale = linear_scale(0.0, 1.0);
-    let (_labels, _proj, threaded) = build_axis_tick_inputs(
+    let (_labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Thread {
@@ -4774,7 +4774,7 @@ fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal
     )
     .unwrap();
     assert_eq!(threaded.as_deref(), Some(".1%"), "threaded like every d3 spec");
-    let (labels, _proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate { format: Some(".1%"), format_type: None },
@@ -4809,7 +4809,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
     ));
     let default_labels = scale.tick_labels(6);
     for spec in [".2f", ".3e"] {
-        let (thread, _p, thread_threaded) = build_axis_tick_inputs(
+        let (thread, _anchors, _p, thread_threaded) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Thread {
@@ -4822,7 +4822,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
         .unwrap();
         assert_eq!(thread, default_labels, "Thread, {spec}");
         assert_eq!(thread_threaded, None, "Thread must not re-seed {spec} as d3");
-        let (immediate, _p, _t) = build_axis_tick_inputs(
+        let (immediate, _anchors, _p, _t) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Immediate {
@@ -5221,7 +5221,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
     }
     let (thread, immediate) = run("%Y", None);
     for (mode, got) in [("Thread", thread), ("Immediate", immediate)] {
-        let (labels, _, threaded) = got.unwrap();
+        let (labels, _, _, threaded) = got.unwrap();
         assert_eq!(threaded, None, "{mode}");
         assert!(labels.iter().all(|l| l.len() == 4 && l.starts_with("20")), "{mode}: {labels:?}");
     }
@@ -5236,7 +5236,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
 #[test]
 fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
     let scale = linear_scale(1.0, 5.0);
-    let (thread, _p, threaded) = build_axis_tick_inputs(
+    let (thread, _anchors, _p, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Thread {
@@ -5251,7 +5251,7 @@ fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
     // The threaded spec is applied later by `apply_tick_format`; the
     // stray type must not un-declare it there either.
     let applied = apply_tick_format(thread, threaded.as_deref(), Some("time"));
-    let (immediate, _p, _t) = build_axis_tick_inputs(
+    let (immediate, _anchors, _p, _t) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {
@@ -6079,9 +6079,15 @@ fn an_independent_y_layers_own_scale_does_not_establish_the_primary_axis() {
         "the primary ladder runs from the bar's top to zero: {primary:?}"
     );
     assert_eq!(prep.axes.secondary_y.len(), 1);
+    // `breaks_log` (scale/log.rs): 2 decades at count 10
+    // reach neither the integer-power target (`count - 2 = 8`) nor the
+    // sparse `{1, 3}` multiple set (5 ticks), but `{1, 2, 5}` (7 ticks) fits
+    // the `count` budget and is the DENSEST set that does — round values,
+    // not the fractional exponents a linear subdivision of log-space gave,
+    // and not the denser `{1..9}` ladder (19 ticks), which overshoots.
     assert_eq!(
         prep.axes.secondary_y[0].tick_labels,
-        ["100", "63.0957", "39.8107", "25.1189", "15.8489", "10", "6.3096", "3.9811", "2.5119", "1.5849", "1"],
+        ["100", "50", "20", "10", "5", "2", "1"],
         "the secondary axis keeps its log ladder"
     );
 }
@@ -7282,6 +7288,42 @@ fn a_stroke_width_scale_honors_an_explicit_domain_and_range_and_clamps() {
     );
 }
 
+/// `LogScale`/`PowScale`/`SqrtScale` map stroke width through their own
+/// transform instead of refusing, with the exact same gate and clamp
+/// contract `a_stroke_width_scale_honors_an_explicit_domain_and_range_and_clamps`
+/// pins for `linear`: the domain's low end maps to the range's low end, the
+/// high end to the high end, the interior values strictly increase, and a
+/// value outside a tighter explicit domain draws at the nearer end.
+#[test]
+fn a_stroke_width_scale_honors_log_pow_and_sqrt_and_clamps() {
+    let w = [20.0, 30.0, 40.0, 50.0];
+    let widths = |scale: serde_json::Value| {
+        let spec = drawn_channel_alone("point", bound("stroke_width", &serde_json::json!({"field": "w", "scale": scale})));
+        point_stroke_widths(&drawn_channel_scene(&spec).0)
+    };
+    for (scale_type, extra) in [
+        ("log", serde_json::json!({"base": 10.0})),
+        ("pow", serde_json::json!({"exponent": 2.0})),
+        ("sqrt", serde_json::json!({})),
+    ] {
+        let mut scale = serde_json::json!({"type": scale_type, "domain": [w[0], w[3]], "range": [2.0, 8.0]});
+        for (k, v) in extra.as_object().unwrap() {
+            scale[k] = v.clone();
+        }
+        let mapped = widths(scale.clone());
+        assert_eq!(mapped[0], 2.0, "{scale_type}: domain low end maps to range low end, got {mapped:?}");
+        assert_eq!(mapped[3], 8.0, "{scale_type}: domain high end maps to range high end, got {mapped:?}");
+        assert!(mapped[0] < mapped[1] && mapped[1] < mapped[2] && mapped[2] < mapped[3], "{scale_type}: strictly increasing, got {mapped:?}");
+
+        let mut tight = scale;
+        tight["domain"] = serde_json::json!([25.0, 45.0]);
+        tight["range"] = serde_json::json!([2.0, 6.0]);
+        let clamped = widths(tight);
+        assert_eq!(clamped[0], 2.0, "{scale_type}: below the domain clamps to the low range end");
+        assert_eq!(clamped[3], 6.0, "{scale_type}: above the domain clamps to the high range end");
+    }
+}
+
 /// The stroke-width scale's default range is the theme's
 /// `[line_stroke_width_min, line_stroke_width_max]`, 1 to 4 px by default,
 /// read the way the size scale reads its point-size band: a theme with
@@ -7467,6 +7509,116 @@ fn a_stroke_width_no_layer_draws_gets_no_legend() {
     );
 }
 
+/// A numeric auxiliary channel's raw style value on a point node, read
+/// directly off `FillStroke` (no color/alpha-byte quantization): unlike
+/// [`aux_drawn_value`], needs no painted stroke color, so it reads a
+/// layered chart's circles too (a layered `ChartSpec` cannot carry a
+/// chart-level `mark_style`, so there is no stroke to read through).
+fn raw_aux_value(channel: &str, node: &ferrum_scene::SceneNode) -> f64 {
+    match (channel, node) {
+        ("size", ferrum_scene::SceneNode::Circle { r, .. }) => std::f64::consts::PI * r * r,
+        ("stroke_width", ferrum_scene::SceneNode::Circle { style, .. }) => style.stroke_width,
+        ("opacity", ferrum_scene::SceneNode::Circle { style, .. }) => style.opacity,
+        ("fill_opacity", ferrum_scene::SceneNode::Circle { style, .. }) => style.fill_opacity,
+        ("stroke_opacity", ferrum_scene::SceneNode::Circle { style, .. }) => style.stroke_opacity,
+        (ch, other) => panic!("{ch}: {other:?}"),
+    }
+}
+
+/// `g=[a,a,b,b]`, `c=[null,null,null,null]` (no scale, Linear) on every
+/// numeric auxiliary channel: a faceted unlayered chart, a faceted layered
+/// chart (two layers both drawing the same binding), and the unfaceted twin
+/// all build no legend and draw every mark at the channel's unbound
+/// default -- faceting an all-null column changes nothing about what it
+/// draws. With `c=[1,2,3,4]` (a real domain) the faceted chart's legend
+/// equals the unfaceted chart's own (byte-identical entries), so faceting
+/// does not, on its own, change a chart-level aux legend.
+#[test]
+fn a_faceted_all_null_linear_aux_column_draws_no_legend_on_every_route() {
+    let facet = serde_json::json!({"field": "g", "mode": {"kind": "wrap", "ncols": 2}});
+    for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
+        let encoding = with_xy(bound(channel, &serde_json::json!({"field": "c"})));
+
+        let null_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("c", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 4.0, 9.0])),
+                Arc::new(Float64Array::from(vec![None, None, None, None])),
+            ],
+        )
+        .unwrap();
+        let theme = crate::layout::ThemeInputs::default();
+
+        // The unfaceted twin -- the channel's default value every other
+        // route must match.
+        let unfaceted: ChartSpec = serde_json::from_value(serde_json::json!({"mark": "point", "encoding": encoding})).unwrap();
+        let (unfaceted_scene, unfaceted_warnings) = scene_over(&unfaceted, &null_batch, &theme);
+        assert!(unfaceted_warnings.is_empty(), "{channel}: {unfaceted_warnings:?}");
+        assert!(unfaceted_scene.legend.is_empty(), "{channel} unfaceted: {:?}", unfaceted_scene.legend);
+        let default_value = raw_aux_value(channel, &unfaceted_scene.panels[0].marks[0].nodes[0]);
+
+        // Faceted, unlayered.
+        let faceted_unlayered = faceted_spec("point", encoding.clone(), facet.clone(), serde_json::json!({}));
+        let (faceted_scene, faceted_warnings) = scene_over(&faceted_unlayered, &null_batch, &theme);
+        assert!(faceted_warnings.is_empty(), "{channel}: {faceted_warnings:?}");
+        assert!(faceted_scene.legend.is_empty(), "{channel} faceted unlayered: {:?}", faceted_scene.legend);
+        let faceted_marks: Vec<&ferrum_scene::SceneNode> = faceted_scene.panels.iter().flat_map(|p| p.marks.iter()).flat_map(|b| b.nodes.iter()).collect();
+        assert_eq!(faceted_marks.len(), 4, "{channel}: {faceted_marks:?}");
+        for node in &faceted_marks {
+            assert_eq!(raw_aux_value(channel, node), default_value, "{channel} faceted unlayered");
+        }
+
+        // Faceted, layered (two layers both drawing the same binding).
+        let layered_json = serde_json::json!({
+            "mark": "point",
+            "encoding": with_xy(serde_json::json!({})),
+            "facet": facet,
+            "layers": [
+                {"mark": "point", "encoding": encoding},
+                {"mark": "point", "encoding": encoding},
+            ],
+        });
+        let faceted_layered: ChartSpec = serde_json::from_value(layered_json).unwrap();
+        let (layered_scene, layered_warnings) = scene_over(&faceted_layered, &null_batch, &theme);
+        assert!(layered_warnings.is_empty(), "{channel}: {layered_warnings:?}");
+        assert!(layered_scene.legend.is_empty(), "{channel} faceted layered: {:?}", layered_scene.legend);
+        let layered_marks: Vec<&ferrum_scene::SceneNode> = layered_scene.panels.iter().flat_map(|p| p.marks.iter()).flat_map(|b| b.nodes.iter()).collect();
+        for node in &layered_marks {
+            assert_eq!(raw_aux_value(channel, node), default_value, "{channel} faceted layered");
+        }
+
+        // A real (non-null) column: the faceted legend equals the
+        // unfaceted legend.
+        let valued_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("c", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 4.0, 9.0])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)])),
+            ],
+        )
+        .unwrap();
+        let (unfaceted_valued_scene, _) = scene_over(&unfaceted, &valued_batch, &theme);
+        let faceted_valued = faceted_spec("point", encoding.clone(), facet.clone(), serde_json::json!({}));
+        let (faceted_valued_scene, _) = scene_over(&faceted_valued, &valued_batch, &theme);
+        assert!(!unfaceted_valued_scene.legend.is_empty(), "{channel}: a real domain must draw a legend");
+        assert_eq!(legend_text(&faceted_valued_scene), legend_text(&unfaceted_valued_scene), "{channel}: faceting must not change the aux legend");
+    }
+}
+
 /// The new legends reach the interactive scene the WASM runtime paints,
 /// drawn from the existing circle and line legend nodes.
 #[test]
@@ -7582,13 +7734,23 @@ fn numeric_aux_batch() -> RecordBatch {
 
 /// The marks and the legend a render draws, as JSON, or the refusal text.
 fn marks_and_legend(spec: &ChartSpec) -> Result<(serde_json::Value, serde_json::Value), String> {
+    marks_and_legend_over(spec, &numeric_aux_batch())
+}
+
+/// [`marks_and_legend`] over a caller-supplied `batch` and the warnings the
+/// render reports, instead of [`numeric_aux_batch`]'s fixed all-positive
+/// `c` — the Log sided-mapping cases (a mixed-sign, all-negative or
+/// zero-touching column) need their own data.
+fn marks_and_legend_warned(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+) -> Result<(serde_json::Value, serde_json::Value, Vec<RenderWarning>), String> {
     pyo3::Python::initialize();
     let theme = crate::layout::ThemeInputs::default();
     let chart_config = crate::render::chart_config::ChartConfig::default();
-    let batch = numeric_aux_batch();
     let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
         spec,
-        &batch,
+        batch,
         &theme,
         crate::layout::Viewport { width: 600.0, height: 400.0 },
         &chart_config,
@@ -7607,7 +7769,12 @@ fn marks_and_legend(spec: &ChartSpec) -> Result<(serde_json::Value, serde_json::
     )
     .map_err(|e| e.to_string())?;
     let marks: Vec<&ferrum_scene::SceneNode> = scene.panels[0].marks.iter().flat_map(|b| b.nodes.iter()).collect();
-    Ok((serde_json::to_value(marks).unwrap(), serde_json::to_value(&scene.legend).unwrap()))
+    Ok((serde_json::to_value(marks).unwrap(), serde_json::to_value(&scene.legend).unwrap(), warnings))
+}
+
+/// [`marks_and_legend`] over a caller-supplied `batch`, dropping the warnings.
+fn marks_and_legend_over(spec: &ChartSpec, batch: &RecordBatch) -> Result<(serde_json::Value, serde_json::Value), String> {
+    marks_and_legend_warned(spec, batch).map(|(marks, legend, _)| (marks, legend))
 }
 
 /// What a `linear` scale key does on a numeric auxiliary channel.
@@ -7639,7 +7806,7 @@ fn every_linear_scale_key_is_refused_or_drawn_on_every_numeric_aux_channel() {
         assert_eq!(baseline, marks_and_legend(&numeric_aux_chart(channel, None, param.clone())).unwrap(), "{channel}");
         let refused = |reason: &str| {
             KeyOutcome::Refused(format!(
-                "{channel} scale: {reason}; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+                "{channel} scale: {reason}; pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
             ))
         };
         for key in &keys {
@@ -7668,27 +7835,1974 @@ fn every_linear_scale_key_is_refused_or_drawn_on_every_numeric_aux_channel() {
     }
 }
 
-/// Every scale type other than `linear` refuses on every numeric auxiliary
-/// channel, naming the type by its wire tag, as does a domain or range that
-/// is not `[lo, hi]` (with the positional sentence).
+/// Every scale type other than `linear`, `log`, `pow` and `sqrt` refuses on
+/// every numeric auxiliary channel, naming the type by its wire tag, as does
+/// a domain or range that is not `[lo, hi]` (with the positional sentence) --
+/// on every one of the four supported types, not only `linear`.
 #[test]
-fn a_non_linear_or_malformed_scale_refuses_on_every_numeric_aux_channel() {
+fn an_unsupported_or_malformed_scale_refuses_on_every_numeric_aux_channel() {
+    const SUPPORTED: [&str; 4] = ["linear", "log", "pow", "sqrt"];
     for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
-        for tag in crate::spec::encoding::ScaleSpec::TAGS.into_iter().filter(|t| *t != "linear") {
+        for tag in crate::spec::encoding::ScaleSpec::TAGS.into_iter().filter(|t| !SUPPORTED.contains(t)) {
             let text = marks_and_legend(&numeric_aux_chart(channel, Some(serde_json::json!({"type": tag})), serde_json::json!([])))
-                .expect_err("a non-linear scale refuses");
+                .expect_err("an unsupported scale refuses");
             assert_eq!(
                 text,
-                format!("{channel} scale: type '{tag}' is not supported; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="),
+                format!(
+                    "{channel} scale: type '{tag}' is not supported; \
+                     pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
+                ),
             );
         }
-        for (key, len) in [("domain", 3), ("range", 1)] {
-            let values: Vec<f64> = (0..len).map(f64::from).collect();
-            let text = marks_and_legend(&numeric_aux_chart(channel, Some(serde_json::json!({"type": "linear", key: values})), serde_json::json!([])))
+        for scale_type in SUPPORTED {
+            for (key, len) in [("domain", 3), ("range", 1)] {
+                let values: Vec<f64> = (0..len).map(f64::from).collect();
+                let text = marks_and_legend(&numeric_aux_chart(
+                    channel,
+                    Some(serde_json::json!({"type": scale_type, key: values})),
+                    serde_json::json!([]),
+                ))
                 .expect_err("a malformed extent refuses");
-            assert_eq!(text, format!("{channel} scale: {key} must have length 2; got {len}"));
+                assert_eq!(text, format!("{channel} scale: {key} must have length 2; got {len}"), "{channel} {scale_type} {key}");
+            }
         }
     }
+}
+
+/// The value a mark node draws on a numeric auxiliary `channel`: the
+/// painted alpha for the opacity family, the stroke width directly, and for
+/// `size` the drawn circle's AREA (`pi * r^2`, since the scale's range maps
+/// to area, not radius -- see `an_on_side_infinity_clamps_to_the_range_end_like_linear`).
+fn aux_drawn_value(channel: &str, node: &ferrum_scene::SceneNode) -> f64 {
+    match channel {
+        "size" => match node {
+            ferrum_scene::SceneNode::Circle { r, .. } => std::f64::consts::PI * r * r,
+            other => panic!("size draws a circle: {other:?}"),
+        },
+        "stroke_width" => match node {
+            ferrum_scene::SceneNode::Circle { style, .. } => style.stroke_width,
+            other => panic!("stroke_width draws a circle: {other:?}"),
+        },
+        "opacity" => painted_alpha(node, Faded::Mark),
+        "fill_opacity" => painted_alpha(node, Faded::Fill),
+        "stroke_opacity" => painted_alpha(node, Faded::Stroke),
+        other => panic!("{other} is not a numeric auxiliary channel"),
+    }
+}
+
+/// [`numeric_aux_chart`]'s four rows (`c` = 1.3, 2, 3, 9.7) drawn on
+/// `channel` under `scale`, read through [`aux_drawn_value`].
+fn aux_drawn_values(channel: &str, scale: serde_json::Value) -> Vec<f64> {
+    let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+    let (scene, warnings) = scene_over(&spec, &numeric_aux_batch(), &crate::layout::ThemeInputs::default());
+    assert!(warnings.is_empty(), "{channel}: every row is in domain: {warnings:?}");
+    scene.panels[0].marks[0].nodes.iter().map(|n| aux_drawn_value(channel, n)).collect()
+}
+
+/// `log`, `pow` and `sqrt` map every numeric auxiliary channel through the
+/// same transform `build_from_scale_spec` resolves on x/y (d3's log, pow
+/// and sqrt formulas), checked to the row: over `c` = 1.3, 2, 3, 9.7 and a
+/// domain/range of `[1, 10]`/`[10, 40]` (`[0.2, 0.6]` for the opacity
+/// family), Log(base 10), Log(base 2), Pow(exponent 3) and Sqrt each give
+/// the exact values below -- not merely "differs from linear". Log's base
+/// cancels out of the mapped fraction entirely once `domain=`/`range=` are
+/// both stated (`t = (ln(c) - ln(lo)) / (ln(hi) - ln(lo))`, independent of
+/// `base`), so base 2 gives the SAME per-row values as base 10 here --
+/// this still proves base is read and dispatched (not silently ignored or
+/// defaulted), since a malformed/unsupported base would refuse instead of
+/// rendering.
+#[test]
+fn log_pow_and_sqrt_scales_map_every_numeric_aux_channel() {
+    let opacity_range = serde_json::json!([0.2, 0.6]);
+    let width_range = serde_json::json!([10.0, 40.0]);
+    // (tag, scale base, expected opacity-family values, expected size/stroke_width values)
+    let cases: [(&str, serde_json::Value, [f64; 4], [f64; 4]); 4] = [
+        (
+            "log",
+            serde_json::json!({"type": "log", "base": 10.0}),
+            [0.245577, 0.320412, 0.390849, 0.594709],
+            [13.418301, 19.0309, 24.313638, 39.603152],
+        ),
+        (
+            "log2",
+            serde_json::json!({"type": "log", "base": 2.0}),
+            [0.245577, 0.320412, 0.390849, 0.594709],
+            [13.418301, 19.0309, 24.313638, 39.603152],
+        ),
+        (
+            "pow",
+            serde_json::json!({"type": "pow", "exponent": 3.0}),
+            [0.200479, 0.202803, 0.21041, 0.565034],
+            [10.035946, 10.21021, 10.780781, 37.377568],
+        ),
+        (
+            "sqrt",
+            serde_json::json!({"type": "sqrt"}),
+            [0.225931, 0.276625, 0.335422, 0.591158],
+            [11.94483, 15.746906, 20.156662, 39.336875],
+        ),
+    ];
+    for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
+        let is_opacity = channel.contains("opacity");
+        let range = if is_opacity { opacity_range.clone() } else { width_range.clone() };
+        for (tag, base, opacity_expected, width_expected) in &cases {
+            let mut scale = base.clone();
+            scale["domain"] = serde_json::json!([1.0, 10.0]);
+            scale["range"] = range.clone();
+            let got = aux_drawn_values(channel, scale);
+            let expected = if is_opacity { opacity_expected } else { width_expected };
+            // The opacity family bakes into the fill/stroke color's 8-bit alpha
+            // byte (painted_alpha reads it back through that byte), so its
+            // achievable precision is the byte's own half-step, the same
+            // tolerance `assert_painted_close` uses; size/stroke_width are
+            // exact floats with no such quantization.
+            let tolerance = if is_opacity { 0.5 / 255.0 + 1e-9 } else { 1e-5 };
+            assert_eq!(got.len(), expected.len(), "{channel} {tag}");
+            for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+                assert!((g - e).abs() <= tolerance, "{channel} {tag} row {i}: got {g}, expected {e}");
+            }
+        }
+    }
+}
+
+// ── Log drop-and-warn on every channel ──────────────────────────────────────
+
+/// A mixed-sign column under `Log` with no stated domain maps its positive
+/// rows (the only inferred side) and leaves the one negative row out,
+/// warned by name and count, NOT DRAWN — on x (the row is not placed) and
+/// on every numeric auxiliary channel alike (the row is
+/// removed at the draw seam, not drawn at the channel's default) — exactly
+/// 3 marks on every channel, not 4.
+#[test]
+fn a_mixed_sign_log_column_leaves_the_off_side_out_and_warns() {
+    let batch = one_column_batch(vec![Some(-5.0), Some(1.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+
+    for channel in ["x"].into_iter().chain(crate::render::scale_resolve::NUMERIC_AUX_CHANNELS) {
+        let spec = numeric_aux_chart(channel, Some(log_scale.clone()), serde_json::json!([]));
+        let (marks, legend, warnings) = marks_and_legend_warned(&spec, &batch)
+            .unwrap_or_else(|e| panic!("{channel}: expected to render, refused with {e}"));
+        let side = crate::scale::log::LogSide::Positive;
+        let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
+            channel: channel.to_string(),
+            field: "c".to_string(),
+            rows: 1,
+            side,
+            coord_flipped: false,
+        };
+        assert!(
+            warnings.contains(&expected),
+            "{channel}: expected {expected:?} among {warnings:?}"
+        );
+        assert_eq!(
+            expected.to_string().contains("not drawn"),
+            true,
+            "{channel}: the warning text says 'not drawn'"
+        );
+        if channel != "x" {
+            assert_ne!(legend, serde_json::Value::Null, "{channel}: a legend still draws over the positive rows");
+        }
+        let n = marks.as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(n, 3, "{channel}: exactly the three positive rows draw, the off-side one removed: {marks:?}");
+    }
+}
+
+/// [`a_mixed_sign_log_column_leaves_the_off_side_out_and_warns`]'s rule on
+/// `y`, not only `x` and the auxiliary channels, and on a zero-touching
+/// column (`0` is neither positive nor negative, so it is off-side under a
+/// positive domain exactly as `-5` is): both `c=[-5,1,10,100]` and
+/// `c=[0,1,10,100]` draw exactly 3 marks and warn exactly once, naming the
+/// channel the row was dropped from, on x, y and every numeric auxiliary
+/// channel.
+#[test]
+fn a_mixed_sign_or_zero_touching_log_column_draws_three_marks_on_every_channel() {
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    for data in [
+        vec![Some(-5.0), Some(1.0), Some(10.0), Some(100.0)],
+        vec![Some(0.0), Some(1.0), Some(10.0), Some(100.0)],
+    ] {
+        let batch = one_column_batch(data.clone());
+        for channel in ["x", "y"].into_iter().chain(crate::render::scale_resolve::NUMERIC_AUX_CHANNELS) {
+            let spec = numeric_aux_chart(channel, Some(log_scale.clone()), serde_json::json!([]));
+            let (marks, _legend, warnings) = marks_and_legend_warned(&spec, &batch)
+                .unwrap_or_else(|e| panic!("{channel} {data:?}: expected to render, refused with {e}"));
+            let n = marks.as_array().map(|a| a.len()).unwrap_or(0);
+            assert_eq!(n, 3, "{channel} {data:?}: {marks:?}");
+            let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
+                channel: channel.to_string(),
+                field: "c".to_string(),
+                rows: 1,
+                side: crate::scale::log::LogSide::Positive,
+                coord_flipped: false,
+            };
+            assert!(warnings.contains(&expected), "{channel} {data:?}: expected {expected:?} among {warnings:?}");
+        }
+    }
+}
+
+/// Choice D's `tick_anchors`/`tick_labels` lockstep holds per facet panel,
+/// not only on the chart-level shared axis the other choice-D tests read:
+/// an independent-x Log facet gives each panel its own `AxisInput`
+/// (`AxesInput::panels`), with `tick_anchors.len() == tick_labels.len()`
+/// and the `true` entries exactly the power labels -- panel `a`'s own
+/// domain `[1, 100]` and panel `b`'s own `[1, 1000]`, not the chart-level
+/// union.
+#[test]
+fn an_independent_facet_log_axis_keeps_anchors_aligned() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 100.0, 1.0, 1000.0])),
+        ],
+    )
+    .unwrap();
+    let facet = serde_json::json!({
+        "field": "g",
+        "mode": {"kind": "wrap", "ncols": 2},
+        "resolve": {"x": "independent", "y": "shared"},
+    });
+    let spec = faceted_spec(
+        "point",
+        serde_json::json!({"x": {"field": "v", "scale": {"type": "log", "base": 10.0}}, "y": {"field": "g"}}),
+        facet,
+        serde_json::json!({}),
+    );
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.panels.len(), 2);
+
+    let panel_a = prep.axes.panels[0].x.as_ref().expect("panel a draws its own independent x axis");
+    assert_eq!(panel_a.tick_anchors.len(), panel_a.tick_labels.len());
+    assert_eq!(panel_a.tick_labels, vec!["1", "2", "5", "10", "20", "50", "100"]);
+    let panel_a_powers: Vec<&str> = panel_a
+        .tick_labels
+        .iter()
+        .zip(&panel_a.tick_anchors)
+        .filter(|(_, anchor)| **anchor)
+        .map(|(label, _)| label.as_str())
+        .collect();
+    assert_eq!(panel_a_powers, vec!["1", "10", "100"]);
+
+    let panel_b = prep.axes.panels[1].x.as_ref().expect("panel b draws its own independent x axis");
+    assert_eq!(panel_b.tick_anchors.len(), panel_b.tick_labels.len());
+    assert_eq!(panel_b.tick_labels, vec!["1", "2", "5", "10", "20", "50", "100", "200", "500", "1000"]);
+    let panel_b_powers: Vec<&str> = panel_b
+        .tick_labels
+        .iter()
+        .zip(&panel_b.tick_anchors)
+        .filter(|(_, anchor)| **anchor)
+        .map(|(label, _)| label.as_str())
+        .collect();
+    assert_eq!(panel_b_powers, vec!["1", "10", "100", "1000"]);
+}
+
+/// A faceted Log channel warns once for the WHOLE faceted frame (every
+/// panel's rows folded together), not once per panel: `g=[a,a,a,b,b,b]`,
+/// `v=[-5,1,10,7,100,-3]` facets by `g` as a column facet and as a row
+/// facet, resolved shared and independent, with the Log channel on x and on
+/// y -- every variant draws the 4 positive rows across both panels and
+/// warns exactly once, naming 2 left-out rows. With only one negative row
+/// (`v=[-5,1,10,7,100,3]`) the same warning names 1 row. Under an
+/// independent resolve, panel `b`'s own domain covers `[7, 100]` only (not
+/// panel `a`'s `1`), read off whether its axis draws a `"1"` tick: it does
+/// under `shared` (the union with panel `a`'s `[1, 10]` includes `1`) and
+/// does not under `independent`.
+///
+/// The `y=v {type:log} under coord Flip` variant: the pushed warning's own fields stay the RESOLVED
+/// (post-flip) token (`channel: "x"`) and the real flag (`coord_flipped:
+/// true`) — `resolve_log_extent` threads the caller's real flag through
+/// rather than hardcoding `false` — and `Display` un-flips `channel`
+/// through `user_facing_channel` so the TEXT names the channel the user
+/// actually wrote (`"y scale: ..."`, never `"x scale: ..."`). Checked on
+/// the faceted route (this function's own col/row x shared/independent
+/// matrix) and on the flat (unfaceted) route, in
+/// [`a_flat_log_axis_under_coord_flip_warns_with_the_users_channel`] below.
+#[test]
+fn a_faceted_log_axis_warns_once_with_the_whole_frame_count() {
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let batch_of = |last: f64| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b", "b"])),
+                Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0, 7.0, 100.0, last])),
+            ],
+        )
+        .unwrap()
+    };
+    let two_negative = batch_of(-3.0);
+    let one_negative = batch_of(3.0);
+
+    let modes = [("col", serde_json::json!({"kind": "wrap", "ncols": 2})), ("row", serde_json::json!({"kind": "wrap", "ncols": 1}))];
+    let variants = [("x", serde_json::json!({"x": {"field": "v", "scale": log_scale}, "y": {"field": "g"}})), ("y", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}}))];
+
+    for (mode_name, mode) in &modes {
+        for resolve_independent in [false, true] {
+            for (log_channel, encoding) in &variants {
+                let mut resolve = serde_json::json!({"x": "shared", "y": "shared"});
+                resolve[log_channel] = serde_json::json!(if resolve_independent { "independent" } else { "shared" });
+                let facet = serde_json::json!({"field": "g", "mode": mode, "resolve": resolve});
+                let spec = faceted_spec("point", encoding.clone(), facet, serde_json::json!({}));
+
+                for (batch, rows) in [(&two_negative, 2u64 as usize), (&one_negative, 1usize)] {
+                    let (scene, warnings) = scene_over(&spec, batch, &crate::layout::ThemeInputs::default());
+                    let total_marks: usize = scene.panels.iter().flat_map(|p| p.marks.iter()).map(|b| b.nodes.len()).sum();
+                    assert_eq!(total_marks, 6 - rows, "{mode_name} independent={resolve_independent} {log_channel} rows={rows}");
+                    let log_warnings: Vec<&RenderWarning> =
+                        warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+                    assert_eq!(log_warnings.len(), 1, "{mode_name} independent={resolve_independent} {log_channel} rows={rows}: {warnings:?}");
+                    let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
+                        channel: log_channel.to_string(),
+                        field: "v".to_string(),
+                        rows,
+                        side: crate::scale::log::LogSide::Positive,
+                        coord_flipped: false,
+                    };
+                    assert_eq!(*log_warnings[0], expected, "{mode_name} independent={resolve_independent} {log_channel} rows={rows}");
+                }
+            }
+        }
+    }
+
+    // Independent resolve: panel b's own domain covers [7, 100] only.
+    let facet_independent_y = serde_json::json!({
+        "field": "g",
+        "mode": {"kind": "wrap", "ncols": 2},
+        "resolve": {"x": "shared", "y": "independent"},
+    });
+    let spec_independent = faceted_spec(
+        "point",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}}),
+        facet_independent_y,
+        serde_json::json!({}),
+    );
+    let (scene, _) = scene_over(&spec_independent, &two_negative, &crate::layout::ThemeInputs::default());
+    let panel_a_labels: Vec<String> = axis_text_positions(&scene.panels[0], true).into_iter().map(|(l, _)| l).collect();
+    let panel_b_labels: Vec<String> = axis_text_positions(&scene.panels[1], true).into_iter().map(|(l, _)| l).collect();
+    assert!(panel_a_labels.contains(&"1".to_string()), "panel a (domain [1, 10]) should draw '1': {panel_a_labels:?}");
+    assert!(!panel_b_labels.contains(&"1".to_string()), "panel b (domain [7, 100], independent) should not draw '1': {panel_b_labels:?}");
+
+    let facet_shared_y = serde_json::json!({
+        "field": "g",
+        "mode": {"kind": "wrap", "ncols": 2},
+        "resolve": {"x": "shared", "y": "shared"},
+    });
+    let spec_shared = faceted_spec(
+        "point",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}}),
+        facet_shared_y,
+        serde_json::json!({}),
+    );
+    let (scene, _) = scene_over(&spec_shared, &two_negative, &crate::layout::ThemeInputs::default());
+    let panel_b_labels: Vec<String> = axis_text_positions(&scene.panels[1], true).into_iter().map(|(l, _)| l).collect();
+    assert!(panel_b_labels.contains(&"1".to_string()), "panel b under shared resolve spans the union [1, 100]: {panel_b_labels:?}");
+
+    // The `y=v {type:log} under coord Flip` variant: `y` is the user's
+    // written channel, resolved on the physical x axis after the swap, so
+    // an independent resolve is keyed on "x" (the physical channel), not
+    // "y". The pushed warning's own fields carry the RESOLVED token
+    // (`channel: "x"`) and the real flag (`coord_flipped: true`); its
+    // `Display` text names the user's "y".
+    for (mode_name, mode) in &modes {
+        for resolve_independent in [false, true] {
+            let mut resolve = serde_json::json!({"x": "shared", "y": "shared"});
+            resolve["x"] = serde_json::json!(if resolve_independent { "independent" } else { "shared" });
+            let facet = serde_json::json!({"field": "g", "mode": mode, "resolve": resolve});
+            let spec = faceted_spec(
+                "point",
+                serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}}),
+                facet,
+                serde_json::json!({"coord": {"kind": "flip"}}),
+            );
+            for (batch, rows) in [(&two_negative, 2usize), (&one_negative, 1usize)] {
+                let (scene, warnings) = scene_over(&spec, batch, &crate::layout::ThemeInputs::default());
+                let total_marks: usize = scene.panels.iter().flat_map(|p| p.marks.iter()).map(|b| b.nodes.len()).sum();
+                assert_eq!(total_marks, 6 - rows, "{mode_name} independent={resolve_independent} flip rows={rows}");
+                let log_warnings: Vec<&RenderWarning> =
+                    warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+                assert_eq!(log_warnings.len(), 1, "{mode_name} independent={resolve_independent} flip rows={rows}: {warnings:?}");
+                let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
+                    channel: "x".to_string(),
+                    field: "v".to_string(),
+                    rows,
+                    side: crate::scale::log::LogSide::Positive,
+                    coord_flipped: true,
+                };
+                assert_eq!(*log_warnings[0], expected, "{mode_name} independent={resolve_independent} flip rows={rows}");
+                let text = log_warnings[0].to_string();
+                assert!(text.starts_with("y scale:"), "{mode_name} independent={resolve_independent} flip rows={rows}: {text}");
+            }
+        }
+    }
+}
+
+/// [`a_faceted_log_axis_warns_once_with_the_whole_frame_count`]'s `CoordFlip`
+/// proof on the FLAT (unfaceted) route: `y=fm.Y('v', scale=LogScale())`
+/// under `CoordFlip`, one frame with 2 off-side rows -- the same pushed
+/// warning (`channel: "x"`, `coord_flipped: true`) and the same
+/// user-facing `Display` text (`"y scale: ..."`, never `"x scale: ..."`).
+#[test]
+fn a_flat_log_axis_under_coord_flip_warns_with_the_users_channel() {
+    let batch = one_column_batch(vec![Some(-5.0), Some(1.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "c", "scale": log_scale}},
+    }))
+    .unwrap();
+    spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+    let (_scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    let log_warnings: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+    assert_eq!(log_warnings.len(), 1, "{warnings:?}");
+    let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
+        channel: "x".to_string(),
+        field: "c".to_string(),
+        rows: 1,
+        side: crate::scale::log::LogSide::Positive,
+        coord_flipped: true,
+    };
+    assert_eq!(*log_warnings[0], expected);
+    let text = log_warnings[0].to_string();
+    assert!(text.starts_with("y scale:"), "{text}");
+    assert!(!text.starts_with("x scale:"), "{text}");
+}
+
+/// Cycle 4c's concern 1, closed: `RenderError::LogScaleNoValueOnSide`'s own
+/// `Display` has the identical bug `LogScaleRowsLeftOut` had before choice
+/// F concern 2 -- under `CoordFlip`, `y=fm.Y('v', scale=LogScale())` over a
+/// column with NOTHING on the positive side refuses with `channel: "x"`
+/// (the post-flip resolved token) and `coord_flipped: false`, so the
+/// message names the wrong axis. The flat (unfaceted) route.
+#[test]
+fn a_flat_log_axis_no_value_refusal_names_the_users_channel_under_coord_flip() {
+    let batch = one_column_batch(vec![Some(-5.0), Some(-7.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "c", "scale": log_scale}},
+    }))
+    .unwrap();
+    spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect_err("nothing on the positive side refuses");
+    match &err {
+        RenderError::LogScaleNoValueOnSide { channel, coord_flipped, .. } => {
+            assert_eq!(channel, "x", "the resolved token stays x internally");
+            assert!(coord_flipped, "the real flag must be threaded, not hardcoded false");
+        }
+        other => panic!("expected LogScaleNoValueOnSide: {other:?}"),
+    }
+    let text = err.to_string();
+    assert!(text.starts_with("y scale:"), "{text}");
+    assert!(!text.starts_with("x scale:"), "{text}");
+}
+
+/// [`a_flat_log_axis_no_value_refusal_names_the_users_channel_under_coord_flip`]'s
+/// proof on the faceted route: the SAME all-negative column, faceted by
+/// `g`, under `CoordFlip` -- the refusal `prepare_render_inputs`/
+/// `prepare_and_layout` surfaces names the user's `y`, not the resolved
+/// `x`, on every panel (the whole chart refuses, since the Log channel has
+/// nothing on-side anywhere in the frame).
+#[test]
+fn a_faceted_log_axis_no_value_refusal_names_the_users_channel_under_coord_flip() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(Float64Array::from(vec![-5.0, -7.0, -3.0, -9.0])),
+        ],
+    )
+    .unwrap();
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let facet = serde_json::json!({"field": "g", "mode": {"kind": "wrap", "ncols": 2}});
+    let spec = faceted_spec(
+        "point",
+        serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}}),
+        facet,
+        serde_json::json!({"coord": {"kind": "flip"}}),
+    );
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect_err("nothing on the positive side refuses, faceted");
+    match &err {
+        RenderError::LogScaleNoValueOnSide { channel, coord_flipped, .. } => {
+            assert_eq!(channel, "x");
+            assert!(coord_flipped);
+        }
+        other => panic!("expected LogScaleNoValueOnSide: {other:?}"),
+    }
+    let text = err.to_string();
+    assert!(text.starts_with("y scale:"), "{text}");
+    assert!(!text.starts_with("x scale:"), "{text}");
+}
+
+/// [`one_column_batch`] plus a string key column `k` (`extract_keys`'s own
+/// key column), for the Log aux drop's source-row remap tests: the key must
+/// name the same row after the drop as before it.
+fn one_column_batch_with_key(values: Vec<Option<f64>>, keys: &[&str]) -> RecordBatch {
+    let n = values.len();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Float64, true),
+            Field::new("k", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from((0..n).map(|i| (i * i) as f64).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(values)),
+            Arc::new(StringArray::from(keys.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+/// A point chart over [`one_column_batch_with_key`]'s `x`/`y`/`k`, binding
+/// `channel` to `c` under `scale` and `key` to `k`.
+fn numeric_aux_chart_keyed(channel: &str, scale: serde_json::Value) -> ChartSpec {
+    let mut binding = serde_json::json!({"field": "c", "scale": scale});
+    if channel == "x" {
+        binding = serde_json::json!({"field": "c", "scale": scale});
+    }
+    let mut encoding = with_xy(bound(channel, &binding));
+    encoding["key"] = serde_json::json!({"field": "k"});
+    serde_json::from_value(serde_json::json!({"mark": "point", "encoding": encoding}))
+        .expect("the keyed spec deserializes")
+}
+
+/// The fix case): the Log aux drop used to
+/// renumber `data_indices` by position in the FILTERED batch (the builder's
+/// own numbering), disagreeing with the x/y drop, which already names
+/// source rows. Keys stayed right (`extract_keys` reads the filtered batch
+/// with the builder's own indices), but `data_indices` did not, so a point
+/// selection keyed by `data_idx` named the wrong row in a sibling layer.
+#[test]
+fn a_log_aux_drop_keeps_source_row_indices_like_the_x_drop() {
+    let batch = one_column_batch_with_key(
+        vec![Some(1.0), Some(-5.0), Some(10.0), None, Some(100.0)],
+        &["a", "b", "c", "d", "e"],
+    );
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    for channel in crate::render::scale_resolve::NUMERIC_AUX_CHANNELS {
+        let spec = numeric_aux_chart_keyed(channel, log_scale.clone());
+        let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        let batch_out = &scene.panels[0].marks[0];
+        assert_eq!(batch_out.data_indices, Some(vec![0, 2, 3, 4]), "{channel}");
+        assert_eq!(batch_out.keys, Some(vec!["a".to_string(), "c".to_string(), "d".to_string(), "e".to_string()]), "{channel}");
+    }
+    let x_spec = numeric_aux_chart_keyed("x", log_scale);
+    let (scene, _) = scene_over(&x_spec, &batch, &crate::layout::ThemeInputs::default());
+    let x_out = &scene.panels[0].marks[0];
+    assert_eq!(x_out.data_indices, Some(vec![0, 2, 4]));
+    assert_eq!(x_out.keys, Some(vec!["a".to_string(), "c".to_string(), "e".to_string()]));
+}
+
+/// [`a_log_aux_drop_keeps_source_row_indices_like_the_x_drop`]'s rule on
+/// every mark that draws a numeric auxiliary channel, not point alone: the
+/// off-side row is absent, not renumbered, on bar/rect/rule/tick/segment
+/// (one node per source row) and on line/area (one node, the surviving
+/// vertices named by source row) alike.
+#[test]
+fn a_log_aux_drop_keeps_source_rows_on_every_mark() {
+    let batch = one_column_batch(vec![Some(1.0), Some(-5.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let cases: [(&str, &str, serde_json::Value); 6] = [
+        ("point", "size", serde_json::json!([10.0, 40.0])),
+        ("bar", "opacity", serde_json::json!([0.2, 0.6])),
+        ("rect", "fill_opacity", serde_json::json!([0.2, 0.6])),
+        ("rule", "stroke_opacity", serde_json::json!([0.2, 0.6])),
+        ("tick", "stroke_width", serde_json::json!([10.0, 40.0])),
+        ("segment", "opacity", serde_json::json!([0.2, 0.6])),
+    ];
+    for (mark, channel, range) in cases {
+        let mut scale = log_scale.clone();
+        scale["range"] = range;
+        let mut encoding = with_xy(bound(channel, &serde_json::json!({"field": "c", "scale": scale})));
+        if mark == "rect" {
+            encoding["x2"] = serde_json::json!({"field": "x"});
+            encoding["y2"] = serde_json::json!({"field": "y"});
+        }
+        if mark == "segment" {
+            encoding["x2"] = serde_json::json!({"field": "x"});
+            encoding["y2"] = serde_json::json!({"field": "y"});
+        }
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding}))
+            .unwrap_or_else(|e| panic!("{mark}/{channel}: {e}"));
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        let batch_out = &scene.panels[0].marks[0];
+        assert_eq!(batch_out.nodes.len(), 3, "{mark}/{channel}: {:?}", batch_out.nodes);
+        assert_eq!(batch_out.data_indices, Some(vec![0, 2, 3]), "{mark}/{channel}");
+        assert_eq!(
+            warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { rows: 1, .. })).count(),
+            1,
+            "{mark}/{channel}: {warnings:?}"
+        );
+    }
+    // line/area: one node, 3 surviving vertices named by source row.
+    for mark in ["line", "area"] {
+        let mut scale = log_scale.clone();
+        scale["range"] = serde_json::json!([10.0, 40.0]);
+        let encoding = with_xy(bound("size", &serde_json::json!({"field": "c", "scale": scale})));
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap();
+        let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        let batch_out = &scene.panels[0].marks[0];
+        assert_eq!(batch_out.nodes.len(), 1, "{mark}");
+        assert_eq!(batch_out.data_indices, Some(vec![0]), "{mark}: the one node names its own source row");
+    }
+}
+
+/// Guard, pinned per mark family: every mark builder's positional
+/// pre-filter reads `ScaleKind::admits_for_pixel`, the one shared predicate
+/// that admits a
+/// non-`NaN` infinity ONLY for a `Log` scale (deferring to `to_pixel_f64`'s
+/// own on-side gate) and requires a plain finite value for every other
+/// scale kind, UNCHANGED from before this whole Log/infinity feature
+/// existed. `arc`'s `pie_wedges`/`build_annular`/`radius_to_pixel` never
+/// call `admits_for_pixel` at all (they never dispatch through
+/// `ScaleKind::to_pixel_f64`), so arc keeps its own, separate, always-finite
+/// gate. This test uses an UNCLAMPED Linear scale, where the pre-existing,
+/// deliberately unchanged behavior ("the silent
+/// drop of a non-finite x/y row under Linear") holds regardless of the
+/// predicate: `to_pixel_f64`'s own `is_finite` check on the dispatched
+/// pixel already catches an infinite input there. See
+/// [`a_clamped_non_log_scale_still_drops_matching_sign_infinity_on_every_mark`]
+/// for the CLAMPED case, where the predicate is load-bearing.
+#[test]
+fn an_infinite_positional_value_is_silently_dropped_on_every_mark_under_linear() {
+    let batch_of = |v2: f64| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("x2", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("zero", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, v2, 30.0])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0])),
+            ],
+        )
+        .unwrap()
+    };
+    let finite_batch = batch_of(20.0);
+    let infinite_batch = batch_of(f64::INFINITY);
+
+    // Non-path marks: one node per row; the infinite row's node is absent.
+    let node_cases: [(&str, serde_json::Value); 6] = [
+        ("bar", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v"}})),
+        ("rect", serde_json::json!({"x": {"field": "x"}, "x2": {"field": "x2"}, "y": {"field": "v"}, "y2": {"field": "zero"}})),
+        ("rule", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v"}})),
+        ("tick", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v"}})),
+        ("segment", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v"}, "x2": {"field": "x2"}, "y2": {"field": "zero"}})),
+        ("text", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v"}, "text": {"field": "g"}})),
+    ];
+    for (mark, encoding) in node_cases {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap_or_else(|e| panic!("{mark}: {e}"));
+        let (finite_scene, finite_warnings) = scene_over(&spec, &finite_batch, &crate::layout::ThemeInputs::default());
+        assert!(finite_warnings.is_empty(), "{mark} (control): {finite_warnings:?}");
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "{mark}: an infinite Linear value is dropped silently, no warning: {inf_warnings:?}");
+        let finite_count: usize = finite_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        assert_eq!(finite_count, 3, "{mark} (control)");
+        assert_eq!(inf_count, 2, "{mark}: the infinite row's node must be absent, not drawn at a fallback position");
+    }
+
+    // Path marks: one node, fewer vertices (commands).
+    for mark in ["line", "area"] {
+        let encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "v"}});
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap();
+        let path_commands = |scene: &ferrum_scene::SceneGraph| -> usize {
+            match &scene.panels[0].marks[0].nodes[0] {
+                ferrum_scene::SceneNode::Path { commands, .. } => commands.len(),
+                // A plain (untapered, no size channel) line draws a Polyline.
+                ferrum_scene::SceneNode::Polyline { points, .. } => points.len(),
+                other => panic!("{mark}: expected a path or polyline: {other:?}"),
+            }
+        };
+        let (finite_scene, _) = scene_over(&spec, &finite_batch, &crate::layout::ThemeInputs::default());
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "{mark}: {inf_warnings:?}");
+        assert!(path_commands(&inf_scene) < path_commands(&finite_scene), "{mark}: the infinite row must drop a vertex from the path");
+    }
+
+    // Arc: theta=v under a polar coord; `pie_wedges` drops the infinite row's slice.
+    {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "arc",
+            "encoding": {"x": {"field": "v"}},
+            "coord": {"kind": "polar", "theta": "x", "start_angle": 0.0, "direction": "clockwise", "inner_radius": 0.0, "pad_angle": 0.0},
+        }))
+        .unwrap();
+        let (finite_scene, _) = scene_over(&spec, &finite_batch, &crate::layout::ThemeInputs::default());
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "arc: {inf_warnings:?}");
+        let finite_count: usize = finite_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        assert_eq!(finite_count, 3, "arc (control)");
+        assert_eq!(inf_count, 2, "arc: the infinite row's wedge must be absent");
+    }
+}
+
+/// Only a `Log` scale's matching-sign infinity goes through the relaxed
+/// check (`ScaleKind::admits_for_pixel`); every OTHER scale kind must
+/// behave EXACTLY as before this whole feature existed, on all nine mark
+/// families, including `point` -- a clamped Linear, Sqrt, Pow or Symlog
+/// channel drops `+inf`/`-inf` again, not clamps it to the range end.
+/// `clamp=true` is the reason this needs its own guard, distinct from
+/// [`an_infinite_positional_value_is_silently_dropped_on_every_mark_under_linear`]'s
+/// unclamped case: a clamped non-`Log` scale's OWN arithmetic maps an
+/// infinite input to a FINITE range-end pixel (`f64::INFINITY.clamp(lo,
+/// hi)` is finite), so the row count would silently grow unless the
+/// upstream pre-filter keeps excluding it.
+#[test]
+fn a_clamped_non_log_scale_still_drops_matching_sign_infinity_on_every_mark() {
+    let batch_of = |v2: f64| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("x2", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("base", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, v2, 90.0])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap()
+    };
+    let control_batch = batch_of(100.0);
+    let infinite_batch = batch_of(f64::INFINITY);
+
+    let scales: [(&str, serde_json::Value); 4] = [
+        ("linear", serde_json::json!({"type": "linear", "domain": [0.0, 100.0], "clamp": true})),
+        ("pow", serde_json::json!({"type": "pow", "exponent": 3.0, "domain": [0.0, 100.0], "clamp": true})),
+        ("sqrt", serde_json::json!({"type": "sqrt", "domain": [0.0, 100.0], "clamp": true})),
+        ("symlog", serde_json::json!({"type": "symlog", "constant": 1.0, "domain": [0.0, 100.0], "clamp": true})),
+    ];
+
+    for (kind, scale) in &scales {
+        let node_cases: [(&str, serde_json::Value); 7] = [
+            ("point", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": scale}})),
+            ("bar", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": scale}})),
+            ("rect", serde_json::json!({"x": {"field": "x"}, "x2": {"field": "x2"}, "y": {"field": "v", "scale": scale}, "y2": {"field": "base"}})),
+            ("rule", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": scale}})),
+            ("tick", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": scale}})),
+            ("segment", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": scale}, "x2": {"field": "x2"}, "y2": {"field": "base"}})),
+            ("text", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": scale}, "text": {"field": "g"}})),
+        ];
+        for (mark, encoding) in node_cases {
+            let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap_or_else(|e| panic!("{kind}/{mark}: {e}"));
+            let (control_scene, control_warnings) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
+            assert!(control_warnings.is_empty(), "{kind}/{mark} (control): {control_warnings:?}");
+            let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+            assert!(inf_warnings.is_empty(), "{kind}/{mark}: a dropped row warns nothing under a non-Log scale: {inf_warnings:?}");
+            let control_count: usize = control_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+            let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+            assert_eq!(control_count, 3, "{kind}/{mark} (control)");
+            assert_eq!(inf_count, 2, "{kind}/{mark}: a clamped non-Log scale must still drop the infinite row, not clamp it to the range end");
+        }
+
+        // Path marks: one node, the infinite row's vertex is absent.
+        for mark in ["line", "area"] {
+            let encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": scale}});
+            let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap();
+            let path_commands = |scene: &ferrum_scene::SceneGraph| -> usize {
+                match &scene.panels[0].marks[0].nodes[0] {
+                    ferrum_scene::SceneNode::Path { commands, .. } => commands.len(),
+                    ferrum_scene::SceneNode::Polyline { points, .. } => points.len(),
+                    other => panic!("{kind}/{mark}: expected a path or polyline: {other:?}"),
+                }
+            };
+            let (control_scene, _) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
+            let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+            assert!(inf_warnings.is_empty(), "{kind}/{mark}: {inf_warnings:?}");
+            assert!(path_commands(&inf_scene) < path_commands(&control_scene), "{kind}/{mark}: the infinite row must drop its vertex, not clamp into place");
+        }
+    }
+}
+
+/// A matching-sign (on-side) Log infinity
+/// clamps to the range end on EVERY mark, not only `point`. Each mark binds
+/// its value channel (`v`) to `{type: log, domain: [1, 100], clamp: true}`;
+/// row b's value is either the domain's own upper bound (`100.0`, the
+/// control) or `+inf` (on-side, since the domain is positive). Without this
+/// gating, every mark but `point` still gates its positional read on
+/// `is_finite()`, so the infinite row never reaches `to_pixel_f64`'s own
+/// on-side clamp and is silently dropped — one fewer node/vertex than the
+/// control. After the fix, both variants draw the SAME row count: `+inf`
+/// clamps to the range end exactly as the domain's own boundary value does
+/// (`to_pixel_f64`'s Log arm maps both to the same range-end pixel via
+/// `LogScaleData::scale`'s `clamp` branch). `arc` has no equivalent: its
+/// polar wedge math (`pie_wedges`'s proportional sweep, `build_annular`'s
+/// raw-radian theta, `radius_to_pixel`'s own ratio interpolation) never
+/// dispatches through `ScaleKind::to_pixel_f64` at all — there is no
+/// `on_side` gate for an infinite theta or radius to reach, so this test
+/// pins arc's CURRENT behavior as a documented exception, not a case this
+/// gate covers.
+#[test]
+fn a_matching_sign_log_infinity_clamps_to_the_range_end_on_every_mark() {
+    let log_scale = serde_json::json!({"type": "log", "domain": [1.0, 100.0], "clamp": true});
+    // `base` (bound to `y2`/`x2` where a mark needs a second positional
+    // value on the SAME Log-scaled channel) is the domain's own lower
+    // bound (`1.0`), not `0.0` -- `0.0` is off-side for a positive Log
+    // domain and would itself trigger the drop-and-warn rule,
+    // confounding the proof for rect/segment (both bind y2 on the same y-scale).
+    let batch_of = |v2: f64| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("x2", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("base", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, v2, 90.0])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap()
+    };
+    let control_batch = batch_of(100.0);
+    let infinite_batch = batch_of(f64::INFINITY);
+
+    let node_cases: [(&str, serde_json::Value); 6] = [
+        ("bar", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}})),
+        ("rect", serde_json::json!({"x": {"field": "x"}, "x2": {"field": "x2"}, "y": {"field": "v", "scale": log_scale}, "y2": {"field": "base"}})),
+        ("rule", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": log_scale}})),
+        ("tick", serde_json::json!({"x": {"field": "g"}, "y": {"field": "v", "scale": log_scale}})),
+        ("segment", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": log_scale}, "x2": {"field": "x2"}, "y2": {"field": "base"}})),
+        ("text", serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": log_scale}, "text": {"field": "g"}})),
+    ];
+    for (mark, encoding) in node_cases {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap_or_else(|e| panic!("{mark}: {e}"));
+        let (control_scene, control_warnings) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
+        assert!(control_warnings.is_empty(), "{mark} (control): {control_warnings:?}");
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "{mark}: a dropped Log row would warn via LogScaleRowsLeftOut if off-side, but an on-side clamp drops nothing: {inf_warnings:?}");
+        let control_count: usize = control_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        assert_eq!(control_count, 3, "{mark} (control)");
+        assert_eq!(inf_count, 3, "{mark}: the on-side infinite row must clamp to the range end, not be dropped");
+    }
+
+    // Path marks: one node, the same vertex count either way.
+    for mark in ["line", "area"] {
+        let encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "v", "scale": log_scale}});
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding})).unwrap();
+        let path_commands = |scene: &ferrum_scene::SceneGraph| -> usize {
+            match &scene.panels[0].marks[0].nodes[0] {
+                ferrum_scene::SceneNode::Path { commands, .. } => commands.len(),
+                ferrum_scene::SceneNode::Polyline { points, .. } => points.len(),
+                other => panic!("{mark}: expected a path or polyline: {other:?}"),
+            }
+        };
+        let (control_scene, _) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "{mark}: {inf_warnings:?}");
+        assert_eq!(path_commands(&inf_scene), path_commands(&control_scene), "{mark}: the on-side infinite row must keep its vertex, clamped");
+    }
+
+    // Arc: no `ScaleKind` dispatch for theta/radius at all (see doc comment
+    // above) -- this pins the UNCHANGED behavior, not a fix.
+    {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "arc",
+            "encoding": {"x": {"field": "v"}},
+            "coord": {"kind": "polar", "theta": "x", "start_angle": 0.0, "direction": "clockwise", "inner_radius": 0.0, "pad_angle": 0.0},
+        }))
+        .unwrap();
+        let (control_scene, _) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
+        let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
+        assert!(inf_warnings.is_empty(), "arc: {inf_warnings:?}");
+        let control_count: usize = control_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+        assert_eq!(control_count, 3, "arc (control)");
+        assert_eq!(inf_count, 2, "arc: unchanged -- pie_wedges never dispatches through a ScaleKind, so there is no on_side gate to clamp through");
+    }
+}
+
+/// A line's `size=` conditional carries per-vertex rows (`vertex_rows`):
+/// the Log drop must remap those to source rows too, the same seam that
+/// fixes `data_indices`.
+#[test]
+fn a_log_size_drop_keeps_source_vertex_rows_on_a_conditional_line() {
+    let batch = one_column_batch(vec![Some(1.0), Some(-5.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0, "range": [1.0, 4.0]});
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "line",
+        "encoding": with_xy(bound("size", &serde_json::json!({"field": "c", "scale": log_scale}))),
+    }))
+    .expect("the conditional line spec deserializes");
+    spec.conditionals = vec![crate::spec::chart::ChartConditional {
+        encoding: ferrum_scene::ConditionalEncoding {
+            selection_name: "s".into(),
+            channel: ferrum_scene::ChannelName::Size,
+            if_selected: ferrum_scene::EncodingValue::Size { value: 20.0 },
+            if_not: ferrum_scene::EncodingValue::Size { value: 10.0 },
+        },
+        layers: None,
+    }];
+    let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    let batch_out = &scene.panels[0].marks[0];
+    let expected: Vec<Vec<ferrum_scene::VertexRow>> =
+        vec![[0usize, 2, 3].into_iter().map(ferrum_scene::VertexRow::Row).collect()];
+    assert_eq!(batch_out.vertex_rows, Some(expected));
+}
+
+/// Two layers over one frame, one filtered by a Log `size`, one plain: each
+/// layer's own `data_indices` keep their own source rows — a sibling
+/// layer's drop never renumbers a layer that did not drop anything.
+#[test]
+fn a_layered_log_aux_drop_keeps_each_layers_source_rows() {
+    let batch = one_column_batch(vec![Some(1.0), Some(-5.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0, "range": [10.0, 40.0]});
+    let spec = drawn_channel_spec(
+        serde_json::json!({}),
+        &[
+            ("point", serde_json::json!({"size": {"field": "c", "scale": log_scale}})),
+            ("tick", serde_json::json!({"x": {"field": "c"}})),
+        ],
+    );
+    let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0, 2, 3]), "layer 0 (filtered)");
+    assert_eq!(scene.panels[0].marks[1].data_indices, Some(vec![0, 1, 2, 3]), "layer 1 (plain)");
+}
+
+/// The remap runs at one seam `build_scene` itself owns
+/// (`build_panel_mark_batches`'s one `log_aux_drawn_rows` shadow,
+/// scene_build.rs), so the SVG route (`render_svg`, static) and the scene-
+/// JSON route (`render_scene_json`, the one the interactive/WASM runtime
+/// consumes) — which both build the scene by calling it — must agree on the
+/// mark batch (nodes, `data_indices`, keys), not just on each one's own
+/// entry point happening to remap correctly.
+#[test]
+fn a_log_aux_drop_is_identical_static_and_interactive() {
+    let batch = one_column_batch(vec![Some(1.0), Some(-5.0), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0, "range": [10.0, 40.0]});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("size", &serde_json::json!({"field": "c", "scale": log_scale}))),
+    }))
+    .unwrap();
+    pyo3::Python::initialize();
+    let theme = crate::layout::ThemeInputs::default();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let config = crate::render::config::RenderConfig::default();
+    let (static_scene, _) = scene_over(&spec, &batch, &theme);
+    let (json, _packed, _) = crate::render::render_scene_json(&spec, &batch, &theme, viewport, &config, &chart_config)
+        .expect("the interactive route renders");
+    let interactive_scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).expect("the scene JSON deserializes");
+    assert_eq!(static_scene.panels[0].marks, interactive_scene.panels[0].marks);
+}
+
+/// The fix case): an off-side infinity used
+/// to be dropped from the left-out tally entirely (`admits`'s finiteness
+/// check folded "non-finite" into "off-side" with no distinction), so a
+/// `-inf` under a positive `Log` size mapped to the channel's unbound
+/// default and no warning counted it. `on_side` now admits an infinity
+/// matching the domain's sign, so a `-inf` on a positive scale is correctly
+/// off-side: not drawn, and counted.
+#[test]
+fn an_off_side_infinity_is_not_drawn_and_is_counted() {
+    let batch = one_column_batch(vec![Some(1.0), Some(f64::NEG_INFINITY), Some(10.0), Some(100.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0, "range": [10.0, 40.0]});
+    for channel in ["size", "x"] {
+        let mut scale = log_scale.clone();
+        if channel == "size" {
+            scale["range"] = serde_json::json!([10.0, 40.0]);
+        }
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": with_xy(bound(channel, &serde_json::json!({"field": "c", "scale": scale}))),
+        }))
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(scene.panels[0].marks[0].nodes.len(), 3, "{channel}");
+        let expected = RenderWarning::LogScaleRowsLeftOut {
+            channel: channel.to_string(),
+            field: "c".to_string(),
+            rows: 1,
+            side: crate::scale::log::LogSide::Positive,
+            coord_flipped: false,
+        };
+        assert!(warnings.contains(&expected), "{channel}: {warnings:?}");
+    }
+}
+
+/// An on-side infinity clamps to the range end, as `LinearScale` already
+/// does on aux: `+inf` under a positive domain is not left out, so it maps
+/// through `LogScaleData::scale`'s clamp to the far end of the range — the
+/// same pixel/area a `+inf` under `Linear` lands at.
+#[test]
+fn an_on_side_infinity_clamps_to_the_range_end_like_linear() {
+    let batch = one_column_batch(vec![Some(1.0), Some(f64::INFINITY), Some(10.0)]);
+    let log_scale = serde_json::json!({"type": "log", "domain": [1.0, 10.0], "range": [10.0, 40.0]});
+    let linear_scale = serde_json::json!({"type": "linear", "domain": [1.0, 10.0], "range": [10.0, 40.0]});
+    let area_of_row1 = |scale: serde_json::Value| {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": with_xy(bound("size", &serde_json::json!({"field": "c", "scale": scale}))),
+        }))
+        .unwrap();
+        let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        match &scene.panels[0].marks[0].nodes[1] {
+            ferrum_scene::SceneNode::Circle { r, .. } => std::f64::consts::PI * r * r,
+            other => panic!("expected a circle: {other:?}"),
+        }
+    };
+    let log_area = area_of_row1(log_scale);
+    let linear_area = area_of_row1(linear_scale);
+    assert!((log_area - linear_area).abs() < 1e-9, "log {log_area} vs linear {linear_area}");
+    assert!((log_area - 40.0).abs() < 1e-9, "row 1 must sit at area 40 (the range end): {log_area}");
+}
+
+/// A negative-domain Log aux: `+inf` is off-side (dropped, counted), `-inf`
+/// is on-side (clamps to the domain's own far end, `-100`).
+#[test]
+fn a_negative_domain_log_aux_drops_plus_infinity_and_clamps_minus_infinity() {
+    let batch = one_column_batch(vec![Some(-10.0), Some(f64::INFINITY), Some(f64::NEG_INFINITY)]);
+    let log_scale = serde_json::json!({"type": "log", "domain": [-100.0, -1.0], "range": [10.0, 40.0]});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("size", &serde_json::json!({"field": "c", "scale": log_scale}))),
+    }))
+    .unwrap();
+    let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    let batch_out = &scene.panels[0].marks[0];
+    assert_eq!(batch_out.nodes.len(), 2);
+    assert_eq!(batch_out.data_indices, Some(vec![0, 2]));
+    match &batch_out.nodes[1] {
+        ferrum_scene::SceneNode::Circle { r, .. } => {
+            let area = std::f64::consts::PI * r * r;
+            assert!((area - 10.0).abs() < 1e-9, "row 2 (-inf) must sit at area 10 (the -100 end): {area}");
+        }
+        other => panic!("expected a circle: {other:?}"),
+    }
+    let expected = RenderWarning::LogScaleRowsLeftOut {
+        channel: "size".to_string(),
+        field: "c".to_string(),
+        rows: 1,
+        side: crate::scale::log::LogSide::Negative,
+        coord_flipped: false,
+    };
+    assert!(warnings.contains(&expected), "{warnings:?}");
+}
+
+/// A `Log` x column of only off-side infinities refuses, naming the row
+/// count, exactly as an all-negative finite column already does — today it
+/// silently renders an empty `[1, 10]` axis.
+#[test]
+fn a_log_x_column_of_only_off_side_infinities_refuses() {
+    let batch = one_column_batch(vec![Some(f64::NEG_INFINITY), Some(f64::NEG_INFINITY)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("x", &serde_json::json!({"field": "c", "scale": log_scale}))),
+    }))
+    .unwrap();
+    let text = marks_and_legend_over(&spec, &batch).expect_err("an all-off-side-infinity column refuses");
+    assert_eq!(
+        text,
+        "x scale: 2 row(s) of 'c' are zero or negative, and a LogScale with no domain maps only \
+         positive values; use fm.SymlogScale()"
+    );
+}
+
+/// A clamped Log x axis places `+inf` at the range end: the domain-maximum
+/// pixel (the plot area's own right edge, read off the scene directly, not
+/// a Linear twin -- a clamped Linear scale drops `+inf` rather than drawing
+/// it, so a Linear clamp comparison would prove nothing about `Log`'s own
+/// on-side clamp). The same column under `clamp=False` still drops it (the
+/// NaN path).
+#[test]
+fn a_clamped_log_x_places_plus_infinity_at_the_range_end() {
+    let batch = one_column_batch(vec![Some(1.0), Some(f64::INFINITY), Some(5.0)]);
+    let log_clamped = serde_json::json!({"type": "log", "domain": [1.0, 10.0], "clamp": true});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("x", &serde_json::json!({"field": "c", "scale": log_clamped}))),
+    }))
+    .unwrap();
+    let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    let n = scene.panels[0].marks[0].nodes.len();
+    assert_eq!(n, 3, "clamped Log draws every row");
+    let log_cx = match &scene.panels[0].marks[0].nodes[1] {
+        ferrum_scene::SceneNode::Circle { cx, .. } => *cx,
+        other => panic!("expected a circle: {other:?}"),
+    };
+    let domain_max_px = scene.panels[0].plot_area.x + scene.panels[0].plot_area.w;
+    assert!(
+        (log_cx - domain_max_px).abs() < 1e-6,
+        "clamped +inf must sit at the domain-max pixel {domain_max_px}, got {log_cx}"
+    );
+
+    let log_unclamped = serde_json::json!({"type": "log", "domain": [1.0, 10.0]});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("x", &serde_json::json!({"field": "c", "scale": log_unclamped}))),
+    }))
+    .unwrap();
+    let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    assert_eq!(scene.panels[0].marks[0].nodes.len(), 2, "clamp false still drops +inf");
+}
+
+/// `NaN`/`null` are unaffected by the off-side-drop rule: they draw at the
+/// unbound channel's own default, exactly as before.
+#[test]
+fn a_nan_or_null_log_aux_row_draws_at_the_default() {
+    let batch = one_column_batch(vec![Some(1.0), Some(f64::NAN), None, Some(10.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0, "range": [10.0, 40.0]});
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(bound("size", &serde_json::json!({"field": "c", "scale": log_scale}))),
+    }))
+    .unwrap();
+    let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    assert_eq!(scene.panels[0].marks[0].nodes.len(), 4);
+    let unbound: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": with_xy(serde_json::json!({})),
+    }))
+    .unwrap();
+    let (unbound_scene, _) = scene_over(&unbound, &batch, &crate::layout::ThemeInputs::default());
+    let default_r = match &unbound_scene.panels[0].marks[0].nodes[0] {
+        ferrum_scene::SceneNode::Circle { r, .. } => *r,
+        other => panic!("expected a circle: {other:?}"),
+    };
+    for idx in [1usize, 2] {
+        match &scene.panels[0].marks[0].nodes[idx] {
+            ferrum_scene::SceneNode::Circle { r, .. } => assert_eq!(*r, default_r, "row {idx}"),
+            other => panic!("expected a circle: {other:?}"),
+        }
+    }
+}
+
+/// A wire-dict `scale=` whose explicit `Log` domain touches zero or crosses
+/// sign refuses with the scale constructor's own words, on x and on an
+/// aux channel — today both render with 0 marks (x) or every mark pinned
+/// to the range maximum (aux) and no error at all.
+#[test]
+fn a_log_wire_dict_domain_crossing_zero_refuses() {
+    let batch = one_column_batch(vec![Some(-5.0), Some(1.0), Some(10.0), Some(100.0)]);
+    let scale = serde_json::json!({"type": "log", "domain": [-10.0, 1000.0]});
+    for channel in ["x", "size"] {
+        let spec = numeric_aux_chart(channel, Some(scale.clone()), serde_json::json!([]));
+        let text = marks_and_legend_over(&spec, &batch).expect_err("a sign-crossing explicit domain refuses");
+        assert_eq!(
+            text,
+            format!("{channel} scale: log scale domain endpoints must have the same sign"),
+            "{channel}"
+        );
+    }
+}
+
+/// A column every one of whose values is strictly negative refuses under a
+/// data-derived `Log` scale (no stated domain is always the positive side,
+/// never inferred from the data), naming an explicit negative `domain=`
+/// built from the column's own extent — today a mirrored negative log axis
+/// (x) or every mark at one end (aux) draws with no error.
+#[test]
+fn an_all_negative_log_column_refuses_naming_an_explicit_domain() {
+    let batch = one_column_batch(vec![Some(-1000.0), Some(-100.0), Some(-10.0), Some(-1.0)]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    for channel in ["x", "size"] {
+        let spec = numeric_aux_chart(channel, Some(log_scale.clone()), serde_json::json!([]));
+        let text = marks_and_legend_over(&spec, &batch).expect_err("an all-negative column refuses");
+        assert_eq!(
+            text,
+            format!(
+                "{channel} scale: every value of 'c' (4 rows) is negative, and a LogScale with no domain \
+                 maps only positive values; pass an explicit negative domain, e.g. \
+                 fm.LogScale(domain=[-1000, -1]), to draw a mirrored log scale"
+            ),
+            "{channel}"
+        );
+    }
+    // The suggested domain draws as written: the mirrored axis, every row in.
+    let with_domain = serde_json::json!({"type": "log", "base": 10.0, "domain": [-1000.0, -1.0]});
+    let spec = numeric_aux_chart("x", Some(with_domain), serde_json::json!([]));
+    let (marks, _, warnings) = marks_and_legend_warned(&spec, &batch).expect("the suggested domain renders");
+    assert!(warnings.is_empty(), "every row is on the negative side: {warnings:?}");
+    assert_ne!(marks, serde_json::json!([]), "all four negative rows draw");
+}
+
+/// A column that is zero wherever it is not strictly off-side (zero-only,
+/// or a mix of zero and negative rows) refuses under a data-derived `Log`
+/// scale, naming the alternative scale a column touching zero needs:
+/// `fm.SymlogScale()` on x/y, `fm.SqrtScale() or fm.LinearScale()` on an
+/// aux channel — plus an explicit negative domain suggestion when at least
+/// one value is strictly negative.
+#[test]
+fn a_zero_touching_log_column_refuses_naming_the_alternative_scale() {
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+
+    let all_zero = one_column_batch(vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0)]);
+    let x_spec = numeric_aux_chart("x", Some(log_scale.clone()), serde_json::json!([]));
+    let text = marks_and_legend_over(&x_spec, &all_zero).expect_err("an all-zero column refuses");
+    assert_eq!(
+        text,
+        "x scale: 4 row(s) of 'c' are zero or negative, and a LogScale with no domain maps only \
+         positive values; use fm.SymlogScale()"
+    );
+    let size_spec = numeric_aux_chart("size", Some(log_scale.clone()), serde_json::json!([]));
+    let text = marks_and_legend_over(&size_spec, &all_zero).expect_err("an all-zero column refuses");
+    assert_eq!(
+        text,
+        "size scale: 4 row(s) of 'c' are zero or negative, and a LogScale with no domain maps only \
+         positive values; use fm.SqrtScale() or fm.LinearScale()"
+    );
+
+    let zero_and_negative = one_column_batch(vec![Some(0.0), Some(-5.0), Some(0.0), Some(-10.0)]);
+    let text = marks_and_legend_over(&x_spec, &zero_and_negative).expect_err("zero and negative rows refuse");
+    assert_eq!(
+        text,
+        "x scale: 4 row(s) of 'c' are zero or negative, and a LogScale with no domain maps only \
+         positive values; use fm.SymlogScale(), or pass an explicit negative domain, e.g. \
+         fm.LogScale(domain=[-10, -5])"
+    );
+}
+
+/// A constant-valued column under `Log` maps to the range midpoint on every
+/// numeric auxiliary channel and on x/y, exactly as a degenerate domain's
+/// `degenerate_ratio` already resolves for a direct `LogScale::scale` call
+/// (`log_scale_degenerate_positive_domain_returns_range_midpoint_not_nan`):
+/// `t = 0.5` when the domain collapses to one value, so every row paints
+/// the same midpoint rather than `NaN`.
+#[test]
+fn a_constant_log_column_maps_to_the_range_midpoint_on_every_channel() {
+    let batch = one_column_batch(vec![Some(5.0), Some(5.0), Some(5.0)]);
+    // `nice` is a no-op on a degenerate domain (`log_nice_degenerate_positive_domain_returns_it_unchanged`:
+    // `[5, 5]` stays `[5, 5]`, so the midpoint fraction is unchanged whether
+    // `nice` is requested or not).
+    for nice in [false, true] {
+        for channel in ["size", "stroke_width"] {
+            let scale = serde_json::json!({"type": "log", "range": [10.0, 40.0], "nice": nice});
+            let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+            let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+            for node in &scene.panels[0].marks[0].nodes {
+                let value = match (node, channel) {
+                    (ferrum_scene::SceneNode::Circle { r, .. }, "size") => std::f64::consts::PI * r * r,
+                    (ferrum_scene::SceneNode::Circle { style, .. }, "stroke_width") => style.stroke_width,
+                    other => panic!("{channel} nice={nice}: expected a circle: {other:?}"),
+                };
+                assert!((value - 25.0).abs() < 1e-6, "{channel} nice={nice}: midpoint 25, got {value}");
+            }
+            let labels = legend_text(&scene);
+            assert_eq!(&labels[1..], ["5"], "{channel} nice={nice}: the one legend entry is the constant value: {labels:?}");
+        }
+        for (channel, faded) in [("opacity", Faded::Mark), ("fill_opacity", Faded::Fill), ("stroke_opacity", Faded::Stroke)] {
+            let scale = serde_json::json!({"type": "log", "range": [0.2, 0.6], "nice": nice});
+            let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+            let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+            for node in &scene.panels[0].marks[0].nodes {
+                let alpha = painted_alpha(node, faded);
+                assert!((alpha - 0.4).abs() < 1e-6, "{channel} nice={nice}: midpoint 0.4, got {alpha}");
+            }
+            let labels = legend_text(&scene);
+            assert_eq!(&labels[1..], ["5"], "{channel} nice={nice}: the one legend entry is the constant value: {labels:?}");
+        }
+        for channel in ["x", "y"] {
+            let scale = serde_json::json!({"type": "log", "nice": nice});
+            let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+            let (scene, _) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+            let plot = scene.panels[0].plot_area;
+            let mid = if channel == "x" { plot.x + plot.w / 2.0 } else { plot.y + plot.h / 2.0 };
+            for node in &scene.panels[0].marks[0].nodes {
+                let pos = match (node, channel) {
+                    (ferrum_scene::SceneNode::Circle { cx, .. }, "x") => *cx,
+                    (ferrum_scene::SceneNode::Circle { cy, .. }, "y") => *cy,
+                    other => panic!("{channel} nice={nice}: {other:?}"),
+                };
+                assert!((pos - mid).abs() < 1.0, "{channel} nice={nice}: every circle at the plot midpoint, got {pos} vs {mid}");
+            }
+        }
+    }
+}
+
+/// An all-null column under `Log` builds no scale on size/opacity/
+/// stroke_width — matching `LinearScale`'s own no-value path via the new
+/// guard `build_size_scale` gained (`build_opacity_channel_scale`/
+/// `build_stroke_width_scale` already had it) — not the old artifact where
+/// `resolve_log_extent`'s `(0.0, 1.0)` all-null default sanitized under `Log`
+/// into a fabricated `1e-6..1` legend.
+#[test]
+fn an_all_null_log_aux_column_builds_no_scale_matching_linear() {
+    let all_null = one_column_batch(vec![None, None, None, None]);
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let linear_scale = serde_json::json!({"type": "linear"});
+
+    for channel in ["size", "opacity", "stroke_width"] {
+        let log_spec = numeric_aux_chart(channel, Some(log_scale.clone()), serde_json::json!([]));
+        let (marks, legend, warnings) = marks_and_legend_warned(&log_spec, &all_null)
+            .unwrap_or_else(|e| panic!("{channel}: expected to render, refused with {e}"));
+        assert!(warnings.is_empty(), "{channel}: nothing was left out: {warnings:?}");
+        assert_eq!(legend, serde_json::json!([]), "{channel}: no scale, no legend");
+
+        let linear_spec = numeric_aux_chart(channel, Some(linear_scale.clone()), serde_json::json!([]));
+        let (linear_marks, linear_legend, _) = marks_and_legend_warned(&linear_spec, &all_null)
+            .unwrap_or_else(|e| panic!("{channel}: linear control expected to render, refused with {e}"));
+        assert_eq!(marks, linear_marks, "{channel}: matches Linear's all-null render");
+        assert_eq!(legend, linear_legend, "{channel}: matches Linear's all-null legend");
+    }
+}
+
+/// An all-null column under `Log` on x resolves the `[1, base]` no-value
+/// domain (d3's `scaleLog` default, the log-space twin
+/// of every other continuous channel's `(0.0, 1.0)` unit-interval
+/// fallback), drawing no marks and no refusal — not the old `1e-6..1`
+/// artifact from reusing the `(0.0, 1.0)` Linear default under a `Log`
+/// sanitize.
+#[test]
+fn an_all_null_log_x_column_resolves_the_one_decade_no_value_domain() {
+    pyo3::Python::initialize();
+    let all_null = one_column_batch(vec![None, None, None, None]);
+    for (base, want) in [(10.0, (1.0, 10.0)), (2.0, (1.0, 2.0))] {
+        let spec = numeric_aux_chart("x", Some(serde_json::json!({"type": "log", "base": base})), serde_json::json!([]));
+        let theme = crate::layout::ThemeInputs::default();
+        let chart_config = crate::render::chart_config::ChartConfig::default();
+        let crate::render::PipelineOutput { prep, warnings, .. } = crate::render::prepare_and_layout(
+            &spec,
+            &all_null,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &chart_config,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("base {base}: expected to render, refused with {e}"));
+        assert!(warnings.is_empty(), "base {base}: nothing was left out: {warnings:?}");
+        assert_eq!(
+            prep.provisional_scales.x.data_domain(),
+            Some(want),
+            "base {base}: the no-value domain is [1, base], not a Linear-sanitized artifact"
+        );
+    }
+}
+
+/// The y twin of [`an_all_null_log_x_column_resolves_the_one_decade_no_value_domain`]:
+/// the no-value rule is asked of the SAME channel-agnostic
+/// `resolve_log_extent`, so y answers identically.
+#[test]
+fn an_all_null_log_y_column_resolves_the_no_value_domain() {
+    pyo3::Python::initialize();
+    let all_null = one_column_batch(vec![None, None, None, None]);
+    for (base, want) in [(10.0, (1.0, 10.0)), (2.0, (1.0, 2.0))] {
+        let spec = numeric_aux_chart("y", Some(serde_json::json!({"type": "log", "base": base})), serde_json::json!([]));
+        let theme = crate::layout::ThemeInputs::default();
+        let chart_config = crate::render::chart_config::ChartConfig::default();
+        let crate::render::PipelineOutput { prep, warnings, .. } = crate::render::prepare_and_layout(
+            &spec,
+            &all_null,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &chart_config,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("base {base}: expected to render, refused with {e}"));
+        assert!(warnings.is_empty(), "base {base}: nothing was left out: {warnings:?}");
+        assert_eq!(prep.provisional_scales.y.data_domain(), Some(want), "base {base}");
+    }
+}
+
+/// A `size` binding whose column is ALL null builds no scale, draws every
+/// mark at the unbound default, and adds no legend -- unaffected by this
+/// cycle's Log/infinity work, which never touches a column with nothing to
+/// map. Guarded against a literal captured from the pre-task tree
+/// (`/tmp/bir-base-T42`) rather than re-derived, so a change to any
+/// upstream default (the point radius, grid line count, tick ladder) would
+/// fail this test exactly as it would a hand-inspected byte diff.
+#[test]
+fn an_all_null_linear_size_column_is_byte_identical() {
+    let batch = one_column_batch(vec![None, None, None]);
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "size": {"field": "c"}},
+    }))
+    .unwrap();
+    let (json, _, warnings) = crate::render::render_scene_json(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::config::RenderConfig::default(),
+        &crate::render::chart_config::ChartConfig::default(),
+    )
+    .expect("the spec renders");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    const GOLDEN: &str = r#"{"width":600.0,"height":400.0,"background":{"r":250,"g":247,"b":242,"a":255},"title":[],"panels":[{"id":0,"plot_area":{"x":62.36376953125,"y":16.0,"w":521.63623046875,"h":324.9609375},"clip":{"x":62.36376953125,"y":16.0,"w":521.63623046875,"h":324.9609375},"coord":{"kind":"cartesian","x_domain":[0.0,2.0],"y_domain":[0.0,4.0],"expand":true,"clip":true},"grid":[{"type":"line","x1":70.36376953125,"y1":16.0,"x2":70.36376953125,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":120.92739257812501,"y1":16.0,"x2":120.92739257812501,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":171.491015625,"y1":16.0,"x2":171.491015625,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":222.054638671875,"y1":16.0,"x2":222.054638671875,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":272.61826171875,"y1":16.0,"x2":272.61826171875,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":323.181884765625,"y1":16.0,"x2":323.181884765625,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":373.7455078125,"y1":16.0,"x2":373.7455078125,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":424.30913085937505,"y1":16.0,"x2":424.30913085937505,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":474.87275390625,"y1":16.0,"x2":474.87275390625,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":525.4363769531251,"y1":16.0,"x2":525.4363769531251,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":576.0,"y1":16.0,"x2":576.0,"y2":340.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":24.0,"x2":584.0,"y2":24.0,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":62.62011718750006,"x2":584.0,"y2":62.62011718750006,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":101.240234375,"x2":584.0,"y2":101.240234375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":139.86035156249997,"x2":584.0,"y2":139.86035156249997,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":178.48046875,"x2":584.0,"y2":178.48046875,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":217.1005859375,"x2":584.0,"y2":217.1005859375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":255.720703125,"x2":584.0,"y2":255.720703125,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":294.3408203125,"x2":584.0,"y2":294.3408203125,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":332.9609375,"x2":584.0,"y2":332.9609375,"style":{"color":{"r":214,"g":211,"b":209,"a":255},"width":0.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}}],"marks":[{"kind":"point","nodes":[{"type":"circle","cx":70.36376953125,"cy":332.9609375,"r":3.385137501286538,"style":{"fill":{"r":37,"g":99,"b":235,"a":255},"stroke":null,"stroke_width":0.0,"opacity":1.0,"stroke_dash":null}},{"type":"circle","cx":323.181884765625,"cy":255.720703125,"r":3.385137501286538,"style":{"fill":{"r":37,"g":99,"b":235,"a":255},"stroke":null,"stroke_width":0.0,"opacity":1.0,"stroke_dash":null}},{"type":"circle","cx":576.0,"cy":24.0,"r":3.385137501286538,"style":{"fill":{"r":37,"g":99,"b":235,"a":255},"stroke":null,"stroke_width":0.0,"opacity":1.0,"stroke_dash":null}}],"data_indices":[0,1,2],"tooltips":null,"hrefs":null,"descriptions":null,"keys":null,"blend":"normal","stroke_cap":null,"stroke_join":null}],"axes":[{"type":"line","x1":62.36376953125,"y1":16.0,"x2":63.36376953125,"y2":340.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":62.36376953125,"y1":24.0,"x2":58.36376953125,"y2":24.0,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":27.666666666666668,"content":"4","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":62.62011718750006,"x2":58.36376953125,"y2":62.62011718750006,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":66.28678385416673,"content":"3.5","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":101.240234375,"x2":58.36376953125,"y2":101.240234375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":104.90690104166667,"content":"3","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":139.86035156249997,"x2":58.36376953125,"y2":139.86035156249997,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":143.52701822916663,"content":"2.5","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":178.48046875,"x2":58.36376953125,"y2":178.48046875,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":182.14713541666666,"content":"2","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":217.1005859375,"x2":58.36376953125,"y2":217.1005859375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":220.76725260416666,"content":"1.5","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":255.720703125,"x2":58.36376953125,"y2":255.720703125,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":259.3873697916667,"content":"1","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":294.3408203125,"x2":58.36376953125,"y2":294.3408203125,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":298.0074869791667,"content":"0.5","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":332.9609375,"x2":58.36376953125,"y2":332.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":56.36376953125,"y":336.6276041666667,"content":"0","style":{"font_size":11.0,"font_weight":"normal","anchor":"end","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"text","x":23.86474609375,"y":178.48046875,"content":"y","style":{"font_size":13.0,"font_weight":{"custom":"600"},"anchor":"middle","baseline":"alphabetic","angle":-90.0,"color":{"r":31,"g":41,"b":55,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":62.36376953125,"y1":340.9609375,"x2":584.0,"y2":341.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"line","x1":70.36376953125,"y1":340.9609375,"x2":70.36376953125,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":70.36376953125,"y":357.9609375,"content":"0","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":120.92739257812501,"y1":340.9609375,"x2":120.92739257812501,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":120.92739257812501,"y":357.9609375,"content":"0.2","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":171.491015625,"y1":340.9609375,"x2":171.491015625,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":171.491015625,"y":357.9609375,"content":"0.4","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":222.054638671875,"y1":340.9609375,"x2":222.054638671875,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":222.054638671875,"y":357.9609375,"content":"0.6","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":272.61826171875,"y1":340.9609375,"x2":272.61826171875,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":272.61826171875,"y":357.9609375,"content":"0.8","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":323.181884765625,"y1":340.9609375,"x2":323.181884765625,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":323.181884765625,"y":357.9609375,"content":"1","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":373.7455078125,"y1":340.9609375,"x2":373.7455078125,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":373.7455078125,"y":357.9609375,"content":"1.2","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":424.30913085937505,"y1":340.9609375,"x2":424.30913085937505,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":424.30913085937505,"y":357.9609375,"content":"1.4","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":474.87275390625,"y1":340.9609375,"x2":474.87275390625,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":474.87275390625,"y":357.9609375,"content":"1.6","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":525.4363769531251,"y1":340.9609375,"x2":525.4363769531251,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":525.4363769531251,"y":357.9609375,"content":"1.8","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"line","x1":576.0,"y1":340.9609375,"x2":576.0,"y2":344.9609375,"style":{"color":{"r":107,"g":114,"b":128,"a":255},"width":1.0,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}},{"type":"text","x":576.0,"y":357.9609375,"content":"2","style":{"font_size":11.0,"font_weight":"normal","anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":107,"g":114,"b":128,"a":255},"opacity":1.0,"font_family":"Inter"}},{"type":"text","x":323.181884765625,"y":376.13525390625,"content":"x","style":{"font_size":13.0,"font_weight":{"custom":"600"},"anchor":"middle","baseline":"alphabetic","angle":0.0,"color":{"r":31,"g":41,"b":55,"a":255},"opacity":1.0,"font_family":"Inter"}}],"annotations":[],"strip_title":[]}],"legend":[],"decorations":[],"selections":[],"interaction":{"zoom_enabled":false,"pan_enabled":false,"conditionals":[],"linked_panels":[],"tick_levels":[{"panel_id":0,"x_levels":[{"min_zoom":0.0,"max_zoom":0.5,"ticks":[{"value":0.0,"label":"0","pixel":70.36376953125},{"value":0.5,"label":"0.5","pixel":196.7728271484375},{"value":1.0,"label":"1","pixel":323.181884765625},{"value":1.5,"label":"1.5","pixel":449.5909423828125},{"value":2.0,"label":"2","pixel":576.0}]},{"min_zoom":0.5,"max_zoom":2.0,"ticks":[{"value":0.0,"label":"0","pixel":70.36376953125},{"value":0.2,"label":"0.2","pixel":120.927392578125},{"value":0.4,"label":"0.4","pixel":171.491015625},{"value":0.6000000000000001,"label":"0.6","pixel":222.054638671875},{"value":0.8,"label":"0.8","pixel":272.61826171875},{"value":1.0,"label":"1","pixel":323.181884765625},{"value":1.2000000000000002,"label":"1.2","pixel":373.7455078125},{"value":1.4000000000000001,"label":"1.4","pixel":424.30913085937505},{"value":1.6,"label":"1.6","pixel":474.87275390625},{"value":1.8,"label":"1.8","pixel":525.4363769531251},{"value":2.0,"label":"2","pixel":576.0}]},{"min_zoom":2.0,"max_zoom":4.0,"ticks":[{"value":0.0,"label":"0","pixel":70.36376953125},{"value":0.1,"label":"0.1","pixel":95.6455810546875},{"value":0.2,"label":"0.2","pixel":120.927392578125},{"value":0.30000000000000004,"label":"0.3","pixel":146.2092041015625},{"value":0.4,"label":"0.4","pixel":171.491015625},{"value":0.5,"label":"0.5","pixel":196.7728271484375},{"value":0.6000000000000001,"label":"0.6","pixel":222.054638671875},{"value":0.7000000000000001,"label":"0.7","pixel":247.33645019531252},{"value":0.8,"label":"0.8","pixel":272.61826171875},{"value":0.9,"label":"0.9","pixel":297.90007324218755},{"value":1.0,"label":"1","pixel":323.181884765625},{"value":1.1,"label":"1.1","pixel":348.4636962890625},{"value":1.2000000000000002,"label":"1.2","pixel":373.7455078125},{"value":1.3,"label":"1.3","pixel":399.02731933593753},{"value":1.4000000000000001,"label":"1.4","pixel":424.30913085937505},{"value":1.5,"label":"1.5","pixel":449.5909423828125},{"value":1.6,"label":"1.6","pixel":474.87275390625},{"value":1.7000000000000002,"label":"1.7","pixel":500.1545654296875},{"value":1.8,"label":"1.8","pixel":525.4363769531251},{"value":1.9000000000000001,"label":"1.9","pixel":550.7181884765625},{"value":2.0,"label":"2","pixel":576.0}]},{"min_zoom":4.0,"max_zoom":1000000000.0,"ticks":[{"value":0.0,"label":"0","pixel":70.36376953125},{"value":0.05,"label":"0.05","pixel":83.00467529296876},{"value":0.1,"label":"0.1","pixel":95.6455810546875},{"value":0.15000000000000002,"label":"0.15","pixel":108.28648681640625},{"value":0.2,"label":"0.2","pixel":120.927392578125},{"value":0.25,"label":"0.25","pixel":133.56829833984375},{"value":0.30000000000000004,"label":"0.3","pixel":146.2092041015625},{"value":0.35000000000000003,"label":"0.35","pixel":158.85010986328126},{"value":0.4,"label":"0.4","pixel":171.491015625},{"value":0.45,"label":"0.45","pixel":184.13192138671877},{"value":0.5,"label":"0.5","pixel":196.7728271484375},{"value":0.55,"label":"0.55","pixel":209.41373291015626},{"value":0.6000000000000001,"label":"0.6","pixel":222.054638671875},{"value":0.65,"label":"0.65","pixel":234.69554443359377},{"value":0.7000000000000001,"label":"0.7","pixel":247.33645019531252},{"value":0.75,"label":"0.75","pixel":259.97735595703125},{"value":0.8,"label":"0.8","pixel":272.61826171875},{"value":0.8500000000000001,"label":"0.85","pixel":285.25916748046876},{"value":0.9,"label":"0.9","pixel":297.90007324218755},{"value":0.9500000000000001,"label":"0.95","pixel":310.5409790039063},{"value":1.0,"label":"1","pixel":323.181884765625},{"value":1.05,"label":"1.05","pixel":335.8227905273438},{"value":1.1,"label":"1.1","pixel":348.4636962890625},{"value":1.1500000000000001,"label":"1.15","pixel":361.1046020507813},{"value":1.2000000000000002,"label":"1.2","pixel":373.7455078125},{"value":1.25,"label":"1.25","pixel":386.38641357421875},{"value":1.3,"label":"1.3","pixel":399.02731933593753},{"value":1.35,"label":"1.35","pixel":411.66822509765626},{"value":1.4000000000000001,"label":"1.4","pixel":424.30913085937505},{"value":1.4500000000000002,"label":"1.45","pixel":436.9500366210938},{"value":1.5,"label":"1.5","pixel":449.5909423828125},{"value":1.55,"label":"1.55","pixel":462.2318481445313},{"value":1.6,"label":"1.6","pixel":474.87275390625},{"value":1.6500000000000001,"label":"1.65","pixel":487.5136596679688},{"value":1.7000000000000002,"label":"1.7","pixel":500.1545654296875},{"value":1.75,"label":"1.75","pixel":512.7954711914062},{"value":1.8,"label":"1.8","pixel":525.4363769531251},{"value":1.85,"label":"1.85","pixel":538.0772827148437},{"value":1.9000000000000001,"label":"1.9","pixel":550.7181884765625},{"value":1.9500000000000002,"label":"1.95","pixel":563.3590942382813},{"value":2.0,"label":"2","pixel":576.0}]}],"y_levels":[{"min_zoom":0.0,"max_zoom":0.5,"ticks":[{"value":0.0,"label":"0","pixel":332.9609375},{"value":1.0,"label":"1","pixel":255.720703125},{"value":2.0,"label":"2","pixel":178.48046875},{"value":3.0,"label":"3","pixel":101.240234375},{"value":4.0,"label":"4","pixel":24.0}]},{"min_zoom":0.5,"max_zoom":2.0,"ticks":[{"value":0.0,"label":"0","pixel":332.9609375},{"value":0.5,"label":"0.5","pixel":294.3408203125},{"value":1.0,"label":"1","pixel":255.720703125},{"value":1.5,"label":"1.5","pixel":217.1005859375},{"value":2.0,"label":"2","pixel":178.48046875},{"value":2.5,"label":"2.5","pixel":139.8603515625},{"value":3.0,"label":"3","pixel":101.240234375},{"value":3.5,"label":"3.5","pixel":62.6201171875},{"value":4.0,"label":"4","pixel":24.0}]},{"min_zoom":2.0,"max_zoom":4.0,"ticks":[{"value":0.0,"label":"0","pixel":332.9609375},{"value":0.2,"label":"0.2","pixel":317.512890625},{"value":0.4,"label":"0.4","pixel":302.06484375},{"value":0.6000000000000001,"label":"0.6","pixel":286.616796875},{"value":0.8,"label":"0.8","pixel":271.16875},{"value":1.0,"label":"1","pixel":255.720703125},{"value":1.2000000000000002,"label":"1.2","pixel":240.27265624999998},{"value":1.4000000000000001,"label":"1.4","pixel":224.824609375},{"value":1.6,"label":"1.6","pixel":209.37656249999998},{"value":1.8,"label":"1.8","pixel":193.928515625},{"value":2.0,"label":"2","pixel":178.48046875},{"value":2.2,"label":"2.2","pixel":163.03242187499998},{"value":2.4000000000000004,"label":"2.4","pixel":147.58437499999997},{"value":2.6,"label":"2.6","pixel":132.136328125},{"value":2.8000000000000003,"label":"2.8","pixel":116.68828124999999},{"value":3.0,"label":"3","pixel":101.240234375},{"value":3.2,"label":"3.2","pixel":85.79218749999998},{"value":3.4000000000000004,"label":"3.4","pixel":70.34414062499997},{"value":3.6,"label":"3.6","pixel":54.89609374999998},{"value":3.8000000000000003,"label":"3.8","pixel":39.44804687499999},{"value":4.0,"label":"4","pixel":24.0}]},{"min_zoom":4.0,"max_zoom":1000000000.0,"ticks":[{"value":0.0,"label":"0","pixel":332.9609375},{"value":0.1,"label":"0.1","pixel":325.2369140625},{"value":0.2,"label":"0.2","pixel":317.512890625},{"value":0.30000000000000004,"label":"0.3","pixel":309.7888671875},{"value":0.4,"label":"0.4","pixel":302.06484375},{"value":0.5,"label":"0.5","pixel":294.3408203125},{"value":0.6000000000000001,"label":"0.6","pixel":286.616796875},{"value":0.7000000000000001,"label":"0.7","pixel":278.8927734375},{"value":0.8,"label":"0.8","pixel":271.16875},{"value":0.9,"label":"0.9","pixel":263.4447265625},{"value":1.0,"label":"1","pixel":255.720703125},{"value":1.1,"label":"1.1","pixel":247.99667968749998},{"value":1.2000000000000002,"label":"1.2","pixel":240.27265624999998},{"value":1.3,"label":"1.3","pixel":232.5486328125},{"value":1.4000000000000001,"label":"1.4","pixel":224.824609375},{"value":1.5,"label":"1.5","pixel":217.1005859375},{"value":1.6,"label":"1.6","pixel":209.37656249999998},{"value":1.7000000000000002,"label":"1.7","pixel":201.65253906249998},{"value":1.8,"label":"1.8","pixel":193.928515625},{"value":1.9000000000000001,"label":"1.9","pixel":186.2044921875},{"value":2.0,"label":"2","pixel":178.48046875},{"value":2.1,"label":"2.1","pixel":170.7564453125},{"value":2.2,"label":"2.2","pixel":163.03242187499998},{"value":2.3000000000000003,"label":"2.3","pixel":155.3083984375},{"value":2.4000000000000004,"label":"2.4","pixel":147.58437499999997},{"value":2.5,"label":"2.5","pixel":139.8603515625},{"value":2.6,"label":"2.6","pixel":132.136328125},{"value":2.7,"label":"2.7","pixel":124.41230468749998},{"value":2.8000000000000003,"label":"2.8","pixel":116.68828124999999},{"value":2.9000000000000004,"label":"2.9","pixel":108.96425781249997},{"value":3.0,"label":"3","pixel":101.240234375},{"value":3.1,"label":"3.1","pixel":93.5162109375},{"value":3.2,"label":"3.2","pixel":85.79218749999998},{"value":3.3000000000000003,"label":"3.3","pixel":78.06816406249999},{"value":3.4000000000000004,"label":"3.4","pixel":70.34414062499997},{"value":3.5,"label":"3.5","pixel":62.6201171875},{"value":3.6,"label":"3.6","pixel":54.89609374999998},{"value":3.7,"label":"3.7","pixel":47.17207031250001},{"value":3.8000000000000003,"label":"3.8","pixel":39.44804687499999},{"value":3.9000000000000004,"label":"3.9","pixel":31.724023437499966},{"value":4.0,"label":"4","pixel":24.0}]}]}],"toolbar":true}}"#;
+    assert_eq!(json, GOLDEN, "the all-null size column's scene bytes must stay stable");
+}
+
+/// A chart over `c=[1,100]` on `x` under a Log scale, with `axis` carrying
+/// whatever per-channel override JSON `axis_override` names.
+fn log_x_chart_with_axis_override(axis_override: serde_json::Value) -> (ChartSpec, RecordBatch) {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 100.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+        ],
+    )
+    .unwrap();
+    let mut x_binding = serde_json::json!({"field": "x", "scale": {"type": "log", "base": 10.0}});
+    x_binding["axis"] = axis_override;
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": x_binding, "y": {"field": "y"}},
+    }))
+    .expect("the log-x-with-axis-override spec deserializes");
+    (spec, batch)
+}
+
+/// The full `prepare → apply_chart_config_pipeline` pass (`prepare_and_layout`,
+/// dropping its layout): `tick_min_step`/`tick_extra`/`tick_values` are
+/// applied by `resync_ticks_after_axis_merge`, which runs AFTER
+/// `prepare_render_inputs` returns (`apply_chart_config_pipeline`, called
+/// from `prepare_and_layout`), so a bare `prepare_render_inputs` call would
+/// not see their effect on `tick_labels`/`tick_anchors`.
+fn prepared(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
+    pyo3::Python::initialize();
+    let crate::render::PipelineOutput { prep, .. } = crate::render::prepare_and_layout(
+        spec,
+        batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("expected to prepare, refused with {e}"));
+    prep
+}
+
+/// The fix case `tick_anchors` was computed
+/// once from `tick_values_raw(tick_count)` and never updated when
+/// `tick_min_step` later thinned `tick_labels`/`proj.major` — a length
+/// mismatch anchors' own stride-fallback guard silently absorbed, so a
+/// decade could be culled by the stride that follows.
+#[test]
+fn log_tick_anchors_follow_tick_min_step() {
+    let (spec, batch) = log_x_chart_with_axis_override(serde_json::json!({"tick_min_step": 3.0}));
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.x.tick_labels, vec!["1", "5", "10", "20", "50", "100"]);
+    assert_eq!(prep.axes.x.tick_anchors, vec![true, false, true, false, false, true]);
+}
+
+/// `tick_extra` pushes a boundary label beyond the ladder `breaks_log`
+/// built: the anchor it pushes alongside must be the scale's own answer for
+/// that boundary (empty for a non-decade boundary), not stale or omitted.
+#[test]
+fn log_tick_anchors_follow_tick_extra() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![2.0, 80.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {
+            "x": {"field": "x", "scale": {"type": "log", "base": 10.0, "domain": [2.0, 80.0]}, "axis": {"tick_extra": true}},
+            "y": {"field": "y"},
+        },
+    }))
+    .unwrap();
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.x.tick_labels, vec!["2", "5", "10", "20", "50", "80"]);
+    assert_eq!(prep.axes.x.tick_anchors, vec![false, false, true, false, false, false]);
+}
+
+/// A `tick_values=` override replaces `tick_labels` wholesale, so its
+/// anchors must be recomputed from the OVERRIDE's own values, not left
+/// describing the auto ladder's (which would protect whatever positions the
+/// auto ladder's decades happened to occupy, regardless of what the override
+/// actually ships there).
+#[test]
+fn log_tick_anchors_follow_a_tick_values_override() {
+    let (spec, batch) = log_x_chart_with_axis_override(serde_json::json!({"tick_values": [1.5, 3.0, 15.0, 30.0, 70.0, 90.0, 100.0]}));
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.x.tick_anchors, vec![false, false, false, false, false, false, true]);
+
+    let (spec, batch) = log_x_chart_with_axis_override(serde_json::json!({"tick_values": [1.0, 10.0, 100.0]}));
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.x.tick_anchors, vec![true, true, true]);
+}
+
+/// A secondary (independent) y axis under `tick_min_step` runs through the
+/// SAME `adjust_axis_ticks` helper the primary axis does
+/// (`resync_ticks_after_axis_merge`'s `secondary_y` loop), so its anchors
+/// must stay aligned too, not just the primary's.
+#[test]
+fn a_secondary_log_y_axis_keeps_anchors_aligned_under_tick_min_step() {
+    use crate::spec::layer::Layer;
+    let primary = Layer {
+        mark: Mark::Line,
+        encoding: Encoding { y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }), ..Default::default() },
+        ..Default::default()
+    };
+    let secondary_axis_override: crate::render::chart_config::AxisStyleSpec =
+        serde_json::from_value(serde_json::json!({"tick_min_step": 3.0})).unwrap();
+    let secondary = Layer {
+        mark: Mark::Line,
+        encoding: Encoding {
+            y: Some(EncodingSpec {
+                field: "y1".into(),
+                scale: Some(serde_json::from_value(serde_json::json!({"type": "log", "base": 10.0, "domain": [1.0, 100.0]})).unwrap()),
+                axis: Some(Box::new(secondary_axis_override)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        independent_y: true,
+        ..Default::default()
+    };
+    let spec = ChartSpec {
+        mark: Mark::Line,
+        encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+        layers: Some(vec![primary, secondary]),
+        ..Default::default()
+    };
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 100.0])),
+        ],
+    )
+    .unwrap();
+    let prep = prepared(&spec, &batch);
+    assert_eq!(prep.axes.secondary_y.len(), 1);
+    let secondary_axis = &prep.axes.secondary_y[0];
+    // Y labels/fractions reverse in lockstep (descending display order); the
+    // anchors reverse with them.
+    assert_eq!(secondary_axis.tick_labels, vec!["100", "50", "20", "10", "5", "1"]);
+    assert_eq!(secondary_axis.tick_anchors, vec![true, false, false, true, false, true]);
+}
+
+/// A `Log` x axis over `[1, 100]` at narrow widths keeps its decades
+/// through the collision cascade's anchored cull:
+/// `breaks_log`'s `{1, 2, 5}` ladder (`1, 2, 5, 10, 20, 50, 100`) culled by
+/// a plain stride from index 0 can drop `10` (stride 2: `1, 5, 20, 100`) or
+/// `100` (stride 3: `1, 10, ...`, depending on count) — `anchored_visibility`
+/// keeps every decade regardless of stride. Every drawn label is also
+/// checked against the FULL ladder, so a label that is neither a decade nor
+/// the stride's own even spacing would fail this test too.
+#[test]
+fn a_log_x_axis_keeps_its_decades_at_narrow_widths() {
+    pyo3::Python::initialize();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 10.0, 100.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "x", "scale": {"type": "log", "base": 10.0}}, "y": {"field": "y"}},
+    }))
+    .unwrap();
+    let theme = crate::layout::ThemeInputs::default();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let config = crate::render::config::RenderConfig::default();
+    for width in [600.0, 400.0, 300.0] {
+        let out = crate::render::render_svg(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport { width, height: 400.0 },
+            &config,
+            &chart_config,
+        )
+        .unwrap_or_else(|e| panic!("width {width}: expected to render, refused with {e}"));
+        let labels: Vec<&str> = regex_text_labels(&out.bytes);
+        for decade in ["1", "10", "100"] {
+            assert!(
+                labels.contains(&decade),
+                "width {width}: decade {decade} dropped: {labels:?}"
+            );
+        }
+    }
+}
+
+/// Every text label drawn on `axis`'s own [`ferrum_scene::Panel::axes`]
+/// chrome, as `(content, position along axis)` — `y` for a y axis, `x` for
+/// an x axis (the greedy-y fix only needs `y`, but the walk is the same
+/// either way and this mirrors [`categories_and_marks`]'s shape).
+fn axis_text_positions(panel: &ferrum_scene::Panel, on_y: bool) -> Vec<(String, f64)> {
+    fn walk(nodes: &[ferrum_scene::SceneNode], on_y: bool, out: &mut Vec<(String, f64)>) {
+        for node in nodes {
+            match node {
+                ferrum_scene::SceneNode::Text { x, y, content, .. } => {
+                    out.push((content.clone(), if on_y { *y } else { *x }));
+                }
+                ferrum_scene::SceneNode::Group { children, .. } => walk(children, on_y, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&panel.axes, on_y, &mut out);
+    out
+}
+
+/// The fix case `resolve_y_overlap`'s
+/// `Greedy` policy judged distance in CASCADE SLOTS (`cascade_slot_h`, the
+/// tightest adjacent gap) rather than the real pixel positions labels draw
+/// at, and kept every anchor (Log decade) unconditionally rather than
+/// greedily among themselves — so at narrow heights a Log y axis drew
+/// decades closer than one line apart, and at wider heights a non-decade
+/// survived right next to a decade. No two drawn labels may sit closer than
+/// `line_height(11)` = 13.2px, at any of these heights, and `1`/`10`/`100`
+/// must all be drawn once the panel is tall enough to fit them.
+#[test]
+fn a_greedy_log_y_axis_never_draws_two_labels_closer_than_a_line() {
+    pyo3::Python::initialize();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ])),
+        vec![
+            // x values deliberately disjoint from the y ladder's labels
+            // ("1"/"10"/"100") so a walk over every panel text node's `y`
+            // cannot conflate an x-axis tick label with a y-axis one.
+            Arc::new(Float64Array::from(vec![51.0, 52.0, 53.0])),
+            Arc::new(Float64Array::from(vec![1.0, 10.0, 100.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": "point",
+        "encoding": {
+            "x": {"field": "x"},
+            "y": {"field": "y", "scale": {"type": "log", "base": 10.0}, "axis": {"label_overlap": "greedy"}},
+        },
+    }))
+    .unwrap();
+    let theme = crate::layout::ThemeInputs::default();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let config = crate::render::config::RenderConfig::default();
+    const LINE_H: f64 = 11.0 * 1.2;
+    for height in [90.0, 130.0, 160.0, 200.0, 300.0] {
+        let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+            &spec, &batch, &theme, crate::layout::Viewport { width: 400.0, height }, &chart_config, None,
+        )
+        .unwrap_or_else(|e| panic!("height {height}: expected to prepare, refused with {e}"));
+        let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
+            .unwrap_or_else(|e| panic!("height {height}: expected to build a scene, refused with {e}"));
+        let mut drawn: Vec<(String, f64)> = axis_text_positions(&scene.panels[0], true)
+            .into_iter()
+            .filter(|(label, _)| ["1", "10", "100"].contains(&label.as_str()))
+            .collect();
+        drawn.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for pair in drawn.windows(2) {
+            let gap = (pair[1].1 - pair[0].1).abs();
+            assert!(
+                gap >= LINE_H - 1e-6,
+                "height {height}: {:?} and {:?} are only {gap}px apart (line height {LINE_H}px)",
+                pair[0], pair[1],
+            );
+        }
+        if height >= 200.0 {
+            let mut labels: Vec<&str> = drawn.iter().map(|(l, _)| l.as_str()).collect();
+            labels.sort_unstable();
+            assert_eq!(labels, ["1", "10", "100"], "height {height}: tall enough to draw every decade: {drawn:?}");
+        }
+    }
+}
+
+/// Every rendered label in [`a_log_x_axis_keeps_its_decades_at_narrow_widths`]'s
+/// SVG, in document order — the text content between each `<text ...>` tag's
+/// closing `>` and the following `</text>`, the same extraction
+/// `tests/_svg_extents.py::axis_tick_labels` does in Python, without adding
+/// a `regex` dependency for one test.
+fn regex_text_labels(svg: &str) -> Vec<&str> {
+    let mut labels = Vec::new();
+    let mut rest = svg;
+    while let Some(open) = rest.find("<text") {
+        let after_open = &rest[open..];
+        let Some(tag_end) = after_open.find('>') else { break };
+        let content_start = tag_end + 1;
+        let Some(close_rel) = after_open[content_start..].find("</text>") else { break };
+        labels.push(&after_open[content_start..content_start + close_rel]);
+        rest = &after_open[content_start + close_rel + "</text>".len()..];
+    }
+    labels
+}
+
+/// `Size`/`Opacity`/`StrokeWidth(scale=LogScale())`'s legend lists the
+/// scale's own `breaks_log` ticks exactly, not a linear subdivision of
+/// log-space and not merely containing the powers: over `[1, 1000]`, the
+/// integer powers of 10 alone meet the legend's `count - 2 = 3` target, so
+/// `1`, `10`, `100` and `1000` all label the legend — not the fractional
+/// exponents (`316.2278`, …) the pre-fix tick rule gave instead of `1000`.
+/// `Pow`/`Sqrt` legends list their own (linear-domain) nice ticks the same
+/// way. Replaces the containment-only
+/// `a_log_size_legends_ticks_are_the_scales_own_breaks`.
+#[test]
+fn log_pow_and_sqrt_legends_list_the_scales_own_ticks() {
+    // `size`/`stroke_width` always nice a data-derived domain
+    // (`nice_data_domain: true` at their `numeric_aux_scale_kind` call
+    // sites); `opacity` does not (`false` there) unless `nice: true` is
+    // stated. A Log nice rounds the domain's bounds out to the nearest
+    // power of the base, so `[1, 50]` nices to `[1, 100]` for size/width
+    // (the same ticks as the already-decade `[1, 100]` case) while opacity
+    // keeps the literal `[1, 50]` domain and its own densest-fitting set.
+    let unniced_log_cases: [(&[f64], &[&str]); 4] = [
+        (&[1.0, 100.0], &["1", "10", "100"]),
+        (&[1.0, 1000.0], &["1", "10", "100", "1000"]),
+        (&[1.0, 50.0], &["1", "3", "10", "30"]),
+        (&[1.0, 10.0], &["1", "2", "5", "10"]),
+    ];
+    let niced_log_cases: [(&[f64], &[&str]); 4] = [
+        (&[1.0, 100.0], &["1", "10", "100"]),
+        (&[1.0, 1000.0], &["1", "10", "100", "1000"]),
+        (&[1.0, 50.0], &["1", "10", "100"]),
+        (&[1.0, 10.0], &["1", "2", "5", "10"]),
+    ];
+    for channel in ["size", "opacity", "stroke_width"] {
+        let range = if channel == "opacity" { serde_json::json!([0.2, 0.6]) } else { serde_json::json!([10.0, 40.0]) };
+        let log_cases = if channel == "opacity" { unniced_log_cases } else { niced_log_cases };
+        for (data, expected) in log_cases {
+            let batch = one_column_batch(data.iter().map(|v| Some(*v)).collect());
+            let scale = serde_json::json!({"type": "log", "base": 10.0, "range": range});
+            let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+            let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+            assert!(warnings.is_empty(), "{channel} {data:?}: every row is in domain: {warnings:?}");
+            let labels = legend_text(&scene);
+            assert_eq!(labels[0], "c", "{channel} {data:?}: legend title");
+            assert_eq!(&labels[1..], expected, "{channel} {data:?}");
+        }
+        for (tag, scale_type) in [("pow", serde_json::json!({"type": "pow", "exponent": 2.0})), ("sqrt", serde_json::json!({"type": "sqrt"}))] {
+            let mut scale = scale_type;
+            scale["domain"] = serde_json::json!([1.0, 10.0]);
+            scale["range"] = range.clone();
+            let spec = numeric_aux_chart(channel, Some(scale), serde_json::json!([]));
+            let (scene, warnings) = scene_over(&spec, &numeric_aux_batch(), &crate::layout::ThemeInputs::default());
+            assert!(warnings.is_empty(), "{channel} {tag}: {warnings:?}");
+            let labels = legend_text(&scene);
+            assert_eq!(&labels[1..], ["2", "4", "6", "8", "10"], "{channel} {tag}");
+        }
+    }
+}
+
+/// A `size` legend over 12 decades (`[1, 1e12]`) lists every other power
+/// (the thinning rule), not all 13 -- the legend-count analogue of
+/// [`log_breaks_thin_to_every_nth_power_past_the_count`].
+#[test]
+fn a_log_size_legend_over_twelve_decades_lists_every_other_power() {
+    let batch = one_column_batch(vec![Some(1.0), Some(1e12)]);
+    let scale = serde_json::json!({"type": "log", "base": 10.0, "range": [10.0, 40.0]});
+    let spec = numeric_aux_chart("size", Some(scale), serde_json::json!([]));
+    let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let labels = legend_text(&scene);
+    assert_eq!(labels[0], "c");
+    assert_eq!(&labels[1..], ["1", "100", "10000", "1e6", "1e8", "1e10", "1e12"]);
+}
+
+/// `breaks_log`'s step-3 thinning bug reached the legend too:
+/// a `nice=False` legend over `[3, 7e12]` (non-power ends) used to list
+/// `"1"`, below the data's own minimum of `3` -- `breaks_log` thinned over
+/// the floor-extended exponent `0` (`10^0 = 1`), not the first IN-DOMAIN
+/// exponent `1` (`10^1 = 10`). Every legend entry must be `>=` the data
+/// minimum. Uses `opacity`, not `size`: `size`/`stroke_width` always nice a
+/// data-derived domain regardless of the scale's own `nice=` (their
+/// `nice_data_domain: true` ORs into the formula unconditionally), which
+/// would round `[3, 7e12]` out to `[1, 1e13]` and make `"1"` a genuinely
+/// in-domain power rather than a sign of this bug; `opacity` passes
+/// `false` there, so `nice=False` actually keeps the domain at its literal
+/// `[3, 7e12]`.
+#[test]
+fn a_log_opacity_legend_over_non_power_ends_lists_no_entry_below_the_data_minimum() {
+    let batch = one_column_batch(vec![Some(3.0), Some(7e12)]);
+    let scale = serde_json::json!({"type": "log", "base": 10.0, "nice": false, "range": [0.2, 0.6]});
+    let spec = numeric_aux_chart("opacity", Some(scale), serde_json::json!([]));
+    let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let labels = legend_text(&scene);
+    assert_eq!(labels[0], "c");
+    assert!(labels.len() > 1, "expected at least one legend entry: {labels:?}");
+    for label in &labels[1..] {
+        let value: f64 = label.parse().unwrap_or_else(|_| panic!("non-numeric legend label {label}"));
+        assert!(value >= 3.0 - 1e-6, "legend entry {label} is below the data minimum 3: {labels:?}");
+    }
+}
+
+/// Numeric-looking labels among `positions`, sorted by pixel position.
+fn numeric_labels(positions: Vec<(String, f64)>) -> Vec<String> {
+    let mut out: Vec<(String, f64)> = positions.into_iter().filter(|(l, _)| l.parse::<f64>().is_ok()).collect();
+    out.sort_by(|a, b| a.1.total_cmp(&b.1));
+    out.into_iter().map(|(l, _)| l).collect()
+}
+
+/// A Log x/y axis spanning 5-6 decades (the `breaks_log` thinning rule) labels
+/// only the powers of 10 it keeps within its tick budget, on x and on y
+/// alike: `[1, 1e5]` labels all 6 powers (within the default count-10
+/// budget); `[1, 1e6]` keeps only 7 -- the render-level proof beside
+/// [`log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits`]'s
+/// direct `breaks_log` unit test. The non-Log channel is categorical (`g`),
+/// so its labels never collide textually with a power of 10.
+#[test]
+fn a_log_axis_over_five_or_six_decades_labels_only_powers() {
+    let log_scale = serde_json::json!({"type": "log", "base": 10.0});
+    let cases: [(f64, &[&str]); 2] = [
+        (1e5, &["1", "10", "100", "1000", "10000", "100000"]),
+        (1e6, &["1", "10", "100", "1000", "10000", "100000", "1e6"]),
+    ];
+    for channel in ["x", "y"] {
+        for (hi, expected) in cases {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(vec!["p", "q"])), Arc::new(Float64Array::from(vec![1.0, hi]))],
+            )
+            .unwrap();
+            let other = serde_json::json!({"field": "g"});
+            let log = serde_json::json!({"field": "v", "scale": log_scale});
+            let encoding = if channel == "x" {
+                serde_json::json!({"x": log, "y": other})
+            } else {
+                serde_json::json!({"x": other, "y": log})
+            };
+            let width = 1400.0;
+            let height = if channel == "x" { 400.0 } else { 600.0 };
+            let spec: ChartSpec = serde_json::from_value(serde_json::json!({"mark": "point", "encoding": encoding})).unwrap();
+            pyo3::Python::initialize();
+            let chart_config = crate::render::chart_config::ChartConfig::default();
+            let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+                &spec,
+                &batch,
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width, height },
+                &chart_config,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{channel} hi={hi}: {e}"));
+            let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &crate::render::config::RenderConfig::default(), &mut warnings, &chart_config, None)
+                .unwrap_or_else(|e| panic!("{channel} hi={hi}: {e}"));
+            assert!(warnings.is_empty(), "{channel} hi={hi}: {warnings:?}");
+            let on_y = channel == "y";
+            let drawn = numeric_labels(axis_text_positions(&scene.panels[0], on_y));
+            // A y axis draws top-to-bottom, so sorting by pixel position gives
+            // descending values; reverse the (ascending) expected list to match.
+            let mut expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+            if on_y {
+                expected.reverse();
+            }
+            assert_eq!(drawn, expected, "{channel} hi={hi}");
+        }
+    }
+}
+
+/// A layered `Log` `size` channel: layer 0
+/// draws `size` from `c1` (one negative row), layer 1 from `c2` (two
+/// negative rows) — `numeric_aux_extent`'s layered union folds both
+/// columns' left-out rows into ONE whole-frame
+/// `RenderWarning::LogScaleRowsLeftOut` naming the chart-level field (`c1`,
+/// the establishing layer's) and the COMBINED count (3), not two separate
+/// warnings and not the old silently-dropped `left_out: 0`. The three
+/// positive-side rows across both layers still draw.
+#[test]
+fn a_layered_log_size_channel_warns_once_for_the_whole_frame() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c1", DataType::Float64, false),
+            Field::new("c2", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![-5.0, 2.0, 50.0])),
+            Arc::new(Float64Array::from(vec![-3.0, -7.0, 100.0])),
+        ],
+    )
+    .unwrap();
+    let spec = drawn_channel_spec(
+        serde_json::json!({"size": {"field": "c1", "scale": {"type": "log", "base": 10.0}}}),
+        &[
+            ("point", serde_json::json!({"size": {"field": "c1"}})),
+            ("point", serde_json::json!({"size": {"field": "c2"}})),
+        ],
+    );
+    let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+    let side = crate::scale::log::LogSide::Positive;
+    let expected = RenderWarning::LogScaleRowsLeftOut {
+        channel: "size".to_string(),
+        field: "c1".to_string(),
+        rows: 3,
+        side,
+        coord_flipped: false,
+    };
+    assert!(
+        warnings.contains(&expected),
+        "expected {expected:?} among {warnings:?}"
+    );
+    assert_eq!(
+        warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).count(),
+        1,
+        "one whole-frame warning, not one per layer: {warnings:?}"
+    );
+    let marks: usize = scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
+    assert!(marks > 0, "the positive-side rows across both layers still draw");
 }
 
 /// Size reads an explicit domain, and a value outside it draws at the nearer

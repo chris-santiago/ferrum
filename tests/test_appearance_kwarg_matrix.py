@@ -36,9 +36,10 @@ rather than a bare inequality.
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 import pytest
@@ -49,6 +50,7 @@ from ferrum._core import aux_legend_channels  # type: ignore[attr-defined]
 from ferrum._warn import reset_warnings
 from ferrum.color import palette
 from ferrum.encoding.base import ChannelBase
+from tests._aux_scale_oracle import log_map, pow_map
 
 # ---------------------------------------------------------------------------
 # Derived population
@@ -196,6 +198,16 @@ def _circle_fill_alphas(svg: str) -> list[float]:
 def _attr_values(svg: str, attr: str) -> list[float]:
     """Every numeric value of *attr* (e.g. ``fill-opacity``, ``stroke-opacity``), in order."""
     return [float(v) for v in re.findall(rf'{re.escape(attr)}="([0-9.]+)"', svg)]
+
+
+def _stroke_widths(svg: str, color: str = _MARK_COLOR) -> list[float]:
+    """Every outline's ``stroke-width``, for every circle stroked in *color*, in order."""
+    return [
+        float(w)
+        for w in re.findall(
+            rf'<circle[^>]*stroke="{re.escape(color)}"[^>]*stroke-width="([0-9.]+)"', svg
+        )
+    ]
 
 
 def _legend_title_present(svg: str, field: str) -> bool:
@@ -704,13 +716,7 @@ def test_scale_works_for_stroke_width() -> None:
     svg = _render(
         fm.StrokeWidth, scale=fm.LinearScale(domain=[0.0, 12.0], range=[0.0, 6.0]), legend=None
     )
-    widths = [
-        float(w)
-        for w in re.findall(
-            rf'<circle[^>]*stroke="{re.escape(_MARK_COLOR)}"[^>]*stroke-width="([0-9.]+)"', svg
-        )
-    ]
-    assert widths == pytest.approx([n / 2.0 for n in _DF["n"].to_list()])
+    assert _stroke_widths(svg) == pytest.approx([n / 2.0 for n in _DF["n"].to_list()])
 
 
 def test_a_scale_whose_domain_equals_its_range_draws_literal_pixel_widths() -> None:
@@ -723,19 +729,21 @@ def test_a_scale_whose_domain_equals_its_range_draws_literal_pixel_widths() -> N
     assert not _legend_title_present(svg, "n")
 
 
-# The five channels whose scale is the numeric auxiliary linear scale.
+# The five channels whose scale is the numeric auxiliary scale.
 _NUMERIC_AUX_CLASSES = (fm.Size, fm.Opacity, fm.FillOpacity, fm.StrokeOpacity, fm.StrokeWidth)
 
-_GATE_REMEDY = "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+# Linear, Log, Pow and Sqrt each map through their own transform; the
+# remedy names the scale types the gate admits.
+_GATE_REMEDY = (
+    "pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
+)
 
 # Each malformed scale, in the class spelling where one exists and the dict
-# spelling, with the reason the gate gives for it.
+# spelling, with the reason the gate gives for it. "symlog" takes the
+# still-unsupported-type slot the table always needs one of.
 _MALFORMED_AUX_SCALES: dict[str, tuple[Any, str]] = {
-    "log": (fm.LogScale(), f"type 'log' is not supported; {_GATE_REMEDY}"),
-    "log-dict": ({"type": "log"}, f"type 'log' is not supported; {_GATE_REMEDY}"),
-    "sqrt": (fm.SqrtScale(), f"type 'sqrt' is not supported; {_GATE_REMEDY}"),
-    "pow": (fm.PowScale(), f"type 'pow' is not supported; {_GATE_REMEDY}"),
     "symlog": (fm.SymlogScale(), f"type 'symlog' is not supported; {_GATE_REMEDY}"),
+    "ordinal-dict": ({"type": "ordinal"}, f"type 'ordinal' is not supported; {_GATE_REMEDY}"),
     "padding": (
         fm.LinearScale(padding=0.1),
         f"padding is not supported (it insets an axis); {_GATE_REMEDY}",
@@ -780,6 +788,63 @@ def test_a_numeric_aux_channel_accepts_every_linear_field_it_draws(channel_cls: 
             "n", scale=fm.LinearScale(domain=[0.0, 10.0], range=[0.2, 0.8], reverse=True, nice=True)
         )
         channel_cls("n", scale={"domain": [1.0, 5.0], "zero": True, "clamp": True})
+
+
+# A per-channel reader of the concrete rendered attribute a numeric
+# auxiliary scale maps onto: a radius for size, else the opacity family's
+# own per-attribute reader, else stroke width.
+_NUMERIC_AUX_EXTRACT: dict[str, Callable[[str], list[float]]] = {
+    "size": _circle_radii,
+    "opacity": _OPACITY_ATTR_BY_CHANNEL["opacity"],
+    "fill_opacity": _OPACITY_ATTR_BY_CHANNEL["fill_opacity"],
+    "stroke_opacity": _OPACITY_ATTR_BY_CHANNEL["stroke_opacity"],
+    "stroke_width": _stroke_widths,
+}
+
+
+@pytest.mark.parametrize("kind", ["log", "pow", "sqrt"])
+@pytest.mark.parametrize("channel_cls", _NUMERIC_AUX_CLASSES, ids=lambda c: c.__name__)
+def test_log_pow_and_sqrt_scales_work_for_every_numeric_aux_channel(
+    channel_cls: type, kind: str
+) -> None:
+    """Log/Pow/Sqrt map size, the opacity family and stroke width through
+    their own transform, not a linear fallback and not a refusal.
+
+    `_DF`'s "n" column is `[1, ..., 6]`; against each kind's own transform
+    over `domain=[1, 6]`, `range=[0.1, 0.9]`, every row's drawn value
+    equals the independently computed oracle (`tests._aux_scale_oracle`),
+    not merely a render that changed from the unscaled baseline. The range
+    stays strictly inside ``(0, 1)`` so no row paints fully transparent or
+    fully opaque: either endpoint drops the opacity attribute from the SVG
+    entirely (transparent fill renders as ``none``; fully opaque matches
+    the default and is left unwritten), which would undercount the
+    extractors -- a rendering quirk unrelated to which scale kind produced
+    the endpoint value.
+    """
+    domain = (1.0, 6.0)
+    range_ = (0.1, 0.9)
+    scale = {
+        "log": fm.LogScale(domain=list(domain), range=list(range_)),
+        "pow": fm.PowScale(domain=list(domain), range=list(range_), exponent=3.0),
+        "sqrt": fm.SqrtScale(domain=list(domain), range=list(range_)),
+    }[kind]
+    mapper = {
+        "log": lambda x: log_map(x, domain, range_, base=10.0),
+        "pow": lambda x: pow_map(x, domain, range_, exponent=3.0),
+        "sqrt": lambda x: pow_map(x, domain, range_, exponent=0.5),
+    }[kind]
+    name = channel_cls._channel_name
+    expected = [mapper(n) for n in _DF["n"].to_list()]
+    if name == "size":
+        # SizeScale's range is an area; the mark draws its radius.
+        expected = [math.sqrt(v / math.pi) if v > 0.0 else 0.0 for v in expected]
+
+    svg = _render(channel_cls, scale=scale, legend=None)
+    # `opacity` bakes its value into the mark's rgba(...) fill alpha, which
+    # rounds during hex/rgba conversion (the same tolerance `test_scale_
+    # works_for_opacity_family` above uses for exactly that reason); a
+    # linear fallback would be off by tens of percent, not a few.
+    assert _NUMERIC_AUX_EXTRACT[name](svg) == pytest.approx(expected, rel=0.05)
 
 
 def test_scale_na_for_angle() -> None:

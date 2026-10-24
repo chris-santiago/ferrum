@@ -567,7 +567,7 @@ pub(crate) fn build_color_legend(
     // nothing about whether `build_aux_legends` actually emitted a merged
     // Size block. Size legend emission has its own independent gates
     // (`legend_channel_disabled`, `scales.size.is_some()`,
-    // `size_scale.inner.data_domain()` returning `Some`, non-empty entries),
+    // `size_scale.inner.tick_values_raw(5)` returning `Some`, non-empty entries),
     // any of which can make `aux_legends` carry NO `Size` entry even though
     // the field/scale-kind condition holds — e.g. `mark_point().encode(
     // color='v:Q', size=Size('v', legend=None))`. Nulling the colorbar in
@@ -1047,8 +1047,10 @@ fn same_field_numeric_size_color_merge(bindings: &LegendBindings<'_>, scales: &R
 /// Build the auxiliary legend blocks: size, shape, stroke-dash, then one per
 /// bound opacity-family channel, then stroke-width.
 ///
-/// Size: graduated symbols at ~5 nice round values spanning the size domain
-/// (`nice_ticks`), each scaled to the size scale's pixel radius and labeled
+/// Size: graduated symbols at the size scale's own ~5 ticks
+/// (`ScaleKind::tick_values_raw`, the same call an axis makes — decade ticks
+/// under `LogScale`, nice round values under `LinearScale`/`PowScale`/
+/// `SqrtScale`), each scaled to the size scale's pixel radius and labeled
 /// with the value. Shape: one glyph per category in the shape scale.
 /// Stroke-dash (T12): one dashed-line swatch per category in the
 /// [`StrokeDashScale`](crate::render::scale_resolve::StrokeDashScale), beside
@@ -1102,8 +1104,6 @@ fn build_aux_legends(
     size_symbol: Option<SymbolKind>,
     drawn: DrawnAuxChannels,
 ) -> AuxLegends {
-    use crate::scale::ticks::nice_ticks;
-
     use super::super::scale_resolve::{ColorInput, ColorScale};
 
     let color_field = bindings.color.map(|c| c.field.as_str());
@@ -1143,8 +1143,7 @@ fn build_aux_legends(
         let suppressed = disabled || (same_field_as_color && !color_is_numeric);
         if !suppressed {
             let label = aux_value_labeler(size_enc, transformed);
-            if let Some((lo, hi)) = size_scale.inner.data_domain() {
-                let values = nice_ticks(lo, hi, 5);
+            if let Some(values) = size_scale.inner.tick_values_raw(5) {
                 let entries: Vec<SizeLegendEntry> = values
                     .iter()
                     .filter_map(|&v| {
@@ -1275,9 +1274,9 @@ fn build_aux_legends(
         if legend_channel_disabled(Some(enc)) {
             continue;
         }
-        let Some((lo, hi)) = scale.inner.data_domain() else { continue };
+        let Some(values) = scale.inner.tick_values_raw(5) else { continue };
         let label = aux_value_labeler(enc, transformed);
-        let entries: Vec<OpacityLegendEntry> = nice_ticks(lo, hi, 5)
+        let entries: Vec<OpacityLegendEntry> = values
             .into_iter()
             .filter_map(|v| Some(OpacityLegendEntry { label: label(v), opacity: scale.inner.to_pixel_f64(v)? }))
             .collect();
@@ -1288,19 +1287,19 @@ fn build_aux_legends(
 
     // ── Stroke-width legend ──────────────────────────────────────────────
     let width_block = match (&scales.stroke_width, width_enc) {
-        (Some(scale), Some(enc)) if drawn.stroke_width && !legend_channel_disabled(Some(enc)) => {
-            scale.inner.data_domain().map(|domain| (scale, enc, domain))
-        }
+        (Some(scale), Some(enc)) if drawn.stroke_width && !legend_channel_disabled(Some(enc)) => Some((scale, enc)),
         _ => None,
     };
-    if let Some((scale, enc, (lo, hi))) = width_block {
-        let label = aux_value_labeler(enc, transformed);
-        let entries: Vec<StrokeWidthLegendEntry> = nice_ticks(lo, hi, 5)
-            .into_iter()
-            .filter_map(|v| Some(StrokeWidthLegendEntry { label: label(v), width: scale.width(v)? }))
-            .collect();
-        if !entries.is_empty() {
-            out.push(AuxLegendInput::StrokeWidth { title: aux_legend_title(enc), entries });
+    if let Some((scale, enc)) = width_block {
+        if let Some(values) = scale.inner.tick_values_raw(5) {
+            let label = aux_value_labeler(enc, transformed);
+            let entries: Vec<StrokeWidthLegendEntry> = values
+                .into_iter()
+                .filter_map(|v| Some(StrokeWidthLegendEntry { label: label(v), width: scale.width(v)? }))
+                .collect();
+            if !entries.is_empty() {
+                out.push(AuxLegendInput::StrokeWidth { title: aux_legend_title(enc), entries });
+            }
         }
     }
 

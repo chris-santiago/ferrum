@@ -432,14 +432,40 @@ pub enum RenderError {
         coord_flipped: bool,
     },
     /// A numeric auxiliary channel (size, the opacity family, stroke width)
-    /// carried a `scale=` its linear resolution cannot draw: a scale type
-    /// other than `linear` (named by its wire tag), or a `padding`/`scheme`
-    /// that has no meaning off an axis or a color scale
+    /// carried a `scale=` its continuous resolution cannot draw: a scale type
+    /// other than `linear`/`log`/`pow`/`sqrt` (named by its wire tag), or a
+    /// `padding`/`scheme` that has no meaning off an axis or a color scale
     /// (`scale_resolve::auxiliary::numeric_aux_scale`). `channel` is the
     /// channel's wire name, never positional, so nothing un-flips.
     AuxiliaryScaleUnsupported {
         channel: String,
         reason: String,
+    },
+    /// A `Log` channel (x, y, size, stroke_width, or an opacity-family
+    /// channel) whose data holds at least one non-null, finite value, but
+    /// none of them on the side its domain maps, so there is nothing left
+    /// to build a domain from. With no stated `scale=` domain, the side is
+    /// always positive — never inferred from the data, so an all-negative
+    /// column refuses rather than silently drawing a mirrored axis.
+    /// `reason`, built by [`log_no_value_on_side_reason`], names the row
+    /// count and the remedy the data's own shape calls for (an explicit
+    /// negative `domain=` built from the column's own extent when every
+    /// excluded row is negative; `fm.SymlogScale()`/`fm.SqrtScale()`/
+    /// `fm.LinearScale()` when any is zero). `channel` is the wire name
+    /// (positional or auxiliary); `coord_flipped` un-flips a positional one
+    /// at `Display` time (through
+    /// [`prepare::user_facing_channel`](crate::render::prepare::user_facing_channel)),
+    /// exactly as
+    /// [`InvalidScaleDomainConfig`](Self::InvalidScaleDomainConfig) does,
+    /// and stays `false` (uncorrected) for an auxiliary channel, which never
+    /// flips. The one construction site
+    /// ([`resolve_log_extent`](crate::render::scale_resolve::positional::resolve_log_extent))
+    /// threads its caller's real flag straight through, the same parameter
+    /// `LogScaleRowsLeftOut` reads.
+    LogScaleNoValueOnSide {
+        channel: String,
+        reason: String,
+        coord_flipped: bool,
     },
     /// A binned color (`Color(bin=...)`, a `bin-ordinal` scale carrying
     /// `bin`) over a column the `Bin` transform cannot read as numbers.
@@ -1261,6 +1287,14 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // `ScaleSpec::Band` arm and corrected by the same caller and
         // discipline as `InvalidScaleDomainConfig` directly above.
         | RenderError::InvalidBandPadding { .. }
+        // Carries `coord_flipped`, constructed `false` at every site this
+        // refuses (`build_from_scale_spec`'s `Log` arm, `numeric_aux_scale`'s
+        // `Log` handling). The positional site is corrected by
+        // `build_axis_scale`'s own `map_err`, same discipline as
+        // `InvalidScaleDomainConfig`/`InvalidBandPadding` above; the
+        // auxiliary site is never corrected, since an auxiliary channel
+        // never flips.
+        | RenderError::LogScaleNoValueOnSide { .. }
         // #126: carries no channel token at all — a color string, not a
         // positional channel.
         | RenderError::ColorRangeParseFailure { .. }
@@ -1447,8 +1481,12 @@ impl std::fmt::Display for RenderError {
             }
             Self::AuxiliaryScaleUnsupported { channel, reason } => write!(
                 f,
-                "{channel} scale: {reason}; pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+                "{channel} scale: {reason}; pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
             ),
+            Self::LogScaleNoValueOnSide { channel, reason, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(f, "{channel} scale: {reason}")
+            }
             Self::SharedColorScalesDiffer { first, other } => write!(
                 f,
                 "a shared color needs one color scale on every panel, but one panel colors by {first} \
@@ -1946,6 +1984,62 @@ pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
     matches!(channel, "x" | "y" | "x2" | "y2")
 }
 
+/// [`RenderError::LogScaleNoValueOnSide`]'s `reason`: built once, at the one
+/// place every `Log` channel's resolution discovers its on-side extent is
+/// empty, so x/y and every numeric auxiliary channel refuse with the same
+/// words. `side` is the channel's side (always
+/// [`crate::scale::log::LogSide::Positive`] with no stated `scale=` domain —
+/// never inferred from the data); `rows` is the count of non-null, finite
+/// values on the excluded side; `has_zero` is whether at least one of them
+/// is exactly zero; `opposite_extent` is the `(min, max)` of the
+/// strictly-opposite-signed ones among them, when any exist, for the
+/// suggested `fm.LogScale(domain=[min, max])` call. `channel` (via
+/// [`excluded_channel_is_positional`]) picks `fm.SymlogScale()` (x/y) or
+/// `fm.SqrtScale()`/`fm.LinearScale()` (a numeric auxiliary channel) as the
+/// alternative-scale remedy a column touching zero needs — the one piece of
+/// this text that differs between the two channel classes; every other word
+/// is shared.
+pub(crate) fn log_no_value_on_side_reason(
+    channel: &str,
+    field: &str,
+    rows: usize,
+    side: crate::scale::log::LogSide,
+    has_zero: bool,
+    opposite_extent: Option<(f64, f64)>,
+) -> String {
+    use crate::scale::log::LogSide;
+    let maps_word = match side {
+        LogSide::Positive => "positive",
+        LogSide::Negative => "negative",
+    };
+    let sign_word = match side {
+        LogSide::Positive => "negative",
+        LogSide::Negative => "positive",
+    };
+    let alt_scale = if excluded_channel_is_positional(channel) {
+        "fm.SymlogScale()"
+    } else {
+        "fm.SqrtScale() or fm.LinearScale()"
+    };
+    match (has_zero, opposite_extent) {
+        (false, Some((min, max))) => format!(
+            "every value of '{field}' ({rows} rows) is {sign_word}, and a LogScale with no domain maps only \
+             {maps_word} values; pass an explicit {sign_word} domain, e.g. fm.LogScale(domain=[{min}, {max}]), \
+             to draw a mirrored log scale"
+        ),
+        (_, Some((min, max))) => format!(
+            "{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain maps only {maps_word} \
+             values; use {alt_scale}, or pass an explicit {sign_word} domain, e.g. fm.LogScale(domain=[{min}, {max}])",
+            excluded = side.excluded_words(),
+        ),
+        (_, None) => format!(
+            "{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain maps only {maps_word} \
+             values; use {alt_scale}",
+            excluded = side.excluded_words(),
+        ),
+    }
+}
+
 /// Where a layer left out of the layered axis a caller's scale establishes
 /// draws its marks (see [`RenderWarning::LayerScaleExcluded`]). The two
 /// layering routes differ here: a flat layered chart (`+`, `Chart.layer`)
@@ -2000,7 +2094,45 @@ pub enum RenderWarning {
     /// drained by `render::prepare::run_transforms_with_facet` into the
     /// render pipeline's own warnings vec.
     Transform(TransformWarning),
-    OutOfDomainRows { mark: String, count: u64 },
+    /// A `Log` channel (x, y, size, stroke_width, or an opacity-family
+    /// channel) left `rows` of `field` out of its scale: they are on the
+    /// excluded side of `side` (`LogSide::Positive`'s excluded side is "zero
+    /// or negative"; `Negative`'s is "zero or positive"), which a `Log`
+    /// scale cannot place (x/y) or map (an auxiliary channel) — on EVERY
+    /// channel the row is not drawn:
+    /// an auxiliary channel's row is removed at the one draw seam
+    /// (`scale_resolve::log_aux_drawn_rows`, called from
+    /// `scene_build::build_panel_mark_batches`), the same treatment
+    /// `ScaleKind::to_pixel_f64`'s `None` already gives an off-side x/y row,
+    /// since `None` cannot express "not drawn" to an aux reader (every one
+    /// folds it into the channel's default instead) — the other half, an
+    /// empty on-side extent, refuses with
+    /// [`RenderError::LogScaleNoValueOnSide`](crate::render::RenderError::LogScaleNoValueOnSide)
+    /// instead. Pushed once per channel by the resolution that folded the
+    /// rows, with the whole frame's count (one content-deduplicated tally
+    /// shared by every fold, so `+`, `fm.layer`,
+    /// a static `LayerChart` overlay and a faceted chart report the SAME
+    /// count for the SAME data) — a faceted chart's per-panel resolution
+    /// restates the identical warning, which
+    /// `prepare::panel_pass_warning_restated_by_every_panel`/
+    /// `provisional_scale_warning_superseded_by_panel_pass` collapse to one,
+    /// as they already do for `ShapePaletteOverflowed`/
+    /// `StrokeDashPaletteOverflowed`. `coord_flipped` un-flips a positional
+    /// `channel` at `Display` time, through
+    /// [`prepare::user_facing_channel`](crate::render::prepare::user_facing_channel)
+    /// — every pusher passes its OWN real flag (`resolve_log_scale`'s
+    /// `build_axis_scale` caller, a composite caller's
+    /// `LeafResolveInput::coord_flipped()`), not a placeholder corrected
+    /// later, since a pushed warning (unlike a returned `RenderError`) has
+    /// no `Result` for a caller to `map_err` over after the fact. `false`
+    /// for an auxiliary channel, which `CoordFlip` never swaps.
+    LogScaleRowsLeftOut {
+        channel: String,
+        field: String,
+        rows: usize,
+        side: crate::scale::log::LogSide,
+        coord_flipped: bool,
+    },
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
     /// A categorical `stroke_dash` channel named more categories than the dash
@@ -2507,10 +2639,24 @@ impl std::fmt::Display for RenderWarning {
         match self {
             RenderWarning::Layout(w) => write!(f, "{w}"),
             RenderWarning::Transform(w) => write!(f, "{w}"),
-            RenderWarning::OutOfDomainRows { mark, count } => write!(
-                f,
-                "{count} {mark} row(s) fell outside the scale domain and were not drawn"
-            ),
+            RenderWarning::LogScaleRowsLeftOut { channel, field, rows, side, coord_flipped } => {
+                let excluded = side.excluded_words();
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                if excluded_channel_is_positional(channel) {
+                    write!(
+                        f,
+                        "{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale \
+                         cannot place, so they are not drawn; filter them, or use fm.SymlogScale() for \
+                         data that reaches zero"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale \
+                         cannot map, so they are not drawn; filter them, or use fm.SqrtScale()"
+                    )
+                }
+            }
             RenderWarning::ColorPaletteOverflowed { categories } => write!(
                 f,
                 "color palette has fewer entries than the {categories} categories; \
@@ -2847,7 +2993,13 @@ mod tests {
                 group: Some("g=a".into()),
                 reason: "fewer than 2 usable points".into(),
             }),
-            RenderWarning::OutOfDomainRows { mark: "point".into(), count: 3 },
+            RenderWarning::LogScaleRowsLeftOut {
+                channel: "size".into(),
+                field: "v".into(),
+                rows: 3,
+                side: crate::scale::log::LogSide::Positive,
+                coord_flipped: false,
+            },
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::StrokeDashPaletteOverflowed { categories: 6 },

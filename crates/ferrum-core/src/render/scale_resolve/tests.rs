@@ -223,6 +223,115 @@ fn size_scale_defaults_to_theme_point_size_range() {
     assert_eq!(scale.max_px(), 36.0);
 }
 
+/// `Size(scale=LogScale(domain=[1, 10], range=[10, 40]))` resolves to
+/// `ScaleKind::Log`, through the exact same `LogScale::new_internal` the
+/// positional `x`/`y` resolution uses, so `size_val` 1 (domain low) and 10
+/// (domain high) map to the range ends and a mid-domain value maps
+/// logarithmically, not linearly, between them.
+#[test]
+fn a_log_size_scale_resolves_to_scale_kind_log_and_maps_logarithmically() {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let mut spec = make_spec_with_size();
+    spec.encoding.size.as_mut().unwrap().scale = Some(ScaleSpec::Log {
+        base: 10.0,
+        common: ContinuousScaleCommon {
+            domain: Some(vec![1.0, 10.0]),
+            range: Some(vec![10.0, 40.0]),
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        },
+        nice: false,
+    });
+    let (scale, warns) = build_size_scale(&spec.encoding, &batch, &outputs, false, &theme, None, &[]).unwrap();
+    assert!(warns.is_empty());
+    let scale = scale.unwrap();
+    assert!(matches!(scale.inner, ScaleKind::Log(_)));
+    assert_eq!(scale.inner.to_pixel_f64(1.0), Some(10.0));
+    assert_eq!(scale.inner.to_pixel_f64(10.0), Some(40.0));
+    let mid = scale.inner.to_pixel_f64(3.1622776601683795).expect("sqrt(10) is in-domain");
+    assert!((mid - 25.0).abs() < 1e-9, "log10(3.162)=0.5, so the half-decade point maps to the range midpoint, got {mid}");
+}
+
+/// `Size(scale=PowScale(exponent=2, domain=[0, 10], range=[0, 100]))` and
+/// `Size(scale=SqrtScale(domain=[0, 10], range=[0, 100]))` resolve to
+/// `ScaleKind::Pow`, mirroring the positional `pow_scale_exponent_2_
+/// compresses_low_values`/`sqrt_scale_expands_low_values` tests: `Sqrt`
+/// carries no `nice` field and resolves as `exponent: 0.5`, exactly as
+/// `build_from_scale_spec`'s `ScaleSpec::Sqrt` arm does for x/y.
+#[test]
+fn pow_and_sqrt_size_scales_resolve_to_scale_kind_pow() {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let common = |domain: Vec<f64>, range: Vec<f64>| ContinuousScaleCommon {
+        domain: Some(domain),
+        range: Some(range),
+        clamp: false,
+        padding: None,
+        scheme: None,
+        domain_param: None,
+        reverse: false,
+    };
+
+    let mut pow_spec = make_spec_with_size();
+    pow_spec.encoding.size.as_mut().unwrap().scale =
+        Some(ScaleSpec::Pow { exponent: 2.0, common: common(vec![0.0, 10.0], vec![0.0, 100.0]) });
+    let pow_scale = build_size_scale(&pow_spec.encoding, &batch, &outputs, false, &theme, None, &[])
+        .unwrap()
+        .0
+        .unwrap();
+    assert!(matches!(pow_scale.inner, ScaleKind::Pow(_)));
+    assert_eq!(pow_scale.inner.to_pixel_f64(5.0), Some(25.0), "5^2 / 10^2 * 100 = 25");
+
+    let mut sqrt_spec = make_spec_with_size();
+    sqrt_spec.encoding.size.as_mut().unwrap().scale =
+        Some(ScaleSpec::Sqrt { common: common(vec![0.0, 100.0], vec![0.0, 10.0]) });
+    let sqrt_scale = build_size_scale(&sqrt_spec.encoding, &batch, &outputs, false, &theme, None, &[])
+        .unwrap()
+        .0
+        .unwrap();
+    assert!(matches!(sqrt_scale.inner, ScaleKind::Pow(_)));
+    assert_eq!(sqrt_scale.inner.to_pixel_f64(25.0), Some(5.0), "sqrt(25)/sqrt(100) * 10 = 5");
+}
+
+/// A value outside an explicit domain clamps to the nearer range end, on a
+/// `Size(scale=LogScale(...))` exactly as it does on `Size(scale=
+/// LinearScale(...))` (`a_size_domain_is_honored_and_clamps`,
+/// `render::prepare::tests`) -- the numeric auxiliary channels' own
+/// always-clamp contract, carried through unchanged for the new scale
+/// kinds.
+#[test]
+fn a_log_size_domain_clamps_out_of_domain_values() {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let mut spec = make_spec_with_size();
+    spec.encoding.size.as_mut().unwrap().scale = Some(ScaleSpec::Log {
+        base: 10.0,
+        common: ContinuousScaleCommon {
+            domain: Some(vec![2.0, 3.0]),
+            range: Some(vec![10.0, 40.0]),
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        },
+        nice: false,
+    });
+    let scale = build_size_scale(&spec.encoding, &batch, &outputs, false, &theme, None, &[]).unwrap().0.unwrap();
+    assert_eq!(scale.inner.to_pixel_f64(0.5), Some(10.0), "below the domain clamps to the low range end");
+    assert_eq!(scale.inner.to_pixel_f64(100.0), Some(40.0), "above the domain clamps to the high range end");
+}
+
 /// A size `domainParam` reaches the size scale the marks draw with and the
 /// provisional scale `build_scene`'s once-per-chart swarm packing bound
 /// (`position::chart_swarms`) and the size legend read: both map the param's
@@ -1079,6 +1188,43 @@ fn opacity_scale_defaults_to_0_1_to_1_0() {
     let scale = scale.unwrap();
     assert_eq!(scale.min_opacity(), 0.1);
     assert_eq!(scale.max_opacity(), 1.0);
+}
+
+/// `Opacity(scale=LogScale(...))` resolves through the same gate and the
+/// same `ScaleKind::Log` path `build_size_scale` does, with its own
+/// `DrawableInterval::Alpha` clamp (the opacity band, not the size band):
+/// an explicit `[0.2, 0.6]` range is honored and a value outside the
+/// explicit domain clamps to the nearer end, never dropped.
+#[test]
+fn a_log_opacity_scale_resolves_to_scale_kind_log_and_clamps() {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let mut spec = make_spec_with_opacity();
+    spec.encoding.opacity.as_mut().unwrap().scale = Some(ScaleSpec::Log {
+        base: 10.0,
+        common: ContinuousScaleCommon {
+            domain: Some(vec![0.2, 2.0]),
+            range: Some(vec![0.2, 0.6]),
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        },
+        nice: false,
+    });
+    let (scale, warns) =
+        build_opacity_channel_scale(OpacityChannel::Opacity, &spec.encoding, &batch, &outputs, false, &theme, &[])
+            .unwrap();
+    assert!(warns.is_empty());
+    let scale = scale.unwrap();
+    assert!(matches!(scale.inner, ScaleKind::Log(_)));
+    assert_eq!(scale.inner.to_pixel_f64(0.2), Some(0.2));
+    assert_eq!(scale.inner.to_pixel_f64(2.0), Some(0.6));
+    assert_eq!(scale.inner.to_pixel_f64(0.01), Some(0.2), "below the domain clamps to the low alpha end");
+    assert_eq!(scale.inner.to_pixel_f64(50.0), Some(0.6), "above the domain clamps to the high alpha end");
 }
 
 // --- Encoding resolution / inheritance edge-case tests ---
@@ -8256,9 +8402,10 @@ fn layer_scale_excluded_says_scale_for_a_non_positional_channel() {
 }
 
 /// `ferrum._core.validate_numeric_aux_scale` runs the render-time gate on a
-/// raw dict with no data: it admits a linear scale, refuses a non-linear one
-/// with the text a render refuses with, refuses a key the scale-dict gate
-/// refuses, and refuses a channel that is not a numeric auxiliary one.
+/// raw dict with no data: it admits `linear`, `log`, `pow` and `sqrt`,
+/// refuses any other type with the text a render refuses with, refuses a key
+/// the scale-dict gate refuses, and refuses a channel that is not a numeric
+/// auxiliary one.
 #[test]
 fn the_published_gate_answers_as_the_render_does() {
     use pyo3::types::{PyDict, PyDictMethods};
@@ -8276,11 +8423,18 @@ fn the_published_gate_answers_as_the_render_does() {
         let linear = dict(&[("type", s("linear")), ("domain", vec![0.0, 1.0].into_py_any(py).unwrap())]);
         for channel in NUMERIC_AUX_CHANNELS {
             validate_numeric_aux_scale(py, channel, &linear).unwrap();
-            let log = dict(&[("type", s("log"))]);
-            let err = validate_numeric_aux_scale(py, channel, &log).unwrap_err();
+            for supported in ["log", "pow", "sqrt"] {
+                let scale = dict(&[("type", s(supported))]);
+                validate_numeric_aux_scale(py, channel, &scale).unwrap();
+            }
+            let ordinal = dict(&[("type", s("ordinal"))]);
+            let err = validate_numeric_aux_scale(py, channel, &ordinal).unwrap_err();
             assert_eq!(
                 err.value(py).to_string(),
-                format!("{channel} scale: type 'log' is not supported; pass fm.LinearScale(domain=[...], range=[...]) or drop scale=")
+                format!(
+                    "{channel} scale: type 'ordinal' is not supported; \
+                     pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
+                )
             );
         }
         let typo = dict(&[("type", s("linear")), ("clammp", true.into_py_any(py).unwrap())]);
@@ -8454,4 +8608,24 @@ fn polar_text_is_single_axis_eligible_on_its_theta_channel() {
         assert!(!super::mark_single_axis_eligible(mark, None, true, false), "{mark}: no polar coord");
     }
     assert!(!super::mark_single_axis_eligible(Mark::Point, Some(&on_x), true, false), "control: a point needs both");
+}
+
+// ── `ScaleKind::tick_anchors`: which tick values are `Log` decades ─────────
+
+#[test]
+fn tick_anchors_marks_log_decades_among_the_1_2_5_ladder() {
+    use crate::scale::log::LogScale;
+    let log = ScaleKind::Log(LogScale::new_internal(vec![1.0, 100.0], vec![0.0, 400.0], 10.0, false, false));
+    let values = log.tick_values_raw(10).expect("log scale has tick values");
+    assert_eq!(values, vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]);
+    let anchors = log.tick_anchors(&values);
+    assert_eq!(anchors, vec![true, false, false, true, false, false, true]);
+}
+
+#[test]
+fn tick_anchors_empty_for_every_non_log_kind() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![0.0, 400.0], false, false));
+    let values = linear.tick_values_raw(5).expect("linear scale has tick values");
+    assert!(linear.tick_anchors(&values).is_empty(), "non-Log tick_anchors is empty, not all-false");
 }

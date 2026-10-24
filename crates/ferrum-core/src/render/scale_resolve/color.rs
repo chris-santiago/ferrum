@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, SortContext};
+use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, FacetExtentPolicy, SortContext};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
@@ -228,7 +228,7 @@ pub fn build_color_scale(
         // when faceted (Shared), union the per-panel extent with the global
         // FINAL_OUTPUT_KEY batch so marks normalize through the same domain as
         // the global colorbar legend.
-        let data_extent = match aux_numeric_union(layer_reads, primary_batch, transform_outputs, facet_shared, continuous_extent)? {
+        let data_extent = match aux_numeric_union(layer_reads, primary_batch, transform_outputs, facet_shared, FacetExtentPolicy::UnionWithPanel, continuous_extent)? {
             Some(union) => union,
             None if facet_shared => {
                 union_panel_with_global_extent(panel_extent, &c_enc.field, transform_outputs)
@@ -1121,7 +1121,7 @@ pub(in crate::render) fn raster_cell_scale(
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<Option<ColorScale>, RenderError> {
     let numeric = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
-    let Some(data_domain) = aux_numeric_union(reads, primary_batch, transform_outputs, false, numeric)? else {
+    let Some(data_domain) = aux_numeric_union(reads, primary_batch, transform_outputs, false, FacetExtentPolicy::UnionWithPanel, numeric)? else {
         return Ok(None);
     };
     if !(data_domain.0.is_finite() && data_domain.1.is_finite()) {

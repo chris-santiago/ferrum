@@ -28,6 +28,49 @@ pub(crate) const LOG_DOMAIN_CONTAINS_ZERO: &str = "log scale domain must not con
 pub(crate) const LOG_DOMAIN_SIGN_MISMATCH: &str =
     "log scale domain endpoints must have the same sign";
 
+/// Which side of zero a Log scale's domain lives on. A Log scale maps the
+/// values on one side; the other side is left out of the channel
+/// rather than mirrored, clamped, or silently folded in.
+///
+/// The side is never inferred from data: with no stated `scale=` domain it
+/// is always [`Positive`](Self::Positive) ([`LogSide::of`]`(None)`), even
+/// over an all-negative column — an all-negative data-derived extent refuses
+/// instead ([`crate::render::RenderError::LogScaleNoValueOnSide`]), naming an
+/// explicit negative `domain=` as the remedy. [`Negative`](Self::Negative) is
+/// reached only by stating that domain, which
+/// [`LogScaleData::validate_user_domain`] already requires to be one-signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LogSide {
+    Positive,
+    Negative,
+}
+
+impl LogSide {
+    /// The side a stated `scale=` domain names (its first endpoint's sign),
+    /// or [`Positive`](Self::Positive) when no domain is stated. `domain` is
+    /// read before validation, but every reachable caller has already passed
+    /// it through [`LogScaleData::validate_user_domain`] (directly, or via
+    /// `render::scale_resolve::positional::validate_explicit_log_domain`),
+    /// so a `Some` domain here is always nonzero and one-signed.
+    pub(crate) fn of(domain: Option<&[f64]>) -> LogSide {
+        match domain {
+            Some([d0, ..]) if *d0 < 0.0 => LogSide::Negative,
+            _ => LogSide::Positive,
+        }
+    }
+
+    /// The remedy word this side's off-side rows are: the side a value must
+    /// NOT be to map, in [`RenderWarning::LogScaleRowsLeftOut`] and
+    /// [`RenderError::LogScaleNoValueOnSide`]'s `Display` text.
+    pub(crate) fn excluded_words(self) -> &'static str {
+        match self {
+            LogSide::Positive => "zero or negative",
+            LogSide::Negative => "zero or positive",
+        }
+    }
+}
+
 impl LogScaleData {
     /// Number of decades below the reference endpoint used as a floor when
     /// [`sanitize_domain`](Self::sanitize_domain) replaces a zero (or
@@ -124,6 +167,22 @@ impl LogScaleData {
         }
     }
 
+    /// Whether `x` lies on this scale's domain side: non-NaN, nonzero, and
+    /// signed like the stored domain — an infinity matching the domain's
+    /// sign is on-side too, since the side is just the sign, so a value this
+    /// gate admits is clamped to the range end downstream like any other
+    /// continuous scale's aux reader, never left out for being non-finite.
+    /// The gate
+    /// `ScaleKind::to_pixel_f64`/`to_pixel_f64_extrapolated` apply before
+    /// dispatching to a `Log` scale, so a value failing this never reaches
+    /// [`scale`](Self::scale) through the render path at all (left out of
+    /// the channel, not clamped or NaN-mapped). `scale`/`invert`/`ticks`
+    /// keep their own standalone contract unchanged — this is a render-only
+    /// gate, not a new rule on the scale object itself.
+    fn on_side(&self, x: f64) -> bool {
+        !x.is_nan() && x != 0.0 && (self.domain[0] < 0.0) == (x < 0.0)
+    }
+
     fn scale(&self, x: f64) -> f64 {
         if x.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -200,15 +259,61 @@ impl LogScaleData {
         }
     }
 
+    /// Relative tolerance a candidate tick's magnitude is kept within `[lo,
+    /// hi]` by: `ln(1000)/ln(10) = 2.9999999999999996`, so a power or
+    /// multiple landing exactly on a snapped exponent must not be floated
+    /// just outside the domain it names.
+    const TICK_DOMAIN_TOLERANCE: f64 = 1e-9;
+
+    /// `scales::breaks_log` (ggplot2): round values a log axis or legend
+    /// labels, instead of the fractional exponents (`1, 1.5849, 2.5119, ...`)
+    /// a linear subdivision of log-space gives. Over the domain's
+    /// magnitudes `[lo, hi]` with `base`-exponents snapped by
+    /// [`snap_exp`](Self::snap_exp) at both ends:
+    ///
+    /// 1. A degenerate domain (`lo == hi`, e.g. a constant-valued data
+    ///    column) returns its one value.
+    /// 2. A domain spanning less than one `base`-decade (`ln(hi/lo) <
+    ///    ln(base)`, e.g. `[3, 7]` under base 10) has no decade structure to
+    ///    round to — falls straight to step 6.
+    /// 3. More powers of `base` within `[lo, hi]` than `count` allows
+    ///    thinned to every Nth power at a
+    ///    nice integer-exponent step (`nice_ticks` over the exponents —
+    ///    d3's own `log.ticks` does exactly `ticks(i, j, min(j - i, n)).map(pows)`
+    ///    past `n` decades), so a span of many decades stays within budget
+    ///    instead of overshooting it.
+    /// 4. The integer powers of `base` within `[lo, hi]`, kept with a
+    ///    tolerance at the domain ends, when there are at least `count - 2`
+    ///    of them (subsumes the former `span_decades >= count` branch: a
+    ///    wide domain's powers alone already clear that bar, so it is
+    ///    unchanged).
+    /// 5. Otherwise, for an integer `base`, multiples `k * base^e` with `k`
+    ///    drawn from increasingly dense step sets — `{1, 3}`, `{1, 2, 5}`,
+    ///    `{1..9}` for base 10, `{1..base-1}` for another integer base —
+    ///    taking the DENSEST set whose tick count is AT MOST `count` — not
+    ///    the first set reaching `count - 2`, which could, and did, skip
+    ///    past a set that fits the budget straight to one so dense a later
+    ///    stride cull drops a decade in favor of a non-decade multiple:
+    ///    over `[1, 100]` at `count` 10, `{1, 2, 5}` (7 ticks) fits; the old
+    ///    rule passed over it for `{1..9}` (19 ticks) because 7 fell short
+    ///    of `count - 2 = 8`. When no multiple set fits the budget either
+    ///    the powers themselves, which
+    ///    always fit (step 4 already returned when they numbered at least
+    ///    `count - 2`, so reaching here they number fewer than that, hence
+    ///    fewer than `count`).
+    /// 6. Otherwise (step 2's narrow domain, or a non-integer `base`):
+    ///    `nice_ticks(lo, hi, count)` in value space, the same fallback d3's
+    ///    `log.ticks` and ggplot2's `breaks_log` both take.
+    ///
+    /// Sign mirroring (a negative domain) and `should_reverse` (a
+    /// descending domain) are applied last, to whichever of 1-6 produced the
+    /// magnitudes, exactly as before this rule replaced the two-branch
+    /// (decade-powers vs. linear-in-log-space) one it supersedes.
     fn ticks(&self, count: usize) -> Vec<f64> {
         let neg = self.domain[0] < 0.0;
         let sign: f64 = if neg { -1.0 } else { 1.0 };
         let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
         let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
-        let log_base = self.base.ln();
-        let lo_exp = Self::snap_exp(lo.ln() / log_base).floor() as i64;
-        let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil() as i64;
-        let span_decades = (hi_exp - lo_exp).max(1) as usize;
 
         // Ticks are generated in ascending-exponent order.
         // For positive domains, ascending exponent = ascending value.
@@ -224,22 +329,140 @@ impl LogScaleData {
             self.domain[0] > self.domain[1]
         };
 
-        if span_decades >= count {
-            let mut out: Vec<f64> = (lo_exp..=hi_exp)
-                .map(|e| sign * self.base.powi(e as i32))
-                .filter(|t| (t.abs() >= lo) && (t.abs() <= hi))
-                .collect();
-            if should_reverse { out.reverse(); }
-            out
-        } else {
-            let lvals = nice_ticks(lo.ln() / log_base, hi.ln() / log_base, count);
-            let mut out: Vec<f64> = lvals.into_iter().map(|lv| sign * self.base.powf(lv)).collect();
-            if should_reverse { out.reverse(); }
-            out
+        let magnitudes = Self::breaks_log(lo, hi, self.base, count);
+        let mut out: Vec<f64> = magnitudes.into_iter().map(|v| sign * v).collect();
+        if should_reverse { out.reverse(); }
+        out
+    }
+
+    /// Whether `v` is an integer power of `base`, within
+    /// [`TICK_DOMAIN_TOLERANCE`](Self::TICK_DOMAIN_TOLERANCE) — a decade, the
+    /// same tolerance [`breaks_log`](Self::breaks_log) keeps a candidate
+    /// power inside `[lo, hi]` with. `ScaleKind::tick_anchors` uses this to
+    /// mark which of this scale's ticks are decades,
+    /// so `layout::axis::anchored_visibility` can keep them through a stride
+    /// cull — ggplot2's/d3's "always label the powers" rule, enforced at the
+    /// cull instead of only at tick generation.
+    fn is_decade(&self, v: f64) -> bool {
+        let v = v.abs();
+        if v <= 0.0 || !v.is_finite() {
+            return false;
         }
+        let log_base = self.base.ln();
+        let exp = Self::snap_exp(v.ln() / log_base).round();
+        let power = self.base.powi(exp as i32);
+        Self::within_tick_tolerance(power, v, v)
+    }
+
+    /// Whether `v` is within [`TICK_DOMAIN_TOLERANCE`](Self::TICK_DOMAIN_TOLERANCE)
+    /// of `[lo, hi]` — both strictly positive magnitudes.
+    fn within_tick_tolerance(v: f64, lo: f64, hi: f64) -> bool {
+        let tol = Self::TICK_DOMAIN_TOLERANCE;
+        v >= lo * (1.0 - tol) && v <= hi * (1.0 + tol)
+    }
+
+    /// [`ticks`](Self::ticks)'s rule, over positive magnitudes, with no sign
+    /// or reversal applied — see that method's doc for the four steps.
+    fn breaks_log(lo: f64, hi: f64, base: f64, count: usize) -> Vec<f64> {
+        if lo == hi {
+            return vec![lo];
+        }
+        let log_base = base.ln();
+        // Step 2: a sub-decade domain has no powers/multiples structure —
+        // straight to the linear fallback.
+        if hi.ln() - lo.ln() < log_base {
+            return nice_ticks(lo, hi, count);
+        }
+        let lo_exp = Self::snap_exp(lo.ln() / log_base).floor() as i64;
+        let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil() as i64;
+        let target = count.saturating_sub(2).max(1);
+
+        let powers: Vec<f64> = (lo_exp..=hi_exp)
+            .map(|e| base.powi(e as i32))
+            .filter(|&v| Self::within_tick_tolerance(v, lo, hi))
+            .collect();
+        // Step 3 more powers than the budget
+        // allows — thin to every Nth power at a nice integer-exponent step,
+        // so a very wide span stays within `count` instead of overshooting
+        // it (today's bug: falling straight to `nice_ticks(lo, hi, count)`
+        // in VALUE space labeled arbitrary linear subdivisions like `30000`
+        // over a multi-decade span).
+        //
+        // Thinned over the FIRST and LAST IN-DOMAIN exponents (`powers`'
+        // own first/last entries), not the floor/ceil-extended `lo_exp`/
+        // `hi_exp` above: those intentionally extend past `[lo, hi]` so the
+        // `within_tick_tolerance` filter above can admit a power right at
+        // the domain's edge, but `nice_ticks` has no such filter of its
+        // own, so thinning over them could map an out-of-domain exponent
+        // (e.g. `lo_exp` itself) straight back to a tick with nothing to
+        // catch it — a non-power domain end exposes this: `[3, 7e12]`
+        // floors `lo_exp` to `0`, one exponent below the first in-domain
+        // power `10^1`, so thinning over `lo_exp`/`hi_exp` directly would
+        // emit `10^0 = 1`, outside the domain. The final
+        // `within_tick_tolerance` filter
+        // below is a second, independent backstop in case `nice_ticks`
+        // ever rounds past even the in-domain exponents' own span.
+        if powers.len() > count {
+            let first_exp = Self::snap_exp(powers[0].ln() / log_base).round();
+            let last_exp = Self::snap_exp(powers[powers.len() - 1].ln() / log_base).round();
+            let exps = nice_ticks(first_exp, last_exp, count);
+            return exps
+                .into_iter()
+                .map(|e| base.powi(e.round() as i32))
+                .filter(|&v| Self::within_tick_tolerance(v, lo, hi))
+                .collect();
+        }
+        if powers.len() >= target {
+            return powers;
+        }
+
+        if base.fract() == 0.0 && base >= 2.0 {
+            let b = base as i64;
+            let step_sets: Vec<Vec<i64>> = if b == 10 {
+                vec![vec![1, 3], vec![1, 2, 5], (1..=9).collect()]
+            } else {
+                vec![(1..b).collect()]
+            };
+            // The DENSEST set whose count still fits the `count` budget —
+            // scanned over every set rather than stopping at the first
+            // dense-enough one, so a set that overshoots `count` never wins
+            // over a sparser one that fits, even if density is not perfectly
+            // monotonic at the domain's tolerance-clipped edges.
+            let mut best: Option<Vec<f64>> = None;
+            for steps in step_sets {
+                let mut candidate: Vec<f64> = (lo_exp..=hi_exp)
+                    .flat_map(|e| steps.iter().map(move |&k| k as f64 * base.powi(e as i32)))
+                    .filter(|&v| Self::within_tick_tolerance(v, lo, hi))
+                    .collect();
+                candidate.sort_by(|a, b| a.partial_cmp(b).expect("finite magnitudes"));
+                candidate.dedup();
+                if candidate.len() <= count && best.as_ref().is_none_or(|b| candidate.len() > b.len()) {
+                    best = Some(candidate);
+                }
+            }
+            if let Some(best) = best {
+                return best;
+            }
+            // Step 5's tail no multiple set
+            // fits the budget either — fall back to the powers themselves,
+            // which always fit (fewer than `count - 2`, or step 4 above
+            // would already have returned).
+            return powers;
+        }
+
+        nice_ticks(lo, hi, count)
     }
 
     fn nice(self) -> Self {
+        // A degenerate domain (both endpoints equal, e.g. a constant-valued
+        // data column) has no span to round outward — mirrors
+        // `LinearScaleData::nice`'s zero-step early return (`scale/linear.rs`),
+        // so a constant column keeps the range midpoint `scale()` already
+        // gives it (`degenerate_ratio`) instead of this decade-floor/ceil
+        // widening it to a multi-decade domain with nothing in it.
+        if self.domain[0] == self.domain[1] {
+            return self;
+        }
         let neg = self.domain[0] < 0.0;
         let sign: f64 = if neg { -1.0 } else { 1.0 };
         let log_base = self.base.ln();
@@ -329,6 +552,14 @@ impl LogScale {
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
+
+    /// `ScaleKind::to_pixel_f64`/`_extrapolated`'s gate — see
+    /// [`LogScaleData::on_side`].
+    pub(crate) fn on_side(&self, x: f64) -> bool { self.data.on_side(x) }
+
+    /// `ScaleKind::tick_anchors`'s per-value question — see
+    /// [`LogScaleData::is_decade`].
+    pub(crate) fn is_decade(&self, x: f64) -> bool { self.data.is_decade(x) }
 
     /// Crate-internal extrapolating scale call — see
     /// [`LogScaleData::scale_extrapolated`].
@@ -683,12 +914,224 @@ mod tests {
         assert!(t.len() >= 3, "got {} ticks: {t:?}", t.len());
     }
 
+    // ── `breaks_log` exact vectors ──────────────────────────────────────────
+
+    #[test]
+    fn log_breaks_powers_cover_a_wide_domain() {
+        let s = d([1.0, 1000.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(5), vec![1.0, 10.0, 100.0, 1000.0]);
+    }
+
+    #[test]
+    fn log_breaks_fall_to_1_2_5_multiples_when_powers_alone_fall_short() {
+        let s = d([1.0, 1000.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(
+            s.ticks(10),
+            vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0],
+        );
+    }
+
+    #[test]
+    fn log_breaks_fall_to_1_3_multiples_for_a_sub_two_decade_domain() {
+        let s = d([1.0, 50.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(5), vec![1.0, 3.0, 10.0, 30.0]);
+    }
+
+    #[test]
+    fn log_breaks_fall_to_linear_nice_ticks_under_one_decade() {
+        let s = d([3.0, 7.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(5), nice_ticks(3.0, 7.0, 5));
+    }
+
+    #[test]
+    fn log_breaks_non_decimal_base_uses_every_integer_multiple() {
+        let s = d([3.0, 243.0], [0.0, 1.0], 3.0, false);
+        assert_eq!(s.ticks(5), vec![3.0, 9.0, 27.0, 81.0, 243.0]);
+    }
+
+    #[test]
+    fn log_breaks_mirror_on_a_negative_domain() {
+        // Domain `[-1000, -1]` is ASCENDING (-1000 < -1), so the ticks come
+        // out ascending too (matching the domain's own order, the same
+        // `should_reverse` rule every other `ticks()` case already follows).
+        let s = d([-1000.0, -1.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(5), vec![-1000.0, -100.0, -10.0, -1.0]);
+    }
+
+    #[test]
+    fn log_breaks_degenerate_domain_returns_its_one_value() {
+        let s = d([5.0, 5.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(5), vec![5.0]);
+    }
+
+    /// The fix case. 2 decades at count 10 — powers alone
+    /// (3: 1, 10, 100) fall short of `count - 2 = 8`, `{1, 3}` (5 ticks) and
+    /// `{1, 2, 5}` (7 ticks) both fit the `count` budget, `{1..9}` (19 ticks)
+    /// does not. The DENSEST that fits is `{1, 2, 5}` — the old "first
+    /// reaching `count - 2`" rule skipped past it straight to `{1..9}`,
+    /// which no stride cull from index 0 keeps every decade of.
+    #[test]
+    fn log_breaks_picks_the_densest_set_within_the_count_budget() {
+        let s = d([1.0, 100.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(10), vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]);
+    }
+
+    /// A domain not starting on a decade boundary: `{1, 2, 5}` (`[2, 5, 10,
+    /// 20]`, 4 ticks) is the densest set that fits `count` 10 — `{1..9}`
+    /// would give 11 ticks (`[2..9, 10, 20, 30]`), over budget.
+    #[test]
+    fn log_breaks_densest_set_off_decade_boundary() {
+        let s = d([2.0, 30.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(10), vec![2.0, 5.0, 10.0, 20.0]);
+    }
+
+    /// A wide domain (12 decades) stays on the unchanged powers-only branch:
+    /// 13 powers already clear `count - 2 = 8`, so the densest-multiple-set
+    /// rule never runs.
+    #[test]
+    fn log_breaks_wide_domain_keeps_every_power() {
+        let s = d([1.0, 1e12], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=12).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(10), expected);
+    }
+
+    /// The fix case a domain so wide its own
+    /// powers overshoot `count` falls back to linear `nice_ticks` today
+    /// (`[1, 1e5]` at count 10 labels `10000..100000`); under the fix it
+    /// thins the powers themselves to every Nth decade instead, so a log
+    /// axis over 5-6 decades still labels only powers of the base.
+    #[test]
+    fn log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits() {
+        let s = d([1.0, 1e5], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(10), vec![1.0, 10.0, 100.0, 1e3, 1e4, 1e5]);
+
+        let s = d([1.0, 1e6], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=6).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(10), expected);
+
+        let s = d([1.0, 1e9], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=9).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(16), expected);
+
+        let s = d([1.0, 1e12], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=12).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(16), expected);
+    }
+
+    /// Past the budget, the powers thin to every Nth decade at a nice integer-
+    /// exponent step (d3's `log.ticks` over `i, j, min(j-i, n)`), not an
+    /// unbounded list: `count` acts as a real cap on every side of the
+    /// domain, wide or narrow.
+    #[test]
+    fn log_breaks_thin_to_every_nth_power_past_the_count() {
+        let s = d([1.0, 1e20], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=20).step_by(2).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(10), expected);
+
+        let s = d([1.0, 1e12], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=12).step_by(2).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(4), expected.clone());
+        assert_eq!(s.ticks(5), expected);
+
+        let s = d([1.0, 1e9], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(4), vec![1.0, 1e2, 1e4, 1e6, 1e8]);
+
+        let s = d([1e-3, 1e9], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(4), vec![1e-2, 1.0, 1e2, 1e4, 1e6, 1e8]);
+
+        let s = d([-1e12, -1.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(4), vec![-1e12, -1e10, -1e8, -1e6, -1e4, -1e2, -1.0]);
+    }
+
+    /// A domain whose powers fit the dense-multiple-set rule as before this
+    /// choice landed is untouched: the new "thin past the budget" and
+    /// "fall back to the powers" branches only fire when the OLD rule's gap
+    /// (powers too few for the dense sets, no dense set fitting `count`
+    /// either) left no answer but a linear fallback.
+    #[test]
+    fn log_breaks_keep_the_fitting_sets_unchanged() {
+        let s = d([1.0, 100.0], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(10), vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]);
+
+        let s = d([1.0, 1e4], [0.0, 1.0], 10.0, false);
+        assert_eq!(
+            s.ticks(10),
+            vec![1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1e3, 3e3, 1e4],
+        );
+
+        let s = d([1.0, 1e5], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(16).len(), 16, "the {{1,2,5}} ladder over 1..1e5 is 16 values");
+
+        let s = d([1.0, 1e12], [0.0, 1.0], 10.0, false);
+        let expected: Vec<f64> = (0..=12).map(|e| 10f64.powi(e)).collect();
+        assert_eq!(s.ticks(10), expected, "13 powers, nice step 1");
+
+        let s = d([1.0, 1e9], [0.0, 1.0], 10.0, false);
+        assert_eq!(s.ticks(32).len(), 28, "the {{1,2,5}} ladder over 1..1e9 is 28 values");
+    }
+
+    /// Decision B's step-3 thinning must run over the first and last
+    /// IN-DOMAIN exponents, not the floor/ceil-extended `lo_exp`/`hi_exp`
+    /// the `powers` list is built from (those extend past the domain on
+    /// purpose, to catch every power `within_tick_tolerance` admits) --
+    /// otherwise `nice_ticks` thins over a wider exponent span than the
+    /// domain actually has, and maps an out-of-domain exponent straight
+    /// back to a tick with no filter. A non-power domain end (`[3, 7e12]`:
+    /// `lo_exp` floors to `0`, one exponent below the first in-domain power
+    /// `10^1`; `hi_exp` ceils to `13`, one above the last in-domain power
+    /// `10^12`) is exactly the case that exposes it: every tick must stay
+    /// within `[lo, hi]` (`LogScaleData::within_tick_tolerance`'s own
+    /// tolerance), on both signs.
+    #[test]
+    fn log_breaks_stay_within_the_domain_on_non_power_ends() {
+        let cases: [(f64, f64, usize); 3] = [(3.0, 7e12, 10), (0.5, 3e9, 4), (20.0, 5e15, 10)];
+        for (lo, hi, count) in cases {
+            // (domain, the positive magnitude bounds every tick must respect)
+            for (dlo, dhi) in [(lo, hi), (-hi, -lo)] {
+                let s = d([dlo, dhi], [0.0, 1.0], 10.0, false);
+                let ticks = s.ticks(count);
+                assert!(!ticks.is_empty(), "domain [{dlo}, {dhi}] count {count}: no ticks at all");
+                for &t in &ticks {
+                    assert!(
+                        LogScaleData::within_tick_tolerance(t.abs(), lo, hi),
+                        "domain [{dlo}, {dhi}] count {count}: tick {t} falls outside [{lo}, {hi}]: {ticks:?}"
+                    );
+                }
+                // No budget assertion here: `nice_ticks`' own step
+                // rounding (mirroring d3's `tickIncrement`, which the
+                // thinning step above is built on) can legitimately keep every
+                // in-domain exponent when the span-to-count ratio rounds to
+                // a step of 1 (`[20, 5e15]` at count 10 spans 13 exponents,
+                // and 13/10 = 1.3 rounds to step 1 under the same <1.5
+                // threshold `log_breaks_thin_to_every_nth_power_past_the_count`'s
+                // own `[1, 1e20]`-at-10 case already exercises) -- that is
+                // accepted, pre-existing thinning behavior, not the bug
+                // this test pins. The bug is a tick escaping the DOMAIN,
+                // checked above.
+            }
+        }
+    }
+
     #[test]
     fn log_nice_rounds_to_decades() {
         let s = d([3.0, 700.0], [0.0, 1.0], 10.0, false);
         let n = s.nice();
         assert!((n.domain[0] - 1.0).abs() < 1e-9);
         assert!((n.domain[1] - 1000.0).abs() < 1e-9);
+    }
+
+    /// A degenerate positive domain (a constant-valued data column) has no
+    /// span to round outward: `nice()` returns it unchanged, mirroring the
+    /// negative case (`log_nice_negative_single_point_domain`). Before this
+    /// guard, `[5, 5]` widened to `[1, 10]`, so a constant column's `scale()`
+    /// no longer landed at the range midpoint once niced (size and
+    /// stroke-width's data-derived domain is niced by default).
+    #[test]
+    fn log_nice_degenerate_positive_domain_returns_it_unchanged() {
+        let s = d([5.0, 5.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert_eq!(n.domain, [5.0, 5.0]);
+        assert_eq!(n.scale(5.0), 0.5, "the midpoint of [0, 1], not a decade-widened fraction");
     }
 
     /// Named-field conversion (T2.5): user-set domain/range/base round-trip,
@@ -835,6 +1278,58 @@ mod tests {
         assert_eq!(y, 0.0);
     }
 
+    // ── `LogSide` / `admits`: an off-side value is left out, not clamped ───
+
+    #[test]
+    fn log_side_of_no_domain_is_always_positive() {
+        assert_eq!(LogSide::of(None), LogSide::Positive);
+    }
+
+    #[test]
+    fn log_side_of_a_positive_domain_is_positive() {
+        assert_eq!(LogSide::of(Some(&[1.0, 1000.0])), LogSide::Positive);
+    }
+
+    #[test]
+    fn log_side_of_a_negative_domain_is_negative() {
+        assert_eq!(LogSide::of(Some(&[-1000.0, -1.0])), LogSide::Negative);
+    }
+
+    /// The fix case): `admits` folded
+    /// "non-finite" into "off-side" with no distinction, so neither an
+    /// on-side nor an off-side infinity ever reached the renamed `on_side`
+    /// gate as a value — both silently drew at the channel's default
+    /// instead. `on_side` is now the sign alone: an infinity matching the
+    /// domain's sign is on-side (admitted), the opposite one is not; only
+    /// `NaN` and `0.0` are rejected regardless of sign.
+    #[test]
+    fn on_side_is_the_sign() {
+        let positive = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!(positive.on_side(1.0) && positive.on_side(500.0) && positive.on_side(1000.0));
+        assert!(positive.on_side(f64::INFINITY));
+        assert!(!positive.on_side(f64::NEG_INFINITY));
+        assert!(!positive.on_side(f64::NAN));
+        assert!(!positive.on_side(0.0));
+        assert!(!positive.on_side(-5.0));
+
+        let negative = d([-1000.0, -1.0], [0.0, 3.0], 10.0, false);
+        assert!(negative.on_side(-500.0));
+        assert!(negative.on_side(f64::NEG_INFINITY));
+        assert!(!negative.on_side(f64::INFINITY));
+        assert!(!negative.on_side(5.0));
+        assert!(!negative.on_side(0.0));
+    }
+
+    /// `on_side` is unaffected by `clamp`: clamp decides what an ADMITTED,
+    /// out-of-domain-bound value maps to, not which values are admitted.
+    #[test]
+    fn admits_is_unaffected_by_clamp() {
+        let clamped = d([1.0, 1000.0], [0.0, 3.0], 10.0, true);
+        assert!(!clamped.on_side(0.0));
+        assert!(!clamped.on_side(-5.0));
+        assert!(clamped.on_side(1.0));
+    }
+
     // ── GH #49 — zero-touching domain regression ────────────────────────────
     //
     // Auto-inferred log domains can legitimately touch 0 (e.g. a
@@ -941,22 +1436,35 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    /// Log minors for [1, 100] land at 2-9 and 20-90.
+    /// Log minors for [1, 1000] land on the multiples `breaks_log`'s own
+    /// majors (the 1-2-5 step set at this span/count) leave out.
     ///
-    /// `minor_ticks_internal()` uses count=10 for majors internally.
-    /// For [1,100] with count=10, the major ticks include 1, 10, 100 as the
-    /// decade boundaries, so the 2-9 and 20-90 multiples are all produced.
+    /// `minor_ticks_internal()` uses count=10 for majors internally. For
+    /// [1,1000] (3 decades) at count 10, the integer powers of 10 alone
+    /// (4 of them) fall short of `breaks_log`'s `count - 2 = 8` target, so
+    /// majors are the 1-2-5 multiples `[1, 2, 5, 10, 20, 50, 100, 200, 500,
+    /// 1000]` (10 of them) — `minor_ticks_log`'s usual 2-9-per-decade
+    /// candidates dedup against THOSE, so `2`/`5` (and their per-decade
+    /// multiples) are majors here, not minors, unlike a span where the
+    /// majors are bare powers of 10.
     #[test]
     fn log_minors_at_standard_multiples() {
         let scale = LogScale::new_internal(
-            vec![1.0, 100.0], vec![0.0, 600.0], 10.0, false, false,
+            vec![1.0, 1000.0], vec![0.0, 600.0], 10.0, false, false,
         );
+        let majors = scale.ticks_internal(10);
+        assert_eq!(majors, vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0]);
+
         let minors = scale.minor_ticks_internal();
-        assert_eq!(minors.len(), 16, "expected 16 minors, got {}: {:?}", minors.len(), minors);
+        let expected = [
+            3.0, 4.0, 6.0, 7.0, 8.0, 9.0,
+            30.0, 40.0, 60.0, 70.0, 80.0, 90.0,
+            300.0, 400.0, 600.0, 700.0, 800.0, 900.0,
+        ];
+        assert_eq!(minors.len(), expected.len(), "expected {} minors, got {}: {:?}", expected.len(), minors.len(), minors);
 
         let positions: Vec<f64> = minors.iter().map(|t| t.position).collect();
-        for m in [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
-                  20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0] {
+        for m in expected {
             assert!(
                 positions.iter().any(|&p| (p - m).abs() < 1e-9),
                 "{m} not in {positions:?}",
@@ -971,7 +1479,7 @@ mod tests {
     #[test]
     fn log_minors_nonuniform_in_linear_space() {
         let scale = LogScale::new_internal(
-            vec![1.0, 100.0], vec![0.0, 600.0], 10.0, false, false,
+            vec![1.0, 1000.0], vec![0.0, 600.0], 10.0, false, false,
         );
         let minors = scale.minor_ticks_internal();
         // First decade: 2,3,...,9 — uniform in LINEAR space but NOT in LOG space.
@@ -1094,13 +1602,15 @@ mod tests {
         );
     }
 
-    /// nice() on a single-point negative domain: [-5, -5] -> [-10, -1].
+    /// nice() on a single-point (degenerate) negative domain returns the
+    /// domain unchanged: [-5, -5] stays [-5, -5], the midpoint `scale()`
+    /// already maps every value to, not the decade-widened [-10, -1] a
+    /// floor/ceil rounding would give a domain with no span.
     #[test]
     fn log_nice_negative_single_point_domain() {
         let s = d([-5.0, -5.0], [0.0, 1.0], 10.0, false);
         let n = s.nice();
-        assert!((n.domain[0] - (-10.0)).abs() < 1e-9, "got {}", n.domain[0]);
-        assert!((n.domain[1] - (-1.0)).abs() < 1e-9, "got {}", n.domain[1]);
+        assert_eq!(n.domain, [-5.0, -5.0]);
     }
 
     /// nice() on a degenerate negative domain that's already an exact power:

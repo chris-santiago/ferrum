@@ -437,8 +437,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 },
                 None => continue,
             },
+            // `ScaleKind::admits_for_pixel` is the ONE shared predicate every
+            // mark builder's positional pre-filter reads: only a `Log` scale
+            // admits a non-`NaN` infinity, deferring to `to_pixel_f64`'s own
+            // on-side gate (clamps when on-side, left out when not); every other
+            // scale kind still requires a plain finite value, unchanged.
             _ => match xs_f64.as_ref().and_then(|v| v[i]) {
-                Some(a) if a.is_finite() => match ctx.scales.x.to_pixel_f64(a) {
+                Some(a) if ctx.scales.x.admits_for_pixel(a) => match ctx.scales.x.to_pixel_f64(a) {
                     Some(p) => p, None => continue,
                 },
                 _ => continue,
@@ -456,7 +461,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 None => continue,
             },
             _ => match ys_f64.as_ref().and_then(|v| v[i]) {
-                Some(a) if a.is_finite() => match ctx.scales.y.to_pixel_f64(a) {
+                Some(a) if ctx.scales.y.admits_for_pixel(a) => match ctx.scales.y.to_pixel_f64(a) {
                     Some(p) => p, None => continue,
                 },
                 _ => continue,

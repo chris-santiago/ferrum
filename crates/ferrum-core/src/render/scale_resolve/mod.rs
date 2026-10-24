@@ -48,6 +48,7 @@ pub use self::auxiliary::{
     build_stroke_width_scale, OpacityChannel,
 };
 pub(crate) use self::auxiliary::NUMERIC_AUX_CHANNELS;
+pub(in crate::render) use self::auxiliary::log_aux_drawn_rows;
 pub use self::color::build_color_scale;
 pub(in crate::render) use self::color::require_binnable;
 
@@ -58,7 +59,7 @@ pub(in crate::render) use self::color::require_binnable;
 pub(in crate::render) use self::domain::{
     add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
-    positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
+    positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
     SortContext,
 };
 
@@ -84,6 +85,12 @@ pub(in crate::render) use self::domain::encoding_explicit_extent;
 // `connect_to` resolution — see the `mod positional` doc above for why this
 // is a re-export rather than a wider module visibility.
 pub(in crate::render) use self::positional::{data_pixel_x, data_pixel_y};
+// The drop-and-warn/refuse step for a `Log` channel's off-side rows
+// (`LogScaleRowsLeftOut`/`LogScaleNoValueOnSide`), shared with `render::composite`'s resolve pass so
+// a composite leaf's `Log` channel accounts for its left-out rows through the
+// SAME fold x/y and every numeric auxiliary channel already use, rather than
+// a second copy of the push/refuse logic.
+pub(in crate::render) use self::positional::resolve_log_extent;
 // The zero-anchor's "widen this extent to include zero" arithmetic, shared with
 // `render::composite`'s resolve pass so a system-injected bar scale's anchor
 // reaches the cross-leaf union it now participates in (#247A) through the same
@@ -157,8 +164,55 @@ impl ScaleKind {
     /// the underlying scale returns `NaN` rather than `None` in that case).
     pub fn to_pixel_f64(&self, x: f64) -> Option<f64> {
         if matches!(self, Self::Ordinal(_)) { return None; }
+        // A `Log` scale maps only the values on its domain's side of zero;
+        // the other side is left out of the channel —
+        // not clamped to a range end, not mapped to `NaN` and then dropped
+        // the usual way — so this gate runs before dispatch, ahead of
+        // `clamp`, which would otherwise map an off-side value anyway. Every
+        // mark builder reads through this one method (or its extrapolating
+        // twin below), so this is x/y's drop: a row this gate returns `None`
+        // for is simply not placed. A numeric auxiliary channel's off-side
+        // row never reaches this gate at all — it is
+        // removed from the batch before any mark builder runs
+        // (`scale_resolve::log_aux_drawn_rows`, called once per layer from
+        // `scene_build::build_panel_mark_batches`), because `None` here
+        // cannot express "not drawn" to an aux reader (every one of them
+        // folds `None` into the channel's default, the null-value rule).
+        // This gate stays live for aux as a backstop (legends still read a
+        // `Log` aux scale's own ticks through it) and because removing the
+        // row is strictly a superset of what this `None` alone could do.
+        // `LogScale::scale`/`invert` keep their own standalone contract —
+        // this is a render-only gate on top of them.
+        if let Self::Log(s) = self {
+            if !s.on_side(x) { return None; }
+        }
         let p = dispatch_continuous!(self, scale_internal, x);
         if p.is_finite() { Some(p) } else { None }
+    }
+
+    /// Whether a positional-pixel read should even ATTEMPT
+    /// [`to_pixel_f64`](Self::to_pixel_f64)/[`to_pixel_f64_extrapolated`](Self::to_pixel_f64_extrapolated)
+    /// for `x` — the one shared predicate every mark builder's `Some(v) if
+    /// ... => ...` pre-filter reads, in place of nine inline copies.
+    ///
+    /// Only a `Log` scale admits a non-`NaN` infinity: its own `on_side`
+    /// gate inside `to_pixel_f64` then decides the rest (clamped to the
+    /// range end when on-side, left out when not). Every other scale kind
+    /// requires a plain finite value — UNCHANGED from before this whole
+    /// Log/infinity feature existed. That matters because `clamp=true` on
+    /// a NON-`Log` scale maps an infinite input to a FINITE range-end pixel
+    /// inside its own `scale_internal` arithmetic (`f64::INFINITY.clamp(lo,
+    /// hi)` is finite, not NaN), so without this gate a clamped Linear/
+    /// Sqrt/Pow/Symlog/Time channel would newly draw an infinity it used to
+    /// drop silently. An unclamped non-`Log` scale is
+    /// unaffected either way (its own dispatch already maps an infinite
+    /// input to a non-finite pixel, caught by `to_pixel_f64`'s own
+    /// `is_finite` check).
+    pub(in crate::render) fn admits_for_pixel(&self, x: f64) -> bool {
+        match self {
+            Self::Log(_) => !x.is_nan(),
+            _ => x.is_finite(),
+        }
     }
 
     /// The extrapolating twin of [`to_pixel_f64`](Self::to_pixel_f64)
@@ -190,6 +244,14 @@ impl ScaleKind {
     /// still returns `None` for them, exactly as `to_pixel_f64` does.
     pub fn to_pixel_f64_extrapolated(&self, x: f64) -> Option<f64> {
         if matches!(self, Self::Ordinal(_)) { return None; }
+        // Same off-side gate as `to_pixel_f64` above — a value past the
+        // domain extrapolates, but a value on the wrong side of zero is
+        // still mathematically unrepresentable for a `Log` scale, not
+        // merely out of range (see `LogScaleData::scale_extrapolated`'s own
+        // wrong-sign guard).
+        if let Self::Log(s) = self {
+            if !s.on_side(x) { return None; }
+        }
         let p = dispatch_continuous!(self, scale_internal_extrapolated, x);
         if p.is_finite() { Some(p) } else { None }
     }
@@ -542,6 +604,23 @@ impl ScaleKind {
             return None;
         }
         Some(dispatch_continuous!(self, ticks_internal, count_hint))
+    }
+
+    /// Which of `values` (tick values, in the same order `tick_labels`/
+    /// `tick_values_raw` emit them) are DECADES of a `Log` scale — an
+    /// integer power of the base, within `LogScaleData::TICK_DOMAIN_TOLERANCE`
+    /// Empty for every other scale kind: `values` is
+    /// `tick_labels`'s FINAL set (after any `tick_min_step`/`tick_extra`
+    /// adjustment `prepare.rs` applies), not re-derived from a `count_hint`,
+    /// so the anchors line up with whatever labels actually ship.
+    /// [`layout::axis::anchored_visibility`] treats an empty mask as "no
+    /// anchors" and reduces to plain [`layout::axis::stride_visibility`], so
+    /// every non-`Log` axis culls byte-identically to before this existed.
+    pub(crate) fn tick_anchors(&self, values: &[f64]) -> Vec<bool> {
+        match self {
+            Self::Log(s) => values.iter().map(|v| s.is_decade(*v)).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Continuous-axis scale-projection support for explicit tick values
@@ -1512,6 +1591,10 @@ pub(in crate::render) fn infer_spec_type(
 /// three identical per-submodule copies). Re-exported so `domain`, `positional`,
 /// and `auxiliary` all reach the same `arrow_cast::min_max_f64` via `super::`.
 pub(super) use super::arrow_cast::min_max_f64 as column_min_max_f64;
+/// The sided twin of [`column_min_max_f64`]: a `Log` channel's extent fold,
+/// over only the values on its domain's side of zero. Re-exported for the
+/// same reason.
+pub(in crate::render) use super::arrow_cast::{sided_min_max_f64, LeftOutTally, SidedExtent};
 
 /// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
 /// Returns (0.0, 1.0) when no finite values are present.
@@ -2565,6 +2648,16 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let x_shared_domain = leaf_scales.and_then(|c| c.x.as_ref());
     let y_shared_domain = leaf_scales.and_then(|c| c.y.as_ref());
 
+    // this leaf's group has not resolved
+    // yet (pass one — `OverlayAuxiliary::unresolved`'s placeholder). A Log
+    // x/y channel's `data_extent` defers its own count/refusal to the
+    // group's later resolve (`composite::resolve_caller_scale_group`)
+    // instead of deciding it standalone from this one leaf's own rows,
+    // mirroring how a grouped aux (color/size) channel already defers in
+    // pass one. One membership, read once, for both axes: a leaf belongs
+    // to at most one overlay group.
+    let pending = leaf_scales.is_some_and(|c| c.overlay.as_ref().is_some_and(|o| o.group.pending));
+
     // T4: per-channel "shared faceted positional scale" flag. When this chart is
     // faceted AND the channel resolves `ResolveMode::Shared` (the documented
     // default), the auto-inferred positional domain unions the global all-panels
@@ -2660,7 +2753,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 // Stack-aware x-axis: see `position::axis_batch`.
                 let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, pending, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
@@ -2671,7 +2764,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             (None, Some(y_enc)) => {
                 let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, pending, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
@@ -2750,12 +2843,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, pending, &mut warnings)?,
     };
     let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, pending, &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the

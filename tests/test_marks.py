@@ -1,9 +1,8 @@
-import re
-
 import polars as pl
 import pytest
 
 from ferrum.marks.base import MarkBase
+from tests._svg_extents import axis_tick_labels
 
 
 def test_markbase_accepts_valid_kwargs():
@@ -144,22 +143,49 @@ def test_encode_with_explicit_log_scale_renders_log_axis():
         .to_svg()
     )
 
-    # Extract text-element labels from the SVG (strip font/base64 blobs).
-    text_labels = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+    # The x-axis should contain tick labels at log-spaced positions, read
+    # through axis_tick_labels rather than by slicing raw text nodes.
+    x_labels = axis_tick_labels(svg, axis="x")
 
-    # The x-axis should contain tick labels at log-spaced positions.
-    # "10" appears only under a log scale over this domain (1–1000).
-    assert "10" in text_labels, (
+    # "10" and "100" appear only under a log scale over this domain
+    # (1-1000) -- a log axis never thins a decade away in favor of a
+    # denser non-decade multiple surviving instead.
+    assert "1" in x_labels
+    assert "10" in x_labels, (
         f"Log-scale x axis missing '10' tick label — "
-        f"explicit ScaleLog was likely dropped. x labels: {text_labels}"
+        f"explicit ScaleLog was likely dropped. x labels: {x_labels}"
     )
+    assert "100" in x_labels, (
+        f"Log-scale x axis missing '100' tick label — "
+        f"explicit ScaleLog was likely dropped. x labels: {x_labels}"
+    )
+    assert "1000" in x_labels
 
-    # Linear-scale ticks over [1, 1000] would produce labels like 400, 500, 600.
-    # Under a log scale none of these are tick positions.
-    linear_spill = {"400", "500", "600"} & set(text_labels)
-    assert not linear_spill, (
-        f"Found linear-scale tick labels {linear_spill} in log-scale render — "
-        f"explicit ScaleLog was silently dropped. x labels: {text_labels}"
+    # breaks_log's 1-2-5 ladder over [1, 1000] (1, 2, 5, 10, 20, 50, 100,
+    # 200, 500, 1000) is round throughout, where a linear subdivision of
+    # log-space gave fractional exponents (1, 1.58, 2.51, ...) for every
+    # value but the decade powers.
+    assert not any("." in label for label in x_labels), x_labels
+
+    # A linear axis over the same domain and viewport gives evenly spaced
+    # ticks; breaks_log's 1-2-5 ladder (1, 2, 5, 10, 20, 50, 100, 200, 500,
+    # 1000) is a real log tick set and legitimately includes "500" too, so
+    # the discriminator is the label set as a whole, not any one value's
+    # absence.
+    linear_svg = (
+        Chart(df)
+        .mark_point()
+        .encode(
+            x=X("x", scale={"type": "linear", "domain": [1.0, 1000.0], "range": [0.0, 600.0]}),
+            y="y",
+        )
+        .to_svg()
+    )
+    linear_labels = axis_tick_labels(linear_svg, axis="x")
+    assert x_labels != linear_labels, (
+        f"Log-scale x axis produced the same tick labels as a linear axis "
+        f"over the same domain — explicit ScaleLog was likely dropped. "
+        f"x labels: {x_labels}"
     )
 
 

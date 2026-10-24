@@ -1854,10 +1854,15 @@ const MIN_EVENLY_THINNED_X_LABELS: usize = 3;
 /// Whether `axis` draws its labels as one even stride thinning of its
 /// generated ticks (those with non-empty label text, the ticks
 /// [`lost_x_tick_labels`] counts): no label is elided, the generated ticks
-/// whose label is drawn are exactly the ones [`axis::stride_visibility`]
-/// keeps for one stride (every `s`-th, from the first), and at least
-/// [`MIN_EVENLY_THINNED_X_LABELS`] labels are drawn. An irregular cull, an
-/// elided label or an axis that draws tick marks only is not one.
+/// whose label is drawn are exactly what [`axis::anchored_visibility`]
+/// gives for SOME stride (every `s`-th, from the first, decades protected —
+/// a Log axis's anchored cull is asked with the
+/// SAME primitive the cull itself used, so "even" means "what the cull
+/// produces for one stride" on every axis kind, not only a plain stride),
+/// and at least [`MIN_EVENLY_THINNED_X_LABELS`] labels are drawn. An
+/// irregular cull, an elided label or an axis that draws tick marks only is
+/// not one. With no anchors (every non-`Log` axis), `anchored_visibility`
+/// reduces to plain `stride_visibility`, so this is exactly today's test.
 fn thins_x_labels_evenly(axis: &AxisLayout) -> bool {
     let generated = || axis.ticks.iter().filter(|t| !t.label.is_empty());
     if generated().any(|t| t.elided) {
@@ -1865,10 +1870,12 @@ fn thins_x_labels_evenly(axis: &AxisLayout) -> bool {
     }
     let drawn: Vec<bool> = generated().map(|t| !t.culled).collect();
     let labelled = drawn.iter().filter(|&&d| d).count();
-    let Some(stride) = drawn.iter().skip(1).position(|&d| d).map(|i| i + 1) else {
+    if labelled < MIN_EVENLY_THINNED_X_LABELS {
         return false;
-    };
-    labelled >= MIN_EVENLY_THINNED_X_LABELS && drawn == axis::stride_visibility(drawn.len(), stride)
+    }
+    let anchors: Vec<bool> = generated().map(|t| t.anchor).collect();
+    let n = drawn.len();
+    (1..=n).any(|stride| axis::anchored_visibility(n, stride, &anchors) == drawn)
 }
 
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
@@ -9045,6 +9052,133 @@ mod tests {
             drawn_plot.h < plot.h,
             "a drawn x axis must reserve a bottom band"
         );
+    }
+
+    /// Nineteen major ticks over the `{1..9}` ladder (`1..9, 10..90, 100`),
+    /// each labelled, anchored at indices 0, 9, 18 (the decades 1, 10, 100),
+    /// and drawn/culled per `drawn`.
+    fn dense_ladder_axis_layout(drawn: &[usize]) -> AxisLayout {
+        let labels: Vec<String> = (1..=9)
+            .chain((1..=9).map(|k| k * 10))
+            .chain(std::iter::once(100))
+            .map(|v| v.to_string())
+            .collect();
+        assert_eq!(labels.len(), 19);
+        let ticks: Vec<TickLayout> = labels
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| TickLayout {
+                position: i as f64,
+                label,
+                label_angle: 0.0,
+                elided: false,
+                culled: !drawn.contains(&i),
+                label_font_size: None,
+                is_major: true,
+                anchor: matches!(i, 0 | 9 | 18),
+            })
+            .collect();
+        AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 0.0, w: 100.0, h: 1.0 },
+            ticks,
+            minor_ticks: vec![],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: false,
+            tick_size: None,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+            offset: None,
+            label_flush: None,
+        }
+    }
+
+    /// The fix case a stride-2-from-zero
+    /// anchored cull (decades at 0, 9, 18 kept unconditionally, every other
+    /// even index among the rest) and a stride-4-from-zero one are both
+    /// `anchored_visibility` outputs for SOME stride, so both must count as
+    /// even — `thins_x_labels_evenly` used to reject both as irregular
+    /// (neither equals a plain `stride_visibility`).
+    #[test]
+    fn thins_x_labels_evenly_accepts_a_decade_anchored_cull() {
+        let axis = dense_ladder_axis_layout(&[0, 2, 4, 6, 9, 11, 13, 15, 18]);
+        assert!(thins_x_labels_evenly(&axis));
+        let axis = dense_ladder_axis_layout(&[0, 4, 9, 13, 18]);
+        assert!(thins_x_labels_evenly(&axis));
+    }
+
+    /// Guard: a drawn mask no stride's anchored visibility produces (index 1
+    /// drawn with nothing else between the decades) still rejects, exactly
+    /// as before the anchor-aware check above was added.
+    #[test]
+    fn thins_x_labels_evenly_still_rejects_an_irregular_log_cull() {
+        let axis = dense_ladder_axis_layout(&[0, 1, 9, 18]);
+        assert!(!thins_x_labels_evenly(&axis));
+    }
+
+    /// The fix case `thins_x_labels_evenly`
+    /// read only the generated ticks' drawn mask, so an anchored Log cull
+    /// that keeps every decade (not a plain stride) was classed as
+    /// irregular — `padding.auto` then rejected the layout that kept the
+    /// dense `{1..9}` ladder's decades in favor of its `auto=false`
+    /// fallback, exactly as if a real label had been lost. A continuous x
+    /// axis whose 19-label ladder (anchors at 0, 9, 18 — the decades 1, 10,
+    /// 100) culls to an anchored mask must keep the `padding.auto` layout
+    /// (every decade drawn), not fall back.
+    #[test]
+    fn a_log_x_axis_with_a_dense_ladder_keeps_the_padding_auto_pass() {
+        let labels: Vec<String> = (1..=9)
+            .chain((1..=9).map(|k| k * 10))
+            .chain(std::iter::once(100))
+            .map(|v| v.to_string())
+            .collect();
+        assert_eq!(labels.len(), 19);
+        let major: Vec<f64> = labels.iter().map(|s| s.parse::<f64>().unwrap().log10() / 2.0).collect();
+        let mut anchors = vec![false; 19];
+        anchors[0] = true;
+        anchors[9] = true;
+        anchors[18] = true;
+
+        let mut x = AxisInput::new(AxisOrient::Bottom, None, labels, None);
+        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major, minor: vec![] });
+        x.tick_anchors = anchors;
+        x.overrides.domain.show = Some(true);
+        x.overrides.grid.show = Some(true);
+
+        let y = axis_input(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
+        let axes = AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new(), panels: Vec::new() };
+
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 200.0, height: 300.0 };
+        // Wide labels at a narrow viewport: 19 labels cannot possibly fit
+        // unculled, however far `padding.auto` grows the gutter, so a real
+        // stride decision is unavoidable.
+        let m = MockMetrics { measure: fixed_width(20.0), line_h_factor: 1.2 };
+        let result = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .unwrap();
+        let x_axis = result.axes.iter().find(|a| a.orient == AxisOrient::Bottom).expect("an x axis");
+        let drawn_labels: Vec<&str> = x_axis.ticks.iter().filter(|t| !t.culled).map(|t| t.label.as_str()).collect();
+        for decade in ["1", "10", "100"] {
+            assert!(drawn_labels.contains(&decade), "decade {decade} dropped: {drawn_labels:?}");
+        }
     }
 
     #[test]

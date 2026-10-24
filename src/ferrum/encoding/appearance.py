@@ -92,14 +92,18 @@ class Size(ChannelBase):
         Column name to map to size.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : LinearScale or dict, optional
+    scale : LinearScale, LogScale, PowScale, SqrtScale, or dict, optional
         Explicit scale override. Its ``range`` is in area units (square
         pixels) for every mark, a line included; an endpoint below 0 draws
-        as 0. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
-        ``zero`` are honored, and values outside the domain clamp to the
-        nearer end of the range. Any other scale type, ``padding``,
-        ``scheme``, or a domain or range whose length is not 2 raises
-        ``ValueError`` at construction.
+        as 0. ``domain``, ``range`` and ``reverse`` are honored on every
+        kind; ``nice`` and ``zero`` only on ``LinearScale``, its own
+        fields. A value outside the domain clamps to the nearer end of the
+        range on every kind -- size always clamps, where a positional axis
+        defaults to not clamping. Under ``LogScale``, a value on the far
+        side of zero from the domain is not drawn, as on a positional
+        axis, and the chart warns naming the row count. Any other scale
+        type, ``padding``, ``scheme``, or a domain or range whose length
+        is not 2 raises ``ValueError`` at construction.
     title : str, optional
         Legend title override.
 
@@ -270,14 +274,18 @@ class Opacity(ChannelBase):
         Column name to map to opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : LinearScale or dict, optional
+    scale : LinearScale, LogScale, PowScale, SqrtScale, or dict, optional
         Explicit scale override: ``domain`` sets the data extent and
         ``range`` the alphas it maps onto, each endpoint clamped to
-        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
-        ``zero`` are honored, and values outside the domain clamp to the
-        nearer end of the range. Any other scale type, ``padding``,
-        ``scheme``, or a domain or range whose length is not 2 raises
-        ``ValueError`` at construction.
+        ``[0, 1]``. ``domain``, ``range`` and ``reverse`` are honored on
+        every kind; ``nice`` and ``zero`` only on ``LinearScale``, its own
+        fields. A value outside the domain clamps to the nearer end of
+        the range on every kind -- this channel always clamps, where a
+        positional axis defaults to not clamping. Under ``LogScale``, a
+        value on the far side of zero from the domain is not drawn, as on
+        a positional axis, and the chart warns naming the row count. Any
+        other scale type, ``padding``, ``scheme``, or a domain or range
+        whose length is not 2 raises ``ValueError`` at construction.
     title : str, optional
         Legend title override.  When omitted the field name is used.
 
@@ -451,14 +459,18 @@ class FillOpacity(ChannelBase):
         Column name to map to fill opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : LinearScale or dict, optional
+    scale : LinearScale, LogScale, PowScale, SqrtScale, or dict, optional
         Explicit scale override: ``domain`` sets the data extent and
         ``range`` the alphas it maps onto, each endpoint clamped to
-        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
-        ``zero`` are honored, and values outside the domain clamp to the
-        nearer end of the range. Any other scale type, ``padding``,
-        ``scheme``, or a domain or range whose length is not 2 raises
-        ``ValueError`` at construction.
+        ``[0, 1]``. ``domain``, ``range`` and ``reverse`` are honored on
+        every kind; ``nice`` and ``zero`` only on ``LinearScale``, its own
+        fields. A value outside the domain clamps to the nearer end of
+        the range on every kind -- this channel always clamps, where a
+        positional axis defaults to not clamping. Under ``LogScale``, a
+        value on the far side of zero from the domain is not drawn, as on
+        a positional axis, and the chart warns naming the row count. Any
+        other scale type, ``padding``, ``scheme``, or a domain or range
+        whose length is not 2 raises ``ValueError`` at construction.
     title : str, optional
         Legend title override.  When omitted the field name is used.
 
@@ -504,14 +516,18 @@ class StrokeOpacity(ChannelBase):
         Column name to map to stroke opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : LinearScale or dict, optional
+    scale : LinearScale, LogScale, PowScale, SqrtScale, or dict, optional
         Explicit scale override: ``domain`` sets the data extent and
         ``range`` the alphas it maps onto, each endpoint clamped to
-        ``[0, 1]``. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
-        ``zero`` are honored, and values outside the domain clamp to the
-        nearer end of the range. Any other scale type, ``padding``,
-        ``scheme``, or a domain or range whose length is not 2 raises
-        ``ValueError`` at construction.
+        ``[0, 1]``. ``domain``, ``range`` and ``reverse`` are honored on
+        every kind; ``nice`` and ``zero`` only on ``LinearScale``, its own
+        fields. A value outside the domain clamps to the nearer end of
+        the range on every kind -- this channel always clamps, where a
+        positional axis defaults to not clamping. Under ``LogScale``, a
+        value on the far side of zero from the domain is not drawn, as on
+        a positional axis, and the chart warns naming the row count. Any
+        other scale type, ``padding``, ``scheme``, or a domain or range
+        whose length is not 2 raises ``ValueError`` at construction.
     title : str, optional
         Legend title override.  When omitted the field name is used.
 
@@ -561,14 +577,19 @@ class StrokeWidth(ChannelBase):
         Column name to map to stroke width.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
-    scale : LinearScale or dict, optional
+    scale : LinearScale, LogScale, PowScale, SqrtScale, or dict, optional
         Explicit scale override: ``domain`` sets the data extent and
         ``range`` the pixel widths it maps onto; an endpoint below 0 draws
-        as 0. A linear scale only: ``domain``, ``range``, ``reverse``, ``nice`` and
-        ``zero`` are honored, and values outside the domain clamp to the
-        nearer end of the range. Any other scale type, ``padding``,
-        ``scheme``, or a domain or range whose length is not 2 raises
-        ``ValueError`` at construction.
+        as 0. ``domain``, ``range`` and ``reverse`` are honored on every
+        kind; ``nice`` and ``zero`` only on ``LinearScale``, its own
+        fields. A value outside the domain clamps to the nearer end of
+        the range on every kind -- stroke width always clamps, where a
+        positional axis defaults to not clamping. Under ``LogScale``, a
+        value on the far side of zero from the domain is not drawn, as on
+        a positional axis, and the chart warns naming the row count. Any
+        other scale type, ``padding``, ``scheme``, or a domain or range
+        whose length is not 2 raises ``ValueError`` at
+        construction.
     title : str, optional
         Legend title override.  When omitted the field name is used.
 

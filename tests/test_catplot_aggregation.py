@@ -30,7 +30,7 @@ import ferrum as fm
 from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
 from ferrum.plots.distribution import _CATPLOT_PER_ROW_APPEARANCE_CHANNELS
 
-from _svg_extents import assert_bars_start_on_the_zero_tick, y_axis_units_per_pixel
+from _svg_extents import assert_bars_start_on_the_zero_tick, axis_tick_labels, y_axis_units_per_pixel
 from _svg_rects import data_bar_rects, svg_elements
 
 # The whisker is a `rule` mark stroked with the theme's `label` token. Axis
@@ -744,13 +744,22 @@ class TestValueAxis:
 
     @pytest.mark.parametrize("kind", ["point", "bar"])
     def test_typed_scale_with_domain_is_honored(self, cat_df, kind):
-        """A log scale WITH a domain is expressible: log ticks, all whiskers."""
-        svg = fm.catplot(
+        """A log scale WITH a domain is expressible: breaks_log ticks, all
+        whiskers, and every in-domain decade (1, 10) stays labeled -- a log
+        axis never thins a decade away in favor of a denser non-decade
+        multiple.
+        """
+        log_svg = fm.catplot(
             cat_df, x="cat", y=fm.Y("val", scale={"type": "log", "domain": [1, 20]}), kind=kind
         ).to_svg()
-        assert len(whisker_lines(svg)) == 4
-        # Log ticks are irregular decimals, unlike the linear axis's integers.
-        assert any("." in label for label in text_labels(svg))
+        assert len(whisker_lines(log_svg)) == 4
+        log_labels = axis_tick_labels(log_svg, axis="y")
+        assert "1" in log_labels, f"missing decade label '1': {log_labels}"
+        assert "10" in log_labels, f"missing decade label '10': {log_labels}"
+        linear_svg = fm.catplot(
+            cat_df, x="cat", y=fm.Y("val", scale={"type": "linear", "domain": [1, 20]}), kind=kind
+        ).to_svg()
+        assert log_labels != axis_tick_labels(linear_svg, axis="y")
 
     @pytest.mark.parametrize("kind", ["point", "bar"])
     def test_domainless_value_scale_refuses_instead_of_clipping(self, cat_df, kind):

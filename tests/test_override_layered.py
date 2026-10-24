@@ -8,11 +8,16 @@ merged into each such layer's scale exactly as it is merged into the chart-level
 encoding, so the rendered axis is the one the channel's own ``scale=`` gives.
 
 The matrix is composition path x override leaf. Each cell asserts the
-overridden chart's rendered y tick labels equal those of the same chart built
-with ``scale=`` on the channel itself (the reference), and that the reference
-differs from the un-overridden chart, so a cell can never pass vacuously. Two
-leaf-independent checks keep a wrong reference from passing: the axis covers
-the data on every cell, and ``reverse`` draws the base ticks in reverse order.
+overridden chart's rendered y tick *pixel ladder* (value -> pixel position,
+not just the label text) equals that of the same chart built with ``scale=``
+on the channel itself (the reference), and that the reference's ladder
+differs from the un-overridden chart's, so a cell can never pass vacuously.
+Comparing pixel positions rather than label text matters for leaf ``type``:
+a Log scale's ``breaks_log`` ticks can fall back to the same linear
+``nice_ticks`` label text the base scale already draws when the data spans
+less than one decade, so two leaf-independent checks alone keep a wrong
+reference from passing: the axis covers the data on every cell, and
+``reverse`` draws the base ticks in reverse label order.
 The leaf population is the override registry's own (``_scale_leaves()``),
 partitioned into the leaves tested here and the leaves excluded with a stated
 reason (``_EXCLUDED``); the partition is pinned. A gate-refused combination
@@ -29,7 +34,7 @@ import pytest
 import ferrum as fm
 from ferrum import _override_apply as oa
 from ferrum.layer import Layer
-from tests._svg_extents import axis_tick_labels
+from tests._svg_extents import axis_tick_labels, value_axis_ladder
 
 # Uneven values so `nice=True` moves the axis ends onto round numbers.
 _DF = pl.DataFrame(
@@ -136,10 +141,6 @@ def _own_scale(leaves: dict[str, object]) -> dict[str, object]:
     return {oa._SCALE_LEAF_WIRE_ALIASES.get(k, k): v for k, v in leaves.items()}
 
 
-def _y_ticks(chart: fm.Chart) -> list[str]:
-    return axis_tick_labels(chart.to_svg(), axis="y")
-
-
 def test_leaf_partition_covers_the_registry() -> None:
     registry = oa._scale_leaves()
     assert set(_LEAF_VALUES).isdisjoint(_EXCLUDED)
@@ -165,12 +166,30 @@ def _assert_axis_covers_the_data(ticks: list[str]) -> None:
 def test_override_renders_like_the_channels_own_scale(path: str, leaf: str) -> None:
     build = _PATHS[path]
     leaves = {leaf: _LEAVES[leaf]}
-    base = _y_ticks(build("v"))
-    reference = _y_ticks(build(fm.Y("v", scale=_own_scale(leaves))))
-    overridden = _y_ticks(build("v").override(**_override_kwargs(leaves)))
+    base_svg = build("v").to_svg()
+    reference_svg = build(fm.Y("v", scale=_own_scale(leaves))).to_svg()
+    overridden_svg = build("v").override(**_override_kwargs(leaves)).to_svg()
 
-    assert reference != base, f"{path}/{leaf}: the own-scale reference must move the axis"
-    assert overridden == reference
+    base = axis_tick_labels(base_svg, axis="y")
+    reference = axis_tick_labels(reference_svg, axis="y")
+    overridden = axis_tick_labels(overridden_svg, axis="y")
+
+    # The discriminator is where values LAND, not just which labels are
+    # drawn: for leaf "type", "v" spans 1.3..6.7 (under one decade), where
+    # a Log scale's breaks_log ticks fall back to the same linear
+    # nice_ticks TEXT the base scale already uses, so comparing labels
+    # alone would pass even if the override never reached the scale type.
+    # A log axis places a value at log(v/lo)/log(hi/lo) of the height, a
+    # linear one at (v-lo)/(hi-lo): the pixel ladder tells them apart even
+    # when the two scales happen to label the same round numbers.
+    base_ladder = value_axis_ladder(base_svg, axis="y")
+    reference_ladder = value_axis_ladder(reference_svg, axis="y")
+    overridden_ladder = value_axis_ladder(overridden_svg, axis="y")
+
+    assert reference_ladder != base_ladder, (
+        f"{path}/{leaf}: the own-scale reference must move the axis"
+    )
+    assert overridden_ladder == reference_ladder
     _assert_axis_covers_the_data(overridden)
     if leaf == "reverse":
         assert overridden == base[::-1]

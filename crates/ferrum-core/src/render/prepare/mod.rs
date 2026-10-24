@@ -1124,7 +1124,7 @@ fn build_axis_input(
     // application; temporal is formatted directly). `channel.reverses()` carries
     // the non-ordinal-y reversal; the theme-gated minor fractions are passed in
     // (not reversed).
-    let (tick_labels, tick_projection, label_format_override) = build_axis_tick_inputs(
+    let (tick_labels, tick_anchors, tick_projection, label_format_override) = build_axis_tick_inputs(
         scale,
         tick_count,
         TickFormatMode::Thread {
@@ -1168,6 +1168,7 @@ fn build_axis_input(
         orient,
         title,
         tick_labels,
+        tick_anchors,
         tick_format: None, // already applied above
         tick_format_type: None,
         tick_projection,
@@ -1308,6 +1309,13 @@ pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarni
             | RenderWarning::ShapePaletteOverflowed { .. }
             | RenderWarning::StrokeDashPaletteOverflowed { .. }
             | RenderWarning::ColorPaletteOverflowed { .. }
+            // A `Log` channel's extent fold reads the whole frame's rows
+            // (facet-shared, via the same `include_final`/`FINAL_OUTPUT_KEY`
+            // every other channel's shared extent already reads), so every
+            // panel's resolution restates the identical count; the panel
+            // pass's own copy supersedes the provisional one exactly as the
+            // palette-overflow warnings above do.
+            | RenderWarning::LogScaleRowsLeftOut { .. }
     ) || excluded_from_a_non_positional_scale(w)
 }
 
@@ -1349,7 +1357,9 @@ fn excluded_from_a_non_positional_scale(w: &RenderWarning) -> bool {
 pub(crate) fn panel_pass_warning_restated_by_every_panel(w: &RenderWarning) -> bool {
     matches!(
         w,
-        RenderWarning::ShapePaletteOverflowed { .. } | RenderWarning::StrokeDashPaletteOverflowed { .. }
+        RenderWarning::ShapePaletteOverflowed { .. }
+            | RenderWarning::StrokeDashPaletteOverflowed { .. }
+            | RenderWarning::LogScaleRowsLeftOut { .. }
     ) || excluded_from_a_non_positional_scale(w)
 }
 
@@ -3978,6 +3988,11 @@ pub(crate) fn adjust_axis_ticks(
     if raw.len() != axis.tick_labels.len() || raw.len() != proj.major.len() {
         return;
     }
+    // `tick_anchors` lines up with `tick_labels`
+    // only when it was built from the SAME raw tick count (non-empty, for a
+    // Log scale) — carried in lockstep through every rewrite below, exactly
+    // as `proj.major` already is. Empty (every non-`Log` axis) stays empty.
+    let anchors_aligned = axis.tick_anchors.len() == raw.len();
 
     // ── tick_min_step: thin ticks closer than min_step in data space ─────────
     if let Some(min_step) = tick_min_step {
@@ -4014,6 +4029,14 @@ pub(crate) fn adjust_axis_ticks(
                 k += 1;
                 keep_it
             });
+            if anchors_aligned {
+                let mut k = 0;
+                axis.tick_anchors.retain(|_| {
+                    let keep_it = keep[k];
+                    k += 1;
+                    keep_it
+                });
+            }
 
             // Quality-review S3 fix (2026-09-03): a chart-level TIME format
             // (`labels.format`'s `format_type == "time"`) is applied AFTER this fn runs,
@@ -4063,6 +4086,10 @@ pub(crate) fn adjust_axis_ticks(
 
     // ── tick_extra: append domain-boundary ticks if missing ──────────────────
     if tick_extra && !is_temporal {
+        // Re-checked post-`tick_min_step` (it may have just thinned `raw` in
+        // lockstep with the anchors above): aligned only when non-empty and
+        // still exactly `raw.len()` long.
+        let anchors_aligned = axis.tick_anchors.len() == raw.len();
         if let Some((d_lo, d_hi)) = scale.data_domain() {
             let eps = ((d_hi - d_lo).abs() * 1e-9).max(f64::MIN_POSITIVE);
             for boundary in [d_lo, d_hi] {
@@ -4081,6 +4108,10 @@ pub(crate) fn adjust_axis_ticks(
                 axis.tick_labels
                     .push(crate::render::format::format_numeric(boundary));
                 proj.major.push(f);
+                if anchors_aligned {
+                    let anchor = scale.tick_anchors(&[boundary]).first().copied().unwrap_or(false);
+                    axis.tick_anchors.push(anchor);
+                }
             }
         }
     }
@@ -4427,10 +4458,12 @@ pub(crate) enum TickFormatMode<'a> {
     },
 }
 
-/// `build_axis_tick_inputs`'s return shape: `(labels, projection,
+/// `build_axis_tick_inputs`'s return shape: `(labels, anchors, projection,
 /// threaded_label_format)` — named to keep the `Result<_, RenderError>`
-/// signature (#133) under clippy's type-complexity threshold.
-type AxisTickInputs = (Vec<String>, Option<TickProjection>, Option<String>);
+/// signature (#133) under clippy's type-complexity threshold. `anchors`
+/// is index-aligned with `labels`; empty for every
+/// non-`Log` scale.
+type AxisTickInputs = (Vec<String>, Vec<bool>, Option<TickProjection>, Option<String>);
 
 /// Derive one axis's tick labels and [`TickProjection`] from a resolved scale —
 /// the single source of truth for the sequence the shared (global) and
@@ -4473,9 +4506,15 @@ pub(crate) fn build_axis_tick_inputs(
     let mut labels = scale.tick_labels(tick_count);
     let mut fractions = scale.tick_fractions(tick_count);
     let padding_frac = scale.padding_fraction();
+    // Which of these SAME tick values (same `count_hint`,
+    // so index-aligned with `labels`/`fractions`) are `Log` decades — empty
+    // for every non-`Log` scale. Reversed in the SAME lockstep as `labels`
+    // so index `i` still names the same tick after either order.
+    let mut anchors = scale.tick_values_raw(tick_count).map(|v| scale.tick_anchors(&v)).unwrap_or_default();
     if reverse {
         labels.reverse();
         fractions.reverse();
+        anchors.reverse();
     }
 
     let (labels, threaded) = match mode {
@@ -4540,7 +4579,7 @@ pub(crate) fn build_axis_tick_inputs(
         minor,
     });
 
-    Ok((labels, projection, threaded))
+    Ok((labels, anchors, projection, threaded))
 }
 
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.

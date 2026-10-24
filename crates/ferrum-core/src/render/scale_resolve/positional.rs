@@ -174,6 +174,16 @@ pub(in crate::render) fn build_axis_scale(
     // scale receives one only as its overlay group's extent, which that scale
     // spans in place of its own data.
     shared: Option<&SharedDomain>,
+    // `true` for a leaf whose overlay group
+    // has not resolved yet (pass one). A Log channel's `data_extent` then
+    // returns this leaf's own extent with an EMPTY tally — deferring the
+    // count/refusal to the group's later resolve
+    // (`composite::resolve_caller_scale_group`) instead of deciding it
+    // standalone — mirroring the `shared: Some(SharedDomain::Numeric)`
+    // early return just below, which does the same for a leaf the group
+    // has ALREADY resolved. `false` for every standalone (flat/facet)
+    // render → byte-identical.
+    pending: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     // The bound field is typed, and a caller's categorical scale takes its
@@ -290,11 +300,20 @@ pub(in crate::render) fn build_axis_scale(
         // categorical scale enumerates the column the establishing layer
         // draws, across panels on a facet-shared channel
         // (`establishing_categories`).
-        let data_extent = || {
+        // `side`: a `Log` channel's side of zero (`None` for every other
+        // continuous type). A composite shared numeric domain has already
+        // been unioned (and its off-side rows counted) by the group's own
+        // resolve pass (`composite::leaf_positional_domain` /
+        // `impose_overlay_axis`), so this leaf's `left_out` stays `0` rather
+        // than restating the group's warning.
+        let data_extent = |side: Option<crate::scale::log::LogSide>| {
             if let Some(SharedDomain::Numeric { lo, hi }) = shared {
-                return Ok((*lo, *hi));
+                return Ok((
+                    super::SidedExtent { lo: *lo, hi: *hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+                    super::LeftOutTally::new(),
+                ));
             }
-            numeric_domain_union_over(
+            let (extent, tally) = numeric_domain_union_over(
                 channel,
                 &enc.field,
                 paired_enc.map(|p| p.field.as_str()),
@@ -303,13 +322,24 @@ pub(in crate::render) fn build_axis_scale(
                 spec,
                 include_final,
                 LayerUnion::CarryingScale(scale_spec),
+                side,
             )
             .map_err(|e| match e {
                 RenderError::UnsupportedDtype { field, dtype, context: None } => {
                     RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
                 }
                 e => e,
-            })
+            })?;
+            // a `Log` channel on a leaf
+            // whose overlay group has not resolved yet defers its count
+            // and any refusal to the group's later resolve — this leaf's
+            // own extent stands (so it still gets SOME scale for pass
+            // one's throwaway render), but with an empty tally, so
+            // `resolve_log_extent` neither warns nor refuses here.
+            if pending && side.is_some() {
+                return Ok((extent, super::LeftOutTally::new()));
+            }
+            Ok((extent, tally))
         };
         // `#247`B: the null band is decided against the opposite positional
         // field the sort reads, so the categories and their sort agree on
@@ -344,6 +374,9 @@ pub(in crate::render) fn build_axis_scale(
                         surface: ScaleDomainSurface::Scale,
                         coord_flipped,
                     }
+                }
+                RenderError::LogScaleNoValueOnSide { channel, reason, .. } => {
+                    RenderError::LogScaleNoValueOnSide { channel, reason, coord_flipped }
                 }
                 other => other,
             });
@@ -502,9 +535,21 @@ pub(in crate::render) fn imposed_axis_scale(
         Err(e) => return Some(Err(e)),
     };
     let sort_ctx = SortContext { category_field: &binding.field, batch: &batch, x_field: None, y_field: None, coord_flipped: false };
-    let data_extent = || match shared {
-        Some(SharedDomain::Numeric { lo, hi }) => Ok((*lo, *hi)),
-        _ => column_extent(&batch, &binding.field),
+    // An imposed member's domain is the group's own (already unioned, and
+    // already counted toward the group's one `LogScaleRowsLeftOut`, per
+    // `composite::leaf_positional_domain`) — this member contributes no
+    // column of its own, so its `left_out` is always `0`.
+    let data_extent = |_side: Option<crate::scale::log::LogSide>| match shared {
+        Some(SharedDomain::Numeric { lo, hi }) => Ok((
+            super::SidedExtent { lo: *lo, hi: *hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+            super::LeftOutTally::new(),
+        )),
+        _ => column_extent(&batch, &binding.field).map(|(lo, hi)| {
+            (
+                super::SidedExtent { lo, hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+                super::LeftOutTally::new(),
+            )
+        }),
     };
     let data_categories = || distinct_positional_categories(&batch, &binding.field, None);
     Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, warnings))
@@ -622,6 +667,14 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 /// refusal below — the same field `apply_axis_domain_config`'s sibling refusal on
 /// this type already carries — and picks the opposite positional channel for the
 /// discrete arms' null-band occupancy rule (`#247`B).
+///
+/// `data_extent` answers a `Log` channel's sided extent (the `LogSide` its
+/// resolved domain maps, or every finite value under `None`) — the `Log`
+/// arm asks for its own side even under an explicit domain, to count the
+/// rows the other side leaves out; every other continuous arm asks with
+/// `None` only when it states no `domain`, exactly as before this closure
+/// carried a side at all (see [`resolve_continuous_domain_and_range`]'s own
+/// `None`-side adaptation of it).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn build_from_scale_spec(
     channel: &str,
@@ -630,7 +683,7 @@ pub(in crate::render) fn build_from_scale_spec(
     batch: &RecordBatch,
     pr: (f64, f64),
     sort_ctx: &SortContext<'_>,
-    data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
+    data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
     data_categories: &dyn Fn() -> Result<Vec<String>, RenderError>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
@@ -639,6 +692,11 @@ pub(in crate::render) fn build_from_scale_spec(
     if batch.column_by_name(&enc.field).is_none() {
         return Err(RenderError::UnknownColumn { name: enc.field.clone() });
     }
+    // Every arm but `Log` reads only the unsided `(lo, hi)` of its own
+    // `None`-side call, exactly as `data_extent` behaved before it carried
+    // a `Log` side at all; its tally (always empty for a non-`Log` call) is
+    // discarded.
+    let unsided_extent = || data_extent(None).map(|(e, _)| (e.lo, e.hi));
 
     Ok(match scale_spec {
         // `system_injected` is read by `build_axis_scale`'s bypass gate above,
@@ -647,25 +705,22 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, zero: *zero, reverse: common.reverse };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
-            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
-            ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, *nice))
+            resolve_log_scale(channel, &enc.field, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, warnings)?
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -690,19 +745,19 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Pow { exponent, common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
             // F-L04-06: `utc=true` survives resolution — the wire tag no
             // longer collapses into an indistinguishable `TimeScale` once
             // resolved (`new_internal` used to default it away here).
@@ -789,7 +844,7 @@ pub(in crate::render) fn build_from_scale_spec(
             // completely separate resolution path — `scale_resolve::color`),
             // so both are hard-coded `false` rather than threading a value
             // that could never mean anything else here.
-            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, data_extent, pr, DomainAdjust::default())?;
+            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, &unsided_extent, pr, DomainAdjust::default())?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }
     })
@@ -904,6 +959,173 @@ pub(super) fn validate_explicit_continuous_shape(
         }
     }
     Ok(())
+}
+
+/// Refuse an explicit `Log` `scale=` domain that touches zero or crosses
+/// sign — the one malformed input left among a `Log` channel's domains:
+/// a domain the caller wrote is input to validate, not
+/// data to repair, exactly as `fm.LogScale(domain=...)` and
+/// `configure_axis(domain_min=...)` already refuse it
+/// ([`LogScaleData::validate_user_domain`]). A stated strictly one-signed
+/// domain stays legal and decides [`LogSide::of`]'s answer. No-op when no
+/// domain is stated (the data decides the extent instead, via the sided
+/// fold).
+pub(super) fn validate_explicit_log_domain(channel: &str, domain: Option<&[f64]>) -> Result<(), RenderError> {
+    let Some(d) = domain else { return Ok(()) };
+    if d.len() != 2 {
+        // Already refused by `validate_explicit_continuous_shape`, called
+        // first by every caller of this function; unreachable in practice,
+        // but a defensive no-op rather than an out-of-bounds index below.
+        return Ok(());
+    }
+    crate::scale::log::LogScaleData::validate_user_domain([d[0], d[1]]).map_err(|reason| {
+        RenderError::InvalidScaleDomainConfig {
+            channel: channel.to_string(),
+            reason: reason.to_string(),
+            surface: ScaleDomainSurface::Scale,
+            coord_flipped: false,
+        }
+    })
+}
+
+/// The `Log` arm of [`build_from_scale_spec`]: the drop-and-warn/refuse
+/// mechanism for a `Log` channel's off-side rows, in one place so x/y and
+/// every numeric auxiliary channel's `Log` resolution
+/// (`auxiliary::numeric_aux_scale_kind`) share it.
+///
+/// An explicit domain touching zero or crossing sign refuses
+/// ([`validate_explicit_log_domain`]). Otherwise, `data_extent` is asked for
+/// its side's extent (and whole-frame tally) — even under an explicit
+/// domain, so the rows the other side leaves out are counted — and:
+/// - the tally's whole-frame `rows() > 0` pushes one
+///   [`RenderWarning::LogScaleRowsLeftOut`];
+/// - an empty on-side extent (`!lo.is_finite() || !hi.is_finite() || lo >
+///   hi`) with `rows() > 0` and nothing on-side anywhere in the frame
+///   refuses with [`RenderError::LogScaleNoValueOnSide`]; otherwise (a
+///   genuinely all-null frame, or an independent facet panel whose own
+///   slice is empty while another panel holds values) the extent falls back
+///   to the no-value Log domain `[1, base]` (d3's own
+///   `scaleLog` default, the log-space twin of every other continuous
+///   channel's unit-interval default).
+///
+/// `channel` is the RESOLVED token; `coord_flipped` is `build_axis_scale`'s
+/// own flag (the real one, threaded straight through to
+/// [`resolve_log_extent`] — see its doc), not corrected after the fact: a
+/// pushed [`RenderWarning`] has no `Result` for a caller to `map_err` over,
+/// unlike `InvalidScaleDomainConfig`/`InvalidBandPadding`/
+/// `LogScaleNoValueOnSide`, which the `?` below still propagates for that
+/// correction.
+#[allow(clippy::too_many_arguments)]
+fn resolve_log_scale(
+    channel: &str,
+    field: &str,
+    base: &f64,
+    common: &crate::spec::encoding::ContinuousScaleCommon,
+    nice: bool,
+    pr: (f64, f64),
+    data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
+    coord_flipped: bool,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<ScaleKind, RenderError> {
+    use crate::scale::log::LogSide;
+
+    validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
+    validate_explicit_log_domain(channel, common.domain.as_deref())?;
+    let side = LogSide::of(common.domain.as_deref());
+    let (extent, tally) = data_extent(Some(side))?;
+    let (lo, hi) = resolve_log_extent(channel, field, common.domain.is_some(), side, (extent.lo, extent.hi), &tally, *base, coord_flipped, warnings)?;
+
+    let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+    let unsided_extent = || Ok((lo, hi));
+    let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+    Ok(ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, nice)))
+}
+
+/// The warn/refuse step for a `Log` channel's off-side rows, shared by
+/// [`resolve_log_scale`] (x/y), `auxiliary::numeric_aux_scale_kind`'s `Log`
+/// arm (every numeric auxiliary channel) and composite's
+/// `resolve_caller_scale_group`/`resolve_group` (a composite group, once per
+/// group): `tally.rows() > 0` pushes one [`RenderWarning::LogScaleRowsLeftOut`]
+/// naming the WHOLE FRAME's count, not just `own_extent`'s own fold — `tally`
+/// is the content-deduplicated whole-frame tally every fold shares,
+/// so every caller reports the same count for the same data.
+///
+/// `own_extent` is THIS fold's own on-side `(lo, hi)` (a single panel's,
+/// under an independent facet resolution, or a composite group's already-
+/// unioned members' extent) — it may be empty even when `tally.any_on_side()`
+/// is true elsewhere in the frame. With no explicit domain stated
+/// (`has_explicit_domain: false`) and `own_extent` empty:
+/// - `tally.any_on_side()`: another part of the frame has values (an
+///   independent facet panel beside one with data) — this fold draws
+///   nothing, falling back to the no-value Log domain `[1, base]`
+///   rather than refusing;
+/// - `!tally.any_on_side() && tally.rows() > 0`: the WHOLE frame has
+///   nothing on-side — refuses with [`RenderError::LogScaleNoValueOnSide`];
+/// - `!tally.any_on_side() && tally.rows() == 0`: a genuinely all-null
+///   frame — the same `[1, base]` no-value domain.
+///
+/// Returns the `(lo, hi)` the caller's scale should resolve its domain from.
+///
+/// `coord_flipped` is the warning's own display flag:
+/// `LogScaleRowsLeftOut`'s `Display` un-flips `channel`
+/// through [`prepare::user_facing_channel`](crate::render::prepare::user_facing_channel)
+/// using it, so every caller must pass its OWN real flag, not `false` — a
+/// positional caller under `CoordFlip` (`build_axis_scale`'s `coord_flipped`,
+/// or a composite caller's `LeafResolveInput::coord_flipped()`) passes the
+/// true value; an auxiliary caller (`numeric_aux_scale_kind`'s `Log` arm,
+/// `resolve_group`'s `size` branch) always passes `false` — an aux channel
+/// is never flipped, mirroring the struct's own doc.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn resolve_log_extent(
+    channel: &str,
+    field: &str,
+    has_explicit_domain: bool,
+    side: crate::scale::log::LogSide,
+    own_extent: (f64, f64),
+    tally: &super::LeftOutTally,
+    base: f64,
+    coord_flipped: bool,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(f64, f64), RenderError> {
+    let rows = tally.rows();
+    if rows > 0 {
+        warnings.push(RenderWarning::LogScaleRowsLeftOut {
+            channel: channel.to_string(),
+            field: field.to_string(),
+            rows,
+            side,
+            coord_flipped,
+        });
+    }
+
+    let (lo, hi) = own_extent;
+    let has_values = lo.is_finite() && hi.is_finite() && lo <= hi;
+    if !has_explicit_domain && !has_values {
+        if tally.any_on_side() {
+            // Another part of the frame holds values (an independent facet
+            // panel beside one with data) — this fold draws nothing, but the
+            // frame as a whole is not valueless, so this is the no-value
+            // domain, not a refusal.
+            return Ok((1.0, base));
+        }
+        if rows > 0 {
+            let reason = crate::render::log_no_value_on_side_reason(
+                channel,
+                field,
+                rows,
+                side,
+                tally.zero(),
+                tally.opposite(),
+            );
+            return Err(RenderError::LogScaleNoValueOnSide { channel: channel.to_string(), reason, coord_flipped });
+        }
+        // Genuinely no value anywhere in the frame (an all-null column): the
+        // Log no-value domain `[1, base]` — d3's own `scaleLog`
+        // default, the log-space twin of every other continuous channel's
+        // `(0.0, 1.0)` all-null default.
+        return Ok((1.0, base));
+    }
+    Ok((lo, hi))
 }
 
 /// Widen a resolved domain pair so it includes zero — the zero-anchor's
@@ -1585,7 +1807,15 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &|| super::column_extent(&batch, "cat"), &|| super::distinct_positional_categories(&batch, "cat", None), &mut warnings)
+        let data_extent = |_side: Option<crate::scale::log::LogSide>| {
+            super::column_extent(&batch, "cat").map(|(lo, hi)| {
+                (
+                    crate::render::scale_resolve::SidedExtent { lo, hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+                    crate::render::scale_resolve::LeftOutTally::new(),
+                )
+            })
+        };
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -1918,6 +2148,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap_err();
@@ -2055,7 +2286,29 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &|| super::column_extent(batch, field), &|| super::distinct_positional_categories(batch, field, None), &mut warnings)
+        let data_extent = |side: Option<crate::scale::log::LogSide>| {
+            let col = batch
+                .column_by_name(field)
+                .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+            let mut extent = crate::render::scale_resolve::sided_min_max_f64(col.as_ref(), side).map_err(|_| RenderError::UnsupportedDtype {
+                field: field.to_string(),
+                dtype: format!("{:?}", col.data_type()),
+                context: Some("scale"),
+            })?;
+            // Matches `column_extent`'s own all-null patch: an integer
+            // column's sided fold would otherwise report its type's
+            // `MAX`/`MIN` seeds instead of the empty `(inf, -inf)` extent.
+            if col.null_count() == col.len() {
+                extent.lo = f64::INFINITY;
+                extent.hi = f64::NEG_INFINITY;
+            }
+            let mut tally = crate::render::scale_resolve::LeftOutTally::new();
+            if col.null_count() != col.len() {
+                tally.count(col.as_ref(), extent);
+            }
+            Ok((extent, tally))
+        };
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &mut warnings)
     }
 
     fn resolve_scale(
@@ -2175,6 +2428,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap_err();
@@ -2619,6 +2873,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap()
@@ -2708,6 +2963,7 @@ mod tests {
             &spec,
             false,
             shared,
+            false,
             &mut warnings,
         )
         .unwrap()
@@ -2860,6 +3116,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
     }
@@ -2929,6 +3186,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap_err();
@@ -2958,6 +3216,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap()
@@ -3199,6 +3458,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .unwrap();

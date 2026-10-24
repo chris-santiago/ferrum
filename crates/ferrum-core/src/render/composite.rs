@@ -48,7 +48,7 @@ use crate::render::scale_resolve::{
     SortContext, SortRows,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
-    column_reads_categorical, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, LayerUnion, LeafScaleContext, SharedDomain,
+    column_reads_categorical, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
 };
 use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
@@ -227,7 +227,7 @@ pub(crate) fn resolve_composite_scales(
     // descendant leaf whose effective mode stays shared, through nested
     // composites and spliced overlay subtrees.
     for channel in [Channel::Color, Channel::Size] {
-        resolve_nonpositional(tree, &span, channel, ResolveMode::Independent, leaves, &mut out)?;
+        resolve_nonpositional(tree, &span, channel, ResolveMode::Independent, leaves, &mut out, warnings)?;
     }
     Ok(out)
 }
@@ -394,16 +394,16 @@ fn resolve_channel(
                     warnings,
                 );
                 match establishing_caller_scale(&axis) {
-                    Some((_, scale)) => resolve_caller_scale_group(&group, channel, scale, leaves, out)?,
+                    Some((_, scale)) => resolve_caller_scale_group(&group, channel, scale, leaves, out, warnings)?,
                     None => {
-                        resolve_group(&group, channel, leaves, out)?;
+                        resolve_group(&group, channel, leaves, out, warnings)?;
                         sort_overlay_categories(&group, channel, leaves, out, warnings)?;
                     }
                 }
                 impose_overlay_axis(&group, channel, leaves, out, warnings)?;
                 continue;
             }
-            resolve_group(&group, channel, leaves, out)?;
+            resolve_group(&group, channel, leaves, out, warnings)?;
         }
         Ok(())
     } else {
@@ -441,6 +441,7 @@ fn resolve_nonpositional(
     inherited: ResolveMode,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let CompositeNode::Composite { children, resolve, .. } = node else {
         return Ok(()); // Leaf/Hole: assignment is decided by an ancestor.
@@ -454,7 +455,7 @@ fn resolve_nonpositional(
         // below resolves on their own).
         let mut group: Vec<usize> = Vec::new();
         collect_shared_leaves(node, leaf_span, channel, inherited, &mut group);
-        resolve_group(&group, channel, leaves, out)?;
+        resolve_group(&group, channel, leaves, out, warnings)?;
     }
 
     // Always recurse: descendants under an explicit-independent boundary reset
@@ -464,7 +465,7 @@ fn resolve_nonpositional(
     let mut cursor = 0;
     for child in children {
         let lc = leaf_count(child);
-        resolve_nonpositional(child, &leaf_span[cursor..cursor + lc], channel, eff, leaves, out)?;
+        resolve_nonpositional(child, &leaf_span[cursor..cursor + lc], channel, eff, leaves, out, warnings)?;
         cursor += lc;
     }
     Ok(())
@@ -519,11 +520,49 @@ fn resolve_group(
     channel: Channel,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
+    let mut tally = LeftOutTally::new();
     for &idx in group {
-        if let Some(d) = leaf_channel_domain(&leaves[idx], channel)? {
+        if let Some(d) = leaf_channel_domain(&leaves[idx], channel, &mut tally)? {
             domains.push((idx, d));
+        }
+    }
+    // `size` has no caller-scale concept (unlike x/y),
+    // so the group's `Log`-ness is decided by its members' OWN scales —
+    // the first contributing member declaring one establishes the side and
+    // base, mirroring the "layer 0 establishes" convention elsewhere. That
+    // member's merged whole-frame tally resolves the group's extent and
+    // pushes the ONE warning/refusal here, once per group, in place of
+    // `leaf_size_domain` resolving (and restating) it per leaf.
+    if channel == Channel::Size {
+        let establishing = group.iter().find_map(|&idx| {
+            let enc = leaves[idx].encoding.size.as_ref()?;
+            match enc.scale.as_ref()? {
+                crate::spec::encoding::ScaleSpec::Log { base, common, .. } => Some((
+                    enc.field.clone(),
+                    crate::scale::log::LogSide::of(common.domain.as_deref()),
+                    common.domain.is_some(),
+                    *base,
+                )),
+                _ => None,
+            }
+        });
+        if let Some((field, side, has_explicit_domain, base)) = establishing {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for (_, d) in &domains {
+                if let SharedDomain::Numeric { lo: l, hi: h } = d {
+                    lo = lo.min(*l);
+                    hi = hi.max(*h);
+                }
+            }
+            let (lo, hi) = resolve_log_extent(channel.as_str(), &field, has_explicit_domain, side, (lo, hi), &tally, base, false, warnings)
+                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped: false })?;
+            for (idx, _) in &domains {
+                out[*idx].set(channel, SharedDomain::Numeric { lo, hi });
+            }
+            return Ok(());
         }
     }
     assign_union(&domains, channel, leaves, out)
@@ -754,7 +793,7 @@ fn sort_member_categories(
             x_field: leaf.encoding.x.as_ref().map(|e| e.field.as_str()),
             y_field: leaf.encoding.y.as_ref().map(|e| e.field.as_str()),
         });
-    let coord_flipped = matches!(leaf.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let coord_flipped = leaf.coord_flipped();
     let sort_ctx = SortContext {
         category_field: &enc.field,
         batch: rows.batch,
@@ -785,7 +824,7 @@ fn establishing_categories(
         return Ok(None);
     };
     let mut categories = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
-        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: false }
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: leaf.coord_flipped() }
     })?;
     if let Some(sort) = enc.sort.as_ref() {
         sort_member_categories(&mut categories, sort, enc, leaf, channel, warnings)?;
@@ -896,18 +935,82 @@ fn resolve_caller_scale_group(
     scale: &crate::spec::encoding::ScaleSpec,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let selection = LayerUnion::CarryingScale(scale);
     let members: Vec<usize> = if scale.positional_extent().is_some() {
-        group.iter().copied().filter(|&idx| selection.admits(leaf_own_scale(&leaves[idx], channel))).collect()
+        let members: Vec<usize> = group.iter().copied().filter(|&idx| selection.admits(leaf_own_scale(&leaves[idx], channel))).collect();
+        // A STATED Log domain still counts
+        // every admitted member's off-side rows as one whole-group tally —
+        // one warning with one count on every door — even
+        // though the domain itself needs no data union. Without this, each
+        // member's own standalone render restates the warning with only its
+        // own rows (the door-count mismatch `+`/`LayerChart` already closed
+        // for the auto-domain branch below).
+        if let crate::spec::encoding::ScaleSpec::Log { base, common, .. } = scale {
+            let side = crate::scale::log::LogSide::of(common.domain.as_deref());
+            let mut tally = LeftOutTally::new();
+            for &idx in &members {
+                leaf_positional_domain(&leaves[idx], channel, selection, &mut tally)?;
+            }
+            let field = members
+                .first()
+                .and_then(|&idx| leaf_post_flip_encoding(&leaves[idx], channel))
+                .map(|e| e.field.clone())
+                .unwrap_or_default();
+            let stated = common.domain.as_ref().expect("positional_extent confirmed Some above");
+            let (lo, hi) = (stated[0], stated[1]);
+            let coord_flipped = members.first().is_some_and(|&idx| leaves[idx].coord_flipped());
+            resolve_log_extent(channel.as_str(), &field, true, side, (lo, hi), &tally, *base, coord_flipped, warnings)
+                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
+            for &idx in &members {
+                out[idx].set(channel, SharedDomain::Numeric { lo, hi });
+            }
+        }
+        members
     } else {
         let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
+        let mut tally = LeftOutTally::new();
         for &idx in group {
-            if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection)? {
+            if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection, &mut tally)? {
                 domains.push((idx, d));
             }
         }
-        assign_union(&domains, channel, leaves, out)?;
+        // A `Log` caller scale resolves the group's
+        // whole-frame tally ONCE here, instead of `leaf_positional_domain`
+        // resolving (and restating) it per member.
+        if let crate::spec::encoding::ScaleSpec::Log { base, common, .. } = scale {
+            let side = crate::scale::log::LogSide::of(common.domain.as_deref());
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            // Only a FINITE member domain folds into the group's extent —
+            // `leaf_positional_domain` no longer sanitizes an all-off-side
+            // member's empty extent to a placeholder `(0.0, 1.0)`, so this
+            // union never sees that placeholder in the first place; skipping
+            // non-finite entries here is still the right rule regardless,
+            // since it is the one check that holds for any extent an
+            // all-off-side member could contribute.
+            for (_, d) in &domains {
+                if let SharedDomain::Numeric { lo: l, hi: h } = d {
+                    if l.is_finite() && h.is_finite() {
+                        lo = lo.min(*l);
+                        hi = hi.max(*h);
+                    }
+                }
+            }
+            let field = domains
+                .first()
+                .and_then(|&(idx, _)| leaf_post_flip_encoding(&leaves[idx], channel))
+                .map(|e| e.field.clone())
+                .unwrap_or_default();
+            let coord_flipped = domains.first().is_some_and(|&(idx, _)| leaves[idx].coord_flipped());
+            let (lo, hi) = resolve_log_extent(channel.as_str(), &field, common.domain.is_some(), side, (lo, hi), &tally, *base, coord_flipped, warnings)
+                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
+            for (idx, _) in &domains {
+                out[*idx].set(channel, SharedDomain::Numeric { lo, hi });
+            }
+        } else {
+            assign_union(&domains, channel, leaves, out)?;
+        }
         domains.into_iter().map(|(idx, _)| idx).collect()
     };
     for idx in members {
@@ -994,7 +1097,12 @@ fn refuse_unplaceable_overlay_members<'a>(
             else {
                 return Ok(());
             };
-            match leaf_channel_domain(&leaves[group[position]], channel)? {
+            // A scratch `warnings` sink: this call only asks the first
+            // member's domain for its KIND (continuous vs categorical) to
+            // judge `axis_kind` by; `resolve_group`/`resolve_caller_scale_group`
+            // resolve the group for real afterward (with the caller's own
+            // `warnings`), so pushing here too would double the count.
+            match leaf_channel_domain(&leaves[group[position]], channel, &mut LeftOutTally::new())? {
                 Some(SharedDomain::Numeric { .. }) => (position, PanelAxisKind::Continuous),
                 Some(SharedDomain::Ordinal(_)) => (position, PanelAxisKind::Categorical),
                 // `Samples` and `FixedBins` are binned colors' domains, never an axis's.
@@ -1073,11 +1181,12 @@ fn refuse_unplaceable_overlay_members<'a>(
 fn leaf_channel_domain(
     leaf: &LeafResolveInput<'_>,
     channel: Channel,
+    tally: &mut LeftOutTally,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     match channel {
-        Channel::X | Channel::Y => leaf_positional_domain(leaf, channel, LayerUnion::Every),
+        Channel::X | Channel::Y => leaf_positional_domain(leaf, channel, LayerUnion::Every, tally),
         Channel::Color => leaf_color_domain(leaf),
-        Channel::Size => leaf_size_domain(leaf),
+        Channel::Size => leaf_size_domain(leaf, tally),
     }
 }
 
@@ -1107,17 +1216,23 @@ fn leaf_channel_domain(
 /// extent), and box/strip whisker fields are picked up via the layer union
 /// inside [`numeric_domain_union`] (spec §6 D3 — shared domains derive from
 /// transform-output batches).
+///
+/// `warnings` receives one [`RenderWarning::LogScaleRowsLeftOut`] when this
+/// leaf's own `Log` fold (`side.is_some()`, the `CarryingScale` arm only)
+/// leaves rows out, through the same [`resolve_log_extent`] x/y and every
+/// numeric auxiliary channel already push theirs through.
 fn leaf_positional_domain(
     leaf: &LeafResolveInput<'_>,
     channel: Channel,
     selection: LayerUnion<'_>,
+    tally: &mut LeftOutTally,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     // R3: `leaf.spec` is the leaf's ORIGINAL ChartSpec (`coord` untouched by
     // `prepare::build_layers`'s encoding swap), while `leaf.encoding` is
     // already the RESOLVED (post-flip) rendering encoding (see
     // `LeafResolveInput`'s doc) — so `leaf.spec.coord` still tells us whether
     // this leaf is flipped, for un-flipping `channel` in any error below.
-    let coord_flipped = matches!(leaf.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let coord_flipped = leaf.coord_flipped();
     let enc = match channel {
         Channel::X => leaf.encoding.x.as_ref(),
         Channel::Y => leaf.encoding.y.as_ref(),
@@ -1200,7 +1315,17 @@ fn leaf_positional_domain(
                 field: enc.field.clone(),
                 coord_flipped,
             })?;
-            let (lo, hi) = numeric_domain_union_over(
+            // A `Log` caller scale reads only its side's rows, exactly as
+            // the flat/layered route does (`positional::resolve_log_scale`);
+            // any other scale type asks with `None`, byte-identical to
+            // before this leaf's union carried a side at all.
+            let side = match selection {
+                LayerUnion::CarryingScale(crate::spec::encoding::ScaleSpec::Log { common, .. }) => {
+                    Some(crate::scale::log::LogSide::of(common.domain.as_deref()))
+                }
+                _ => None,
+            };
+            let (extent, leaf_tally) = numeric_domain_union_over(
                 channel.as_str(),
                 &enc.field,
                 paired.or(stacked.base.as_ref().map(|base| base.field.as_str())),
@@ -1209,6 +1334,7 @@ fn leaf_positional_domain(
                 leaf.spec,
                 false,
                 selection,
+                side,
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
                 channel: channel.as_str(),
@@ -1216,6 +1342,27 @@ fn leaf_positional_domain(
                 source,
                 coord_flipped,
             })?;
+            // A `Log` member's off-side rows feed the GROUP's whole-frame
+            // tally: this leaf merges its own tally in
+            // and resolves its own `(lo, hi)` from the plain finite-or-
+            // default fallback, exactly as every other scale type does —
+            // `resolve_caller_scale_group`'s caller (the only path `side`
+            // is ever `Some` here) pushes the ONE whole-frame warning after
+            // merging every member's tally, not this leaf.
+            if side.is_some() {
+                tally.merge(leaf_tally);
+            }
+            // a Log side keeps the raw
+            // sided extent, even when it is empty (an all-off-side
+            // member) — `finite_or_default`'s `(0.0, 1.0)` placeholder
+            // would otherwise union a fabricated `0` into the GROUP's Log
+            // domain once this member's contribution reaches the caller's
+            // min/max fold. The member still contributes its COUNT via the
+            // tally merge just above; only its numeric extent stays raw,
+            // to be skipped there instead of corrupted here. Every other
+            // scale type is unaffected (an empty extent there still folds
+            // to the plain `(0.0, 1.0)` default, byte-identical).
+            let (lo, hi) = if side.is_some() { (extent.lo, extent.hi) } else { finite_or_default(extent) };
             // #247A: the leaf kept its injected scale's zero anchor by taking
             // the explicit bypass; now that it shares instead, the anchor has to
             // travel with its CONTRIBUTION or it would be silently dropped
@@ -1337,7 +1484,7 @@ fn leaf_color_domain(
             return Ok(None);
         }
         let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
-        let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(resolve_error)?;
+        let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, FacetExtentPolicy::UnionWithPanel, extent).map_err(resolve_error)?;
         return Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }));
     }
     let Some(located) = leaf_aux_column(leaf, enc, channel, reads.as_deref())? else { return Ok(None) };
@@ -1365,7 +1512,7 @@ fn leaf_color_domain(
         (true, None) => Ok(Some(numeric_extent_domain(located.col))),
         (true, Some(reads)) => {
             let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
-            let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(resolve_error)?;
+            let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, FacetExtentPolicy::UnionWithPanel, extent).map_err(resolve_error)?;
             Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
         }
         (false, None) => {
@@ -1379,6 +1526,22 @@ fn leaf_color_domain(
     }
 }
 
+/// A sided numeric fold's `(lo, hi)`, when it has one — the `(0.0, 1.0)`
+/// no-value default every other all-null continuous leaf gets otherwise
+/// ([`numeric_extent`]'s own default, read off a [`SidedExtent`] instead of
+/// a plain pair). For a `Log` fold (`side.is_some()` at the call site),
+/// [`resolve_log_extent`] is used instead of this: it applies the SAME
+/// default only on the `left_out == 0` (genuinely all-null) sub-case, and
+/// refuses with [`RenderError::LogScaleNoValueOnSide`] on the `left_out > 0`
+/// one — a distinction this plain finite check cannot make.
+fn finite_or_default(extent: SidedExtent) -> (f64, f64) {
+    if extent.lo.is_finite() && extent.hi.is_finite() && extent.lo <= extent.hi {
+        (extent.lo, extent.hi)
+    } else {
+        (0.0, 1.0)
+    }
+}
+
 /// One leaf's standalone size domain, or `None` if size is unencoded or no
 /// layer of a layered leaf draws it.
 ///
@@ -1386,26 +1549,59 @@ fn leaf_color_domain(
 /// the column, over every drawing layer's on a layered leaf). An explicit user
 /// size `scale` only pins the pixel *range*, never the data domain, so it does
 /// not exclude the leaf from domain sharing.
+///
+/// `tally` receives this leaf's own `Log` size scale's left-out rows (an
+/// unlayered leaf's own fold, or a layered leaf's whole-layer-set fold via
+/// [`sided_aux_numeric_union`]) — merged into the GROUP's whole-frame tally,
+/// which the caller (`resolve_group`) resolves once per
+/// group through [`resolve_log_extent`], not restated per leaf.
 fn leaf_size_domain(
     leaf: &LeafResolveInput<'_>,
+    tally: &mut LeftOutTally,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     let Some(enc) = leaf.encoding.size.as_ref() else { return Ok(None) };
     let channel = Channel::Size;
+    // A `Log` scale's shared domain reads only its side of zero, exactly as
+    // `leaf_positional_domain` does — correctly excluding an off-side value
+    // from this group's union, and, like that function, merging its own
+    // tally into the group's rather than resolving/warning itself.
+    let side = match &enc.scale {
+        Some(crate::spec::encoding::ScaleSpec::Log { common, .. }) => {
+            Some(crate::scale::log::LogSide::of(common.domain.as_deref()))
+        }
+        _ => None,
+    };
+    let resolve_error = |source| CompositeResolveError::DomainResolve {
+        channel: channel.as_str(),
+        field: enc.field.clone(),
+        source,
+        coord_flipped: false,
+    };
     let reads = leaf_aux_reads(leaf, "size");
     let Some(located) = leaf_aux_column(leaf, enc, channel, reads.as_deref())? else { return Ok(None) };
-    let Some(reads) = reads else { return Ok(Some(numeric_extent_domain(located.col))) };
-    let reads = admitted_aux_reads(&reads, "size", false, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
-        .map_err(|source| CompositeResolveError::DomainResolve {
-            channel: channel.as_str(),
+    let Some(reads) = reads else {
+        let extent = sided_min_max_f64(located.col, side).map_err(|_| RenderError::UnsupportedDtype {
             field: enc.field.clone(),
-            source,
-            coord_flipped: false,
-        })?;
-    let extent = |col: &dyn arrow::array::Array, _: &str| Ok(numeric_extent(col));
-    let union = aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, extent).map_err(|source| {
-        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: false }
-    })?;
-    Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
+            dtype: format!("{:?}", located.col.data_type()),
+            context: Some("size"),
+        });
+        let extent = extent.map_err(resolve_error)?;
+        if side.is_some() && located.col.null_count() != located.col.len() {
+            tally.count(located.col, extent);
+        }
+        let (lo, hi) = finite_or_default(extent);
+        return Ok(Some(SharedDomain::Numeric { lo, hi }));
+    };
+    let reads = admitted_aux_reads(&reads, "size", false, leaf.final_batch, leaf.transform_outputs, &mut Vec::new())
+        .map_err(resolve_error)?;
+    let Some((extent, leaf_tally)) = sided_aux_numeric_union(&reads, leaf.final_batch, leaf.transform_outputs, false, side, "size").map_err(resolve_error)? else {
+        return Ok(None);
+    };
+    if side.is_some() {
+        tally.merge(leaf_tally);
+    }
+    let (lo, hi) = finite_or_default(extent);
+    Ok(Some(SharedDomain::Numeric { lo, hi }))
 }
 
 /// A layered leaf's reads of the auxiliary channel `name`: every layer drawing
@@ -1565,6 +1761,22 @@ mod tests {
 
     fn enc(field: &str) -> EncodingSpec {
         EncodingSpec { field: field.to_string(), ..Default::default() }
+    }
+
+    /// A continuous scale's shared fields with no explicit `domain` (data-
+    /// derived) and every other field at its default — `ContinuousScaleCommon`
+    /// has no `Default` impl (its `domain`/`range` absence is meaningful, not
+    /// a zero value), so every caller spells out all seven fields.
+    fn no_domain_common() -> crate::spec::encoding::ContinuousScaleCommon {
+        crate::spec::encoding::ContinuousScaleCommon {
+            domain: None,
+            range: None,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        }
     }
 
     fn base_spec() -> ChartSpec {
@@ -2809,7 +3021,7 @@ mod tests {
             ..spec_with(e)
         };
         let leaf = owned(spec, batch);
-        match leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every) {
+        match leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new()) {
             Ok(Some(SharedDomain::Numeric { hi, .. })) => assert_eq!(hi, 38.0),
             other => panic!("expected the member's numeric stacked extent, got {other:?}"),
         }
@@ -2818,7 +3030,7 @@ mod tests {
     #[test]
     fn leaf_positional_domain_refuses_a_layer_utf8_column_on_the_shared_y_axis() {
         let leaf = layer_utf8_y_leaf();
-        let err = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every)
+        let err = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new())
             .expect_err("a Utf8 layer column must refuse the static overlay route too");
         match err {
             CompositeResolveError::DomainResolve { source, channel, field, .. } => {
@@ -2965,6 +3177,153 @@ mod tests {
         rendering.y = Some(enc(x_field));
         let outs = outputs(&batch);
         LeafOwned { spec, encoding: rendering, batch, outputs: outs }
+    }
+
+    /// A flipped overlay member's Log-channel binding, carrying `scale` on
+    /// the AUTHORED x field ("v") the way `overlay_flipped_leaf` carries a
+    /// plain field: after the flip, `v` renders on y.
+    fn overlay_flipped_log_x_leaf(v_values: &[f64]) -> LeafOwned {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log {
+            base: 10.0,
+            common: no_domain_common(),
+            nice: false,
+        };
+        let v_enc = EncodingSpec { field: "v".to_string(), scale: Some(log_scale), ..Default::default() };
+        let mut authored = Encoding::default();
+        authored.x = Some(v_enc.clone());
+        authored.y = Some(enc("y"));
+        let spec = ChartSpec { encoding: authored, coord: Some(crate::spec::coord::CoordKind::Flip), ..base_spec() };
+        let mut rendering = Encoding::default();
+        rendering.x = Some(enc("y"));
+        rendering.y = Some(v_enc);
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(v_values.to_vec())),
+                Arc::new(Float64Array::from((0..v_values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap();
+        let outs = outputs(&batch);
+        LeafOwned { spec, encoding: rendering, batch, outputs: outs }
+    }
+
+    /// `resolve_caller_scale_group` used to hardcode `coord_flipped: false`
+    /// in its Log refusal, so a flipped overlay's all-off-side Log channel
+    /// named "shared y domain" (the POST-flip axis) instead of "shared x
+    /// domain" (the channel the user actually wrote `x=` on).
+    ///
+    /// This refusal is reachable only once `leaf_positional_domain` stops
+    /// sanitizing an all-off-side member's empty extent to a FINITE
+    /// `(0.0, 1.0)` before the group's min/max fold ever sees it — with
+    /// that placeholder in place, `resolve_log_extent`'s `!has_values`
+    /// branch never fires through `resolve_composite_scales`, so the
+    /// scenario this test builds renders `Ok` (both leaves resolving to the
+    /// `(0, 1)` placeholder) rather than refusing. Fixed alongside that
+    /// placeholder fix, so the two land and prove out together.
+    #[test]
+    fn a_flipped_overlay_groups_log_refusal_names_the_users_channel() {
+        let leaf0 = overlay_flipped_log_x_leaf(&[-5.0, -7.0]);
+        let leaf1 = overlay_flipped_log_x_leaf(&[-5.0, -7.0]);
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("y"), Some("v")), leaf_node(Some("y"), Some("v"))],
+            shared_both(),
+        );
+        let inputs = [input(&leaf0), input(&leaf1)];
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
+            .expect_err("an all-off-side Log channel refuses");
+        assert!(
+            err.to_string().starts_with("failed to resolve shared x domain for field 'v'"),
+            "{err}"
+        );
+    }
+
+    /// The fix case the
+    /// same hardcoded `coord_flipped: false` recurred at
+    /// `establishing_categories`'s `distinct_values_in_order` call —
+    /// `coord_flipped` is now `leaf.coord_flipped()` there too, so a flipped
+    /// member's own column-enumeration refusal also names the user's
+    /// channel.
+    #[test]
+    fn a_flipped_overlay_categorys_refusal_names_the_users_channel() {
+        let mut authored = Encoding::default();
+        authored.x = Some(enc("d"));
+        authored.y = Some(enc("y"));
+        let spec = ChartSpec { encoding: authored, coord: Some(crate::spec::coord::CoordKind::Flip), ..base_spec() };
+        let mut rendering = Encoding::default();
+        rendering.x = Some(enc("y"));
+        rendering.y = Some(enc("d"));
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("d", DataType::Date32, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(arrow::array::Date32Array::from(vec![0, 1])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let outs = outputs(&batch);
+        let owned = LeafOwned { spec, encoding: rendering, batch, outputs: outs };
+        let leaf = input(&owned);
+        let enc_y = owned.encoding.y.clone().expect("rendering.y is bound");
+        let err = establishing_categories(&leaf, Channel::Y, &enc_y, &mut Vec::new())
+            .expect_err("a Date32 column cannot enumerate distinct values");
+        let CompositeResolveError::DomainResolve { coord_flipped: true, .. } = &err else {
+            panic!("expected coord_flipped: true, got {err:?}");
+        };
+    }
+
+    /// An overlay member over `log_scale` reading `v` from `values`, no
+    /// flip: the shared Y choice-H's group resolution exercises.
+    fn overlay_log_y_leaf(values: &[f64]) -> LeafOwned {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log {
+            base: 10.0,
+            common: no_domain_common(),
+            nice: false,
+        };
+        let mut e = Encoding::default();
+        e.x = Some(enc("x"));
+        e.y = Some(EncodingSpec { field: "v".to_string(), scale: Some(log_scale), ..Default::default() });
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(values.to_vec())),
+            ],
+        )
+        .unwrap();
+        owned(spec_with(e), batch)
+    }
+
+    /// The fix case): `leaf_positional_domain`
+    /// folded an all-off-side member's empty extent to `(0.0, 1.0)` via
+    /// `finite_or_default` before handing it to the group, which then
+    /// unioned that placeholder into the Log domain — an all-off-side
+    /// member must contribute its COUNT to the group, never a `0..1`
+    /// placeholder into the group's own extent.
+    #[test]
+    fn an_all_off_side_member_never_unions_zero_into_the_group_domain() {
+        let leaf0 = overlay_log_y_leaf(&[1.0, 10.0, 100.0]);
+        let leaf1 = overlay_log_y_leaf(&[-5.0, -7.0]);
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("x"), Some("v")), leaf_node(Some("x"), Some("v"))],
+            shared_both(),
+        );
+        let inputs = [input(&leaf0), input(&leaf1)];
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("renders beside an all-off-side sibling");
+        let expect = Some(SharedDomain::Numeric { lo: 1.0, hi: 100.0 });
+        assert_eq!(ctx[0].y, expect, "the on-side member's domain must not include 0");
+        assert_eq!(ctx[1].y, expect, "the all-off-side member still gets the group's real domain");
     }
 
     /// `fm.layer(_shared_bar(), _shared_point_flipped())`
@@ -3271,6 +3630,140 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    // ── A composite leaf's Log channel drops and warns too ──────────────────
+    //
+    // A static `fm.LayerChart`/`a + b` lowers to an `Overlay` composite node
+    // for its default (shared-y) static render (see this module's own doc
+    // comment on the dependency `render::composite` has on `scale_resolve`,
+    // and `ARCHITECTURE.md`'s "Composite rendering" section): the two are the
+    // SAME Rust mechanism reached by two Python-level idioms, so both doors
+    // are pinned here rather than assumed identical.
+
+    /// An `Overlay` group's `Log` caller scale: leaf 0 carries the scale and
+    /// has its own off-side row; leaf 1 carries none and joins the group
+    /// with every row on-side. `leaf_positional_domain` pushes the SAME
+    /// `RenderWarning::LogScaleRowsLeftOut` x/y and every numeric auxiliary
+    /// channel already push theirs through (`resolve_log_extent`) — a
+    /// composite leaf no longer stays silent where a flat layered chart
+    /// would warn, and the group still reports exactly one warning for the
+    /// whole overlay, not one per member.
+    #[test]
+    fn an_overlay_groups_log_caller_scale_warns_once_for_the_whole_frame() {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+        let log = ScaleSpec::Log {
+            base: 10.0,
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+        };
+        let schema = || Arc::new(Schema::new(vec![Field::new("i", DataType::Float64, false), Field::new("v", DataType::Float64, false)]));
+        let batch_a = RecordBatch::try_new(
+            schema(),
+            vec![Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])), Arc::new(Float64Array::from(vec![-5.0, 2.0, 50.0]))],
+        )
+        .unwrap();
+        let batch_b = RecordBatch::try_new(
+            schema(),
+            vec![Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])), Arc::new(Float64Array::from(vec![4.0, 6.0, 8.0]))],
+        )
+        .unwrap();
+        let mut ea = Encoding::default();
+        ea.x = Some(enc("i"));
+        ea.y = Some(EncodingSpec { scale: Some(log), ..enc("v") });
+        let mut eb = Encoding::default();
+        eb.x = Some(enc("i"));
+        eb.y = Some(enc("v"));
+        let a = owned(spec_with(ea), batch_a);
+        let b = owned(spec_with(eb), batch_b);
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("i"), Some("v")), leaf_node(Some("i"), Some("v"))],
+            shared_both(),
+        );
+        let mut warnings = Vec::new();
+        resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut warnings).unwrap();
+        let side = crate::scale::log::LogSide::Positive;
+        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "y".to_string(), field: "v".to_string(), rows: 1, side, coord_flipped: false };
+        assert!(warnings.contains(&expected), "expected {expected:?} among {warnings:?}");
+        assert_eq!(
+            warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).count(),
+            1,
+            "one whole-frame warning, not one per member: {warnings:?}"
+        );
+    }
+
+    /// A shared-`size` composite group of two leaves: leaf 0 is itself a
+    /// `fm.layer(...)`-merged leaf whose TWO internal layers each draw
+    /// `size` under a `Log` scale from their own column (one negative row
+    /// apiece); leaf 1 draws `size` with every row on-side. `leaf_size_domain`
+    /// folds leaf 0's own two layers into one whole-leaf `SidedExtent`
+    /// (`sided_aux_numeric_union`, the same fold the layered flat route
+    /// uses) before pushing `resolve_log_extent`'s warning, so the group
+    /// reports ONE `LogScaleRowsLeftOut` with BOTH layers' rows combined —
+    /// not two per-layer warnings, and not the old silently-dropped
+    /// `left_out: 0`.
+    #[test]
+    fn a_shared_size_groups_layered_leaf_warns_once_with_both_layers_rows() {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+        let log = ScaleSpec::Log {
+            base: 10.0,
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+        };
+        let mut chart_enc = Encoding::default();
+        chart_enc.size = Some(EncodingSpec { scale: Some(log), ..enc("c1") });
+        let mut layer0_enc = Encoding::default();
+        layer0_enc.size = Some(enc("c1"));
+        let mut layer1_enc = Encoding::default();
+        layer1_enc.size = Some(enc("c2"));
+        let layer0 = Layer { mark: Mark::Point, encoding: layer0_enc, ..Default::default() };
+        let layer1 = Layer { mark: Mark::Point, encoding: layer1_enc, ..Default::default() };
+        let spec_a = ChartSpec { encoding: chart_enc, layers: Some(vec![layer0, layer1]), ..base_spec() };
+        let batch_a = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("c1", DataType::Float64, false),
+                Field::new("c2", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![-5.0, 2.0, 50.0])),
+                Arc::new(Float64Array::from(vec![-3.0, -7.0, 100.0])),
+            ],
+        )
+        .unwrap();
+        let a = owned(spec_a, batch_a);
+
+        let mut eb = Encoding::default();
+        eb.size = Some(enc("c"));
+        let b = owned(spec_with(eb), num_batch("c", &[4.0, 6.0, 8.0]));
+
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(None, None), leaf_node(None, None)], shared_size());
+        let mut warnings = Vec::new();
+        resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut warnings).unwrap();
+        let side = crate::scale::log::LogSide::Positive;
+        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "size".to_string(), field: "c1".to_string(), rows: 3, side, coord_flipped: false };
+        assert!(warnings.contains(&expected), "expected {expected:?} among {warnings:?}");
+        assert_eq!(
+            warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).count(),
+            1,
+            "one whole-frame warning, not one per layer and not one per composite leaf: {warnings:?}"
+        );
     }
 
     /// An overlay whose first leaf carries the caller's linear scale with no
@@ -4265,7 +4758,7 @@ mod tests {
         ]);
         let mut leaf = owned(spec, raw);
         leaf.outputs.insert("smooth".to_string(), smooth);
-        let domain = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every)
+        let domain = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new())
             .expect("every column is Float64");
         assert_eq!(domain, Some(SharedDomain::Numeric { lo: -0.2, hi: 20.0 }));
     }
@@ -4290,7 +4783,7 @@ mod tests {
         let mut leaf = owned(spec, merged);
         leaf.outputs.insert("lhs".to_string(), batch_of(vec![Some("a"), Some("b")], vec![1.0, 2.0]));
         leaf.outputs.insert("rhs".to_string(), batch_of(vec![Some("x"), Some("y")], vec![3.0, 4.0]));
-        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every)
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["a", "b", "x", "y"].iter().map(|s| s.to_string()).collect();
         assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
@@ -4324,7 +4817,7 @@ mod tests {
         .unwrap();
         let mut leaf = owned(spec, merged.clone());
         leaf.outputs.insert("_ident_0".to_string(), merged);
-        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every)
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
         assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));

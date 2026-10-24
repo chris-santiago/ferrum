@@ -24,6 +24,7 @@ import pytest
 
 import ferrum as fm
 from ferrum import X
+from tests._svg_extents import axis_tick_labels
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +224,7 @@ class TestLogAxisTickMarkCoincidence:
     _HEIGHT = 400
     _TOLERANCE = 2.0
 
-    def _build_svg(self) -> str:
+    def _build_svg(self, *, width: int | None = None) -> str:
         df = pl.DataFrame(
             {
                 "x": [1.0, 10.0, 100.0],
@@ -234,7 +235,7 @@ class TestLogAxisTickMarkCoincidence:
             fm.Chart(df)
             .mark_point()
             .encode(x=X("x:Q", scale={"type": "log"}), y="y:Q")
-            .properties(width=self._WIDTH, height=self._HEIGHT)
+            .properties(width=width or self._WIDTH, height=self._HEIGHT)
             .to_svg()
         )
 
@@ -276,31 +277,57 @@ class TestLogAxisTickMarkCoincidence:
         )
 
     def test_log_tick_labels_are_geometrically_spaced(self) -> None:
-        """X-axis tick labels on a log scale are geometrically spaced values.
+        """X-axis tick labels on a log scale are geometrically spaced values,
+        not the evenly spaced ones a linear axis over the same domain gives
+        -- and every in-domain decade (1, 10, 100) stays labeled, never
+        thinned away in favor of a denser non-decade multiple.
 
-        A linear scale over [1, 100] would produce uniformly spaced tick labels
-        like 20, 40, 60, 80, 100.  A log scale produces geometrically spaced
-        labels like 1, 1.58, 2.51, 3.98, 6.31, 10, …, 100.  The presence of
-        '10' and absence of '50' (or '60') in the tick labels confirms the log
-        scale is active and its ticks are scale-projected, not uniform-slot.
+        A linear scale over [1, 100] produces round, evenly spaced ticks
+        (e.g. 0, 20, 40, 60, 80, 100). A log scale's ``breaks_log`` ticks
+        crowd near the bottom of each decade instead (here, the ``{1, 2,
+        5}`` ladder: 1, 2, 5, 10, 20, 50, 100) -- compared against a real
+        linear render of the same data and viewport, not a hand-picked
+        label set, and read through ``axis_tick_labels`` rather than by
+        slicing text nodes.
         """
-        svg = self._build_svg()
-        text_labels = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+        log_svg = self._build_svg()
+        x_log_labels = axis_tick_labels(log_svg, axis="x")
 
-        # '10' must appear as a tick label — it is a log-decade value.
-        assert "10" in text_labels, (
-            f"Log-scale x axis missing '10' tick label.  "
-            f"Got labels: {text_labels}.  "
-            f"This suggests the axis reverted to linear-uniform ticking."
+        # "10" and "100" must stay labeled: a log axis never thins away a
+        # decade in favor of a denser non-decade multiple.
+        assert "1" in x_log_labels
+        assert "10" in x_log_labels, (
+            f"Log-scale x axis missing the '10' decade label: {x_log_labels}"
+        )
+        assert "100" in x_log_labels, (
+            f"Log-scale x axis missing the '100' decade label: {x_log_labels}"
         )
 
-        # Linear-scale ticks over [1, 100] would include '50' or '60'; log scale
-        # has geometrically spaced labels and '50'/'60' do not appear.
-        linear_spill = {"50", "60"} & set(text_labels)
-        assert not linear_spill, (
-            f"Found linear-scale tick labels {linear_spill} on a log-scale axis.  "
-            f"All text labels: {text_labels}"
+        df = pl.DataFrame({"x": [1.0, 10.0, 100.0], "y": [1.0, 2.0, 3.0]})
+        linear_svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x=X("x:Q", scale={"type": "linear"}), y="y:Q")
+            .properties(width=self._WIDTH, height=self._HEIGHT)
+            .to_svg()
         )
+        linear_labels = axis_tick_labels(linear_svg, axis="x")
+
+        assert x_log_labels != linear_labels, (
+            f"Log-scale x axis produced the same tick labels as a linear "
+            f"axis over the same domain: {x_log_labels}."
+        )
+
+    @pytest.mark.parametrize("width", [300, 400, 600])
+    def test_log_x_axis_keeps_its_decades_at_every_width(self, width: int) -> None:
+        """A log x axis over [1, 100] labels every in-domain decade (1, 10,
+        100) at a narrow width too, where the cull from a denser candidate
+        ladder would otherwise drop one in favor of surviving non-decade
+        multiples.
+        """
+        labels = axis_tick_labels(self._build_svg(width=width), axis="x")
+        for decade in ("1", "10", "100"):
+            assert decade in labels, f"width={width}: missing decade label {decade!r}: {labels}"
 
     def test_log_gridlines_at_decade_values_match_mark_positions(self) -> None:
         """Each data mark (at x=1, 10, 100) has a coincident gridline.
@@ -320,6 +347,58 @@ class TestLogAxisTickMarkCoincidence:
                 f"Log-scale circle at cx={cx:.3f} has no coincident gridline.  "
                 f"Closest gridline: {closest:.3f} (gap={abs(closest - cx):.3f}px)."
             )
+
+
+# Label expectations over a wide (5-6 decade) domain: fm's format_numeric
+# switches to scientific notation at 1e6, so [1, 1e5]'s top power stays
+# "100000" while [1, 1e6]'s becomes "1e6".
+_WIDE_LOG_POWERS: dict[float, list[str]] = {
+    1e5: ["1", "10", "100", "1000", "10000", "100000"],
+    1e6: ["1", "10", "100", "1000", "10000", "100000", "1e6"],
+}
+
+
+@pytest.mark.parametrize("hi", sorted(_WIDE_LOG_POWERS))
+def test_a_log_axis_over_five_or_six_decades_labels_only_powers(hi: float) -> None:
+    """A log axis spanning 5-6 decades labels every power of 10 and nothing
+    else, on both x and y, at a wide viewport and a narrow one alike --
+    where ``breaks_log``'s fitting multiple sets ({1,2,5}, {1,3}, ...) all
+    overshoot the tick-count budget, so the only set left is the powers
+    themselves, never a linear fallback over the raw values.
+    """
+    powers = _WIDE_LOG_POWERS[hi]
+    data = pl.DataFrame({"v": [1.0, hi], "y": [1.0, 2.0]})
+
+    x_svg = (
+        fm.Chart(data)
+        .mark_point()
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="y")
+        .properties(width=1400, height=400)
+        .to_svg()
+    )
+    assert axis_tick_labels(x_svg, axis="x") == powers
+
+    narrow_svg = (
+        fm.Chart(data)
+        .mark_point()
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="y")
+        .properties(width=300, height=400)
+        .to_svg()
+    )
+    narrow_labels = axis_tick_labels(narrow_svg, axis="x")
+    assert "1" in narrow_labels
+    assert set(narrow_labels) <= set(powers), (
+        f"a narrow log axis over {powers[-1]} decades drew a non-power label: {narrow_labels}"
+    )
+
+    y_svg = (
+        fm.Chart(data)
+        .mark_point()
+        .encode(x="y", y=fm.Y("v", scale=fm.LogScale()))
+        .properties(width=400, height=600)
+        .to_svg()
+    )
+    assert set(axis_tick_labels(y_svg, axis="y")) == set(powers)
 
 
 # ---------------------------------------------------------------------------

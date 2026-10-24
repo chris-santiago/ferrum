@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
-use super::column_min_max_f64;
+use super::{sided_min_max_f64, LeftOutTally, SidedExtent};
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
@@ -606,8 +606,8 @@ impl<'a> AuxRead<'a> {
 
     /// The numeric extent this read contributes, and whether it holds any
     /// value: a column's `extent` (on a faceted chart, a read of the chart's
-    /// data unioned with the all-panels batch), or a raster image's cells'
-    /// finite extent as the image draws it
+    /// data combined with the all-panels batch per `policy`), or a raster
+    /// image's cells' finite extent as the image draws it
     /// ([`crate::render::marks::image::raster_cell_domain`]). `None` when
     /// there is nothing to read (a batch lacking the field, a raster with no
     /// finite cell).
@@ -616,6 +616,7 @@ impl<'a> AuxRead<'a> {
         primary_batch: &RecordBatch,
         transform_outputs: &HashMap<String, RecordBatch>,
         facet_shared: bool,
+        policy: FacetExtentPolicy,
         extent: &impl Fn(&dyn Array, &str) -> Result<(f64, f64), RenderError>,
     ) -> Result<Option<ReadExtent>, RenderError> {
         use crate::render::marks::image::{raster_cell_domain, raster_cell_extent};
@@ -629,14 +630,47 @@ impl<'a> AuxRead<'a> {
                 let Some(located) = self.source.locate(self.field, primary_batch, transform_outputs) else {
                     return Ok(None);
                 };
-                let mut read_extent = extent(located.col, self.field)?;
                 if facet_shared && self.source == LayerSource::Chart {
+                    if let FacetExtentPolicy::GlobalAlone = policy {
+                        // The all-panels column ALONE is
+                        // the shared extent for a numeric auxiliary channel —
+                        // not `union_panel_with_global_extent`'s panel-union-
+                        // global, which fabricates a value for an all-null
+                        // panel via its own `(0.0, 1.0)` default. Falls back
+                        // to the panel's own read when the global batch or
+                        // the field is absent.
+                        if let Some(global_col) = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(self.field)) {
+                            let global_extent = extent(global_col.as_ref(), self.field)?;
+                            return Ok(Some(ReadExtent {
+                                extent: global_extent,
+                                has_values: global_col.null_count() != global_col.len(),
+                            }));
+                        }
+                    }
+                }
+                let mut read_extent = extent(located.col, self.field)?;
+                if facet_shared && self.source == LayerSource::Chart && policy == FacetExtentPolicy::UnionWithPanel {
                     read_extent = super::union_panel_with_global_extent(read_extent, self.field, transform_outputs);
                 }
                 Ok(Some(ReadExtent { extent: read_extent, has_values: located.col.null_count() != located.col.len() }))
             }
         }
     }
+}
+
+/// How a faceted `Chart`-source read's panel extent relates to the all-panels
+/// (`FINAL_OUTPUT_KEY`) one, when both are available.
+/// Continuous color keeps unioning the two
+/// (`union_panel_with_global_extent`'s original rule — color has no `Log`
+/// channel to drop or warn on, and its own all-null default stays an
+/// invented `(0.0, 1.0)` colorbar, unchanged). Every numeric auxiliary
+/// channel ([`sided_aux_numeric_union`]) reads the all-panels column ALONE,
+/// so an all-null faceted column draws no scale and no legend, matching the
+/// same column's unfaceted render.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::render) enum FacetExtentPolicy {
+    UnionWithPanel,
+    GlobalAlone,
 }
 
 /// The extent one [`AuxRead`] contributes, and whether it holds any value
@@ -1003,13 +1037,14 @@ pub(in crate::render) fn aux_numeric_union(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
+    policy: FacetExtentPolicy,
     extent: impl Fn(&dyn Array, &str) -> Result<(f64, f64), RenderError>,
 ) -> Result<Option<(f64, f64)>, RenderError> {
     let mut union: Option<(f64, f64)> = None;
     let mut first: Option<(f64, f64)> = None;
     for read in reads {
         let Some(ReadExtent { extent: read_extent, has_values }) =
-            read.extent(primary_batch, transform_outputs, facet_shared, &extent)?
+            read.extent(primary_batch, transform_outputs, facet_shared, policy, &extent)?
         else {
             continue;
         };
@@ -1020,6 +1055,53 @@ pub(in crate::render) fn aux_numeric_union(
         union = Some(union.map_or(read_extent, |(lo, hi)| (lo.min(read_extent.0), hi.max(read_extent.1))));
     }
     Ok(union.or(first))
+}
+
+/// [`aux_numeric_union`], but folding each read through [`sided_min_max_f64`]
+/// and returning the union's `(lo, hi)` alongside a content-deduplicated
+/// [`LeftOutTally`] of every read —
+/// one tally entry per DISTINCT column, so two layers drawing the same
+/// column count its left-out rows once, not twice, instead of the plain sum
+/// a `(f64, f64)` extent closure would discard the accounting into. A
+/// layered `Log` channel (size, or a numeric auxiliary channel) reads its
+/// data through this so its left-out rows are counted once, over the WHOLE
+/// layer set: the same whole-frame accounting x/y's
+/// [`numeric_domain_union_over`] gives a flat chart's layers, reused here
+/// rather than rebuilt.
+///
+/// `side: None` behaves exactly as `aux_numeric_union` itself (the tally
+/// stores nothing, since `sided_min_max_f64(col, None)` never leaves a row
+/// out).
+///
+/// The per-read tallying is captured through a `RefCell` so the extent
+/// closure `aux_numeric_union` calls can stay an `Fn` (it may be invoked more
+/// than once per read, once per panel on a faceted union) while still
+/// feeding this function's tally as each call happens.
+pub(in crate::render) fn sided_aux_numeric_union(
+    reads: &[AuxRead<'_>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    facet_shared: bool,
+    side: Option<crate::scale::log::LogSide>,
+    channel: &'static str,
+) -> Result<Option<(SidedExtent, LeftOutTally)>, RenderError> {
+    let tally = std::cell::RefCell::new(LeftOutTally::new());
+    let extent = |col: &dyn Array, field: &str| {
+        let e = sided_min_max_f64(col, side).map_err(|_| RenderError::UnsupportedDtype {
+            field: field.to_string(),
+            dtype: format!("{:?}", col.data_type()),
+            context: Some(channel),
+        })?;
+        tally.borrow_mut().count(col, e);
+        Ok((e.lo, e.hi))
+    };
+    let Some((lo, hi)) = aux_numeric_union(reads, primary_batch, transform_outputs, facet_shared, FacetExtentPolicy::GlobalAlone, extent)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        SidedExtent { lo, hi, left_out: 0, left_out_zero: false, left_out_opposite: None },
+        tally.into_inner(),
+    )))
 }
 
 /// The categorical domain of a chart-level color, shape or stroke-dash on a
@@ -1713,7 +1795,9 @@ pub(in crate::render) fn numeric_domain_union(
         spec,
         include_final,
         LayerUnion::Every,
+        None,
     )
+    .map(|(e, _)| (e.lo, e.hi))
 }
 
 /// Which of `spec.layers` [`numeric_domain_union_over`] reads beyond the bound
@@ -2029,6 +2113,19 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
 }
 
 /// [`numeric_domain_union`] with the layer selection spelled out.
+///
+/// `side`: a `Log` channel's side of zero (always `None` for every other
+/// continuous type, exactly as before this parameter existed). Every
+/// contributing column folds through [`sided_min_max_f64`] instead of
+/// [`column_min_max_f64`] (a `None`-side call of the same function, so a
+/// non-`Log` caller's `(lo, hi)` is byte-identical); the rows this union's
+/// layers/seeds/facet-shared batches leave out on the other side accumulate
+/// into the returned [`SidedExtent`]'s `left_out`/`left_out_zero`/
+/// `left_out_opposite`, over EVERY contribution the whole-chart union folds
+/// — a faceted chart's shared extent (`include_final`) and a layered
+/// chart's every layer alike, so the count
+/// `RenderWarning::LogScaleRowsLeftOut`/`RenderError::LogScaleNoValueOnSide`
+/// report is the whole frame's, on every door.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union_over(
     channel: &str,
@@ -2039,14 +2136,33 @@ pub(in crate::render) fn numeric_domain_union_over(
     spec: &ChartSpec,
     include_final: bool,
     layer_union: LayerUnion<'_>,
-) -> Result<(f64, f64), RenderError> {
-    let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+    side: Option<crate::scale::log::LogSide>,
+) -> Result<(SidedExtent, LeftOutTally), RenderError> {
+    // `(mn, mx)` in a `Cell` while the closures below are live: `extent_only`
+    // and `read`'s `take_extent_only` both need to update it, and a `Cell`
+    // lets them do so without two simultaneous `&mut` captures of the same
+    // state (the same reason the tally below uses a `RefCell`). Unpacked
+    // back into plain mutable locals once the data-gathering loop ends,
+    // below, so the rest of the function is unchanged.
+    let mn_mx = std::cell::Cell::new((f64::INFINITY, f64::NEG_INFINITY));
+    // The whole-frame left-out tally, content-deduplicated, so a column read twice (a faceted-shared panel
+    // against the all-panels batch, or two layers drawing one column) counts
+    // once. `RefCell` lets both `accumulate` (every read) and the Chart-source
+    // whole-frame read below (independent facets only) share one tally
+    // without two simultaneous `&mut` captures.
+    let tally = std::cell::RefCell::new(LeftOutTally::new());
     // T5r bar zero-anchor: set when a `Mark::Bar` layer binds this channel's
     // primary (non-paired) field, in the channel's own coordinate space. See
     // this function's doc comment ("Bar zero-anchor") for the full rationale.
     let mut bar_zero_wanted = false;
-    let mut accumulate = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
-        let (a, b) = column_min_max_f64(c).map_err(|_| RenderError::UnsupportedDtype {
+    // `extent_only`: updates `mn`/`mx` alone. `with_tally`: also feeds the
+    // tally. Split so the Chart-source branch below can fold a panel's
+    // column into the EXTENT without ALSO counting it into the tally —
+    // when the whole-frame tally rule reads `FINAL`'s column separately
+    // (an independent facet), the panel's own contribution must not be
+    // counted a second time alongside it.
+    let extent_only = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
+        let extent = sided_min_max_f64(c, side).map_err(|_| RenderError::UnsupportedDtype {
             field: source_field.to_string(),
             dtype: format!("{:?}", c.data_type()),
             context: None,
@@ -2056,9 +2172,24 @@ pub(in crate::render) fn numeric_domain_union_over(
         if c.null_count() == c.len() {
             return Ok(());
         }
-        if a < mn { mn = a; }
-        if b > mx { mx = b; }
+        let (lo, hi) = mn_mx.get();
+        mn_mx.set((lo.min(extent.lo), hi.max(extent.hi)));
         Ok(())
+    };
+    let tally_only = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
+        let extent = sided_min_max_f64(c, side).map_err(|_| RenderError::UnsupportedDtype {
+            field: source_field.to_string(),
+            dtype: format!("{:?}", c.data_type()),
+            context: None,
+        })?;
+        if c.null_count() != c.len() {
+            tally.borrow_mut().count(c, extent);
+        }
+        Ok(())
+    };
+    let accumulate = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
+        extent_only(c, source_field)?;
+        tally_only(c, source_field)
     };
 
     // Reads `f` from one source and returns whether that source holds it.
@@ -2076,12 +2207,33 @@ pub(in crate::render) fn numeric_domain_union_over(
     // the concatenated all-panels output already present at the per-panel
     // callsite. A layer on its own named output reads that output alone,
     // which is already the all-panels one.
-    let mut read = |source: Option<LayerSource<'_>>, f: &str| -> Result<bool, RenderError> {
+    //
+    // Choice C's whole-frame tally rule: a Chart-source field is always
+    // COUNTED from the all-panels column when the chart publishes one,
+    // whatever this read's own facet resolution. `include_final` still
+    // governs the EXTENT fold alone (a true per-panel domain for an
+    // independent facet): when it is already true and `FINAL` holds the
+    // field, `FINAL` is read ALONE (it is a superset of the panel, so the
+    // extent is byte-identical, and the panel is never double-counted into
+    // the tally); when `include_final` is false (independent facet), the
+    // panel's own extent still comes from `primary_batch` alone, but the
+    // tally ALSO reads `FINAL`'s column directly, so every panel's warning
+    // reports the whole frame's count — the restatements then collapse to
+    // one via `panel_pass_warning_restated_by_every_panel`, the same way
+    // every other per-panel-restated warning already does.
+    let read = |source: Option<LayerSource<'_>>, f: &str| -> Result<bool, RenderError> {
         let mut found = false;
         let primary_has = primary_batch.column_by_name(f).is_some();
-        let mut take = |batch: &RecordBatch, found: &mut bool| -> Result<(), RenderError> {
+        let take = |batch: &RecordBatch, found: &mut bool| -> Result<(), RenderError> {
             if let Some(c) = batch.column_by_name(f) {
                 accumulate(c.as_ref(), f)?;
+                *found = true;
+            }
+            Ok(())
+        };
+        let take_extent_only = |batch: &RecordBatch, found: &mut bool| -> Result<(), RenderError> {
+            if let Some(c) = batch.column_by_name(f) {
+                extent_only(c.as_ref(), f)?;
                 *found = true;
             }
             Ok(())
@@ -2094,11 +2246,49 @@ pub(in crate::render) fn numeric_domain_union_over(
             }
             Some(LayerSource::Batch(batch)) => take(batch, &mut found)?,
             Some(LayerSource::Chart) | None => {
-                take(primary_batch, &mut found)?;
-                for (key, batch) in transform_outputs {
-                    let key_is_final = include_final && key == FINAL_OUTPUT_KEY;
-                    if key_is_final || (source.is_none() && !primary_has) {
-                        take(batch, &mut found)?;
+                let final_col = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(f));
+                let covered_by_final = include_final && final_col.is_some();
+                if covered_by_final {
+                    take(transform_outputs.get(FINAL_OUTPUT_KEY).expect("checked above"), &mut found)?;
+                } else {
+                    // EXTENT only here — the panel's own domain stays
+                    // independent (or there is no `FINAL` to union with);
+                    // the tally is resolved separately below so the panel's
+                    // contribution is never ALSO counted into it when
+                    // `FINAL` is read for the tally.
+                    take_extent_only(primary_batch, &mut found)?;
+                    for (key, batch) in transform_outputs {
+                        let key_is_final = include_final && key == FINAL_OUTPUT_KEY;
+                        if key_is_final {
+                            take_extent_only(batch, &mut found)?;
+                        } else if source.is_none() && !primary_has {
+                            // an unlayered
+                            // spec's field living only in a named output (a
+                            // composite mark's own output) is tallied too —
+                            // `take`, not `take_extent_only` — the same full
+                            // read an `Output` source gets above. These
+                            // batches are all-panels batches like `FINAL`'s
+                            // own, so the panel double-count the whole-frame
+                            // rule below guards against cannot recur,
+                            // and `LeftOutTally`'s content dedupe keeps an
+                            // output equal to `FINAL` from counting twice.
+                            take(batch, &mut found)?;
+                        }
+                    }
+                    if side.is_some() {
+                        // Choice C's whole-frame tally rule: `FINAL`'s
+                        // column when the chart publishes one, else the
+                        // panel's own (an unfaceted call, or a field not
+                        // yet in `FINAL` — the panel IS the whole frame
+                        // there).
+                        match final_col {
+                            Some(c) => tally_only(c.as_ref(), f)?,
+                            None => {
+                                if let Some(c) = primary_batch.column_by_name(f) {
+                                    tally_only(c.as_ref(), f)?;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2353,13 +2543,18 @@ pub(in crate::render) fn numeric_domain_union_over(
         }
     }
 
-    if !mn.is_finite() || !mx.is_finite() {
+    let (mut mn, mut mx) = mn_mx.get();
+    if (!mn.is_finite() || !mx.is_finite()) && side.is_none() {
         // All values were null/NaN — return a default domain so the chart
-        // renders with axes but no marks, instead of raising an error.
-        return Ok((0.0, 1.0));
+        // renders with axes but no marks, instead of raising an error. A
+        // sided call (`Log`) falls through instead: its caller needs the
+        // genuine empty extent, together with `left_out`, to tell "no value
+        // at all" (this same default, applied by the `Log` arm itself) from
+        // "no value on this side" (`RenderError::LogScaleNoValueOnSide`).
+        return Ok((SidedExtent { lo: 0.0, hi: 1.0, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()));
     }
     if matches!(layer_union, LayerUnion::CarryingScale(_)) {
-        return Ok((mn, mx));
+        return Ok((SidedExtent { lo: mn, hi: mx, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()));
     }
     if bar_zero_wanted {
         // The SAME widening `resolve_continuous_domain_and_range` applies for a
@@ -2405,7 +2600,7 @@ pub(in crate::render) fn numeric_domain_union_over(
             mx += 0.5;
         }
     }
-    Ok((mn, mx))
+    Ok((SidedExtent { lo: mn, hi: mx, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()))
 }
 
 /// Distinct positional (x:N / y:N) categories for an ordinal/band axis, unioning
@@ -3816,7 +4011,7 @@ mod tests {
             let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![None, None]))]).unwrap()
         };
-        let extent = numeric_domain_union_over(
+        let (extent, _tally) = numeric_domain_union_over(
             "y",
             "v",
             None,
@@ -3825,9 +4020,10 @@ mod tests {
             &spec,
             false,
             LayerUnion::CarryingScale(&scale),
+            None,
         )
         .expect("an all-null Float64 column is readable");
-        assert_eq!(extent, (0.0, 1.0));
+        assert_eq!((extent.lo, extent.hi), (0.0, 1.0));
     }
 
     /// An all-null Int64 column contributes no extent to either union: the
@@ -3844,7 +4040,7 @@ mod tests {
             RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![None, None]))]).unwrap()
         };
         for union in [LayerUnion::Every, LayerUnion::CarryingScale(&scale)] {
-            let extent = numeric_domain_union_over(
+            let (extent, _tally) = numeric_domain_union_over(
                 "y",
                 "v",
                 None,
@@ -3853,9 +4049,10 @@ mod tests {
                 &spec,
                 false,
                 union,
+                None,
             )
             .expect("an all-null Int64 column is readable");
-            assert_eq!(extent, (0.0, 1.0));
+            assert_eq!((extent.lo, extent.hi), (0.0, 1.0));
         }
     }
 
@@ -4375,7 +4572,7 @@ mod tests {
         let scale: crate::spec::encoding::ScaleSpec =
             serde_json::from_str(r#"{"type":"linear"}"#).expect("a linear scale dict");
         let (raw, outputs) = smooth_ci_batches();
-        let extent = numeric_domain_union_over(
+        let (extent, _tally) = numeric_domain_union_over(
             "y",
             "ci_lower",
             Some("ci_upper"),
@@ -4384,9 +4581,10 @@ mod tests {
             &spec,
             false,
             LayerUnion::CarryingScale(&scale),
+            None,
         )
         .expect("every column is Float64");
-        assert_eq!(extent, (-0.2, 20.0));
+        assert_eq!((extent.lo, extent.hi), (-0.2, 20.0));
     }
 
     /// `mark_errorbar` over a frame that has a column of its own named
@@ -4626,6 +4824,7 @@ mod tests {
             &spec,
             false,
             None,
+            false,
             &mut warnings,
         )
         .expect("a band scale over a Utf8 column resolves");
@@ -4863,5 +5062,154 @@ mod tests {
         let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
         let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
         assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [2]);
+    }
+
+    /// A faceted-SHARED (`include_final: true`) read of
+    /// a `Log` channel reads `FINAL_OUTPUT_KEY` ALONE when it holds the
+    /// field, not primary-PLUS-FINAL, so a panel's own off-side rows are
+    /// not counted twice against the whole-frame total. This panel's `v`
+    /// is `[-5, 1, 10]` (1 off-side); the all-panels `FINAL` batch is
+    /// `[-5, 1, 10, 7, 100, -3]` (2 off-side, including this panel's own
+    /// rows verbatim, as a real faceted concat would produce). The tally's
+    /// `rows()` is exactly 2 (the whole frame's), not 3 (this panel's 1
+    /// plus the global's 2, the pre-fix double count).
+    #[test]
+    fn a_shared_facet_log_tally_does_not_double_count_the_panel_against_final() {
+        use arrow::array::Float64Array;
+        let panel = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0]))],
+        )
+        .unwrap();
+        let global = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0, 7.0, 100.0, -3.0]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
+        let spec = ChartSpec::default();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, true, LayerUnion::Every, side)
+            .expect("v is Float64 in this fixture");
+        assert_eq!(tally.rows(), 2, "the whole frame has 2 off-side rows, not 3 (the panel's 1 double-counted): {tally:?}");
+    }
+
+    /// The same two batches, but INDEPENDENT facet resolution
+    /// (`include_final: false`): the panel's own extent still comes from
+    /// its own batch alone (unchanged, independent-panel domain), but the
+    /// tally STILL reads the whole frame's `FINAL` column directly,
+    /// whatever its facet resolution — so an independent
+    /// panel's warning reports the SAME whole-frame count a shared panel's
+    /// would, not just its own panel's.
+    #[test]
+    fn an_independent_facet_log_tally_still_reads_the_whole_frame() {
+        use arrow::array::Float64Array;
+        let panel = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0]))],
+        )
+        .unwrap();
+        let global = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0, 7.0, 100.0, -3.0]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
+        let spec = ChartSpec::default();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (extent, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, false, LayerUnion::Every, side)
+            .expect("v is Float64 in this fixture");
+        assert_eq!((extent.lo, extent.hi), (1.0, 10.0), "the panel's own on-side extent stays independent");
+        assert_eq!(tally.rows(), 2, "the tally reads the whole frame regardless of facet resolution: {tally:?}");
+    }
+
+    /// An unlayered spec whose
+    /// bound field lives only in a named output (a composite mark's `box`,
+    /// say) was read EXTENT-ONLY in that loop, so its off-side rows never
+    /// reached the tally — a reachable-by-spec silent drop, not yet hit by
+    /// any live Python lowering (every composite mark today counts via its
+    /// layered form), but a latent gap in a loop this function's sibling
+    /// readers all tally.
+    #[test]
+    fn an_unlayered_reads_named_output_counts_its_off_side_rows() {
+        use arrow::array::Float64Array;
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("other", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![0.0]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(
+            "box".to_string(),
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("f", DataType::Float64, false)])),
+                vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0]))],
+            )
+            .unwrap(),
+        );
+        let spec = ChartSpec::default();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+            .expect("f is Float64 in the 'box' output");
+        assert_eq!((extent.lo, extent.hi), (1.0, 10.0));
+        assert_eq!(tally.rows(), 1, "the one off-side row (-5) must be counted: {tally:?}");
+    }
+
+    /// The same shape, every row off-side: today's silent `[1, base]` axis
+    /// (no row ever counted) must become a refusal once the output's rows
+    /// are tallied.
+    #[test]
+    fn an_unlayered_reads_all_off_side_output_refuses() {
+        use arrow::array::Float64Array;
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("other", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![0.0]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(
+            "box".to_string(),
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("f", DataType::Float64, false)])),
+                vec![Arc::new(Float64Array::from(vec![-5.0, -7.0]))],
+            )
+            .unwrap(),
+        );
+        let spec = ChartSpec::default();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+            .expect("f is Float64 in the 'box' output");
+        assert_eq!(tally.rows(), 2);
+        assert!(!tally.any_on_side());
+        let err = crate::render::scale_resolve::positional::resolve_log_extent("y", "f", false, crate::scale::log::LogSide::Positive, (extent.lo, extent.hi), &tally, 10.0, false, &mut Vec::new())
+            .expect_err("nothing on side anywhere refuses");
+        assert!(matches!(err, RenderError::LogScaleNoValueOnSide { .. }), "{err:?}");
+    }
+
+    /// An output whose content is equal to `FINAL`'s is counted once, not
+    /// twice (`LeftOutTally`'s content dedupe).
+    #[test]
+    fn an_output_equal_to_final_is_counted_once() {
+        use arrow::array::Float64Array;
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("other", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![0.0]))],
+        )
+        .unwrap();
+        let f_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("f", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert("box".to_string(), f_batch.clone());
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), f_batch);
+        let spec = ChartSpec::default();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+            .expect("f is Float64");
+        assert_eq!(tally.rows(), 1, "'box' and FINAL are equal by content: counted once, not twice: {tally:?}");
     }
 }

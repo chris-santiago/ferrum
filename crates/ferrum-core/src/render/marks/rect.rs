@@ -117,10 +117,10 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     let mut acc = MarkNodes::with_capacity(n);
 
     for i in 0..n {
-        let x_lo = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let x_hi = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let y_lo = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let y_hi = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let x_lo = match xs[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
+        let x_hi = match x2s[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
+        let y_lo = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
+        let y_hi = match y2s[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
         let px_lo = match ctx.scales.x.to_pixel_f64(x_lo) { Some(p) => p, None => continue };
         let px_hi = match ctx.scales.x.to_pixel_f64(x_hi) { Some(p) => p, None => continue };
         let py_lo = match ctx.scales.y.to_pixel_f64(y_lo) { Some(p) => p, None => continue };
@@ -263,8 +263,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
 
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
-            let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
-            let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let yv = match ys[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
+            let y2v = match y2s[i] { Some(v) if ctx.scales.y.admits_for_pixel(v) => v, _ => continue };
             let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
             let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
             let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
@@ -359,8 +359,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
 
         for i in 0..ys.len() {
             let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
-            let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
-            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let xv = match xs[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
+            let x2v = match x2s[i] { Some(v) if ctx.scales.x.admits_for_pixel(v) => v, _ => continue };
             let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
             let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
             let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };

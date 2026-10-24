@@ -92,7 +92,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     for i in 0..n {
         let (xv, yv, x2v, y2v) = match (xs[i], ys[i], x2s[i], y2s[i]) {
             (Some(a), Some(b), Some(c), Some(d))
-                if a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite() =>
+                if ctx.scales.x.admits_for_pixel(a)
+                    && ctx.scales.y.admits_for_pixel(b)
+                    && ctx.scales.x.admits_for_pixel(c)
+                    && ctx.scales.y.admits_for_pixel(d) =>
                 (a, b, c, d),
             _ => continue,
         };

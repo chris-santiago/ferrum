@@ -889,7 +889,7 @@ fn independent_axis_input(
     coord_flipped: bool,
 ) -> Result<crate::layout::AxisInput, RenderError> {
     let (format, format_type) = super::prepare::resolve_axis_label_format(encoding);
-    let (labels, projection, _threaded) = super::prepare::build_axis_tick_inputs(
+    let (labels, anchors, projection, _threaded) = super::prepare::build_axis_tick_inputs(
         scale,
         base.tick_labels.len().max(1),
         super::prepare::TickFormatMode::Immediate {
@@ -901,7 +901,7 @@ fn independent_axis_input(
     )
     .map_err(|e| super::with_coord_flipped(e, coord_flipped))?;
     let mut input = base.clone();
-    input.tick_labels = labels;
+    input.set_ticks(labels, anchors);
     input.tick_projection = projection;
     input.categorical_placement = scale.categorical_placement();
     Ok(input)
@@ -1822,6 +1822,27 @@ fn build_panel_mark_batches(
         // `resolve_legend_color_scale`) reads `layer.encoding` directly and is
         // never touched by what follows.
         let layer_spec_encoding = layer.drawn_encoding();
+
+        // Drop a row this layer's own numeric auxiliary `Log` scale(s)
+        // cannot map — the same treatment an off-side x/y row already gets.
+        // Applied HERE, not at `ScaleKind::to_pixel_f64` (whose `None` every
+        // aux reader folds into the channel's default, so it cannot express
+        // "not drawn" on an aux channel), a third shadow of `layer_batch`
+        // after the swarm/position-adjustment ones above and before the
+        // `DrawCtx` below — every mark family, static and interactive, and
+        // every composite leaf (all reach this loop through `build_scene`)
+        // then never sees the row. Keys/tooltips read the filtered batch
+        // directly (`ctx.batch`/`extract_keys` below) and so stay aligned
+        // automatically; `data_indices`/`vertex_rows` do NOT — a mark
+        // builder numbers those by position in the batch it is handed, so
+        // they come back renumbered within the filtered batch rather than
+        // naming source rows, and `restore_source_rows` (below, after the
+        // builder runs) un-renumbers them. A selection keyed off
+        // `data_indices` would have named the wrong row without that seam.
+        let log_filtered = scale_resolve::log_aux_drawn_rows(&layer_spec_encoding, scales, layer_batch).map_err(name_layer)?;
+        let source_rows: Option<&[usize]> = log_filtered.as_ref().map(|f| f.source_rows.as_slice());
+        let layer_batch: &RecordBatch = log_filtered.as_ref().map(|f| &f.batch).unwrap_or(layer_batch);
+
         // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
         // Stamped onto the synthetic spec so every mark builder that asks
         // `ctx.spec.coord` — `arc::polar_geom`, `bar::build_polar`,
@@ -1924,6 +1945,17 @@ fn build_panel_mark_batches(
         }
 
         let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
+        // the Log aux drop's filtered batch
+        // renumbered `data_indices`/`vertex_rows` by position in the
+        // FILTERED batch (every mark builder numbers the rows it is
+        // handed), disagreeing with the x/y drop, which already names
+        // source rows — `extract_keys` just above still reads the filtered
+        // batch with the builder's own indices, so keys stay right and need
+        // no remap. One seam un-renumbers the other two sidecars back to
+        // source rows, mirroring `install_rebuilt_nodes`'s one-seam realign
+        // for a break's rebuild: a layer with no Log aux drop
+        // (`source_rows: None`) is untouched.
+        restore_source_rows(&mut result, source_rows);
         // #6 alignment guard (spec §7): each present per-node vector must
         // have exactly one entry per node. All seven channels — tooltips,
         // hrefs, descriptions, data_indices, keys, polar_spans, and
@@ -3485,6 +3517,43 @@ fn remap_glyph_batch<'a>(
             .and_then(|a| a.get(i).copied())
             .unwrap_or_else(|| remap.bbox_anchor_fallback(node));
         place(remap, node, anchor);
+    }
+}
+
+/// Remap `result.data_indices` and `result.vertex_rows` from positions in a
+/// Log-filtered batch back to their source rows in the layer's original
+/// batch — a mark builder numbers the rows it is handed by position in that
+/// batch, so a batch `log_aux_drawn_rows` has filtered must be translated
+/// back once, here, rather than taught to every builder. `source_rows` is
+/// `None` for a layer with no Log aux drop, leaving `result` untouched.
+fn restore_source_rows(result: &mut draw::MarkBuildResult, source_rows: Option<&[usize]>) {
+    let Some(source_rows) = source_rows else { return };
+    if let Some(indices) = result.data_indices.as_mut() {
+        for i in indices.iter_mut() {
+            *i = source_rows[*i];
+        }
+    }
+    if let Some(rows) = result.vertex_rows.as_mut() {
+        for vertex_list in rows.iter_mut() {
+            for v in vertex_list.iter_mut() {
+                remap_vertex_row(v, source_rows);
+            }
+        }
+    }
+}
+
+/// [`restore_source_rows`]'s per-vertex remap. A fresh build's `vertex_rows`
+/// carries only `Row` entries — `Cut` is a break-clip artifact
+/// (`break_axis::ClippedNodes`) that cannot exist yet at this seam — but the
+/// recursion costs nothing to write and keeps this total over the type
+/// rather than assuming a shape.
+fn remap_vertex_row(v: &mut ferrum_scene::VertexRow, source_rows: &[usize]) {
+    match v {
+        ferrum_scene::VertexRow::Row(r) => *r = source_rows[*r],
+        ferrum_scene::VertexRow::Cut { from, to, .. } => {
+            remap_vertex_row(from, source_rows);
+            remap_vertex_row(to, source_rows);
+        }
     }
 }
 
@@ -6916,6 +6985,50 @@ mod tests {
             !json.contains("y_slot_levels"),
             "empty slot levels must be omitted from JSON"
         );
+    }
+
+    /// Choice B's `breaks_log` fix at every interactive zoom level
+    /// (`build_tick_levels`'s own `ZOOM_BREAKPOINTS` counts 4/8/16/32), not
+    /// only the direct `breaks_log` unit tests
+    /// (`log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits`,
+    /// `log_breaks_thin_to_every_nth_power_past_the_count`): `[1, 1e9]`
+    /// gives 5/10/10/28 ticks across the four levels, `[1, 1e12]` gives
+    /// 7/7/13/25.
+    #[test]
+    fn build_tick_levels_label_powers_at_every_zoom_of_a_wide_log_axis() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        pyo3::Python::initialize();
+        for (hi, counts) in [(1e9, [5usize, 10, 10, 28]), (1e12, [7, 7, 13, 25])] {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("x", DataType::Float64, false),
+                    Field::new("y", DataType::Float64, false),
+                ])),
+                vec![Arc::new(Float64Array::from(vec![1.0, hi])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+            )
+            .unwrap();
+            let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+                "mark": "point",
+                "encoding": {"x": {"field": "x", "scale": {"type": "log", "base": 10.0}}, "y": {"field": "y"}},
+            }))
+            .unwrap();
+            let prep = crate::render::prepare::prepare_render_inputs(
+                &spec,
+                &batch,
+                &ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::chart_config::ChartConfig::default(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("hi={hi}: {e}"));
+            let ptl = build_tick_levels(&prep.provisional_scales, 0);
+            assert_eq!(ptl.x_levels.len(), 4, "hi={hi}");
+            for (level, expected_count) in ptl.x_levels.iter().zip(counts) {
+                assert_eq!(level.ticks.len(), expected_count, "hi={hi} level {:?}-{:?}: {:?}", level.min_zoom, level.max_zoom, level.ticks);
+            }
+        }
     }
 
     // ── #52 Task 3: layout + axis emission for independent-y layers ─────────

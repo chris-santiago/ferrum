@@ -206,7 +206,7 @@ class TestOpacityOrdinal:
         """
         text = (
             "opacity scale: type 'bin-ordinal' is not supported; "
-            "pass fm.LinearScale(domain=[...], range=[...]) or drop scale="
+            "pass fm.LinearScale/LogScale/PowScale/SqrtScale(domain=[...], range=[...]) or drop scale="
         )
         with pytest.raises(ValueError, match=re.escape(text)):
             _render(

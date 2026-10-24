@@ -14,7 +14,7 @@
 //! instead of five.
 
 use arrow::array::{
-    Array, BooleanArray,
+    Array, ArrayData, BooleanArray,
     Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, Int8Array,
     LargeStringArray, StringArray,
@@ -487,6 +487,114 @@ pub(crate) fn col_as_positional_category_str(
         .collect())
 }
 
+/// A numeric extent folded over only the values on one side of zero
+/// ([`sided_min_max_f64`]), or over every value when no side is asked for
+/// ([`min_max_f64`]). `left_out` counts the column's non-null, finite values
+/// that fell on the other side (always `0` with no side); `left_out_zero`
+/// and `left_out_opposite` characterize those left-out values for
+/// `RenderError::LogScaleNoValueOnSide`'s remedy text (`left_out_opposite`
+/// omits any exact zero, which `left_out_zero` already reports).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SidedExtent {
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    pub(crate) left_out: usize,
+    pub(crate) left_out_zero: bool,
+    pub(crate) left_out_opposite: Option<(f64, f64)>,
+}
+
+/// A `Log` channel's whole-frame left-out count: one content-deduplicated
+/// tally shared by every fold that
+/// reads a `Log` channel's data, so `+`, `fm.layer`, a static `LayerChart`
+/// overlay and a faceted chart (shared or independent) all report the SAME
+/// count for the SAME underlying data, rather than each fold summing
+/// `left_out` over whatever columns it happened to read (which double-
+/// counted a faceted-shared panel's rows against the all-panels batch, and
+/// summed a column two layers both draw).
+///
+/// [`count`](Self::count) is the one write path: a column counts only when
+/// no column already counted compares equal by content
+/// (`ArrayData`'s `PartialEq`, the same "equal values are one frame" rule
+/// `ferrum._compose._same_frame` already applies in Python for `+`), and
+/// only when it left rows out (`extent.left_out > 0`) — a column with
+/// nothing left out contributes nothing to store, only to `any_on_side`.
+/// [`merge`](Self::merge) folds another tally in with the same dedupe, for
+/// composite groups whose members each build their own tally before the
+/// group combines them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LeftOutTally {
+    columns: Vec<(ArrayData, SidedExtent)>,
+    any_on_side: bool,
+}
+
+impl LeftOutTally {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `col`'s already-folded `extent`. A no-op for a column equal by
+    /// content to one already counted (two reads of the same data, or the
+    /// same column read through two layers). `any_on_side` is updated
+    /// whenever `extent` holds a value, even for a column with nothing left
+    /// out, so a channel whose every counted column is fully off-side can
+    /// still be told apart from one with no value anywhere at all.
+    pub(crate) fn count(&mut self, col: &dyn Array, extent: SidedExtent) {
+        if extent.lo.is_finite() && extent.hi.is_finite() && extent.lo <= extent.hi {
+            self.any_on_side = true;
+        }
+        if extent.left_out == 0 {
+            return;
+        }
+        let data = col.to_data();
+        if self.columns.iter().any(|(d, _)| d == &data) {
+            return;
+        }
+        self.columns.push((data, extent));
+    }
+
+    /// Fold `other`'s counted columns into `self`, with the same
+    /// content-equality dedupe [`count`](Self::count) applies — a composite
+    /// group merging its members' tallies.
+    pub(crate) fn merge(&mut self, other: LeftOutTally) {
+        self.any_on_side |= other.any_on_side;
+        for (data, extent) in other.columns {
+            if self.columns.iter().any(|(d, _)| d == &data) {
+                continue;
+            }
+            self.columns.push((data, extent));
+        }
+    }
+
+    /// The whole-frame left-out row count: the sum of every distinct
+    /// counted column's own `left_out`.
+    pub(crate) fn rows(&self) -> usize {
+        self.columns.iter().map(|(_, e)| e.left_out).sum()
+    }
+
+    /// Whether any counted column's left-out values include an exact zero.
+    pub(crate) fn zero(&self) -> bool {
+        self.columns.iter().any(|(_, e)| e.left_out_zero)
+    }
+
+    /// The combined `(min, max)` of every counted column's strictly
+    /// opposite-signed left-out values, when any exist.
+    pub(crate) fn opposite(&self) -> Option<(f64, f64)> {
+        self.columns.iter().filter_map(|(_, e)| e.left_out_opposite).fold(None, |acc, (lo, hi)| {
+            Some(match acc {
+                Some((a_lo, a_hi)) => (a_lo.min(lo), a_hi.max(hi)),
+                None => (lo, hi),
+            })
+        })
+    }
+
+    /// Whether any read this tally has seen held an on-side value, counted
+    /// or not — the whole frame's own answer to "is there anything to map
+    /// anywhere", independent of any one fold's own (possibly empty) extent.
+    pub(crate) fn any_on_side(&self) -> bool {
+        self.any_on_side
+    }
+}
+
 /// `(min, max)` over a numeric Arrow column, including non-finite values.
 /// Returns `Err(message)` for unsupported dtypes — matches the prior
 /// `scale_resolve::column_min_max_f64` semantics exactly. Caller is
@@ -496,40 +604,144 @@ pub(crate) fn col_as_positional_category_str(
 /// `f64::min`/`max` IEEE-754 semantics treat NaN as "absent" (non-NaN wins),
 /// which is the prior behavior. An all-NaN column returns `(+INF, -INF)` —
 /// caller should validate.
+///
+/// The `None`-side call of [`sided_min_max_f64`], which owns the dtype
+/// match so a `Log` channel's sided fold and every other channel's full
+/// fold read one body instead of two that could drift. Every row counts
+/// toward `(lo, hi)` under `None` (`left_out` is always `0`), so this is
+/// byte-identical to the dtype match this function used to run itself.
 pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
-    macro_rules! min_max_int {
+    sided_min_max_f64(col, None).map(|e| (e.lo, e.hi))
+}
+
+/// [`min_max_f64`] folded over only the values on `side` of zero (every
+/// value when `side` is `None`). A value not on `side` (and, for `None`,
+/// never) counts toward `left_out` instead of `(lo, hi)` — a `Log` scale's
+/// extent reads only the side it maps, and the rows it leaves out are what
+/// `RenderWarning::LogScaleRowsLeftOut`/`RenderError::LogScaleNoValueOnSide`
+/// report. Returns `Err(message)` for unsupported dtypes, matching
+/// `min_max_f64` exactly.
+pub(crate) fn sided_min_max_f64(
+    col: &dyn Array,
+    side: Option<crate::scale::log::LogSide>,
+) -> Result<SidedExtent, String> {
+    use crate::scale::log::LogSide;
+    let on_side = |v: f64| match side {
+        None => true,
+        Some(LogSide::Positive) => v > 0.0,
+        Some(LogSide::Negative) => v < 0.0,
+    };
+    // A left-out value's own fold, for `RenderError::LogScaleNoValueOnSide`'s
+    // remedy: `zero` is whether any left-out value is exactly `0.0`;
+    // `opposite` is the `(min, max)` of the left-out values on the strictly
+    // OPPOSITE sign from `side` (an exact zero counts toward `zero`, not
+    // `opposite`). A no-op fold under `side: None`, since nothing is ever
+    // left out there.
+    struct LeftOut {
+        zero: bool,
+        opposite: Option<(f64, f64)>,
+    }
+    // A non-finite left-out value (an off-side infinity) contributes to
+    // neither `zero` nor `opposite`: both only
+    // characterize a FINITE left-out value, for the remedy text's mirrored-
+    // domain suggestion, which means nothing for an infinity.
+    let left_out_fold = |v: f64, left_out: &mut LeftOut| {
+        if v == 0.0 {
+            left_out.zero = true;
+        } else if v.is_finite() {
+            let (lo, hi) = left_out.opposite.unwrap_or((f64::INFINITY, f64::NEG_INFINITY));
+            left_out.opposite = Some((lo.min(v), hi.max(v)));
+        }
+    };
+    macro_rules! sided_min_max_int {
         ($t:ty, $native:ty) => {{
             let a = col.as_any().downcast_ref::<$t>().expect("dtype matched");
-            let min = a.iter().flatten().fold(<$native>::MAX, <$native>::min) as f64;
-            let max = a.iter().flatten().fold(<$native>::MIN, <$native>::max) as f64;
-            return Ok((min, max));
+            let mut lo = <$native>::MAX;
+            let mut hi = <$native>::MIN;
+            let mut left_out = 0usize;
+            let mut left_out_info = LeftOut { zero: false, opposite: None };
+            for v in a.iter().flatten() {
+                if on_side(v as f64) {
+                    lo = <$native>::min(lo, v);
+                    hi = <$native>::max(hi, v);
+                } else {
+                    left_out += 1;
+                    left_out_fold(v as f64, &mut left_out_info);
+                }
+            }
+            return Ok(SidedExtent {
+                lo: lo as f64,
+                hi: hi as f64,
+                left_out,
+                left_out_zero: left_out_info.zero,
+                left_out_opposite: left_out_info.opposite,
+            });
         }};
     }
     match col.data_type() {
         DataType::Float64 => {
             let a = col.as_any().downcast_ref::<Float64Array>().expect("Float64");
-            let min = a.iter().flatten().filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
-            let max = a.iter().flatten().filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
-            Ok((min, max))
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            let mut left_out = 0usize;
+            let mut left_out_info = LeftOut { zero: false, opposite: None };
+            // Only NaN is filtered: an infinity reaches `on_side` (choice
+            // A(3)) so an off-side infinity counts toward `left_out`
+            // instead of silently passing the finiteness filter the on-
+            // side test ran behind. It never folds into `lo`/`hi` itself —
+            // only a FINITE on-side value narrows the extent; an on-side
+            // infinity clamps to the range end downstream
+            // (`LogScaleData::scale`), like `LinearScale`.
+            for v in a.iter().flatten().filter(|v| !v.is_nan()) {
+                if on_side(v) {
+                    if v.is_finite() {
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                } else {
+                    left_out += 1;
+                    left_out_fold(v, &mut left_out_info);
+                }
+            }
+            Ok(SidedExtent { lo, hi, left_out, left_out_zero: left_out_info.zero, left_out_opposite: left_out_info.opposite })
         }
         DataType::Float32 => {
             let a = col.as_any().downcast_ref::<Float32Array>().expect("Float32");
-            let min = a.iter().flatten().filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min) as f64;
-            let max = a.iter().flatten().filter(|v| v.is_finite()).fold(f32::NEG_INFINITY, f32::max) as f64;
-            Ok((min, max))
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            let mut left_out = 0usize;
+            let mut left_out_info = LeftOut { zero: false, opposite: None };
+            for v in a.iter().flatten().filter(|v| !v.is_nan()) {
+                if on_side(v as f64) {
+                    if v.is_finite() {
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                } else {
+                    left_out += 1;
+                    left_out_fold(v as f64, &mut left_out_info);
+                }
+            }
+            Ok(SidedExtent {
+                lo: lo as f64,
+                hi: hi as f64,
+                left_out,
+                left_out_zero: left_out_info.zero,
+                left_out_opposite: left_out_info.opposite,
+            })
         }
-        DataType::Int64 => min_max_int!(Int64Array, i64),
-        DataType::Int32 => min_max_int!(Int32Array, i32),
-        DataType::Int16 => min_max_int!(Int16Array, i16),
-        DataType::Int8 => min_max_int!(Int8Array, i8),
-        DataType::UInt64 => min_max_int!(UInt64Array, u64),
-        DataType::UInt32 => min_max_int!(UInt32Array, u32),
-        DataType::UInt16 => min_max_int!(UInt16Array, u16),
-        DataType::UInt8 => min_max_int!(UInt8Array, u8),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => min_max_int!(TimestampNanosecondArray, i64),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => min_max_int!(TimestampMicrosecondArray, i64),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => min_max_int!(TimestampMillisecondArray, i64),
-        DataType::Timestamp(TimeUnit::Second, _) => min_max_int!(TimestampSecondArray, i64),
+        DataType::Int64 => sided_min_max_int!(Int64Array, i64),
+        DataType::Int32 => sided_min_max_int!(Int32Array, i32),
+        DataType::Int16 => sided_min_max_int!(Int16Array, i16),
+        DataType::Int8 => sided_min_max_int!(Int8Array, i8),
+        DataType::UInt64 => sided_min_max_int!(UInt64Array, u64),
+        DataType::UInt32 => sided_min_max_int!(UInt32Array, u32),
+        DataType::UInt16 => sided_min_max_int!(UInt16Array, u16),
+        DataType::UInt8 => sided_min_max_int!(UInt8Array, u8),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => sided_min_max_int!(TimestampNanosecondArray, i64),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => sided_min_max_int!(TimestampMicrosecondArray, i64),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => sided_min_max_int!(TimestampMillisecondArray, i64),
+        DataType::Timestamp(TimeUnit::Second, _) => sided_min_max_int!(TimestampSecondArray, i64),
         // `Date32`/`Date64`/`Duration` fall through to the error arm: every batch
         // reaching the render layer has been pre-cast to `Timestamp(ms)` by
         // `_coerce.normalize_for_rust`, so they never occur here on live paths and
@@ -715,6 +927,26 @@ mod tests {
     fn batch_f64(name: &str, values: Vec<Option<f64>>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, true)]));
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    /// The fix case): `sided_min_max_f64`
+    /// used to filter non-finite values out before the `on_side` test, so an
+    /// off-side infinity was silently dropped from both the extent AND the
+    /// left-out tally. An infinite value now only skips the NaN filter; it
+    /// counts toward `left_out` when off-side (never folded into `lo`/`hi`,
+    /// which stay the finite on-side extent), and a non-finite left-out value
+    /// contributes to neither `left_out_zero` nor `left_out_opposite` (those
+    /// only characterize a FINITE left-out value, for the remedy text).
+    #[test]
+    fn sided_min_max_counts_an_off_side_infinity_but_never_folds_it() {
+        use crate::scale::log::LogSide;
+        let a = Float64Array::from(vec![f64::NEG_INFINITY, -5.0, 0.0, 2.0, f64::INFINITY]);
+        let extent = sided_min_max_f64(&a, Some(LogSide::Positive)).unwrap();
+        assert_eq!(extent.lo, 2.0);
+        assert_eq!(extent.hi, 2.0);
+        assert_eq!(extent.left_out, 3);
+        assert!(extent.left_out_zero);
+        assert_eq!(extent.left_out_opposite, Some((-5.0, -5.0)));
     }
 
     #[test]

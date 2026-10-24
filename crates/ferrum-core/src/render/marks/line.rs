@@ -155,7 +155,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             xs.iter()
                 .map(|opt| opt
-                    .filter(|v| v.is_finite())
+                    .filter(|v| ctx.scales.x.admits_for_pixel(*v))
                     .and_then(|v| ctx.to_pixel(&ctx.scales.x, v)))
                 .collect()
         }
@@ -171,7 +171,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             ys.iter()
                 .map(|opt| opt
-                    .filter(|v| v.is_finite())
+                    .filter(|v| ctx.scales.y.admits_for_pixel(*v))
                     .and_then(|v| ctx.to_pixel(&ctx.scales.y, v)))
                 .collect()
         }
