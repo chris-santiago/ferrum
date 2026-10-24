@@ -682,7 +682,7 @@ A quick decision guide for the common cases:
 
 ## A complete example
 
-Combining multiple marks against one data source with shared encodings (full composition is covered on the [Composition](composition.md) page):
+Combining multiple marks against one data source, each layer binding its own channels (full composition is covered on the [Composition](composition.md) page):
 
 ```python
 import ferrum as fm
@@ -709,7 +709,7 @@ combined
 
 ![Points + LOESS trend](img/marks-encodings_points_loess.png)
 
-This puts a per-species LOESS overlay on top of a scatter. Same encoding, two marks, one layered chart — the `+` operator on `Chart` produces a layered view that renders both marks against the same axes.
+This puts a per-species LOESS overlay on top of a scatter. Each layer binds `color="species:N"` itself, because a binding on one layer never reaches the other; the `+` operator on `Chart` produces a layered view that renders both marks against the same axes and one shared color scale, and the smooth fits one curve per species.
 
 ## Where to go next
 

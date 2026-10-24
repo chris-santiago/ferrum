@@ -213,21 +213,7 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 ## Composite rendering (Phase B, 2026-07-05)
 
-All composition (HConcat/VConcat/Concat/Joint/ClusterMap/Repeat/Layer) renders
-through ONE Rust composite entry per output kind (`render_composite_svg` /
-`render_composite_interactive`): Python lowers the composition to a composite
-spec tree (`src/ferrum/composition.py`, `_lower_any`/`_build_grid_tree`), Rust
-resolves shared scales across leaves, plans the layout, and emits one
-SceneGraph. There is NO legacy fallback — a composition that cannot lower
-raises a typed `ValueError`. The former W4/W5 interactive-export limitations
-(raw-node offsets; JointChart's flat interactive layout) were subsumed:
-raw-node defs place per-panel via Rust clip uniquification, and JointChart
-interactive is a true ratio grid (verified by headless WASM captures,
-`.claude/output/phase-b-captures/`). The one deliberate interactive exception:
-`LayerChart._render_interactive` renders the merged single-panel Chart (the
-flat path) because selections/hit-testing require overlays to be ONE scene
-panel. Deliberate behavior change: an all-empty composition (e.g. zero-row
-pairplot) raises instead of rendering a blank grid.
+All composition (HConcat/VConcat/Concat/Joint/ClusterMap/Repeat/Layer) renders through ONE Rust composite entry per output kind (`render_composite_svg` / `render_composite_interactive`): Python lowers the composition to a composite spec tree (`src/ferrum/composition.py`, `_lower_any`/`_build_grid_tree`), Rust resolves shared scales across leaves, plans the layout, and emits one SceneGraph. There is NO legacy fallback — a composition that cannot lower raises a typed `ValueError`. The former W4/W5 interactive-export limitations (raw-node offsets; JointChart's flat interactive layout) were subsumed: raw-node defs place per-panel via Rust clip uniquification, and JointChart interactive is a true ratio grid (verified by headless WASM captures, `.claude/output/phase-b-captures/`). The one deliberate interactive exception: `LayerChart._render_interactive` renders the merged single-panel Chart (the flat path) because selections/hit-testing require overlays to be ONE scene panel. Deliberate behavior change: an all-empty grid composition (e.g. zero-row `pairplot`, or any `concat`/`repeat`/`JointChart`/`ClusterMapChart` whose every child is zero-row) raises instead of rendering a blank grid; zero-row data on a single `Chart`, `+`, `Chart.layer` or `LayerChart` draws its frame and axes and warns once instead, the same path filter-emptied data already took.
 
 **Overlay chrome dedup is total (residuals batch, #89, 2026-08-28).** For an
 Overlay group whose children are all leaves, every leaf lays out against one

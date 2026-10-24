@@ -510,7 +510,7 @@ chart
 
 ## Power-scaled bubble chart
 
-Use `SqrtScale` on the size encoding so bubble area is proportional to the data value:
+`size` is a point's area in px², so with a `LinearScale` bubble area grows linearly with the value. A `SqrtScale` makes area grow with the square root of the value instead, which compresses a skewed column such as population so the largest bubbles do not swamp the rest:
 
 ```python
 import ferrum as fm
@@ -537,7 +537,7 @@ chart
 
 ![Power-scaled bubble chart](img/recipes_power_bubble.png)
 
-`SqrtScale(domain=[0, 1500])` is equivalent to `PowScale(domain=[0, 1500], exponent=0.5)`. It makes bubble area proportional to the data value — without it, large values visually dominate.
+`SqrtScale(domain=[0, 1500])` is equivalent to `PowScale(domain=[0, 1500], exponent=0.5)`. Either way the area runs over the theme's size range (4 to 36 px² by default; set `range=` to change it). `size` also accepts `LogScale`, which leaves out (with a warning) any value that is zero or negative.
 
 ## Where to go next
 

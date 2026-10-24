@@ -47,7 +47,7 @@ layered
 
 ![Layered scatter + trend](img/composition_layered_trend.png)
 
-Layered charts share axes by construction: both marks are drawn against the same x/y scales, the same color scale, and the same plot region. Each layer keeps its own mark and any layer-specific encoding overrides, but the shared encodings apply uniformly.
+Layered charts share one panel: both marks are drawn against the same x/y scales, the same color scale, and the same plot region. The scales are shared, but a binding is not: each layer draws only the bindings it declares, plus the x/y of the first layer when it binds none. That is why both charts above bind `color="species:N"`; the one color scale and legend are built from every layer that draws color. To bind a channel once for every layer, write it on the composition: `(points + trend).encode(color="species:N")`.
 
 Use layering when:
 
