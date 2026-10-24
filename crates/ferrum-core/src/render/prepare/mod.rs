@@ -207,9 +207,15 @@ impl SeriesGrouping {
 ///   channels and the axis included, so only these channels' fields count.
 ///   A `detail` needs no entry: every series mark splits by its own
 ///   `mark_style.detail`.
-/// - `by_step`, on a series mark (line, area, ribbon): each field a step the
-///   user wrote grouped by ([`OutputLineage::written_groupby`]), but the
-///   layer's positional fields, along which the series runs.
+/// - `by_step`, on a series mark (line, area, ribbon): each field a step
+///   grouped by where the grouping was authored explicitly, not derived by
+///   the chart's statistic planner ([`OutputLineage::written_groupby`] --
+///   a user's own pre-marker step, or a lowered composite statistic's own
+///   `groupby=` keyword like `mark_smooth(groupby=[...])`,
+///   `transform::run::groupby_is_chart_planned`'s doc), minus the layer's
+///   own color and positional fields, along which the series runs. A field
+///   bound on `shape`/`stroke_dash` reaches `by_channel` too;
+///   `fields()`'s dedup keeps it from doubling.
 ///
 /// The layer's own color, binned or not, and its grouping-only `group` key
 /// split through the color path and stay out of both.
@@ -1397,9 +1403,10 @@ pub fn prepare_render_inputs(
     chart_config: &crate::render::chart_config::ChartConfig,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<PreparedInputs, RenderError> {
-    if batch.num_rows() == 0 {
-        return Err(RenderError::EmptyBatch);
-    }
+    // A zero-row batch is real input, not malformed: it takes the exact
+    // path a filter-emptied tail already takes (transforms, scale
+    // resolution, scene build), which draws the chart's frame and axes and
+    // warns once (`RenderWarning::NoRowsToDraw`) rather than refusing.
     // The primary y axis is owned by a layer that draws y (an independent-y
     // layer when no sharing layer does), before any layer, slot or axis
     // reads the flags.
@@ -1988,7 +1995,23 @@ fn run_transforms_with_facet(
         fspec.field.as_str(),
         null_facet_rows(crate::render::facet_key_column(normalized, &fspec.field)?, &col_repeat),
     )];
-    let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if let Some(row_field) = &fspec.row {
+    let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if normalized.num_rows() == 0 {
+        // Zero-row input has no facet VALUE to partition by at all -- there
+        // is nothing to group. Rather than refuse, give the per-partition
+        // loop below one placeholder partition over the whole (empty)
+        // batch, so every step it already runs (the transform chain,
+        // per-panel imputation, facet-column re-injection, lineage
+        // merging) still runs once and still publishes `FINAL_OUTPUT_KEY`
+        // with the right (empty) schema, exactly as it does for a REAL
+        // facet value. The placeholder key itself never becomes a panel:
+        // `facet_panels::held_values` builds panel membership from the
+        // rows a layer actually DRAWS, which is none here, so this
+        // reaches the SAME "no layer draws any facet value" state a
+        // filter-emptied facet already reaches (via its own, unrelated
+        // route: real facet values whose per-partition rows the filter
+        // happens to empty) -- one downstream reduction, not two.
+        vec![((String::new(), fspec.row.is_some().then(String::new)), normalized.clone())]
+    } else if let Some(row_field) = &fspec.row {
         let row_repeat = facet_repeat_mask(normalized, &fspec.repeat, row_field)?;
         dropped_nulls.push((row_field.as_str(), null_facet_rows(crate::render::facet_key_column(normalized, row_field)?, &row_repeat)));
         partition_batch_by_two_fields(
@@ -2944,22 +2967,17 @@ fn chart_rows_schema(layer: &LayerPrepared, pipeline: &PipelineBatches<'_>) -> S
     }
 }
 
-/// The rows a layer draws from before any statistic of its own: what a
-/// data-aware sort on the layer's binding aggregates over, since a
-/// statistic's output (a boxplot's `box`) carries the category but not the
-/// raw field the sort names.
-/// - A layer with no `data_source` starts from the chart rows: `primary_batch`,
-///   or the all-panels tail ([`FINAL_OUTPUT_KEY`]) when the channel is
-///   shared across facet panels (`include_final`).
-/// - A layer with a `data_source` starts from the rows its statistics
-///   consumed when it reads a statistic's output, else from the rows it
-///   reads ([`OutputLineage::pre_statistic_rows`]).
+/// Where a layer's own rows live, whole: its named data source's output, or
+/// the chart rows when it has none. [`pre_statistic_rows`]'s counterpart
+/// that keeps a statistic's own OUTPUT columns (an aggregate's result, a
+/// bin's edges) instead of stripping back to its input -- read by a
+/// data-aware sort whose value field IS that output, since the field the
+/// sort names then lives only here.
 ///
 /// Every output already spans every panel, so a faceted channel reads the
 /// same key.
-pub(in crate::render) fn pre_statistic_rows<'b>(
+pub(in crate::render) fn layer_final_rows<'b>(
     data_source: Option<&str>,
-    lineages: &'b OutputLineages,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     include_final: bool,
@@ -2968,11 +2986,36 @@ pub(in crate::render) fn pre_statistic_rows<'b>(
         true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(primary_batch),
         false => primary_batch,
     };
-    let Some(key) = data_source else { return chart_rows() };
+    match data_source.and_then(|key| transform_outputs.get(key)) {
+        Some(batch) => batch,
+        None => chart_rows(),
+    }
+}
+
+/// The rows a layer draws from before any statistic of its own: what a
+/// data-aware sort on the layer's binding aggregates over when the sort
+/// names a raw field its own statistic consumed, since a statistic's
+/// output (a boxplot's `box`) carries the category but not that raw field.
+/// - A layer with no `data_source` starts from the chart rows: `primary_batch`,
+///   or the all-panels tail ([`FINAL_OUTPUT_KEY`]) when the channel is
+///   shared across facet panels (`include_final`).
+/// - A layer with a `data_source` starts from the rows its statistics
+///   consumed when it reads a statistic's output, else from the rows it
+///   reads ([`OutputLineage::pre_statistic_rows`]).
+pub(in crate::render) fn pre_statistic_rows<'b>(
+    data_source: Option<&str>,
+    lineages: &'b OutputLineages,
+    primary_batch: &'b RecordBatch,
+    transform_outputs: &'b HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> &'b RecordBatch {
+    let Some(key) = data_source else {
+        return layer_final_rows(data_source, primary_batch, transform_outputs, include_final);
+    };
     match (transform_outputs.get(key), lineages.get(key)) {
         (Some(batch), Some(lineage)) => lineage.pre_statistic_rows(batch),
         (Some(batch), None) => batch,
-        (None, _) => chart_rows(),
+        (None, _) => layer_final_rows(data_source, primary_batch, transform_outputs, include_final),
     }
 }
 

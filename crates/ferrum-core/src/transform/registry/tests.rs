@@ -191,6 +191,7 @@ fn bin_outputs_match_actual_schema() {
     use crate::transform::bin::BinSpec;
     use crate::transform::bin_mode::BinMode;
     let spec = BinSpec {
+        written_groupby: Vec::new(),
         field: "v".into(),
         mode: BinMode::Fixed { n: 4 },
         extent: None,
@@ -232,6 +233,7 @@ fn bin_outputs_match_actual_schema_with_agg() {
     use crate::transform::bin::BinSpec;
     use crate::transform::bin_mode::BinMode;
     let spec = BinSpec {
+        written_groupby: Vec::new(),
         field: "v".into(),
         mode: BinMode::Fixed { n: 4 },
         extent: None,
@@ -840,6 +842,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
 
     vec![
         ("bin", Bin(BinSpec {
+            written_groupby: Vec::new(),
             field: "v".into(), mode: BinMode::Fixed { n: 4 }, extent: None, nice: false,
             cumulative: false, shared_extent: false, groupby: vec![],
             agg_field: None, agg: None, name: None,

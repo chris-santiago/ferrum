@@ -1268,6 +1268,7 @@ fn test_kde_count_scale_ungrouped_scales_by_n_times_bin_width() {
 
     // The real Bin transform, same field + mode, to get the ACTUAL bin width.
     let bin_spec = crate::transform::bin::BinSpec {
+        written_groupby: Vec::new(),
         field: "x".into(),
         mode: BinMode::Fixed { n: 5 },
         extent: None,
@@ -1328,6 +1329,7 @@ fn actual_bin_widths_per_group(
     shared_extent: bool,
 ) -> std::collections::HashMap<String, f64> {
     let bin_spec = crate::transform::bin::BinSpec {
+        written_groupby: Vec::new(),
         field: field.into(),
         mode,
         extent: None,
@@ -1578,6 +1580,7 @@ fn test_kde_count_scale_faceted_grouped_matches_bin_actual_panel_width() {
     let mode = BinMode::Fixed { n: 5 };
     let group_cols = vec!["g".to_string()];
     let bin_spec = crate::transform::bin::BinSpec {
+        written_groupby: Vec::new(),
         field: "x".into(),
         mode: mode.clone(),
         extent: None,
@@ -1805,6 +1808,7 @@ fn actual_bin_width_ungrouped(
     extent: Option<(f64, f64)>,
 ) -> f64 {
     let bin_spec = crate::transform::bin::BinSpec {
+        written_groupby: Vec::new(),
         field: field.into(),
         mode,
         extent,
@@ -1885,6 +1889,7 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
 
             // Grouped: one `clean` per group, one width per group.
             let bin_spec = crate::transform::bin::BinSpec {
+                written_groupby: Vec::new(),
                 field: "x".into(),
                 mode: mode.clone(),
                 extent: pinned,

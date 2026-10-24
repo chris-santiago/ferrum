@@ -330,8 +330,8 @@ def test_inset_interactive_no_crash():
 # ============================================================================
 
 
-def test_zero_row_df_interactive_produces_empty_panels():
-    """Zero-row DataFrame must produce a scene with empty panels list."""
+def test_zero_row_df_interactive_draws_its_frame():
+    """A zero-row DataFrame draws its frame: one panel with no mark nodes."""
     df = pl.DataFrame(
         {
             "x": pl.Series([], dtype=pl.Float64),
@@ -339,10 +339,12 @@ def test_zero_row_df_interactive_produces_empty_panels():
         }
     )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
-    scene_json, packed = _render_scene(chart)
+    with pytest.warns(UserWarning, match="the chart has no rows to draw"):
+        scene_json, packed = _render_scene(chart)
     scene = json.loads(scene_json)
     assert isinstance(scene["panels"], list)
-    assert len(scene["panels"]) == 0
+    assert len(scene["panels"]) == 1
+    assert sum(len(b["nodes"]) for b in scene["panels"][0]["marks"]) == 0
     w, h = scene["width"], scene["height"]
     assert w == w, "width must not be NaN"
     assert h == h, "height must not be NaN"

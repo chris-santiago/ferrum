@@ -187,6 +187,7 @@ pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> 
 /// slots its own question sets.
 fn count_scale_bin_spec(spec: &KdeSpec, mode: &BinMode) -> BinSpec {
     BinSpec {
+        written_groupby: Vec::new(),
         field: spec.field.clone(),
         mode: mode.clone(),
         extent: None,

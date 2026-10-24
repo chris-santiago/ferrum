@@ -1148,15 +1148,17 @@ def test_b2_empty_data_scene_json_has_all_required_keys():
         }
     )
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
-    scene_json, packed = _render_scene(chart)
+    with pytest.warns(UserWarning, match="the chart has no rows to draw"):
+        scene_json, packed = _render_scene(chart)
     scene = json.loads(scene_json)
 
     # All required top-level keys must be present
     missing = _REQUIRED_SCENE_KEYS - scene.keys()
     assert not missing, f"empty-data scene JSON missing required keys: {missing}"
 
-    # panels must be empty list
-    assert scene["panels"] == []
+    # the zero-row chart draws its frame, one panel with no mark nodes
+    assert len(scene["panels"]) == 1
+    assert sum(len(b["nodes"]) for b in scene["panels"][0]["marks"]) == 0
     assert scene["width"] == 300
     assert scene["height"] == 200
 
@@ -1165,8 +1167,8 @@ def test_b2_empty_data_scene_json_has_all_required_keys():
     missing_int = _REQUIRED_INTERACTION_KEYS - interaction.keys()
     assert not missing_int, f"interaction missing required keys: {missing_int}"
 
-    # packed data must be empty bytes
-    assert packed == b""
+    # packed data is a bytes object (empty: a zero-row chart packs no instances)
+    assert isinstance(packed, bytes)
 
 
 def test_b2_empty_data_interactive_chart_does_not_crash():

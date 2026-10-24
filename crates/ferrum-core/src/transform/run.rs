@@ -229,10 +229,13 @@ impl Lineage<'_> {
         }
     }
 
-    /// This lineage after `spec`, one of the user's own steps: its `groupby`
-    /// fields join [`OutputLineage::written_groupby`].
-    fn written(mut self, spec: &TransformSpec) -> Self {
-        for field in spec.groupby().unwrap_or_default() {
+    /// This lineage after a step whose `fields` were authored by the
+    /// caller rather than derived by the chart's own statistic planner:
+    /// a user's own step's whole `groupby`, or a lowered step's
+    /// [`caller_groupby`]. Each field joins [`OutputLineage::written_groupby`]
+    /// once.
+    fn written(mut self, fields: &[String]) -> Self {
+        for field in fields {
             if !self.written_groupby.contains(field) {
                 self.written_groupby.push(field.clone());
             }
@@ -396,9 +399,13 @@ impl<'s> Run<'s, '_> {
             .then(|| Rc::new(StepBins { fields: fields.to_vec(), edges: self.edges.clone() }));
         let result = spec.apply_with_context(&current.batch, &step_ctx)?;
         let own = lowered.map(|id| LoweredStep { id, groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(), shared: false });
-        // A user's own step records its grouping on every output it makes.
-        let written = own.is_none();
-        let after = |lineage: Lineage<'s>| if written { lineage.written(spec) } else { lineage };
+        // A user's own step records its WHOLE grouping on every output it
+        // makes, since there is no planner involved before the marker at
+        // all. A lowered step records only the fields the caller wrote
+        // directly on it ([`caller_groupby`]'s doc), which is everything
+        // for most kinds but a narrower subset for `Aggregate`/`Bin`.
+        let written_fields: &[String] = if own.is_some() { caller_groupby(spec) } else { spec.groupby().unwrap_or(&[]) };
+        let after = |lineage: Lineage<'s>| lineage.written(written_fields);
         // Secondary outputs first, so a named step's explicit `name` wins a
         // key collision. A secondary output descends from no Swarm.
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
@@ -478,7 +485,7 @@ impl<'s> Run<'s, '_> {
         match spec_name(&copy.step) {
             Some(name) => {
                 lineage.composed.ran(copy, None);
-                let mut published_lineage = lineage.clone().written(&copy.step);
+                let mut published_lineage = lineage.clone().written(copy.step.groupby().unwrap_or(&[]));
                 published_lineage.origin =
                     RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: Some(name.to_string()) };
                 published.insert(name.to_string(), Rows { batch: out, lineage: published_lineage });
@@ -486,7 +493,7 @@ impl<'s> Run<'s, '_> {
             }
             None => {
                 lineage.composed.ran(copy, Some((&batch.schema(), &out.schema())));
-                let mut lineage = lineage.written(&copy.step);
+                let mut lineage = lineage.written(copy.step.groupby().unwrap_or(&[]));
                 lineage.origin = RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: None };
                 Ok(Rows { batch: out, lineage })
             }
@@ -561,6 +568,37 @@ impl<'s> Run<'s, '_> {
             published.insert(crate::transform::registry::secondary_key(Some(&spec.name), key), rows);
         }
         Ok(tail)
+    }
+}
+
+/// Whether `spec`'s `groupby` is the chart's own statistic planner's
+/// derivation from the layer's effective encoding (every bound channel,
+/// value channels included) rather than a keyword the caller wrote on the
+/// step itself. Only `Aggregate` and `Bin` are ever lowered this way: the
+/// planner never builds any other kind (spec §6.4's one statistic plan).
+///
+/// `Aggregate` and `Bin` differ in how much of their `groupby` the planner
+/// can own. An `Aggregate`'s whole `groupby` is always planner-derived,
+/// spanning every encoded channel including ones that must never split a
+/// series (`opacity`, `size`), so none of it joins [`OutputLineage::written_groupby`]
+/// and splitting on it stays gated on `shape`/`stroke_dash` binding
+/// instead. A `Bin`'s `groupby` can MIX a planner-derived field (its own
+/// planning, when the chart groups a positional Bin by a drawn channel)
+/// with a field the caller wrote directly on the `Bin` itself (a composite
+/// mark's `bin=Bin(groupby=[...])`), which the wire alone cannot tell
+/// apart -- Python records the caller's own subset under `BinSpec::written_groupby`
+/// at the point it knows which fields it wrote, and this reads only that
+/// subset. Every other lowered kind with a `groupby` -- `Smooth`, `Kde`,
+/// `Robust`, `Logistic`, `Glm`, and the rest -- carries a value the caller
+/// passed directly to the transform, exactly as a user's own pre-marker
+/// step's `groupby` does, so its WHOLE `groupby` joins
+/// [`OutputLineage::written_groupby`], read by a line/area/ribbon's series
+/// split regardless of whether any channel also names the field.
+fn caller_groupby(spec: &TransformSpec) -> &[String] {
+    match spec {
+        TransformSpec::Aggregate(_) => &[],
+        TransformSpec::Bin(bin) => &bin.written_groupby,
+        other => other.groupby().unwrap_or(&[]),
     }
 }
 
@@ -978,5 +1016,42 @@ mod tests {
         assert_eq!(read(composed("datum.count > 1")), ["count"]);
         assert!(read(serde_json::json!({"type": "identity"})).is_empty());
         assert!(read(serde_json::json!({"type": "filter", "predicate": "true"})).is_empty());
+    }
+
+    /// A lowered `Bin`'s own `written_groupby` is the only part of its
+    /// `groupby` [`caller_groupby`] names: a planner-built `Bin` (no
+    /// `written_groupby`) names none of it, even though its `groupby` is
+    /// non-empty, while a lowered `Aggregate`'s `groupby` names none of
+    /// it either, and every other lowered kind (`Smooth` here) names all
+    /// of it.
+    #[test]
+    fn a_lowered_bins_written_groupby_is_the_only_caller_written_grouping() {
+        pyo3::Python::initialize();
+        let marker = || serde_json::json!({"type": "identity", "statistics": true});
+
+        let written = chain(serde_json::json!([marker(), {
+            "type": "bin", "field": "v", "groupby": ["g"], "written_groupby": ["g"], "name": "b",
+        }]));
+        let (_, lineages) = apply_transforms_named(&written, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(lineages["b"].written_groupby, vec!["g".to_string()]);
+
+        let planned = chain(serde_json::json!([marker(), {
+            "type": "bin", "field": "v", "groupby": ["g"], "name": "b",
+        }]));
+        let (_, lineages) = apply_transforms_named(&planned, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(lineages["b"].written_groupby, Vec::<String>::new());
+
+        let aggregate = chain(serde_json::json!([marker(), {
+            "type": "aggregate", "ops": [{"field": "v", "fn": "mean", "as": "mean_v"}], "groupby": ["g"], "name": "a",
+        }]));
+        let (_, lineages) = apply_transforms_named(&aggregate, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(lineages["a"].written_groupby, Vec::<String>::new());
+
+        let smooth = chain(serde_json::json!([marker(), {
+            "type": "smooth", "x": "v", "y": "v", "method": "loess", "bandwidth": 0.75, "degree": 2, "n": 10,
+            "seed": 0, "output": "fitted", "inject_zero_ref": false, "inject_metrics": false, "groupby": ["g"], "name": "s",
+        }]));
+        let (_, lineages) = apply_transforms_named(&smooth, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(lineages["s"].written_groupby, vec!["g".to_string()]);
     }
 }

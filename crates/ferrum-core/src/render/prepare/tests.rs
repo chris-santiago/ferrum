@@ -473,6 +473,7 @@ fn fix_extents_pins_bin_to_niced_global_extent() {
     use crate::transform::core::TransformSpec;
     let batch = extent_pin_batch();
     let spec = BinSpec {
+        written_groupby: Vec::new(),
         field: "v".into(),
         mode: BinMode::Fixed { n: 10 },
         extent: None,
@@ -588,6 +589,7 @@ fn fix_extents_respects_user_extent() {
     let batch = extent_pin_batch();
     let user = Some((-5.0, 100.0));
     let bin = BinSpec {
+        written_groupby: Vec::new(),
         field: "v".into(),
         mode: BinMode::Fixed { n: 10 },
         extent: user,
@@ -654,6 +656,7 @@ fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
     let batch = extent_pin_batch();
 
     let bin_spec = BinSpec {
+        written_groupby: Vec::new(),
         field: "v".into(),
         mode: BinMode::Fixed { n: 10 },
         extent: None,
@@ -2511,8 +2514,14 @@ fn color_only_chart_has_no_aux_legends() {
     assert!(!p.legend_entries.is_empty(), "color legend still present");
 }
 
+/// A zero-row batch is real input, not a malformed one: it prepares
+/// successfully and renders exactly the way a filter-emptied tail already
+/// does, drawing the chart's frame and axes with no mark nodes and warning
+/// once (`RenderWarning::NoRowsToDraw { faceted: false }`), rather than
+/// refusing.
 #[test]
-fn empty_batch_errors() {
+fn a_zero_row_batch_prepares_and_draws_its_frame() {
+    pyo3::Python::initialize();
     let schema = Arc::new(Schema::new(vec![
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
@@ -2528,19 +2537,23 @@ fn empty_batch_errors() {
     let mut spec = spec_color_facet();
     spec.encoding.color = None;
     spec.facet = None;
-    let err = prepare_render_inputs(
-        &spec,
-        &batch,
-        &crate::layout::ThemeInputs::default(),
-        crate::layout::Viewport {
-            width: 600.0,
-            height: 400.0,
-        },
-        &crate::render::chart_config::ChartConfig::default(),
-        None,
-    )
-    .unwrap_err();
-    assert!(matches!(err, RenderError::EmptyBatch));
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let config = crate::render::config::RenderConfig::default();
+    let crate::render::PipelineOutput { prep, layout, applied, mut warnings } =
+        crate::render::prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None)
+            .expect("a zero-row batch prepares successfully, like a filter-emptied one");
+    let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
+        .expect("a zero-row batch builds a scene");
+    assert_eq!(scene.panels.len(), 1, "one panel is drawn, empty");
+    assert!(scene.panels[0].marks.iter().all(|m| m.nodes.is_empty()), "no mark nodes are drawn");
+    let no_rows_warnings: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
+    assert_eq!(no_rows_warnings.len(), 1, "exactly one no-rows warning: {warnings:?}");
+    assert!(
+        matches!(no_rows_warnings[0], RenderWarning::NoRowsToDraw { faceted: false }),
+        "the chart is unfaceted: {no_rows_warnings:?}"
+    );
 }
 
 // --- Phase 8a Task 6 tests ---
@@ -2688,6 +2701,7 @@ fn spec_with_one_bin(name: Option<String>) -> ChartSpec {
     let named = name.is_some();
     let mut spec = single_layer_spec();
     spec.transforms = vec![TransformSpec::Bin(BinSpec {
+        written_groupby: Vec::new(),
         field: "price".into(),
         mode: BinMode::Fixed { n: 2 },
         extent: Some((10.0, 30.0)),
@@ -5967,6 +5981,7 @@ fn normalize_transform_outputs_casts_a_real_transforms_large_utf8_groupby_echo()
 
     fn grouped_bin_spec() -> BinSpec {
         BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((0.0, 10.0)),
@@ -12818,6 +12833,175 @@ fn user_fit_line(groupby: Option<&str>, extra: serde_json::Value) -> ChartSpec {
         }
     }
     serde_json::from_value(spec).expect("the user fit wire deserializes")
+}
+
+/// The Python wire of `Chart(df).mark_smooth(groupby=<groupby>, ci=None)
+/// .encode(x="v", y="y", **extra)`: the real shape `desugar_smooth`'s
+/// no-CI path emits (probed via `to_json()`) -- the `Smooth` step runs
+/// BEHIND the chart's own statistics marker (lowered), unlike
+/// [`user_fit_line`]'s pre-marker (written) shape, so this is the fixture
+/// for a composite statistic the chart planned and ran behind its own
+/// marker, with its own author-written `groupby=` and no grouping
+/// channel -- distinct from a step the user wrote themselves, which
+/// [`user_fit_line`] fixtures.
+fn planned_fit_line(groupby: Option<&str>, extra: serde_json::Value) -> ChartSpec {
+    let mut fit = serde_json::json!({"type":"smooth","x":"v","y":"y","method":"loess","bandwidth":0.75,"degree":2,"n":200,"seed":0,"output":"fitted","inject_zero_ref":false,"inject_metrics":false});
+    if let Some(field) = groupby {
+        fit["groupby"] = serde_json::json!([field]);
+    }
+    let mut spec = serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "line",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        "transforms": [{"type": "identity", "statistics": true}, fit],
+    });
+    for (key, value) in extra.as_object().expect("extra is an object") {
+        match key.as_str() {
+            "encoding" => {
+                for (channel, binding) in value.as_object().expect("channels") {
+                    spec["encoding"][channel] = binding.clone();
+                }
+            }
+            _ => spec[key] = value.clone(),
+        }
+    }
+    serde_json::from_value(spec).expect("the planned fit wire deserializes")
+}
+
+/// A composite statistic the chart planned (`mark_smooth(groupby=[...])`,
+/// lowered behind the statistics marker) splits a line by its own
+/// `groupby=` with no channel asking for it, exactly as a user's own
+/// pre-marker step does ([`a_line_over_a_user_grouped_step_draws_one_series_per_group`]);
+/// `color="c"` over the same field stays one split, not a second.
+/// Rejects the one line zigzagging through every group's fitted rows,
+/// and rejects reading every lowered step's groupby unconditionally (an
+/// `Aggregate`/`Bin` the chart's own encoding planner built must NOT
+/// split on an unbound field -- see the sibling tests this would
+/// otherwise break, `a_line_splits_only_by_a_grouping_channel_its_statistic_grouped_by`
+/// and `a_siblings_grouping_channel_never_splits_another_layers_series`).
+#[test]
+fn a_planned_composite_statistics_own_groupby_splits_a_line_with_no_channel() {
+    let rows = grouped_series_rows();
+    let render = |spec: &ChartSpec| {
+        let (scene, warnings) = gate_render(spec, &rows);
+        (open_series(&scene.expect("renders").panels[0]), warnings)
+    };
+    let (grouped, warnings) = render(&planned_fit_line(Some("c"), serde_json::json!({})));
+    assert_eq!(grouped.len(), 3, "one fit line per group, planned behind the marker");
+    assert_eq!(channel_not_drawn(&warnings), Vec::<String>::new());
+    let (ungrouped, _) = render(&planned_fit_line(None, serde_json::json!({})));
+    assert_eq!(ungrouped.len(), 1, "an ungrouped fit draws one line");
+    let (colored, _) = render(&planned_fit_line(Some("c"), serde_json::json!({"encoding": {"color": {"field": "c"}}})));
+    assert_eq!(colored.len(), 3, "color=\"c\" over the same groupby field stays one split, not two");
+}
+
+/// The Python wire of `Chart(df).mark_smooth(groupby=["c"], ci=0.95)
+/// .encode(x="v", y="y")`: the real layered shape (probed via `to_json()`)
+/// -- a `ribbon` layer and a `line` layer both reading the named `smooth`
+/// output. Both layers must split by the statistic's own `groupby=` with
+/// no channel bound.
+#[test]
+fn a_planned_composite_statistics_own_groupby_splits_its_ribbon_and_line_layers() {
+    let rows = grouped_series_rows();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "v"}, "y": {"field": "y"}},
+        "transforms": [
+            {"type": "identity", "statistics": true},
+            {
+                "type": "smooth", "x": "v", "y": "y", "method": "loess", "ci": 0.95,
+                "bandwidth": 0.75, "degree": 2, "n": 200, "seed": 0, "output": "fitted",
+                "inject_zero_ref": false, "inject_metrics": false, "groupby": ["c"], "name": "smooth",
+            },
+        ],
+        "layers": [
+            {
+                "mark": "ribbon",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "ci_lower"}, "y2": {"field": "ci_upper"}},
+                "mark_style": {"opacity": 0.3},
+                "data_source": "smooth", "name": "ribbon", "entry": "mark_smooth",
+            },
+            {
+                "mark": "line",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                "data_source": "smooth", "name": "line", "entry": "mark_smooth",
+            },
+        ],
+    }))
+    .expect("the layered planned-fit wire deserializes");
+    let (scene, warnings) = gate_render(&spec, &rows);
+    let scene = scene.expect("renders");
+    assert_eq!(area_bands(&scene).len(), 3, "one ribbon band per group; {warnings:?}");
+    assert_eq!(open_series(&scene.panels[0]).len(), 3, "one fit line per group");
+}
+
+/// `mark_density`'s own `groupby=` (`Kde(groupby=[...])`, lowered behind
+/// the marker) splits its area the same way `mark_smooth`'s does, with no
+/// channel bound: every other composite statistic that draws a line,
+/// area or ribbon over its own `groupby=` is covered by the same fix
+/// (`transform::run::groupby_is_chart_planned`), not re-handled per mark.
+#[test]
+fn a_planned_densitys_own_groupby_splits_its_area_with_no_channel() {
+    let rows = grouped_series_rows();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "area",
+        "encoding": {"x": {"field": "value"}, "y": {"field": "density"}},
+        "transforms": [
+            {"type": "identity", "statistics": true},
+            {
+                "type": "kde", "field": "v", "bandwidth": {"kind": "scott"}, "bw_adjust": 1.0,
+                "n": 64, "cumulative": false, "shared_extent": false, "kernel": "gaussian", "groupby": ["c"],
+            },
+        ],
+    }))
+    .expect("the density wire deserializes");
+    let (scene, warnings) = gate_render(&spec, &rows);
+    assert_eq!(area_bands(&scene.expect("renders")).len(), 3, "one density band per group; {warnings:?}");
+}
+
+/// A line over a `Bin`'s own output splits one series per group only when
+/// the `Bin`'s `written_groupby` names the field: a composite mark's own
+/// `bin=Bin(groupby=["c"])` is caller-written, exactly like `Smooth`'s own
+/// `groupby=`, and splits. A `Bin` with the SAME `groupby` but no
+/// `written_groupby` (the chart's own planner shape) must NOT split -- a
+/// value channel's planner-derived groupby still splits nothing on its
+/// own.
+#[test]
+fn a_line_over_a_bin_splits_by_its_written_groupby() {
+    let rows = grouped_series_rows();
+    let bin = |written: bool| {
+        let mut wire = serde_json::json!({
+            "type": "bin", "field": "v", "bin_count": 5, "groupby": ["c"], "name": "b",
+        });
+        if written {
+            wire["written_groupby"] = serde_json::json!(["c"]);
+        }
+        wire
+    };
+    let spec = |written: bool| -> ChartSpec {
+        serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {},
+            "transforms": [{"type": "identity", "statistics": true}, bin(written)],
+            "layers": [{
+                "mark": "line",
+                "data_source": "b",
+                "encoding": {"x": {"field": "bin_start"}, "y": {"field": "count"}},
+            }],
+        }))
+        .expect("the bin-over-line wire deserializes")
+    };
+    let render = |s: &ChartSpec| {
+        let (scene, warnings) = gate_render(s, &rows);
+        (open_series(&scene.expect("renders").panels[0]).len(), warnings)
+    };
+    let (written_count, warnings) = render(&spec(true));
+    assert_eq!(written_count, 3, "written_groupby splits one series per group: {warnings:?}");
+    let (planned_count, _) = render(&spec(false));
+    assert_eq!(planned_count, 1, "no written_groupby: a planner-shaped Bin stays one joined line");
 }
 
 /// A line drawing a step the user wrote with `groupby=` draws one series per

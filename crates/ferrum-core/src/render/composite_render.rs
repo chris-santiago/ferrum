@@ -545,6 +545,30 @@ pub(crate) fn render_composite_scene(
         bundles.push(bundle);
         leaf_warning_lists.push(leaf_warnings);
     }
+    // A `LayerChart`'s members are one chart's layers, read as the same
+    // groups `overlay_selection_reach` reaches: an empty member's own
+    // `NoRowsToDraw` is the GROUP's warning, not each member's, so the
+    // group warns exactly once, as one chart does over its own layers.
+    // When some member drew, no member's copy is kept (nothing in the
+    // group failed to draw, group-wide). When none did, the first
+    // member's copy is kept and every later member's is dropped, so the
+    // group still says so, but only once.
+    for group in overlay_auxiliary_groups(tree) {
+        let mut members = group.members.clone();
+        let any_member_drew = members
+            .clone()
+            .any(|j| !leaf_warning_lists[j].iter().any(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })));
+        // Drop every member's copy when some member drew. Otherwise skip
+        // the first member (`next()`, unfiltered) and drop every LATER
+        // one's, so the group's single `NoRowsToDraw` survives on the
+        // first member only.
+        if !any_member_drew {
+            members.next();
+        }
+        for j in members {
+            leaf_warning_lists[j].retain(|w| !matches!(w, RenderWarning::NoRowsToDraw { .. }));
+        }
+    }
     // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
     // produce), matching `render_svg`'s single-scene warning contract.
     // Figure-level config-key warnings dedupe by `PartialEq` here (#140), and
@@ -10279,6 +10303,198 @@ mod tests {
         assert!(
             err.contains("layer 2 of overlay in chart 1 of vconcat declares type='point'"),
             "the refusal names the declaring member: {err}"
+        );
+    }
+
+    /// The reach above matches by field, not by declaration: a sibling whose
+    /// rows genuinely lack the reached field shows nothing for it (the same
+    /// absent-column skip every tooltip field already gets,
+    /// `selection_tooltip_specs`'s doc), never a refusal for the field it
+    /// cannot carry.
+    #[test]
+    fn an_overlay_members_field_selection_skips_a_sibling_whose_rows_lack_it() {
+        use arrow::array::StringArray;
+        let field_selection = |name: &str| -> SelectionSpec {
+            serde_json::from_str(&format!(
+                r#"{{"type":"point","name":"{name}","fields":["extra"],"encodings":null,"nearest":false,"toggle":"shift_key","on":"click","clear":"click","resolve":"global"}}"#
+            ))
+            .unwrap()
+        };
+        let declaring_spec = ChartSpec { selections: vec![field_selection("s")], ..scatter_spec() };
+        let plain_spec = scatter_spec();
+        let declaring_batch = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("extra", DataType::Utf8, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                ],
+            )
+            .unwrap()
+        };
+        let plain_batch = xy_batch(&[1.0, 2.0], &[10.0, 20.0]);
+        let theme = ThemeInputs::default();
+        let config = RenderConfig::default();
+        let chart_config = ChartConfig::default();
+        let tree = composite(CompositeLayout::Overlay, vec![leaf_node_with(declaring_spec.clone(), 0), leaf_node_with(plain_spec.clone(), 1)]);
+        let leaves = [
+            CompositeLeafInput {
+                spec: &declaring_spec,
+                batch: &declaring_batch,
+                theme: &theme,
+                viewport: Viewport { width: 300.0, height: 200.0 },
+                config: &config,
+                chart_config: &chart_config,
+            },
+            CompositeLeafInput {
+                spec: &plain_spec,
+                batch: &plain_batch,
+                theme: &theme,
+                viewport: Viewport { width: 300.0, height: 200.0 },
+                config: &config,
+                chart_config: &chart_config,
+            },
+        ];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let tooltip_fields = |panel: usize| -> Vec<String> {
+            scene.panels[panel].marks[0].tooltips.as_ref().map_or_else(Vec::new, |tips| {
+                tips[0].fields.iter().map(|f| f.name.clone()).collect()
+            })
+        };
+        assert_eq!(tooltip_fields(0), ["extra"], "the declaring member matches by its own field");
+        assert_eq!(
+            tooltip_fields(1),
+            Vec::<String>::new(),
+            "the sibling's rows lack the field, so it reaches nothing to show it with, not a refusal"
+        );
+    }
+
+    /// An `Overlay` group's members are one `LayerChart`'s layers: an empty
+    /// member's own `NoRowsToDraw` is suppressed once a sibling in the SAME
+    /// group draws, but an `Hconcat` sibling is a separate chart, not a
+    /// layer, so the same empty leaf still warns there on its own.
+    #[test]
+    fn an_overlay_groups_empty_member_warns_nothing_when_a_sibling_draws() {
+        pyo3::Python::initialize();
+        let empty_spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "transforms": [{"type": "filter", "predicate": "datum.x > 1000"}],
+        }))
+        .unwrap();
+        let drawing_spec = scatter_spec();
+        let empty_batch = xy_batch(&[1.0, 2.0], &[10.0, 20.0]);
+        let drawing_batch = xy_batch(&[1.0, 2.0], &[10.0, 20.0]);
+        let theme = ThemeInputs::default();
+        let config = RenderConfig::default();
+        let chart_config = ChartConfig::default();
+        let leaves = [
+            CompositeLeafInput {
+                spec: &empty_spec,
+                batch: &empty_batch,
+                theme: &theme,
+                viewport: Viewport { width: 300.0, height: 200.0 },
+                config: &config,
+                chart_config: &chart_config,
+            },
+            CompositeLeafInput {
+                spec: &drawing_spec,
+                batch: &drawing_batch,
+                theme: &theme,
+                viewport: Viewport { width: 300.0, height: 200.0 },
+                config: &config,
+                chart_config: &chart_config,
+            },
+        ];
+        let overlay_tree = composite(CompositeLayout::Overlay, vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(drawing_spec.clone(), 1)]);
+        let (_scene, warnings) = render_composite_scene(&overlay_tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            !warnings.iter().any(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })),
+            "a sibling layer draws, so the empty member must not warn on its own: {warnings:?}"
+        );
+
+        let hconcat_tree = composite(CompositeLayout::Hconcat, vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(drawing_spec.clone(), 1)]);
+        let (_scene, hconcat_warnings) = render_composite_scene(&hconcat_tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            hconcat_warnings.iter().any(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })),
+            "an hconcat sibling is a separate chart, not a layer, so the empty one still warns: {hconcat_warnings:?}"
+        );
+    }
+
+    /// An `Overlay` group of several empty members is one chart's layers,
+    /// and one chart that draws nothing says so once: two empty members
+    /// warn once, and so do three. An `Hconcat` of two empty charts is
+    /// two separate charts, so each still warns on its own.
+    #[test]
+    fn an_all_empty_overlay_group_warns_once() {
+        pyo3::Python::initialize();
+        let empty_spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "transforms": [{"type": "filter", "predicate": "datum.x > 1000"}],
+        }))
+        .unwrap();
+        let empty_batch = xy_batch(&[1.0, 2.0], &[10.0, 20.0]);
+        let theme = ThemeInputs::default();
+        let config = RenderConfig::default();
+        let chart_config = ChartConfig::default();
+        let leaf = || CompositeLeafInput {
+            spec: &empty_spec,
+            batch: &empty_batch,
+            theme: &theme,
+            viewport: Viewport { width: 300.0, height: 200.0 },
+            config: &config,
+            chart_config: &chart_config,
+        };
+        let no_rows_count = |warnings: &[RenderWarning]| warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).count();
+
+        let leaves2 = [leaf(), leaf()];
+        let two_tree = composite(CompositeLayout::Overlay, vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(empty_spec.clone(), 1)]);
+        let (_scene, warnings2) = render_composite_scene(&two_tree, &leaves2, &ThemeInputs::default()).unwrap();
+        assert_eq!(no_rows_count(&warnings2), 1, "two empty members warn once: {warnings2:?}");
+
+        let leaves3 = [leaf(), leaf(), leaf()];
+        let three_tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(empty_spec.clone(), 1), leaf_node_with(empty_spec.clone(), 2)],
+        );
+        let (_scene, warnings3) = render_composite_scene(&three_tree, &leaves3, &ThemeInputs::default()).unwrap();
+        assert_eq!(no_rows_count(&warnings3), 1, "three empty members warn once: {warnings3:?}");
+
+        let hconcat_tree = composite(CompositeLayout::Hconcat, vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(empty_spec.clone(), 1)]);
+        let (_scene, hconcat_warnings) = render_composite_scene(&hconcat_tree, &leaves2, &ThemeInputs::default()).unwrap();
+        assert_eq!(no_rows_count(&hconcat_warnings), 2, "hconcat(empty, empty) is two charts, each warns: {hconcat_warnings:?}");
+    }
+
+    /// A zero-row batch (never run through a filter, just empty from the
+    /// start) reaches an `Overlay` group's leaves the same way a
+    /// filter-emptied one does: both members draw with no mark nodes, and
+    /// the group warns exactly once, not once per leaf.
+    #[test]
+    fn an_overlay_of_zero_row_leaves_draws_one_frame_and_warns_once() {
+        pyo3::Python::initialize();
+        let spec = scatter_spec();
+        let zero_batch = xy_batch(&[], &[]);
+        let theme = ThemeInputs::default();
+        let config = RenderConfig::default();
+        let chart_config = ChartConfig::default();
+        let leaves = [
+            CompositeLeafInput { spec: &spec, batch: &zero_batch, theme: &theme, viewport: Viewport { width: 300.0, height: 200.0 }, config: &config, chart_config: &chart_config },
+            CompositeLeafInput { spec: &spec, batch: &zero_batch, theme: &theme, viewport: Viewport { width: 300.0, height: 200.0 }, config: &config, chart_config: &chart_config },
+        ];
+        let tree = composite(CompositeLayout::Overlay, vec![leaf_node_with(spec.clone(), 0), leaf_node_with(spec.clone(), 1)]);
+        let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(scene.panels.iter().flat_map(|p| &p.marks).all(|m| m.nodes.is_empty()), "no mark nodes are drawn");
+        assert_eq!(
+            warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).count(),
+            1,
+            "one warning for the group, not one per leaf: {warnings:?}"
         );
     }
 

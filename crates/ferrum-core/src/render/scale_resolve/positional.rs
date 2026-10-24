@@ -202,7 +202,7 @@ pub(in crate::render) fn build_axis_scale(
                 true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(seed.batch),
                 false => seed.batch,
             };
-            super::domain::SortRows { batch, x_field: positional_fields.x, y_field: positional_fields.y }
+            super::domain::chart_sort_rows(batch, transform_lineages.get(FINAL_OUTPUT_KEY), positional_fields.x, positional_fields.y)
         })
     };
     let dtype = infer_spec_type(enc, seed.col.data_type());
@@ -284,6 +284,7 @@ pub(in crate::render) fn build_axis_scale(
         let sort_ctx = SortContext {
             category_field: &enc.field,
             batch: rows.batch,
+            fallback: rows.fallback,
             x_field: rows.x_field,
             y_field: rows.y_field,
             coord_flipped,
@@ -423,6 +424,7 @@ pub(in crate::render) fn build_axis_scale(
             let sort_ctx = SortContext {
                 category_field: &enc.field,
                 batch: rows.batch,
+                fallback: rows.fallback,
                 x_field: rows.x_field,
                 y_field: rows.y_field,
                 coord_flipped,
@@ -534,7 +536,7 @@ pub(in crate::render) fn imposed_axis_scale(
         Ok(batch) => batch,
         Err(e) => return Some(Err(e)),
     };
-    let sort_ctx = SortContext { category_field: &binding.field, batch: &batch, x_field: None, y_field: None, coord_flipped: false };
+    let sort_ctx = SortContext { category_field: &binding.field, batch: &batch, fallback: None, x_field: None, y_field: None, coord_flipped: false };
     // An imposed member's domain is the group's own (already unioned, and
     // already counted toward the group's one `LogScaleRowsLeftOut`, per
     // `composite::leaf_positional_domain`) — this member contributes no
@@ -1802,6 +1804,7 @@ mod tests {
         let sort_ctx = super::SortContext {
             category_field: "cat",
             batch: &batch,
+            fallback: None,
             x_field: None,
             y_field: None,
             coord_flipped: false,
@@ -2281,6 +2284,7 @@ mod tests {
         let sort_ctx = super::SortContext {
             category_field: field,
             batch,
+            fallback: None,
             x_field: None,
             y_field: None,
             coord_flipped: false,

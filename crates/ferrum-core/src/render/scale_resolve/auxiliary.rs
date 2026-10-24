@@ -15,7 +15,7 @@ use ferrum_scene::{categorical_slot_dash, STROKE_DASH_LEGACY_SLOTS};
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
-use super::domain::{admitted_aux_reads, aux_category_union, sided_aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, AuxRead, SortContext};
+use super::domain::{admitted_aux_reads, aux_category_union, sided_aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, legend_sort_context, AuxRead};
 use super::{distinct_values_in_order, infer_spec_type, shared_categorical_batch, sided_min_max_f64, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
 
 /// The channels whose scale maps a quantitative field onto a bounded output
@@ -370,8 +370,9 @@ fn numeric_aux_scale_kind(
 /// `layer_reads` are a layered spec's admitted reads of the channel
 /// ([`AuxRead`]): the data-derived domain is then every drawing layer's
 /// categories in layer order ([`aux_category_union`]), and a data-aware
-/// `sort=` aggregates over the first contributing batch. Empty for an
-/// unlayered spec, which reads `batch`.
+/// `sort=` reads the first contributing read's own pre-statistic rows
+/// ([`legend_sort_context`]). Empty for an unlayered spec, which reads
+/// `batch`.
 #[allow(clippy::too_many_arguments)]
 fn sorted_categorical_domain(
     encoding: &Encoding,
@@ -380,15 +381,16 @@ fn sorted_categorical_domain(
     sort: Option<&serde_json::Value>,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &crate::transform::run::OutputLineages,
     facet_shared: bool,
     coord_flipped: bool,
     layer_reads: &[AuxRead<'_>],
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
     // A layered spec's every read draws its field, so the union is `None`
     // only for an unlayered spec, which reads its one batch.
-    let (layer_categories, domain_batch) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
-        Some((categories, first_batch)) => (Some(categories), first_batch),
-        None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared)),
+    let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
+        Some((categories, first_batch, read)) => (Some(categories), first_batch, Some(read)),
+        None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared), None),
     };
     let mut distinct = match (explicit_domain, layer_categories) {
         (Some(declared), _) => declared,
@@ -397,18 +399,20 @@ fn sorted_categorical_domain(
     };
 
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
-    let sort_ctx = SortContext {
-        category_field: field,
-        batch: domain_batch,
-        // `encoding` is the RENDERED (post-`CoordFlip`) encoding, so these two
-        // fields name the rendered channels; `coord_flipped` is what lets an
-        // authored `sort="-y"` still find the channel the user wrote (#95).
-        // A shape/stroke-dash domain sorts by the same rule the positional
-        // axes do, because it runs through the same `apply_sort_to_domain`.
-        x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
-        y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
+    // `encoding` is the RENDERED (post-`CoordFlip`) encoding, so these two
+    // fields name the rendered channels; `coord_flipped` is what lets an
+    // authored `sort="-y"` still find the channel the user wrote (#95). A
+    // shape/stroke-dash domain sorts by the same rule the positional axes
+    // do, because it runs through the same `apply_sort_to_domain`.
+    let sort_ctx = legend_sort_context(
+        field,
+        lead,
+        domain_batch,
+        transform_lineages,
+        encoding.x.as_ref().map(|e| e.field.as_str()),
+        encoding.y.as_ref().map(|e| e.field.as_str()),
         coord_flipped,
-    };
+    );
     apply_sort_to_domain(&mut distinct, sort, &sort_ctx, &mut warnings)?;
     Ok((distinct, warnings))
 }
@@ -603,6 +607,7 @@ pub fn build_shape_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &crate::transform::run::OutputLineages,
     facet_shared: bool,
     // `spec.coord` is `CoordFlip`: `encoding` above is the RENDERED encoding,
     // so an authored `sort="-y"` shorthand needs this to find the channel the
@@ -632,6 +637,7 @@ pub fn build_shape_scale(
         shape_enc.sort.as_ref(),
         batch,
         transform_outputs,
+        transform_lineages,
         facet_shared,
         coord_flipped,
         layer_reads,
@@ -817,6 +823,7 @@ pub fn build_stroke_dash_scale(
     encoding: &Encoding,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &crate::transform::run::OutputLineages,
     facet_shared: bool,
     // See [`build_shape_scale`]'s `coord_flipped` — the same authored-vs-
     // rendered channel question, same answer (#95).
@@ -864,6 +871,7 @@ pub fn build_stroke_dash_scale(
         dash_enc.sort.as_ref(),
         batch,
         transform_outputs,
+        transform_lineages,
         facet_shared,
         coord_flipped,
         &layer_reads,

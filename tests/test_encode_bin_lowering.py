@@ -664,6 +664,13 @@ def test_a_pre_built_bin_the_plan_does_not_extend_is_sent_as_built():
 
 
 def test_a_pre_built_bin_the_plan_groups_is_sent_as_its_wire_with_the_groups_added():
+    """The plan's own group joins the Bin's declared groupby, which stays marked written.
+
+    ``g`` is the caller's own ``groupby=`` on the ``Bin``; ``h`` is the
+    planner's addition from the ``color`` channel. Only ``g`` is
+    ``written_groupby``: a line reading this Bin's output splits by the
+    group the caller wrote, never by one the planner added.
+    """
     from ferrum._core import Bin as RustBin
     from ferrum._encode_lowering import _statistic_plan
     from ferrum._registry import transform_wires
@@ -671,7 +678,12 @@ def test_a_pre_built_bin_the_plan_groups_is_sent_as_its_wire_with_the_groups_add
     prebuilt = RustBin("v", bin_count=2, groupby=["g"])
     plan = _statistic_plan({"x": fm.X("v", bin=prebuilt), "y": "count", "color": "h"}, None)
     (wire,) = transform_wires([prebuilt])
-    assert plan.step() == {**wire, "groupby": ["g", "h"], "shared_extent": True}
+    assert plan.step() == {
+        **wire,
+        "groupby": ["g", "h"],
+        "shared_extent": True,
+        "written_groupby": ["g"],
+    }
 
 
 def test_the_transform_wire_reader_reads_a_bins_own_parameters():

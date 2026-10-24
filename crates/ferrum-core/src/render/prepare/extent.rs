@@ -343,6 +343,7 @@ mod tests {
         use crate::transform::bin::BinSpec;
         use crate::transform::bin_mode::BinMode;
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "v".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,
@@ -636,6 +637,7 @@ mod tests {
         use crate::transform::bin::BinSpec;
         use crate::transform::bin_mode::BinMode;
         let bin = TransformSpec::Bin(BinSpec {
+            written_groupby: Vec::new(),
             field: "v".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,

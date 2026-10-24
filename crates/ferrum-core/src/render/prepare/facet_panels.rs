@@ -13,14 +13,18 @@
 //!   partition order. A value a layer draws that no partition holds follows,
 //!   in first appearance over the layers in layer order.
 //! - **Data-aware sort.** A sort object or an `x`/`-x`/`y`/`-y` shorthand
-//!   orders each value by the pre-statistic rows of the first layer, in
-//!   layer order, that draws it, with that layer's own x and y fields for a
-//!   shorthand, as the establishing layer orders an axis
-//!   ([`layer_sort_rows`]). One batch is assembled from those rows and
-//!   handed to the one sorter ([`apply_sort_to_domain`]); a value whose
-//!   layer's rows cannot be read for the sort is ordered by its rule for a
-//!   value with no rows, and [`RenderWarning::FacetSortPartial`] names it.
-//!   Each layer's rows are the batch the render resolved for it.
+//!   orders each value by the rows of the first layer, in layer order,
+//!   that draws it, with that layer's own x and y fields for a shorthand,
+//!   as the establishing layer orders an axis ([`layer_sort_rows`]). Each
+//!   value reads its own pre-statistic rows or, when the sort's actual
+//!   field lives only in the layer's final rows (an aggregate's own
+//!   output), its final rows instead ([`batch_carrying`]) -- both the
+//!   value and the category key for that value come from the SAME chosen
+//!   batch, so a row never splits across the two. One batch is assembled
+//!   from those rows and handed to the one sorter
+//!   ([`apply_sort_to_domain`]); a value whose layer's rows cannot be read
+//!   for the sort is ordered by its rule for a value with no rows, and
+//!   [`RenderWarning::FacetSortPartial`] names it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,9 +35,10 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::{FacetGroup, FacetKey, FacetSpec};
 use crate::spec::chart::ChartSpec;
+use crate::transform::core::FINAL_OUTPUT_KEY;
 use crate::transform::run::OutputLineages;
 
-use super::super::scale_resolve::{apply_sort_to_domain, layer_sort_rows, SortContext, SortRows};
+use super::super::scale_resolve::{apply_sort_to_domain, batch_carrying, chart_sort_rows, layer_sort_rows, SortContext, SortRows};
 use super::super::{RenderError, RenderWarning};
 use super::FacetPartitions;
 
@@ -83,7 +88,7 @@ impl<'a> FacetRows<'a> {
                 .collect(),
             None => vec![FacetLayerRows {
                 drawn: transformed,
-                sort: SortRows { batch: transformed, x_field: chart_fields.0, y_field: chart_fields.1 },
+                sort: chart_sort_rows(transformed, lineages.get(FINAL_OUTPUT_KEY), chart_fields.0, chart_fields.1),
             }],
         };
         Self { layers, partitions, coord_flipped }
@@ -244,6 +249,7 @@ fn sort_panels(
     let ctx = SortContext {
         category_field: field,
         batch: &batch,
+        fallback: None,
         x_field: channel_field(SORT_X),
         y_field: channel_field(SORT_Y),
         coord_flipped: rows.coord_flipped,
@@ -276,8 +282,9 @@ struct SortBatch {
 }
 
 /// One batch of every value's sort rows: the value under `field`, and the
-/// columns `reads` names, each read from the pre-statistic rows of the first
-/// layer drawing that value.
+/// columns `reads` names, each read from the rows of the first layer
+/// drawing that value -- its pre-statistic rows when they carry the field
+/// `reads` names, else its final rows ([`batch_carrying`]).
 fn sort_batch(
     domain: &[String],
     field: &str,
@@ -299,7 +306,31 @@ fn sort_batch(
                 continue;
             };
             let source = &rows.layers[layer].sort;
-            let column = |name: Option<&str>| name.and_then(|name| crate::render::arrow_cast::col_as_f64(source.batch, name).ok());
+            // The field the sort actually reads this time, so the batch
+            // choice below matches the ACTUAL field (an explicit sort
+            // object can name a raw field the established channel never
+            // draws) rather than being decided by `x_field`/`y_field`
+            // presence alone (`resolve_sort_batch`'s doc). A count-only sort
+            // never reads a value column, so it stays on `source.batch`, the
+            // pre-statistic grain, exactly as `resolve_sort_batch` keeps
+            // `SortOp::Count` off the fallback: counting the fallback's rows
+            // would count groups, not observations.
+            let wanted = match reads {
+                SortReads::Channel { y: true } => source.y_field,
+                SortReads::Channel { y: false } => source.x_field,
+                SortReads::Field { field: sort_field, counts_only: false } => Some(*sort_field),
+                SortReads::Field { counts_only: true, .. } | SortReads::Nothing => None,
+            };
+            // Both the category key and the value column are read from this
+            // SAME batch: `source.fallback`'s rows are a different grain
+            // (one row per group, not per observation) from `source.batch`'s,
+            // so mixing keys from one and values from the other would
+            // misalign every row.
+            let chosen = match wanted {
+                Some(name) => batch_carrying(source.batch, source.fallback, name),
+                None => source.batch,
+            };
+            let column = |name: Option<&str>| name.and_then(|name| crate::render::arrow_cast::col_as_f64(chosen, name).ok());
             let (x, y, field_values) = match reads {
                 SortReads::Channel { y } => {
                     let read = if *y { column(source.y_field) } else { column(source.x_field) };
@@ -322,7 +353,7 @@ fn sort_batch(
                 },
                 SortReads::Nothing => (None, None, None),
             };
-            let Ok(keys) = crate::render::arrow_cast::col_as_str(source.batch, field) else {
+            let Ok(keys) = crate::render::arrow_cast::col_as_str(chosen, field) else {
                 unsortable.push(value.clone());
                 continue;
             };
@@ -381,8 +412,17 @@ mod tests {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
     }
 
+    /// A statistic's own output rows over a facet field `f`: one row per
+    /// value, carrying only `f` and `mean_y` (never `y`), the shape an
+    /// aggregating layer's final rows take.
+    fn agg_rows(f: &[&str], mean_y: &[f64]) -> RecordBatch {
+        let fields = vec![Field::new("f", DataType::Utf8, true), Field::new("mean_y", DataType::Float64, true)];
+        let columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(f.to_vec())), Arc::new(Float64Array::from(mean_y.to_vec()))];
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
     fn layer(batch: &RecordBatch) -> FacetLayerRows<'_> {
-        FacetLayerRows { drawn: batch, sort: SortRows { batch, x_field: None, y_field: Some("y") } }
+        FacetLayerRows { drawn: batch, sort: SortRows { batch, fallback: None, x_field: None, y_field: Some("y") } }
     }
 
     fn spec(row: bool, sort: Option<serde_json::Value>, row_sort: Option<serde_json::Value>) -> FacetSpec {
@@ -484,6 +524,115 @@ mod tests {
         }
     }
 
+    /// A faceted `X("g", sort="-y")` with `y="mean(y)")` (an aggregating
+    /// layer, as a layered `bar(x, y=mean(y)) + rule(y)` produces) sorts
+    /// each panel by the aggregate: the establishing layer's drawn field
+    /// (`mean_y`) lives only in its final rows, not its pre-statistic ones,
+    /// so the sort must read the fallback -- the same rule
+    /// `resolve_sort_batch` applies to the axis sort. Rejects reading only
+    /// `batch` (the pre-statistic rows, which never carry `mean_y`), which
+    /// leaves every value unsortable and falls back to insertion order.
+    #[test]
+    fn a_facet_sort_reads_the_establishing_layers_aggregate_output() {
+        let partitions = wrap_keys(&["a", "b", "c"]);
+        let pre = rows(&["a", "a", "b", "b", "c", "c"], None, &[0.0, 2.0, 4.0, 6.0, 8.0, 10.0]);
+        let agg = agg_rows(&["a", "b", "c"], &[1.0, 5.0, 9.0]);
+        let facet_rows = FacetRows {
+            layers: vec![FacetLayerRows {
+                drawn: &agg,
+                sort: SortRows { batch: &pre, fallback: Some(&agg), x_field: None, y_field: Some("mean_y") },
+            }],
+            partitions: &partitions,
+            coord_flipped: false,
+        };
+        let mut warnings = Vec::new();
+        let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("-y")), None), &mut warnings).unwrap();
+        assert_eq!(values(&groups), ["c", "b", "a"], "descending by the aggregate: {warnings:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A raw-field sort is unaffected by the fallback: when `batch` already
+    /// carries the sort's field, the sort reads `batch`, never `fallback`,
+    /// even when a (deliberately unrelated) fallback is also present.
+    #[test]
+    fn a_facet_sort_over_a_raw_field_stays_on_the_pre_statistic_rows() {
+        let partitions = wrap_keys(&["a", "b", "c"]);
+        let pre = rows(&["a", "b", "c"], None, &[9.0, 5.0, 1.0]);
+        // A fallback that would give the OPPOSITE order if ever read.
+        let decoy = agg_rows(&["a", "b", "c"], &[1.0, 5.0, 9.0]);
+        let facet_rows = FacetRows {
+            layers: vec![FacetLayerRows {
+                drawn: &pre,
+                sort: SortRows { batch: &pre, fallback: Some(&decoy), x_field: None, y_field: Some("y") },
+            }],
+            partitions: &partitions,
+            coord_flipped: false,
+        };
+        let mut warnings = Vec::new();
+        let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("-y")), None), &mut warnings).unwrap();
+        assert_eq!(values(&groups), ["a", "b", "c"], "descending by batch's own y, not the decoy fallback: {warnings:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A facet count sort stays on the pre-statistic rows even when the
+    /// establishing layer's own output also names the sort's field (an
+    /// aggregate whose output column is itself called `y`): count reads
+    /// row presence at the pre-statistic grain (observations), never the
+    /// aggregated grain (groups), the same rule `resolve_sort_batch`
+    /// applies to the axis sort. The partition order starts `b` before
+    /// `a` so the two reads are distinguishable by the resulting panel
+    /// order alone: the aggregate's own output (one row per group) ties
+    /// at 1 each and leaves the insertion order `[b, a]` unchanged under
+    /// a stable sort, while the pre-statistic rows count 3 `a`s against 1
+    /// `b` and sort to `[a, b]`.
+    #[test]
+    fn a_facet_count_sort_counts_the_pre_statistic_rows() {
+        let partitions = wrap_keys(&["b", "a"]);
+        let pre = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("f", DataType::Utf8, true),
+                Field::new("val", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a", "b"])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let agg = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("f", DataType::Utf8, true),
+                Field::new("y", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let facet_rows = FacetRows {
+            layers: vec![FacetLayerRows {
+                drawn: &agg,
+                sort: SortRows { batch: &pre, fallback: Some(&agg), x_field: None, y_field: None },
+            }],
+            partitions: &partitions,
+            coord_flipped: false,
+        };
+        let mut warnings = Vec::new();
+        let groups = facet_groups(
+            &facet_rows,
+            &spec(false, Some(serde_json::json!({"field": "y", "op": "count", "order": "descending"})), None),
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(
+            values(&groups),
+            ["a", "b"],
+            "count reads the pre-statistic rows (a: 3, b: 1), not the aggregate's tied 1-each: {warnings:?}"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
     /// In grid mode the column and row sorts each read each value's first
     /// drawing layer.
     #[test]
@@ -526,7 +675,7 @@ mod tests {
         )
         .unwrap();
         let facet_rows = FacetRows {
-            layers: vec![layer(&points), FacetLayerRows { drawn: &unsortable, sort: SortRows { batch: &unsortable, x_field: None, y_field: None } }],
+            layers: vec![layer(&points), FacetLayerRows { drawn: &unsortable, sort: SortRows { batch: &unsortable, fallback: None, x_field: None, y_field: None } }],
             partitions: &partitions,
             coord_flipped: false,
         };

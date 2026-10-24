@@ -488,10 +488,9 @@ def test_d10_t11_concat_chart_chrome_survives_rebuild(two_charts):
 def test_d10_t12_empty_dataset_caption_survives():
     """A chart with an empty dataset still renders the caption from .properties(caption=).
 
-    Previously the empty-dataset fast-path in Chart.to_svg returned the
-    placeholder SVG before reaching the caption post-wrap, so the caption
-    was silently dropped.  The fix applies the same caption wrap to the
-    empty-dataset branch.
+    An empty dataset draws its frame and axes like any other chart, with the
+    same caption post-wrap applied after it, so the caption is never
+    dropped.
     """
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Int64), "y": pl.Series([], dtype=pl.Int64)})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").properties(caption="Source: empty data")
@@ -499,23 +498,18 @@ def test_d10_t12_empty_dataset_caption_survives():
 
     assert "Source: empty data" in svg, (
         "Caption was silently dropped for an empty dataset. "
-        "The empty-dataset fast-path must apply the caption wrap."
+        "The empty-dataset render must apply the caption wrap."
     )
 
 
 def test_d10_t12b_empty_dataset_no_caption_path_unchanged():
-    """An empty dataset without a caption renders the bare placeholder SVG unchanged.
-
-    No caption wrap must be applied when no caption is set — this keeps the
-    no-caption empty-dataset path byte-identical to its pre-fix form.
-    """
+    """An empty dataset without a caption draws its frame with no caption element."""
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Int64), "y": pl.Series([], dtype=pl.Int64)})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     svg = chart.to_svg()
 
-    assert "<!-- empty dataset -->" in svg, (
-        "Empty-dataset placeholder comment must be present when no caption is set."
-    )
+    assert svg.startswith("<svg"), "Empty-dataset chart must draw its frame."
+    assert "<circle" not in svg, "An empty dataset draws no marks."
     assert "<caption" not in svg.lower(), (
         "No caption element should appear when no caption was set."
     )

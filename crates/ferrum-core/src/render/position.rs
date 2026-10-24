@@ -47,6 +47,59 @@ pub(crate) struct StackedAxisBatch<'a> {
 /// carries the stacked value.
 pub(crate) const STACK_BASE_COLUMN: &str = "__stack_y_base__";
 
+/// The column [`set_float64_column`] copies `field`'s own row values into
+/// before a position adjustment (`Stack`, continuous `Dodge`, data-space
+/// `Jitter`) overwrites `field` itself in place: any non-positional channel
+/// bound to the SAME field (`mark_text`'s own `text=`, a `tooltip=`, a
+/// `color=`) is retargeted onto this one instead
+/// ([`read_own_values`]), so it reads the row's own value (ggplot2's
+/// `position_stack()` default for a label) rather than the position the
+/// adjustment moved `field`'s column to. Named by `field` because a chart
+/// has at most one column a given adjustment overwrites per field, but the
+/// name must still distinguish it from every other column a layer reads.
+pub(crate) fn own_value_column(field: &str) -> String {
+    format!("__own_value__{field}")
+}
+
+/// Retargets `binding` onto its [`own_value_column`] in `batch`, when one
+/// exists: a tooltip, label, color, selection field or any other
+/// non-positional channel bound to a field a position adjustment
+/// overwrote in place reads the row's own value instead of the adjusted
+/// position, stamping `title` with the caller's field when `title` is
+/// `None` (the same field-is-read-column, title-is-display-name split
+/// `draw.rs`'s renamed-column handling already uses). A no-op when the
+/// field has no companion column (no position adjustment ran, or the
+/// field names something else), so every reader this is applied to is
+/// byte-identical wherever [`set_float64_column`] never overwrote
+/// anything. The one shared retarget step, called per binding by
+/// [`read_own_values`] and per field by `draw::selection_tooltip_specs`
+/// (a selection's own, producer-written field is not an `EncodingSpec`
+/// in `encoding`, so it needs this directly rather than through a full
+/// encoding).
+pub(crate) fn read_own_value(binding: &mut crate::spec::encoding::EncodingSpec, batch: &RecordBatch) {
+    let own = own_value_column(&binding.field);
+    if batch.schema().column_with_name(&own).is_some() {
+        if binding.title.is_none() {
+            binding.title = Some(binding.field.clone());
+        }
+        binding.field = own;
+    }
+}
+
+/// Retargets every non-positional binding of `encoding` through
+/// [`read_own_value`]. `x`, `y`, `x2` and `y2` are skipped: they read the
+/// adjusted position deliberately, that being the geometry the mark
+/// draws. Called once, on the draw pass's own copy of the layer's
+/// encoding, after it resolves which bindings the mark draws.
+pub(crate) fn read_own_values(encoding: &mut crate::spec::encoding::Encoding, batch: &RecordBatch) {
+    for (name, binding) in encoding.bindings_mut() {
+        if matches!(name, "x" | "y" | "x2" | "y2") {
+            continue;
+        }
+        read_own_value(binding, batch);
+    }
+}
+
 /// The batches an unlayered spec's value axis on `axis` resolves against,
 /// accounting for the stack its one mark draws ([`StackedAxisBatch`]).
 ///
@@ -597,13 +650,27 @@ fn dodge_slot_domain<'a>(
 /// Name, nullability, and field metadata are preserved. Nullability is safe to
 /// keep as-is because both callers only ever emit a null where the value they
 /// read was null, so the output's null set is a subset of the input's.
+///
+/// Before the overwrite, the column's ORIGINAL array (whatever its dtype,
+/// nulls and non-finite values included) is appended unchanged under
+/// [`own_value_column`], once per column, so a non-positional channel bound
+/// to the same field can still read each row's own value after this
+/// function moves `idx`'s column to the adjusted position
+/// ([`read_own_values`]). This is the one place every position adjustment
+/// in this module retypes a column, so it is also the one place that keeps
+/// what each adjustment overwrites.
 fn set_float64_column(
-    fields: &mut [Field],
-    cols: &mut [ArrayRef],
+    fields: &mut Vec<Field>,
+    cols: &mut Vec<ArrayRef>,
     idx: usize,
     values: Float64Array,
 ) {
-    let old = &fields[idx];
+    let old = fields[idx].clone();
+    let own_name = own_value_column(old.name());
+    if !fields.iter().any(|f| f.name() == own_name.as_str()) {
+        fields.push(Field::new(own_name, old.data_type().clone(), old.is_nullable()).with_metadata(old.metadata().clone()));
+        cols.push(cols[idx].clone());
+    }
     fields[idx] = Field::new(old.name(), DataType::Float64, old.is_nullable())
         .with_metadata(old.metadata().clone());
     cols[idx] = Arc::new(values);
@@ -1812,6 +1879,12 @@ pub(crate) fn apply_stack(
     // Inert as written — `y_output` is null-free, so the forced `true` never
     // mattered — but a third hand-rolled copy of the thing the helper exists to
     // single-source is exactly the drift the helper's own doc warns about.
+    // `set_float64_column` appends a copy of the column's ORIGINAL values
+    // (whatever `yi`'s dtype and nulls were, before this overwrite) under
+    // `own_value_column(value_field.field)`, so a non-positional channel
+    // bound to the same field reads each row's own value rather than the
+    // cumulative position this call moves `yi`'s column to
+    // ([`read_own_values`]).
     set_float64_column(&mut new_fields, &mut cols, yi, Float64Array::from(y_output));
 
     // Append a synthetic __stack_y_base__ column so mark drawers can emit
@@ -2728,6 +2801,54 @@ mod tests {
         assert_eq!(ya.value(1), 30.0);
         assert_eq!(ya.value(2), 30.0);
         assert_eq!(ya.value(3), 70.0);
+    }
+
+    /// A stacked value field's own column holds the cumulative position
+    /// above, but each row's own (pre-stack) value survives under
+    /// `own_value_column("y")` -- the value a non-positional channel bound
+    /// to the same field reads instead of the stacked position
+    /// ([`read_own_values`]).
+    #[test]
+    fn stack_preserves_each_rows_own_value_under_the_own_value_column() {
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let raw = out
+            .column_by_name(&own_value_column("y"))
+            .expect("own-value column present")
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let y = b.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..4 {
+            assert_eq!(raw.value(i), y.value(i), "row {i} keeps its own value, not the stacked position");
+        }
+    }
+
+    /// `set_float64_column` appends the ORIGINAL column -- whatever its
+    /// dtype and nulls -- under `own_value_column`, before retyping the
+    /// column it overwrites to `Float64`: an `Int64` column with a null
+    /// keeps its dtype and its null under the companion name, and a second
+    /// rewrite of the same column appends nothing more (one companion per
+    /// column, not one per call).
+    #[test]
+    fn set_float64_column_keeps_the_original_column_under_own_value_column() {
+        use arrow::array::Int64Array;
+        let mut fields = vec![Field::new("v", DataType::Int64, true)];
+        let mut cols: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(vec![Some(5), None, Some(3)]))];
+        set_float64_column(&mut fields, &mut cols, 0, Float64Array::from(vec![1.0, 2.0, 3.0]));
+        let own_idx = fields.iter().position(|f| f.name() == &own_value_column("v")).expect("own-value field present");
+        assert_eq!(fields[own_idx].data_type(), &DataType::Int64, "the original dtype is kept, not widened to Float64");
+        let own = cols[own_idx].as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(own.value(0), 5);
+        assert_eq!(own.value(2), 3);
+        assert!(own.is_null(1), "the original null is kept");
+        assert_eq!(fields.len(), 2, "one rewrite appends exactly one companion column");
+
+        set_float64_column(&mut fields, &mut cols, 0, Float64Array::from(vec![10.0, 20.0, 30.0]));
+        assert_eq!(fields.len(), 2, "a second rewrite of the same column appends nothing more");
     }
 
     #[test]

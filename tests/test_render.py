@@ -66,11 +66,22 @@ def test_render_svg_unknown_column_raises():
         fr.render_svg(spec, _df_3(), viewport=(600.0, 400.0))
 
 
-def test_render_svg_empty_dataframe_raises():
+def test_render_svg_empty_dataframe_draws_its_frame_and_warns_once():
+    """A zero-row batch takes the same path a filter-emptied one already does.
+
+    ``render_svg`` draws the frame and axes with no marks and warns once,
+    rather than refusing, even called directly with no Python wrapper above
+    it.
+    """
     spec = fr.ChartSpec(mark="point", x="x", y="y")
     empty = pl.DataFrame({"x": [], "y": []}, schema={"x": pl.Float64, "y": pl.Float64})
-    with pytest.raises(ValueError):
-        fr.render_svg(spec, empty, viewport=(600.0, 400.0))
+    with pytest.warns(
+        UserWarning, match="the chart has no rows to draw after its transforms"
+    ) as caught:
+        svg = fr.render_svg(spec, empty, viewport=(600.0, 400.0))
+    assert len(caught) == 1
+    assert svg.count("<circle ") == 0
+    assert svg.startswith("<svg")
 
 
 def test_render_svg_pyarrow_table_works():

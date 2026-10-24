@@ -286,7 +286,6 @@ pub enum ScaleDomainSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
-    EmptyBatch,
     UnknownColumn { name: String },
     /// A user-supplied color string that `render::color::parse_color` rejects.
     /// The payload is the `ColorParseError` `parse_color` returned; `Display`
@@ -1231,7 +1230,6 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // their field docs on `RenderError`. The remaining variants carry no
         // user-channel token at all.
         other @ (RenderError::InvalidViewport { .. }
-        | RenderError::EmptyBatch
         | RenderError::UnknownColumn { .. }
         | RenderError::RasterColorNotQuantitative(_)
         | RenderError::InvalidColor(_)
@@ -1393,8 +1391,6 @@ impl std::fmt::Display for RenderError {
         match self {
             Self::InvalidViewport { width, height } =>
                 write!(f, "invalid viewport: width={width}, height={height} (both must be finite and > 0)"),
-            Self::EmptyBatch =>
-                write!(f, "input batch is empty (num_rows == 0)"),
             Self::UnknownColumn { name } =>
                 write!(f, "unknown column '{name}' referenced by an encoding"),
             // Delegates to `ColorParseError`'s own `Display` rather than

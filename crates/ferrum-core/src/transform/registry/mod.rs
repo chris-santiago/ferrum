@@ -346,7 +346,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec![
                 "field", "bin_count", "bin_width", "bin_rule", "extent", "nice",
-                "cumulative", "shared_extent", "groupby", "agg_field", "agg", "per_row",
+                "cumulative", "shared_extent", "groupby", "written_groupby", "agg_field", "agg", "per_row",
                 "aggregates", "name",
             ],
         },

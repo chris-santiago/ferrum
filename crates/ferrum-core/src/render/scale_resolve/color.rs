@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, locate_field, AuxRead, FacetExtentPolicy, SortContext};
+use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, legend_sort_context, locate_field, AuxRead, FacetExtentPolicy};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
@@ -323,12 +323,13 @@ pub fn build_color_scale(
         // A layered spec's categories are every layer's own, in layer order
         // (`layer_reads`); a data-aware sort then aggregates over the first
         // contributing batch.
-        let (layer_categories, domain_batch) =
+        let (layer_categories, domain_batch, lead) =
             match aux_category_union(layer_reads, primary_batch, transform_outputs, facet_shared)? {
-                Some((categories, batch)) => (Some(categories), batch),
+                Some((categories, batch, read)) => (Some(categories), batch, Some(read)),
                 None => (
                     None,
                     shared_categorical_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared),
+                    None,
                 ),
             };
         let data_categories = |batch| -> Result<Vec<String>, RenderError> {
@@ -340,21 +341,25 @@ pub fn build_color_scale(
 
         // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
         // the legend domain by an aggregate, mirroring the positional-axis path.
-        // The category column is the color field; candidate value columns live in
-        // the primary batch alongside it.
+        // The category column is the color field; a sort naming the raw field
+        // its own statistic consumed reads the establishing read's
+        // pre-statistic rows, since that field can be absent from
+        // `domain_batch` (an aggregating layer's own output).
         //
         // When faceted/Shared, use the same global batch for sorting so the
         // sort order matches the global legend, not the per-panel aggregate.
-        let sort_ctx = SortContext {
-            category_field: &c_enc.field,
-            batch: domain_batch,
+        let sort_ctx = legend_sort_context(
+            &c_enc.field,
+            lead,
+            domain_batch,
+            transform_lineages,
             // Rendered channels (`encoding` is post-`CoordFlip`); the flag is
             // what lets an authored `sort="-y"` still name the user's own y
             // channel (#95, same rule the positional axes resolve under).
-            x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
-            y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
+            encoding.x.as_ref().map(|e| e.field.as_str()),
+            encoding.y.as_ref().map(|e| e.field.as_str()),
             coord_flipped,
-        };
+        );
         // D1: if the color encoding carries an explicit ordinal string range, build
         // the palette from those colors (parsed via `parse_color`).
         //

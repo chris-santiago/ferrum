@@ -1817,11 +1817,22 @@ fn build_panel_mark_batches(
         // Synthetic ChartSpec for this layer. The `encoding` here is a
         // DrawCtx-LOCAL copy, the bindings this layer's mark draws
         // ([`LayerPrepared::drawn_encoding`](super::prepare::LayerPrepared::drawn_encoding)):
-        // everything else in this loop (position grouping just above, key
-        // extraction below, and the legend's own separate resolution in
-        // `resolve_legend_color_scale`) reads `layer.encoding` directly and is
-        // never touched by what follows.
-        let layer_spec_encoding = layer.drawn_encoding();
+        // position grouping just above and the legend's own separate
+        // resolution in `resolve_legend_color_scale` read `layer.encoding`
+        // directly and are never touched by what follows. Key extraction
+        // below reads THIS copy (`layer_spec.encoding`), after the
+        // own-value retarget just below, so `key=` on an adjusted field
+        // reads the row's own value too.
+        let mut layer_spec_encoding = layer.drawn_encoding();
+
+        // Any non-positional binding bound to a field a position adjustment
+        // overwrote in place (`Stack`, continuous `Dodge`, data-space
+        // `Jitter`) is retargeted onto the companion column that adjustment
+        // preserved it under, so a tooltip, label, color or any other
+        // non-positional channel reads the row's own value rather than the
+        // adjusted position (`position::own_value_column`'s doc). A no-op
+        // wherever no adjustment ran.
+        position::read_own_values(&mut layer_spec_encoding, layer_batch);
 
         // Drop a row this layer's own numeric auxiliary `Log` scale(s)
         // cannot map — the same treatment an off-side x/y row already gets.
@@ -1944,7 +1955,7 @@ fn build_panel_mark_batches(
             apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
         }
 
-        let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
+        let keys = extract_keys(&layer_spec.encoding, layer_batch, result.data_indices.as_deref());
         // the Log aux drop's filtered batch
         // renumbered `data_indices`/`vertex_rows` by position in the
         // FILTERED batch (every mark builder numbers the rows it is
@@ -5876,6 +5887,78 @@ mod tests {
         }
     }
 
+    /// `mark_text(position=Stack(by="c")).encode(x="g", y="v", text="v",
+    /// tooltip="v")` over one x-category with a null row: both the label
+    /// content and the tooltip's "v" entry must read each row's own value
+    /// (`position::read_own_values`'s retarget, applied once to the
+    /// DrawCtx-local encoding every channel reads from), not the cumulative
+    /// stack position `v`'s own column now holds -- and a null row draws no
+    /// label at all, the same way it does unstacked.
+    #[test]
+    fn a_stacked_texts_label_and_tooltip_read_the_rows_own_value() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let position = PositionAdjust::Stack {
+            by: Some("c".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let spec = ChartSpec {
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                text: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            position: Some(position),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, true),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a", "a"])),
+                Arc::new(Float64Array::from(vec![Some(50.0), None, Some(30.0), Some(40.0)])),
+                Arc::new(StringArray::from(vec!["c1", "c2", "c3", "c4"])),
+            ],
+        )
+        .unwrap();
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let mark = &panel.marks[0];
+        let contents: Vec<&str> = mark
+            .nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Text { content, .. } = n { Some(content.as_str()) } else { None })
+            .collect();
+        assert_eq!(contents, ["50", "30", "40"], "each label prints its own value, in row order, with no label for the null row");
+        let tooltip_values: Vec<&str> = mark
+            .tooltips
+            .as_ref()
+            .expect("tooltips present")
+            .iter()
+            .map(|t| {
+                t.fields
+                    .iter()
+                    .find(|f| f.name == "v")
+                    .map(|f| f.value.as_str())
+                    .expect("a 'v' tooltip field")
+            })
+            .collect();
+        assert_eq!(tooltip_values, contents, "the tooltip's own-field value agrees with the label it sits beside");
+    }
+
     // ── A layer's paint is its own, whatever mark sits on either side ────
 
     /// The mirror of `layered_bar_fill_does_not_leak_into_text_color`: the
@@ -6642,30 +6725,23 @@ mod tests {
     }
 
     /// GH #184 cross-module follow-through, measured rather than reasoned.
+    /// Two separable facts about `key=` on a column a continuous `Dodge`
+    /// moves, both pinned here:
     ///
-    /// `extract_keys` reads the POST-position batch — line 1569 above shadows
-    /// `layer_batch` with `apply_position`'s output — so a `key=` bound to the
-    /// same column a CONTINUOUS dodge rewrites in data space reads the rewritten
-    /// column. #184 widened which dtypes reach that branch (an `Int*`/`UInt*`/
-    /// `Float32`/`Timestamp` band now dodges where it used to hit a silent
-    /// no-op) and retypes the rewritten column to `Float64`, so the open question
-    /// was whether keys change shape. Two separable facts, both pinned here:
-    ///
-    /// 1. **The retype is key-neutral.** Epoch values in a `Timestamp` column
-    ///    (via `col_as_temporal_epoch_str`) and the identical epochs in a
+    /// 1. **A Float64 retype is key-neutral.** Epoch values in a `Timestamp`
+    ///    column (via `col_as_temporal_epoch_str`) and the identical epochs in a
     ///    `Float64` column (via `col_as_ordinal_category_str`, whose
     ///    `float_as_ordinal_str` integer-formats whole-valued floats) produce
     ///    BYTE-IDENTICAL keys. The feared "float-formatted keys instead of
     ///    epoch ints" does not occur for whole values.
-    /// 2. **The offset is not.** The dodge sub-band offset shifts the key
-    ///    values, because the key is read from the moved column. This is
-    ///    pre-existing behavior for `Float64` bands, which this branch has always
-    ///    rewritten in place; #184 only widens the set of dtypes that reach it.
-    ///    Keys stay injective (distinct rows keep distinct keys) and the offset is
-    ///    uniform within a dodge group, so keyed transitions remain stable across
-    ///    updates that do not change the group count.
+    /// 2. **The dodge offset never reaches a key.** `position::read_own_values`
+    ///    retargets a `key=` binding onto its `own_value_column` companion
+    ///    before `extract_keys` ever runs — `scene_build`'s draw loop applies
+    ///    that retarget to the SAME encoding copy `extract_keys` reads — so a
+    ///    `key=` bound to a field a continuous `Dodge` rewrote in place reads
+    ///    the row's own (unmoved) value, not the offset position.
     #[test]
-    fn extract_keys_is_unchanged_by_a_float64_retype_but_moves_with_a_dodge_offset() {
+    fn extract_keys_is_unchanged_by_a_float64_retype_and_unmoved_by_a_dodge_offset() {
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::{Float64Array, TimestampMillisecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -6714,16 +6790,37 @@ mod tests {
             "a Timestamp->Float64 retype must not change the key strings for whole values"
         );
 
-        // Fact 2: the dodge offset does move them (here a -250ms sub-band
-        // offset), and they stay distinct.
-        let dodged = float_batch(epochs.iter().map(|e| *e as f64 - 250.0).collect());
-        let dodged_keys = extract_keys(&encoding, &dodged, Some(&idx)).unwrap();
+        // Fact 2: a dodge-offset column (`t`, here -250ms) carries its own
+        // companion (`__own_value__t`, the unmoved epochs) — what
+        // `set_float64_column` appends before a continuous `Dodge` rewrites
+        // `t` in place. Running `read_own_values` on the encoding, the same
+        // step `scene_build`'s draw loop takes before calling `extract_keys`,
+        // retargets `key=`'s field onto that companion, so the keys equal
+        // the unmoved epochs, not the offset ones.
+        let dodged_with_own_value = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, false),
+                Field::new("__own_value__t", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(
+                    epochs.iter().map(|e| *e as f64 - 250.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    epochs.iter().map(|e| *e as f64).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        let mut retargeted_encoding = encoding.clone();
+        crate::render::position::read_own_values(&mut retargeted_encoding, &dodged_with_own_value);
+        let keys = extract_keys(&retargeted_encoding, &dodged_with_own_value, Some(&idx)).unwrap();
         assert_eq!(
-            dodged_keys,
-            vec!["1767225599750".to_string(), "1767225600750".to_string()],
-            "keys are read off the offset column, so they carry the offset"
+            keys,
+            ts_keys.unwrap(),
+            "the retarget reads the row's own value, so the keys never carry the dodge offset"
         );
-        assert_ne!(dodged_keys[0], dodged_keys[1], "keys must stay injective");
+        assert_ne!(keys[0], keys[1], "keys must stay injective");
     }
 
     /// **Boolean key column** (GH #93): a residual silent-drop gap distinct
@@ -9201,6 +9298,7 @@ mod tests {
                 cumulative: false,
                 shared_extent: false,
                 groupby: vec![],
+                written_groupby: Vec::new(),
                 agg_field: None,
                 agg: None,
                 name: Some("binned".into()),
@@ -9644,6 +9742,118 @@ mod tests {
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         let scene = result.expect("an empty faceted chart renders");
         assert!(scene.panels.is_empty(), "no facet value is drawn");
+        let no_rows: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
+        assert_eq!(no_rows, [&RenderWarning::NoRowsToDraw { faceted: true }], "{warnings:?}");
+    }
+
+    /// A genuinely zero-row `.facet()` chart -- no rows at all, not merely
+    /// filtered to none -- takes the SAME path
+    /// [`a_faceted_chart_with_no_rows_draws_no_panel_and_warns`] already
+    /// does: no facet panel is drawn, and the chart warns once with
+    /// `faceted: true`. Rejects refusing with `RenderError::EmptyDomain`
+    /// because the facet field has no rows to partition by at all.
+    #[test]
+    fn a_zero_row_faceted_chart_draws_no_panel_and_warns() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        pyo3::Python::initialize();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "cat".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                repeat: Vec::new(),
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+            ],
+        )
+        .unwrap();
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("a zero-row faceted chart renders, like a filter-emptied one");
+        assert!(scene.panels.is_empty(), "no facet panel is drawn");
+        let no_rows: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
+        assert_eq!(no_rows, [&RenderWarning::NoRowsToDraw { faceted: true }], "{warnings:?}");
+    }
+
+    /// The grid-mode (`row=` set, e.g. `displot(row=...)`/`catplot(row=...)`)
+    /// door of [`a_zero_row_faceted_chart_draws_no_panel_and_warns`]: a
+    /// genuinely zero-row two-dimensional facet (`field` and `row` both
+    /// set) also draws no panel and warns once, instead of refusing.
+    #[test]
+    fn a_zero_row_grid_faceted_chart_draws_no_panel_and_warns() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        pyo3::Python::initialize();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "cat".into(),
+                row: Some("grp".into()),
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                repeat: Vec::new(),
+                mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+            ],
+        )
+        .unwrap();
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("a zero-row grid-faceted chart renders, like a filter-emptied one");
+        assert!(scene.panels.is_empty(), "no facet panel is drawn");
         let no_rows: Vec<_> = warnings.iter().filter(|w| matches!(w, RenderWarning::NoRowsToDraw { .. })).collect();
         assert_eq!(no_rows, [&RenderWarning::NoRowsToDraw { faceted: true }], "{warnings:?}");
     }

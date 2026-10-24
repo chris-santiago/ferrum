@@ -857,6 +857,7 @@ mod tests {
             mark: Mark::Bar,
             encoding: Encoding::default(),
             transforms: vec![TransformSpec::Bin(BinSpec {
+                written_groupby: Vec::new(),
                 field: "x".into(),
                 mode: BinMode::Fixed { n: 10 },
                 extent: None,

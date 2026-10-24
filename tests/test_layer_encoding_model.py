@@ -4806,6 +4806,411 @@ def test_a_stacked_label_sits_on_its_own_segment():
         assert sy <= ly <= sy + sh
 
 
+def _stacked_label_contents(svg: str) -> list[str]:
+    return sorted(text for _x, _y, fill, text in _LABEL.findall(svg) if fill != _CHROME_TEXT)
+
+
+#: In group ``b``, ``c``'s row order is p, q, but the categorical domain
+#: stacks q before p, so a label pinned to its own segment (not sorted
+#: insertion order) is a real discriminating check, not an accident of a
+#: fixture where stack order and row order happen to coincide.
+_STACK_ORDER_ROWS = pl.DataFrame(
+    {"g": ["a", "a", "b", "b"], "c": ["q", "p", "p", "q"], "y": [1.0, 2.0, 3.0, 4.0]}
+)
+
+
+#: ``c``'s first-seen order in ``_STACK_ORDER_ROWS`` is q, p, so the default
+#: categorical palette assigns q the first color, p the second -- stable
+#: across every chart built from this fixture, static and interactive.
+_STACK_ORDER_FILL_TO_C = {"#2563eb": "q", "#dc2626": "p"}
+_STACK_ORDER_RGB_TO_C = {(37, 99, 235): "q", (220, 38, 38): "p"}
+
+
+def _label_g_map(xs: list[float]) -> dict[float, str]:
+    """The two distinct label x positions, in ascending order, as g='a' then g='b'."""
+    ordered = sorted(set(xs))
+    assert len(ordered) == 2
+    return dict(zip(ordered, ("a", "b")))
+
+
+def _alone_label_pairs(svg: str) -> set[tuple[str, str, str]]:
+    """Each ``door='alone'`` label's (g, c, content): the text itself draws ``color='c'``."""
+    labels = [
+        (round(float(x), 1), fill, text)
+        for x, _y, fill, text in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    ]
+    g_of_x = _label_g_map([x for x, _fill, _text in labels])
+    return {(g_of_x[x], _STACK_ORDER_FILL_TO_C[fill], text) for x, fill, text in labels}
+
+
+def _interactive_alone_label_pairs(chart: Any) -> set[tuple[str, str, str]]:
+    """Interactive twin of :func:`_alone_label_pairs`, reading the text nodes' own ``color``."""
+    nodes = [
+        (round(n["x"], 1), n["style"]["color"], n["content"])
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+        if batch["kind"] == "text"
+        for n in batch["nodes"]
+        if "content" in n
+    ]
+    g_of_x = _label_g_map([x for x, _color, _content in nodes])
+    return {
+        (g_of_x[x], _STACK_ORDER_RGB_TO_C[(color["r"], color["g"], color["b"])], content)
+        for x, color, content in nodes
+    }
+
+
+def _beside_bars_label_pairs(svg: str) -> set[tuple[str, str, str]]:
+    """Each ``door='beside-bars'`` label's (g, c, content): a text layer beside the host bars
+
+    inherits no color of its own, so c is read off the bar segment sitting
+    at the label's exact position instead (center x, same y: an
+    ``anchor='top'`` stacked label sits at its segment's top, matching the
+    bar's own top).
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    segments = {
+        (round(float(r["x"]) + float(r["width"]) / 2, 1), round(float(r["y"]), 1)): r["fill"]
+        for r in data_bar_rects(mark_layer(svg))
+    }
+    labels = [
+        (round(float(x), 1), round(float(y), 1), text)
+        for x, y, fill, text in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    ]
+    g_of_x = _label_g_map([x for x, _y, _text in labels])
+    return {
+        (g_of_x[x], _STACK_ORDER_FILL_TO_C[segments[(x, y)]], text) for x, y, text in labels
+    }
+
+
+def _interactive_beside_bars_label_pairs(chart: Any) -> set[tuple[str, str, str]]:
+    """Interactive twin of :func:`_beside_bars_label_pairs`, matching bar and text nodes by position."""
+    bar_fills: dict[tuple[float, float], tuple[int, int, int]] = {}
+    labels: list[tuple[float, float, str]] = []
+    for panel in _quiet(lambda: _scene(chart))["panels"]:
+        for batch in panel["marks"]:
+            if batch["kind"] == "bar":
+                for n in batch["nodes"]:
+                    center = round(n["x"] + n["w"] / 2, 1)
+                    fill = n["style"]["fill"]
+                    bar_fills[(center, round(n["y"], 1))] = (fill["r"], fill["g"], fill["b"])
+            elif batch["kind"] == "text":
+                for n in batch["nodes"]:
+                    if "content" in n:
+                        labels.append((round(n["x"], 1), round(n["y"], 1), n["content"]))
+    g_of_x = _label_g_map([x for x, _y, _content in labels])
+    return {
+        (g_of_x[x], _STACK_ORDER_RGB_TO_C[bar_fills[(x, y)]], content) for x, y, content in labels
+    }
+
+
+def _label_segment_scale_factors(svg: str) -> list[float]:
+    """Each stacked label's content, paired to its own bar segment by position, as a height/value ratio.
+
+    Every row shares one linear y scale from a zero baseline, so a
+    segment's pixel height is proportional to its OWN row's value,
+    regardless of what any other stacked row's value is. The ratio
+    (height / label content) is the same constant for every row when the
+    label prints its own value; it is NOT constant when a label prints the
+    cumulative stack top instead (a different, value-dependent distortion
+    per segment).
+    """
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    segments = sorted(
+        (round(float(r["x"]) + float(r["width"]) / 2, 1), float(r["y"]), float(r["height"]))
+        for r in data_bar_rects(mark_layer(svg))
+    )
+    labels = sorted(
+        (round(float(x), 1), float(y), text)
+        for x, y, fill, text in _LABEL.findall(svg)
+        if fill != _CHROME_TEXT
+    )
+    assert len(labels) == len(segments)
+    return [
+        sh / float(content)
+        for (_lx, _ly, content), (_sx, _sy, sh) in zip(labels, segments, strict=True)
+    ]
+
+
+@pytest.mark.parametrize("door", ["alone", "beside-bars"])
+def test_a_stacked_labels_text_prints_its_own_value_not_the_stack_top(door):
+    """``mark_text(position=fm.Stack())`` prints each row's own value, as ggplot2's position_stack does.
+
+    The stacked *position* is unchanged (pinned by
+    ``test_a_stacked_label_sits_on_its_own_segment``); only the printed
+    content differs. Static and interactive agree. Rejects printing the
+    cumulative stack top, which would distort the height/content ratio
+    differently per segment instead of leaving it constant, on a text mark
+    carrying its own ``Stack()`` position and on one attached beside
+    stacked bars.
+    """
+    text = (
+        fm.Chart(_STACK_ORDER_ROWS)
+        .mark_text(position=fm.Stack())
+        .encode(x="g", y="y", text="y", color="c")
+    )
+    if door == "alone":
+        chart = text
+    else:
+        bars = (
+            fm.Chart(_STACK_ORDER_ROWS).mark_bar(position=fm.Stack()).encode(x="g", y="y", color="c")
+        )
+        chart = bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
+    svg = _quiet(chart.to_svg)
+    assert _stacked_label_contents(svg) == ["1", "2", "3", "4"]
+
+    #: Ground truth: row 0 (g=a, c=q, y=1), row 1 (g=a, c=p, y=2),
+    #: row 2 (g=b, c=p, y=3), row 3 (g=b, c=q, y=4).
+    expected_pairs = {("a", "q", "1"), ("a", "p", "2"), ("b", "p", "3"), ("b", "q", "4")}
+    if door == "alone":
+        assert _alone_label_pairs(svg) == expected_pairs
+        assert _interactive_alone_label_pairs(chart) == expected_pairs
+    else:
+        scale_factors = _label_segment_scale_factors(svg)
+        assert scale_factors == pytest.approx([scale_factors[0]] * len(scale_factors), rel=1e-3)
+        assert _beside_bars_label_pairs(svg) == expected_pairs
+        assert _interactive_beside_bars_label_pairs(chart) == expected_pairs
+
+
+def _interactive_stacked_label_contents(chart: Any) -> list[str]:
+    """Interactive twin of :func:`_stacked_label_contents`: every text node's own content, sorted."""
+    return sorted(
+        n["content"]
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+        if batch["kind"] == "text"
+        for n in batch["nodes"]
+        if "content" in n
+    )
+
+
+def test_a_stacked_label_on_a_null_row_prints_nothing():
+    """A stacked label's null row prints no content, on either door, matching its ``Dodge()`` twin.
+
+    Static and interactive agree. Rejects mapping a null's own-value
+    companion column to ``0`` (the cumulative-sum reading that would make
+    a null row print ``"0"`` instead of staying blank).
+    """
+    rows = _STACK_ORDER_ROWS.with_columns(
+        y=pl.Series([1.0, None, 3.0, 4.0]),
+    )
+    dodge_text = (
+        fm.Chart(rows).mark_text(position=fm.Dodge()).encode(x="g", y="y", text="y", color="c")
+    )
+    stack_text = (
+        fm.Chart(rows).mark_text(position=fm.Stack()).encode(x="g", y="y", text="y", color="c")
+    )
+    for door in ("alone", "beside-bars"):
+        if door == "alone":
+            dodge_chart, stack_chart = dodge_text, stack_text
+        else:
+            dodge_bars = fm.Chart(rows).mark_bar(position=fm.Dodge()).encode(x="g", y="y", color="c")
+            stack_bars = fm.Chart(rows).mark_bar(position=fm.Stack()).encode(x="g", y="y", color="c")
+            dodge_chart = dodge_bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
+            stack_chart = stack_bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
+        dodge_svg = _quiet(dodge_chart.to_svg)
+        stack_svg = _quiet(stack_chart.to_svg)
+        assert _stacked_label_contents(stack_svg) == _stacked_label_contents(dodge_svg) == [
+            "1",
+            "3",
+            "4",
+        ]
+        assert (
+            _interactive_stacked_label_contents(stack_chart)
+            == _interactive_stacked_label_contents(dodge_chart)
+            == ["1", "3", "4"]
+        )
+
+
+_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
+
+
+def _title_entries(svg: str) -> list[dict[str, str]]:
+    """Each static ``<title>``'s fields as a name->value dict, one dict per title.
+
+    A duplicate name inside one title (the dedup bug this reader guards
+    against) raises here rather than silently collapsing into one key.
+    """
+    out = []
+    for title in _TITLE_RE.findall(svg):
+        fields: dict[str, str] = {}
+        for entry in title.split(", "):
+            name, _, value = entry.partition(": ")
+            assert name not in fields, f"duplicate {name!r} entry in one <title>: {title!r}"
+            fields[name] = value
+        out.append(fields)
+    return out
+
+
+def _interactive_tooltip_entries(chart: Any) -> list[dict[str, str]]:
+    """Each interactive tooltip's fields as a name->value dict, one dict per row.
+
+    Tooltips are carried on ``batch["tooltips"]``, row-aligned with
+    ``batch["nodes"]`` by index -- not on each node itself.
+    """
+    out = []
+    for panel in _quiet(lambda: _scene(chart))["panels"]:
+        for batch in panel["marks"]:
+            for t in batch.get("tooltips") or []:
+                fields: dict[str, str] = {}
+                for f in t["fields"]:
+                    assert f["name"] not in fields, f"duplicate {f['name']!r} entry: {t['fields']}"
+                    fields[f["name"]] = f["value"]
+                out.append(fields)
+    return out
+
+
+def _tooltip_values(chart: Any, field: str) -> list[str]:
+    """Every *field* value *chart*'s tooltip entries hold, static and interactive, sorted and equal.
+
+    A null row's value is blank (kept, as ``""``) or the row carries no
+    entry for *field* at all (skipped); either way each entry holds *field*
+    at most once, enforced by the two entry readers above.
+    """
+    static = sorted(d[field] for d in _title_entries(_quiet(chart.to_svg)) if field in d)
+    interactive = sorted(d[field] for d in _interactive_tooltip_entries(chart) if field in d)
+    assert static == interactive
+    return static
+
+
+def test_a_non_positional_channel_reads_the_rows_own_value_under_a_position_adjustment():
+    """A tooltip or color channel bound to the adjusted field reads the row's own value.
+
+    Compared against the ``fm.Dodge()`` twin, which never rewrites the
+    field in place, so its tooltip/color values ARE each row's own value
+    by construction. Covers ``Stack()`` (bar/point/text with ``tooltip``,
+    and a bar's own ``color``) and data-space ``Jitter()`` (``tooltip``,
+    on the same continuous field it jitters).
+    """
+    rows = _STACK_ORDER_ROWS.with_columns(y=pl.Series([1.0, 2.0, None, 4.0]))
+
+    for mark in ("bar", "point", "text"):
+        extra = {"text": "y"} if mark == "text" else {}
+        stack_chart = getattr(fm.Chart(rows), f"mark_{mark}")(position=fm.Stack()).encode(
+            x="g", y="y", color="c", tooltip="y", **extra
+        )
+        dodge_chart = getattr(fm.Chart(rows), f"mark_{mark}")(position=fm.Dodge()).encode(
+            x="g", y="y", color="c", tooltip="y", **extra
+        )
+        # Blanks dropped before comparing: a null row's own value is blank
+        # under both, but a stacked mark still draws a zero-height ghost for
+        # it (one blank title) while a dodged mark draws none at all (no
+        # title) -- a separate, already-pinned difference in whether a null
+        # row's mark exists at all, not in what a present row's value is.
+        non_null_stack = [v for v in _tooltip_values(stack_chart, "y") if v != ""]
+        non_null_dodge = [v for v in _tooltip_values(dodge_chart, "y") if v != ""]
+        assert non_null_stack == non_null_dodge == ["1", "2", "4"]
+
+    # A bar's own color, bound to the stacked field: each rect's fill
+    # follows its own row's value, giving 4 distinct fills (as the Dodge
+    # twin's does), not the 2 cumulative stack tops it would give if color
+    # read the overwritten column. No null here: a null row's own-color
+    # ghost segment is a separate question from whether a non-null row's
+    # color reads its own value.
+    stack_color = (
+        fm.Chart(_STACK_ORDER_ROWS)
+        .mark_bar(position=fm.Stack())
+        .encode(x="g", y="y", color="y", detail="c")
+    )
+    dodge_color = (
+        fm.Chart(_STACK_ORDER_ROWS)
+        .mark_bar(position=fm.Dodge())
+        .encode(x="g", y="y", color="y", detail="c")
+    )
+    from tests._svg_rects import data_bar_rects, mark_layer
+
+    stack_fills = {r["fill"] for r in data_bar_rects(mark_layer(_quiet(stack_color.to_svg)))}
+    dodge_fills = {r["fill"] for r in data_bar_rects(mark_layer(_quiet(dodge_color.to_svg)))}
+    assert stack_fills == dodge_fills
+    assert len(stack_fills) == 4
+
+    # Jitter's data-space branch only rewrites a CONTINUOUS axis in place
+    # (a categorical axis jitters in pixel space, untouched by the own-value
+    # retarget); the tooltip is bound to that same continuous field, so a
+    # duplicate or a jittered reading would show here.
+    jitter_chart = (
+        fm.Chart(df)
+        .mark_point(position=fm.Jitter(width=0.3, seed=2))
+        .encode(x="v", y="y", tooltip="v")
+    )
+    unjittered_chart = fm.Chart(df).mark_point().encode(x="v", y="y", tooltip="v")
+    assert _tooltip_values(jitter_chart, "v") == _tooltip_values(unjittered_chart, "v")
+
+
+#: Two rows, one shared ``g``, two distinct ``v``/``c`` values: enough to
+#: give a ``Stack``, a continuous ``Dodge`` or a data-space ``Jitter`` real
+#: work to do, and small enough that each row's own value is unambiguous.
+_SELECTION_DEDUP_ROWS = pl.DataFrame({"g": ["a", "a"], "v": [60.0, 40.0], "c": ["p", "q"]})
+
+#: Each case's chart, built with ``x``/``y``/the position adjustment already
+#: set; the test adds ``tooltip=``/the selection itself.
+_SELECTION_DEDUP_CASES: dict[str, Callable[[], fm.Chart]] = {
+    "stack": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
+    .mark_bar(position=fm.Stack(by="c"))
+    .encode(x="g", y="v", color="c"),
+    "dodge-continuous": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
+    .mark_point(position=fm.Dodge(by="c"))
+    .encode(x="v", y="v", color="c"),
+    "jitter-data-space": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
+    .mark_point(position=fm.Jitter(width=0.5, seed=1))
+    .encode(x="v", y="v"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SELECTION_DEDUP_CASES))
+def test_a_field_selection_dedupes_against_its_tooltip_and_reads_the_own_value(case):
+    """A selection on an adjusted field never doubles its tooltip entry, with or without ``tooltip=``.
+
+    Covers ``Stack``, continuous ``Dodge`` and data-space ``Jitter``,
+    static and interactive: ``tooltip='v'`` plus a field selection on
+    ``v`` holds exactly one ``v`` entry, the row's own value; a selection
+    alone (no ``tooltip=``) gives the same one entry. Rejects a second,
+    unretargeted entry (a duplicate '60'/'100'-style reading) and rejects
+    the selection-only entry reading the adjusted position instead of the
+    row's own value.
+    """
+    build = _SELECTION_DEDUP_CASES[case]
+
+    with_tooltip = build().encode(tooltip="v").add_selection(fm.selection_point(fields=["v"]))
+    selection_only = build().add_selection(fm.selection_point(fields=["v"]))
+
+    for chart in (with_tooltip, selection_only):
+        svg = _quiet(chart.to_svg)
+        static_entries = _title_entries(svg)
+        interactive_entries = _interactive_tooltip_entries(chart)
+        assert len(static_entries) == len(interactive_entries) == 2
+        # _title_entries/_interactive_tooltip_entries each raise on a
+        # duplicate key within one entry, so reaching this point already
+        # proves "exactly one" 'v' per row; this checks its VALUE too.
+        assert sorted(d["v"] for d in static_entries) == ["40", "60"]
+        assert sorted(d["v"] for d in interactive_entries) == ["40", "60"]
+
+
+def test_a_stacked_keys_interactive_read_the_rows_own_value():
+    """``key=`` on a stacked field reads each row's own value, not the cumulative stack top.
+
+    A sibling's height changing a later row's cumulative position must not
+    re-key an earlier row's mark (the whole point of a key: a stable row
+    identity across data updates).
+    """
+    chart = (
+        fm.Chart(_SELECTION_DEDUP_ROWS)
+        .mark_bar(position=fm.Stack(by="c"))
+        .encode(x="g", y="v", color="c", key="v")
+    )
+    keys = [
+        key
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+        for key in (batch.get("keys") or [])
+    ]
+    assert sorted(keys) == ["40", "60"]
+
+
 def _binned_mark(mark: str, position: Any, **encoding: Any) -> fm.Chart:
     chart = getattr(fm.Chart(_GROUP_ROWS), f"mark_{mark}")(position=position)
     return chart.encode(x="g", y="mean(y)", **encoding)
@@ -7332,6 +7737,148 @@ def test_a_data_aware_sort_reads_the_establishing_layers_own_rows(case):
     assert _x_tick_labels(_quiet(lambda: build().to_svg())) == order
 
 
+#: g's groups differ in size (a: 6, b: 2, c: 4), so mean, sum and count each
+#: give a different order: mean b(8) > c(5) > a(3); sum c(20) > a(18) > b(16);
+#: count a(6) > c(4) > b(2). ``f`` alternates evenly within every group, so a
+#: facet panel's per-group order matches the chart-wide one.
+_AGG_SORT_ROWS = pl.DataFrame(
+    {
+        "g": ["a"] * 6 + ["b"] * 2 + ["c"] * 4,
+        "y": [3.0] * 6 + [8.0] * 2 + [5.0] * 4,
+        "f": ["m", "n"] * 6,
+    }
+)
+
+
+def _agg_bar(sort: Any, rows: pl.DataFrame = _AGG_SORT_ROWS) -> fm.Chart:
+    """A bar whose x sorts by the chart's own ``mean(y)``, not a raw column."""
+    return fm.Chart(rows).mark_bar().encode(x=fm.X("g", sort=sort), y="mean(y)")
+
+
+def _agg_rule(rows: pl.DataFrame = _AGG_SORT_ROWS) -> fm.Chart:
+    """A sibling that draws no x, so it reads the bar's established order."""
+    return fm.Chart(rows).mark_rule().encode(y="y")
+
+
+#: Each door, building the chart for a given sort spec.
+_AGG_SORT_DOORS: dict[str, Callable[[Any], fm.Chart]] = {
+    "F": lambda sort: _agg_bar(sort),
+    "+": lambda sort: _agg_bar(sort) + _agg_rule(),
+    "L": lambda sort: _agg_bar(sort).layer(fm.Layer(mark="rule", encoding={"y": "y"})),
+    "LCs": lambda sort: fm.LayerChart(_agg_bar(sort), _agg_rule()),
+    "LCm": lambda sort: fm.LayerChart(_agg_bar(sort), _agg_rule())._build_merged(),
+    "Fc": lambda sort: _agg_bar(sort).facet("f"),
+    "Fc-layered": lambda sort: (_agg_bar(sort) + _agg_rule()).facet("f"),
+}
+
+#: Each sort form, and the category order it gives over the chart's own aggregate.
+#: The channel shorthand (``"-y"``/``"y"``) reads the chart's own drawn
+#: aggregate (``mean``); a sort-field object naming the raw column defaults
+#: to ``sum`` (Vega-Lite's ``EncodingSortField`` default), independent of
+#: the chart's own aggregate, unless it names its own ``op``.
+_AGG_SORT_SPECS: dict[str, tuple[Any, list[str]]] = {
+    "descending": ("-y", ["b", "c", "a"]),
+    "ascending": ("y", ["a", "c", "b"]),
+    "named-field": ({"field": "mean_y", "order": "descending"}, ["b", "c", "a"]),
+    "raw-field-mean": ({"field": "y", "op": "mean", "order": "descending"}, ["b", "c", "a"]),
+    "raw-field-default-op": ({"field": "y", "order": "descending"}, ["c", "a", "b"]),
+    "raw-field-sum": ({"field": "y", "op": "sum", "order": "descending"}, ["c", "a", "b"]),
+    "raw-field-count": ({"field": "y", "op": "count", "order": "descending"}, ["a", "c", "b"]),
+}
+
+
+def _interactive_x_tick_labels(chart: Any) -> list[str]:
+    """The flat (or first facet panel's) bottom x axis tick labels, off the interactive scene."""
+    panel = _scene(chart)["panels"][0]
+    ticks = [
+        n
+        for n in panel["axes"]
+        if n["type"] == "text"
+        and n["style"].get("anchor") == "middle"
+        and n["style"].get("angle", 0.0) == 0.0
+        and n["style"].get("font_weight") == "normal"
+    ]
+    return [t["content"] for t in ticks]
+
+
+@pytest.mark.parametrize("door", sorted(_AGG_SORT_DOORS))
+@pytest.mark.parametrize("variant", sorted(_AGG_SORT_SPECS))
+def test_a_data_aware_sort_reads_the_aggregate_the_establishing_layer_draws(variant, door):
+    """``X("g", sort=...)`` beside ``y="mean(y)"`` sorts by the chart's own aggregate.
+
+    Covers the channel shorthand (descending and ascending, which reads the
+    chart's own drawn aggregate), a sort-field object naming the
+    aggregate's own output column, and a sort-field object naming the raw
+    field with its own op (mean, the default sum, and count, each giving a
+    different order), on flat, ``+``, ``Chart.layer``, static and
+    interactive ``LayerChart``, and flat and layered facet, with no
+    fallback warning raised on any of them. Rejects a sort that reads only
+    the pre-statistic rows, which lack the aggregate's own output column
+    and have no per-field rule for a raw-field sort beside an aggregate,
+    falling back to insertion order or miscounting a grouped op.
+    """
+    sort, order = _AGG_SORT_SPECS[variant]
+    build = _AGG_SORT_DOORS[door]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build(sort)
+        svg = chart.to_svg()
+    assert caught == []
+    assert _x_tick_labels(svg) == order
+    with warnings.catch_warnings(record=True) as caught_interactive:
+        warnings.simplefilter("always")
+        interactive_order = _interactive_x_tick_labels(chart)
+    assert caught_interactive == []
+    assert interactive_order == order
+
+
+#: A legend sort naming the raw field with its own ``op``, independent of
+#: the chart's own ``mean(y)``.
+_LEGEND_SORT = {"field": "y", "op": "mean", "order": "descending"}
+
+#: Each (channel, mark) pair and door, encoding the legend sort beside the
+#: chart's own aggregate: a colored bar, a shaped point, each beside a rule
+#: sharing its rows for the ``+`` door.
+_LEGEND_SORT_CASES: dict[tuple[str, str], Callable[[], fm.Chart]] = {
+    ("color", "F"): lambda: mk(
+        "bar", _AGG_SORT_ROWS, x="g", y="mean(y)", color=fm.Color("g", sort=_LEGEND_SORT)
+    ),
+    ("color", "+"): lambda: (
+        mk("bar", _AGG_SORT_ROWS, x="g", y="mean(y)", color=fm.Color("g", sort=_LEGEND_SORT))
+        + mk("rule", _AGG_SORT_ROWS, y="y")
+    ),
+    ("shape", "F"): lambda: mk(
+        "point", _AGG_SORT_ROWS, x="g", y="mean(y)", shape=fm.Shape("g", sort=_LEGEND_SORT)
+    ),
+    ("shape", "+"): lambda: (
+        mk("point", _AGG_SORT_ROWS, x="g", y="mean(y)", shape=fm.Shape("g", sort=_LEGEND_SORT))
+        + mk("rule", _AGG_SORT_ROWS, y="y")
+    ),
+}
+
+
+@pytest.mark.parametrize("channel,door", sorted(_LEGEND_SORT_CASES))
+def test_a_legend_sort_reads_the_raw_field_beside_an_aggregate(channel, door):
+    """A legend's ``sort={'field': ..., 'op': 'mean', ...}`` reads the raw rows, not the drawn aggregate.
+
+    The chart's own y is ``mean(y)`` but the legend sort names the same raw
+    field with its own op, giving the group order by that op's result
+    (b, c, a by mean) rather than falling back to insertion order (a, b, c).
+    """
+    build = _LEGEND_SORT_CASES[(channel, door)]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        svg = chart.to_svg()
+    assert caught == []
+    assert legend_set(svg)["g"] == ("b", "c", "a")
+    with warnings.catch_warnings(record=True) as caught_interactive:
+        warnings.simplefilter("always")
+        interactive_legends = interactive_legend_set(chart)
+    assert caught_interactive == []
+    assert interactive_legends["g"] == ("b", "c", "a")
+
+
 def test_a_layer_charts_reactive_name_collision_is_refused_alike_on_every_route():
     """A name that is a variable parameter on one member and a selection on another.
 
@@ -8205,6 +8752,34 @@ def test_a_layer_chart_members_selection_reaches_every_member_on_the_static_over
     expected = _title_texts(_quiet(lambda: other().to_svg()))
     assert _title_texts(overlay) == expected
     assert sum(expected.values()) > 1
+
+
+#: Each case, and the selected fields ({"c"} or {"g"}) each member's
+#: interactive tooltip carries once the selection has reached it.
+_SELECTION_REACH_EXPECTED: dict[str, tuple[set[str], set[str]]] = {
+    "declared-on-the-second": ({"c"}, {"c"}),
+    "declared-on-the-first": ({"c"}, {"c"}),
+    "other-member-lacks-the-field": ({"c"}, set()),
+    "one-on-each": ({"c", "g"}, {"c", "g"}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SELECTION_MEMBERS))
+def test_a_layer_chart_members_selection_reaches_every_member_interactively(case):
+    """LCx lists a field selection's field on every member's tooltip whose rows carry it.
+
+    The same four cases as the static overlay, read off the merged
+    interactive scene's tooltip fields rather than ``<title>`` text. A
+    guard, not a regression test: rejects the field reaching a sibling
+    whose rows lack it (``other-member-lacks-the-field``), and rejects it
+    reaching only the member that declared it.
+    """
+    a, b = _SELECTION_MEMBERS[case]
+    expected_a, expected_b = _SELECTION_REACH_EXPECTED[case]
+    fields = _quiet(lambda: interactive_tooltip_fields(fm.LayerChart(a(), b())))
+    assert len(fields) == 2
+    assert fields[0] & {"c", "g"} == expected_a
+    assert fields[1] & {"c", "g"} == expected_b
 
 
 # ---------------------------------------------------------------------------
@@ -11928,6 +12503,186 @@ def test_a_faceted_chart_with_no_rows_draws_no_facet_panel_and_warns():
     assert scene["panels"] == []
 
 
+def test_a_layer_charts_empty_member_warns_nothing_when_a_sibling_draws():
+    """A static ``LayerChart`` with one empty member and one that draws warns nothing.
+
+    The static overlay renders each member through its own leaf and judges
+    the group of leaves together: a sibling that draws suppresses an empty
+    leaf's own warning, the same as the merged flat chart (used by
+    ``Chart.layer``/``+`` and every interactive render) already judges every
+    layer as one chart. Rejects warning once per empty member when every
+    member is empty (the group still warns, but once, like one chart does),
+    and rejects an ``hconcat`` sibling (a separate chart, not a layer)
+    suppressing the same warning.
+    """
+    empty = P().transform(_nothing_above())
+    full = P()
+    one_draws = fm.LayerChart(empty, full)
+    svg, caught = _warned(one_draws.to_svg)
+    assert caught == []
+    assert sum(census(svg).values()) > 0
+    _scene_out, caught_interactive = _warned(lambda: _scene(one_draws))
+    assert caught_interactive == []
+
+    all_empty = fm.LayerChart(empty, P().transform(_nothing_above()))
+    _svg, caught_all = _warned(all_empty.to_svg)
+    assert caught_all.count(_NO_ROWS_WARNING) == 1
+    _scene_all, caught_all_interactive = _warned(lambda: _scene(all_empty))
+    assert caught_all_interactive.count(_NO_ROWS_WARNING) == 1
+
+    all_empty_three = fm.LayerChart(
+        empty, P().transform(_nothing_above()), P(df2).transform(_nothing_above())
+    )
+    _svg3, caught_all_three = _warned(all_empty_three.to_svg)
+    assert caught_all_three.count(_NO_ROWS_WARNING) == 1
+    _scene3, caught_all_three_interactive = _warned(lambda: _scene(all_empty_three))
+    assert caught_all_three_interactive.count(_NO_ROWS_WARNING) == 1
+
+    hc = fm.hconcat(empty, full)
+    _hc_svg, caught_hc = _warned(hc.to_svg)
+    assert caught_hc.count(_NO_ROWS_WARNING) == 1
+
+    hc_all_empty = fm.hconcat(all_empty, P())
+    _hc2_svg, caught_hc2 = _warned(hc_all_empty.to_svg)
+    assert caught_hc2.count(_NO_ROWS_WARNING) == 1
+
+
+# Zero-row data (a source with no rows at all, not a filter that emptied one)
+# draws its frame and axes and warns once on every route, the same way
+# filter-emptied data already does.
+
+#: Zero-row twin of ``df``, carrying the schema but no rows.
+_Z = df.head(0)
+
+#: Each door over zero-row data, building its chart.
+_ZERO_ROW_DOORS: dict[str, Callable[[], Any]] = {
+    "F": lambda: P(_Z),
+    "+": lambda: P(_Z) + P(_Z, y="r"),
+    "L": lambda: P(_Z).layer(fm.Layer(mark="line", encoding={"x": "v", "y": "y"})),
+    "LCs": lambda: fm.LayerChart(P(_Z), P(_Z, y="y")),
+    "LCm": lambda: fm.LayerChart(P(_Z), P(_Z, y="y"), resolve={"y": "independent"}),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_ZERO_ROW_DOORS))
+def test_zero_row_data_draws_its_frame_and_warns_once_on_every_route(door):
+    """Zero-row data draws its frame and axes and warns once, on every layering door.
+
+    Static and interactive agree. Rejects a blank placeholder comment with
+    no warning, and rejects a typed all-empty refusal that leaves a
+    ``LayerChart`` unrendered.
+    """
+    chart = _ZERO_ROW_DOORS[door]()
+    svg, caught = _warned(chart.to_svg)
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert len(_clip_groups(_svg_root(svg))) == (2 if door == "LCs" else 1)
+    assert sum(census(svg).values()) == 0
+    assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
+    scene, caught = _warned(lambda: _scene(chart))
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert len(scene["panels"]) == 1
+    assert sum(len(b["nodes"]) for p in scene["panels"] for b in p["marks"]) == 0
+
+
+@pytest.mark.parametrize("door", sorted(_ZERO_ROW_DOORS))
+def test_zero_row_data_renders_as_its_filter_emptied_twin(door):
+    """A zero-row source and a filter-emptied one render byte-identically, on every door.
+
+    Both reach the same empty-batch render path, so a zero-row chart's SVG
+    equals the same door built over ``df`` with a filter that drops every
+    row, and their interactive scenes' panels are equal.
+    """
+    zero_chart = _ZERO_ROW_DOORS[door]()
+    if door == "F":
+        filtered_chart = P().transform(_nothing_above())
+    elif door == "+":
+        filtered_chart = (P() + P(y="r")).transform(_nothing_above())
+    elif door == "L":
+        filtered_chart = P().transform(_nothing_above()).layer(
+            fm.Layer(mark="line", encoding={"x": "v", "y": "y"})
+        )
+    elif door == "LCs":
+        filtered_chart = fm.LayerChart(
+            P().transform(_nothing_above()), P(y="y").transform(_nothing_above())
+        )
+    else:
+        filtered_chart = fm.LayerChart(
+            P().transform(_nothing_above()),
+            P(y="y").transform(_nothing_above()),
+            resolve={"y": "independent"},
+        )
+    zero_svg, _ = _warned(zero_chart.to_svg)
+    filtered_svg, _ = _warned(filtered_chart.to_svg)
+    assert zero_svg == filtered_svg
+    zero_scene, _ = _warned(lambda: _scene(zero_chart))
+    filtered_scene, _ = _warned(lambda: _scene(filtered_chart))
+    assert zero_scene["panels"] == filtered_scene["panels"]
+
+
+def test_zero_row_null_typed_columns_draw_the_frame():
+    """A Null-dtype zero-row frame (no column ever typed) draws its frame too."""
+    null_df = pl.DataFrame({"v": [], "y": []})
+    chart = fm.Chart(null_df).mark_point().encode(x="v", y="y")
+    for build in (chart, fm.LayerChart(chart, chart)):
+        svg, caught = _warned(build.to_svg)
+        assert caught.count(_NO_ROWS_WARNING) == 1
+        assert sum(census(svg).values()) == 0
+        assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
+        scene, caught = _warned(lambda: _scene(build))
+        assert caught.count(_NO_ROWS_WARNING) == 1
+
+
+def test_a_faceted_chart_over_zero_rows_warns_as_when_filtered():
+    """A ``.facet()`` over genuinely zero-row data warns, as a filter-emptied facet does."""
+    chart = P(_Z).facet("g")
+    svg, caught = _warned(chart.to_svg)
+    assert caught.count(_NO_FACET_ROWS_WARNING) == 1
+    assert _clip_groups(_svg_root(svg)) == []
+    scene, caught = _warned(lambda: _scene(chart))
+    assert caught.count(_NO_FACET_ROWS_WARNING) == 1
+    assert scene["panels"] == []
+
+
+def test_a_layer_charts_mixed_empty_members_warn_once():
+    """One zero-row member beside a filter-emptied one still warns exactly once, either route."""
+    mixed = fm.LayerChart(P(_Z), P().transform(_nothing_above()))
+    svg, caught = _warned(mixed.to_svg)
+    assert caught.count(_NO_ROWS_WARNING) == 1
+    _scene_out, caught_interactive = _warned(lambda: _scene(mixed))
+    assert caught_interactive.count(_NO_ROWS_WARNING) == 1
+
+    one_draws = fm.LayerChart(P(_Z), P())
+    svg2, caught2 = _warned(one_draws.to_svg)
+    assert caught2 == []
+    assert census(svg2) == census(_quiet(P().to_svg))
+
+
+def test_a_grid_of_zero_row_charts_still_refuses():
+    """A grid composition of zero-row children keeps refusing with its exact message.
+
+    Zero-row data draws a frame on every non-grid door, but a grid cell has
+    no data of its own to size a frame from (the sized-hole lowering
+    requires at least one child with rows), so the all-empty grid refusal is
+    unchanged.
+    """
+    with pytest.raises(
+        ValueError, match=r"ConcatChart: every child's data is empty; nothing to render"
+    ):
+        fm.concat(P(_Z), P(_Z), columns=2).to_svg()
+    with pytest.raises(
+        ValueError, match=r"HConcatChart: every child's data is empty; nothing to render"
+    ):
+        fm.hconcat(P(_Z), P(_Z)).to_svg()
+    with pytest.raises(
+        ValueError, match=r"ConcatChart: every child's data is empty; nothing to render"
+    ):
+        fm.concat(P(_Z), P(_Z), columns=2).interactive()
+    with pytest.raises(
+        ValueError, match=r"HConcatChart: every child's data is empty; nothing to render"
+    ):
+        fm.hconcat(P(_Z), P(_Z)).interactive()
+
+
 # Facet panels come from the rows the layers draw, in the facet partition's
 # order whichever operand comes first, and a value no layer draws has no
 # panel.
@@ -12003,6 +12758,41 @@ def test_a_partial_facet_sort_says_which_values_it_left_unsorted(door):
     ]
     sums = df.group_by("c").agg(pl.col("y").sum()).sort("y", descending=True)["c"].to_list()
     assert _facet_titles(svg) == [*sums, "s"]
+
+
+#: Per ``g`` panel, ``f``'s row count falls as its DISTINCT-value count
+#: rises: a=6 rows/1 distinct, b=2 rows/2 distinct, c=4 rows/3 distinct.
+#: Counting observations (the pre-statistic rows) orders a, c, b; counting
+#: ``f``'s drawn (post-aggregation, one row per distinct value) rows would
+#: instead order c, b, a -- the opposite order, not a tie, so misreading
+#: the grain is a real discriminating difference, not an accident of ties.
+_FACET_COUNT_SORT_ROWS = pl.DataFrame(
+    {
+        "g": ["a"] * 6 + ["b"] * 2 + ["c"] * 4,
+        "y": [3.0] * 6 + [8.0] * 2 + [5.0] * 4,
+        "f": ["m"] * 6 + ["m", "n"] + ["m", "n", "o", "p"],
+    }
+)
+
+
+def test_a_facet_count_sort_counts_observations_not_the_drawn_rows():
+    """``facet(sort={'field': ..., 'op': 'count'})`` counts raw rows, even when the field is also drawn.
+
+    ``f`` is both the chart's own ``x`` (so the drawn, post-aggregation
+    rows carry a column named ``f`` too) and the sort's field: a sort that
+    read the drawn rows whenever the field happens to be present there
+    would count distinct ``f`` values per panel instead of observations,
+    giving the opposite panel order. Rejects that misreading.
+    """
+    chart = (
+        fm.Chart(_FACET_COUNT_SORT_ROWS)
+        .mark_bar()
+        .encode(x="f", y="mean(y)")
+        .facet("g", sort={"field": "f", "op": "count", "order": "descending"})
+    )
+    svg, caught = _warned(chart.to_svg)
+    assert caught == []
+    assert [t for t in chrome_text(svg) if t in {"a", "b", "c"}] == ["a", "c", "b"]
 
 
 # A step written on a composition that drops a column an operand's statistic
@@ -13312,6 +14102,263 @@ def test_a_line_follows_the_groupby_of_a_step_the_user_wrote(case, output):
     else:
         drawn = sum(_scene_line_counts(_quiet(lambda: _scene(build()))))
     assert drawn == lines
+
+
+#: 4 rows per (g, c) cell (16 rows total), so faceting by ``g`` still leaves
+#: each panel with 4 rows per ``c`` group -- enough for ``smooth-ci``'s
+#: confidence band to compute on every panel, not just on the whole chart.
+_OWN_GROUPBY_ROWS = pl.DataFrame(
+    {
+        "g": ["a"] * 8 + ["b"] * 8,
+        "c": (["p"] * 4 + ["q"] * 4) * 2,
+        "v": [1.0, 2.0, 3.0, 4.0] * 4,
+        "y": [
+            3.0, 4.2, 5.1, 6.3,
+            2.0, 1.3, 4.5, 3.8,
+            5.0, 6.5, 4.2, 7.1,
+            1.0, 3.3, 2.8, 4.6,
+        ],
+    }
+)
+
+
+def _own_groupby_smooth(ci: float | None = None) -> fm.Chart:
+    """``mark_smooth``'s own ``groupby=``, with no grouping channel bound."""
+    return (
+        fm.Chart(_OWN_GROUPBY_ROWS).mark_smooth(method="lm", ci=ci, groupby=["c"]).encode(x="v", y="y")
+    )
+
+
+def _own_groupby_density() -> fm.Chart:
+    return fm.Chart(_OWN_GROUPBY_ROWS).mark_density(groupby=["c"]).encode(x="v")
+
+
+#: Per case: a composite built from its own ``groupby=`` with no grouping
+#: channel bound, its static tag counts, and its interactive per-kind node
+#: counts, PER PANEL (``_OWN_GROUPBY_ROWS``'s two ``c`` groups, four rows
+#: each; faceting by ``g`` still leaves each panel with both ``c`` groups
+#: at four rows each, so every door's per-panel counts are the case's own,
+#: unchanged by faceting).
+_OWN_GROUPBY_NO_CHANNEL: dict[
+    str, tuple[Callable[[], fm.Chart], dict[str, int], dict[str, int]]
+] = {
+    "smooth": (_own_groupby_smooth, {"polyline": 2}, {"line": 2}),
+    "smooth-ci": (
+        lambda: _own_groupby_smooth(ci=0.95),
+        {"path": 2, "polyline": 2},
+        {"ribbon": 2, "line": 2},
+    ),
+    "density": (_own_groupby_density, {"path": 2}, {"area": 2}),
+    "smooth/color-control": (
+        lambda: _own_groupby_smooth().encode(color="c"),
+        {"polyline": 2},
+        {"line": 2},
+    ),
+}
+
+
+def _static_panel_tag_counts(svg: str) -> list[dict[str, int]]:
+    """Every panel's tag counts, reusing the one static per-panel reader (``_panel_tag_counts``)."""
+    return [_panel_tag_counts(counts) for counts in panel_census(svg)]
+
+
+def _interactive_panel_kind_counts(chart: Any) -> list[dict[str, int]]:
+    """Per panel, the interactive mark-batch kind->node-count map.
+
+    A batch with no nodes (an empty kind the scene still lists) is left
+    out, matching ``_static_panel_tag_counts``'s static side, which has no
+    equivalent "absent tag" entry to omit.
+    """
+    out = []
+    for panel in _quiet(lambda: _scene(chart))["panels"]:
+        counts: Counter = Counter()
+        for batch in panel["marks"]:
+            counts[batch["kind"]] += len(batch["nodes"])
+        out.append({kind: n for kind, n in counts.items() if n > 0})
+    return out
+
+
+#: Each door, wrapping a case's build function. ``+``/``LCs``/``LCm`` layer a
+#: plain ``P()`` beside the composite (8 circles, df's whole height), so
+#: those three panels' expected marks gain ``{"circle": 8}``; ``LCs`` renders
+#: through the static overlay tree while ``LCm`` forces the merged flat path
+#: statically too (``_build_merged()``), exercising both static mechanisms
+#: beside the always-merged interactive route. ``Fc`` facets by ``g`` (df's
+#: other grouping column, independent of ``c``), giving two panels each
+#: still holding both ``c`` groups.
+_OWN_GROUPBY_DOORS: dict[str, Callable[[Callable[[], fm.Chart]], fm.Chart]] = {
+    "F": lambda build: build(),
+    "+": lambda build: build() + P(),
+    "LCs": lambda build: fm.LayerChart(build(), P()),
+    "LCm": lambda build: fm.LayerChart(build(), P())._build_merged(),
+    "Fc": lambda build: build().facet("g"),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_OWN_GROUPBY_DOORS))
+@pytest.mark.parametrize("case", sorted(_OWN_GROUPBY_NO_CHANNEL))
+def test_a_composite_statistics_own_groupby_splits_its_line_ribbon_or_area_with_no_channel(
+    case, door
+):
+    """``mark_smooth``/``mark_density``'s own ``groupby=`` splits what it draws, even unbound.
+
+    The fit or density is already computed per group, and the series split
+    reads that same groupby behind the chart's own statistics marker, so
+    one line or area is drawn per group rather than joining every group's
+    rows into one, on every layering and facet door, static and
+    interactive. ``color="c"`` splits the same way through the channel
+    (the control case). Rejects reading only a lowered Aggregate's groupby
+    and never a declared ``Bin``'s (a declared ``Bin`` groupby splits too,
+    pinned by ``test_a_line_splits_by_the_groupby_its_bin_declares``), and
+    rejects doubling the split when a channel also covers the field.
+    """
+    build, marks, kinds = _OWN_GROUPBY_NO_CHANNEL[case]
+    chart = _OWN_GROUPBY_DOORS[door](build)
+    expected_marks = {**marks, "circle": 8} if door in ("+", "LCs", "LCm") else dict(marks)
+    expected_kinds = {**kinds, "point": 8} if door in ("+", "LCs", "LCm") else dict(kinds)
+    svg = _quiet(chart.to_svg)
+
+    if door == "Fc":
+        # Two independent facet panels, each still holding both `c` groups
+        # at four rows each (P() is not layered on this door).
+        assert _static_panel_tag_counts(svg) == [expected_marks, expected_marks]
+        assert _interactive_panel_kind_counts(chart) == [expected_kinds, expected_kinds]
+        return
+
+    # F/+/LCm render (or merge) to one panel; LCs's static overlay keeps the
+    # composite and P()'s layer as separate clip groups over the same rect
+    # (two panel entries), so the total across panels is what one chart
+    # draws -- interactive always merges LCs to one panel already.
+    total_static: Counter = Counter()
+    for panel_counts in _static_panel_tag_counts(svg):
+        total_static.update(panel_counts)
+    assert dict(total_static) == expected_marks
+
+    total_interactive: Counter = Counter()
+    for panel_counts in _interactive_panel_kind_counts(chart):
+        total_interactive.update(panel_counts)
+    assert dict(total_interactive) == expected_kinds
+
+
+_ROC_Y_PRED = np.random.default_rng(1).dirichlet([1.0, 1.0, 1.0], size=90)
+_ROC_Y_TRUE = [0, 1, 2] * 30
+
+
+def test_a_diagnostic_composites_lines_follow_their_grouping_channels():
+    """ROC/errorband-plus-line/``lmplot`` split their lines by the channel or grouping they declare.
+
+    These composites' own groupby is a grouping channel (class, hue) or the
+    chart's planner grouping, not an unbound own-``groupby=`` like
+    ``mark_smooth``/``mark_density`` above, so they are a different
+    provenance path through the same series split. Probed byte-identical
+    across every demo diagnostic and composite variant; this guard pins the
+    counts directly so a future provenance change cannot silently join them.
+    """
+    roc = fm.roc_chart(y_true=_ROC_Y_TRUE, y_pred=_ROC_Y_PRED)
+    roc_lines = sum(_scene_line_counts(_quiet(lambda: _scene(roc))))
+    assert roc_lines == 4  # 3 classes + the chance line
+
+    roc_averaged = fm.roc_chart(y_true=_ROC_Y_TRUE, y_pred=_ROC_Y_PRED, per_class=False)
+    roc_averaged_lines = sum(_scene_line_counts(_quiet(lambda: _scene(roc_averaged))))
+    assert roc_averaged_lines == 2  # averaged curve + the chance line
+
+    # h alternates every row (not every-other-pair), so each `g` value holds
+    # both h groups -- a fixture where h correlated 1:1 with g (e.g.
+    # `["x", "y"] * 4`, matching g's own `["a", "b"] * 4`) leaves each x-bin
+    # with only one h value and the composite draws nothing at all.
+    band_rows = df.with_columns(h=pl.Series(["x", "x", "y", "y"] * 2))
+    errorband_plus_line = mk(
+        "errorband", band_rows, x="g", y="y", color="h"
+    ) + mk("line", band_rows, x="g", y="mean(y)", color="h")
+    scene = _quiet(lambda: _scene(errorband_plus_line))
+    got: Counter = Counter()
+    for panel in scene["panels"]:
+        for batch in panel["marks"]:
+            got[batch["kind"]] += len(batch["nodes"])
+    assert dict(got) == {"ribbon": 2, "line": 2}
+
+    # Likewise, hue and col must vary independently so every col panel
+    # holds both hue values.
+    d = df.with_columns(h=pl.Series(["x", "y"] * 4), col=pl.Series(["m", "m", "n", "n"] * 2))
+    lmplot_chart = fm.lmplot(d, x="v", y="y", hue="h", col="col")
+    lmplot_lines = sum(_scene_line_counts(_quiet(lambda: _scene(lmplot_chart))))
+    assert lmplot_lines == 4  # 2 hue values x 2 col panels, one fit line each
+
+
+#: Each door, building a line over a binned x whose Bin declares its own
+#: groupby.
+_BIN_GROUPBY_DOORS: dict[str, Callable[[Any], fm.Chart]] = {
+    "F": lambda bin_: fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"),
+    "+": lambda bin_: (
+        fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()") + P()
+    ),
+    "L": lambda bin_: fm.Chart(df)
+    .mark_line()
+    .encode(x=fm.X("v", bin=bin_), y="count()")
+    .layer(fm.Layer(mark="point", encoding={"x": "v", "y": "y"})),
+    "LCs": lambda bin_: fm.LayerChart(
+        fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"), P()
+    ),
+    "LCm": lambda bin_: fm.LayerChart(
+        fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"), P()
+    )._build_merged(),
+    "Fc": lambda bin_: fm.Chart(df)
+    .mark_line()
+    .encode(x=fm.X("v", bin=bin_), y="count()")
+    .facet("g"),
+}
+
+
+@pytest.mark.parametrize("spelling", ["object", "dict"])
+@pytest.mark.parametrize("door", sorted(_BIN_GROUPBY_DOORS))
+def test_a_line_splits_by_the_groupby_its_bin_declares(door, spelling):
+    """A line over ``X(bin=Bin(groupby=[...]))`` splits by the Bin's own declared groupby.
+
+    Covers both spellings (``bin=fm.Bin('v', groupby=['c'])`` and
+    ``bin={'groupby': ['c']}``), on every layering door. The lowered Bin's
+    wire carries ``written_groupby`` naming the caller's own field. Rejects
+    the planner-kind rule, which read provenance from the step's TYPE
+    (Bin/Aggregate) rather than from who wrote the groupby, and so never
+    split a declared Bin groupby at all.
+    """
+    bin_ = fm.Bin("v", groupby=["c"]) if spelling == "object" else {"groupby": ["c"]}
+    build = _BIN_GROUPBY_DOORS[door]
+    chart = build(bin_)
+    svg = _quiet(chart.to_svg)
+    expected = 4 if door == "Fc" else 2
+    assert tag_counts(svg).get("polyline", 0) == expected
+
+    line_nodes = sum(
+        len(batch["nodes"])
+        for panel in _quiet(lambda: _scene(chart))["panels"]
+        for batch in panel["marks"]
+        if batch["kind"] == "line"
+    )
+    assert line_nodes == expected
+
+
+def test_a_declared_bin_groupbys_wire_carries_written_groupby():
+    """The lowered ``Bin``'s wire names the caller's declared groupby, under either spelling."""
+    for bin_ in (fm.Bin("v", groupby=["c"]), {"groupby": ["c"]}):
+        chart = fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()")
+        wire = json.loads(chart.to_spec().to_json())
+        bin_steps = [step for step in wire["transforms"] if step.get("type") == "bin"]
+        assert any(step.get("written_groupby") == ["c"] for step in bin_steps)
+
+
+def test_a_bin_with_no_declared_groupby_is_unaffected_by_written_groupby():
+    """A planner-grouped Bin (``bin=True`` plus a grouping channel) carries no ``written_groupby``.
+
+    The control: the planner's own addition to the Bin's groupby (from
+    ``color``) must not be marked as caller-written, so the wire carries no
+    ``written_groupby`` key at all.
+    """
+    chart = fm.Chart(df).mark_line().encode(x=fm.X("v", bin=True), y="count()", color="c")
+    svg = _quiet(chart.to_svg)
+    assert tag_counts(svg) == {"polyline": 2}
+    wire = json.loads(chart.to_spec().to_json())
+    bin_steps = [step for step in wire["transforms"] if step.get("type") == "bin"]
+    assert all("written_groupby" not in step for step in bin_steps)
 
 
 def test_a_shape_beside_a_user_grouped_step_is_still_reported_ignored():

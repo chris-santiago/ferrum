@@ -350,7 +350,7 @@ def test_single_row_df_with_selection_and_conditional():
     assert len(scene["panels"]) >= 1
 
 
-def test_empty_df_with_conditional_no_crash():  # BUG: ValueError: empty record batch stream
+def test_empty_df_with_conditional_no_crash():
     """An empty DataFrame with selection + conditional must not crash."""
     df = pl.DataFrame(
         {

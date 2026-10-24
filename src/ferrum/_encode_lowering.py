@@ -449,10 +449,14 @@ class _StatisticPlan:
 
         An ``Aggregate`` holding every op, or the ``Bin``
         (:func:`_build_bin_transform`; *name* is set on the layered path's
-        named fan-out ``Bin``). The Bin is the ``Bin`` object, except a
-        pre-built Bin the plan extends, which is its wire dict with the
-        plan's parameters added: the PyO3 ``Bin`` can be extended no other
-        way.
+        named fan-out ``Bin``). ``bin=True``/``bin={...}`` with the plan's
+        additions builds a new ``Bin`` object (the PyO3 constructor takes
+        every parameter directly). Only two shapes come back as a wire
+        dict instead: a pre-built ``bin=Bin(...)`` the plan extends (the
+        PyO3 ``Bin`` can be extended no other way), or a Bin that declares
+        its own groupby (marked ``written_groupby`` on the wire, whether or
+        not the plan adds anything) -- when neither applies and the plan
+        adds nothing, a pre-built Bin comes back as the object itself.
 
         Raises
         ------
@@ -513,6 +517,13 @@ def _build_bin_transform(
     ``shared_extent`` added; the layered serialiser
     (``_transforms_to_json_list_named``) injects a name from
     ``_NamedTransform.name`` into either form.
+
+    A Bin that declares its own ``groupby=`` (``declaration.groupby``) always
+    comes back as its wire dict, with ``written_groupby`` added naming those
+    columns: a line, area or ribbon reading this Bin's output splits by a
+    groupby the caller wrote directly, never by one the chart's own statistic
+    planner added (which lands in *groupby*/*plan_kwargs* instead, and must
+    not split). A Bin declaring no groupby is unaffected by this.
     """
     from ferrum import Bin
 
@@ -520,6 +531,12 @@ def _build_bin_transform(
     if groupby:
         additions["groupby"] = list(dict.fromkeys((*declaration.groupby, *groupby)))
         additions["shared_extent"] = True
+    if declaration.groupby:
+        base = declaration.wire if declaration.wire is not None else declaration.bin_wire
+        wire = {**base, **additions, "written_groupby": list(declaration.groupby)}
+        if name is not None:
+            wire["name"] = name
+        return wire
     if declaration.wire is not None:
         if not additions:
             return pending.bin_obj

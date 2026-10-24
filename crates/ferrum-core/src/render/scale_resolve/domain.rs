@@ -11,7 +11,7 @@ use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
-use crate::transform::run::OutputLineages;
+use crate::transform::run::{OutputLineage, OutputLineages};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// Result of looking up a field across the primary batch and named
@@ -286,13 +286,28 @@ fn drawn_channel_slots<'a>(spec: &'a ChartSpec, layer: &'a Layer, channel: &str)
 
 /// The rows a data-aware sort of a layered `channel` aggregates over, and the
 /// fields `x_field`/`y_field` a channel shorthand (`sort="-y"`) names: the
-/// establishing layer's ([`establishing_axis_layer`]) pre-statistic rows
-/// (`prepare::pre_statistic_rows`) and the fields that layer draws on the
-/// rendered x and y. So a sort orders the axis by the establishing layer's
-/// own data, whichever operand's frame the chart rows hold. `None` for a
-/// spec with no layers, which sorts over its one batch.
+/// establishing layer's ([`establishing_axis_layer`]) own rows
+/// ([`layer_sort_rows`]) and the fields that layer draws on the rendered x
+/// and y. So a sort orders the axis by the establishing layer's own data,
+/// whichever operand's frame the chart rows hold. `None` for a spec with no
+/// layers, which sorts over its one batch.
 pub(in crate::render) struct SortRows<'a> {
     pub(in crate::render) batch: &'a RecordBatch,
+    /// The layer's final (post-statistic) rows: read instead of `batch` for
+    /// whichever field a sort actually names, ONLY when that field is the
+    /// statistic's own output (an aggregate like `mean(y)`, a boxplot's
+    /// `median`) rather than one of its raw inputs -- `batch` (the
+    /// pre-statistic rows) and `fallback` can name entirely different
+    /// fields (an explicit sort-field object's `field` is independent of
+    /// whatever the layer draws on x/y), so the choice is made per field at
+    /// the point a sort resolves one, in [`sort_domain_by_aggregate`], not
+    /// here. `None` for an unlayered chart, which already resolves the one
+    /// batch appropriate to it.
+    /// Read by two choosers: `resolve_sort_batch` (the axis/legend/aux-domain
+    /// sort path) and the facet panel sort
+    /// (`prepare::facet_panels::sort_batch`), both of which pick per field
+    /// through the shared [`batch_carrying`].
+    pub(in crate::render) fallback: Option<&'a RecordBatch>,
     pub(in crate::render) x_field: Option<&'a str>,
     pub(in crate::render) y_field: Option<&'a str>,
 }
@@ -310,9 +325,12 @@ pub(in crate::render) fn establishing_sort_rows<'a>(
 }
 
 /// The rows a data-aware sort reads for one `layer`: its pre-statistic rows
-/// (`prepare::pre_statistic_rows`) and the fields it draws on the rendered x
-/// and y. Shared by the establishing axis sort and the facet panel sort,
-/// which reads each panel value's first drawing layer.
+/// (`prepare::pre_statistic_rows`) -- what a sort naming a raw field its own
+/// statistic consumed reads -- paired with its final rows
+/// (`prepare::layer_final_rows`) as the fallback a sort naming the
+/// statistic's own output reads instead ([`SortRows::fallback`]'s doc).
+/// Shared by the establishing axis sort and the facet panel sort, which
+/// reads each panel value's first drawing layer.
 pub(in crate::render) fn layer_sort_rows<'a>(
     spec: &'a ChartSpec,
     layer: &'a Layer,
@@ -328,11 +346,64 @@ pub(in crate::render) fn layer_sort_rows<'a>(
         transform_outputs,
         include_final,
     );
+    let fallback = crate::render::prepare::layer_final_rows(layer.data_source.as_deref(), primary_batch, transform_outputs, include_final);
     SortRows {
         batch,
+        fallback: Some(fallback),
         x_field: drawn_channel_slots(spec, layer, "x").value,
         y_field: drawn_channel_slots(spec, layer, "y").value,
     }
+}
+
+/// The two batches an unlayered chart's data-aware sort reads: its
+/// pre-statistic rows ([`OutputLineage::pre_statistic_rows`]) when its own
+/// statistics lowered a step, paired with `drawn` as the rows a sort naming
+/// the statistic's own output (an aggregate's result) reads instead. A
+/// chart with no statistic reads `drawn` for both, since `pre_statistic_rows`
+/// returns exactly the batch it is given — byte-identical to reading
+/// `drawn` alone.
+fn chart_sort_pair<'a>(drawn: &'a RecordBatch, lineage: Option<&'a OutputLineage>) -> (&'a RecordBatch, &'a RecordBatch) {
+    (lineage.map_or(drawn, |l| l.pre_statistic_rows(drawn)), drawn)
+}
+
+/// [`SortRows`] for an unlayered spec, built from [`chart_sort_pair`]: a
+/// sort naming a raw field its own statistic consumed reads `drawn`'s
+/// pre-statistic rows; a sort naming the statistic's own output (`y="mean(y)"`
+/// → `mean_y`) reads `drawn` itself, as the fallback. `lineage` is the
+/// chart's own lineage ([`FINAL_OUTPUT_KEY`]), read by every caller the same
+/// way [`AuxRead::published_origin`] does.
+pub(in crate::render) fn chart_sort_rows<'a>(
+    drawn: &'a RecordBatch,
+    lineage: Option<&'a OutputLineage>,
+    x_field: Option<&'a str>,
+    y_field: Option<&'a str>,
+) -> SortRows<'a> {
+    let (batch, fallback) = chart_sort_pair(drawn, lineage);
+    SortRows { batch, fallback: Some(fallback), x_field, y_field }
+}
+
+/// The [`SortContext`] a chart-level categorical legend's (color, shape,
+/// stroke-dash) data-aware `sort=` reads: a layered spec's `lead` read (the
+/// first contributing one [`aux_category_union`] returns) pairs its own
+/// pre-statistic rows with `domain_batch` as the fallback
+/// ([`AuxRead::pre_statistic_rows`]); an unlayered spec (`lead: None`) pairs
+/// the chart's pre-statistic rows with `domain_batch` the same way
+/// [`chart_sort_rows`] does for a positional axis.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn legend_sort_context<'a>(
+    category_field: &'a str,
+    lead: Option<AuxRead<'a>>,
+    domain_batch: &'a RecordBatch,
+    transform_lineages: &'a OutputLineages,
+    x_field: Option<&'a str>,
+    y_field: Option<&'a str>,
+    coord_flipped: bool,
+) -> SortContext<'a> {
+    let batch = match lead {
+        Some(read) => read.pre_statistic_rows(domain_batch, transform_lineages),
+        None => chart_sort_pair(domain_batch, transform_lineages.get(FINAL_OUTPUT_KEY)).0,
+    };
+    SortContext { category_field, batch, fallback: Some(domain_batch), x_field, y_field, coord_flipped }
 }
 
 /// `spec` with the primary y axis owned by a layer that draws y: when no
@@ -565,6 +636,26 @@ impl<'a> AuxRead<'a> {
             LayerSource::Batch(_) => return self.origin,
         };
         transform_lineages.get(key)?.binned_rows(self.field)
+    }
+
+    /// The rows a data-aware legend sort reads for this read's own value,
+    /// when the sort's field is this read's statistic's raw input rather
+    /// than its aggregated output: the same lineage key
+    /// [`Self::published_origin`] maps, read through
+    /// `OutputLineage::pre_statistic_rows` instead of `binned_rows`. `fallback`
+    /// (the read's own, already-drawn batch) when no lineage is recorded
+    /// for that key, and for an overlay-collapsed read, whose `source` no
+    /// longer names one.
+    fn pre_statistic_rows<'b>(&self, fallback: &'b RecordBatch, transform_lineages: &'b OutputLineages) -> &'b RecordBatch
+    where
+        'a: 'b,
+    {
+        let key = match self.source {
+            LayerSource::Chart => FINAL_OUTPUT_KEY,
+            LayerSource::Output(key) => key,
+            LayerSource::Batch(_) => return fallback,
+        };
+        transform_lineages.get(key).map_or(fallback, |lineage| lineage.pre_statistic_rows(fallback))
     }
 
     /// The batch a binned color's edges read this column read's values from:
@@ -1109,21 +1200,24 @@ pub(in crate::render) fn sided_aux_numeric_union(
 /// unioned in layer order, as [`positional_category_union`] unions an axis's
 /// categories. A read of
 /// the chart's data takes the all-panels batch on a faceted chart
-/// ([`super::shared_categorical_batch`]). Returns the domain and the first
-/// contributing batch, which a data-aware `sort=` aggregates over; `None`
-/// for no reads (an unlayered spec, which reads its one batch instead).
+/// ([`super::shared_categorical_batch`]). Returns the domain, the first
+/// contributing batch and that batch's read, whose own pre-statistic rows a
+/// data-aware `sort=` reads instead of aggregating over the domain batch
+/// ([`legend_sort_context`]); `None` for no reads (an unlayered spec, which
+/// reads its one batch instead).
+#[allow(clippy::type_complexity)]
 pub(in crate::render) fn aux_category_union<'b>(
     reads: &[AuxRead<'b>],
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     facet_shared: bool,
-) -> Result<Option<(Vec<String>, &'b RecordBatch)>, RenderError> {
-    let mut union: Option<(Vec<String>, &'b RecordBatch)> = None;
+) -> Result<Option<(Vec<String>, &'b RecordBatch, AuxRead<'b>)>, RenderError> {
+    let mut union: Option<(Vec<String>, &'b RecordBatch, AuxRead<'b>)> = None;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for read in reads {
         let Some(batch) = read.column_batch(primary_batch, transform_outputs, facet_shared) else { continue };
         let values = super::distinct_values_in_order(batch, read.field)?;
-        let (domain, _) = union.get_or_insert_with(|| (Vec::new(), batch));
+        let (domain, ..) = union.get_or_insert_with(|| (Vec::new(), batch, *read));
         for value in values {
             if seen.insert(value.clone()) {
                 domain.push(value);
@@ -1350,6 +1444,12 @@ pub(in crate::render) fn explicit_ordinal_range(
 pub(in crate::render) struct SortContext<'a> {
     pub(in crate::render) category_field: &'a str,
     pub(in crate::render) batch: &'a RecordBatch,
+    /// The layer's final (post-statistic) rows, read instead of `batch` for
+    /// a sort's value field only when `batch` does not carry it
+    /// ([`SortRows::fallback`]'s doc). `None` wherever `batch` is already
+    /// the one rows a sort over this context could ever need (every
+    /// context not built from a layered chart's [`SortRows`]).
+    pub(in crate::render) fallback: Option<&'a RecordBatch>,
     /// Field bound to the RENDERED x channel (if any), for resolving `"x"`/`"-x"`.
     pub(in crate::render) x_field: Option<&'a str>,
     /// Field bound to the RENDERED y channel (if any), for resolving `"y"`/`"-y"`.
@@ -1531,6 +1631,36 @@ fn apply_sort_field_object(
     Ok(())
 }
 
+/// Which of two batches carries `field`: `batch` when it does, else
+/// `fallback` when `fallback` carries it instead, else `batch` (so a field
+/// nowhere still refuses in `batch`'s own words). Shared by
+/// [`resolve_sort_batch`] (the axis/legend/aux-domain sort path) and the
+/// facet panel sort (`prepare::facet_panels::sort_batch`), both of which
+/// read a value's category key from this SAME returned batch, so a row
+/// never splits its key and its value across two batches that could
+/// disagree about which rows exist or what order they are in.
+pub(in crate::render) fn batch_carrying<'a>(batch: &'a RecordBatch, fallback: Option<&'a RecordBatch>, field: &str) -> &'a RecordBatch {
+    if batch.schema().column_with_name(field).is_some() {
+        return batch;
+    }
+    match fallback {
+        Some(fallback) if fallback.schema().column_with_name(field).is_some() => fallback,
+        _ => batch,
+    }
+}
+
+/// Which of `ctx`'s two batches to read `value_field` -- and, for row
+/// alignment, the matching category column -- from: [`batch_carrying`],
+/// except for `SortOp::Count`, which never reads a value field and so
+/// always stays on `ctx.batch`, the pre-statistic grain -- counting rows
+/// at the aggregated grain would count groups, not observations.
+fn resolve_sort_batch<'a>(ctx: &SortContext<'a>, value_field: &str, op: SortOp) -> &'a RecordBatch {
+    if matches!(op, SortOp::Count) {
+        return ctx.batch;
+    }
+    batch_carrying(ctx.batch, ctx.fallback, value_field)
+}
+
 /// Shared driver for both data-aware forms: compute the per-category aggregate
 /// of `value_field` (using the category column from `ctx`) and reorder `domain`
 /// accordingly. On any data failure, leave the domain untouched and warn.
@@ -1542,7 +1672,8 @@ fn sort_domain_by_aggregate(
     ctx: &SortContext<'_>,
     warnings: &mut Vec<RenderWarning>,
 ) {
-    let categories = match crate::render::arrow_cast::col_as_str(ctx.batch, ctx.category_field) {
+    let batch = resolve_sort_batch(ctx, value_field, op);
+    let categories = match crate::render::arrow_cast::col_as_str(batch, ctx.category_field) {
         Ok(c) => c,
         Err(e) => {
             warnings.push(RenderWarning::SortSpecIgnored {
@@ -1555,7 +1686,7 @@ fn sort_domain_by_aggregate(
     let values: Vec<Option<f64>> = if matches!(op, SortOp::Count) {
         vec![None; categories.len()]
     } else {
-        match crate::render::arrow_cast::col_as_f64(ctx.batch, value_field) {
+        match crate::render::arrow_cast::col_as_f64(batch, value_field) {
             Ok(v) => v,
             Err(e) => {
                 warnings.push(RenderWarning::SortSpecIgnored {
@@ -3111,6 +3242,7 @@ mod tests {
         let ctx = SortContext {
             category_field: "group",
             batch: &batch,
+            fallback: None,
             x_field: None,
             y_field: None,
             coord_flipped: false,
@@ -3141,6 +3273,7 @@ mod tests {
         let ctx = SortContext {
             category_field: "group",
             batch: &batch,
+            fallback: None,
             x_field: None,
             y_field: None,
             coord_flipped: false,
@@ -3170,6 +3303,7 @@ mod tests {
         let ctx = SortContext {
             category_field: "cat",
             batch: &batch,
+            fallback: None,
             x_field: Some("price"),
             y_field: None,
             coord_flipped: false,
@@ -3211,6 +3345,7 @@ mod tests {
         let ctx = SortContext {
             category_field: "cat",
             batch: &batch,
+            fallback: None,
             x_field: None,            // post-flip x holds the user's y — unbound
             y_field: Some("species"), // post-flip y holds the user's x (the category)
             coord_flipped: true,
@@ -3267,6 +3402,7 @@ mod tests {
         let unflipped = SortContext {
             category_field: "cat",
             batch: &batch,
+            fallback: None,
             x_field: Some("cat"),
             y_field: Some("val"),
             coord_flipped: false,
@@ -3281,6 +3417,7 @@ mod tests {
         let flipped = SortContext {
             category_field: "cat",
             batch: &batch,
+            fallback: None,
             x_field: Some("val"),
             y_field: Some("cat"),
             coord_flipped: true,
@@ -5211,5 +5348,196 @@ mod tests {
         let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
             .expect("f is Float64");
         assert_eq!(tally.rows(), 1, "'box' and FINAL are equal by content: counted once, not twice: {tally:?}");
+    }
+
+    /// `layer_sort_rows` pairs a layer's pre-statistic rows (`batch`) with
+    /// its final rows (`fallback`): a data-aware sort whose value field is
+    /// the establishing layer's own aggregate OUTPUT (`y="mean(y)"`) needs
+    /// the fallback, since `batch` never carries that output column --
+    /// `resolve_sort_batch`'s own test proves the sort actually reads it.
+    #[test]
+    fn layer_sort_rows_pairs_pre_statistic_rows_with_the_layers_final_rows() {
+        let primary = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![10.0, 20.0, 5.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let agg = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("mean_y", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![15.0, 5.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let mut transform_outputs = HashMap::new();
+        transform_outputs.insert("agg".to_string(), agg);
+        let mut lineages: OutputLineages = HashMap::new();
+        lineages.insert(
+            "agg".to_string(),
+            crate::transform::run::OutputLineage {
+                swarm: None,
+                statistic_input: Some(primary.clone()),
+                lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false }],
+                written_groupby: Vec::new(),
+                source: primary.schema(),
+            },
+        );
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: crate::spec::encoding::Encoding {
+                x: Some(crate::spec::encoding::EncodingSpec { field: "g".into(), ..Default::default() }),
+                y: Some(crate::spec::encoding::EncodingSpec { field: "mean_y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            data_source: Some("agg".into()),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer.clone()]), ..Default::default() };
+        let rows = layer_sort_rows(&spec, &layer, &primary, &transform_outputs, &lineages, false);
+        assert_eq!(rows.y_field, Some("mean_y"));
+        assert!(
+            rows.batch.schema().column_with_name("mean_y").is_none(),
+            "batch is the pre-statistic rows, which never carry the aggregate's own output"
+        );
+        assert_eq!(rows.batch.num_rows(), 3, "batch is the raw pre-statistic rows, one per observation");
+        let fallback = rows.fallback.expect("a layer with a data_source always has a fallback");
+        assert!(
+            fallback.schema().column_with_name("mean_y").is_some(),
+            "fallback is the layer's final rows, which carry the aggregate's output"
+        );
+        assert_eq!(fallback.num_rows(), 2, "the layer's final rows are one per category");
+    }
+
+    /// `chart_sort_rows` pairs an unlayered chart's pre-statistic rows with
+    /// its drawn (final) rows, the same pair `layer_sort_rows` builds for a
+    /// layer: `batch` is the chart's lineage's `pre_statistic_rows` (the
+    /// raw rows a statistic consumed), `fallback` is `drawn` (the
+    /// statistic's own output), so a sort naming the statistic's own
+    /// output column still finds it. With no lineage recorded, `batch` is
+    /// `drawn` itself, by pointer identity: `pre_statistic_rows` returns
+    /// exactly the batch it is given when there is no statistic, so an
+    /// unlowered chart's sort reads `drawn` directly.
+    #[test]
+    fn chart_sort_rows_pairs_the_chart_lineages_pre_statistic_rows_with_the_drawn_rows() {
+        let pre = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![10.0, 20.0, 5.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let drawn = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("mean_y", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![15.0, 5.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let lineage = crate::transform::run::OutputLineage {
+            swarm: None,
+            statistic_input: Some(pre.clone()),
+            lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false }],
+            written_groupby: Vec::new(),
+            source: pre.schema(),
+        };
+        let rows = chart_sort_rows(&drawn, Some(&lineage), None, Some("mean_y"));
+        assert_eq!(rows.batch.num_rows(), 3, "batch is the chart's pre-statistic rows");
+        let fallback = rows.fallback.expect("a chart with a lineage always has a fallback");
+        assert_eq!(fallback.num_rows(), 2, "fallback is the drawn rows, one per category");
+
+        let no_lineage = chart_sort_rows(&drawn, None, None, Some("mean_y"));
+        assert!(std::ptr::eq(no_lineage.batch, &drawn), "with no lineage, batch is the drawn batch itself");
+    }
+
+    /// `resolve_sort_batch` reads a sort's value field from `ctx.batch` when
+    /// present there, from `ctx.fallback` only when `ctx.batch` lacks it
+    /// (an aggregate's own output, `mean_y`, absent from the pre-statistic
+    /// rows), and stays on `ctx.batch` for `SortOp::Count` even when
+    /// `fallback` would also carry the field -- count reads row presence at
+    /// the pre-statistic grain, not the aggregated one. Rejects always
+    /// preferring `batch` alone (which would miss `mean_y` and any other
+    /// aggregate output absent from the pre-statistic rows -- deciding by
+    /// `x_field`/`y_field` presence instead of the ACTUAL field a sort reads
+    /// breaks a boxplot/violin/errorbar sort whose drawn channel differs
+    /// from the raw field the sort object names) and rejects always
+    /// preferring `fallback` (which would misread `count` and any raw-field
+    /// sort whose field only the pre-statistic rows carry).
+    #[test]
+    fn resolve_sort_batch_reads_whichever_batch_carries_the_value_field() {
+        let pre = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("raw", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let post = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("mean_y", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(arrow::array::Float64Array::from(vec![10.0, 20.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let ctx = SortContext { category_field: "g", batch: &pre, fallback: Some(&post), x_field: None, y_field: None, coord_flipped: false };
+        assert!(
+            std::ptr::eq(resolve_sort_batch(&ctx, "raw", SortOp::Sum), &pre),
+            "a field batch carries stays on batch"
+        );
+        assert!(
+            std::ptr::eq(resolve_sort_batch(&ctx, "mean_y", SortOp::Sum), &post),
+            "a field only fallback carries reads from fallback"
+        );
+        assert!(
+            std::ptr::eq(resolve_sort_batch(&ctx, "mean_y", SortOp::Count), &pre),
+            "count never needs a value field, so it stays on the pre-statistic grain"
+        );
+        assert!(
+            std::ptr::eq(resolve_sort_batch(&ctx, "nowhere", SortOp::Sum), &pre),
+            "a field in neither batch stays on batch, so the existing refusal names it"
+        );
     }
 }

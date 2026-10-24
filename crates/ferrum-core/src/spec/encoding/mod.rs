@@ -1496,6 +1496,54 @@ impl Encoding {
         out
     }
 
+    /// Mutable counterpart of [`Self::bindings`]: every populated channel as
+    /// `(wire name, &mut EncodingSpec)`, in the same order, exhaustive the
+    /// same way. Read by
+    /// [`crate::render::position::read_own_values`] to retarget a
+    /// non-positional binding's field onto the companion column a position
+    /// adjustment preserved it under.
+    pub(crate) fn bindings_mut(&mut self) -> Vec<(&'static str, &mut EncodingSpec)> {
+        let Encoding {
+            x,
+            y,
+            color,
+            size,
+            shape,
+            opacity,
+            x2,
+            y2,
+            text,
+            tooltip,
+            tooltip_fields,
+            href,
+            description,
+            key,
+            url,
+            stroke_width,
+            stroke_opacity,
+            stroke_dash,
+            angle,
+            fill_opacity,
+            group: _,
+        } = self;
+        let mut out = Vec::new();
+        macro_rules! push {
+            ($($name:literal => $ch:expr),* $(,)?) => {
+                $( if let Some(e) = $ch { out.push(($name, e)); } )*
+            };
+        }
+        push!(
+            "x" => x, "y" => y, "color" => color, "size" => size, "shape" => shape,
+            "opacity" => opacity, "x2" => x2, "y2" => y2, "text" => text,
+            "tooltip" => tooltip, "href" => href, "description" => description,
+            "key" => key, "url" => url, "stroke_width" => stroke_width,
+            "stroke_opacity" => stroke_opacity, "stroke_dash" => stroke_dash,
+            "angle" => angle, "fill_opacity" => fill_opacity,
+        );
+        out.extend(tooltip_fields.iter_mut().flatten().map(|e| ("tooltip_fields", e)));
+        out
+    }
+
     /// Clear every binding `keep` rejects, given its wire name as
     /// [`Self::bindings`] names it: a singular channel becomes unbound, a
     /// rejected `tooltip_fields` entry leaves the list (an emptied list stays

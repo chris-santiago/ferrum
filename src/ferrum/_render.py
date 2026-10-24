@@ -597,23 +597,6 @@ class _RenderMixin:
 
         chart = self._with_raster_override(raster)
         spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
-        if data.num_rows == 0:
-            w, h = viewport
-            empty_svg = (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
-                f"<!-- empty dataset --></svg>"
-            )
-            figure_caption = getattr(chart, "_figure_caption", None)
-            if figure_caption is not None:
-                from ferrum._chrome import chrome_kwargs
-                from ferrum._core import wrap_svg_with_chrome
-
-                return wrap_svg_with_chrome(
-                    empty_svg,
-                    caption=figure_caption,
-                    **chrome_kwargs(chart_config_dict),
-                )
-            return empty_svg
         svg = render_svg(
             spec,
             data,

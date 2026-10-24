@@ -147,6 +147,17 @@ pub(crate) struct BinSpec {
     /// rows. Output schema gains one column per groupby field after the 4th
     /// field (5th when `agg` is set — see `agg`/`agg_field`).
     pub groupby: Vec<String>,
+    /// The subset of `groupby` the caller declared on this `Bin` directly
+    /// (a composite mark's own `bin=Bin(groupby=[...])`), as opposed to a
+    /// field the chart's statistic planner added from an encoded channel.
+    /// Every entry must also be in `groupby`, checked at
+    /// `TryFrom<BinWire>`. Empty for a planner-built `Bin` and for a `Bin`
+    /// wire payload with no `written_groupby` key, so every such payload
+    /// round-trips unchanged; read by
+    /// [`crate::transform::run::caller_groupby`] to tell a caller-written
+    /// grouping field apart from a planner-derived one on the SAME `Bin`,
+    /// which `groupby` alone cannot.
+    pub written_groupby: Vec<String>,
     /// Column to aggregate per bin (batch-E T7). Must be set together with
     /// [`agg`](Self::agg) — either both are `Some` or both are `None`.
     pub agg_field: Option<String>,
@@ -263,6 +274,14 @@ struct BinWire {
         deserialize_with = "deserialize_groupby_vec"
     )]
     groupby: Vec<String>,
+    /// Additive key (#193's `bin_rule` pattern): absent whenever empty, so
+    /// a `Bin` that declares no groupby of its own keeps its exact bytes.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    written_groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     agg_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -307,6 +326,12 @@ impl TryFrom<BinWire> for BinSpec {
             .map(|m| AggFn::parse_or_refuse("agg", &m))
             .transpose()
             .map_err(|e| format!("stat_bin: {e}"))?;
+        if let Some(bad) = w.written_groupby.iter().find(|f| !w.groupby.contains(f)) {
+            return Err(format!(
+                "Bin: written_groupby names {bad:?}, which is not in groupby {:?}; every field the caller wrote must be one the Bin groups by",
+                w.groupby
+            ));
+        }
         Ok(BinSpec {
             field: w.field,
             mode,
@@ -315,6 +340,7 @@ impl TryFrom<BinWire> for BinSpec {
             cumulative: w.cumulative,
             shared_extent: w.shared_extent,
             groupby: w.groupby,
+            written_groupby: w.written_groupby,
             agg_field: w.agg_field,
             agg,
             per_row: w.per_row,
@@ -346,6 +372,7 @@ impl From<BinSpec> for BinWire {
             cumulative: s.cumulative,
             shared_extent: s.shared_extent,
             groupby: s.groupby,
+            written_groupby: s.written_groupby,
             agg_field: s.agg_field,
             agg: s.agg.map(|f| f.as_str().to_string()),
             per_row: s.per_row,
@@ -667,6 +694,7 @@ pub(crate) fn scale_bin_edges(
         return Ok(None);
     }
     let spec = BinSpec::try_from(BinWire {
+        written_groupby: Vec::new(),
         field: String::new(),
         bin_count: bin.bin_count,
         bin_width: bin.bin_width,
@@ -1223,6 +1251,7 @@ impl PyBin {
             }
         };
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: field.to_string(),
             mode,
             extent,
@@ -1324,6 +1353,7 @@ mod tests {
         // counts: [2, 2, 2, 2, 2]   (10 inclusive captured by upper-edge convention)
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
@@ -1357,6 +1387,7 @@ mod tests {
     fn test_bin_density_normalizes_to_one() {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
@@ -1386,6 +1417,7 @@ mod tests {
         // sturges_floor(8) = 4 per scale::ticks::sturges_floor
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Sturges,
             extent: None,
@@ -1407,6 +1439,7 @@ mod tests {
     fn test_bin_all_equal_data_emits_single_unit_bin() {
         let batch = batch_with(vec![3.0, 3.0, 3.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Sturges,
             extent: None,
@@ -1438,6 +1471,7 @@ mod tests {
         let arr = Float64Array::from(vec![Some(1.0), None, Some(2.0), Some(f64::NAN), Some(3.0)]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
@@ -1462,6 +1496,7 @@ mod tests {
         pyo3::Python::initialize();
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "ghost".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: None,
@@ -1491,6 +1526,7 @@ mod tests {
             vec![Arc::new(StringArray::from(vec!["a", "b", "c"]))],
         ).unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
@@ -1521,6 +1557,7 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
         ).unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: None,
@@ -1546,6 +1583,7 @@ mod tests {
         // (hi - lo) must be a clean multiple of step.
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,
@@ -1580,6 +1618,7 @@ mod tests {
     fn bin_cumulative_count_is_monotonic() {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
@@ -1612,6 +1651,7 @@ mod tests {
     fn test_bin_single_row_produces_one_bin() {
         let batch = batch_with(vec![42.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Sturges,
             extent: None,
@@ -1636,6 +1676,7 @@ mod tests {
         // 10 rows all with value=5.0 → should produce exactly 1 bin containing all 10.
         let batch = batch_with(vec![5.0; 10]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: None,
@@ -1659,6 +1700,7 @@ mod tests {
     fn test_bin_count_one_single_bin_spanning_full_extent() {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 1 },
             extent: Some((1.0, 5.0)),
@@ -1689,6 +1731,7 @@ mod tests {
     fn test_bin_global_extent_no_nice() {
         let batch = batch_with(vec![1.5, 3.7, 2.2, 8.1]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 4 },
             extent: None,
@@ -1717,6 +1760,7 @@ mod tests {
         // x in [0.13, 9.7], 10 bins, nice=true. The apply path produces [0.0, 10.0].
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,
@@ -1773,6 +1817,7 @@ mod tests {
         // fires instead of falling back to Sturges.
         let values: Vec<f64> = (0..64).map(|i| 0.13 + (i as f64) * 0.15).collect();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::FreedmanDiaconis,
             extent: None,
@@ -1823,6 +1868,7 @@ mod tests {
     fn test_bin_global_extent_explicit_extent_passthrough() {
         let batch = batch_with(vec![1.0, 5.0, 10.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: Some((0.0, 20.0)),
@@ -1847,6 +1893,7 @@ mod tests {
         pyo3::Python::initialize();
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "nonexistent".into(),
             mode: BinMode::Fixed { n: 5 },
             extent: None,
@@ -1875,6 +1922,7 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![1_i64, 5, 3]))],
         ).unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 3 },
             extent: None,
@@ -2008,6 +2056,7 @@ mod tests {
             vec!["x", "x", "y", "y", "x", "x", "y", "y"],
         );
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((0.0, 10.0)),
@@ -2076,6 +2125,7 @@ mod tests {
         .unwrap();
 
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((0.0, 10.0)),
@@ -2117,6 +2167,7 @@ mod tests {
     fn bin_groupby_serde_round_trip_and_back_compat() {
         // Serialize a BinSpec with groupby=["col"] — must emit array form.
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Sturges,
             extent: None,
@@ -2153,6 +2204,7 @@ mod tests {
 
     fn sturges_spec() -> BinSpec {
         BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Sturges,
             extent: None,
@@ -2316,6 +2368,26 @@ mod tests {
                 "conflicting mode keys must refuse, got: {err} for {payload}"
             );
         }
+    }
+
+    /// `written_groupby` is additive (absent from every pre-existing
+    /// payload, round-trips to nothing when unset) and refuses a field
+    /// that is not also in `groupby`, naming it.
+    #[test]
+    fn written_groupby_outside_groupby_is_refused() {
+        let err = serde_json::from_str::<BinSpec>(r#"{"field":"x","groupby":["c"],"written_groupby":["d"]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("written_groupby names \"d\", which is not in groupby [\"c\"]"),
+            "{err}"
+        );
+        let spec: BinSpec = serde_json::from_str(r#"{"field":"x","groupby":["c"]}"#).unwrap();
+        assert!(spec.written_groupby.is_empty(), "no written_groupby key means none written");
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("written_groupby"), "unset written_groupby is not written: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec, "a Bin with no written_groupby round-trips to identical bytes");
     }
 
     /// A degenerate hand-authored wire with `bin_count:0` deserializes WITHOUT
@@ -2667,6 +2739,7 @@ mod tests {
 
     fn agg_spec(field: &str, mode: BinMode, extent: Option<(f64, f64)>, agg_field: &str, agg: &str) -> BinSpec {
         BinSpec {
+            written_groupby: Vec::new(),
             field: field.into(),
             mode,
             extent,
@@ -2960,6 +3033,7 @@ mod tests {
         )
         .unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: None,
@@ -2998,6 +3072,7 @@ mod tests {
         )
         .unwrap();
         let spec = BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: None,
@@ -3098,6 +3173,7 @@ mod tests {
 
     fn grouped_spec(mode: BinMode, extent: Option<(f64, f64)>, shared_extent: bool) -> BinSpec {
         BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode,
             extent,

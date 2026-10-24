@@ -813,23 +813,36 @@ pub(crate) use super::arrow_cast::{
 };
 
 /// The tooltip entries a chart's field selections add to a layer's own
-/// (`listed`): one per field any point or interval selection names, in sorted
-/// order, skipping a field `listed` already carries. Read by
-/// [`MetadataColumns::from_ctx`], whose absent-column skip leaves out a field
-/// the layer's rows lack, as a datum without the field is never selected.
+/// (`listed`): one per field any point or interval selection names, in
+/// sorted order. Each field's entry is retargeted through
+/// [`position::read_own_value`] before the dedup check, so a selection on
+/// a field a position adjustment overwrote reads the row's own value
+/// (the same column a `listed` entry on that field reads, once retargeted
+/// too) rather than the adjusted position; two entries are the same entry
+/// when they read the same column, so the dedup compares the RETARGETED
+/// field against `listed`'s (already-retargeted, since `listed` comes
+/// from the DrawCtx-local encoding `read_own_values` already ran over),
+/// not the field the selection names verbatim. Read by
+/// [`MetadataColumns::from_ctx`], whose absent-column skip leaves out a
+/// field the layer's rows lack, as a datum without the field is never
+/// selected.
 fn selection_tooltip_specs(
     selections: &[ferrum_scene::SelectionSpec],
     listed: &[&crate::spec::encoding::EncodingSpec],
+    batch: &RecordBatch,
 ) -> Vec<crate::spec::encoding::EncodingSpec> {
     let fields: std::collections::BTreeSet<&str> = selections
         .iter()
         .flat_map(|selection| selection.fields().unwrap_or_default())
         .map(String::as_str)
-        .filter(|field| !listed.iter().any(|e| e.field == *field))
         .collect();
     fields
         .into_iter()
-        .map(|field| crate::spec::encoding::EncodingSpec { field: field.to_string(), ..Default::default() })
+        .filter_map(|field| {
+            let mut spec = crate::spec::encoding::EncodingSpec { field: field.to_string(), ..Default::default() };
+            super::position::read_own_value(&mut spec, batch);
+            (!listed.iter().any(|e| e.field == spec.field)).then_some(spec)
+        })
         .collect()
 }
 
@@ -879,7 +892,7 @@ impl MetadataColumns {
         // mark's tooltip, so every such field joins the tooltip after the
         // layer's own entries. They are match keys, not bindings: added here,
         // after the column gate, and skipped below on rows that lack them.
-        let selection_specs = selection_tooltip_specs(&ctx.spec.selections, &tooltip_specs);
+        let selection_specs = selection_tooltip_specs(&ctx.spec.selections, &tooltip_specs, ctx.batch);
         tooltip_specs.extend(selection_specs.iter());
 
         // Read a single tooltip column, applying format/format_type from the spec.
@@ -2719,6 +2732,70 @@ mod tests {
         );
         assert_eq!(names(Encoding { tooltip: Some(field("x")), ..Default::default() }), ["x", "b", "g", "k"]);
         assert_eq!(names(Encoding::default()), ["b", "g", "k"]);
+    }
+
+    /// A selection's own field is retargeted through `position::read_own_value`
+    /// before the dedup check: a selection naming `v` beside a `listed`
+    /// entry already retargeted onto `v`'s own-value column dedupes
+    /// (both read the same column), while the same selection with nothing
+    /// listed gets its own retargeted entry, titled by the field the
+    /// selection named.
+    #[test]
+    fn selection_tooltip_specs_retargets_and_dedupes_by_the_retargeted_field() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use ferrum_scene::{EventExpr, SelectionResolve, SelectionSpec};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("__own_value__v", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![100.0])),
+                Arc::new(Float64Array::from(vec![60.0])),
+                Arc::new(StringArray::from(vec!["a"])),
+            ],
+        )
+        .unwrap();
+        let selection = SelectionSpec::Point {
+            name: "pick".into(),
+            fields: Some(vec!["v".to_string(), "g".to_string()]),
+            encodings: None,
+            nearest: false,
+            toggle: EventExpr::ShiftKey,
+            on: EventExpr::Click,
+            clear: EventExpr::Click,
+            resolve: SelectionResolve::Global,
+        };
+        let selections = [selection];
+
+        let retargeted_v = crate::spec::encoding::EncodingSpec {
+            field: "__own_value__v".into(),
+            title: Some("v".into()),
+            ..Default::default()
+        };
+        let listed = [&retargeted_v];
+        let specs = selection_tooltip_specs(&selections, &listed, &batch);
+        assert_eq!(
+            specs.iter().map(|e| e.field.as_str()).collect::<Vec<_>>(),
+            ["g"],
+            "the selection's v entry dedupes against the already-retargeted listed entry"
+        );
+
+        let specs_unlisted = selection_tooltip_specs(&selections, &[], &batch);
+        let v_entry = specs_unlisted
+            .iter()
+            .find(|e| e.field == "__own_value__v")
+            .expect("the selection's v entry retargets to its own-value column");
+        assert_eq!(
+            v_entry.title.as_deref(),
+            Some("v"),
+            "titled by the field the selection named, not the column it reads"
+        );
     }
 
     // --- RSUP-04: parse_text_baseline + to_scene_text_style corrected SVG output ---

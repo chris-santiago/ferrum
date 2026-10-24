@@ -1304,11 +1304,13 @@ def _lower_any(
     Every non-overlay layout (hconcat/vconcat/wrap/grid) reaches an empty-data
     leaf through :func:`_lower_leaf_node`, which lowers it to a
     ``{"kind": "hole"}`` cell (sized under hconcat/vconcat per Task 10-rust;
-    ignored by grid/wrap cell math per spec/Task 8a). Only ``LayerChart``'s
-    overlay lowering (which does not route through this generic composite
-    branch) reaches :func:`_lower_overlay_leaf_node` instead, which excludes
-    an empty layer rather than holing it, since a hole is illegal under
-    overlay.
+    ignored by grid/wrap cell math per spec/Task 8a): a grid cell has no data
+    of its own to draw a frame from, so a hole is the only sizeable
+    placeholder. Only ``LayerChart``'s overlay lowering (which does not route
+    through this generic composite branch) reaches
+    :func:`_lower_overlay_leaf_node` instead, which lowers an empty layer like
+    any other leaf, since a hole is illegal under overlay and an empty layer
+    draws its own frame on the shared panel instead.
 
     Raises
     ------
@@ -1523,10 +1525,9 @@ def _lower_leaf_node(
     by every composite form except ``LayerChart``'s overlay (see
     :func:`_lower_overlay_leaf_node`). An empty-data leaf (``num_rows == 0``)
     lowers to a ``{"kind": "hole"}`` placeholder, sized from the viewport the
-    leaf would otherwise have rendered at (matching the space its flat
-    ``Chart.to_svg()`` empty-dataset placeholder would have occupied) --
-    required under hconcat/vconcat (Task 10-rust's ``HoleSizeRequired``) and
-    harmlessly ignored by grid/wrap cell math.
+    leaf would otherwise have rendered at, so it occupies the same space a
+    drawn leaf would -- required under hconcat/vconcat (Task 10-rust's
+    ``HoleSizeRequired``) and harmlessly ignored by grid/wrap cell math.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
     if data.num_rows == 0:
@@ -1550,19 +1551,18 @@ def _lower_overlay_leaf_node(
     payloads: list,
     leaf_inputs: list,
     leaf_nodes: list,
-) -> Optional[dict]:
-    """Lower one leaf chart for an overlay panel, or ``None`` to skip it.
+) -> dict:
+    """Lower one leaf chart to its overlay-panel wire node.
 
     Used only by :meth:`LayerChart._composite_tree`, whose overlay layout has
-    no hole placeholder at all (a hole is illegal under overlay): an
-    empty-data leaf (``num_rows == 0``) returns ``None`` to signal the caller
-    to SKIP this layer -- an empty layer draws no marks either way, matching
-    the legacy ``Chart + Chart`` merge behavior -- instead of the
-    ``{"kind": "hole"}`` :func:`_lower_leaf_node` produces everywhere else.
+    no hole placeholder at all (a hole is illegal under overlay). An
+    empty-data layer (``num_rows == 0``) lowers like any other leaf and draws
+    its share of the shared panel's frame -- zero rows take the same render
+    path a filter-emptied chart already takes, drawing the frame/axes and
+    warning once, rather than the ``{"kind": "hole"}`` :func:`_lower_leaf_node`
+    produces everywhere else.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
-    if data.num_rows == 0:
-        return None  # overlay: caller skips this empty-data layer
     return _append_leaf_wire_node(
         spec,
         data,
@@ -3925,9 +3925,10 @@ class LayerChart(_ChartLike):
         composite form's title gets, rather than the chart-level title the
         legacy ``_build_merged`` path applies via ``.properties(title=...)``.
 
-        An empty-data layer is SKIPPED (an overlay has no hole placeholder;
-        an empty layer draws no marks in the merged ``Chart + Chart`` render
-        either). Every layer empty is a typed error.
+        An empty-data layer lowers like any other layer (an overlay has no
+        hole placeholder, so it draws its own share of the shared panel's
+        frame instead): it draws no marks, the same as a non-empty layer a
+        filter emptied, and the group warns once if no layer draws anything.
 
         Returns
         -------
@@ -3937,10 +3938,9 @@ class LayerChart(_ChartLike):
         ------
         ValueError
             When ``resolve=`` marks an unsupported channel ``"shared"``, when
-            a layer is not a plain leaf ``Chart``, when a layer carries its
+            a layer is not a plain leaf ``Chart``, or when a layer carries its
             own ``independent_y=True`` flag (a ``chart + SecondaryY(...)``
-            member reaching this shared-y overlay path -- see below), or
-            when every layer's data is empty.
+            member reaching this shared-y overlay path -- see below).
         """
         resolve_field = _composite_resolve_field(self._resolve, kind="LayerChart")
         # x is always forced "shared" here regardless of self._resolve --
@@ -3994,20 +3994,16 @@ class LayerChart(_ChartLike):
         payloads: list = []
         leaf_inputs: list = []
         leaf_nodes: list = []
-        children: list = []
-        for layer in layers:
-            node = _lower_overlay_leaf_node(
+        children: list = [
+            _lower_overlay_leaf_node(
                 layer,
                 auto_tooltips=auto_tooltips,
                 payloads=payloads,
                 leaf_inputs=leaf_inputs,
                 leaf_nodes=leaf_nodes,
             )
-            if node is None:
-                continue  # empty-data layer: draws no marks; skip it
-            children.append(node)
-        if not children:
-            raise ValueError("LayerChart: every layer's data is empty; nothing to render")
+            for layer in layers
+        ]
 
         tree = _composite_node(
             "overlay",

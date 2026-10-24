@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 
 import polars as pl
 import pytest
@@ -117,10 +118,11 @@ def test_all_null_secondary_column_renders_without_nan():
 # ---------------------------------------------------------------------------
 
 
-def test_zero_row_base_plus_secondary_y_renders_placeholder():
+def test_zero_row_base_plus_secondary_y_draws_its_frame():
     """Zero-row polars frame still exposes its schema, so the S4 field guard
-    passes and the render must fall through to the empty-dataset placeholder
-    (Chart.to_svg empty path), not divide by len or index [0]."""
+    passes and the render must draw the chart's frame over zero rows (the
+    same path a filter-emptied chart already takes), not divide by len or
+    index [0]."""
     chart = fm.Chart(_empty_df()).mark_bar().encode(x="x", y="y") + SecondaryY("z")
     svg = chart.to_svg()
     assert svg.startswith("<svg")
@@ -129,15 +131,20 @@ def test_zero_row_base_plus_secondary_y_renders_placeholder():
 
 def test_all_empty_independent_y_layerchart_renders_valid_svg():
     """resolve={"y": "independent"} routes through _build_merged (the flat
-    path), which renders the plain-Chart empty placeholder instead of the
-    composite tree's typed all-empty ValueError. Pin: valid SVG, no NaN.
-    (The shared route raising while this renders is the documented flat-path
-    exception; what must NOT happen is a panic or NaN viewBox.)"""
+    path), which draws the plain-Chart's frame over zero rows. Pin: valid
+    SVG, no NaN, one no-rows warning. (The shared, non-independent-y route
+    draws its own frame over zero rows too, through the composite overlay's
+    own per-layer leaf lowering; what must NOT happen on either route is a
+    panic or NaN viewBox.)"""
     a = fm.Chart(_empty_df()).mark_bar().encode(x="x", y="y")
     b = fm.Chart(_empty_df()).mark_line().encode(x="x", y="z")
-    svg = LayerChart(a, b, resolve={"y": "independent"}).to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = LayerChart(a, b, resolve={"y": "independent"}).to_svg()
     assert svg.startswith("<svg")
     _assert_no_bad_tokens(svg)
+    messages = [str(w.message) for w in caught]
+    assert messages.count("the chart has no rows to draw after its transforms; its panel is drawn empty") == 1
 
 
 def test_one_empty_layer_under_independent_y_renders():

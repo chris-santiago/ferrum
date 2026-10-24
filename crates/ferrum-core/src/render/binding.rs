@@ -524,12 +524,19 @@ fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_b
     let iter = reader
         .into_reader()
         .map_err(|e| PyValueError::new_err(format!("arrow reader: {e}")))?;
+    let schema = arrow::record_batch::RecordBatchReader::schema(&iter);
     let mut all = Vec::new();
     for next in iter {
         all.push(next.map_err(|e| PyValueError::new_err(format!("arrow read: {e}")))?);
     }
     if all.is_empty() {
-        return Err(PyValueError::new_err("empty record batch stream"));
+        // Zero rows and zero batches alike are real input, not a
+        // malformed stream: a `df.head(0)` or a filter-emptied source
+        // reaches the pipeline the same way either does, and renders its
+        // frame and axes the same way. An empty stream, unlike an empty
+        // batch, carries no rows at all to read a schema from, so it
+        // takes the reader's own declared schema instead.
+        return Ok(arrow::record_batch::RecordBatch::new_empty(schema));
     }
     if all.len() == 1 {
         Ok(all.into_iter().next().unwrap())

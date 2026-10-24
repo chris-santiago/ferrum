@@ -82,70 +82,15 @@ class ZoomRebuildable(Protocol):
     def _clone(self) -> Any: ...
 
 
-def _empty_scene_json(viewport: tuple[float, float]) -> tuple[str, bytes]:
-    """Return the ``(scene_json, b"")`` for a zero-row chart.
-
-    Hand-maintained mirror of the Rust ``SceneGraph`` empty-scene shape: when a
-    chart resolves to zero data rows the Rust ``render_interactive`` is bypassed
-    and this literal scene is emitted instead (an empty panel list plus a
-    fully-spelled interaction block).  The dict is byte-identical to the inline
-    literal it replaces.
-
-    The ideal fix is to let Rust ``render_interactive`` return a valid empty
-    ``SceneGraph`` for a zero-row batch so Python never mirrors the schema; that
-    remains a cross-language follow-up (a trivial Rust entry producing an
-    empty ``SceneGraph`` does not exist today).  Until then, this mirror is
-    pinned by a discriminating schema-parity test
-    (``tests/test_scene_production.py::test_empty_scene_json_schema_parity_with_real_render``)
-    that renders real (non-empty, and separately param-bound) charts through
-    the actual Rust ``render_interactive`` entry and asserts this dict's
-    top-level and ``interaction`` key sets match exactly — so a Rust-side
-    ``SceneGraph``/``InteractionConfig`` field rename or addition fails that
-    test loudly instead of silently drifting from this hand-mirror.
-
-    Parameters
-    ----------
-    viewport : tuple[float, float]
-        The ``(width, height)`` of the chart viewport.
-
-    Returns
-    -------
-    tuple[str, bytes]
-        ``(scene_json, packed_data)`` where ``packed_data`` is empty.
-    """
-    import json as _json
-
-    w, h = viewport
-    return _json.dumps(
-        {
-            "panels": [],
-            "width": w,
-            "height": h,
-            "background": None,
-            "title": [],
-            "legend": [],
-            "decorations": [],
-            "selections": [],
-            "interaction": {
-                "zoom_enabled": True,
-                "pan_enabled": True,
-                "toolbar": True,
-                "conditionals": [],
-                "linked_panels": [],
-                "tick_levels": [],
-                "params": [],
-                "param_bindings": [],
-            },
-        }
-    ), b""
-
-
 def _render_scene(chart: "Chart | SceneRenderable") -> tuple[str, bytes]:
     """Return (scene_json, packed_bytes) for the interactive renderer.
 
     Dispatches to ``_render_interactive()`` when the object is a
     composition type (HConcat, VConcat, Layer, etc.), and falls through
-    to the standard Rust ``render_interactive`` for plain ``Chart``.
+    to the standard Rust ``render_interactive`` for plain ``Chart``. Zero-row
+    data renders through this same Rust call like any other chart: it draws
+    its frame and axes and warns once, the same way a filter-emptied chart
+    already does, rather than a hand-mirrored empty scene.
     """
     # Composition types implement _render_interactive(); plain Charts do not.
     if isinstance(chart, SceneRenderable):
@@ -154,8 +99,6 @@ def _render_scene(chart: "Chart | SceneRenderable") -> tuple[str, bytes]:
     from ferrum._core import render_interactive
 
     spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs(_auto_tooltips=True)
-    if data.num_rows == 0:
-        return _empty_scene_json(viewport)
     return render_interactive(
         spec,
         data,

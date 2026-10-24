@@ -724,6 +724,7 @@ mod tests {
     #[test]
     fn test_transform_spec_bin_round_trip() {
         let original = TransformSpec::Bin(BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,
@@ -761,6 +762,7 @@ mod tests {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
+                written_groupby: Vec::new(),
                 field: "x".into(),
                 mode: BinMode::Fixed { n: 5 },
                 extent: Some((1.0, 10.0)),
@@ -810,6 +812,7 @@ mod tests {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
+                written_groupby: Vec::new(),
                 field: "x".into(),
                 mode: BinMode::Fixed { n: 3 },
                 extent: Some((1.0, 5.0)),
@@ -843,6 +846,7 @@ mod tests {
     #[test]
     fn transform_spec_json_byte_identical_when_name_none() {
         let s = TransformSpec::Bin(BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 10 },
             extent: None,
@@ -911,6 +915,7 @@ mod tests {
         pyo3::Python::initialize();
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
         let spec = TransformSpec::Bin(BinSpec {
+            written_groupby: Vec::new(),
             field: "x".into(),
             mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
@@ -1171,6 +1176,7 @@ mod tests {
         cases.push((
             "Bin",
             TransformSpec::Bin(BinSpec {
+                written_groupby: Vec::new(),
                 field: "v".into(), mode: BinMode::Fixed { n: 2 }, extent: None,
                 nice: false, cumulative: false, shared_extent: false,
                 groupby: vec!["g".into()], agg_field: None, agg: None, name: None,

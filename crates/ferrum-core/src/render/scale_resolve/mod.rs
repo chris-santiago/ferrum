@@ -57,7 +57,7 @@ pub(in crate::render) use self::color::require_binnable;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
+    add_distinct_source, admitted_aux_reads, admitted_color_reads, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
     SortContext,
@@ -1941,7 +1941,7 @@ fn resolve_auxiliary_scales<'r>(
     let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, reads("size"))
         .map_err(refused("size"))?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, reads("shape"))
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("shape"))
         .map_err(refused("shape"))?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
@@ -1956,7 +1956,7 @@ fn resolve_auxiliary_scales<'r>(
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, reads("stroke_dash"))
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("stroke_dash"))
         .map_err(refused("stroke_dash"))?;
     warnings.extend(dash_warns);
     let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, reads("stroke_width"))

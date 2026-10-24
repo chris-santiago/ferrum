@@ -372,7 +372,8 @@ def test_inset_norm_coord_bounds_accepted():
 def test_hconcat_with_zero_row_chart():
     """HConcatChart where one chart has 0 rows should produce valid SVG.
 
-    Targets _render.py to_svg lines 426-431: empty dataset path.
+    The zero-row member lowers to a sized hole cell (`_lower_leaf_node`),
+    sized from the viewport it would otherwise have rendered at.
     """
     df_empty = pl.DataFrame(
         {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
@@ -388,7 +389,11 @@ def test_hconcat_with_zero_row_chart():
 
 
 def test_vconcat_with_zero_row_chart():
-    """VConcatChart where one chart has 0 rows."""
+    """VConcatChart where one chart has 0 rows.
+
+    The zero-row member lowers to a sized hole cell (`_lower_leaf_node`),
+    the same mechanism the hconcat twin exercises.
+    """
     df_empty = pl.DataFrame(
         {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
     )

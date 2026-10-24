@@ -374,7 +374,15 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     }
     let texts: Option<Vec<Option<String>>> = match text_field {
         None => None,
-        Some(f) => Some(col_as_str(ctx.batch, f).or_else(|_| {
+        Some(f) => {
+            // A `text=` bound to a field a position adjustment overwrote in
+            // place already reads the row's own value here: `ctx.spec`'s
+            // encoding is the DrawCtx-local copy `position::read_own_values`
+            // retargets onto the companion column that adjustment preserved
+            // it under (`scene_build`'s draw loop), so `f` already names
+            // that column, not the adjusted one, wherever this field was
+            // ever overwritten.
+            Some(col_as_str(ctx.batch, f).or_else(|_| {
             col_as_f64(ctx.batch, f).map(|nums| {
                 nums.into_iter()
                     .map(|opt_v| {
@@ -397,7 +405,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                     })
                     .collect()
             })
-        })?),
+            })?)
+        }
     };
 
     let anchor = match ctx.mark_style.text.align.as_deref() {

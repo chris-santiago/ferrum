@@ -44,8 +44,8 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, AuxRead, ColorReads,
-    SortContext, SortRows,
+    add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, chart_sort_rows, establishing_sort_rows, AuxRead, ColorReads,
+    SortContext,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
     column_reads_categorical, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
@@ -788,15 +788,19 @@ fn sort_member_categories(
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let rows = establishing_sort_rows(channel.as_str(), leaf.spec, leaf.final_batch, leaf.transform_outputs, leaf.transform_lineages, false)
-        .unwrap_or(SortRows {
-            batch: leaf.final_batch,
-            x_field: leaf.encoding.x.as_ref().map(|e| e.field.as_str()),
-            y_field: leaf.encoding.y.as_ref().map(|e| e.field.as_str()),
+        .unwrap_or_else(|| {
+            chart_sort_rows(
+                leaf.final_batch,
+                leaf.transform_lineages.get(FINAL_OUTPUT_KEY),
+                leaf.encoding.x.as_ref().map(|e| e.field.as_str()),
+                leaf.encoding.y.as_ref().map(|e| e.field.as_str()),
+            )
         });
     let coord_flipped = leaf.coord_flipped();
     let sort_ctx = SortContext {
         category_field: &enc.field,
         batch: rows.batch,
+        fallback: rows.fallback,
         x_field: rows.x_field,
         y_field: rows.y_field,
         coord_flipped,
@@ -1521,7 +1525,7 @@ fn leaf_color_domain(
         }
         (false, Some(reads)) => {
             let union = aux_category_union(&reads, leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
-            Ok(union.map(|(cats, _)| SharedDomain::Ordinal(cats)))
+            Ok(union.map(|(cats, ..)| SharedDomain::Ordinal(cats)))
         }
     }
 }

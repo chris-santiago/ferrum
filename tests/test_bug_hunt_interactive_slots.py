@@ -385,16 +385,20 @@ def test_ordinal_secondary_layer_emits_null_slot_domain():
     assert y_domains[0] is not None, "quantitative slot 0 must keep its domain"
 
 
-def test_zero_row_dual_axis_interactive_returns_valid_empty_scene():
-    """A zero-row dual-axis chart must produce the empty-scene JSON, not raise.
+def test_zero_row_dual_axis_interactive_draws_its_frame():
+    """A zero-row dual-axis chart draws its frame and warns once, not raise.
 
-    Exercises the ``_empty_scene_json`` bypass in ``ferrum._scene`` through the
-    LayerChart ``_render_interactive`` path.
+    Exercises a zero-row ``LayerChart`` through the independent-y merged
+    single-panel path (``LayerChart._render_interactive``): one panel with no
+    mark nodes, the same way a filter-emptied dual-axis chart already
+    renders.
     """
-    scene_json, packed = _render_scene(_dual_layer(_dual_df().head(0)))
+    with pytest.warns(UserWarning, match="the chart has no rows to draw"):
+        scene_json, packed = _render_scene(_dual_layer(_dual_df().head(0)))
     scene = json.loads(scene_json, parse_constant=_reject_constant)
-    assert scene["panels"] == []
-    assert packed == b""
+    assert len(scene["panels"]) == 1
+    assert sum(len(b["nodes"]) for b in scene["panels"][0]["marks"]) == 0
+    assert isinstance(packed, bytes)
     assert scene["width"] > 0 and scene["height"] > 0
 
 
