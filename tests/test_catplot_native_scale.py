@@ -505,10 +505,12 @@ def test_native_scale_true_jitter_default_example_preserves_all_marks():
 
 def test_native_scale_true_jitter_default_example_padding_auto_extra_is_pinned():
     """The same chart as `test_native_scale_true_jitter_default_example_preserves_all_marks`:
-    its numeric-category x tick labels draw at the cascade's shrunk 9.02pt
-    font. On this real shrunk-font chart, `padding.auto`'s extra is exactly
-    zero: the default clip rect is byte-identical to `auto=False`'s, both
-    exactly 564.623px wide."""
+    its three numeric-category x tick labels have room at the full 11pt
+    font, so the cascade draws them flat at full size rather than
+    shrinking. The last label's ink still reaches a fraction of a pixel
+    past the canvas, so `padding.auto`'s extra is small but nonzero: the
+    default clip rect (564.484px) is narrower than `auto=False`'s
+    (564.623px)."""
     df = pl.DataFrame(
         {
             "cat": [2020] * 8 + [2021] * 8 + [2022] * 8,
@@ -518,7 +520,7 @@ def test_native_scale_true_jitter_default_example_padding_auto_extra_is_pinned()
     chart = fm.catplot(df, x="cat", y="val", kind="strip", native_scale=True, seed=0)
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
     svg_default = chart.to_svg()
-    assert 'font-size="9.02"' in svg_auto_false  # the shrunk-font path
+    assert 'font-size="11"' in svg_auto_false  # the full-font path
     clip_off = re.search(
         r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_auto_false
     )
@@ -527,8 +529,8 @@ def test_native_scale_true_jitter_default_example_padding_auto_extra_is_pinned()
     )
     assert clip_off is not None and clip_default is not None
     assert clip_off.group(1) == "564.623"
-    assert clip_default.group(1) == "564.623"  # the extra: exactly zero
-    assert svg_default == svg_auto_false
+    assert clip_default.group(1) == "564.484"  # the extra: small but nonzero
+    assert svg_default != svg_auto_false
 
 
 def test_native_scale_jitter_single_category_falls_back_sanely():

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -583,31 +584,31 @@ class TestRotatedLabelsThatFitAreUntouched:
     @pytest.mark.parametrize(
         "width",
         [
-            165,  # 160-169: -90, cull stride flips
-            200,  # 195-209
-            310,  # 305-319
-            590,  # 585-599: -90 / -60
-            697,  # 690-704: -60 / -45
+            150,  # rotated -90, 3 labels
+            165,  # rotated -90, 4 labels
+            200,  # rotated -90, 6 labels
+            250,  # thinned flat, 3 labels
+            310,  # thinned flat, 4 labels
         ],
     )
     def test_cascade_width_bands_keep_auto_false(self, width):
-        """One real-font width per cascade band where the old flat
-        half-width extra flipped the label count or angle: the drawn labels
-        fit with auto off, so the default is byte-identical to
-        `auto=False`."""
+        """One real-font width per cascade band (rotated at full font, or
+        thinned to an even stride and drawn flat): the drawn labels fit with
+        auto off, so the default is byte-identical to `auto=False`."""
         chart = self._chart().properties(width=width)
         svg_auto_false = chart.configure_padding(auto=False).to_svg()
         assert _last_x_tick_overhang_margin(svg_auto_false, width, self.HEIGHT) >= 0
         assert _sha16(chart.to_svg()) == _sha16(svg_auto_false)
 
     def test_flat_band_default_ticks_draw_the_same_labels_as_auto_false(self):
-        """The 725-739 cascade band on this class's chart itself (x at 0,
-        5e5 and 1e6, default ticks, currency): at 730px the cascade draws every label flat
-        at a shrunk font size. The last label's ADVANCE reaches a fraction
-        of a pixel past the canvas (its ink stays inside), so the default
-        rescues it and differs from `auto=False`, but it must draw exactly
-        the same labels, at the same angles and font sizes."""
-        width = 730
+        """This class's chart itself (x at 0, 5e5 and 1e6, default ticks,
+        currency) at 740px: the cascade draws every one of its 11 ticks
+        flat at the full 11pt font. The last label's ink reaches a fraction
+        of a pixel past the canvas, so the default rescues it and differs
+        from `auto=False`, but it must draw exactly the same labels, at the
+        same angles and font sizes -- the rescue narrows the plot rather
+        than thinning the tick set."""
+        width = 740
         chart = self._chart().properties(width=width)
         svg_default = chart.to_svg()
         svg_auto_false = chart.configure_padding(auto=False).to_svg()
@@ -618,8 +619,8 @@ class TestRotatedLabelsThatFitAreUntouched:
         # The rescue extra, pinned exactly rather than left to the `!=` above.
         clip_off = _CLIP_RECT.findall(svg_auto_false)
         clip_default = _CLIP_RECT.findall(svg_default)
-        assert clip_off == [("59.727", "16", "654.273", "124.961")]
-        assert clip_default == [("59.727", "16", "653.876", "124.961")]
+        assert clip_off == [("59.727", "16", "664.273", "124.961")]
+        assert clip_default == [("59.727", "16", "658.52", "124.961")]
 
     def test_flat_band_label_whose_ink_overhangs_is_rescued(self):
         """The 725-739 flat band, on a chart whose flat last label's INK
@@ -675,15 +676,15 @@ _FLAT_NUMERIC_X_TICK_LABEL = re.compile(
 
 
 def test_a_rescue_within_half_the_plot_is_applied():
-    """192x200, a `,.8f`-formatted last label (1234.56789): auto=False draws
-    both flat labels ("0.00000000" and "1,234.56789000", already at the
-    shrunk 9.02pt font) in a 113.056x124.961 plot, but the last one
-    overhangs the canvas by 8px of real rendered ink. Narrowing the plot to
-    98.975x124.961 -- still 87.5% of the auto=False width, well above half
-    in both dimensions -- pulls it back onto the canvas (6px to spare)
-    without dropping either label, so the default applies the rescue in
-    full: same two flat labels, same font, narrower plot, no overhanging
-    ink."""
+    """192x200, a `,.8f`-formatted last label (1234.56789): both adjacent
+    labels have room at the full 11pt font, so auto=False draws both flat
+    labels ("0.00000000" and "1,234.56789000") at full size in a
+    113.056x124.961 plot, but the last one overhangs the canvas by 14px of
+    real rendered ink. Narrowing the plot to 90.881x124.961 -- still 80.4% of
+    the auto=False width, well above half in both dimensions -- pulls it
+    back onto the canvas (13px to spare) without dropping either label, so
+    the default applies the rescue in full: same two flat labels, same font,
+    narrower plot, no overhanging ink."""
     lo = -float("1.23456789e3")
     df = pl.DataFrame({"x": [0.0, -lo], "y": [0.0, 1.0]})
     chart = (
@@ -703,14 +704,14 @@ def test_a_rescue_within_half_the_plot_is_applied():
     clip_off = _CLIP_RECT.findall(svg_auto_false)
     clip_default = _CLIP_RECT.findall(svg_default)
     assert clip_off == [("62.944", "16", "113.056", "124.961")]
-    assert clip_default == [("62.944", "16", "98.975", "124.961")]
+    assert clip_default == [("62.944", "16", "90.881", "124.961")]
     off_w, off_h = (float(v) for v in clip_off[0][2:4])
     default_w, default_h = (float(v) for v in clip_default[0][2:4])
     assert default_w >= off_w / 2
     assert default_h >= off_h / 2
     assert svg_default != svg_auto_false
-    assert _last_x_tick_overhang_margin(svg_auto_false, 192, 200) == -8
-    assert _last_x_tick_overhang_margin(svg_default, 192, 200) == 6
+    assert _last_x_tick_overhang_margin(svg_auto_false, 192, 200) == -14
+    assert _last_x_tick_overhang_margin(svg_default, 192, 200) == 13
 
 
 def _flat_x_tick_labels(svg: str) -> list[tuple[str, str]]:
@@ -756,15 +757,16 @@ def _inter_ink_columns(svg: str, viewport_width: float, viewport_height: float) 
     return min(columns) - int(w), max(columns) - int(w)
 
 
-def test_a_title_rescue_that_thins_the_x_labels_evenly_ships():
+def test_the_cascade_thins_the_x_labels_on_its_own_while_the_rescue_only_narrows_for_the_title():
     """270x200, x=[0,1,2,3] with the title "A moderately long horizontal
-    axis title here": auto=False draws 8 rotated -90 x tick labels (every
-    second of the 16 ticks 0, 0.2, ..., 3) in a 191.056x110.056 plot, and the
-    title's ink overhangs the canvas by a measured 8px. The rescue lays the
-    same 16 ticks flat and labels every third (0, 0.6, ..., 3): an even
-    stride thinning of a continuous axis, 6 labels, none elided, so it is
-    not a loss. It ships: a 151.999x124.961 plot (79.6% of the auto=False
-    width) with the title's overhang pulled back to +11px."""
+    axis title here": the x-axis collision cascade thins its 16 ticks
+    (0, 0.2, ..., 3) to an even stride of 3 and draws them flat at the full
+    11pt font on its own, so `auto=False` and the default agree on the same
+    6 labels (0, 0.6, ..., 3) in that regard. What still differs is the
+    TITLE: with auto off it keeps the 191.056x124.961 plot and the title's
+    ink overhangs the canvas by a measured 8px; the rescue narrows the plot
+    to 151.999x124.961 (79.6% of the auto=False width) and pulls the
+    title's overhang back to +11px."""
     control_df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
     chart = (
         fm.Chart(control_df)
@@ -776,17 +778,15 @@ def test_a_title_rescue_that_thins_the_x_labels_evenly_ships():
     svg_default = chart.to_svg()
     assert svg_auto_false.count("<circle") == 4
     assert svg_default.count("<circle") == 4
-    assert _X_TICK_LABEL.findall(svg_auto_false) == [
-        ("-90", text) for text in ("0", "0.4", "0.8", "1.2", "1.6", "2", "2.4", "2.8")
-    ]
+    assert _X_TICK_LABEL.findall(svg_auto_false) == []
     assert _X_TICK_LABEL.findall(svg_default) == []
-    assert _flat_x_tick_labels(svg_default) == [
-        (text, "9.02") for text in ("0", "0.6", "1.2", "1.8", "2.4", "3")
-    ]
+    thinned_x_labels = [(text, "11") for text in ("0", "0.6", "1.2", "1.8", "2.4", "3")]
+    assert _flat_x_tick_labels(svg_auto_false) == thinned_x_labels
+    assert _flat_x_tick_labels(svg_default) == thinned_x_labels
     assert "\u2026" not in svg_default
     clip_off = _CLIP_RECT.findall(svg_auto_false)
     clip_default = _CLIP_RECT.findall(svg_default)
-    assert clip_off == [("62.944", "16", "191.056", "110.056")]
+    assert clip_off == [("62.944", "16", "191.056", "124.961")]
     assert clip_default == [("62.944", "16", "151.999", "124.961")]
     assert float(clip_default[0][2]) >= float(clip_off[0][2]) / 2
     assert _last_x_tick_overhang_margin(svg_auto_false, 270, 200) == -8
@@ -794,69 +794,96 @@ def test_a_title_rescue_that_thins_the_x_labels_evenly_ships():
 
 
 def test_a_rescue_that_would_cull_every_x_label_is_declined():
-    """124x150, x=[-1234567.89, 0] ticked at both values with `,.4f`:
-    auto=False draws one x label, "-1,234,567.8900" at -45 degrees, in a
-    45.056x9.756 plot (the second tick's "0.0000" is already culled), its
-    Inter ink reaching x=2 at the canvas's left edge. A rescue here would
-    cull that label too, losing more of its own ticks than auto=False, so
-    the default ships byte-identical to auto=False.
+    """144x200, x=[-1e12, -5e11, -1e3] ticked at all three values with
+    `,.4f`: auto=False culls two of the three ticks already, drawing one
+    rotated label ("-1,000,000,000,000.0000" at -60 degrees) in a
+    65.056x3.955 plot, overhanging the canvas on the left by a measured
+    13.5px. The default ships byte-identical to auto=False and warns
+    naming the left side and the 13.5px overhang; auto=False itself never
+    warns.
 
-    Liveness: padding.auto does act on this chart's long first label. The
-    same chart at 176x150 keeps both labels with auto=False and is rescued
-    by default, its left inset growing from 62.944 to 66.038 with the same
-    two labels drawn; only the cull at 124x150 stops the rescue."""
-    lo = -1.23456789e6
-    df = pl.DataFrame({"x": [lo, 0.0], "y": [0.0, 1.0]})
+    With the left side set explicitly to the warned amount
+    (`configure_padding(left=16+13.5+1)`), the plot is 50.556px wide and
+    140.271px tall -- both at or above half of auto=False's 65.056x3.955
+    -- yet the rescue draws no x tick label at all: the one label
+    auto=False still manages is exactly what the rescue would have to
+    drop, which the no-more-lost-x-labels rule refuses."""
+    lo, mid, hi = -1e12, -5e11, -1e3
+    df = pl.DataFrame({"x": [lo, mid, hi], "y": [0.0, 1.0, 2.0]})
     chart = (
         fm.Chart(df)
         .mark_point()
-        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.4f", values=[lo, 0.0])), y="y:Q")
-        .properties(width=124, height=150)
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.4f", values=[lo, mid, hi])), y="y:Q")
+        .properties(width=144, height=200)
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
-    svg_default = chart.to_svg()
-    assert re.findall(
-        r'transform="rotate\((-?[\d.]+) [^"]*"[^>]*>(-1,234,567\.8900)</text>', svg_auto_false
-    ) == [("-45", "-1,234,567.8900")]
-    assert ">0.0000<" not in svg_auto_false
-    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "45.056", "9.756")]
-    assert _inter_ink_columns(svg_auto_false, 124, 150)[0] == 2
+    assert _X_TICK_LABEL.findall(svg_auto_false) == [("-60", "-1,000,000,000,000.0000")]
+    assert _flat_x_tick_labels(svg_auto_false) == []
+    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "65.056", "3.955")]
+    with warnings.catch_warnings(record=True) as off_warnings:
+        warnings.simplefilter("always")
+        assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
+    assert off_warnings == []
+    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the left by 13\.5px"):
+        svg_default = chart.to_svg()
     assert svg_default == svg_auto_false
 
-    wider = chart.properties(width=176)
-    wider_off = wider.configure_padding(auto=False).to_svg()
-    wider_default = wider.to_svg()
-    assert _CLIP_RECT.findall(wider_off) == [("62.944", "16", "97.056", "9.756")]
-    assert _CLIP_RECT.findall(wider_default) == [("66.038", "16", "93.962", "9.756")]
-    for svg in (wider_off, wider_default):
-        assert ">-1,234,567.8900<" in svg
-        assert ">0.0000<" in svg
+    off_w, off_h = 65.056, 3.955
+    twin = chart.configure_padding(left=16 + 13.5 + 1)
+    twin_off = twin.configure_padding(auto=False).to_svg()
+    twin_w, twin_h = (float(v) for v in _CLIP_RECT.findall(twin_off)[0][2:4])
+    assert twin_w >= off_w / 2 and twin_h >= off_h / 2
+    assert _X_TICK_LABEL.findall(twin_off) == []
+    assert _flat_x_tick_labels(twin_off) == []
+    assert twin_off == twin.to_svg()
 
 
 def test_a_rescue_that_thins_the_x_labels_to_two_is_declined():
-    """176x100, x=[0, 1234567.89] ticked at both values with `,.4f`: auto=False
-    draws both flat labels ("0.0000" and "1,234,567.8900") in a 97.056x24.961
-    plot, and the last one overhangs the canvas by a measured 7px. A rescue
-    would keep fewer of its own ticks than auto=False, and an even thinning
-    down to 2 labels is still a loss (an even thinning needs at least 3), so
-    the default ships byte-identical to auto=False, label overhang and all."""
-    hi = 1.23456789e6
-    df = pl.DataFrame({"x": [0.0, hi], "y": [0.0, 1.0], "g": ["a", "b"]})
+    """252x150, x=[0, 49999999.9375, 99999999.875] ticked at all three
+    values with `,.3f`: auto=False draws all three flat at the shrunk
+    9.02pt font in the same 173.056x74.961 plot, the last one overhanging
+    the canvas on the right by a measured 10.3px. The default ships
+    byte-identical to auto=False and warns naming the right side and the
+    10.3px overhang; auto=False itself never warns.
+
+    With the right side set explicitly to the warned amount
+    (`configure_padding(right=16+10.3+1)`), the plot is 161.756px wide and
+    74.961px tall -- both above half of auto=False's -- yet the rescue
+    keeps only the two end ticks ("0.000" and "99,999,999.875"), dropping
+    the middle one: an even thinning needs at least three survivors, so
+    thinning to two is still a loss the own-ticks rule refuses, which is
+    why the default declines rather than applying this narrower plot."""
+    xs = [0.0, 49999999.9375, 99999999.875]
+    df = pl.DataFrame({"x": xs, "y": [0.0, 1.0, 2.0]})
     chart = (
         fm.Chart(df)
         .mark_point()
-        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.4f", values=[0.0, hi])), y="y:Q")
-        .properties(width=176, height=100)
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.3f", values=xs)), y="y:Q")
+        .properties(width=252, height=150)
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
-    svg_default = chart.to_svg()
     assert _flat_x_tick_labels(svg_auto_false) == [
-        ("0.0000", "9.02"),
-        ("1,234,567.8900", "9.02"),
+        ("0.000", "9.02"),
+        ("49,999,999.938", "9.02"),
+        ("99,999,999.875", "9.02"),
     ]
-    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "97.056", "24.961")]
-    assert _last_x_tick_overhang_margin(svg_auto_false, 176, 100) == -7
+    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "173.056", "74.961")]
+    assert _last_x_tick_overhang_margin(svg_auto_false, 252, 150) == -4
+    with warnings.catch_warnings(record=True) as off_warnings:
+        warnings.simplefilter("always")
+        assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
+    assert off_warnings == []
+    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the right by 10\.3px"):
+        svg_default = chart.to_svg()
     assert svg_default == svg_auto_false
+
+    off_w, off_h = 173.056, 74.961
+    twin = chart.configure_padding(right=16 + 10.3 + 1)
+    twin_off = twin.configure_padding(auto=False).to_svg()
+    twin_w, twin_h = (float(v) for v in _CLIP_RECT.findall(twin_off)[0][2:4])
+    assert twin_w >= off_w / 2 and twin_h >= off_h / 2
+    assert _flat_x_tick_labels(twin_off) == [("0.000", "11"), ("99,999,999.875", "11")]
+    assert twin_off == twin.to_svg()
 
 
 def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
@@ -868,7 +895,9 @@ def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
     (49.056) -- under half, so auto adds nothing: the default renders
     byte-identically to auto=False rather than a smaller plot that still
     overhangs. The overhanging label ("1,234.56789000") is drawn, unchanged,
-    in both renders."""
+    in both renders. The default warns naming the right side and the
+    24.3px overhang the real rendered ink measures; auto=False never
+    warns."""
     lo = -float("1.23456789e3")
     df = pl.DataFrame({"x": [0.0, -lo], "y": [0.0, 1.0]})
     chart = (
@@ -884,7 +913,12 @@ def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
         .properties(width=128, height=200)
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
-    svg_default = chart.to_svg()
+    with warnings.catch_warnings(record=True) as off_warnings:
+        warnings.simplefilter("always")
+        assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
+    assert off_warnings == []
+    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the right by 24\.3px"):
+        svg_default = chart.to_svg()
     assert svg_auto_false.count("<circle") == 2
     assert svg_default.count("<circle") == 2
     assert _last_x_tick_overhang_margin(svg_auto_false, 128, 200) == -17
@@ -926,63 +960,40 @@ def _plain_x_tick_labels(svg: str) -> list[tuple[str, str, str]]:
     return drawn
 
 
-_FLAT_SHRUNK_X_TICKS = [
-    ("0", "9.02", "0"),
-    ("0.2", "9.02", "0"),
-    ("0.4", "9.02", "0"),
-    ("0.6", "9.02", "0"),
-    ("0.8", "9.02", "0"),
-    ("1", "9.02", "0"),
-]
 _FLAT_EVERY_THIRD_X_TICKS = [
     ("0", "11", "0"),
     ("0.3", "11", "0"),
     ("0.6", "11", "0"),
     ("0.9", "11", "0"),
 ]
-_ROTATED_FULL_SIZE_X_TICKS = [
-    ("0", "11", "-90"),
-    ("0.2", "11", "-90"),
-    ("0.4", "11", "-90"),
-    ("0.6", "11", "-90"),
-    ("0.8", "11", "-90"),
-    ("1", "11", "-90"),
-]
 
 
 @pytest.mark.parametrize(
-    "chars, clip_on, drawn_default, title_x, ink_right_off",
+    "chars, clip_on, title_x, ink_right_off",
     [
-        (25, ("66.054", "16", "125.397", "110.056"), _ROTATED_FULL_SIZE_X_TICKS, "128.752", 225),
-        (26, ("66.054", "16", "118.098", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "125.103", 228),
-        (27, ("66.054", "16", "110.798", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "121.453", 232),
-        (28, ("66.054", "16", "103.498", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "117.803", 236),
+        (25, ("66.054", "16", "125.397", "124.961"), "128.752", 225),
+        (26, ("66.054", "16", "118.098", "124.961"), "125.103", 228),
+        (27, ("66.054", "16", "110.798", "124.961"), "121.453", 232),
+        (28, ("66.054", "16", "103.498", "124.961"), "117.803", 236),
     ],
 )
-def test_220px_x_title_boundary_is_pinned_at_real_fonts(
-    chars, clip_on, drawn_default, title_x, ink_right_off
-):
+def test_220px_x_title_boundary_is_pinned_at_real_fonts(chars, clip_on, title_x, ink_right_off):
     """220x200, `y` over a 0..1e9 domain (so the y label band stays wide
     and fixed regardless of the x title) and an x title of *chars*
-    repeated "a" characters, over `x=[0.0, 1.0]`: `auto=False` always draws
-    the six x ticks ("0"/"0.2"/.../"1") flat and shrunk to the cascade's
-    9.02pt font (`_FLAT_SHRUNK_X_TICKS`), whatever the title's length.
+    repeated "a" characters, over `x=[0.0, 1.0]`: the 11 ticks (0, 0.1,
+    ..., 1) thin to an even stride of 3, labelling every third
+    (0, 0.3, 0.6, 0.9) flat at the full 11pt font (`_FLAT_EVERY_THIRD_X_TICKS`)
+    -- a thinning the x-axis cascade applies on its own, so `auto=False` and
+    the default agree on the tick set at every title length.
 
-    - 25 chars: `padding.auto` genuinely rescues the title. The plot
-      narrows (clip width 137.946 -> 125.397) and the recentred title's own
-      `<text x=...>` moves from 135.027 to 128.752; the x axis keeps the
-      SAME six labels, but now rotated -90 at the full, unshrunk 11pt font
-      (`_ROTATED_FULL_SIZE_X_TICKS`) rather than flat-and-shrunk.
-    - 26/27/28 chars: `padding.auto` rescues the title too. The plot
-      narrows further (clip width 137.946 -> 118.098 / 110.798 / 103.498,
-      each above half the auto=False width), the title recentres (135.027
-      -> 125.103 / 121.453 / 117.803, its Inter ink ending at x=218, inside
-      the 220px canvas, where auto=False's ends at 228 / 232 / 236), and the
-      x axis lays its 11 ticks (0, 0.1, ..., 1) flat at the full 11pt font
-      labelling every third: 0, 0.3, 0.6, 0.9
-      (`_FLAT_EVERY_THIRD_X_TICKS`). That is an even stride thinning of a
-      continuous axis with at least 3 labels and none elided, which is not
-      a loss, so the rescue ships.
+    What the title's length still moves is the rescue of the TITLE itself:
+    `padding.auto` narrows the plot (clip width 137.946 -> 125.397 / 118.098
+    / 110.798 / 103.498, each above half the auto=False width) and recentres
+    the title's own `<text x=...>` (135.027 -> 128.752 / 125.103 / 121.453 /
+    117.803), pulling its Inter ink back inside the 220px canvas (ending at
+    x=218) where `auto=False`'s overhangs it (ending at 225 / 228 / 232 /
+    236). The x tick set itself, and its 124.961 band height (``clip_on``'s
+    fourth value), is unaffected either way.
     """
     title = "a" * chars
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1000000000.0]})
@@ -994,8 +1005,8 @@ def test_220px_x_title_boundary_is_pinned_at_real_fonts(
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
     svg_default = chart.to_svg()
-    assert _plain_x_tick_labels(svg_auto_false) == _FLAT_SHRUNK_X_TICKS
-    assert _plain_x_tick_labels(svg_default) == drawn_default
+    assert _plain_x_tick_labels(svg_auto_false) == _FLAT_EVERY_THIRD_X_TICKS
+    assert _plain_x_tick_labels(svg_default) == _FLAT_EVERY_THIRD_X_TICKS
     assert _CLIP_RECT.findall(svg_default) == [clip_on]
     title_match = re.search(
         rf'<text x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>{title}</text>', svg_default
@@ -1009,3 +1020,79 @@ def test_220px_x_title_boundary_is_pinned_at_real_fonts(
     # The title's real Inter ink: past the canvas with auto off, inside it by default.
     assert _inter_ink_columns(svg_auto_false, 220, 200)[1] == ink_right_off
     assert _inter_ink_columns(svg_default, 220, 200)[1] == 218
+
+
+# ---------------------------------------------------------------------------
+# A declined rescue that still clips content warns: `padding.auto` either
+# contains the labels or says why it didn't. An explicit side, or
+# `auto=False`, is the user's own clip and stays silent (their choice).
+# ---------------------------------------------------------------------------
+
+
+def test_a_declined_rescue_warns_with_the_side_amount_and_remedy():
+    """264x150, x=[0, 1e6] formatted `currency_cents`: the default declines
+    to rescue the clipping right-edge label ("$1,000,000.00") and warns
+    naming the content kind, the side, the overflow in pixels, the cause
+    and a remedy. `auto=False` renders the identical bytes but raises no
+    warning -- the decline is the user's own clip once they turn
+    `padding.auto` off."""
+    df = pl.DataFrame({"x": [0.0, 1_000_000.0], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format="currency_cents")), y="y:Q")
+        .properties(width=264, height=150)
+    )
+    with pytest.warns(UserWarning, match="x tick labels overflow the canvas on the right"):
+        svg_default = chart.to_svg()
+    with warnings.catch_warnings(record=True) as off_warnings:
+        warnings.simplefilter("always")
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    assert off_warnings == []
+    assert svg_default == svg_auto_false
+    with warnings.catch_warnings(record=True) as default_warnings:
+        warnings.simplefilter("always")
+        chart.to_svg()
+    message = str(default_warnings[0].message)
+    assert "x tick labels overflow the canvas on the right" in message
+    assert "padding.auto declined the margin" in message
+    assert "more than half the plot or drop x tick labels" in message
+    assert "widen the chart" in message
+    assert "label_angle or label_overlap" in message
+    assert "configure_padding(right=...)" in message
+
+
+def test_a_declined_rescue_is_silent_under_an_explicit_padding_side():
+    """The same 264x150 currency_cents chart, with the right side set
+    explicitly: that side is the user's own clip, not `padding.auto`'s, so
+    no warning fires even though the same label still overflows."""
+    df = pl.DataFrame({"x": [0.0, 1_000_000.0], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format="currency_cents")), y="y:Q")
+        .properties(width=264, height=150)
+        .configure_padding(right=20)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart.to_svg()
+    assert caught == []
+
+
+def test_a_declined_rescue_is_silent_under_auto_false():
+    """The same chart with `auto=False`: declining a rescue is only
+    disclosed when `padding.auto` owns the decision; a user who turned it
+    off entirely gets no warning for their own clip."""
+    df = pl.DataFrame({"x": [0.0, 1_000_000.0], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format="currency_cents")), y="y:Q")
+        .properties(width=264, height=150)
+        .configure_padding(auto=False)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart.to_svg()
+    assert caught == []

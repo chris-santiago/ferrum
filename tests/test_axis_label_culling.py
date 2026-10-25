@@ -476,7 +476,7 @@ def test_cull_threshold_positive_wraps_uniformly_without_worst_case_packing() ->
 # ---------------------------------------------------------------------------
 
 _S2B_MIXED_LENGTH_CATEGORIES = [
-    "Massachusetts Institute",
+    "Massachusetts Institute of",
     "Costa Rica",
     "New Zealand",
     "South Africa",
@@ -502,15 +502,14 @@ def test_s2b_reduced_font_wrap_ragged_at_zero_uniform_at_default_threshold() -> 
     same uniform-degradation guarantee S1 already carries must hold there
     too.
 
-    At ``cull_threshold=0``: RAGGED is the CORRECT, pre-task-identical
-    result -- ``"Massachusetts Institute"`` doesn't fit combined even at the
-    reduced font and wraps to 2 lines, while the other four (shorter)
-    2-word categories each fit combined and stay on 1 line -- a genuinely
-    non-uniform set of natural line counts, which is what pre-task
-    (never-uniformized) code would also produce. At the DEFAULT theme
-    (``cull_threshold=8``): every category must resolve to the SAME line
-    count -- before this cycle's fix, S2b had no `cull_threshold` branch at
-    all, so this rendered identically (ragged) at both 0 and 8.
+    At ``cull_threshold=0``: RAGGED is the correct result -- the three-word
+    ``"Massachusetts Institute of"`` doesn't fit combined even at the
+    reduced font and wraps to 2 lines (``"Massachusetts"`` / ``"Institute
+    of"``), while the other four (shorter) 2-word categories each fit
+    combined and stay on 1 line -- a genuinely non-uniform set of natural
+    line counts, which is what never-uniformized wrapping produces. At the
+    DEFAULT theme (``cull_threshold=8``): every category must resolve to
+    the SAME line count instead.
     """
     chart = _s2b_categories_chart()
 
@@ -530,8 +529,8 @@ def test_s2b_reduced_font_wrap_ragged_at_zero_uniform_at_default_threshold() -> 
         f"counts {line_counts_zero} -- if every category now wraps the same "
         "way even at 0, byte-identity to pre-task has regressed"
     )
-    assert line_counts_zero["Massachusetts Institute"] == 2, (
-        "'Massachusetts Institute' must still wrap to 2 lines at the reduced "
+    assert line_counts_zero["Massachusetts Institute of"] == 2, (
+        "'Massachusetts Institute of' must still wrap to 2 lines at the reduced "
         f"font; got {line_counts_zero}"
     )
 

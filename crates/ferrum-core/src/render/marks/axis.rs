@@ -740,6 +740,7 @@ mod tests {
             label_font_size: None,
             is_major: true,
             anchor: false,
+            origin: false,
         }
     }
 
@@ -754,6 +755,7 @@ mod tests {
             label_font_size: None,
             is_major: false,
             anchor: false,
+            origin: false,
         }
     }
 
@@ -1056,7 +1058,7 @@ mod tests {
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
             ticks: vec![
                 major_tick(25.0, "visible"),
-                TickLayout { position: 75.0, label: "culled".into(), label_angle: 0.0, elided: false, culled: true, label_font_size: None, is_major: true, anchor: false },
+                TickLayout { position: 75.0, label: "culled".into(), label_angle: 0.0, elided: false, culled: true, label_font_size: None, is_major: true, anchor: false, origin: false },
             ],
             minor_ticks: vec![],
             title: None,
@@ -1111,6 +1113,7 @@ mod tests {
                     label_font_size: None,
                     is_major: true,
                     anchor: false,
+                    origin: false,
                 },
             ],
             minor_ticks: vec![],
@@ -1176,6 +1179,7 @@ mod tests {
                     label_font_size: Some(9.0),
                     is_major: true,
                     anchor: false,
+                    origin: false,
                 },
             ],
             minor_ticks: vec![],
@@ -1429,8 +1433,8 @@ mod tests {
             panel_index: 0,
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
             ticks: vec![
-                TickLayout { position: 25.0, label: "a".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true, anchor: false },
-                TickLayout { position: 75.0, label: "b".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true, anchor: false },
+                TickLayout { position: 25.0, label: "a".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true, anchor: false, origin: false },
+                TickLayout { position: 75.0, label: "b".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true, anchor: false, origin: false },
             ],
             minor_ticks: vec![],
             title: None,
@@ -1817,16 +1821,19 @@ mod tests {
                 position: 10.0, label: "left".into(), label_angle: 0.0,
                 elided: false, culled: false, label_font_size: None, is_major: true,
  anchor: false,
+ origin: false,
             },
             crate::layout::TickLayout {
                 position: 50.0, label: "mid".into(), label_angle: 0.0,
                 elided: false, culled: false, label_font_size: None, is_major: true,
  anchor: false,
+ origin: false,
             },
             crate::layout::TickLayout {
                 position: 90.0, label: "right".into(), label_angle: 0.0,
                 elided: false, culled: false, label_font_size: None, is_major: true,
  anchor: false,
+ origin: false,
             },
         ];
         axis

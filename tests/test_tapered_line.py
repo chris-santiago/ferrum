@@ -1135,8 +1135,8 @@ def _vacuity_curved_chart() -> fm.Chart:
     )
 
 
-_VACUITY_DASHED_SHA256 = "0e038bd6c009692aa6c2a9bc767ed5f97a6a7d640f6b4a721ccd97c66d82af6c"
-_VACUITY_CURVED_ROUND_SHA256 = "867d550096b1167b8617e5687a5573a8bc2c0b94bdee374148d0c44140cc3b77"
+_VACUITY_DASHED_SHA256 = "e86df1d9a52d2cccb5a46989302418d37881c7557e4dfcc0ee73834ff4508688"
+_VACUITY_CURVED_ROUND_SHA256 = "49e3c23086cdc080a7bec6a2dc081a61a27e5d991429dbed73f8744b1d2862a6"
 
 
 def test_unsized_dashed_line_draws_a_stroked_dash_array_with_no_tapered_outline() -> None:

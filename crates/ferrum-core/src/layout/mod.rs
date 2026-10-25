@@ -218,6 +218,125 @@ pub enum LayoutWarning {
     EmptyPartitions {
         keys: Vec<String>,
     },
+    /// `padding.auto` could not contain some drawn x/y tick label or axis
+    /// title inside the canvas. One [`CanvasOverflow`] per overflowing
+    /// content kind, in the order x tick labels, y tick labels, x title, y
+    /// title. Each kind's own cause and remedy are distinct (see `Display`
+    /// below): a half-the-plot-or-loss-rule decline, categorical x labels
+    /// `padding.auto` never charges for, and a title too wide or tall for
+    /// the canvas no margin could ever contain — so one shared sentence
+    /// for every kind would state a cause or remedy that does not hold for
+    /// at least one of them.
+    ContentPastCanvas {
+        overflows: Vec<CanvasOverflow>,
+    },
+}
+
+/// One content item a [`LayoutWarning::ContentPastCanvas`] reports.
+/// `left`/`right`/`top`/`bottom` are this item's own overflow past its
+/// canvas edge, in px (`0.0` where that side does not overflow this item,
+/// or where an explicit `padding_<side>` already owns that side).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanvasOverflow {
+    pub content: OverflowingContent,
+    pub left: f64,
+    pub right: f64,
+    pub top: f64,
+    pub bottom: f64,
+}
+
+/// The kind of drawn content a [`CanvasOverflow`] names, read from the
+/// shipped layout and inputs rather than threaded out of `padding.auto`'s
+/// settle: whether x tick labels are continuous or categorical
+/// (`AxisInput.tick_projection`), and whether an axis title merely lost a
+/// declined rescue or is wider/taller than the canvas itself
+/// ([`recentering_is_feasible`]) and so could never fit under any margin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowingContent {
+    XTickLabels,
+    CategoricalXTickLabels,
+    YTickLabels,
+    XAxisTitle,
+    XAxisTitleWiderThanCanvas,
+    YAxisTitle,
+    YAxisTitleTallerThanCanvas,
+}
+
+/// The sentence one [`CanvasOverflow`] contributes to a
+/// [`LayoutWarning::ContentPastCanvas`] message: which sides overflow and
+/// by how much, then this content kind's own true cause and remedy. A
+/// side counts (is named, and offered a `configure_padding` remedy) only
+/// past [`AUTO_PADDING_EPS`] — [`content_past_canvas`] already floors every
+/// side to `0.0` at or below it, so this is the same threshold, not a
+/// second one. A title that is wider or taller than the canvas names no
+/// padding remedy, since no margin could ever contain it.
+fn canvas_overflow_sentence(o: &CanvasOverflow) -> String {
+    let mut sides: Vec<(&str, f64)> = Vec::new();
+    if o.left > AUTO_PADDING_EPS {
+        sides.push(("left", o.left));
+    }
+    if o.right > AUTO_PADDING_EPS {
+        sides.push(("right", o.right));
+    }
+    if o.top > AUTO_PADDING_EPS {
+        sides.push(("top", o.top));
+    }
+    if o.bottom > AUTO_PADDING_EPS {
+        sides.push(("bottom", o.bottom));
+    }
+    let side_text = sides
+        .iter()
+        .map(|(name, px)| format!("{name} by {px:.1}px"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let padding_remedy = || {
+        sides
+            .iter()
+            .map(|(name, _)| format!("configure_padding({name}=...)"))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    match o.content {
+        OverflowingContent::XTickLabels => format!(
+            "x tick labels overflow the canvas on the {side_text}: padding.auto declined the \
+             margin, since containing them would take more than half the plot or drop x tick \
+             labels; widen the chart, set the x axis label_angle or label_overlap, or set {}.",
+            padding_remedy(),
+        ),
+        OverflowingContent::CategoricalXTickLabels => format!(
+            "x tick labels overflow the canvas on the {side_text}: padding.auto reserves no \
+             margin for categorical x labels; widen the chart, set the x axis label_angle or \
+             label_overlap, or set {}.",
+            padding_remedy(),
+        ),
+        OverflowingContent::YTickLabels => format!(
+            "y tick labels overflow the canvas on the {side_text}: padding.auto declined the \
+             margin, since containing them would take more than half the plot or drop x tick \
+             labels; heighten the chart or set {}.",
+            padding_remedy(),
+        ),
+        OverflowingContent::XAxisTitle => format!(
+            "the x axis title overflows the canvas on the {side_text}: padding.auto declined \
+             the margin, since containing it would take more than half the plot or drop x tick \
+             labels; widen the chart, shorten the title, or set {}.",
+            padding_remedy(),
+        ),
+        OverflowingContent::XAxisTitleWiderThanCanvas => format!(
+            "the x axis title overflows the canvas on the {side_text}: it is wider than the \
+             chart, so no margin contains it; shorten the title or widen the chart."
+        ),
+        OverflowingContent::YAxisTitle => format!(
+            "the y axis title overflows the canvas on the {side_text}: padding.auto declined \
+             the margin, since containing it would take more than half the plot or drop x tick \
+             labels; heighten the chart, shorten the title, or set {}.",
+            padding_remedy(),
+        ),
+        OverflowingContent::YAxisTitleTallerThanCanvas => format!(
+            "the y axis title overflows the canvas on the {side_text}: it is taller than the \
+             chart, so no margin contains it; shorten the title or heighten the chart."
+        ),
+    }
 }
 
 impl std::fmt::Display for LayoutWarning {
@@ -264,6 +383,10 @@ impl std::fmt::Display for LayoutWarning {
                 "facet grid has empty cell(s) with no data: {}",
                 keys.join("; ")
             ),
+            LayoutWarning::ContentPastCanvas { overflows } => {
+                let sentences: Vec<String> = overflows.iter().map(canvas_overflow_sentence).collect();
+                write!(f, "{}", sentences.join(" "))
+            }
         }
     }
 }
@@ -1855,14 +1978,20 @@ const MIN_EVENLY_THINNED_X_LABELS: usize = 3;
 /// generated ticks (those with non-empty label text, the ticks
 /// [`lost_x_tick_labels`] counts): no label is elided, the generated ticks
 /// whose label is drawn are exactly what [`axis::anchored_visibility`]
-/// gives for SOME stride (every `s`-th, from the first, decades protected —
+/// gives for SOME stride, counted from EITHER index 0 or the axis's own
+/// stamped origin tick (every `s`-th in both directions, decades protected —
 /// a Log axis's anchored cull is asked with the
 /// SAME primitive the cull itself used, so "even" means "what the cull
 /// produces for one stride" on every axis kind, not only a plain stride),
-/// and at least [`MIN_EVENLY_THINNED_X_LABELS`] labels are drawn. An
-/// irregular cull, an elided label or an axis that draws tick marks only is
-/// not one. With no anchors (every non-`Log` axis), `anchored_visibility`
-/// reduces to plain `stride_visibility`, so this is exactly today's test.
+/// and at least [`MIN_EVENLY_THINNED_X_LABELS`] labels are drawn. Both
+/// origins are tried because an axis may thin from either: a phase-0
+/// thinning is an even one, and so is the cascade's own origin-phased
+/// thinning (`cascade_collision_recovery`'s stage D, S4, and the
+/// band-budget cull), which must not be misread as a loss merely for not
+/// being phase 0. An irregular cull, an elided label or an
+/// axis that draws tick marks only is not one. With no anchors (every
+/// non-`Log` axis), `anchored_visibility` reduces to plain
+/// `stride_visibility`.
 fn thins_x_labels_evenly(axis: &AxisLayout) -> bool {
     let generated = || axis.ticks.iter().filter(|t| !t.label.is_empty());
     if generated().any(|t| t.elided) {
@@ -1874,8 +2003,12 @@ fn thins_x_labels_evenly(axis: &AxisLayout) -> bool {
         return false;
     }
     let anchors: Vec<bool> = generated().map(|t| t.anchor).collect();
+    let stamped_origin = generated().position(|t| t.origin);
     let n = drawn.len();
-    (1..=n).any(|stride| axis::anchored_visibility(n, stride, &anchors) == drawn)
+    (1..=n).any(|stride| {
+        axis::anchored_visibility(n, stride, &anchors, 0) == drawn
+            || stamped_origin.is_some_and(|o| axis::anchored_visibility(n, stride, &anchors, o) == drawn)
+    })
 }
 
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
@@ -2085,6 +2218,187 @@ fn title_half_extent(
     let text = axis.title.get().as_deref()?;
     let font_size = axis.overrides.title.font_size.unwrap_or(theme.typography.title_font_size);
     Some(metrics.measure_width(text, font_size) / 2.0)
+}
+
+/// Whether any drawn x/y tick label or axis title in `axis_layouts` reaches
+/// past `viewport`'s canvas edges, measured directly on those final
+/// layouts (not on a wider candidate `padding.auto` might try): `None` when
+/// nothing does, or a [`LayoutWarning::ContentPastCanvas`] with one
+/// [`CanvasOverflow`] per overflowing content kind otherwise.
+///
+/// Each item's overflow is the largest of what contributes to it:
+/// - x tick labels: each drawn label's own ink ([`axis::drawn_x_labels`]),
+///   past the left by `-left_ink` and past the right by
+///   `right_ink - viewport.w`. [`OverflowingContent::CategoricalXTickLabels`]
+///   when `axes.x.tick_projection` is `None`, else
+///   [`OverflowingContent::XTickLabels`].
+/// - y tick labels: the topmost drawn tick's half-line-height proxy (the
+///   same measure [`auto_padding_for_edge_ticks`] charges), past the top
+///   by `line_height/2 - its pixel`, only when that y axis is continuous,
+///   flat and shows labels — the proxy assumes a flat label's vertical
+///   reach is half its line height, which does not hold otherwise.
+/// - an axis title: its anchor plus or minus [`title_half_extent`], judged
+///   against its own dimension (an x title against `viewport.w`, a y title
+///   — rendered rotated, so its measured width is its vertical reach —
+///   against `viewport.h`). [`OverflowingContent::XAxisTitleWiderThanCanvas`]
+///   / [`OverflowingContent::YAxisTitleTallerThanCanvas`] when
+///   [`recentering_is_feasible`] says no margin could ever fit it; otherwise
+///   [`OverflowingContent::XAxisTitle`] / [`OverflowingContent::YAxisTitle`].
+///
+/// A side whose `padding_<side>` is set explicitly is excluded from both
+/// the reported amount and from deciding whether that item overflows at
+/// all: that side is the caller's own clip, not one `padding.auto` could
+/// have tried to contain. Entries are returned in the order x tick labels,
+/// y tick labels, x title, y title; each keeps its OWN sides and amounts
+/// rather than being folded into a single cross-kind maximum, since a
+/// decline's cause and remedy differ by kind. Every side of every kind is
+/// floored to exactly `0.0` at or below [`AUTO_PADDING_EPS`] before it is
+/// stored, so a side that does not genuinely overflow is never a
+/// sub-threshold positive value — [`canvas_overflow_sentence`] names "the
+/// sides that overflow" by testing `> AUTO_PADDING_EPS`, the same
+/// threshold this function already floored against.
+fn content_past_canvas(
+    axes: &AxesInput,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+    viewport: Rect,
+    axis_layouts: &[AxisLayout],
+) -> Option<LayoutWarning> {
+    let padding = &theme.padding;
+    let keep_left = padding.padding_left.is_none();
+    let keep_right = padding.padding_right.is_none();
+    let keep_top = padding.padding_top.is_none();
+    let keep_bottom = padding.padding_bottom.is_none();
+
+    let x_axes = || axis_layouts.iter().filter(|a| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top));
+    let y_axes = || axis_layouts.iter().filter(|a| matches!(a.orient, AxisOrient::Left | AxisOrient::Right));
+
+    // Floors a side to exactly `0.0` once it is at or below the single
+    // threshold every side of every content kind is judged against, so a
+    // stored `CanvasOverflow` field is either a real overflow or a clean
+    // zero — never EPS-level noise that `canvas_overflow_sentence` would
+    // then have to filter again.
+    let clamp_eps = |v: f64| if v > AUTO_PADDING_EPS { v } else { 0.0 };
+
+    let mut overflows: Vec<CanvasOverflow> = Vec::new();
+
+    // x tick labels
+    let mut x_tick_left = 0.0_f64;
+    let mut x_tick_right = 0.0_f64;
+    for axis in x_axes() {
+        for label in axis::drawn_x_labels(axis, theme.typography.label_font_size, metrics) {
+            x_tick_left = x_tick_left.max(-label.left_ink);
+            x_tick_right = x_tick_right.max(label.right_ink - viewport.w);
+        }
+    }
+    let x_tick_left = clamp_eps(if keep_left { x_tick_left.max(0.0) } else { 0.0 });
+    let x_tick_right = clamp_eps(if keep_right { x_tick_right.max(0.0) } else { 0.0 });
+    if x_tick_left > 0.0 || x_tick_right > 0.0 {
+        let content = if axes.x.tick_projection.is_none() {
+            OverflowingContent::CategoricalXTickLabels
+        } else {
+            OverflowingContent::XTickLabels
+        };
+        overflows.push(CanvasOverflow {
+            content,
+            left: x_tick_left,
+            right: x_tick_right,
+            top: 0.0,
+            bottom: 0.0,
+        });
+    }
+
+    // y tick labels
+    let y_label_font_size = axes.y.overrides.labels.font_size.unwrap_or(theme.typography.label_font_size);
+    let y_flat = axes.y.overrides.labels.angle.is_none_or(|a| a == 0.0);
+    let y_continuous = axes.y.tick_projection.is_some();
+    let mut y_tick_top = 0.0_f64;
+    if axes.show_y && axes.y.show_labels() && y_continuous && y_flat && !axes.y.tick_labels.is_empty() {
+        let half_line = metrics.line_height(y_label_font_size) / 2.0;
+        for axis in y_axes() {
+            let topmost = axis
+                .ticks
+                .iter()
+                .filter(|t| !t.culled && !t.label.is_empty())
+                .map(|t| t.position)
+                .fold(f64::INFINITY, f64::min);
+            if topmost.is_finite() {
+                y_tick_top = y_tick_top.max(half_line - topmost);
+            }
+        }
+    }
+    let y_tick_top = clamp_eps(if keep_top { y_tick_top.max(0.0) } else { 0.0 });
+    if y_tick_top > 0.0 {
+        overflows.push(CanvasOverflow {
+            content: OverflowingContent::YTickLabels,
+            left: 0.0,
+            right: 0.0,
+            top: y_tick_top,
+            bottom: 0.0,
+        });
+    }
+
+    // x axis title
+    if let Some(half) = title_half_extent(&axes.x, axes.show_x, theme, metrics) {
+        let mut x_title_left = 0.0_f64;
+        let mut x_title_right = 0.0_f64;
+        for axis in x_axes() {
+            if let Some(title) = &axis.title {
+                x_title_left = x_title_left.max(half - title.anchor_x);
+                x_title_right = x_title_right.max(title.anchor_x + half - viewport.w);
+            }
+        }
+        let x_title_left = clamp_eps(if keep_left { x_title_left.max(0.0) } else { 0.0 });
+        let x_title_right = clamp_eps(if keep_right { x_title_right.max(0.0) } else { 0.0 });
+        if x_title_left > 0.0 || x_title_right > 0.0 {
+            let content = if recentering_is_feasible(half, viewport.w) {
+                OverflowingContent::XAxisTitle
+            } else {
+                OverflowingContent::XAxisTitleWiderThanCanvas
+            };
+            overflows.push(CanvasOverflow {
+                content,
+                left: x_title_left,
+                right: x_title_right,
+                top: 0.0,
+                bottom: 0.0,
+            });
+        }
+    }
+
+    // y axis title
+    if let Some(half) = title_half_extent(&axes.y, axes.show_y, theme, metrics) {
+        let mut y_title_top = 0.0_f64;
+        let mut y_title_bottom = 0.0_f64;
+        for axis in y_axes() {
+            if let Some(title) = &axis.title {
+                y_title_top = y_title_top.max(half - title.anchor_y);
+                y_title_bottom = y_title_bottom.max(title.anchor_y + half - viewport.h);
+            }
+        }
+        let y_title_top = clamp_eps(if keep_top { y_title_top.max(0.0) } else { 0.0 });
+        let y_title_bottom = clamp_eps(if keep_bottom { y_title_bottom.max(0.0) } else { 0.0 });
+        if y_title_top > 0.0 || y_title_bottom > 0.0 {
+            let content = if recentering_is_feasible(half, viewport.h) {
+                OverflowingContent::YAxisTitle
+            } else {
+                OverflowingContent::YAxisTitleTallerThanCanvas
+            };
+            overflows.push(CanvasOverflow {
+                content,
+                left: 0.0,
+                right: 0.0,
+                top: y_title_top,
+                bottom: y_title_bottom,
+            });
+        }
+    }
+
+    if overflows.is_empty() {
+        None
+    } else {
+        Some(LayoutWarning::ContentPastCanvas { overflows })
+    }
 }
 
 /// Whether x's/y's axis-title rescue is infeasible, in either of two ways:
@@ -3565,7 +3879,8 @@ pub fn compute_layout(
 
     // Assemble warnings in the original push order: legend overflow first, then
     // the facet stage (dropped panels / empty cells), then the per-panel stage
-    // (collapse / x-label elision).
+    // (collapse / x-label elision), then whether padding.auto still leaves
+    // drawn content past the canvas edge.
     let mut warnings: Vec<LayoutWarning> = Vec::new();
     if legend_dropped > 0 {
         warnings.push(LayoutWarning::LegendOverflowed {
@@ -3573,6 +3888,11 @@ pub fn compute_layout(
         });
     }
     warnings.extend(plot_warnings);
+    if theme.padding.padding_auto {
+        if let Some(w) = content_past_canvas(axes, theme, metrics, viewport_rect, &axis_layouts) {
+            warnings.push(w);
+        }
+    }
 
     Ok(LayoutResult {
         viewport: viewport_rect,
@@ -3731,6 +4051,24 @@ mod tests {
             },
             LayoutWarning::EmptyPartitions {
                 keys: vec!["col_cat=c2, row_cat=r2".into()],
+            },
+            LayoutWarning::ContentPastCanvas {
+                overflows: vec![
+                    CanvasOverflow {
+                        content: OverflowingContent::XTickLabels,
+                        left: 0.0,
+                        right: 26.0,
+                        top: 0.0,
+                        bottom: 0.0,
+                    },
+                    CanvasOverflow {
+                        content: OverflowingContent::YAxisTitleTallerThanCanvas,
+                        left: 0.0,
+                        right: 0.0,
+                        top: 4.0,
+                        bottom: 5.0,
+                    },
+                ],
             },
         ] {
             let json = serde_json::to_string(&w).unwrap();
@@ -5910,11 +6248,18 @@ mod tests {
             with_auto.is_ok(),
             "an unfixably-wide title must still render, not refuse: {with_auto:?}"
         );
+        let with_auto = with_auto.unwrap();
         assert_eq!(
-            with_auto.unwrap(),
-            baseline,
+            LayoutResult { warnings: Vec::new(), ..with_auto.clone() },
+            LayoutResult { warnings: Vec::new(), ..baseline.clone() },
             "with no competing auto-padding pass on this axis, an infeasible \
-             title's auto=true render must be byte-identical to auto=false",
+             title's auto=true render must be the same as auto=false apart \
+             from the warning the still-clipping title carries",
+        );
+        assert!(
+            overflow_kinds(&with_auto).contains(&OverflowingContent::XAxisTitleWiderThanCanvas),
+            "the still-clipping title must warn: {:?}",
+            with_auto.warnings,
         );
     }
 
@@ -6013,13 +6358,19 @@ mod tests {
 
         // The genuine guarantee: never worse than auto=false.
         // Since this axis's combined auto contribution is suppressed to
-        // exactly zero in the infeasible regime, the two renders are
-        // byte-identical -- not merely "no worse".
+        // exactly zero in the infeasible regime, the two renders are the
+        // same apart from the warning the still-clipping title carries.
         assert_eq!(
-            with_auto, baseline,
-            "an infeasible title's auto=true render must be byte-identical to \
-             auto=false when a same-axis tick correction cannot be applied \
-             without decentering an already-unfixable title",
+            LayoutResult { warnings: Vec::new(), ..with_auto.clone() },
+            LayoutResult { warnings: Vec::new(), ..baseline.clone() },
+            "an infeasible title's auto=true render must match auto=false \
+             when a same-axis tick correction cannot be applied without \
+             decentering an already-unfixable title",
+        );
+        assert!(
+            overflow_kinds(&with_auto).contains(&OverflowingContent::XAxisTitleWiderThanCanvas),
+            "the still-clipping title must warn: {:?}",
+            with_auto.warnings,
         );
     }
 
@@ -6074,6 +6425,13 @@ mod tests {
     fn compute_layout_solves_titles_against_the_post_suppression_base() {
         let spec = minimal_chart_spec();
         let mut axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
+        // The first label is wide enough to fit flat at the wider
+        // (suppressed) plot width, while at the narrower (unsuppressed)
+        // width it fails flat, wrap and every rotation angle at the
+        // panel's own height budget, leaving the axis with no label band
+        // at all — so the two orders disagree through "some band" vs "no
+        // band" rather than "flat" vs "rotated".
+        axes.x.tick_labels[0] = format!("-{}", "9".repeat(24));
         axes.y.title.set(Some("a".repeat(18)));
         let theme = theme_inputs_with_padding_auto_off();
         let viewport = Viewport {
@@ -9076,6 +9434,7 @@ mod tests {
                 label_font_size: None,
                 is_major: true,
                 anchor: matches!(i, 0 | 9 | 18),
+                origin: false,
             })
             .collect();
         AxisLayout {
@@ -9128,6 +9487,80 @@ mod tests {
     #[test]
     fn thins_x_labels_evenly_still_rejects_an_irregular_log_cull() {
         let axis = dense_ladder_axis_layout(&[0, 1, 9, 18]);
+        assert!(!thins_x_labels_evenly(&axis));
+    }
+
+    /// Fourteen plain (no anchors) ticks, one of them stamped `origin:
+    /// true`, drawn/culled per `drawn`.
+    fn linear_axis_layout_with_origin(n: usize, origin: usize, drawn: &[usize]) -> AxisLayout {
+        let ticks: Vec<TickLayout> = (0..n)
+            .map(|i| TickLayout {
+                position: i as f64,
+                label: i.to_string(),
+                label_angle: 0.0,
+                elided: false,
+                culled: !drawn.contains(&i),
+                label_font_size: None,
+                is_major: true,
+                anchor: false,
+                origin: i == origin,
+            })
+            .collect();
+        AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 0.0, w: 100.0, h: 1.0 },
+            ticks,
+            minor_ticks: vec![],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: false,
+            tick_size: None,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+            offset: None,
+            label_flush: None,
+        }
+    }
+
+    /// A stride-2 thinning counted from the stamped origin (index 7, not
+    /// index 0) is still "even": `1, 3, 5, 7, 9, 11, 13` is not a plain
+    /// `stride_visibility(14, 2, 0)` mask, but it is `stride_visibility(14,
+    /// 2, 7)` — the cascade's own origin-phased output, which must not be
+    /// misread as a loss.
+    #[test]
+    fn thins_x_labels_evenly_accepts_an_origin_phased_thinning() {
+        let axis = linear_axis_layout_with_origin(14, 7, &[1, 3, 5, 7, 9, 11, 13]);
+        assert!(thins_x_labels_evenly(&axis));
+    }
+
+    /// A plain stride-2-from-zero mask is accepted even though the
+    /// stamped origin is 7: the phase-0 case stands alongside the origin
+    /// phase, not instead of it.
+    #[test]
+    fn thins_x_labels_evenly_still_accepts_phase_zero_alongside_a_different_origin() {
+        let axis = linear_axis_layout_with_origin(14, 7, &[0, 2, 4, 6, 8, 10, 12]);
+        assert!(thins_x_labels_evenly(&axis));
+    }
+
+    /// Guard: a drawn mask that is neither phase's stride_visibility output
+    /// (an irregular cull) is still rejected.
+    #[test]
+    fn thins_x_labels_evenly_rejects_a_mask_matching_neither_origin() {
+        let axis = linear_axis_layout_with_origin(14, 7, &[0, 1, 4, 9, 12]);
         assert!(!thins_x_labels_evenly(&axis));
     }
 
@@ -9961,14 +10394,25 @@ mod tests {
 
     /// Every width in the cascade's range, derived by sweeping rather than
     /// hand-listed (it crosses the -90 cull strides, -60, -45, -30 and
-    /// flat). Where the drawn labels fit with `auto=false`, the default must
-    /// lay out exactly the same labels at the same angle (the whole layout
-    /// is equal). Where they do not fit (the flat band, whose `$1,000,000`
-    /// overhangs the right edge), the default must keep them inside the
-    /// canvas. Both populations must be non-empty, so neither arm is
-    /// vacuous.
+    /// flat). Where the drawn labels fit with `auto=false`, the default
+    /// must lay out exactly the same labels at the same angle (the whole
+    /// layout is equal, warnings included — labels that fit never warn).
+    /// Where they do not fit, the default either rescues them (drawn ink
+    /// inside the canvas) or declines and ships the `auto=false` layout
+    /// apart from one `ContentPastCanvas` warning: at 274..=296 the flat
+    /// stride-5 presentation (`$0`, `$500,000`, `$1,000,000`) keeps the
+    /// long last label, and every candidate extra narrows the plot past
+    /// that stride's own pair test, so the cascade rotates to -90 at
+    /// stride 2 — a 51px-tall plot against a 148.8px `auto=false` height,
+    /// under its floor. No usable covering pass exists there, so
+    /// `settle_within` reports no usable pass and the chart ships
+    /// `auto=false`, still clipping the long label, and warns about it.
+    /// All three arms must be exercised, and the declined widths must be
+    /// exactly 274..=296.
     #[test]
     fn padding_auto_matches_auto_off_wherever_the_drawn_labels_fit() {
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
         let axes = currency_x_axes();
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -9976,14 +10420,20 @@ mod tests {
         };
         let theme = default_theme_inputs();
         let fs = theme.typography.label_font_size;
+        let base = base_padding_insets(&theme);
         let mut fitting = 0;
         let mut rescued = 0;
+        let mut declined = 0;
+        let mut declined_widths: Vec<i32> = Vec::new();
         let mut presentations = std::collections::BTreeSet::new();
+        let drop_warnings = |l: &LayoutResult| LayoutResult { warnings: Vec::new(), ..l.clone() };
         for width in 150..=1400 {
             let viewport = Viewport {
                 width: f64::from(width),
                 height: 200.0,
             };
+            let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+            let room = AutoPlotRoom::of_auto_off(&inputs, base);
             let off = layout_with_auto(&theme, false, viewport, &axes, &m);
             let on = layout_with_auto(&theme, true, viewport, &axes, &m);
             let x_axis = off
@@ -10000,23 +10450,392 @@ mod tests {
                     on, off,
                     "at {width}px the labels fit with auto off, so the default must match it",
                 );
-            } else {
-                rescued += 1;
-                let (lo, hi) = drawn_x_label_ink(&on, &m, fs);
-                assert!(
-                    lo >= -1e-6 && hi <= viewport.width + 1e-6,
-                    "at {width}px the default must keep the drawn labels inside the canvas ({lo}, {hi})",
-                );
+                continue;
             }
+            let probe = probe_auto_padding(base, &inputs, &room);
+            let extra = auto_padding_extra(&inputs, probe.chrome, probe.x_overhang, &room).total;
+            let candidate = probe_auto_padding(resolve_padding_inset(&theme, base, extra), &inputs, &room);
+            let no_usable_pass = settle_within(&inputs, base, &room).no_usable_pass;
+            if no_usable_pass && candidate.unusable && drop_warnings(&on) == drop_warnings(&off) {
+                declined += 1;
+                declined_widths.push(width);
+                assert!(
+                    overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+                    "a declined width that still clips must warn about x tick labels: {width}px, got {:?}",
+                    on.warnings,
+                );
+                continue;
+            }
+            rescued += 1;
+            let (lo, hi) = drawn_x_label_ink(&on, &m, fs);
+            assert!(
+                lo >= -1e-6 && hi <= viewport.width + 1e-6,
+                "at {width}px the default must keep the drawn labels inside the canvas ({lo}, {hi})",
+            );
         }
         assert!(
-            fitting > 0 && rescued > 0,
-            "both arms must be exercised (fitting {fitting}, rescued {rescued})",
+            fitting > 0 && rescued > 0 && declined > 0,
+            "all three arms must be exercised (fitting {fitting}, rescued {rescued}, declined {declined})",
+        );
+        assert_eq!(
+            declined_widths,
+            (274..=296).collect::<Vec<i32>>(),
+            "the declined window must be exactly 274..=296",
         );
         assert!(
             presentations.len() >= 5,
             "the sweep must cross the cascade's presentations: {presentations:?}",
         );
+    }
+
+    /// The one `ContentPastCanvas` warning in `result.warnings`, if any.
+    fn content_past_canvas_warning(result: &LayoutResult) -> Option<&LayoutWarning> {
+        result
+            .warnings
+            .iter()
+            .find(|w| matches!(w, LayoutWarning::ContentPastCanvas { .. }))
+    }
+
+    /// The content kinds a `ContentPastCanvas` warning on `result` names,
+    /// in the order they were reported; empty when there is none.
+    fn overflow_kinds(result: &LayoutResult) -> Vec<OverflowingContent> {
+        match content_past_canvas_warning(result) {
+            Some(LayoutWarning::ContentPastCanvas { overflows }) => {
+                overflows.iter().map(|o| o.content).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The `CanvasOverflow` entry for `content` on `result`, if its
+    /// warning names that kind.
+    fn overflow_for<'a>(
+        result: &'a LayoutResult,
+        content: OverflowingContent,
+    ) -> Option<&'a CanvasOverflow> {
+        match content_past_canvas_warning(result) {
+            Some(LayoutWarning::ContentPastCanvas { overflows }) => {
+                overflows.iter().find(|o| o.content == content)
+            }
+            _ => None,
+        }
+    }
+
+    /// At 274px the declined currency chart's last label overhangs the
+    /// right edge by about 26px; the default names that side, the amount
+    /// and the content kind.
+    #[test]
+    fn content_past_canvas_names_the_side_amount_and_kind() {
+        let axes = currency_x_axes();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 274.0,
+            height: 200.0,
+        };
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        match overflow_for(&on, OverflowingContent::XTickLabels) {
+            Some(o) => {
+                assert_eq!(o.left, 0.0);
+                assert!((o.right - 26.0).abs() < 1.0, "right {}", o.right);
+                assert_eq!(o.top, 0.0);
+                assert_eq!(o.bottom, 0.0);
+                let text = content_past_canvas_warning(&on).unwrap().to_string();
+                assert!(text.contains("right"), "{text}");
+                assert!(text.contains("x tick labels"), "{text}");
+            }
+            None => panic!("expected XTickLabels, got {:?}", on.warnings),
+        }
+    }
+
+    /// At 297px (rescued) and 170px (fits) the default never leaves content
+    /// past the canvas, so neither warns.
+    #[test]
+    fn content_past_canvas_is_silent_once_rescued_or_fitting() {
+        let axes = currency_x_axes();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        for width in [297.0, 170.0] {
+            let viewport = Viewport { width, height: 200.0 };
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            assert!(
+                content_past_canvas_warning(&on).is_none(),
+                "{width}px must not warn: {:?}",
+                on.warnings,
+            );
+        }
+    }
+
+    /// An explicit `padding_right` is the caller's own clip, not a side
+    /// `padding.auto` could have tried to contain, so the same declined
+    /// 274px chart stays silent once that side is explicit.
+    #[test]
+    fn content_past_canvas_is_silent_on_an_explicit_side() {
+        let axes = currency_x_axes();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let mut theme = default_theme_inputs();
+        theme.padding.padding_right = Some(16.0);
+        let viewport = Viewport {
+            width: 274.0,
+            height: 200.0,
+        };
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert!(
+            content_past_canvas_warning(&on).is_none(),
+            "an explicit right side must not warn: {:?}",
+            on.warnings,
+        );
+    }
+
+    /// `auto=false` is the user's own choice to skip containment, the same
+    /// standing as an explicit padding side, so it never warns even on the
+    /// same declined 274px chart.
+    #[test]
+    fn content_past_canvas_is_silent_under_auto_false() {
+        let axes = currency_x_axes();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 274.0,
+            height: 200.0,
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        assert!(
+            content_past_canvas_warning(&off).is_none(),
+            "auto=false must not warn: {:?}",
+            off.warnings,
+        );
+    }
+
+    /// An axis title wider than the viewport is distinguished from a
+    /// merely-declined one: no margin could ever contain it, the message
+    /// says so, and it names no `label_angle`/`label_overlap` remedy
+    /// (neither does anything for a title).
+    #[test]
+    fn content_past_canvas_names_a_too_wide_axis_title() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["0".into(), "1".into()];
+        axes.x.title.set(Some("a".repeat(50)));
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 200.0,
+        };
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        match overflow_for(&on, OverflowingContent::XAxisTitleWiderThanCanvas) {
+            Some(o) => {
+                assert!(o.left > 0.0 && o.right > 0.0, "both sides overflow: {o:?}");
+                let text = content_past_canvas_warning(&on).unwrap().to_string();
+                assert!(text.contains("wider than the chart"), "{text}");
+                assert!(!text.contains("label_angle"), "{text}");
+                assert!(!text.contains("label_overlap"), "{text}");
+            }
+            None => panic!("expected XAxisTitleWiderThanCanvas, got {:?}", on.warnings),
+        }
+    }
+
+    /// One Display sentence per `OverflowingContent` kind, pinning the
+    /// cause and remedy each kind states — a cause and remedy true for
+    /// that kind specifically, rather than one sentence for all of them.
+    #[test]
+    fn canvas_overflow_sentence_states_a_true_cause_and_remedy_per_kind() {
+        let cases: Vec<(CanvasOverflow, &[&str], &[&str])> = vec![
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::XTickLabels,
+                    left: 0.0,
+                    right: 26.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                &["x tick labels", "right by 26.0px", "half the plot or drop x tick labels", "label_angle", "configure_padding(right=...)"],
+                &["categorical", "wider than the chart"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::CategoricalXTickLabels,
+                    left: 12.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                &["x tick labels", "left by 12.0px", "reserves no margin for categorical x labels", "label_angle", "configure_padding(left=...)"],
+                &["half the plot"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::YTickLabels,
+                    left: 0.0,
+                    right: 0.0,
+                    top: 9.0,
+                    bottom: 0.0,
+                },
+                &["y tick labels", "top by 9.0px", "half the plot or drop x tick labels", "heighten the chart", "configure_padding(top=...)"],
+                &["label_angle", "categorical"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::XAxisTitle,
+                    left: 0.0,
+                    right: 40.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                &["the x axis title overflows", "right by 40.0px", "half the plot or drop x tick labels", "shorten the title", "configure_padding(right=...)"],
+                &["wider than the chart"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::XAxisTitleWiderThanCanvas,
+                    left: 46.6,
+                    right: 93.6,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                &["the x axis title overflows", "left by 46.6px, right by 93.6px", "wider than the chart", "no margin contains it", "shorten the title or widen the chart"],
+                &["half the plot", "label_angle", "configure_padding"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::YAxisTitle,
+                    left: 0.0,
+                    right: 0.0,
+                    top: 15.0,
+                    bottom: 0.0,
+                },
+                &["the y axis title overflows", "top by 15.0px", "half the plot or drop x tick labels", "heighten the chart", "shorten the title", "configure_padding(top=...)"],
+                &["taller than the chart"],
+            ),
+            (
+                CanvasOverflow {
+                    content: OverflowingContent::YAxisTitleTallerThanCanvas,
+                    left: 0.0,
+                    right: 0.0,
+                    top: 20.0,
+                    bottom: 30.0,
+                },
+                &["the y axis title overflows", "top by 20.0px, bottom by 30.0px", "taller than the chart", "no margin contains it", "shorten the title or heighten the chart"],
+                &["half the plot", "configure_padding"],
+            ),
+        ];
+        for (overflow, must_contain, must_not_contain) in cases {
+            let text = LayoutWarning::ContentPastCanvas { overflows: vec![overflow.clone()] }.to_string();
+            for needle in must_contain {
+                assert!(text.contains(needle), "{:?} missing {needle:?} in {text:?}", overflow.content);
+            }
+            for needle in must_not_contain {
+                assert!(!text.contains(needle), "{:?} must not contain {needle:?} in {text:?}", overflow.content);
+            }
+        }
+    }
+
+    /// `canvas_overflow_sentence` and `content_past_canvas` share ONE
+    /// threshold: a side at or below `AUTO_PADDING_EPS` is neither named
+    /// nor offered a `configure_padding` remedy, even when a sibling side
+    /// of the SAME entry genuinely overflows and the entry is reported.
+    #[test]
+    fn canvas_overflow_sentence_ignores_a_side_at_or_below_the_eps_threshold() {
+        let overflow = CanvasOverflow {
+            content: OverflowingContent::XTickLabels,
+            left: AUTO_PADDING_EPS, // at the threshold: not an overflow
+            right: 26.0,            // past it: a real overflow
+            top: 0.0,
+            bottom: 0.0,
+        };
+        let text = LayoutWarning::ContentPastCanvas { overflows: vec![overflow] }.to_string();
+        assert!(text.contains("right by 26.0px"), "{text}");
+        assert!(!text.contains("left"), "a side at exactly AUTO_PADDING_EPS must not be named: {text}");
+        assert!(
+            !text.contains("configure_padding(left="),
+            "a side at exactly AUTO_PADDING_EPS must not be offered a remedy: {text}"
+        );
+        assert_eq!(
+            text, "x tick labels overflow the canvas on the right by 26.0px: padding.auto declined \
+             the margin, since containing them would take more than half the plot or drop x tick \
+             labels; widen the chart, set the x axis label_angle or label_overlap, or set \
+             configure_padding(right=...).",
+        );
+    }
+
+    /// A continuous, flat, unhidden y axis with no x axis to share the
+    /// budget with: the topmost tick's half-line-height proxy needs a top
+    /// rescue (`60px`, at a 100pt font with no theme padding to offset it)
+    /// that takes more than half the 80px-tall `auto=false` plot, so
+    /// `padding.auto` declines it and the default still clips the label —
+    /// the real-path fixture the "y tick labels" branch of
+    /// `content_past_canvas` had no test at all for.
+    #[test]
+    fn content_past_canvas_names_a_clipping_y_tick_label() {
+        let mut y = axis_input(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
+        y.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 1.0],
+            minor: vec![],
+        });
+        let axes = AxesInput {
+            x: axis_input(AxisOrient::Bottom, None, vec![], None),
+            y,
+            show_x: false,
+            show_y: true,
+            secondary_y: Vec::new(),
+            panels: Vec::new(),
+        };
+        let mut theme = default_theme_inputs();
+        theme.padding.padding = 0.0;
+        theme.typography.label_font_size = 100.0;
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 80.0,
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        assert!(off.panels[0].plot_area.h > 0.0, "fixture assumption: a plot renders");
+        let half = off.panels[0].plot_area.h / 2.0;
+        let rescue = auto_padding_for_edge_ticks(
+            &theme,
+            &axes,
+            &m,
+            Inset::default(),
+            x_overhang_without_auto(&theme, &axes, &m, viewport),
+        );
+        assert!(rescue.top > half, "fixture assumption: the y tick rescue ({}) exceeds half the plot ({half})", rescue.top);
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+            "a declined y tick rescue leaves the auto=false layout",
+        );
+        match overflow_for(&on, OverflowingContent::YTickLabels) {
+            Some(o) => {
+                assert_eq!(o.left, 0.0);
+                assert_eq!(o.right, 0.0);
+                assert!(o.top > 0.0, "top must be the overflowing side: {o:?}");
+                assert_eq!(o.bottom, 0.0);
+                let text = content_past_canvas_warning(&on).unwrap().to_string();
+                assert!(text.contains("y tick labels"), "{text}");
+                assert!(text.contains("top"), "{text}");
+            }
+            None => panic!("expected YTickLabels, got {:?}", on.warnings),
+        }
     }
 
     /// A flat edge label that overhangs is still rescued, and the extra is
@@ -10059,6 +10878,77 @@ mod tests {
             (right_inset - 22.0).abs() < 1e-6,
             "right inset = 16 + (30 - 8 - 16) = 22, got {right_inset}",
         );
+    }
+
+    /// A rescued edge label and a declined one, on two different axes of
+    /// the same chart: the x tick label is rescued to within
+    /// `AUTO_PADDING_EPS` of the right edge (the same mechanism as the
+    /// test above, which only ever reports its exact residual, never a
+    /// positive one `canvas_overflow_sentence` would wrongly print), while
+    /// the y tick label's own rescue is declined, so only the y side
+    /// appears in the warning.
+    #[test]
+    fn content_past_canvas_floors_a_rescued_edge_while_a_different_axis_still_overflows() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.05;
+        }
+        axes.y.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 0.5, 1.0],
+            minor: vec![],
+        });
+        axes.y.overrides.labels.font_size = Some(100.0);
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 400.0,
+            height: 100.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        let (_, hi_off) = drawn_x_label_ink(&off, &m, fs);
+        assert!(
+            hi_off > viewport.width,
+            "fixture assumption: the flat last x label overhangs with auto off ({hi_off})",
+        );
+        let half = off.panels[0].plot_area.h / 2.0;
+        let y_rescue = auto_padding_for_edge_ticks(
+            &theme,
+            &axes,
+            &m,
+            Inset::default(),
+            x_overhang_without_auto(&theme, &axes, &m, viewport),
+        );
+        assert!(
+            y_rescue.top > half,
+            "fixture assumption: the y tick rescue ({}) exceeds half the plot ({half})",
+            y_rescue.top,
+        );
+
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let (_, hi) = drawn_x_label_ink(&on, &m, fs);
+        assert!(
+            (hi - viewport.width).abs() < 1e-6,
+            "the x label must still be rescued to the edge ({hi})",
+        );
+        assert!(
+            overflow_for(&on, OverflowingContent::XTickLabels).is_none(),
+            "a successfully rescued edge label must not warn: {:?}",
+            on.warnings,
+        );
+        match overflow_for(&on, OverflowingContent::YTickLabels) {
+            Some(o) => {
+                assert_eq!(o.left, 0.0);
+                assert_eq!(o.right, 0.0);
+                assert!(o.top > 0.0, "top must be the overflowing side: {o:?}");
+                assert_eq!(o.bottom, 0.0);
+            }
+            None => panic!("expected YTickLabels, got {:?}", on.warnings),
+        }
     }
 
     /// A continuous x axis with `labels` at an explicit `label_angle`,
@@ -10176,9 +11066,11 @@ mod tests {
         );
     }
 
-    /// A categorical x axis (no `tick_projection`) places its labels at
-    /// band centers, inside the plot edge by construction; its long labels
-    /// get no edge-label extra, so the default is the `auto=false` layout.
+    /// A categorical x axis (no `tick_projection`) gets no edge-label
+    /// extra from `padding.auto`, since that rescue only reads a
+    /// continuous axis's scale-projected positions, so the layout is the
+    /// `auto=false` one at every width — clipping (and warning about it)
+    /// exactly where `auto=false` does.
     #[test]
     fn padding_auto_leaves_a_categorical_x_axis_untouched() {
         let mut axes = continuous_x_axes_with_long_last_label();
@@ -10189,16 +11081,33 @@ mod tests {
             line_h_factor: 1.2,
         };
         let theme = default_theme_inputs();
+        let fs = theme.typography.label_font_size;
         for width in [120.0, 200.0, 400.0] {
             let viewport = Viewport {
                 width,
                 height: 300.0,
             };
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            let off = layout_with_auto(&theme, false, viewport, &axes, &m);
             assert_eq!(
-                layout_with_auto(&theme, true, viewport, &axes, &m),
-                layout_with_auto(&theme, false, viewport, &axes, &m),
+                LayoutResult { warnings: Vec::new(), ..on.clone() },
+                LayoutResult { warnings: Vec::new(), ..off.clone() },
                 "a chart with no continuous axis must lay out identically at {width}px",
             );
+            let (lo, hi) = drawn_x_label_ink(&off, &m, fs);
+            if lo < 0.0 || hi > viewport.width {
+                assert!(
+                    overflow_kinds(&on).contains(&OverflowingContent::CategoricalXTickLabels),
+                    "a clipping categorical axis at {width}px must warn: {:?}",
+                    on.warnings,
+                );
+            } else {
+                assert!(
+                    on.warnings.is_empty(),
+                    "a non-clipping width must not warn at {width}px: {:?}",
+                    on.warnings,
+                );
+            }
         }
     }
 
@@ -10237,16 +11146,23 @@ mod tests {
             ticks_alone.right > 0.0 && ticks_alone.left == 0.0,
             "fixture assumption: only the right tick extra fires ({ticks_alone:?})",
         );
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         assert_eq!(
-            layout_with_auto(&theme, true, viewport, &axes, &m),
-            layout_with_auto(&theme, false, viewport, &axes, &m),
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
             "an infeasible x title must drop the right tick extra too",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XAxisTitleWiderThanCanvas),
+            "the still-clipping title must warn: {:?}",
+            on.warnings,
         );
     }
 
     /// A chart whose `padding.auto` has no fixed point, so
     /// `settle_auto_padding` runs all `AUTO_PADDING_MAX_PASSES` passes. At
-    /// 175px with `auto=false` the flat 80px last label overhangs the right
+    /// 175px with `auto=false` the flat 130px last label overhangs the right
     /// edge; the extra that rescues it narrows the plot just enough that
     /// the next pass's inset grows the overhang, and the slightly larger
     /// extra after that narrows the plot past the cascade's flat threshold,
@@ -10258,7 +11174,7 @@ mod tests {
     fn settle_auto_padding_returns_the_last_covering_extra_when_the_cascade_cycles() {
         let spec = minimal_chart_spec();
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels[1] = "9".repeat(8);
+        axes.x.tick_labels[1] = "9".repeat(12);
         if let Some(p) = axes.x.tick_projection.as_mut() {
             p.padding_frac = 0.05;
         }
@@ -10520,17 +11436,19 @@ mod tests {
     /// the plot unusable. On a 288x150 chart the flat 100px last label
     /// overhangs the right edge with `auto=false`, by its 50px half-width
     /// past the plot edge less the 16px padding. The 34px extra that
-    /// contains it narrows the plot until the labels no longer fit flat in
-    /// half its width, so the cascade rotates them, and their band leaves
-    /// the plot under half its 9px `auto=false` height: that pass is
-    /// unusable, and the next one is back at `auto=false`. The fallback,
-    /// the per-side maximum need, is that same 34px extra, so auto adds
-    /// nothing and the chart is laid out exactly as `auto=false` lays it.
+    /// contains it narrows the plot until the two adjacent 100px labels no
+    /// longer clear `fits_adjacent_pairs`' budget, so the cascade rotates
+    /// them, and their band leaves the plot under half its `auto=false`
+    /// height: that pass is unusable, and the next one is back at
+    /// `auto=false`. The fallback, the per-side maximum need, is that same
+    /// 34px extra, so auto adds nothing and the chart is laid out exactly
+    /// as `auto=false` lays it, still clipping the last label and warning
+    /// about it.
     #[test]
     fn settle_auto_padding_adds_nothing_when_the_no_cover_fallback_would_collapse() {
         let spec = minimal_chart_spec();
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = vec!["0".into(), "5".into(), "9".repeat(10)];
+        axes.x.tick_labels = vec!["0".into(), "9".repeat(10), "9".repeat(10)];
         if let Some(p) = axes.x.tick_projection.as_mut() {
             p.padding_frac = 0.0;
             p.major = vec![0.0, 0.5, 1.0];
@@ -10570,11 +11488,19 @@ mod tests {
             Inset::default(),
             "a no-cover fallback that leaves the plot unusable must add nothing",
         );
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         assert_eq!(
-            layout_with_auto(&theme, true, viewport, &axes, &m),
-            layout_with_auto(&theme, false, viewport, &axes, &m),
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
             "the default must be the auto=false layout",
         );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the declined chart still clips and must warn: {:?}",
+            on.warnings,
+        );
+        assert!(off.warnings.is_empty(), "auto=false never warns: {:?}", off.warnings);
     }
 
     /// A `label_overlap=True` axis whose long flat label sits just right of
@@ -10754,7 +11680,16 @@ mod tests {
         );
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
         assert!(on.panels[0].plot_area.w > 100.0, "the plot must not collapse: {:?}", on.panels[0]);
-        assert_eq!(on, off, "a label the left margin cannot move leaves the layout as auto=false");
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+            "a label the left margin cannot move leaves the layout as auto=false",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
+        );
     }
 
     /// The right-side twin: a Top-orient axis at -45 anchors its labels at
@@ -10795,7 +11730,16 @@ mod tests {
         );
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
         assert!(on.panels[0].plot_area.w > 100.0, "the plot must not collapse: {:?}", on.panels[0]);
-        assert_eq!(on, off, "a label the right margin cannot move leaves the layout as auto=false");
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+            "a label the right margin cannot move leaves the layout as auto=false",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
+        );
     }
 
     /// An infeasible charge contributes nothing, and does not squeeze the
@@ -10908,8 +11852,8 @@ mod tests {
     }
 
     /// A rescue that would cull a label is declined. On a 360x110 chart,
-    /// `auto=false` draws the three labels flat and the 120px first label
-    /// overhangs the left edge. The 18px left extra that contains it
+    /// `auto=false` draws the three labels flat and the (locally widened)
+    /// first label overhangs the left edge. The 18px left extra that contains it
     /// narrows the plot until the three labels no longer fit flat, rotated
     /// they would need a band that leaves no plot height, and the cascade's
     /// band budget would cull the middle label. That pass loses one of its
@@ -10917,10 +11861,14 @@ mod tests {
     /// tick) are fewer than [`MIN_EVENLY_THINNED_X_LABELS`], so it is not an
     /// even thinning either. It is declined like one that collapses the
     /// plot, so the chart is the `auto=false` layout: every label it draws,
-    /// by text, is drawn, and the first still clips.
+    /// by text, is drawn, and the first still clips and warns about it.
     #[test]
     fn a_rescue_that_would_cull_a_label_is_declined() {
-        let axes = axes_whose_left_rescue_rotates_the_labels();
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        // The first label is wide enough to fit flat with `auto=false`
+        // but fails once the 18px rescue narrows the plot, forcing the
+        // non-flat presentation the fixture's own narrative depends on.
+        axes.x.tick_labels[0] = format!("-{}", "9".repeat(24));
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
@@ -10963,8 +11911,18 @@ mod tests {
         );
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
         assert_eq!(drawn_text(&on), axes.x.tick_labels, "every label auto=false draws is drawn");
-        assert_eq!(on, off, "the declined rescue leaves the auto=false layout");
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+            "the declined rescue leaves the auto=false layout",
+        );
         assert!(drawn_x_label_ink(&on, &m, fs).0 < 0.0, "the first label still clips");
+        assert!(
+            overflow_for(&on, OverflowingContent::XTickLabels).is_some_and(|o| o.left > 0.0),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
+        );
+        assert!(off.warnings.is_empty(), "auto=false never warns: {:?}", off.warnings);
     }
 
     /// Each axis is judged on its own: when the x rescue would cull a label
@@ -10986,7 +11944,7 @@ mod tests {
         let spec = minimal_chart_spec();
         let legend_overrides = legend::LegendOverrides::default();
         let mut shipped = 0;
-        for (first, width, title, height) in (8..=16).step_by(4).flat_map(|f| {
+        for (first, width, title, height) in (20..=36).step_by(4).flat_map(|f| {
             (280..=440).step_by(40).flat_map(move |w| {
                 (4..=24).step_by(4).flat_map(move |t| (90..=220).step_by(10).map(move |h| (f, w, t, h)))
             })
@@ -11234,11 +12192,13 @@ mod tests {
         assert!(!room.culls_x_labels(&hidden), "so it is usable on any axis");
     }
 
-    /// An x title rescue whose narrower plot labels every 3rd of the x
-    /// axis's eleven ticks where `auto=false` labels every 2nd ships: on a
-    /// 160x200 chart the 20-character title clips at `auto=false`, and the
-    /// default draws it inside the canvas, labels `0, 0.3, 0.6, 0.9` (none
-    /// elided), and keeps more than half the plot width.
+    /// An x title rescue on a continuous axis whose own continuous-x
+    /// thinning already labels every 3rd of the eleven ticks at
+    /// `auto=false`: on a 160x200 chart the 20-character title clips at
+    /// `auto=false`, and the default draws it inside the canvas, still
+    /// labelling every 3rd tick (`0, 0.3, 0.6, 0.9`, none elided), and keeps
+    /// more than half the plot width. The title rescue itself adds no
+    /// further thinning here; what it fixes is the title clipping.
     #[test]
     fn a_title_rescue_that_thins_the_x_labels_evenly_ships() {
         let m = MockMetrics {
@@ -11270,12 +12230,12 @@ mod tests {
         };
         let labelled = |l: &LayoutResult| x_axis(l).ticks.iter().map(|t| !t.culled).collect::<Vec<_>>();
         let off = layout_with_auto(&theme, false, viewport, &axes, &m);
-        assert_eq!(labelled(&off), axis::stride_visibility(11, 2), "fixture assumption: auto=false labels every 2nd tick");
+        assert_eq!(labelled(&off), axis::stride_visibility(11, 3, 0), "fixture assumption: auto=false's own continuous-x thinning already labels every 3rd tick");
         assert!(title_ink(&off).1 > viewport.width, "fixture assumption: the title clips at auto=false");
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
         let (lo, hi) = title_ink(&on);
         assert!(lo >= -1e-6 && hi <= viewport.width + 1e-6, "the title is rescued inside the canvas ({lo}, {hi})");
-        assert_eq!(labelled(&on), axis::stride_visibility(11, 3), "the rescue labels every 3rd tick");
+        assert_eq!(labelled(&on), axis::stride_visibility(11, 3, 0), "the rescue labels every 3rd tick");
         let drawn: Vec<String> = x_axis(&on).ticks.iter().filter(|t| !t.culled).map(|t| t.label.clone()).collect();
         assert_eq!(drawn, ["0", "0.3", "0.6", "0.9"], "every drawn label is drawn as generated");
         assert!(x_axis(&on).ticks.iter().all(|t| !t.elided), "no label is elided");
@@ -11307,8 +12267,8 @@ mod tests {
 
     /// A rescue that thins a continuous x axis to its two end labels is
     /// declined. On a 300x100 chart `auto=false` draws all three `",.4f"`
-    /// labels (`0.0000`, `617,283.9450`, `1,234,567.8900`) and the last one
-    /// overhangs the right edge. The 33px right extra that contains it keeps
+    /// labels (`0.0000`, `617,283.9450`, `12,345,678,901.234`) and the last
+    /// one overhangs the right edge. The right extra that contains it keeps
     /// the plot above its floors but narrows it until only every 2nd tick is
     /// labelled: an even thinning, but to two labels, fewer than
     /// [`MIN_EVENLY_THINNED_X_LABELS`], and it loses a tick `auto=false`
@@ -11316,7 +12276,10 @@ mod tests {
     #[test]
     fn a_rescue_that_thins_the_x_labels_to_two_is_declined() {
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = vec!["0.0000".into(), "617,283.9450".into(), "1,234,567.8900".into()];
+        // The last label is long enough to fit flat with `auto=false` but
+        // fails once the right rescue narrows the plot, restoring the
+        // stride-2 thinning the fixture depends on.
+        axes.x.tick_labels = vec!["0.0000".into(), "617,283.9450".into(), "12,345,678,901.234".into()];
         if let Some(p) = axes.x.tick_projection.as_mut() {
             p.major = vec![0.0, 0.5, 1.0];
         }
@@ -11354,20 +12317,30 @@ mod tests {
             "fixture assumption: the rescue labels the two ends only",
         );
         assert!(room.culls_x_labels(&candidate), "two labels is a loss");
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         assert_eq!(
-            layout_with_auto(&theme, true, viewport, &axes, &m),
-            layout_with_auto(&theme, false, viewport, &axes, &m),
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
             "the chart ships as auto=false",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
         );
     }
 
-    /// The charts of [`a_failing_rescue_on_one_axis_keeps_the_other`]: an
-    /// x axis whose long first label (`first` nines) overhangs the left edge
-    /// among `labels` ticks, and a y title of `title` characters, on a
+    /// The charts of [`a_failing_rescue_on_one_axis_keeps_the_other`] and
+    /// [`rescues_valid_alone_but_failing_together_ship_auto_off`]: an x
+    /// axis whose long first label (`first` nines) overhangs the left
+    /// edge among `labels` ticks, every other tick `i` followed by
+    /// `other` zeros so no stride's survivors ever sit flat together and
+    /// the cascade rotates, and a y title of `title` characters, on a
     /// `width` x `height` chart.
-    fn two_rescue_axes(first: usize, labels: usize, title: usize) -> AxesInput {
+    fn two_rescue_axes(first: usize, labels: usize, other: usize, title: usize) -> AxesInput {
         let mut axes = axes_whose_left_rescue_rotates_the_labels();
-        let mut texts: Vec<String> = (0..labels).map(|i| format!("{}", i * 5)).collect();
+        let mut texts: Vec<String> = (0..labels).map(|i| format!("{i}{}", "0".repeat(other))).collect();
         texts[0] = format!("-{}", "9".repeat(first));
         axes.x.tick_labels = texts;
         if let Some(p) = axes.x.tick_projection.as_mut() {
@@ -11396,14 +12369,15 @@ mod tests {
         let spec = minimal_chart_spec();
         let legend_overrides = legend::LegendOverrides::default();
         let (mut x_fails, mut y_fails) = (0, 0);
-        for (first, width, title, height, labels) in [6, 10]
+        for (first, width, title, height, labels, other) in [6usize, 8]
             .into_iter()
-            .flat_map(|f| [240, 320, 400].map(move |w| (f, w)))
-            .flat_map(|(f, w)| (4..=16).step_by(4).map(move |t| (f, w, t)))
-            .flat_map(|(f, w, t)| (110..=150).step_by(10).map(move |h| (f, w, t, h)))
-            .flat_map(|(f, w, t, h)| [6usize, 10].map(move |n| (f, w, t, h, n)))
+            .flat_map(|f| [3usize, 10].map(move |n| (f, n)))
+            .flat_map(|(f, n)| [5usize, 7].map(move |o| (f, n, o)))
+            .flat_map(|(f, n, o)| [200, 240, 280].map(move |w| (f, n, o, w)))
+            .flat_map(|(f, n, o, w)| (8..=16).step_by(2).map(move |t| (f, n, o, w, t)))
+            .flat_map(|(f, n, o, w, t)| (110..=180).step_by(10).map(move |h| (f, w, t, h, n, o)))
         {
-            let axes = two_rescue_axes(first + 2, labels, title);
+            let axes = two_rescue_axes(first, labels, other, title);
             let theme = default_theme_inputs();
             let viewport = Viewport {
                 width: f64::from(width),
@@ -11455,10 +12429,12 @@ mod tests {
 
     /// When the x and the y rescue are each valid alone but together leave
     /// the plot unusable, neither axis is closed and the chart ships as
-    /// `auto=false`. On a 240x140 chart with an 8-nine first label among 6
-    /// x labels and an 8-character y title, the x rescue alone ships 7.37px
-    /// on the left and the y rescue alone 7.93px on top, but no settle with
-    /// both open has a usable pass.
+    /// `auto=false`, still clipping both axes and warning about it. On a
+    /// 240x160 chart with a 6-nine first label, 2 other 6-char labels
+    /// among 3 x labels and a 16-character y title, the x rescue alone
+    /// ships 14.0px on the right (the far label's own overhang) and the y
+    /// rescue alone 19.2px on top, but no settle with both open has a
+    /// usable pass.
     #[test]
     fn rescues_valid_alone_but_failing_together_ship_auto_off() {
         let m = MockMetrics {
@@ -11467,11 +12443,11 @@ mod tests {
         };
         let spec = minimal_chart_spec();
         let legend_overrides = legend::LegendOverrides::default();
-        let axes = two_rescue_axes(8, 6, 8);
+        let axes = two_rescue_axes(6, 3, 5, 16);
         let theme = default_theme_inputs();
         let viewport = Viewport {
             width: 240.0,
-            height: 140.0,
+            height: 160.0,
         };
         let base = base_padding_insets(&theme);
         let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
@@ -11480,28 +12456,41 @@ mod tests {
         let x_alone = settle_within(&inputs, base, &room.closing(false, true)).total;
         let y_alone = settle_within(&inputs, base, &room.closing(true, false)).total;
         assert!(
-            (x_alone.left - 7.373419818451708).abs() < 1e-9 && x_alone.right == 0.0,
+            (x_alone.right - 14.0).abs() < 1e-9 && x_alone.left == 0.0,
             "fixture assumption: the x rescue alone is valid ({x_alone:?})",
         );
         assert!(
-            (y_alone.top - 7.931535329954585).abs() < 1e-9 && y_alone.bottom == 0.0,
+            (y_alone.top - 19.19999999999999).abs() < 1e-9 && y_alone.bottom == 0.0,
             "fixture assumption: the y rescue alone is valid ({y_alone:?})",
         );
         assert_eq!(settle_auto_padding(&inputs, base), Inset::default());
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         assert_eq!(
-            layout_with_auto(&theme, true, viewport, &axes, &m),
-            layout_with_auto(&theme, false, viewport, &axes, &m),
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
             "the chart ships as auto=false",
         );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels) && overflow_kinds(&on).contains(&OverflowingContent::YAxisTitle),
+            "the declined chart still clips and must warn: {:?}",
+            on.warnings,
+        );
+        assert!(off.warnings.is_empty(), "auto=false never warns: {:?}", off.warnings);
     }
 
     /// The same rule for an x axis drawn on top: the rescue that would cull
     /// the middle label is declined, every label `auto=false` draws is
-    /// drawn, and the chart is the `auto=false` layout.
+    /// drawn, and the chart is the `auto=false` layout, still clipping
+    /// and warning about it.
     #[test]
     fn a_top_axis_rescue_that_would_cull_a_label_is_declined() {
         let mut axes = axes_whose_left_rescue_rotates_the_labels();
         axes.x.orient = AxisOrient::Top;
+        // The first label is wide enough to fit flat with `auto=false`
+        // but fails once the 18px rescue narrows the plot, restoring the
+        // cull the fixture depends on.
+        axes.x.tick_labels[0] = format!("-{}", "9".repeat(24));
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
@@ -11538,7 +12527,17 @@ mod tests {
         );
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
         assert_eq!(top_ticks(&on.axes), top_ticks(&off.axes), "every label auto=false draws is drawn");
-        assert_eq!(on, off, "the declined rescue leaves the auto=false layout");
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+            "the declined rescue leaves the auto=false layout",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
+        );
+        assert!(off.warnings.is_empty(), "auto=false never warns: {:?}", off.warnings);
     }
 
     /// A 388x300 chart with a right legend and 2px padding, the default
@@ -11546,7 +12545,10 @@ mod tests {
     /// fixed point and no pass covers.
     fn no_cover_fallback_that_ships() -> (ChartSpec, AxesInput, ThemeInputs, Viewport, Vec<LegendEntry>) {
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = vec!["9".repeat(8), "5".into(), "0".into()];
+        // The middle label is wide enough that the 80px first label still
+        // fails flat against its neighbor, forcing the rotation this
+        // fixture's dependents are about.
+        axes.x.tick_labels = vec!["9".repeat(8), "9".repeat(13), "0".into()];
         if let Some(p) = axes.x.tick_projection.as_mut() {
             p.padding_frac = 0.0;
             p.major = vec![0.0, 0.5, 1.0];
@@ -11568,11 +12570,11 @@ mod tests {
 
     /// A run where no pass covers but the no-cover fallback leaves a
     /// usable plot: it ships the per-side maximum of every pass's need,
-    /// not zero and not the last pass. With the labels at -30 (End
-    /// anchored, so `cos30°·w + sin30°·line_h` left of the tick and
-    /// `sin30°·line_h` right of it), the left need is the 80px first
+    /// not zero and not the last pass. With the labels at -60 (End
+    /// anchored, so `cos60°·w + sin60°·line_h` left of the tick and
+    /// `sin60°·line_h` right of it), the left need is the 80px first
     /// label's reach less the 2px padding and the 16px y gutter, and the
-    /// right need the `"0"` label's `13.2·sin30°` reach less the 2px
+    /// right need the `"0"` label's `13.2·sin60°` reach less the 2px
     /// padding (see the next test for why the legend gutter does not hold
     /// it). The plot must survive, and the result must not be a fixed
     /// point: re-solving at its own measurement gives another extra.
@@ -11590,7 +12592,7 @@ mod tests {
         };
         let base = base_padding_insets(&theme);
         let room = AutoPlotRoom::of_auto_off(&inputs, base);
-        let (sin, cos) = 30f64.to_radians().sin_cos();
+        let (sin, cos) = 60f64.to_radians().sin_cos();
         let line_h = 1.2 * theme.typography.label_font_size;
         let want_left = 80.0 * cos + line_h * sin - 2.0 - 16.0;
         let want_right = line_h * sin - 2.0;
@@ -11767,7 +12769,32 @@ mod tests {
             let need = rescue.left + rescue.right;
             let half = off.panels[0].plot_area.w / 2.0;
             if need == 0.0 {
-                assert_eq!(on, off, "a {n}-char title that fits needs nothing");
+                assert_eq!(
+                    LayoutResult { warnings: Vec::new(), ..on.clone() },
+                    LayoutResult { warnings: Vec::new(), ..off.clone() },
+                    "a {n}-char title that fits needs nothing",
+                );
+                // `need == 0` also covers a title too wide to ever fit
+                // (recentering is infeasible, so it reports no shift);
+                // that title still clips and must still warn.
+                let off_title = off
+                    .axes
+                    .iter()
+                    .find(|a| a.orient == AxisOrient::Bottom)
+                    .and_then(|a| a.title.as_ref());
+                let off_clips = off_title.is_some_and(|t| {
+                    let half_w = m.measure_width(&t.text, theme.typography.title_font_size) / 2.0;
+                    t.anchor_x - half_w < -1e-6 || t.anchor_x + half_w > viewport.width + 1e-6
+                });
+                if off_clips {
+                    assert!(
+                        overflow_kinds(&on).contains(&OverflowingContent::XAxisTitleWiderThanCanvas),
+                        "a {n}-char infeasible title must still warn: {:?}",
+                        on.warnings,
+                    );
+                } else {
+                    assert!(on.warnings.is_empty(), "a {n}-char title that fits must not warn: {:?}", on.warnings);
+                }
             } else if need <= half {
                 rescued += 1;
                 let title = on
@@ -11784,7 +12811,17 @@ mod tests {
                 assert!(on.panels[0].plot_area.w >= half - 1e-6, "the rescue keeps half the plot");
             } else {
                 given_up += 1;
-                assert_eq!(on, off, "a {n}-char title whose rescue takes {need}px of a {}px plot", 2.0 * half);
+                assert_eq!(
+                    LayoutResult { warnings: Vec::new(), ..on.clone() },
+                    LayoutResult { warnings: Vec::new(), ..off.clone() },
+                    "a {n}-char title whose rescue takes {need}px of a {}px plot",
+                    2.0 * half,
+                );
+                assert!(
+                    overflow_kinds(&on).contains(&OverflowingContent::XAxisTitle),
+                    "a {n}-char given-up title must warn: {:?}",
+                    on.warnings,
+                );
             }
         }
         let viewport_feasible_given_up = (1..=40)
@@ -11830,7 +12867,38 @@ mod tests {
             let need = rescue.top + rescue.bottom;
             let half = off.panels[0].plot_area.h / 2.0;
             if need == 0.0 {
-                assert_eq!(on, off, "a {n}-char y title that fits needs nothing");
+                assert_eq!(
+                    LayoutResult { warnings: Vec::new(), ..on.clone() },
+                    LayoutResult { warnings: Vec::new(), ..off.clone() },
+                    "a {n}-char y title that fits needs nothing",
+                );
+                // `need == 0` also covers a title too tall to ever fit
+                // (recentering is infeasible, so it reports no shift);
+                // that title still clips and must still warn.
+                let off_title = off
+                    .axes
+                    .iter()
+                    .find(|a| a.orient == AxisOrient::Left)
+                    .and_then(|a| a.title.as_ref());
+                let (clips_top, clips_bottom) = off_title
+                    .map(|t| {
+                        let half_h = m.measure_width(&t.text, theme.typography.title_font_size) / 2.0;
+                        (t.anchor_y - half_h < -1e-6, t.anchor_y + half_h > viewport.height + 1e-6)
+                    })
+                    .unwrap_or((false, false));
+                if clips_top || clips_bottom {
+                    match overflow_for(&on, OverflowingContent::YAxisTitleTallerThanCanvas) {
+                        Some(o) => {
+                            assert_eq!(o.left, 0.0);
+                            assert_eq!(o.right, 0.0);
+                            assert_eq!(o.top > 0.0, clips_top, "top side at n={n}: {o:?}");
+                            assert_eq!(o.bottom > 0.0, clips_bottom, "bottom side at n={n}: {o:?}");
+                        }
+                        None => panic!("a {n}-char infeasible y title must still warn: {:?}", on.warnings),
+                    }
+                } else {
+                    assert!(on.warnings.is_empty(), "a {n}-char y title that fits must not warn: {:?}", on.warnings);
+                }
             } else if need <= half {
                 rescued += 1;
                 let title = on
@@ -11847,7 +12915,20 @@ mod tests {
                 assert!(on.panels[0].plot_area.h >= half - 1e-6, "the rescue keeps half the plot");
             } else {
                 given_up += 1;
-                assert_eq!(on, off, "a {n}-char y title whose rescue takes {need}px of a {}px plot", 2.0 * half);
+                assert_eq!(
+                    LayoutResult { warnings: Vec::new(), ..on.clone() },
+                    LayoutResult { warnings: Vec::new(), ..off.clone() },
+                    "a {n}-char y title whose rescue takes {need}px of a {}px plot",
+                    2.0 * half,
+                );
+                match overflow_for(&on, OverflowingContent::YAxisTitle) {
+                    Some(o) => {
+                        assert_eq!(o.left, 0.0);
+                        assert_eq!(o.right, 0.0);
+                        assert!(o.top > 0.0 || o.bottom > 0.0, "n={n}: {o:?}");
+                    }
+                    None => panic!("a {n}-char given-up y title must warn: {:?}", on.warnings),
+                }
             }
         }
         assert!(rescued > 0 && given_up > 0, "both arms (rescued {rescued}, given up {given_up})");
@@ -11888,7 +12969,17 @@ mod tests {
                 assert!((hi - viewport.width).abs() < 1e-6, "a {chars}-char label is rescued to the edge ({hi})");
             } else {
                 given_up += 1;
-                assert_eq!(on, off, "a {chars}-char label needing {need}px of a {}px plot", 2.0 * half);
+                assert_eq!(
+                    LayoutResult { warnings: Vec::new(), ..on.clone() },
+                    LayoutResult { warnings: Vec::new(), ..off.clone() },
+                    "a {chars}-char label needing {need}px of a {}px plot",
+                    2.0 * half,
+                );
+                assert!(
+                    overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+                    "a {chars}-char given-up label must warn: {:?}",
+                    on.warnings,
+                );
             }
         }
         assert!(rescued > 0 && given_up > 0, "both arms (rescued {rescued}, given up {given_up})");
@@ -12262,7 +13353,11 @@ mod tests {
     #[test]
     fn padding_auto_adds_nothing_when_a_rescue_leaves_under_half_the_plot_height() {
         let spec = minimal_chart_spec();
-        let axes = axes_whose_left_rescue_rotates_the_labels();
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        // The middle label is wide enough that the 120px first label
+        // still fails flat against its neighbor at the rescued width,
+        // forcing the rotation this fixture depends on.
+        axes.x.tick_labels[1] = "9".repeat(14);
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
@@ -12293,10 +13388,17 @@ mod tests {
             "fixture assumption: the rescue keeps the width but not half the height ({area:?}, floor {w_floor} x {h_floor})",
         );
         assert!(probe_auto_padding(resolve_padding_inset(&theme, base, rescue), &inputs, &room).unusable);
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         assert_eq!(
-            layout_with_auto(&theme, true, viewport, &axes, &m),
-            layout_with_auto(&theme, false, viewport, &axes, &m),
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
             "a rescue that leaves under half the plot height adds nothing",
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::XTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
         );
     }
 
@@ -12504,22 +13606,28 @@ mod tests {
         text.chars().count() as f64 * font_size * 0.6
     }
 
-    /// At 330px the cascade draws these five currency labels flat at the
+    /// At 330px the cascade draws these four currency labels flat at the
     /// shrunk font size (`FONT_SHRINK_FACTOR` of 11), with and without
     /// auto. The flat last label sits on the plot's right edge, so the
     /// rescue is exactly its SHRUNK half-width past the edge: the right
     /// inset equals that half-width and the label ends on the canvas edge.
-    /// Measured at the unshrunk size it would be `9·11·0.6/2 = 29.7`.
+    /// Measured at the unshrunk size it would be `19·11·0.6/2 = 62.7`.
     #[test]
     fn padding_auto_sizes_a_shrunk_font_rescue_by_the_drawn_font() {
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = ["0", "250,000", "500,000", "750,000", "1,000,000"]
+        // Four ticks, not five: keeps continuous-x thinning structurally
+        // unreachable here (any stride over 4 labels keeps at most 2
+        // survivors, under `MIN_EVENLY_THINNED_X_LABELS`), so this fixture
+        // isolates the font-shrink stage alone. The last label is long
+        // enough that its pair with its neighbor fails flat at full font
+        // (forcing the shrink) but fits once shrunk.
+        axes.x.tick_labels = ["0", "500,000", "750,000", "100,000,000,000,000"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         if let Some(p) = axes.x.tick_projection.as_mut() {
             p.padding_frac = 0.0;
-            p.major = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+            p.major = vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
         }
         let m = MockMetrics {
             measure: font_scaled_width,
@@ -12544,10 +13652,10 @@ mod tests {
         };
         let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
-        assert_eq!(presentation(&off), vec![(0.0, Some(shrunk), false); 5], "fixture assumption");
+        assert_eq!(presentation(&off), vec![(0.0, Some(shrunk), false); 4], "fixture assumption");
         assert_eq!(presentation(&on), presentation(&off), "the rescue keeps the presentation");
         assert!(drawn_x_label_ink(&off, &m, fs).1 > viewport.width, "fixture assumption: overhangs");
-        let half_w = font_scaled_width("1,000,000", shrunk) / 2.0;
+        let half_w = font_scaled_width("100,000,000,000,000", shrunk) / 2.0;
         let right_inset = viewport.width - on.padded_region.x - on.padded_region.w;
         assert!(
             (right_inset - half_w).abs() < 1e-9,
@@ -12617,7 +13725,16 @@ mod tests {
         let off = layout_with_auto(&theme, false, viewport, &axes, &m);
         let (lo, _) = drawn_x_label_ink(&off, &m, theme.typography.label_font_size);
         assert!(lo < 0.0, "fixture assumption: the first label crosses the left edge ({lo})");
-        assert_eq!(layout_with_auto(&theme, true, viewport, &axes, &m), off);
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(
+            LayoutResult { warnings: Vec::new(), ..on.clone() },
+            LayoutResult { warnings: Vec::new(), ..off.clone() },
+        );
+        assert!(
+            overflow_kinds(&on).contains(&OverflowingContent::CategoricalXTickLabels),
+            "the still-clipping default must warn: {:?}",
+            on.warnings,
+        );
     }
 
     // ── drawn_x_labels matches the renderer ─────────────────────────────────
@@ -12832,7 +13949,15 @@ mod tests {
     /// the widest drawn label, larger than the flat band.
     #[test]
     fn labels_that_rotate_keep_the_rotated_band() {
-        let axes = currency_x_axes();
+        let mut axes = currency_x_axes();
+        // Continuous-x thinning gates on there being a real scale
+        // projection; these eleven dense labels at this slot width thin to
+        // a stride-3 flat subset on a continuous axis rather than
+        // rotating. Make the axis categorical locally (the shared
+        // `currency_x_axes` helper stays untouched for its other callers)
+        // so this fixture keeps testing the rotated-band reservation this
+        // test is about.
+        axes.x.tick_projection = None;
         let m = MockMetrics {
             measure: font_scaled_width,
             line_h_factor: 1.2,

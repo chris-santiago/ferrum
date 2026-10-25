@@ -4438,7 +4438,7 @@ fn old_independent_y(
 #[test]
 fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
     let scale = linear_scale(0.0, 100.0);
-    let (labels, _anchors, proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, _origin, proj, threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4459,7 +4459,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
 #[test]
 fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
     let scale = linear_scale(0.0, 1.0);
-    let (labels, _anchors, proj, _t) = build_axis_tick_inputs(
+    let (labels, _anchors, _origin, proj, _t) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {
@@ -4480,7 +4480,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
 #[test]
 fn build_axis_tick_inputs_y_matches_old_independent_reversed() {
     let scale = linear_scale(-50.0, 50.0);
-    let (labels, _anchors, proj, _t) = build_axis_tick_inputs(
+    let (labels, _anchors, _origin, proj, _t) = build_axis_tick_inputs(
         &scale,
         8,
         TickFormatMode::Immediate {
@@ -4510,7 +4510,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
         vec![0.0, 30.0],
         DiscreteLayout::band(0.1, 0.0, DEFAULT_ALIGN),
     ));
-    let (x_labels, _anchors, x_proj, _t) = build_axis_tick_inputs(
+    let (x_labels, _anchors, _origin, x_proj, _t) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4522,7 +4522,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
     )
     .unwrap();
     assert!(x_proj.is_none(), "ordinal scale yields no tick projection");
-    let (y_labels, _anchors, y_proj, _t) = build_axis_tick_inputs(
+    let (y_labels, _anchors, _origin, y_proj, _t) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4551,7 +4551,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
     // Shared/global path: numeric format threads forward (not applied here),
     // and a non-empty minor vec is carried into the projection.
     let shared_minor = vec![0.1_f64, 0.3, 0.7];
-    let (shared_labels, _anchors, shared_proj, shared_threaded) = build_axis_tick_inputs(
+    let (shared_labels, _anchors, _origin, shared_proj, shared_threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Thread {
@@ -4564,7 +4564,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
     .unwrap();
 
     // Independent/per-panel path: format applied immediately, minor empty.
-    let (indep_labels, _anchors, indep_proj, indep_threaded) = build_axis_tick_inputs(
+    let (indep_labels, _anchors, _origin, indep_proj, indep_threaded) = build_axis_tick_inputs(
         &scale,
         10,
         TickFormatMode::Immediate {
@@ -4637,7 +4637,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
     let default_labels = scale.tick_labels(6);
 
     for format_type in [None, Some("time")] {
-        let (immediate, _anchors, _proj, threaded) = build_axis_tick_inputs(
+        let (immediate, _anchors, _origin, _proj, threaded) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Immediate {
@@ -4658,7 +4658,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
             "every label must be rendered through {pattern}, got {immediate:?}"
         );
 
-        let (thread, _anchors, _proj, _t) = build_axis_tick_inputs(
+        let (thread, _anchors, _origin, _proj, _t) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Thread {
@@ -4684,7 +4684,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
 #[test]
 fn build_axis_tick_inputs_immediate_still_applies_a_numeric_format_itself() {
     let scale = linear_scale(0.0, 1.0);
-    let (labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, _origin, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {
@@ -4776,7 +4776,7 @@ fn build_axis_tick_inputs_immediate_refuses_time_format_on_non_temporal_scale() 
 #[test]
 fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal_scale() {
     let scale = linear_scale(0.0, 1.0);
-    let (_labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
+    let (_labels, _anchors, _origin, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Thread {
@@ -4788,7 +4788,7 @@ fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal
     )
     .unwrap();
     assert_eq!(threaded.as_deref(), Some(".1%"), "threaded like every d3 spec");
-    let (labels, _anchors, _proj, threaded) = build_axis_tick_inputs(
+    let (labels, _anchors, _origin, _proj, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate { format: Some(".1%"), format_type: None },
@@ -4823,7 +4823,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
     ));
     let default_labels = scale.tick_labels(6);
     for spec in [".2f", ".3e"] {
-        let (thread, _anchors, _p, thread_threaded) = build_axis_tick_inputs(
+        let (thread, _anchors, _origin, _p, thread_threaded) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Thread {
@@ -4836,7 +4836,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
         .unwrap();
         assert_eq!(thread, default_labels, "Thread, {spec}");
         assert_eq!(thread_threaded, None, "Thread must not re-seed {spec} as d3");
-        let (immediate, _anchors, _p, _t) = build_axis_tick_inputs(
+        let (immediate, _anchors, _origin, _p, _t) = build_axis_tick_inputs(
             &scale,
             6,
             TickFormatMode::Immediate {
@@ -5235,7 +5235,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
     }
     let (thread, immediate) = run("%Y", None);
     for (mode, got) in [("Thread", thread), ("Immediate", immediate)] {
-        let (labels, _, _, threaded) = got.unwrap();
+        let (labels, _, _, _, threaded) = got.unwrap();
         assert_eq!(threaded, None, "{mode}");
         assert!(labels.iter().all(|l| l.len() == 4 && l.starts_with("20")), "{mode}: {labels:?}");
     }
@@ -5250,7 +5250,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
 #[test]
 fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
     let scale = linear_scale(1.0, 5.0);
-    let (thread, _anchors, _p, threaded) = build_axis_tick_inputs(
+    let (thread, _anchors, _origin, _p, threaded) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Thread {
@@ -5265,7 +5265,7 @@ fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
     // The threaded spec is applied later by `apply_tick_format`; the
     // stray type must not un-declare it there either.
     let applied = apply_tick_format(thread, threaded.as_deref(), Some("time"));
-    let (immediate, _anchors, _p, _t) = build_axis_tick_inputs(
+    let (immediate, _anchors, _origin, _p, _t) = build_axis_tick_inputs(
         &scale,
         5,
         TickFormatMode::Immediate {

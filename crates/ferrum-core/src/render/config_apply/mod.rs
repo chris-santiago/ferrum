@@ -1196,12 +1196,14 @@ fn sync_tick_placement_to_tick_values(
     }
     // an explicit `tick_values=` replaces
     // `tick_labels` wholesale (`apply_label_format_to_axis`, just above in
-    // the resync ladder), so the anchors it shipped describe a ladder that
-    // no longer exists — recomputed from the override's own values here,
-    // before the projection early-return below, so this runs for every axis
-    // `tick_values=` reaches (primary x/y and every secondary y). Empty for
-    // every non-`Log` scale, byte-identical to today.
+    // the resync ladder), so the anchors and origin it shipped describe a
+    // ladder that no longer exists — recomputed from the override's own
+    // values here, before the projection early-return below, so this runs
+    // for every axis `tick_values=` reaches (primary x/y and every
+    // secondary y). `tick_anchors` is empty for every non-`Log` scale,
+    // and `tick_origin` is `None` for Time/Log/Ordinal.
     axis.tick_anchors = scale.tick_anchors(&values);
+    axis.tick_origin = scale.tick_origin(&values);
     if axis.tick_projection.is_none() {
         return;
     }

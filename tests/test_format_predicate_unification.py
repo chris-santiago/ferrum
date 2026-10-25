@@ -138,16 +138,32 @@ class TestIndependentFacetAxisHonorsATemporalFormat:
         """Regression pin. One format discipline: the two spellings must agree.
 
         This is the finding itself — pre-fix the shared axis rendered
-        ``2020/01/01`` and the independent one ``2020``, so the sets differed.
+        ``2020/01/01`` and the independent one ``2020``, so the pattern was
+        applied on one spelling and dropped on the other. Each panel's own
+        axis picks its own even-stride thinning over its own narrower
+        domain, so the exact tick SET need not match the shared axis's
+        wider-domain thinning tick for tick; what must hold is that both
+        spellings apply the pattern, and that the thinning on each
+        genuinely reads the same formatted ticks where the domains overlap.
         """
         base = self._chart(temporal_df)
-        shared = set(patterned_labels(base.facet(col="g")))
-        independent = set(patterned_labels(base.facet(col="g").share_scale(x="independent")))
+        shared_chart = base.facet(col="g")
+        independent_chart = base.facet(col="g").share_scale(x="independent")
+        shared = set(patterned_labels(shared_chart))
+        independent = set(patterned_labels(independent_chart))
         assert shared, "shared facet axis must apply the format (control)"
-        assert shared <= independent, (
-            "every label the shared axis formats must also be formatted on the "
-            f"independent one; shared={sorted(shared)} independent={sorted(independent)}"
+        assert independent, "independent facet axis must apply the format"
+        assert shared & independent, (
+            "shared and independent axes must select some of the same formatted "
+            f"ticks; shared={sorted(shared)} independent={sorted(independent)}"
         )
+        bare_year = re.compile(r"^\d{4}$")
+        for route, chart in (("shared", shared_chart), ("independent", independent_chart)):
+            unpatterned = [t for t in rendered_text(chart) if bare_year.match(t)]
+            assert not unpatterned, (
+                f"{route} axis must never render a bare year where the pattern dropped; "
+                f"got {unpatterned}"
+            )
 
     def test_a_numeric_format_is_still_applied_in_place(self):
         """Invariant guard — passes pre-fix too. The other direction: routing

@@ -202,10 +202,11 @@ def test_chart_level_axis_x_date_iso_preset_renders_dates():
 def test_chart_level_axis_x_date_iso_preset_padding_auto_extra_is_pinned():
     """The same chart as `test_chart_level_axis_x_date_iso_preset_renders_dates`
     (`_wide_temporal_df`, chart-level `axis_x=AxisConfig(label_format="date_iso")`,
-    default width): its day-level ISO labels wrap onto two lines at the
-    cascade's shrunk 9.02pt font. `padding.auto`'s extra on this real
-    shrunk-font chart narrows the `auto=False` plot from exactly 566.69px
-    wide to exactly 566.086px wide."""
+    default width): the x-axis collision cascade thins its day-level ISO
+    ticks down to one per year and draws them flat at the full 11pt font.
+    `padding.auto`'s extra on this real full-font chart narrows the
+    `auto=False` plot from exactly 566.69px wide to exactly 560.685px
+    wide."""
     df = _wide_temporal_df()
     chart = (
         fm.Chart(df)
@@ -215,7 +216,7 @@ def test_chart_level_axis_x_date_iso_preset_padding_auto_extra_is_pinned():
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
     svg_default = chart.to_svg()
-    assert 'font-size="9.02"' in svg_auto_false  # the shrunk-font path
+    assert 'font-size="11"' in svg_auto_false  # the full-font path
     clip_off = re.search(
         r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_auto_false
     )
@@ -224,10 +225,16 @@ def test_chart_level_axis_x_date_iso_preset_padding_auto_extra_is_pinned():
     )
     assert clip_off is not None and clip_default is not None
     assert clip_off.group(1) == "566.69"
-    assert clip_default.group(1) == "566.086"
+    assert clip_default.group(1) == "560.685"
 
 
 def test_chart_level_month_year_preset_renders_month_names():
+    """The month/year labels wrap onto two lines (month, then year) once
+    the x-axis collision cascade decides to wrap rather than draw them
+    combined on one line, so each rendered label is split across two
+    adjacent entries (e.g. "Jan" then "2020") rather than one "Jan 2020"
+    string -- match on the month abbreviation alone, with an optional
+    trailing year for the unwrapped, single-line shape."""
     svg = (
         fm.Chart(_temporal_df())
         .mark_point()
@@ -236,8 +243,22 @@ def test_chart_level_month_year_preset_renders_month_names():
         .to_svg()
     )
     labels = _extract_text_labels(svg)
-    month_labels = {l for l in labels if re.match(r"^[A-Z][a-z]{2} \d{4}$", l)}
-    assert len(month_labels) > 1, f"expected multiple distinct month/year labels, got: {labels}"
+    month_abbr = re.compile(r"^[A-Z][a-z]{2}$")
+    year = re.compile(r"^\d{4}$")
+    # Each wrapped x tick label is a (month, year) pair of adjacent entries
+    # -- not any bare month-shaped token, and never a month missing its own
+    # year line.
+    month_positions = [i for i, l in enumerate(labels) if month_abbr.match(l)]
+    assert len(month_positions) > 1, f"expected multiple month lines, got: {labels}"
+    pairs = []
+    for i in month_positions:
+        assert i + 1 < len(labels) and year.match(labels[i + 1]), (
+            f"month line {labels[i]!r} at index {i} must be followed by its own year line; "
+            f"got {labels}"
+        )
+        pairs.append((labels[i], labels[i + 1]))
+    assert {m for m, _ in pairs} > {"Jan"}, f"expected more than one distinct month, got {pairs}"
+    assert {y for _, y in pairs} == {"2020"}
 
 
 # ---------------------------------------------------------------------------

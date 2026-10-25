@@ -623,6 +623,31 @@ impl ScaleKind {
         }
     }
 
+    /// The index, in `values` (the same `tick_labels`-order values
+    /// [`tick_anchors`](Self::tick_anchors) takes), of this axis's nicest
+    /// tick: a continuous-x stride cull counts strides FROM this index in
+    /// both directions, instead of always from index 0, so a thinning
+    /// keeps the tick a reader expects (zero when it is on the axis, else
+    /// the coarsest round number) rather than whichever tick index 0
+    /// happens to be.
+    ///
+    /// A tick equal to 0 (within `1e-9` of the smallest adjacent spacing)
+    /// wins outright when one exists. Otherwise the tick divisible by the
+    /// largest power of ten wins — the largest integer `j` with
+    /// `|v / 10^j - round(v / 10^j)| <= 1e-9 * max(1, |v / 10^j|)`, searched
+    /// from `floor(log10(|v|))` down to `floor(log10(spacing)) - 1` — and
+    /// the first such tick (lowest index) wins a tie. `None` for `Time`
+    /// (a calendar-aligned origin needs the time interval `TimeScale`
+    /// owns, not this niceness search), `Log` (its decades already anchor
+    /// via `tick_anchors`), `Ordinal`, and for fewer than two `values` (no
+    /// spacing to measure niceness against).
+    pub(crate) fn tick_origin(&self, values: &[f64]) -> Option<usize> {
+        match self {
+            Self::Linear(_) | Self::Pow(_) | Self::Symlog(_) => nicest_tick_index(values),
+            Self::Time(_) | Self::Log(_) | Self::Ordinal(_) => None,
+        }
+    }
+
     /// Continuous-axis scale-projection support for explicit tick values
     /// (`configure_axis(tick_values=[...])`). Projects each supplied data value
     /// to a domain fraction `t ∈ [0, 1]` over this scale's resolved range, in
@@ -821,6 +846,57 @@ impl ScaleKind {
                 .collect(),
         }
     }
+}
+
+/// [`ScaleKind::tick_origin`]'s search, pulled out as a free function so
+/// it can be unit-tested directly against tick vectors rather than only
+/// through a constructed scale.
+fn nicest_tick_index(values: &[f64]) -> Option<usize> {
+    if values.len() < 2 {
+        return None;
+    }
+    let spacing = values
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .filter(|d| *d > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    if !spacing.is_finite() {
+        return None;
+    }
+    let zero_tol = 1e-9 * spacing;
+    if let Some(idx) = values.iter().position(|v| v.abs() <= zero_tol) {
+        return Some(idx);
+    }
+    let floor_log10_spacing = spacing.log10().floor() as i64;
+    let mut best: Option<(usize, i64)> = None;
+    for (i, &v) in values.iter().enumerate() {
+        let v_abs = v.abs();
+        if v_abs == 0.0 {
+            continue;
+        }
+        let start_j = v_abs.log10().floor() as i64;
+        let mut j = start_j;
+        let mut found_j: Option<i64> = None;
+        while j >= floor_log10_spacing - 1 {
+            let scaled = v / 10f64.powi(j as i32);
+            let tol = 1e-9 * scaled.abs().max(1.0);
+            if (scaled - scaled.round()).abs() <= tol {
+                found_j = Some(j);
+                break;
+            }
+            j -= 1;
+        }
+        if let Some(j) = found_j {
+            let better = match best {
+                Some((_, best_j)) => j > best_j,
+                None => true,
+            };
+            if better {
+                best = Some((i, j));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// Ordered numeric buckets, each painted a single flat color.

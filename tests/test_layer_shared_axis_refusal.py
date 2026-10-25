@@ -358,10 +358,11 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 #
 # Each hash below pins one route's rendered bytes. For
 # "categorical_bar_temporal_line", the `fm.layer` route renders with
-# `padding.auto`'s default: the hidden temporal line layer's x band is
-# reserved for exactly the labels the axis draws (rotated -90, fitting),
-# not for labels a collision cascade culls, and the merged panel's height
-# reflects that. The `+` and `interactive` routes for the same fixture, and
+# `padding.auto`'s default: the band the x axis reserves is sized by the
+# same adjacent-gap measure the axis itself draws with, not a more
+# conservative estimate, so the merged panel's height reflects the band the
+# three flat category labels actually need. The `+` and `interactive`
+# routes for the same fixture, and
 # both routes for "integer_category_ordinal_union", render unaffected by
 # that reservation. These hashes guard the ordinal-union rule against the
 # continuous-axis predicate; they are unrelated to it, and must not move on
@@ -373,7 +374,7 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 
 _ORDINAL_UNION_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
-        "fm.layer": "a46894be42998cf3",
+        "fm.layer": "9f112fc7ec2f70f0",
         "+": "1a8ac40fe0c24787",
         "interactive": "374f5ba1bc1ce13f",
     },

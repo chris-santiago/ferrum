@@ -1130,7 +1130,7 @@ fn build_axis_input(
     // application; temporal is formatted directly). `channel.reverses()` carries
     // the non-ordinal-y reversal; the theme-gated minor fractions are passed in
     // (not reversed).
-    let (tick_labels, tick_anchors, tick_projection, label_format_override) = build_axis_tick_inputs(
+    let (tick_labels, tick_anchors, tick_origin, tick_projection, label_format_override) = build_axis_tick_inputs(
         scale,
         tick_count,
         TickFormatMode::Thread {
@@ -1175,6 +1175,7 @@ fn build_axis_input(
         title,
         tick_labels,
         tick_anchors,
+        tick_origin,
         tick_format: None, // already applied above
         tick_format_type: None,
         tick_projection,
@@ -4172,6 +4173,12 @@ pub(crate) fn adjust_axis_ticks(
             }
         }
     }
+
+    // `raw` now holds the FINAL tick values, in lockstep with `tick_labels`,
+    // after whatever `tick_min_step`/`tick_extra` just did to them — re-derive
+    // the origin from them directly, rather than trying to track an index
+    // through the retains/pushes above the way `tick_anchors` does.
+    axis.tick_origin = scale.tick_origin(&raw);
 }
 
 /// Resolve the tick-label format `(spec, type)` for a positional channel.
@@ -4515,12 +4522,14 @@ pub(crate) enum TickFormatMode<'a> {
     },
 }
 
-/// `build_axis_tick_inputs`'s return shape: `(labels, anchors, projection,
-/// threaded_label_format)` — named to keep the `Result<_, RenderError>`
-/// signature (#133) under clippy's type-complexity threshold. `anchors`
-/// is index-aligned with `labels`; empty for every
-/// non-`Log` scale.
-type AxisTickInputs = (Vec<String>, Vec<bool>, Option<TickProjection>, Option<String>);
+/// `build_axis_tick_inputs`'s return shape: `(labels, anchors, origin,
+/// projection, threaded_label_format)` — named to keep the
+/// `Result<_, RenderError>` signature (#133) under clippy's type-complexity
+/// threshold. `anchors` is index-aligned with `labels`; empty for every
+/// non-`Log` scale. `origin` is the index, among `labels`, of the axis's
+/// nicest tick ([`crate::render::scale_resolve::ScaleKind::tick_origin`]);
+/// `None` for Time/Log/Ordinal and for fewer than two ticks.
+type AxisTickInputs = (Vec<String>, Vec<bool>, Option<usize>, Option<TickProjection>, Option<String>);
 
 /// Derive one axis's tick labels and [`TickProjection`] from a resolved scale —
 /// the single source of truth for the sequence the shared (global) and
@@ -4528,7 +4537,8 @@ type AxisTickInputs = (Vec<String>, Vec<bool>, Option<TickProjection>, Option<St
 /// non-ordinal-y label/fraction reversal, format application, and the
 /// fraction-projection build.
 ///
-/// Returns `(labels, projection, threaded_label_format)`. The threaded format is
+/// Returns `(labels, anchors, origin, projection, threaded_label_format)`.
+/// The threaded format is
 /// `Some` only under [`TickFormatMode::Thread`] for a numeric axis (the caller
 /// seeds it onto `AxisInput.overrides.labels.format`); it is always `None` under
 /// [`TickFormatMode::Immediate`].
@@ -4563,15 +4573,28 @@ pub(crate) fn build_axis_tick_inputs(
     let mut labels = scale.tick_labels(tick_count);
     let mut fractions = scale.tick_fractions(tick_count);
     let padding_frac = scale.padding_fraction();
+    let raw_values = scale.tick_values_raw(tick_count);
     // Which of these SAME tick values (same `count_hint`,
     // so index-aligned with `labels`/`fractions`) are `Log` decades — empty
     // for every non-`Log` scale. Reversed in the SAME lockstep as `labels`
     // so index `i` still names the same tick after either order.
-    let mut anchors = scale.tick_values_raw(tick_count).map(|v| scale.tick_anchors(&v)).unwrap_or_default();
+    let mut anchors = raw_values.as_ref().map(|v| scale.tick_anchors(v)).unwrap_or_default();
+    // The index, among the SAME tick values, of the axis's nicest tick (see
+    // `ScaleKind::tick_origin`) — `None` for Time/Log/Ordinal and for fewer
+    // than two ticks. Re-indexed in the SAME lockstep as `labels` so it
+    // still names the same tick after either order.
+    let mut origin = raw_values.as_ref().and_then(|v| scale.tick_origin(v));
     if reverse {
         labels.reverse();
         fractions.reverse();
         anchors.reverse();
+        if let Some(o) = origin {
+            // `labels.len() - 1 - o` underflows for an out-of-range `o`
+            // (or an empty `labels`) — the same `o < labels.len()` guard
+            // `AxisInput::set_ticks` applies to a mismatched origin,
+            // degrading to `None` instead.
+            origin = (o < labels.len()).then(|| labels.len() - 1 - o);
+        }
     }
 
     let (labels, threaded) = match mode {
@@ -4636,7 +4659,7 @@ pub(crate) fn build_axis_tick_inputs(
         minor,
     });
 
-    Ok((labels, anchors, projection, threaded))
+    Ok((labels, anchors, origin, projection, threaded))
 }
 
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.

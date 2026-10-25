@@ -889,7 +889,7 @@ fn independent_axis_input(
     coord_flipped: bool,
 ) -> Result<crate::layout::AxisInput, RenderError> {
     let (format, format_type) = super::prepare::resolve_axis_label_format(encoding);
-    let (labels, anchors, projection, _threaded) = super::prepare::build_axis_tick_inputs(
+    let (labels, anchors, origin, projection, _threaded) = super::prepare::build_axis_tick_inputs(
         scale,
         base.tick_labels.len().max(1),
         super::prepare::TickFormatMode::Immediate {
@@ -901,7 +901,7 @@ fn independent_axis_input(
     )
     .map_err(|e| super::with_coord_flipped(e, coord_flipped))?;
     let mut input = base.clone();
-    input.set_ticks(labels, anchors);
+    input.set_ticks(labels, anchors, origin);
     input.tick_projection = projection;
     input.categorical_placement = scale.categorical_placement();
     Ok(input)

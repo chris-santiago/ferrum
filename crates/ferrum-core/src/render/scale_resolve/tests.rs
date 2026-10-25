@@ -8629,3 +8629,74 @@ fn tick_anchors_empty_for_every_non_log_kind() {
     let values = linear.tick_values_raw(5).expect("linear scale has tick values");
     assert!(linear.tick_anchors(&values).is_empty(), "non-Log tick_anchors is empty, not all-false");
 }
+
+// ── `ScaleKind::tick_origin`: the index a continuous-x stride cull counts from ──
+
+#[test]
+fn tick_origin_picks_zero_when_zero_is_a_tick() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![-3.5, 3.0], vec![0.0, 400.0], false, false));
+    let values: Vec<f64> = (0..14).map(|i| -3.5 + 0.5 * f64::from(i)).collect();
+    assert_eq!(values[7], 0.0, "fixture assumption: index 7 is the zero tick");
+    assert_eq!(linear.tick_origin(&values), Some(7));
+}
+
+#[test]
+fn tick_origin_picks_the_coarsest_power_of_ten_tick_when_zero_is_absent() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![5.0, 50.0], vec![0.0, 400.0], false, false));
+    let values: Vec<f64> = (1..=10).map(|i| 5.0 * f64::from(i)).collect();
+    assert_eq!(values[1], 10.0, "fixture assumption: index 1 is the value 10");
+    assert_eq!(linear.tick_origin(&values), Some(1));
+}
+
+#[test]
+fn tick_origin_picks_a_round_year_over_an_off_phase_one() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![1995.0, 2020.0], vec![0.0, 400.0], false, false));
+    let values: Vec<f64> = (0..=5).map(|i| 1995.0 + 5.0 * f64::from(i)).collect();
+    assert_eq!(values[1], 2000.0, "fixture assumption: index 1 is the value 2000");
+    assert_eq!(linear.tick_origin(&values), Some(1));
+}
+
+#[test]
+fn tick_origin_breaks_a_tie_toward_the_first_tick() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![2.5, 7.5], vec![0.0, 400.0], false, false));
+    let values: Vec<f64> = (0..=10).map(|i| 2.5 + 0.5 * f64::from(i)).collect();
+    assert_eq!(values[1], 3.0, "fixture assumption: index 1 is the value 3");
+    assert_eq!(linear.tick_origin(&values), Some(1), "3 and 5 tie at the same power of ten; 3 is first");
+}
+
+#[test]
+fn tick_origin_is_zero_when_no_tick_is_nicer_than_the_rest() {
+    use crate::scale::linear::LinearScale;
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![20.0, 90.0], vec![0.0, 400.0], false, false));
+    let values: Vec<f64> = (2..=9).map(|i| 10.0 * f64::from(i)).collect();
+    assert_eq!(linear.tick_origin(&values), Some(0), "every tick ties at the same power of ten; the first wins");
+}
+
+#[test]
+fn tick_origin_none_for_time_log_ordinal_and_too_few_ticks() {
+    use crate::scale::linear::LinearScale;
+    use crate::scale::log::LogScale;
+    use crate::scale::ordinal::OrdinalScale;
+    use crate::scale::time::TimeScale;
+
+    let time = ScaleKind::Time(TimeScale::new_internal(vec![0.0, 1.0], vec![0.0, 400.0], false, false));
+    assert_eq!(time.tick_origin(&[0.0, 0.5, 1.0]), None, "a calendar-aligned origin needs the time interval TimeScale owns, not this search");
+
+    let log = ScaleKind::Log(LogScale::new_internal(vec![1.0, 100.0], vec![0.0, 400.0], 10.0, false, false));
+    assert_eq!(log.tick_origin(&[1.0, 10.0, 100.0]), None, "Log's decades already anchor via tick_anchors");
+
+    let ordinal = ScaleKind::Ordinal(OrdinalScale::new_internal(
+        vec!["a".into(), "b".into()],
+        vec![0.0, 100.0],
+        DiscreteLayout::UNPADDED,
+    ));
+    assert_eq!(ordinal.tick_origin(&[0.0, 1.0]), None, "Ordinal has no numeric tick domain");
+
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 400.0], false, false));
+    assert_eq!(linear.tick_origin(&[]), None, "no ticks, nothing to anchor");
+    assert_eq!(linear.tick_origin(&[5.0]), None, "a single tick has no spacing to judge niceness against");
+}
