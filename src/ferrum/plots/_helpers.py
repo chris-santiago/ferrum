@@ -323,8 +323,12 @@ def _charts_with_endpoint_labels(
     """Append endpoint direct labels to ``chart`` for each ``label_field`` series.
 
     Thin wrapper over :func:`ferrum._direct_label._direct_label_endpoint`
-    that the gain / lift / learning-curve builders share. The underlying
-    helper is unchanged, so output is byte-identical to a direct call.
+    that the gain / lift / learning-curve / validation-curve builders
+    share. Always binds the label layer's own color to ``label_field``
+    with no legend of its own, so each label reads in its own series'
+    color -- the same field and the same ``legend=None`` suppression the
+    base chart's own color binding already uses, rather than falling
+    through to the theme's label ink.
     """
     from ferrum._direct_label import _direct_label_endpoint
 
@@ -333,6 +337,7 @@ def _charts_with_endpoint_labels(
         label_field=label_field,
         x_col=x_col,
         y_col=y_col,
+        color_field=label_field,
     )
 
 

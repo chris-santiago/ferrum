@@ -501,8 +501,11 @@ def test_lift_chart_figure_function(binary_source):
 # --- F-L11-08 / G4: gain/lift show real class names, not a binary rename map ---
 
 
+_TICK_INK = "#6b7280"
+
+
 def _direct_label_texts(svg: str) -> set[str]:
-    """Text content of gain/lift chart direct-label + legend `<text>` nodes,
+    """Text content of gain/lift chart direct-label `<text>` nodes,
     excluding axis-tick text.
 
     A naive `">0<" in svg` (or any other bare substring) check does NOT
@@ -510,19 +513,19 @@ def _direct_label_texts(svg: str) -> set[str]:
     '0'..'1' gridline labels, the x-axis '0'..'1' percentage labels), so a
     chart with *zero* digit class labels anywhere (e.g. `class_names=["A",
     "B", "C"]`) still trips `">0<" in svg` / `">1<" in svg` via its ticks
-    alone -- verified live against the spec reviewer's proof. Direct labels
-    and axis ticks are visually distinguishable by SVG attributes even
-    though both are `<text>`: ticks render in the theme's muted gray
-    (`fill="#6b7280"`), while direct labels/legend text use the dark ink
-    color (`fill="#1f2937"`) at the same `font-size="11"` the chart title
-    and axis titles do NOT share (those are `font-size="13"
-    font-weight="600"`). That combination -- dark fill, tick-sized font,
-    no bold weight -- uniquely selects the direct-label layer.
+    alone. Direct labels and axis ticks are visually distinguishable by SVG
+    attributes even though both are `<text>`: ticks render in the theme's
+    muted gray (`fill="#6b7280"`) at `font-size="11"`, the same size the
+    chart title and axis titles do NOT share (those are `font-size="13"
+    font-weight="600"`). Each direct label reads in its own series' color,
+    not one fixed ink, so excluding the tick fill -- rather than matching
+    one hardcoded label fill -- is what uniquely selects the direct-label
+    layer at that font size.
     """
     return {
         content
         for attrs, content in re.findall(r"<text([^>]*)>([^<]*)</text>", svg)
-        if 'fill="#1f2937"' in attrs and 'font-size="11"' in attrs
+        if 'font-size="11"' in attrs and f'fill="{_TICK_INK}"' not in attrs
     }
 
 

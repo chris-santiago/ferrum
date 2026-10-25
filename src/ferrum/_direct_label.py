@@ -19,6 +19,7 @@ from ferrum._metric_labels import _resolve_field
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
+    from ferrum.encoding import Color
 
 
 def _direct_label_endpoint(
@@ -28,6 +29,7 @@ def _direct_label_endpoint(
     x_col: str | None = None,
     y_col: str | None = None,
     position: str = "end",
+    color_field: str | None = None,
 ) -> Chart:
     """Append a text label at the endpoint of each series of ``chart``.
 
@@ -51,6 +53,15 @@ def _direct_label_endpoint(
         back to the base chart's ``x`` / ``y`` encodings (resolved via
         :func:`ferrum.annotations._resolve_field`). The helper bails
         out (returns ``chart`` unchanged) when both fallbacks fail.
+    color_field : str, optional
+        Column whose values pick the text layer's own color, with no
+        legend of its own. A text mark draws only a color it binds
+        itself, so without this the label falls through to the theme's
+        label ink regardless of which series it names. Pass the same
+        field the base chart's series color is bound to so the label
+        reads through that already-established scale instead of a
+        second one. ``None`` (the default) leaves the layer with no
+        color binding, so the label draws the theme's label ink.
     position : {"end", "start"}, default "end"
         Endpoint at which to place each series' label.
 
@@ -118,12 +129,22 @@ def _direct_label_endpoint(
     )
     from ferrum._layer import _Layer
 
+    text_encoding: dict[str, str | Color] = {
+        "x": x_col,
+        "y": "_direct_label_y",
+        "text": "_direct_label_text",
+    }
+    if color_field is not None:
+        from ferrum.encoding import Color
+
+        text_encoding["color"] = Color(color_field, legend=None)
+
     chart_aug = chart._clone()
     chart_aug._data = augmented
     return chart_aug.layer(
         _Layer(
             mark="text",
-            encoding={"x": x_col, "y": "_direct_label_y", "text": "_direct_label_text"},
+            encoding=text_encoding,
             mark_kwargs={"align": "right", "dx": -4},
         )
     )
