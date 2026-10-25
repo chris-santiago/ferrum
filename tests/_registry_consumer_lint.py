@@ -90,6 +90,15 @@ _LOOKUP_HELPERS = frozenset({PRIMARY_LOOKUP, SECONDARY_LOOKUP})
 #: such a dict, so its arguments are channel bindings too.
 _ENCODING_CONTAINERS = frozenset({"encoding", "mark_kwargs", "remap"})
 
+#: Keyword arguments that are not themselves an encoding-channel name (so
+#: ``_channel_vocabulary()``'s reflection over ``ferrum.encoding`` does not
+#: find them) but whose value a consumer treats exactly like one -- it ends
+#: up bound to a real channel downstream. ``_Layer.contrast_against`` (spec
+#: §6.5) is one: ``_build_layers_list`` assigns its value straight into the
+#: layer's own ``color`` encoding when no caller fill reached the layer, so
+#: a literal here names a column precisely as a ``color=`` keyword would.
+_CHANNEL_EQUIVALENT_KEYWORDS = frozenset({"contrast_against"})
+
 
 # ---------------------------------------------------------------------------
 # Inputs derived from the live registry and the live encoding package
@@ -357,7 +366,10 @@ def _column_reference_nodes(index: _ModuleIndex, channel_names: frozenset[str]) 
       ``X("bin_start")``, ``ch.__class__("bin_start")`` -- under any import
       alias;
     * the value of a keyword argument named after a channel --
-      ``.encode(y=Y("sample"))``, ``.encode(x="x_lo")``, ``Smooth(x="x")``;
+      ``.encode(y=Y("sample"))``, ``.encode(x="x_lo")``, ``Smooth(x="x")`` --
+      or named in :data:`_CHANNEL_EQUIVALENT_KEYWORDS`, a keyword that is not
+      itself a channel name but whose value a consumer binds to one
+      downstream (``_Layer(contrast_against="value")``);
     * the value assigned to a channel-keyed subscript -- ``enc["y"] = "count"``;
     * any argument of a call passed as ``encoding=``/``mark_kwargs=``/``remap=``,
       since such a call builds the channel dict (``encoding=enc("q1")``).
@@ -432,7 +444,7 @@ def _column_reference_nodes(index: _ModuleIndex, channel_names: frozenset[str]) 
             if _callee_name(node) in index.channel_callees and node.args:
                 mark(node.args[0], owner, set())
             for kw in node.keywords:
-                if kw.arg in channel_names:
+                if kw.arg in channel_names or kw.arg in _CHANNEL_EQUIVALENT_KEYWORDS:
                     mark(kw.value, owner, set())
                 elif kw.arg in _ENCODING_CONTAINERS:
                     mark_container(kw.value, owner, set())

@@ -70,6 +70,14 @@ SCANNED_ROOTS = ("src/ferrum/marks", "src/ferrum/plots")
 #: validation. Widening this set would conflate two different contracts.
 CHANNEL = "color"
 
+#: ``_Layer``'s contrast-reading field (spec §6.5): the color binding of the
+#: cells a text layer sits on, read through the same scale a cell layer's
+#: own ``color`` draws. It is a ``color``-channel binding in every sense this
+#: guard cares about -- an untyped field would resolve its scale kind from
+#: runtime dtype exactly as a raw ``color=`` would -- so a ``_Layer(...)``
+#: call's ``contrast_against=`` keyword is held to the identical rule.
+CONTRAST_KEYWORD = "contrast_against"
+
 #: Call targets that constitute an explicit type declaration. A binding whose
 #: value is a call to one of these has stated its scale type (or delegated
 #: that statement to a helper that does), so it satisfies the invariant.
@@ -111,7 +119,9 @@ def _color_bindings(tree: ast.AST) -> Iterator[tuple[ast.expr, int]]:
 
     Covers the three shapes the codebase actually uses to build an encoding:
     a dict literal (``{"color": v}``), a subscript assignment
-    (``enc["color"] = v``), and a call keyword (``.encode(color=v)``).
+    (``enc["color"] = v``), and a call keyword -- ``.encode(color=v)`` or
+    ``_Layer(..., contrast_against=v)``, the contrast-reading field's own
+    color binding (spec §6.5), held to the same rule as any other.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
@@ -128,7 +138,7 @@ def _color_bindings(tree: ast.AST) -> Iterator[tuple[ast.expr, int]]:
                     yield node.value, node.lineno
         elif isinstance(node, ast.Call):
             for keyword in node.keywords:
-                if keyword.arg == CHANNEL:
+                if keyword.arg in (CHANNEL, CONTRAST_KEYWORD):
                     yield keyword.value, node.lineno
 
 
@@ -241,6 +251,15 @@ ALLOWED: dict[tuple[str, str], str] = {
         "src/ferrum/plots/matrix.py",
         "'value'",
     ): "Heatmap cell value (figure-function side of the same binding).",
+    (
+        "src/ferrum/plots/matrix.py",
+        "enc['color']",
+    ): "The heatmap label's contrast reading rebinds "
+    "the SAME object the cells' own `color` draws: the literal 'value' above by "
+    "default, a caller's color= override, or the scale/title-wrapped Color this "
+    "function builds. Whatever scale kind enc['color'] resolves to, the cells "
+    "already established it; the label only re-reads that one object to judge "
+    "contrast against it, never a dtype inference of its own.",
     (
         "src/ferrum/plots/matrix.py",
         "_bin2d_cols['count']",

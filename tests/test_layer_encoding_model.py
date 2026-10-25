@@ -9671,8 +9671,8 @@ _FIGURE_DIGESTS = {
     "lmplot/x_bins-hue": "9aee24538af3407953e91bac6949e91a21300421dcfcdc7cf2523aaaadbe979a",
     "regplot/hue": "f3ac385b78b66370f3426db7f3ad73f3d7d957de5c19fafbeadb2e6f3d050a55",
     "lmplot/col-hue": "4760e91c0648f68bbe436de48d991032fd31d992aebb5d04b720b374d8c1c104",
-    "heatmap/annot": "f085f1007f5f446e1d40a4a0baa2c8151afa02272e91e0d4a4808f8b564c14ca",
-    "heatmap/annot-id": "0ab65abfe968531c7a803ece1df1f48d4733b91f57c48143e5dd72b2cc489e86",
+    "heatmap/annot": "23573f7dde2ca27786ff0e9168ebadf113ccaff2e8aa217eecea8b7cf3eb59a3",
+    "heatmap/annot-id": "9c55288da7d73a05c6df4aea8752411e48f49b9215e6e7329a5d1d3eeadfb9e7",
 }
 
 

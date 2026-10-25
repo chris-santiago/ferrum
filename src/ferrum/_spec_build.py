@@ -42,7 +42,7 @@ from ferrum._encode_lowering import (
     _statistic_plan,
     _theta_axis,
 )
-from ferrum._layer import layer_mark
+from ferrum._layer import CONTRAST_FILL, layer_mark
 from ferrum._layer_transforms import _POSITIONAL, _split_chain, _with_statistics_marker
 from ferrum._override_apply import OverridePayload
 from ferrum._override_consume import (
@@ -710,6 +710,20 @@ class SpecBuildMixin:
             if inherited_detail is not None:
                 layer_enc.setdefault("detail", inherited_detail)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
+            # Contrast reading (spec §6.5): a layer carrying `contrast_against`
+            # binds its own color to it and paints the sentinel ink ONLY when
+            # no caller fill reached this layer -- every style door (figure
+            # `mark=`, the composite catch-all, `layer_kwargs=`, a literal
+            # `fill=`/`fill="none"`) resolves to a `"fill"` key in `mark_kwargs`
+            # well before this point, so a `"fill"` already present means a
+            # caller painted this layer and it must win, exactly as it would
+            # on any other styled text. This is the one place every layer
+            # reaches regardless of route (static, interactive, facet,
+            # overlay, composite leaf), so it is the one place this decision
+            # is made.
+            if layer.contrast_against is not None and "fill" not in layer_mk:
+                layer_enc["color"] = layer.contrast_against
+                layer_mk["fill"] = CONTRAST_FILL
             layer_color_source = alias_source(layer_enc, "color")
             layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
 

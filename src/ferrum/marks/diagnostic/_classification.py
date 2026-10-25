@@ -479,6 +479,7 @@ def desugar_confusion(
                 name="label",
                 mark="text",
                 encoding={"x": "predicted", "y": "actual", "text": "value_fmt"},
+                contrast_against=color_enc,
             )
         )
     return MarkDesugarResult(layers=_apply("confusion", layers, user_kw))
@@ -523,16 +524,18 @@ def desugar_class_prediction_error(
     offset = "normalize" if normalize else "zero"
     bar_stack = Stack(by=color_field, offset=offset)  # anchor="top" by default
     text_stack = Stack(by=color_field, offset=offset, anchor="mid")
+    # `predicted` is a class-id column that can be numeric; a bare string
+    # infers Continuous and silently renders a colorbar instead of per-class
+    # stacked-segment colors (no warning -- UnsupportedColorScaleOnMark only
+    # fires for line/ribbon). Bind Nominal explicitly (see
+    # nominal_color_channel's docstring). One object, reused by the label's
+    # contrast reading below, so it reads the exact scale the bar draws.
+    color_enc = nominal_color_channel(color_field)
     layers: list = [
         _Layer(
             name="bar",
             mark="bar",
-            # `predicted` is a class-id column that can be numeric; a bare
-            # string infers Continuous and silently renders a colorbar
-            # instead of per-class stacked-segment colors (no warning --
-            # UnsupportedColorScaleOnMark only fires for line/ribbon). Bind
-            # Nominal explicitly (see nominal_color_channel's docstring).
-            encoding={"x": "actual", "y": "value", "color": nominal_color_channel(color_field)},
+            encoding={"x": "actual", "y": "value", "color": color_enc},
             position=bar_stack,
         ),
     ]
@@ -543,6 +546,7 @@ def desugar_class_prediction_error(
                 mark="text",
                 encoding={"x": "actual", "y": "value", "text": "_count_text"},
                 position=text_stack,
+                contrast_against=color_enc,
             )
         )
     return MarkDesugarResult(layers=_apply("class_prediction_error", layers, user_kw))

@@ -89,11 +89,8 @@ def desugar_rank2d(
             _Layer(
                 name="label",
                 mark="text",
-                encoding={
-                    "x": "feature_x",
-                    "y": "feature_y",
-                    "text": text_field,
-                },
+                encoding={"x": "feature_x", "y": "feature_y", "text": text_field},
+                contrast_against=color_enc,
             )
         )
     return MarkDesugarResult(layers=_apply("rank2d", layers, user_kw))

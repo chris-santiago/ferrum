@@ -976,11 +976,11 @@ def _heatmap_build(
     if not color_overridden and isinstance(enc["color"], str):
         enc["color"] = Color(enc["color"], title=value_title)
 
-    if melted_data is not None:
-        # Data already melted and filtered — no Unpivot transform needed.
-        chart = Chart(melted_data).mark_rect(**rect_kwargs).encode(**enc)
-    else:
-        chart = Chart(data)._with_statistics(unpivot).mark_rect(**rect_kwargs).encode(**enc)
+    # One rows chart, built once: already-melted/filtered data needs no
+    # Unpivot transform, otherwise the raw data runs through it. Both the
+    # cells and (when annotated) the label read these same rows.
+    rows = Chart(melted_data) if melted_data is not None else Chart(data)._with_statistics(unpivot)
+    chart = rows.mark_rect(**rect_kwargs).encode(**enc)
 
     # square=True → fix width=height proportions.
     if square:
@@ -989,25 +989,33 @@ def _heatmap_build(
         side = 30 * max(n_rows, n_cols)
         chart = chart.properties(width=side, height=side)
 
-    # annot=True: layer mark_text on top of rects, with the `text` channel
-    # bound to the value column. Format spec lives on the text channel.
+    # annot=True: a sibling label layer composed with `+` (mirrors lmplot's
+    # fit operand, regression.py's build_fit_layers), not attached via
+    # `chart.layer(...)`, so it does not inherit the cells chart's own
+    # **encode_kwargs (opacity=, size=, ...) the way a host's bindings reach
+    # every layer attached to it -- those are meant for the cells only. The
+    # label's own `color` reads the same object the cells' `color` draws
+    # (`enc["color"]`, already resolved above through the encode_kwargs
+    # override, the scale wrap and the title wrap), so each label reads its
+    # own cell's hue and paints the contrast ink against it (spec §6.5)
+    # instead of one fixed theme ink. `rows` is reused here rather than
+    # rebuilt: `.mark_rect(...).encode(...)` above already cloned away from
+    # it, so it is still the plain, markless rows chart.
     if annot:
+        from ferrum._layer import _Layer
         from ferrum.encoding import Text
 
-        if melted_data is not None:
-            text_layer = (
-                Chart(melted_data)
-                .mark_text()
-                .encode(x="column", y=id_col, text=Text("value", format=fmt))
+        label = rows
+        label._layers = [
+            _Layer(
+                name="label",
+                mark="text",
+                encoding={"x": "column", "y": id_col, "text": Text("value", format=fmt)},
+                contrast_against=enc["color"],
             )
-        else:
-            text_layer = (
-                Chart(data)
-                ._with_statistics(unpivot)
-                .mark_text()
-                .encode(x="column", y=id_col, text=Text("value", format=fmt))
-            )
-        chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
+        ]
+        label._mark = None
+        chart = _merge_layers(chart, label, scatter_name="cells", fit_name="label")
 
     from ferrum.title import Title
 

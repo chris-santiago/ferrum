@@ -21,8 +21,9 @@ Every contrast assertion here checks the OUTCOME property (the WCAG 2.x
 contrast ratio between the drawn ink and the actual rendered cell color,
 read back out of the SVG/scene) rather than re-deriving the ink by replaying
 Rust's own branching logic on the raw input data -- a test built that way
-would just restate the implementation as its own oracle. ``_contrast_ratio``
-below is the public W3C formula, not a copy of any ferrum source.
+would just restate the implementation as its own oracle. ``tests/_wcag.py``
+is the public W3C formula, not a copy of any ferrum source, shared with
+``tests/test_annotation_contrast.py``.
 """
 
 from __future__ import annotations
@@ -38,6 +39,11 @@ import ferrum as fm
 from ferrum._layer import _Layer
 from tests._snapshots import legend_texts
 from tests._svg_rects import figure_elements
+from tests._wcag import (
+    contrast_ratio as _contrast_ratio,
+    opaque_rgb as _opaque_rgb,
+    parse_paint as _parse_paint,
+)
 
 # ---------------------------------------------------------------------------
 # Public vocabulary boundary: the sentinel is reachable only through the
@@ -55,67 +61,6 @@ def test_the_public_mark_text_door_still_refuses_the_sentinel_as_a_color() -> No
     """
     with pytest.raises(ValueError, match="theme:contrast"):
         fm.Chart(pl.DataFrame({"x": [1]})).mark_text(fill="theme:contrast")
-
-
-# ---------------------------------------------------------------------------
-# Independent WCAG 2.x contrast oracle (not ferrum's formula -- the public
-# standard both ferrum and this test separately implement).
-# ---------------------------------------------------------------------------
-
-
-def _srgb_to_linear(channel_0_1: float) -> float:
-    return channel_0_1 / 12.92 if channel_0_1 <= 0.04045 else ((channel_0_1 + 0.055) / 1.055) ** 2.4
-
-
-def _relative_luminance(rgb: tuple[int, int, int]) -> float:
-    r, g, b = (_srgb_to_linear(c / 255.0) for c in rgb)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-
-def _contrast_ratio(rgb1: tuple[int, int, int], rgb2: tuple[int, int, int]) -> float:
-    """WCAG 2.x contrast ratio between two opaque sRGB colors."""
-    l1, l2 = _relative_luminance(rgb1), _relative_luminance(rgb2)
-    lighter, darker = max(l1, l2), min(l1, l2)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def _composite_over(
-    fg: tuple[int, int, int, float], bg: tuple[int, int, int]
-) -> tuple[int, int, int]:
-    """Alpha-composite an (r, g, b, alpha 0..1) foreground over an opaque background."""
-    r, g, b, a = fg
-    br, bg_g, bb = bg
-    return (
-        round(r * a + br * (1 - a)),
-        round(g * a + bg_g * (1 - a)),
-        round(b * a + bb * (1 - a)),
-    )
-
-
-_HEX6 = re.compile(r"^#([0-9a-fA-F]{6})$")
-_HEX8 = re.compile(r"^#([0-9a-fA-F]{8})$")
-_RGBA = re.compile(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)")
-
-
-def _parse_paint(value: str) -> tuple[int, int, int, float]:
-    """Parse an SVG fill attribute (hex6/hex8/`rgba()`) into `(r, g, b, alpha 0..1)`."""
-    if m := _HEX8.match(value):
-        r, g, b, a = (int(m.group(1)[i : i + 2], 16) for i in (0, 2, 4, 6))
-        return r, g, b, a / 255.0
-    if m := _HEX6.match(value):
-        r, g, b = (int(m.group(1)[i : i + 2], 16) for i in (0, 2, 4))
-        return r, g, b, 1.0
-    if m := _RGBA.match(value):
-        r, g, b = (round(float(m.group(i))) for i in (1, 2, 3))
-        a = float(m.group(4)) if m.group(4) else 1.0
-        return r, g, b, a
-    raise ValueError(f"not a recognized SVG paint: {value!r}")
-
-
-def _opaque_rgb(fill: str, background: tuple[int, int, int]) -> tuple[int, int, int]:
-    """The color *fill* actually displays as, composited over *background* if translucent."""
-    r, g, b, a = _parse_paint(fill)
-    return (r, g, b) if a >= 1.0 else _composite_over((r, g, b, a), background)
 
 
 _WCAG_AA = 4.5

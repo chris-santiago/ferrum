@@ -32,6 +32,13 @@ _FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", 
 
 _POSITIONAL_WIRE = ("x", "y", "x2", "y2")
 
+#: The internal ``"theme:contrast"`` paint sentinel (spec §6.5): written in
+#: exactly one place, :meth:`ferrum._spec_build.SpecBuildMixin._build_layers_list`,
+#: when a layer carries :attr:`_Layer.contrast_against` and no caller fill.
+#: Never written directly at a producer site; see ``contrast_against``'s
+#: docstring below.
+CONTRAST_FILL = "theme:contrast"
+
 
 def draws_inherited_color(mark: Optional[str]) -> bool:
     """Whether a layer drawing *mark* draws a color it inherits from a parent.
@@ -199,6 +206,50 @@ class _Layer:
     #: against the final layer list (:func:`ferrum.composition._conditional_layer_scopes`).
     #: Never serialized and never compared.
     conditionals: tuple = field(default=(), compare=False, repr=False)
+    #: The color binding of the cells this text layer sits on -- the same
+    #: typed object (a ``Color``/``ChannelBase`` instance, or a plain field
+    #: name) the cell layer's own ``color`` binds. When the final
+    #: ``mark_kwargs`` this layer reaches the wire build with carries no
+    #: ``fill`` (no caller painted this layer), ``_build_layers_list`` binds
+    #: this layer's own ``color`` to it and paints the ``CONTRAST_FILL``
+    #: sentinel ink against it (spec §6.5): each label reads its own cell's
+    #: color and picks a contrasting ink, never drawing a hue of its own
+    #: (``reads_color_for_contrast`` in Rust). A caller fill -- a literal
+    #: color, or a clear such as ``"none"`` -- already reached ``mark_kwargs``
+    #: by then (every style door resolves to a ``"fill"`` key before the wire
+    #: is built), so it wins and neither the color binding nor the sentinel
+    #: is emitted: the label draws exactly what the caller asked for, as any
+    #: other styled text does. ``None`` (the default) is the ordinary case:
+    #: no contrast reading at all. Never serialized directly; only through
+    #: the ``color``/``mark_style.fill`` it produces.
+    contrast_against: Any = None
+
+    def __post_init__(self) -> None:
+        """Reject ``contrast_against`` on a non-text layer or beside an own ``color``.
+
+        Mirrors :meth:`MarkDesugarResult.__post_init__`'s invariant
+        enforcement below: a contract a producer could violate by mistake is
+        checked here once, at construction, rather than left to a confusing
+        failure downstream. The contrast reading is text-only
+        (``reads_color_for_contrast`` is defined only for ``Mark::Text`` in
+        Rust), and it conflicts with the layer declaring its own ``color``
+        directly -- ``_build_layers_list`` would not know which one to
+        prefer, and a layer wanting a literal contrast reading over a
+        specific field has no reason to also hand-bind ``color`` itself.
+        """
+        if self.contrast_against is not None:
+            if layer_mark(self.mark) != "text":
+                raise ValueError(
+                    "_Layer.contrast_against is text-only (it reads a color "
+                    f"to judge contrast, never to draw a hue); got mark={self.mark!r}."
+                )
+            if "color" in self.encoding:
+                raise ValueError(
+                    "_Layer.contrast_against and an own 'color' binding in "
+                    "encoding are mutually exclusive -- the wire build "
+                    "cannot tell which one this layer means; got "
+                    f"encoding={self.encoding!r}."
+                )
 
 
 def reads_named_output(layer: "_Layer") -> bool:

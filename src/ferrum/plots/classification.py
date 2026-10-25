@@ -929,6 +929,7 @@ def _classification_report_chart(
             _Layer(
                 mark="text",
                 encoding={"x": "metric", "y": "class", "text": "value_fmt"},
+                contrast_against="value",
                 name="annotation",
             )
         )
