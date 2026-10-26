@@ -66,7 +66,7 @@ def _all_produced(driver: ModuleType, references) -> dict[str, str]:
     return {
         image: f"scripts/example.py:{Path(image).stem}"
         for image in references
-        if image not in driver.EXEMPT and image != _HIST_DENSITY
+        if image not in driver.EXEMPT
     }
 
 
@@ -238,47 +238,73 @@ def test_no_generator_hardcodes_an_absolute_or_working_directory_path(driver: Mo
 
 # ── known failure ─────────────────────────────────────────────────────────────
 
-_HIST_DENSITY = "docs/site/gallery/img/comp_histogram_density.png"
+# A real referenced image with a real generator entry, borrowed to stand in for
+# whichever image KNOWN_FAILURES currently names: the mechanism is tested on a
+# synthetic entry (monkeypatched in), not on the production KNOWN_FAILURES
+# tuple, which may be empty whenever every docs image renders cleanly.
+_KNOWN_FAILURE_IMAGE = "docs/site/gallery/img/comp_histogram_density.png"
+
+
+def _synthetic_known_failure(driver: ModuleType):
+    return driver.KnownFailure(
+        image=_KNOWN_FAILURE_IMAGE,
+        source="design-docs/demos/demo_grammar_pngs/comp_histogram_density.png",
+        generator="design-docs/demos/demo_grammar_marks.py:comp_histogram_density",
+        issue="#999",
+        verdict="regression #999: synthetic failure for this test",
+    )
 
 
 def test_known_failure_is_tolerated_only_while_it_fails(
     driver: ModuleType, references, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    failure = _synthetic_known_failure(driver)
+    monkeypatch.setattr(driver, "KNOWN_FAILURES", (failure,))
     produced = _all_produced(driver, references)
-    assert _HIST_DENSITY in references and _HIST_DENSITY not in produced
-    assert driver.check_run(references, produced, set(produced) | {_HIST_DENSITY}) == []
+    assert _KNOWN_FAILURE_IMAGE in references
+    del produced[_KNOWN_FAILURE_IMAGE]
+    assert driver.check_run(references, produced, set(produced) | {_KNOWN_FAILURE_IMAGE}) == []
 
-    produced[_HIST_DENSITY] = "design-docs/demos/demo_grammar_marks.py:comp_histogram_density"
+    produced[_KNOWN_FAILURE_IMAGE] = failure.generator
     (error,) = driver.check_run(references, produced, set(produced))
-    assert error.startswith(_HIST_DENSITY) and "renders again" in error and "#511" in error
+    assert error.startswith(_KNOWN_FAILURE_IMAGE) and "renders again" in error and "#999" in error
 
     monkeypatch.setattr(driver, "KNOWN_FAILURES", ())
-    del produced[_HIST_DENSITY]
-    (error,) = driver.check_run(references, produced, set(produced) | {_HIST_DENSITY})
-    assert error.startswith(_HIST_DENSITY) and "no generator produced it" in error
+    del produced[_KNOWN_FAILURE_IMAGE]
+    (error,) = driver.check_run(references, produced, set(produced) | {_KNOWN_FAILURE_IMAGE})
+    assert error.startswith(_KNOWN_FAILURE_IMAGE) and "no generator produced it" in error
 
 
 def test_known_failure_record_blocks_with_a_verdict_citing_its_issue(
-    driver: ModuleType, references
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (record,) = [r for r in driver.load_manifest() if r["image"] == _HIST_DENSITY]
-    assert record["verdict"] != "ok" and "#511" in record["verdict"]
+    failure = _synthetic_known_failure(driver)
+    monkeypatch.setattr(driver, "KNOWN_FAILURES", (failure,))
+    references = {_KNOWN_FAILURE_IMAGE: ["docs/site/gallery/gallery.md"]}
+    on_disk = {_KNOWN_FAILURE_IMAGE}
 
     built = driver.build_records(references, {}, [], unchanged=set())
-    assert [r for r in built if r["image"] == _HIST_DENSITY] == [record]
+    (record,) = built
+    assert record["image"] == _KNOWN_FAILURE_IMAGE
+    assert record["verdict"] != "ok" and "#999" in record["verdict"]
+    assert driver.check_manifest(built, references, on_disk) == []
 
-    records = [
-        dict(r, verdict="ok") if r["image"] == _HIST_DENSITY else r for r in driver.load_manifest()
-    ]
-    errors = driver.check_manifest(records, references, driver.images_on_disk())
+    records = [dict(r, verdict="ok") for r in built]
+    errors = driver.check_manifest(records, references, on_disk)
     assert len(errors) == 1 and "needs a non-ok verdict citing it" in errors[0]
 
 
-def test_check_mode_prints_the_known_failure(driver: ModuleType, capsys) -> None:
-    driver.main(["--check"])
-    assert "KNOWN FAILURE #511: docs/site/gallery/img/comp_histogram_density.png" in (
-        capsys.readouterr().out
-    )
+def test_check_mode_prints_the_known_failure(
+    driver: ModuleType, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failure = _synthetic_known_failure(driver)
+    monkeypatch.setattr(driver, "KNOWN_FAILURES", (failure,))
+    # The real committed manifest record for this image carries a plain "ok"
+    # verdict, which does not cite the synthetic failure's issue, so --check
+    # fails: the known-failure announcement and the manifest-consistency
+    # check are independent, and this test exercises both at once.
+    assert driver.main(["--check"]) == 1
+    assert f"KNOWN FAILURE #999: {_KNOWN_FAILURE_IMAGE}" in capsys.readouterr().out
 
 
 # ── kept recipe sources ───────────────────────────────────────────────────────

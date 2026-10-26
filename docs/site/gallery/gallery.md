@@ -254,7 +254,7 @@ Multiple marks and charts combined into compound views.
 
     ![comp_histogram_density](img/comp_histogram_density.png)
 
-    `fm.Chart(df).mark_histogram() + fm.Chart(df).mark_density()`
+    `fm.Chart(df).mark_histogram(density=True) + fm.Chart(df).mark_density()`
 
 -   **Line + ribbon**
 

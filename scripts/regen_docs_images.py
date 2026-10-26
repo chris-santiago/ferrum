@@ -193,18 +193,7 @@ GENERATORS: tuple[Generator, ...] = (
     Generator("scripts/generate-theme-grid.py"),
 )
 
-KNOWN_FAILURES: tuple[KnownFailure, ...] = (
-    KnownFailure(
-        image="docs/site/gallery/img/comp_histogram_density.png",
-        source="design-docs/demos/demo_grammar_pngs/comp_histogram_density.png",
-        generator="design-docs/demos/demo_grammar_marks.py:comp_histogram_density",
-        issue="#511",
-        verdict=(
-            "regression #511: mark_histogram() + mark_density() raises"
-            " 'stat_kde: column 'value' not found'; the image is a stale render"
-        ),
-    ),
-)
+KNOWN_FAILURES: tuple[KnownFailure, ...] = ()
 
 
 class ManifestRecord(TypedDict):

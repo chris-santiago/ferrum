@@ -597,8 +597,8 @@ def build_comp_histogram_density():
     """Histogram + Density — same data, two layers."""
     hist = (
         fm.Chart(df_hist)
-        .mark_histogram()
-        .encode(x=fm.X("value", title="Value"), y=fm.Y("count", title="Count"))
+        .mark_histogram(density=True)
+        .encode(x=fm.X("value", title="Value"), y=fm.Y("density", title="Density"))
         .properties(width=W, height=H)
         .theme(THEME)
     )
@@ -870,7 +870,7 @@ COMPOSITION_EXAMPLES = [
         "comp_histogram_density",
         "Histogram + Density",
         build_comp_histogram_density,
-        "fm.Chart(df).mark_histogram() + fm.Chart(df).mark_density()",
+        "fm.Chart(df).mark_histogram(density=True) + fm.Chart(df).mark_density()",
     ),
     (
         "comp_boxplot_swarm",
