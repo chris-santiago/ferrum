@@ -61,6 +61,14 @@ pub(crate) struct LeafResolveInput<'a> {
     /// Each of the leaf's outputs' lineage, keyed like `transform_outputs`
     /// (`PreparedInputs::transform_lineages`).
     pub(crate) transform_lineages: &'a crate::transform::run::OutputLineages,
+    /// This leaf's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// once by its own prepare pass before any composite union
+    /// ([`crate::render::prepare::PreparedInputs::x_text_rows`]/
+    /// `y_text_rows`). `resolve_group` unions these across a positional
+    /// group's contributing members rather than re-measuring any leaf's
+    /// rows from its spec and batch.
+    pub(crate) x_text_rows: super::domain::TextEdgeRows,
+    pub(crate) y_text_rows: super::domain::TextEdgeRows,
 }
 
 impl LeafResolveInput<'_> {
@@ -305,6 +313,20 @@ pub(crate) struct LeafScaleContext {
     pub(crate) y: Option<SharedDomain>,
     pub(crate) color: Option<SharedDomain>,
     pub(crate) size: Option<SharedDomain>,
+    /// This positional channel's `Mark::Text` edge rows (spec §6.13), unioned
+    /// across every group member's own rows (`resolve_group`, the same
+    /// [`super::text_edge_rows`] builder every member's own prepare pass
+    /// would otherwise call standalone) and set on EVERY member that shares
+    /// the channel's domain — so when this leaf is later prepared, its own
+    /// `build_axes` reads this union instead of measuring only its own rows,
+    /// and the resulting demand on its `TickProjection` is the SAME one
+    /// every other member's prepare pass builds. `Some` only when
+    /// [`Self::x`] / [`Self::y`] is `Some(SharedDomain::Numeric)` — an
+    /// ordinal group's scale has no pixel-floor inset to protect. `None`
+    /// (the default) leaves the leaf to its own rows, measured standalone
+    /// exactly as a non-composite render does.
+    pub(crate) x_text_rows: Option<super::domain::TextEdgeRows>,
+    pub(crate) y_text_rows: Option<super::domain::TextEdgeRows>,
     /// The caller's positional scale this leaf's `x`/`y` axis resolves with:
     /// set for a leaf that declares no scale on the channel (or only the
     /// injected bar anchor), or an equal copy of it, and draws in an

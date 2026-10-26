@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::{layer_entry, public_layer, PreparedInputs};
+use super::prepare::{layer_entry, public_layer, user_facing_channel, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -212,6 +212,12 @@ pub fn build_scene(
     let mut break_ledger = BreakWarningLedger::default();
     let merged_breaks = merge_break_specs(&chart_config.structural, &mut break_ledger);
 
+    // One render-wide tally of `Mark::Text` ink still crossing the plot
+    // frame (spec §6.13), noted at every panel-real resolve (shared,
+    // independent-facet and secondary-y-slot alike) and flushed once below,
+    // beside `break_ledger`.
+    let mut text_overrun_ledger = TextOverrunLedger::default();
+
     // Each layer's batch across the whole chart, before any facet filter: the
     // base data, or the named `data_source` output it reads. A panel's layer
     // batches are these filtered to its facet; a swarm's packing bound reads
@@ -324,6 +330,28 @@ pub fn build_scene(
             .map(|r| (panel.plot_area.x - r.x, panel.plot_area.y - r.y))
             .unwrap_or((0.0, 0.0));
 
+        // This panel's text-edge demand (spec §6.13), one per channel, shared
+        // by ticks and marks: a shared channel reads the chart's own axis
+        // (`prep.axes.x/y`, built once in `build_axes`); an independent facet
+        // channel reads this panel's OWN axis input
+        // (`independent_panel_axis_inputs` built it from this panel's real
+        // rows, over the same placeholder-range bootstrap resolve this loop's
+        // real-pixel resolve below reuses the demand from) — never a second,
+        // independent guess at either.
+        let panel_axes = prep.axes.panels.get(panel_idx);
+        let text_demands = scale_resolve::TextEdgeDemands {
+            x: if x_independent {
+                panel_axes.and_then(|p| p.x.as_ref()).map(axis_text_demand).unwrap_or_default()
+            } else {
+                axis_text_demand(&prep.axes.x)
+            },
+            y: if y_independent {
+                panel_axes.and_then(|p| p.y.as_ref()).map(axis_text_demand).unwrap_or_default()
+            } else {
+                axis_text_demand(&prep.axes.y)
+            },
+        };
+
         // Per-panel scale build (encoding merge + param-domain substitution +
         // scale resolution + color-config re-apply) through the single
         // `resolve_panel_scales` seam, so the prepare provisional pass and this
@@ -336,7 +364,40 @@ pub fn build_scene(
             &layer_batches,
             warnings,
             panel_offset,
+            &text_demands,
         )?;
+
+        // Spec §6.13: note this panel's own overrun rows into the
+        // render-wide ledger, flushed once after the loop. A shared channel
+        // unions its overrun rows across every panel that draws it (the
+        // SAME demand each one resolves); an independent channel's demand
+        // is this panel's own, counted on its own.
+        if x_independent {
+            text_overrun_ledger.note_own(false, panel.plot_area.w, &text_demands.x);
+        } else {
+            text_overrun_ledger.note_shared(false, 0, panel.plot_area.w, &text_demands.x);
+        }
+        if y_independent {
+            text_overrun_ledger.note_own(true, panel.plot_area.h, &text_demands.y);
+        } else {
+            text_overrun_ledger.note_shared(true, 0, panel.plot_area.h, &text_demands.y);
+        }
+        // Each secondary y slot's own text demand (the SAME one
+        // `resolve_layer_y_scale` just resolved this panel's slot scale
+        // against, read off the slot's own `AxisInput`) is chart-wide: every
+        // panel resolves the SAME demand, so it is noted shared, in its own
+        // slot (`slot + 1`, distinct from the primary axis's slot `0` and
+        // from every other secondary slot), not summed per panel.
+        for slot in 0..prep.y_slot_plan.secondary_layers().len() {
+            let slot_demand = prep
+                .axes
+                .secondary_y
+                .get(slot)
+                .and_then(|axis| axis.tick_projection.as_ref())
+                .map(|p| p.text_demand.clone())
+                .unwrap_or_default();
+            text_overrun_ledger.note_shared(true, slot + 1, panel.plot_area.h, &slot_demand);
+        }
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
         if resolved_y_slots.is_none() {
@@ -699,6 +760,9 @@ pub fn build_scene(
     // panels observed is reported once, and so the free-scale case where it
     // held on only some of them can say so.
     break_ledger.flush(warnings);
+    // One `TextInkPastFrame` per channel, now that every panel and every
+    // secondary y slot has noted its own overrun rows.
+    text_overrun_ledger.flush(prep.coord_flipped, warnings);
 
     // `#120`(7) + N2: once at least one panel actually resolved its own
     // scales, the panel-real pass has already re-reported every
@@ -880,6 +944,13 @@ fn panel_layer_batches(
 /// fraction of that unit span, and layout re-applies it to the panel, the way
 /// the panel's marks are inset.
 ///
+/// `text_demand` is this panel's own text-edge demand (spec §6.13): built by
+/// the caller from this panel's real rows, against the SAME `scale` this
+/// function places ticks with — the one demand this panel's ticks AND marks
+/// share. Domain fractions, not pixel floors, so they are valid over the
+/// placeholder range `scale` is resolved against here exactly as they are
+/// over this panel's real pixel range later.
+///
 /// [`build_axis_tick_inputs`]: super::prepare::build_axis_tick_inputs
 fn independent_axis_input(
     base: &crate::layout::AxisInput,
@@ -887,6 +958,7 @@ fn independent_axis_input(
     encoding: Option<&crate::spec::encoding::EncodingSpec>,
     is_y: bool,
     coord_flipped: bool,
+    text_demand: crate::layout::geometry::TextEdgeDemand,
 ) -> Result<crate::layout::AxisInput, RenderError> {
     let (format, format_type) = super::prepare::resolve_axis_label_format(encoding);
     let (labels, anchors, origin, projection, _threaded) = super::prepare::build_axis_tick_inputs(
@@ -898,6 +970,7 @@ fn independent_axis_input(
         },
         is_y,
         Vec::new(),
+        text_demand,
     )
     .map_err(|e| super::with_coord_flipped(e, coord_flipped))?;
     let mut input = base.clone();
@@ -905,6 +978,15 @@ fn independent_axis_input(
     input.tick_projection = projection;
     input.categorical_placement = scale.categorical_placement();
     Ok(input)
+}
+
+/// An `AxisInput`'s own text-edge demand (spec §6.13), or the empty default
+/// for an axis that drew no `Mark::Text` row needing one. The one place
+/// `resolve_panel_scales`'s callers read a demand back off a built axis
+/// input, for a shared channel (`prep.axes.x/y`) and for an independent
+/// facet channel's own (`prep.axes.panels[i].x/y`) alike.
+fn axis_text_demand(axis: &crate::layout::AxisInput) -> crate::layout::geometry::TextEdgeDemand {
+    axis.tick_projection.as_ref().map(|p| p.text_demand.clone()).unwrap_or_default()
 }
 
 /// For a faceted chart whose x or y scale resolves independently per panel,
@@ -924,9 +1006,21 @@ fn independent_axis_input(
 /// the panel ([`independent_axis_input`]). A panel with no rows draws nothing
 /// and gets no inputs. Scale warnings are not kept here; the panel render
 /// reports them.
+///
+/// Spec §6.13's one demand per rendered channel extends to an independent
+/// facet channel too: this panel's own text-edge demand is built once here,
+/// from this panel's real rows, against the scale this bootstrap resolve
+/// (below, over the SAME placeholder range the demand's domain fractions are
+/// invariant to) produces — and is handed to [`independent_axis_input`] for
+/// THIS panel's ticks. The panel-real mark resolve later
+/// (`scene_build`'s per-panel loop) reads the identical demand back off the
+/// `AxisInput` this function returns (`tick_projection.text_demand`), so
+/// ticks and marks on an independent channel never diverge, exactly as the
+/// shared-axis route already guarantees.
 pub(in crate::render) fn independent_panel_axis_inputs(
     ctx: &PanelResolveCtx,
     facet_groups: &[crate::layout::FacetGroup],
+    metrics: &crate::render::font::FontdueMetrics,
 ) -> Result<Vec<crate::layout::PanelAxisInputs>, RenderError> {
     let Some(facet) = ctx.spec.facet.as_ref() else {
         return Ok(Vec::new());
@@ -956,14 +1050,51 @@ pub(in crate::render) fn independent_panel_axis_inputs(
                 ..crate::layout::PanelLayout::default()
             };
             let mut discarded = Vec::new();
-            let (rendering, scales) =
-                resolve_panel_scales(ctx, &placeholder, &batch, &layer_batches, &mut discarded, (0.0, 0.0))?;
+            let (rendering, scales) = resolve_panel_scales(
+                ctx,
+                &placeholder,
+                &batch,
+                &layer_batches,
+                &mut discarded,
+                (0.0, 0.0),
+                &scale_resolve::TextEdgeDemands::default(),
+            )?;
             let encoding = &rendering.encoding;
             let x = x_independent
-                .then(|| independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.coord_flipped))
+                .then(|| {
+                    let applies = scale_resolve::text_inset_applies(
+                        encoding.x.as_ref().and_then(|e| e.scale.as_ref()),
+                        scale_resolve::coord_exempts_channel(ctx.spec.coord.as_ref(), "x"),
+                    );
+                    let rows = scale_resolve::primary_axis_text_rows(
+                        "x",
+                        prep.layers.iter().zip(layer_batches.iter()),
+                        &prep.y_slot_plan,
+                        ctx.spec.facet.as_ref(),
+                        ctx.theme,
+                        metrics,
+                    );
+                    let demand = scales.x.text_edge_demand(applies.then_some(&rows));
+                    independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.coord_flipped, demand)
+                })
                 .transpose()?;
             let y = y_independent
-                .then(|| independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.coord_flipped))
+                .then(|| {
+                    let applies = scale_resolve::text_inset_applies(
+                        encoding.y.as_ref().and_then(|e| e.scale.as_ref()),
+                        scale_resolve::coord_exempts_channel(ctx.spec.coord.as_ref(), "y"),
+                    );
+                    let rows = scale_resolve::primary_axis_text_rows(
+                        "y",
+                        prep.layers.iter().zip(layer_batches.iter()),
+                        &prep.y_slot_plan,
+                        ctx.spec.facet.as_ref(),
+                        ctx.theme,
+                        metrics,
+                    );
+                    let demand = scales.y.text_edge_demand(applies.then_some(&rows));
+                    independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.coord_flipped, demand)
+                })
                 .transpose()?;
             Ok(crate::layout::PanelAxisInputs { x, y })
         })
@@ -1011,6 +1142,13 @@ fn resolve_panel_scales(
     // panel instead of leaving it pinned to the same absolute pixels every
     // panel would otherwise share.
     panel_offset: (f64, f64),
+    // Spec §6.13's one demand per rendered channel, shared by ticks and
+    // marks on every route: a shared x/y reads the chart's own axis
+    // (`prep.axes.x/y`); an independent facet channel reads that panel's own
+    // axis (`prep.axes.panels[panel_idx].x`/`.y`, via `axis_text_demand`),
+    // built once in `independent_panel_axis_inputs` from the panel's real
+    // rows and reused here instead of a second, placeholder-blind resolve.
+    text_demands: &scale_resolve::TextEdgeDemands,
 ) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
     let &PanelResolveCtx {
         spec,
@@ -1073,6 +1211,7 @@ fn resolve_panel_scales(
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         theme,
+        text_demands,
         leaf_scales,
     )?;
     warnings.extend(scale_warnings);
@@ -1132,13 +1271,27 @@ fn resolve_panel_scales(
     // matching `layer_slot`.
     if prep.y_slot_plan.has_independent() {
         let mut slots: Vec<scale_resolve::ScaleKind> = vec![scales.y.clone()];
-        for &layer_idx in prep.y_slot_plan.secondary_layers() {
+        for (slot, &layer_idx) in prep.y_slot_plan.secondary_layers().iter().enumerate() {
+            // The slot's own text-edge demand (spec §6.13), read off the
+            // secondary `AxisInput` `prepare::build_secondary_y_axis_inputs`
+            // already built from this layer's real batch — never
+            // recomputed here, so this panel-real resolve and that slot's
+            // ticks cannot diverge. `secondary_layers()`'s order matches
+            // `prep.axes.secondary_y`'s (both built from the same plan).
+            let y_text_demand = prep
+                .axes
+                .secondary_y
+                .get(slot)
+                .and_then(|axis| axis.tick_projection.as_ref())
+                .map(|p| p.text_demand.clone())
+                .unwrap_or_default();
             let y_scale = resolve_layer_y_scale(
                 ctx,
                 &prep.layers[layer_idx],
                 &layer_batches[layer_idx],
                 panel,
                 panel_offset.1,
+                &y_text_demand,
                 warnings,
             )?;
             slots.push(y_scale);
@@ -1175,6 +1328,9 @@ fn resolve_layer_y_scale(
     // plot-area origin (see `resolve_panel_scales`), applied to this slot's
     // resolved y scale the same way the primary y is re-anchored.
     y_offset: f64,
+    // This slot's text-edge demand (spec §6.13), read by the caller off the
+    // secondary `AxisInput` `prepare::build_secondary_y_axis_inputs` built.
+    y_text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
     let &PanelResolveCtx {
@@ -1203,6 +1359,7 @@ fn resolve_layer_y_scale(
         layer_batch,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+        y_text_demand,
     )?;
     warnings.extend(layer_warnings);
     // D3 (spec §4.2) at the `axis_y2` position — the secondary-axis twin of
@@ -3116,6 +3273,78 @@ impl BreakWarningLedger {
     }
 }
 
+/// Per-render tally of `Mark::Text` rows still crossing the plot frame after
+/// the text-edge inset solve (spec §6.13), noted at every site that hands a
+/// demand to a panel-real scale resolve (the panel loop's shared and
+/// independent x/y, and each secondary y slot) and flushed once after the
+/// panel loop, beside [`BreakWarningLedger::flush`]: at most one
+/// [`RenderWarning::TextInkPastFrame`] per channel, never one per panel, per
+/// secondary slot, or per composite leaf.
+#[derive(Default)]
+struct TextOverrunLedger {
+    x: TextOverrunChannel,
+    y: TextOverrunChannel,
+}
+
+/// One channel's tally. A demand every panel resolves — the primary shared
+/// axis (slot 0), or a secondary y slot (slot `k + 1`, chart-wide on every
+/// facet mode) — is the SAME demand on every panel that notes it, so its
+/// overrun row indices are unioned per slot (`shared`) rather than summed:
+/// the same row counted by two panels is one overrunning mark, not two, and
+/// two different slots' row 3 are two different marks, never merged into
+/// one index space. An INDEPENDENT facet panel's demand is its own, with no
+/// row identity any other panel shares, so its own overrun count adds
+/// directly (`own_sum`).
+#[derive(Default)]
+struct TextOverrunChannel {
+    shared: std::collections::BTreeMap<usize, std::collections::HashSet<usize>>,
+    own_sum: usize,
+}
+
+impl TextOverrunLedger {
+    fn channel_mut(&mut self, is_y: bool) -> &mut TextOverrunChannel {
+        if is_y {
+            &mut self.y
+        } else {
+            &mut self.x
+        }
+    }
+
+    /// Note `slot`'s overrun rows at `span` (the real per-panel pixel span
+    /// `demand` resolved against): unioned into that slot's own set, since
+    /// every panel resolving this demand notes the SAME one. `slot` is `0`
+    /// for the primary axis of either channel, `k + 1` for secondary y slot
+    /// `k` — distinct slots keep distinct index spaces, so a primary row and
+    /// a secondary row sharing the same index are counted once each.
+    fn note_shared(&mut self, is_y: bool, slot: usize, span: f64, demand: &crate::layout::geometry::TextEdgeDemand) {
+        let overrun = crate::layout::geometry::text_edge_overrun_rows(span, crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC, demand);
+        self.channel_mut(is_y).shared.entry(slot).or_default().extend(overrun);
+    }
+
+    /// Note an independent panel's own overrun rows at `span`: summed on its
+    /// own, never unioned with a sibling panel's.
+    fn note_own(&mut self, is_y: bool, span: f64, demand: &crate::layout::geometry::TextEdgeDemand) {
+        let overrun = crate::layout::geometry::text_edge_overrun_rows(span, crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC, demand);
+        self.channel_mut(is_y).own_sum += overrun.len();
+    }
+
+    /// Push one [`RenderWarning::TextInkPastFrame`] per channel whose tally
+    /// is non-empty, naming the channel the user wrote
+    /// ([`user_facing_channel`]).
+    fn flush(self, coord_flipped: bool, warnings: &mut Vec<RenderWarning>) {
+        for (is_y, tally) in [(false, self.x), (true, self.y)] {
+            let rows = tally.shared.values().map(|set| set.len()).sum::<usize>() + tally.own_sum;
+            if rows > 0 {
+                let channel = if is_y { "y" } else { "x" };
+                warnings.push(RenderWarning::TextInkPastFrame {
+                    channel: user_facing_channel(channel, coord_flipped).to_string(),
+                    rows,
+                });
+            }
+        }
+    }
+}
+
 /// The scene-level report for a fact whose stored payload does not speak for
 /// every panel, in two shapes the ledger has actually observed:
 ///
@@ -4541,6 +4770,7 @@ mod tests {
             &layer_batches,
             &mut warnings,
             (0.0, 0.0),
+            &scale_resolve::TextEdgeDemands::default(),
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
@@ -4550,6 +4780,7 @@ mod tests {
             &layer_batches,
             &mut warnings,
             (0.0, 0.0),
+            &scale_resolve::TextEdgeDemands::default(),
         )
         .unwrap();
 
@@ -4894,6 +5125,21 @@ mod tests {
         prep.axes.apply_show_defaults(&theme);
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
+        // Mirrors `render::prepare_and_layout`: an independent-x/y facet
+        // panel draws its own axis, from its own scale, resolved here so
+        // layout reserves each axis band for what the panels draw and the
+        // per-panel mark resolve inside `build_scene` below reads the SAME
+        // demand back (spec §6.13). A no-op (`Vec::new()`) for every chart
+        // with no independent-resolve facet, the overwhelming majority of
+        // this helper's callers — their output is unaffected.
+        prep.axes.panels = match independent_panel_axis_inputs(
+            &PanelResolveCtx { spec, prep: &prep, theme: &theme, chart_config, leaf_scales: None },
+            &prep.facet_groups,
+            &metrics,
+        ) {
+            Ok(panels) => panels,
+            Err(e) => return (Err(e), Vec::new()),
+        };
         let layout = crate::layout::compute_layout(
             spec,
             &theme,
@@ -6968,6 +7214,7 @@ mod tests {
             &layer_batches,
             &mut warnings,
             (0.0, 0.0),
+            &scale_resolve::TextEdgeDemands::default(),
         )
         .unwrap();
         scales
@@ -15584,6 +15831,628 @@ mod tests {
         assert_eq!(unfixtured, vec![Mark::Image, Mark::Geoshape]);
         assert!(checked > 0, "vacuity control: some listed paint field was checked");
     }
+
+    /// Spec §6.13 route tests through the real `prepare → layout →
+    /// build_scene` pipeline: a tick and a mark at the same domain value
+    /// land on the same pixel on every route the text-aware inset reaches,
+    /// and the ledger reports one `TextInkPastFrame` per channel per
+    /// render, not one per panel.
+    mod text_inset_route_tests {
+        use super::*;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark::Mark;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        /// `(x, y, content)` of every `SceneNode::Text` under `nodes`, depth
+        /// first through any `Group` wrapper.
+        fn text_positions(nodes: &[ferrum_scene::SceneNode], out: &mut Vec<(f64, f64, String)>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Text { x, y, content, .. } => out.push((*x, *y, content.clone())),
+                    SceneNode::Group { children, .. } => text_positions(children, out),
+                    _ => {}
+                }
+            }
+        }
+
+        /// The x/y pixel of the mark text node whose content is exactly
+        /// `label`, in panel `panel_idx`'s own marks.
+        fn mark_text_xy(scene: &ferrum_scene::SceneGraph, panel_idx: usize, label: &str) -> (f64, f64) {
+            let mut found = Vec::new();
+            for batch in &scene.panels[panel_idx].marks {
+                text_positions(&batch.nodes, &mut found);
+            }
+            match found.iter().find(|(_, _, c)| c == label) {
+                Some((x, y, _)) => (*x, *y),
+                None => panic!("no mark text node {label:?} in panel {panel_idx}; found {found:?}"),
+            }
+        }
+
+        /// The x pixel of the x-axis tick labeled `label`, in panel
+        /// `panel_idx`'s own axis chrome.
+        fn tick_x(scene: &ferrum_scene::SceneGraph, panel_idx: usize, label: &str) -> f64 {
+            let mut found = Vec::new();
+            text_positions(&scene.panels[panel_idx].axes, &mut found);
+            found
+                .iter()
+                .find(|(_, _, c)| c == label)
+                .map(|(x, _, _)| *x)
+                .unwrap_or_else(|| panic!("no x tick labeled {label:?} in panel {panel_idx}; found {found:?}"))
+        }
+
+        /// Every horizontal major-gridline y pixel in panel `panel_idx`:
+        /// the geometric tick position with no text-layout baseline offset.
+        /// A y tick LABEL's own text anchor sits a few px off the gridline
+        /// it labels (a pre-existing rendering artifact independent of the
+        /// text-edge inset this module tests), so mark-vs-gridline, not
+        /// mark-vs-label-text, is the right comparison on the y channel.
+        fn grid_y_values(scene: &ferrum_scene::SceneGraph, panel_idx: usize) -> Vec<f64> {
+            scene.panels[panel_idx]
+                .grid
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { y1, y2, .. } if y1 == y2 => Some(*y1),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Asserts `y` matches one of panel `panel_idx`'s own gridline
+        /// pixels within floating-point tolerance.
+        fn assert_on_a_gridline(scene: &ferrum_scene::SceneGraph, panel_idx: usize, y: f64) {
+            let grid = grid_y_values(scene, panel_idx);
+            assert!(
+                grid.iter().any(|g| (g - y).abs() < 1e-6),
+                "mark y {y} must land exactly on one of panel {panel_idx}'s own gridlines: {grid:?}"
+            );
+        }
+
+        /// x and y use disjoint ranges (0..10 vs 200..210) so a tick's own
+        /// label (e.g. `"0"`) can never be ambiguous between the two axes.
+        fn xy_text_batch() -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+                    Arc::new(Float64Array::from(vec![200.0, 205.0, 210.0])),
+                    Arc::new(StringArray::from(vec![
+                        "a very long glyph sitting right at the left edge",
+                        "glyphMid",
+                        "a very long glyph sitting right at the right edge",
+                    ])),
+                ],
+            )
+            .unwrap()
+        }
+
+        fn text_encoding() -> Encoding {
+            Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                text: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                ..Default::default()
+            }
+        }
+
+        /// Flat `mark_text` alone: the x tick at domain value 0 and the
+        /// glyph drawn at the same value land on the exact same pixel, with
+        /// a label long enough to widen the plain pad past the default
+        /// 8px — proving the shared demand actually reached both ticks and
+        /// marks. On y, compared against the gridline rather than the tick
+        /// LABEL text (see `grid_y_values`'s doc for why).
+        #[test]
+        fn flat_mark_text_tick_equals_mark_pixel_on_x_and_y() {
+            pyo3::Python::initialize();
+            let spec = ChartSpec { mark: Mark::Text, encoding: text_encoding(), ..Default::default() };
+            let scene = build_scene_for(&spec, &xy_text_batch());
+            let (mark_x, mark_y) = mark_text_xy(&scene, 0, "a very long glyph sitting right at the left edge");
+            assert_eq!(mark_x, tick_x(&scene, 0, "0"), "the x tick at 0 and the glyph at x=0 must land on the same pixel");
+            assert_on_a_gridline(&scene, 0, mark_y);
+        }
+
+        /// Text layered on points: the point layer's inert glyph-less rows
+        /// contribute nothing, but the shared axis still floors for the
+        /// text layer's own rows, and ticks/marks still agree.
+        #[test]
+        fn layered_text_on_points_tick_equals_mark_pixel() {
+            pyo3::Python::initialize();
+            let point_layer = Layer { mark: Mark::Point, encoding: text_encoding(), ..Default::default() };
+            let text_layer = Layer { mark: Mark::Text, encoding: text_encoding(), ..Default::default() };
+            let spec = ChartSpec {
+                layers: Some(vec![point_layer, text_layer]),
+                encoding: text_encoding(),
+                ..Default::default()
+            };
+            let scene = build_scene_for(&spec, &xy_text_batch());
+            let (mark_x, _) = mark_text_xy(&scene, 0, "a very long glyph sitting right at the left edge");
+            assert_eq!(mark_x, tick_x(&scene, 0, "0"));
+        }
+
+        /// The binding glyph's own ink clearance from the rendered x axis's
+        /// left frame edge: `mark_x` minus the plot area's left edge must be
+        /// at least the floor plus this glyph's own left ink extent at the
+        /// theme's default label font size (default align/baseline, as
+        /// `text_encoding()`'s rows carry no style override). A route that
+        /// floors only for alignment (tick == mark) without actually
+        /// widening the inset would still pass the alignment assert while
+        /// this glyph's ink crosses the frame.
+        fn assert_clears_the_left_frame_edge(scene: &ferrum_scene::SceneGraph, panel_idx: usize, mark_x: f64, label: &str) {
+            let plot_area = scene.panels[panel_idx].plot_area;
+            let theme = crate::layout::ThemeInputs::default();
+            let glyph = crate::render::marks::text::TextGlyph {
+                label: label.to_string(),
+                font_size: theme.typography.label_font_size,
+                angle: 0.0,
+            };
+            let metrics = crate::render::font::FontdueMetrics::new();
+            let ext = crate::render::marks::text::glyph_edge_extents(&glyph, None, None, &metrics);
+            let clearance = mark_x - plot_area.x;
+            let expected_min = crate::layout::geometry::TEXT_INSET_FLOOR_PX + ext.left;
+            assert!(
+                clearance >= expected_min - 1e-6,
+                "glyph {label:?}'s own ink needs {expected_min}px of left clearance; got {clearance} (plot left {}, mark x {mark_x})",
+                plot_area.x,
+            );
+        }
+
+        /// CoordFlip, unlayered `mark_text`: the rendered x (the user's
+        /// authored y) and the rendered y (the user's authored x) each
+        /// floor and align with their own tick, and the binding glyph's own
+        /// ink actually clears the left frame edge (not just aligned with
+        /// its tick). `text_edge_rows` reads each `LayerPrepared`'s own
+        /// already-flipped encoding rather than `spec.encoding` directly,
+        /// so the floor is measured on the rendered channel, not the
+        /// unflipped one.
+        #[test]
+        fn coord_flip_unlayered_text_tick_equals_mark_pixel() {
+            pyo3::Python::initialize();
+            let spec = ChartSpec {
+                mark: Mark::Text,
+                encoding: text_encoding(),
+                coord: Some(crate::spec::coord::CoordKind::Flip),
+                ..Default::default()
+            };
+            let scene = build_scene_for(&spec, &xy_text_batch());
+            let label = "a very long glyph sitting right at the left edge";
+            let (mark_x, mark_y) = mark_text_xy(&scene, 0, label);
+            assert_eq!(mark_x, tick_x(&scene, 0, "200"), "flipped x (authored y) must still align with its own tick");
+            assert_on_a_gridline(&scene, 0, mark_y);
+            assert_clears_the_left_frame_edge(&scene, 0, mark_x, label);
+        }
+
+        /// CoordFlip, layered (text over points): the same alignment and
+        /// ink clearance hold through the layered branch, which reads the
+        /// rendered channel via the per-layer `LayerPrepared`.
+        #[test]
+        fn coord_flip_layered_text_tick_equals_mark_pixel() {
+            pyo3::Python::initialize();
+            let point_layer = Layer { mark: Mark::Point, encoding: text_encoding(), ..Default::default() };
+            let text_layer = Layer { mark: Mark::Text, encoding: text_encoding(), ..Default::default() };
+            let spec = ChartSpec {
+                layers: Some(vec![point_layer, text_layer]),
+                encoding: text_encoding(),
+                coord: Some(crate::spec::coord::CoordKind::Flip),
+                ..Default::default()
+            };
+            let scene = build_scene_for(&spec, &xy_text_batch());
+            let label = "a very long glyph sitting right at the left edge";
+            let (mark_x, mark_y) = mark_text_xy(&scene, 0, label);
+            assert_eq!(mark_x, tick_x(&scene, 0, "200"));
+            assert_on_a_gridline(&scene, 0, mark_y);
+            assert_clears_the_left_frame_edge(&scene, 0, mark_x, label);
+        }
+
+        /// A secondary y slot's text layer is measured with its OWN style
+        /// (`font_size=30`), not the host's. With the host's default
+        /// (smaller) font the floor alone (4px) would clear a 30px label
+        /// only by accident; measured at the layer's own 30px size the
+        /// glyph's own ink needs real room, so the bottom-edge row's
+        /// clearance from the panel's bottom edge is asserted well past the
+        /// plain 8px pad — a secondary slot that fell back to the host's
+        /// smaller font (or no font at all) would clear by much less. No
+        /// gridline exists for a
+        /// secondary axis to compare a tick pixel against (off by default,
+        /// see `secondary_y_gridlines_are_off_by_default_and_lit_by_the_layer_axis_or_axis_y2`),
+        /// so this checks the geometric ink clearance directly.
+        #[test]
+        fn secondary_y_slot_with_its_own_font_size_clears_the_frame_by_the_floor() {
+            pyo3::Python::initialize();
+            let layer0 = Layer {
+                mark: Mark::Point,
+                encoding: Encoding { y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }), ..Default::default() },
+                ..Default::default()
+            };
+            let mut layer1 = Layer {
+                mark: Mark::Text,
+                encoding: Encoding {
+                    y: Some(EncodingSpec { field: "y1".into(), ..Default::default() }),
+                    text: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { font_size: Some(30.0), ..Default::default() }),
+                ..Default::default()
+            };
+            layer1.independent_y = true;
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+                layers: Some(vec![layer0, layer1]),
+                ..Default::default()
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y0", DataType::Float64, false),
+                Field::new("y1", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                    // y1's own range (1000..1150) is disjoint from y0's and
+                    // x's (0..2), so its tick labels can never collide with
+                    // the primary axis's.
+                    Arc::new(Float64Array::from(vec![1000.0, 1075.0, 1150.0])),
+                    Arc::new(StringArray::from(vec![
+                        "a label at y1's own bottom edge",
+                        "x",
+                        "a label at y1's own top edge",
+                    ])),
+                ],
+            )
+            .unwrap();
+            let scene = build_scene_for(&spec, &batch);
+            let plot_area = scene.panels[0].plot_area;
+            let (_, mark_y) = mark_text_xy(&scene, 0, "a label at y1's own bottom edge");
+            // y1's domain min (1000) sits at the bottom of the panel. The
+            // row's own clearance from that edge must be at least the floor
+            // plus this glyph's own descent at ITS OWN 30px font size
+            // (alphabetic baseline, the default): measured at the host's
+            // smaller default font instead, the expected minimum would be
+            // much smaller, so this discriminates the fix.
+            let clearance = (plot_area.y + plot_area.h) - mark_y;
+            let glyph = crate::render::marks::text::TextGlyph {
+                label: "a label at y1's own bottom edge".to_string(),
+                font_size: 30.0,
+                angle: 0.0,
+            };
+            let metrics = crate::render::font::FontdueMetrics::new();
+            let ext = crate::render::marks::text::glyph_edge_extents(&glyph, None, None, &metrics);
+            let expected_min = crate::layout::geometry::TEXT_INSET_FLOOR_PX + ext.below;
+            assert!(
+                clearance >= expected_min - 1e-6,
+                "a 30px-font glyph's own ink needs {expected_min}px of clearance; got {clearance} (plot bottom {}, mark y {mark_y})",
+                plot_area.y + plot_area.h,
+            );
+        }
+
+        /// Spec §6.13's one-demand-per-rendered-channel rule extends to an
+        /// independent facet x: panel a's own long label floors its OWN
+        /// axis, and its tick and its mark agree, through the real
+        /// production per-panel demand selection (not a hand-fed demand
+        /// passed directly to `resolve_panel_scales`, which cannot
+        /// discriminate whether the production selection is wired at all).
+        #[test]
+        fn independent_facet_x_panel_tick_equals_its_own_mark_pixel() {
+            pyo3::Python::initialize();
+            let spec = ChartSpec {
+                mark: Mark::Text,
+                encoding: text_encoding(),
+                facet: Some(crate::layout::FacetSpec {
+                    field: "g".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    repeat: Vec::new(),
+                    mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
+                }),
+                ..Default::default()
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            // y's own range (500..501) is disjoint from every x value used
+            // here (0..12), so a y tick's label can never collide with an x
+            // tick's.
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.9, 10.0, 12.0])),
+                    Arc::new(Float64Array::from(vec![500.0, 501.0, 500.0, 501.0])),
+                    Arc::new(StringArray::from(vec![
+                        "a very long label sitting right at panel a's own edge",
+                        "x",
+                        "x",
+                        "x",
+                    ])),
+                ],
+            )
+            .unwrap();
+            let scene = build_scene_for(&spec, &batch);
+            // Panel order follows first-appearance facet order: "a" is panel 0.
+            let (mark_x, _) = mark_text_xy(&scene, 0, "a very long label sitting right at panel a's own edge");
+            assert_eq!(mark_x, tick_x(&scene, 0, "0"), "panel a's own glyph at x=0 and panel a's own '0' tick must land on the same pixel");
+        }
+
+        /// Spec §6.13: `TextInkPastFrame` is pushed at most once per channel
+        /// per render, with rows summed across the panels that overrun —
+        /// never once per panel. A facet with 2 panels sharing x, each
+        /// contributing one over-wide label, warns once with both rows
+        /// counted.
+        #[test]
+        fn shared_facet_two_panels_text_ink_past_frame_warns_once_with_summed_rows() {
+            pyo3::Python::initialize();
+            let spec = ChartSpec {
+                mark: Mark::Text,
+                encoding: text_encoding(),
+                facet: Some(crate::layout::FacetSpec {
+                    field: "g".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    repeat: Vec::new(),
+                    mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve::default(),
+                }),
+                ..Default::default()
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            let wide = "W".repeat(80);
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+                    Arc::new(StringArray::from(vec![wide.clone(), wide.clone(), wide.clone(), wide.clone()])),
+                ],
+            )
+            .unwrap();
+            let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+            result.unwrap();
+            let overruns: Vec<&RenderWarning> =
+                warnings.iter().filter(|w| matches!(w, RenderWarning::TextInkPastFrame { .. })).collect();
+            assert_eq!(overruns.len(), 1, "exactly one TextInkPastFrame, not one per panel: {overruns:?}");
+        }
+
+        /// `(x, y)` of every `SceneNode::Circle` under `nodes`, depth first
+        /// through any `Group` wrapper — the point mark's own node, read the
+        /// same way [`text_positions`] reads `SceneNode::Text`.
+        fn circle_centers(nodes: &[SceneNode], out: &mut Vec<(f64, f64)>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Circle { cx, cy, .. } => out.push((*cx, *cy)),
+                    SceneNode::Group { children, .. } => circle_centers(children, out),
+                    _ => {}
+                }
+            }
+        }
+
+        /// Every point mark's own pixel in panel `panel_idx`, sorted so two
+        /// renders of the same data can be compared regardless of draw
+        /// order.
+        fn sorted_circle_centers(scene: &ferrum_scene::SceneGraph, panel_idx: usize) -> Vec<(f64, f64)> {
+            let mut out = Vec::new();
+            for batch in &scene.panels[panel_idx].marks {
+                circle_centers(&batch.nodes, &mut out);
+            }
+            out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            out
+        }
+
+        /// An independent-y facet panel's primary y axis reads its own
+        /// text-edge rows from the layers the y-slot plan places on the
+        /// PRIMARY slot only — the same `primary_axis_text_rows` selector
+        /// `build_axes` already applies on the shared path — so a
+        /// `SecondaryY` text layer's own rows never widen the primary axis
+        /// it does not draw on. The primary point's own pixel is identical
+        /// whether the facet resolves y as `Independent` (through
+        /// `independent_panel_axis_inputs`) or `Shared` (through
+        /// `build_axes`): a route that read every layer unfiltered would
+        /// let the secondary text's wide label floor the primary y and
+        /// move the point.
+        #[test]
+        fn independent_y_facet_primary_axis_ignores_a_secondary_texts_rows() {
+            pyo3::Python::initialize();
+            let primary = Layer {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut secondary = Layer {
+                mark: Mark::Text,
+                encoding: Encoding {
+                    y: Some(EncodingSpec { field: "y2".into(), ..Default::default() }),
+                    text: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            secondary.independent_y = true;
+
+            let facet_with = |y: ResolveMode| {
+                Some(crate::layout::FacetSpec {
+                    field: "g".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    repeat: Vec::new(),
+                    mode: crate::layout::FacetMode::Wrap { ncols: 1 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve { x: ResolveMode::Shared, y },
+                })
+            };
+            let base_spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+                layers: Some(vec![primary, secondary]),
+                ..Default::default()
+            };
+            let shared_spec = ChartSpec { facet: facet_with(ResolveMode::Shared), ..base_spec.clone() };
+            let independent_spec = ChartSpec { facet: facet_with(ResolveMode::Independent), ..base_spec };
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("y2", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a"])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(StringArray::from(vec!["x".to_string(), "W".repeat(80)])),
+                ],
+            )
+            .unwrap();
+
+            let shared_scene = build_scene_for(&shared_spec, &batch);
+            let independent_scene = build_scene_for(&independent_spec, &batch);
+            assert_eq!(
+                sorted_circle_centers(&shared_scene, 0),
+                sorted_circle_centers(&independent_scene, 0),
+                "the primary point's own pixel must not move when the secondary text's wide label floors nothing but its own slot"
+            );
+        }
+
+        /// A secondary y slot's text demand is built once, chart-wide, so
+        /// every panel resolving it notes the SAME overrun indices;
+        /// `TextOverrunChannel::shared` keeps the slot's indices in their
+        /// own set (keyed by slot, not merged with the primary axis's), so
+        /// a 2-panel facet still reports exactly one `TextInkPastFrame` on
+        /// y with the slot's own row count, not the row count doubled by
+        /// the panel count. The unfaceted control (the same 2 rows, one
+        /// panel) gets the identical count.
+        #[test]
+        fn faceted_secondary_y_text_ink_past_frame_warns_once_with_the_unfaceted_row_count() {
+            pyo3::Python::initialize();
+            let primary = Layer {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut secondary = Layer {
+                mark: Mark::Text,
+                encoding: Encoding {
+                    y: Some(EncodingSpec { field: "y2".into(), ..Default::default() }),
+                    text: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { font_size: Some(1000.0), ..Default::default() }),
+                ..Default::default()
+            };
+            secondary.independent_y = true;
+
+            let base_spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+                layers: Some(vec![primary, secondary]),
+                ..Default::default()
+            };
+            let faceted_spec = ChartSpec {
+                facet: Some(crate::layout::FacetSpec {
+                    field: "g".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    repeat: Vec::new(),
+                    mode: crate::layout::FacetMode::Wrap { ncols: 1 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve::default(),
+                }),
+                ..base_spec.clone()
+            };
+            let unfaceted_spec = base_spec;
+
+            // Exactly 2 rows: the facet partitions this SAME row count
+            // across 2 panels (one each), so the chart-wide secondary-slot
+            // demand describes the identical 2 rows either way — a correct
+            // count must agree between the two, not double under the facet.
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("y2", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ]));
+            let wide = "W".repeat(10);
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                    Arc::new(StringArray::from(vec![wide.clone(), wide.clone()])),
+                ],
+            )
+            .unwrap();
+
+            let (faceted_result, faceted_warnings) = try_build_scene_for_capturing_warnings(&faceted_spec, &batch);
+            faceted_result.unwrap();
+            let (unfaceted_result, unfaceted_warnings) = try_build_scene_for_capturing_warnings(&unfaceted_spec, &batch);
+            unfaceted_result.unwrap();
+
+            let y_overruns = |warnings: &[RenderWarning]| -> Vec<usize> {
+                warnings
+                    .iter()
+                    .filter_map(|w| match w {
+                        RenderWarning::TextInkPastFrame { channel, rows } if channel == "y" => Some(*rows),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let faceted_rows = y_overruns(&faceted_warnings);
+            let unfaceted_rows = y_overruns(&unfaceted_warnings);
+            assert_eq!(faceted_rows.len(), 1, "exactly one TextInkPastFrame on y, not one per panel: {faceted_rows:?}");
+            assert_eq!(unfaceted_rows.len(), 1, "the unfaceted control still warns once: {unfaceted_rows:?}");
+            assert_eq!(
+                faceted_rows[0], unfaceted_rows[0],
+                "the faceted slot's own overrun row count must match the unfaceted control's, not be doubled by the panel count"
+            );
+        }
+    }
 }
 
 /// RED-proof + regression pin for `#113` — the pre-flip/post-flip encoding
@@ -15730,6 +16599,7 @@ mod coord_flip_y2_merge_tests {
             &layer_batches,
             &mut warnings,
             (0.0, 0.0),
+            &scale_resolve::TextEdgeDemands::default(),
         )
         .expect("resolve_panel_scales must succeed for a flipped ranged bar");
 
@@ -15862,6 +16732,7 @@ mod coord_flip_y2_merge_tests {
             &layer_batches,
             &mut warnings,
             (0.0, 0.0),
+            &scale_resolve::TextEdgeDemands::default(),
         )
         .expect("resolve_panel_scales must succeed for a flipped ranged bar");
 

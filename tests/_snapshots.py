@@ -15,6 +15,8 @@ import zlib
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+
 
 def legend_texts(svg: str) -> list[str]:
     """Extract all SVG ``<text>`` node contents, in document order.
@@ -150,6 +152,92 @@ def decode_png_rgba(png: bytes) -> tuple[list[list[tuple[int, int, int, int]]], 
         for row in rows
     ]
     return pixels, w, h
+
+
+def decode_png_ink_mask(png: bytes, threshold: int = 382) -> tuple[int, int, int, int] | None:
+    """The pixel bounding box of every "ink" pixel in ``png``, or ``None``.
+
+    A faster sibling to :func:`decode_png_rgba` for a caller that only
+    needs a dark-pixel bounding box, not every pixel's full RGBA:
+    ``decode_png_rgba``'s generic nested-tuple build takes seconds per
+    image, too slow for a caller rasterizing many small images (e.g. one
+    per label). Filter types None/Sub/Up are vectorized across the whole
+    row with numpy; Average/Paeth are walked one pixel column at a time,
+    following their own same-row dependency. A pixel counts as ink at
+    ``threshold`` coverage or more (``r + g + b <= threshold``). Only
+    handles 8-bit, non-interlaced RGB/RGBA; a PNG in any other format
+    raises rather than being silently misread as if it were one of those
+    two.
+    """
+    pos, chunks = 8, {}
+    while pos < len(png):
+        length = struct.unpack(">I", png[pos : pos + 4])[0]
+        chunk_type = png[pos + 4 : pos + 8]
+        chunks[chunk_type] = chunks.get(chunk_type, b"") + png[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+    width, height = struct.unpack(">II", chunks[b"IHDR"][:8])
+    bit_depth, color_type, _compression_method, _filter_method, interlace_method = chunks[b"IHDR"][
+        8:13
+    ]
+    if bit_depth != 8 or color_type not in (2, 6) or interlace_method != 0:
+        raise ValueError(
+            f"unsupported PNG format: bit_depth={bit_depth}, color_type={color_type}, "
+            f"interlace={interlace_method} (only 8-bit, non-interlaced RGB [2] or RGBA [6] "
+            "is decoded)"
+        )
+    bpp = 4 if color_type == 6 else 3
+    raw = zlib.decompress(chunks[b"IDAT"])
+    stride = 1 + width * bpp
+    prev = np.zeros((width, bpp), dtype=np.int16)
+    xs: list[int] = []
+    ys: list[int] = []
+    for row_idx in range(height):
+        offset = row_idx * stride
+        filter_type = raw[offset]
+        row = (
+            np.frombuffer(raw, dtype=np.uint8, count=width * bpp, offset=offset + 1)
+            .astype(np.int16)
+            .reshape(width, bpp)
+        )
+        if filter_type == 0:
+            cur = row
+        elif filter_type == 1:
+            cur = np.cumsum(row, axis=0) % 256
+        elif filter_type == 2:
+            cur = (row + prev) % 256
+        elif filter_type == 3:
+            cur = row.copy()
+            for x in range(width):
+                left = cur[x - 1] if x > 0 else 0
+                cur[x] = (cur[x] + (left + prev[x]) // 2) % 256
+        elif filter_type == 4:
+            cur = row.copy()
+            for x in range(width):
+                left = cur[x - 1] if x > 0 else np.zeros(bpp, dtype=np.int16)
+                up = prev[x]
+                up_left = prev[x - 1] if x > 0 else np.zeros(bpp, dtype=np.int16)
+                predictor = left + up - up_left
+                pa = np.abs(predictor - left)
+                pb = np.abs(predictor - up)
+                pc = np.abs(predictor - up_left)
+                nearest = np.where(
+                    pa <= pb, np.where(pa <= pc, left, up_left), np.where(pb <= pc, up, up_left)
+                )
+                cur[x] = (cur[x] + nearest) % 256
+        else:
+            raise ValueError(f"unsupported PNG filter type {filter_type}")
+        if bpp == 4:
+            ink = (cur[:, 3] > 50) & (cur[:, 0].astype(int) + cur[:, 1] + cur[:, 2] <= threshold)
+        else:
+            ink = cur[:, 0].astype(int) + cur[:, 1] + cur[:, 2] <= threshold
+        if ink.any():
+            cols = np.nonzero(ink)[0]
+            xs.extend(cols.tolist())
+            ys.extend([row_idx] * len(cols))
+        prev = cur
+    if not xs:
+        return None
+    return min(xs), max(xs), min(ys), max(ys)
 
 
 def snapshot_golden(

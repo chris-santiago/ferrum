@@ -22,6 +22,7 @@ serde_json  = { workspace = true }
 rand        = { workspace = true }
 rand_chacha = { workspace = true }
 fontdue     = { workspace = true }
+rustybuzz   = { workspace = true }
 palette     = { workspace = true }
 usvg        = { workspace = true }
 resvg       = { workspace = true }

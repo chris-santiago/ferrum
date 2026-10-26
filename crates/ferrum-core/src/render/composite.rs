@@ -646,6 +646,57 @@ fn assign_union(
         return Ok(());
     };
 
+    // Spec §6.13: a shared numeric x/y group's `Mark::Text` rows are the
+    // union of every contributing member's own, already measured by that
+    // member's own prepare pass before this resolve ran
+    // ([`LeafResolveInput::x_text_rows`]/`y_text_rows`) and gated by that
+    // leaf's own default-padding predicate exactly as the standalone path
+    // gates it — never re-measured from the leaf's spec and batch here. Each
+    // member's own union keeps `own: true` on its own rows and `false` on
+    // every other contributor's (`TextEdgeRows::extend_from`), so when a
+    // leaf is later prepared, its `build_axes` reads this union instead of
+    // its own rows alone: the demand it builds protects a sibling's wider
+    // label too, while a `TextInkPastFrame` warning still counts each
+    // overrunning mark once, from the one leaf that draws it. `color`/`size`
+    // have no pixel-floor inset to protect; an ordinal x/y group's scale has
+    // no continuous inset either.
+    // This match is the one place that decides whether `channel` is `X` or
+    // `Y` (producing the field accessor for the slot that channel draws
+    // through) or `Color`/`Size` (producing `None`, handled below), so
+    // nothing else needs to branch on `channel` again at any read or write
+    // past this point.
+    let text_slot: Option<fn(&mut LeafScaleContext) -> &mut Option<crate::render::scale_resolve::TextEdgeRows>> =
+        match channel {
+            Channel::X => Some(|ctx| &mut ctx.x_text_rows),
+            Channel::Y => Some(|ctx| &mut ctx.y_text_rows),
+            Channel::Color | Channel::Size => None,
+        };
+    if let (SharedDomain::Numeric { .. }, Some(text_slot)) = (&unified, text_slot) {
+        let channel_str = if channel == Channel::X { "x" } else { "y" };
+        let mut contributors: Vec<(usize, &crate::render::scale_resolve::TextEdgeRows)> = Vec::new();
+        for (idx, _) in domains {
+            let leaf = &leaves[*idx];
+            let own_enc = if channel == Channel::X { leaf.encoding.x.as_ref() } else { leaf.encoding.y.as_ref() };
+            let applies = crate::render::scale_resolve::text_inset_applies(
+                own_enc.and_then(|e| e.scale.as_ref()),
+                crate::render::scale_resolve::coord_exempts_channel(leaf.spec.coord.as_ref(), channel_str),
+            );
+            if applies {
+                let own_rows = if channel == Channel::X { &leaf.x_text_rows } else { &leaf.y_text_rows };
+                contributors.push((*idx, own_rows));
+            }
+        }
+        if contributors.iter().any(|(_, rows)| !rows.is_empty()) {
+            for (idx, _) in domains {
+                let mut rows = crate::render::scale_resolve::TextEdgeRows::default();
+                for (contributor, contributor_rows) in &contributors {
+                    rows.extend_from(contributor_rows, contributor == idx);
+                }
+                *text_slot(&mut out[*idx]) = Some(rows);
+            }
+        }
+    }
+
     for (idx, _) in domains {
         out[*idx].set(channel, unified.clone());
     }
@@ -1878,10 +1929,48 @@ mod tests {
     static NO_LINEAGES: std::sync::LazyLock<crate::transform::run::OutputLineages> =
         std::sync::LazyLock::new(Default::default);
 
+    /// A leaf's default theme, for measuring its own `Mark::Text` rows at
+    /// its default label size, the same input a real leaf's own prepare
+    /// pass would use.
+    static DEFAULT_THEME: std::sync::LazyLock<crate::layout::ThemeInputs> = std::sync::LazyLock::new(Default::default);
+
     fn owned(spec: ChartSpec, batch: RecordBatch) -> LeafOwned {
         let encoding = spec.encoding.clone();
         let outputs = outputs(&batch);
         LeafOwned { spec, encoding, batch, outputs }
+    }
+
+    /// This leaf's prepared layers, built the same way `prepare::build_layers`
+    /// builds them for a real render: the chart's own layer when `spec.layers`
+    /// is unset, else each declared layer, each in its own drawn coordinate
+    /// space.
+    fn leaf_prepared_layers(spec: &ChartSpec) -> Vec<crate::render::prepare::LayerPrepared> {
+        use crate::render::prepare::LayerPrepared;
+        match &spec.layers {
+            None => vec![LayerPrepared::from_chart_only(spec)],
+            Some(layer_vec) => layer_vec.iter().map(|l| LayerPrepared::from_chart_and_layer(spec, l)).collect(),
+        }
+        .into_iter()
+        .map(LayerPrepared::in_its_coord)
+        .collect()
+    }
+
+    /// This leaf's own `Mark::Text` rows on `channel` — the fixture's
+    /// stand-in for `PreparedInputs::x_text_rows`/`y_text_rows`, since these
+    /// tests build a leaf's pieces by hand rather than running the whole
+    /// prepare pipeline. Every layer here reads `o.batch` or its own named
+    /// output in `o.outputs`, the same resolution `prepare_render_inputs`
+    /// applies.
+    fn leaf_own_text_rows(o: &LeafOwned, channel: &str) -> crate::render::scale_resolve::TextEdgeRows {
+        let layers = leaf_prepared_layers(&o.spec);
+        let pairs = layers.iter().map(|l| {
+            let batch = match &l.data_source {
+                None => &o.batch,
+                Some(name) => o.outputs.get(name).unwrap_or(&o.batch),
+            };
+            (l, batch)
+        });
+        crate::render::scale_resolve::text_edge_rows(channel, pairs, o.spec.facet.as_ref(), &DEFAULT_THEME, &crate::render::font::FontdueMetrics::new())
     }
 
     fn input(o: &LeafOwned) -> LeafResolveInput<'_> {
@@ -1891,6 +1980,8 @@ mod tests {
             final_batch: &o.batch,
             transform_outputs: &o.outputs,
             transform_lineages: &NO_LINEAGES,
+            x_text_rows: leaf_own_text_rows(o, "x"),
+            y_text_rows: leaf_own_text_rows(o, "y"),
         }
     }
 
@@ -2058,6 +2149,68 @@ mod tests {
         assert_eq!(ctx[1].x, expect);
         // y not encoded → untouched.
         assert_eq!(ctx[0].y, None);
+    }
+
+    /// Spec §6.13: a shared numeric x/y group's `Mark::Text` rows are the
+    /// union of every member's own (already measured by that member's own
+    /// prepare pass, gated by that member's own default-padding predicate),
+    /// set on EVERY member — so a point leaf with no `Mark::Text` of its own
+    /// (leaf 0) still receives the rows a text sibling (leaf 1) draws on the
+    /// SAME shared axis, and its own later `build_axes` builds its demand
+    /// from them instead of from its own (empty) rows alone. Each member's
+    /// own union marks only ITS OWN rows `own: true`: leaf 0 contributed
+    /// none, so every row in its union is a sibling's (`own: false`); leaf 1
+    /// drew every one of them itself (`own: true`) — so a `TextInkPastFrame`
+    /// warning counts leaf 1's overrunning label once, from leaf 1, never
+    /// from a sibling that merely shares its axis.
+    #[test]
+    fn an_overlay_groups_shared_x_text_rows_reach_a_sibling_with_no_text_mark_of_its_own() {
+        // Leaf 0: a point leaf drawing x, no text of its own.
+        let l0 = owned(spec_with_x("v"), num_batch("v", &[0.0, 1.0, 1.9]));
+
+        // Leaf 1: a text leaf sharing the same x channel, with one label
+        // long enough to need real protection, sitting near its own x max.
+        let mut e1 = Encoding::default();
+        e1.x = Some(enc("v"));
+        e1.text = Some(enc("label"));
+        let spec1 = ChartSpec { mark: Mark::Text, encoding: e1, ..base_spec() };
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let batch1 = RecordBatch::try_new(
+            schema1,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 1.9])),
+                Arc::new(StringArray::from(vec![
+                    Some("x"),
+                    Some("x"),
+                    Some("a very long label sitting right at this leaf's own edge"),
+                ])),
+            ],
+        )
+        .unwrap();
+        let l1 = owned(spec1, batch1);
+
+        let inputs = [input(&l0), input(&l1)];
+
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("v"), None), leaf_node(Some("v"), None)],
+            shared_x(),
+        );
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
+
+        assert!(
+            ctx[0].x_text_rows.is_some(),
+            "leaf 0 (no text mark of its own) must still receive the group's rows"
+        );
+        let ctx0_rows = &ctx[0].x_text_rows.as_ref().unwrap().0;
+        let ctx1_rows = &ctx[1].x_text_rows.as_ref().unwrap().0;
+        assert!(!ctx0_rows.is_empty());
+        assert_eq!(ctx0_rows.len(), ctx1_rows.len(), "every member sees the same rows");
+        assert!(ctx0_rows.iter().all(|r| !r.own), "leaf 0 drew none of these rows itself");
+        assert!(ctx1_rows.iter().all(|r| r.own), "leaf 1 drew every one of these rows itself");
     }
 
     #[test]
@@ -3544,7 +3697,7 @@ mod tests {
     #[test]
     fn overlay_caller_scale_layer_selection_matrix() {
         use crate::layout::ThemeInputs;
-        use crate::render::scale_resolve::resolve_scales_with_leaf_context;
+        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, TextEdgeDemands};
         use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
 
         let linear = |domain: Option<Vec<f64>>, zero: bool, system_injected: bool| ScaleSpec::Linear {
@@ -3602,7 +3755,7 @@ mod tests {
                 let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
                 let y_domain = |o: &LeafOwned, c: &LeafScaleContext| {
                     let (scales, _) = resolve_scales_with_leaf_context(
-                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, Some(c),
+                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(c),
                     )
                     .unwrap();
                     scales.y.data_domain()
@@ -3901,7 +4054,7 @@ mod tests {
         lead_type: Option<crate::spec::encoding::DataType>,
     ) -> Routes {
         use crate::layout::ThemeInputs;
-        use crate::render::scale_resolve::resolve_scales_with_leaf_context;
+        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, TextEdgeDemands};
 
         let rows = members[0].values.len();
         let index: arrow::array::ArrayRef =
@@ -3958,7 +4111,7 @@ mod tests {
                     .zip(&ctx)
                     .map(|(o, c)| {
                         let (scales, _) =
-                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, Some(c))?;
+                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(c))?;
                         let adopted = match channel {
                             Channel::X => c.x_scale.is_some(),
                             _ => c.y_scale.is_some(),
@@ -4166,7 +4319,7 @@ mod tests {
     fn a_flipped_layers_caller_scale_does_not_take_a_categorical_layer_0_axis_on_both_routes() {
         use crate::layout::{ThemeInputs, Viewport};
         use crate::render::chart_config::ChartConfig;
-        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, ScaleKind};
+        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, ScaleKind, TextEdgeDemands};
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
@@ -4239,7 +4392,7 @@ mod tests {
             .expect("fm.layer resolves");
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, &NO_LINEAGES, pr, pr, &theme, Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx[0]))
                 .expect("fm.layer panel resolves");
         assert_eq!(band_categories(&scales.x), ["a", "b"], "fm.layer panel x");
         assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
@@ -4439,7 +4592,7 @@ mod tests {
     #[test]
     fn an_admitted_member_annotated_nominal_joins_the_caller_scale_extent() {
         use crate::layout::ThemeInputs;
-        use crate::render::scale_resolve::resolve_scales_with_leaf_context;
+        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, TextEdgeDemands};
         use crate::spec::encoding::DataType as SpecType;
 
         let batch = |field: &str, values: [f64; 2]| {
@@ -4473,7 +4626,7 @@ mod tests {
         let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, &NO_LINEAGES, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, &NO_LINEAGES, pr, pr, &ThemeInputs::default(), &TextEdgeDemands::default(), Some(&ctx[0]))
                 .unwrap();
         assert_eq!(scales.y.data_domain(), Some((1.0, 80.0)));
     }

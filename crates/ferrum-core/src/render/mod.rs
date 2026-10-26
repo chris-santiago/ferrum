@@ -2168,6 +2168,19 @@ pub enum RenderWarning {
     /// (an explicit domain, else the empty-column fallback); a faceted one
     /// has no facet value to draw, so it draws no panel.
     NoRowsToDraw { faceted: bool },
+    /// `Mark::Text` ink still crosses the plot frame on `channel` after
+    /// `inset_pixel_range` kept at least `TEXT_INSET_MIN_SPAN_SHARE` of the
+    /// axis's inner length (spec §6.13): the rows' combined clearance needs
+    /// exceed what the panel can give without collapsing the plot area.
+    /// `rows` is the count of rows still overrunning, each counted once
+    /// where it is actually drawn: a shared axis's overrunning row counts
+    /// once however many panels share it, and a composite leaf's own
+    /// overrunning row counts once from that leaf, never once per sibling
+    /// that merely shares its axis domain. Pushed at most once per channel
+    /// per render, flushed by `scene_build`'s `TextOverrunLedger` after the
+    /// panel loop; the tick projection evaluates the same inset and never
+    /// pushes this.
+    TextInkPastFrame { channel: String, rows: usize },
     /// A chart-level `configure_color(range=…)` named a different number of
     /// colors than the discretizing (Quantize/Quantile/Threshold/BinOrdinal)
     /// color scale has buckets. The bucket count is fixed by the scale's own
@@ -2699,6 +2712,14 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "the chart has no rows to draw after its transforms; {}",
                 if *faceted { "no facet panel is drawn" } else { "its panel is drawn empty" }
+            ),
+            RenderWarning::TextInkPastFrame { channel, rows } => write!(
+                f,
+                "{rows} mark_text row{} on the {channel} axis still cross{} the plot frame; \
+                 the label{} may be too wide for the panel",
+                if *rows == 1 { "" } else { "s" },
+                if *rows == 1 { "es" } else { "" },
+                if *rows == 1 { "" } else { "s" },
             ),
             RenderWarning::ColorRangeBucketCountMismatch { expected, received } => write!(
                 f,
@@ -3643,6 +3664,12 @@ fn prepare_and_layout(
     let applied =
         config_apply::apply_chart_config_pipeline(&mut prep, theme, chart_config, &mut warnings)?;
 
+    // Parsed once per render (spec §6.13): shared by the independent-panel
+    // text-edge measurement just below and by `compute_layout`'s own tick
+    // metrics, so this pass never re-parses the bundled font `build_axes`
+    // already parsed its own copy of for the chart's shared axes.
+    let metrics = font::FontdueMetrics::new();
+
     // An independent-x/y facet panel draws its own axis, from its own scale:
     // resolve those axis inputs now, so layout reserves each axis band for
     // what the panels draw.
@@ -3655,9 +3682,9 @@ fn prepare_and_layout(
             leaf_scales,
         },
         &prep.facet_groups,
+        &metrics,
     )?;
 
-    let metrics = font::FontdueMetrics::new();
     // Composite → layout seam: everything a composite parent imposes on this
     // leaf's layout, threaded through the same `leaf_scales` context the
     // composite already uses for shared-domain resolution (D4b).

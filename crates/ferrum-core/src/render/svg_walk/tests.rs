@@ -607,6 +607,157 @@ fn emit_text_negative_opacity_clamps_to_zero_alpha() {
     );
 }
 
+// ── `glyph_edge_extents` vs usvg's own rendered ink (spec §6.13) ──
+
+/// Builds a full SVG containing exactly one `<text>` node at `(x, y)`, on a
+/// canvas large enough that no case in the matrix below clips.
+fn emit_text_full_svg(x: f64, y: f64, content: &str, style: &FsText) -> String {
+    let mut svg = SvgBuffer::new(
+        crate::layout::Rect { x: 0.0, y: 0.0, w: 4000.0, h: 4000.0 },
+        None,
+        false,
+    );
+    emit_text(&mut svg, x, y, content, style);
+    svg.finish()
+}
+
+/// The first `usvg::Node::Text` found by a depth-first walk of `group`'s
+/// children.
+fn find_text_node<'a>(group: &'a usvg::Group) -> Option<&'a usvg::Text> {
+    for node in group.children() {
+        match node {
+            usvg::Node::Text(t) => return Some(t),
+            usvg::Node::Group(g) => {
+                if let Some(t) = find_text_node(g) {
+                    return Some(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parses `svg` with usvg, loading the bundled Inter face exactly as
+/// `render::png::svg_string_to_png_bytes` does, and returns the lone text
+/// node's tight outline bounding box (flattened to paths, not the loose
+/// SVG text bounding box) in the SVG's own user-space coordinates.
+///
+/// `text.flattened()` is a detached `Group` usvg builds in the text's own
+/// local (pre-element-transform) layout space — its paths carry no
+/// transform of their own, so its `abs_bounding_box()` is identical to its
+/// `bounding_box()` regardless of the `<text transform="...">` attribute
+/// this crate's own `rotate=`/`angle=` emits. `text.abs_transform()` is the
+/// one place that rotation lives (the same field `text.abs_bounding_box`
+/// itself is built from, `usvg::text::convert`), so the tight box is the
+/// local box pushed through it.
+fn rendered_text_ink_box(svg: &str) -> usvg::Rect {
+    let mut opts = usvg::Options::default();
+    opts.fontdb_mut().load_font_data(crate::render::font::INTER_REGULAR.to_vec());
+    let tree = usvg::Tree::from_str(svg, &opts).expect("usvg must parse the emitted SVG");
+    let text = find_text_node(tree.root()).expect("exactly one text node in this fixture");
+    text.flattened()
+        .bounding_box()
+        .transform(text.abs_transform())
+        .expect("a finite rotation must transform the local ink box")
+}
+
+/// For every label, font size, align, baseline and angle in the matrix
+/// below, usvg's own rendered ink (the ground truth the glyph actually
+/// paints, shaped with the same rustybuzz version this crate pins) lies
+/// inside the box `glyph_edge_extents` measures: kerned pairs, a negative
+/// first-glyph bearing, an overhanging last glyph, a glyph above the
+/// ascent or below the descent, and the hanging baseline's real shift are
+/// all exercised. At angle 0 the measured box is also exactly the union of
+/// the font line box and the shaped run's own ink (no looser than either),
+/// re-derived independently from `FontdueMetrics::shaped_ink` rather than
+/// by calling `glyph_edge_extents` again.
+#[test]
+fn glyph_edge_extents_contains_every_pixel_usvg_actually_renders() {
+    use crate::render::marks::text::{glyph_edge_extents, TextGlyph};
+
+    let labels = ["AAAA", "WWWWWWWWWW", "AV To", "j", "fj", "\u{c5}", "(n)", "Hg"];
+    let sizes = [11.0_f64, 40.0];
+    let aligns: [Option<&str>; 3] = [Some("left"), None, Some("right")];
+    let baselines: [Option<&str>; 4] = [None, Some("top"), Some("middle"), Some("bottom")];
+    let angles = [0.0_f64, 30.0, 90.0, -45.0];
+    let metrics = crate::render::font::FontdueMetrics::new();
+    let (anchor_x, anchor_y) = (2000.0_f64, 2000.0_f64);
+    let mut cases = 0;
+
+    for &label in &labels {
+        for &font_size in &sizes {
+            for &align in &aligns {
+                for &baseline in &baselines {
+                    for &angle in &angles {
+                        let glyph = TextGlyph { label: label.to_string(), font_size, angle };
+                        let ext = glyph_edge_extents(&glyph, align, baseline, &metrics);
+
+                        let anchor = match align {
+                            Some("left") => ferrum_scene::TextAnchor::Start,
+                            Some("right") => ferrum_scene::TextAnchor::End,
+                            _ => ferrum_scene::TextAnchor::Middle,
+                        };
+                        let baseline_kind = match baseline {
+                            Some("top") => ferrum_scene::TextBaseline::Top,
+                            Some("middle") => ferrum_scene::TextBaseline::Middle,
+                            Some("bottom") => ferrum_scene::TextBaseline::Bottom,
+                            _ => ferrum_scene::TextBaseline::Alphabetic,
+                        };
+                        let style = FsText {
+                            font_size,
+                            font_weight: ferrum_scene::FontWeight::Normal,
+                            anchor,
+                            baseline: baseline_kind,
+                            angle,
+                            color: Some(Color::rgb(0, 0, 0)),
+                            opacity: 1.0,
+                            font_family: "Inter".to_string(),
+                        };
+                        let svg = emit_text_full_svg(anchor_x, anchor_y, label, &style);
+                        let ink = rendered_text_ink_box(&svg);
+
+                        let want_left = anchor_x - ext.left - 1e-3;
+                        let want_right = anchor_x + ext.right + 1e-3;
+                        let want_above = anchor_y - ext.above - 1e-3;
+                        let want_below = anchor_y + ext.below + 1e-3;
+                        assert!(
+                            f64::from(ink.left()) >= want_left
+                                && f64::from(ink.right()) <= want_right
+                                && f64::from(ink.top()) >= want_above
+                                && f64::from(ink.bottom()) <= want_below,
+                            "label {label:?} size {font_size} align {align:?} baseline {baseline:?} angle {angle}: \
+                             usvg ink {ink:?} must lie inside the measured box [{want_left}, {want_right}] \
+                             x [{want_above}, {want_below}]"
+                        );
+
+                        if angle == 0.0 {
+                            let shaped = metrics.shaped_ink(label, font_size);
+                            let anchor_x_local = match align {
+                                Some("left") => 0.0,
+                                Some("right") => shaped.advance,
+                                _ => shaped.advance / 2.0,
+                            };
+                            let box_lo = shaped.xmin.min(0.0);
+                            let box_hi = shaped.xmax.max(shaped.advance);
+                            assert!(
+                                (ext.left - (anchor_x_local - box_lo)).abs() < 1e-3,
+                                "{label:?} left: {} vs {}", ext.left, anchor_x_local - box_lo
+                            );
+                            assert!(
+                                (ext.right - (box_hi - anchor_x_local)).abs() < 1e-3,
+                                "{label:?} right: {} vs {}", ext.right, box_hi - anchor_x_local
+                            );
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(cases > 700, "vacuity control: the full matrix must have actually run, got {cases} cases");
+}
+
 // ── Tapered strokes: a node with `widths` paints one filled outline ──
 
 use crate::spec::chart::ChartSpec;

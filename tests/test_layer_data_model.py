@@ -869,7 +869,7 @@ _SVG_DIGESTS = {
     "boxplot-layer-tick": "6feaa81d1bf58b524d20707a83ba1ac52369cfe831000530a6d2976562cd6ae0",
     "violin-layer-tick": "6792083281b6cac82ecae8e7f6b92d6bf0efca6ee8663b7e177c7ac3edb95ff5",
     "smooth-band+secondary": "fa3455c4455ae9130b17c6645851c1b9c70b7a36bd75d1c7b7d3351866b4d003",
-    "swarm-layer-text": "a75aec0e2f713fefcf632e17af067f2bf0ff39e5115c86269011a450e1395ab9",
+    "swarm-layer-text": "7a4ab966dd7014d659479afbe439fbbba8f021660255a0ba0f7ca484b8593210",
     "same-frame-composition+secondary": "3262c72b3e7f9287cf22d5cc1dca8f1be56c38a873f2217bd796a17e7589c1b9",
     "same-frame-composition-layer-line": "42d6493e6a5c992ca98792618386cd7548d5ffd8777217ea211d3c0315210923",
     "faceted-point+secondary": "95cd5af2f5808ea74de483e73bf798f70d90f9dd98b622707413643093dd8b45",

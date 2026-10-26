@@ -66,7 +66,7 @@ def ordered_text_entries(svg: str) -> list[tuple[float, float, str]]:
     care about non-numeric labels) should use ``numeric_text_entries``.
     """
     entries: list[tuple[float, float, str]] = []
-    for attrs, text in _text_elements(svg):
+    for attrs, text in text_elements(svg):
         x_m = re.search(r'x="([^"]+)"', attrs)
         y_m = re.search(r'y="([^"]+)"', attrs)
         if x_m and y_m:
@@ -74,13 +74,17 @@ def ordered_text_entries(svg: str) -> list[tuple[float, float, str]]:
     return entries
 
 
-def _text_elements(svg: str) -> list[tuple[str, str]]:
+def text_elements(svg: str) -> list[tuple[str, str]]:
     """``(attributes, text)`` for every non-empty attributed ``<text>`` element.
 
     The module docstring's "the regex lives here once" promise, made literal:
     ``ordered_text_entries`` reads the positions off these attributes and
     ``y_axis_title`` reads the rotation, so a second helper needing another
-    attribute does not bring a second copy of the pattern with it.
+    attribute does not bring a second copy of the pattern with it. Public
+    (no leading underscore) so a sibling test module that needs the raw
+    attributes -- not just the parsed ``(x, y, text)`` triples
+    ``ordered_text_entries`` returns -- can import it directly instead of
+    reaching into this module's internals.
     """
     return [
         (attrs, text.strip())
@@ -99,7 +103,7 @@ def y_axis_title(svg: str) -> str | None:
     telling those two cases apart is what the ``displot(kind="rug", kde=True)``
     composition is pinned on (#201).
     """
-    titles = [text for attrs, text in _text_elements(svg) if "rotate(-90" in attrs]
+    titles = [text for attrs, text in text_elements(svg) if "rotate(-90" in attrs]
     if not titles:
         return None
     if len(titles) > 1:

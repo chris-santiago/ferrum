@@ -813,6 +813,12 @@ pub struct PreparedInputs {
     /// router all read it instead of re-deriving the mapping. Empty (default)
     /// for every chart with no independent-y layer — the byte-stable path.
     pub y_slot_plan: crate::render::scale_resolve::YSlotPlan,
+    /// This chart's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// before any composite union is applied ([`PreparedAxes::x_text_rows`]/
+    /// `y_text_rows`). A composite tree's resolve pass reads these to union
+    /// a group's members' rows without re-measuring them.
+    pub(in crate::render) x_text_rows: crate::render::scale_resolve::TextEdgeRows,
+    pub(in crate::render) y_text_rows: crate::render::scale_resolve::TextEdgeRows,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -1020,6 +1026,11 @@ fn build_axis_input(
     scale: &crate::render::scale_resolve::ScaleKind,
     tick_count: usize,
     theme: &crate::layout::ThemeInputs,
+    // The `Mark::Text` ink demand this channel's panel-real axis carries
+    // (spec §6.13; empty when no `Mark::Text` layer draws it), carried onto
+    // the built `TickProjection` so layout applies the SAME inset the marks
+    // resolve with.
+    text_demand: crate::layout::geometry::TextEdgeDemand,
 ) -> Result<AxisInput, crate::render::UnflippedRenderError> {
     // Axis title resolution priority:
     //   1. Spec-level encoding title (set by user via .encode(y=Y(..., title=...)))
@@ -1139,6 +1150,7 @@ fn build_axis_input(
         },
         channel.reverses(),
         minor_fractions,
+        text_demand,
     )
     .map_err(crate::render::UnflippedRenderError::new)?;
 
@@ -1640,6 +1652,7 @@ pub fn prepare_render_inputs(
             (0.0, 1.0),
             (0.0, 1.0),
             theme,
+            &crate::render::scale_resolve::TextEdgeDemands::default(),
             leaf_scales,
         )?;
 
@@ -1683,16 +1696,20 @@ pub fn prepare_render_inputs(
         y_tick_count,
         secondary_y_scales,
         secondary_y_tick_counts,
+        x_text_rows,
+        y_text_rows,
     } = build_axes(
         spec,
         rendering_encoding,
         &provisional_scales,
         theme,
         &layers,
+        &layer_batches,
         &y_slot_plan,
         &transformed,
         &transform_outputs,
         chart_config,
+        leaf_scales,
         &mut scale_warnings,
     )?;
 
@@ -1808,6 +1825,8 @@ pub fn prepare_render_inputs(
         secondary_y_scales,
         secondary_y_tick_counts,
         y_slot_plan,
+        x_text_rows,
+        y_text_rows,
     })
 }
 
@@ -3090,6 +3109,14 @@ pub(crate) struct PreparedAxes {
     pub(crate) y_tick_count: usize,
     pub(crate) secondary_y_scales: Vec<crate::render::scale_resolve::ScaleKind>,
     pub(crate) secondary_y_tick_counts: Vec<usize>,
+    /// This chart's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// before any composite union is applied — i.e. `leaf_scales`'s own
+    /// union when one was given, else what this chart's layers measure on
+    /// their own. Carried out so a composite tree's resolve pass
+    /// (`render::composite::assign_union`) can union this leaf's rows with
+    /// its siblings' without re-measuring them from a reconstructed spec.
+    pub(crate) x_text_rows: crate::render::scale_resolve::TextEdgeRows,
+    pub(crate) y_text_rows: crate::render::scale_resolve::TextEdgeRows,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3099,10 +3126,21 @@ fn build_axes(
     provisional_scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
     layers: &[LayerPrepared],
+    layer_batches: &[&RecordBatch],
     y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     chart_config: &crate::render::chart_config::ChartConfig,
+    // Composite seam (spec §6.13): `Some` only for a composite leaf whose
+    // positional channel shares a domain across the tree. When that leaf's
+    // channel also carries a group `Mark::Text` rows union
+    // (`LeafScaleContext::x_text_rows`/`y_text_rows`, built by
+    // `composite::assign_union` from every member's own rows), this leaf's
+    // demand is built from THAT union instead of its own rows alone, so its
+    // marks and whichever member's chrome the overlay keeps protect the
+    // same ink. `None` for every standalone (flat/facet) render, and a
+    // composite leaf whose channel shares no domain → byte-identical.
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<PreparedAxes, RenderError> {
     // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
@@ -3124,6 +3162,10 @@ fn build_axes(
     let cartesian_axes_suppressed =
         crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
+    // Parsed once per render (spec §6.13): every `Mark::Text` row this pass
+    // and `build_secondary_y_axis_inputs` measure shares this one font.
+    let metrics = crate::render::font::FontdueMetrics::new();
+
     let SecondaryYAxes {
         inputs: secondary_y,
         scales: secondary_y_scales,
@@ -3136,6 +3178,7 @@ fn build_axes(
         transform_outputs,
         theme,
         chart_config,
+        &metrics,
         warnings,
     )?;
     // The chart's own titles in screen space: a channel's title belongs to
@@ -3146,6 +3189,37 @@ fn build_axes(
     if coord_flipped {
         chart_encoding.flip_positional();
     }
+    // The primary axes' own text-edge demand (spec §6.13): built once here,
+    // off the provisional (domain-correct, pixel-placeholder) scale and the
+    // chart's REAL batch — a row's ink extent does not depend on the pixel
+    // range, so this is the SAME demand the panel-real mark resolve builds
+    // later from `prep.axes.x`/`.y`, never a second guess at it. Empty
+    // whenever the channel's padding is not the default
+    // (`text_inset_applies`) or the chart has no `Mark::Text` layer on it.
+    let x_applies = crate::render::scale_resolve::text_inset_applies(
+        rendering_encoding.x.as_ref().and_then(|e| e.scale.as_ref()),
+        crate::render::scale_resolve::coord_exempts_channel(spec.coord.as_ref(), "x"),
+    );
+    let y_applies = crate::render::scale_resolve::text_inset_applies(
+        rendering_encoding.y.as_ref().and_then(|e| e.scale.as_ref()),
+        crate::render::scale_resolve::coord_exempts_channel(spec.coord.as_ref(), "y"),
+    );
+    // `primary_axis_text_rows` reads every layer on x, but on y only the
+    // layers `y_slot_plan` places on the primary (shared) slot, so an
+    // `independent_y` layer's own text never floors the primary y it does
+    // not share.
+    let layer_pairs = || layers.iter().zip(layer_batches.iter().copied());
+    let own_x_rows =
+        crate::render::scale_resolve::primary_axis_text_rows("x", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics);
+    let own_y_rows =
+        crate::render::scale_resolve::primary_axis_text_rows("y", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics);
+    // A composite leaf whose channel shares a group's rows union measures
+    // from THAT instead of its own rows alone — never a second guess at
+    // what the group's other members already measured.
+    let x_rows = leaf_scales.and_then(|c| c.x_text_rows.clone()).unwrap_or_else(|| own_x_rows.clone());
+    let y_rows = leaf_scales.and_then(|c| c.y_text_rows.clone()).unwrap_or_else(|| own_y_rows.clone());
+    let x_text_demand = provisional_scales.x.text_edge_demand(x_applies.then_some(&x_rows));
+    let y_text_demand = provisional_scales.y.text_edge_demand(y_applies.then_some(&y_rows));
     let axes = AxesInput {
         x: build_axis_input(
             Channel::X,
@@ -3154,6 +3228,7 @@ fn build_axes(
             &provisional_scales.x,
             x_tick_count,
             theme,
+            x_text_demand,
         )
         .map_err(|e| e.resolve(coord_flipped))?,
         y: build_axis_input(
@@ -3163,6 +3238,7 @@ fn build_axes(
             &provisional_scales.y,
             y_tick_count,
             theme,
+            y_text_demand,
         )
         .map_err(|e| e.resolve(coord_flipped))?,
         // `AxesInput::show_x`/`show_y` mean "this Cartesian axis is DRAWN", so
@@ -3183,6 +3259,8 @@ fn build_axes(
         y_tick_count,
         secondary_y_scales,
         secondary_y_tick_counts,
+        x_text_rows: own_x_rows,
+        y_text_rows: own_y_rows,
     })
 }
 
@@ -3220,6 +3298,7 @@ fn build_secondary_y_axis_inputs(
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &crate::layout::ThemeInputs,
     chart_config: &crate::render::chart_config::ChartConfig,
+    metrics: &crate::render::font::FontdueMetrics,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<SecondaryYAxes, RenderError> {
     let mut inputs = Vec::new();
@@ -3268,6 +3347,7 @@ fn build_secondary_y_axis_inputs(
                 layer_batch,
                 (0.0, 1.0),
                 (0.0, 1.0),
+                &Default::default(),
             )?;
         warnings.extend(drop_placeholder_only_warnings(layer_scale_warnings));
         // D3 (spec §4.2) at the `axis_y2` position: reshape THIS layer's own y
@@ -3309,6 +3389,19 @@ fn build_secondary_y_axis_inputs(
         // optional — the compiler forces it before `?` can propagate a
         // `RenderError`.
         let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+        // The secondary axis's own text-edge demand (spec §6.13), measured
+        // on this layer's REAL batch (unlike the placeholder-range scale
+        // resolve above, a row's ink extent does not depend on the pixel
+        // range at all): the slot's own layer, over its own data, matching
+        // `resolve_layer_y_scale`'s panel-real resolve below.
+        let y_applies = crate::render::scale_resolve::text_inset_applies(
+            layer_encoding.y.as_ref().and_then(|e| e.scale.as_ref()),
+            false,
+        );
+        let y_rows = crate::render::scale_resolve::text_edge_rows(
+            "y", std::iter::once((layer, layer_batch)), spec.facet.as_ref(), theme, metrics,
+        );
+        let y_text_demand = y_scale.text_edge_demand(y_applies.then_some(&y_rows));
         let axis_input = build_axis_input(
             Channel::Y,
             layer_encoding.y.as_ref(),
@@ -3316,6 +3409,7 @@ fn build_secondary_y_axis_inputs(
             &y_scale,
             y_tick_count,
             theme,
+            y_text_demand,
         )
         .map_err(|e| e.resolve(coord_flipped))?;
         inputs.push(axis_input);
@@ -3674,11 +3768,11 @@ pub(in crate::render) fn layer_effective_y<'a>(
 /// `From` conversion to [`RenderError`], so a new call chain reaching this
 /// function cannot propagate the error via `?` without an explicit
 /// `.resolve(...)` somewhere in the chain — it fails to compile instead of
-/// silently defaulting. This closes a real near-miss: cycle 1 of this task
-/// shipped `build_axes` and the chart-level chain but missed
-/// `build_secondary_y_axis_inputs`, which went unpatched (silently wrong
-/// under flip) until cycle 2 caught it, back when this discipline was
-/// prose-only.
+/// silently defaulting. Without it, a call chain can add `build_axes`'
+/// `.resolve(coord_flipped)` while leaving a sibling chain (such as
+/// `build_secondary_y_axis_inputs`'s per-layer one) resolving `false`,
+/// silently wrong under a flip; the compiler check keeps every chain honest
+/// instead of relying on a prose rule to catch the omission.
 pub(crate) fn parse_axis_orient(
     value: &str,
     channel: &'static str,
@@ -4550,6 +4644,14 @@ type AxisTickInputs = (Vec<String>, Vec<bool>, Option<usize>, Option<TickProject
 /// behavior). An ordinal scale yields no projection (`None`), matching uniform-
 /// slot placement.
 ///
+/// `text_demand` (spec §6.13) is likewise supplied by the caller rather than
+/// read off `scale`: `scale` here is the metadata-only placeholder `(0, 1)`-range
+/// resolution (`scale.padding_fraction()`'s own precondition), over which the
+/// demand's pixel needs would be meaningless, so the caller passes the SAME
+/// `TextEdgeDemand` `ScaleKind::text_edge_demand` built for the panel-real
+/// axis, carried onto [`TickProjection::text_demand`] for layout to apply at
+/// the real panel range. Empty for every axis no `Mark::Text` layer draws.
+///
 /// Errors (#133) when either mode's format is time-typed but the resolved
 /// `scale` is not temporal — see [`refuse_format_temporality_mismatch_scale`],
 /// which both mode arms share so the surfaces cannot drift on the refusal
@@ -4561,6 +4663,7 @@ pub(crate) fn build_axis_tick_inputs(
     mode: TickFormatMode<'_>,
     is_y: bool,
     minor: Vec<f64>,
+    text_demand: crate::layout::geometry::TextEdgeDemand,
 ) -> Result<AxisTickInputs, RenderError> {
     use crate::render::scale_resolve::ScaleKind;
     let channel: &'static str = if is_y { "y" } else { "x" };
@@ -4653,10 +4756,11 @@ pub(crate) fn build_axis_tick_inputs(
     // A non-empty major-fraction vec means a continuous scale → scale-projected
     // placement; an empty vec means ordinal/discretizing → no carrier (uniform
     // slots), byte-identical to the pre-extraction `None`.
-    let projection = (!fractions.is_empty()).then(|| TickProjection {
+    let projection = (!fractions.is_empty()).then_some(TickProjection {
         padding_frac,
         major: fractions,
         minor,
+        text_demand,
     });
 
     Ok((labels, anchors, origin, projection, threaded))

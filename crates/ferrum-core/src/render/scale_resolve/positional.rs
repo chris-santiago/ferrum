@@ -87,6 +87,83 @@ pub(in crate::render) fn resolve_padding_fraction(scale_padding: Option<f64>, ha
     DEFAULT_SCALE_PADDING_FRAC
 }
 
+/// The `ContinuousScaleCommon` embedded in any of `ScaleSpec`'s 7 continuous
+/// variants, or `None` for a categorical/sequential/diverging/quantize/
+/// binOrdinal variant — the same match [`crate::spec::encoding::ScaleSpec::domain_param`]
+/// uses for "does this variant carry the shared continuous fields at all".
+fn continuous_common(scale: &crate::spec::encoding::ScaleSpec) -> Option<&crate::spec::encoding::ContinuousScaleCommon> {
+    use crate::spec::encoding::ScaleSpec;
+    match scale {
+        ScaleSpec::Linear { common, .. }
+        | ScaleSpec::Log { common, .. }
+        | ScaleSpec::Time { common, .. }
+        | ScaleSpec::Symlog { common, .. }
+        | ScaleSpec::Pow { common, .. }
+        | ScaleSpec::Sqrt { common, .. }
+        | ScaleSpec::Utc { common, .. } => Some(common),
+        _ => None,
+    }
+}
+
+/// Whether a continuous `channel`'s text-edge demand (spec §6.13) applies:
+/// true exactly when `resolve_padding_fraction` would return the plain
+/// `DEFAULT_SCALE_PADDING_FRAC` (no `padding=`, no explicit `domain=`) AND
+/// no explicit `range=` bypasses the inset AND the coord sets no
+/// `xlim`/`ylim` on this channel, or the channel does not draw against a
+/// rectangular Cartesian frame at all (`CoordPolar`, [`coord_exempts_channel`]).
+/// `scale` is the channel's resolved scale spec — the encoding's own, or the
+/// caller scale a composite leaf resolves with; a system-injected scale (the
+/// bar zero anchor, #247A) counts as no scale at all, since it is not
+/// something the user named. A categorical scale (Ordinal/Band/Point) or
+/// Sequential/Diverging/Quantize/BinOrdinal variant never applies — those
+/// carry no `ContinuousScaleCommon` to read, and `ScaleKind::text_edge_demand`
+/// already returns empty for Ordinal.
+pub(in crate::render) fn text_inset_applies(scale: Option<&crate::spec::encoding::ScaleSpec>, coord_exempt: bool) -> bool {
+    if coord_exempt {
+        return false;
+    }
+    let scale = scale.filter(|s| !s.is_system_injected());
+    match scale {
+        None => true,
+        Some(s) => match continuous_common(s) {
+            Some(common) => common.padding.is_none() && common.domain.is_none() && common.range.is_none(),
+            None => false,
+        },
+    }
+}
+
+/// Whether `spec.coord` makes `channel`'s text-edge inset meaningless — the
+/// `coord_exempt` [`text_inset_applies`] takes: either `spec.coord` pins an
+/// explicit `xlim`/`ylim` on `channel` (read the way
+/// [`apply_coord_domain_overrides`] reads the same fields), or `coord`
+/// suppresses the Cartesian axes outright
+/// ([`crate::spec::coord::suppresses_cartesian_axes`], `CoordPolar`/`CoordGeo`),
+/// under which `x`/`y` map onto a circle or a projected plane rather than a
+/// rectangular plot frame — `inset_pixel_range`'s "keep ink off this straight
+/// edge" has no frame to apply to, on EITHER channel regardless of which one
+/// the user bound to `theta`/`radius`. Pinned by
+/// `an_unstacked_label_with_theta_on_y_sits_at_its_value_on_the_y_scale`
+/// (`render::marks::text`'s polar-placement tests): without this exemption a
+/// `Mark::Text` row on a polar `y` narrowed `scales.y`'s pixel range for the
+/// angle math itself, moving every label off the position its own value maps
+/// to.
+pub(in crate::render) fn coord_exempts_channel(coord: Option<&crate::spec::coord::CoordKind>, channel: &str) -> bool {
+    use crate::spec::coord::CoordKind;
+    if crate::spec::coord::suppresses_cartesian_axes(coord) {
+        return true;
+    }
+    match coord {
+        Some(CoordKind::Cartesian { x_domain, y_domain, .. }) | Some(CoordKind::Fixed { x_domain, y_domain, .. }) => {
+            match channel {
+                "x" => x_domain.is_some(),
+                "y" => y_domain.is_some(),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// #183: a categorical axis asked to place more categories into its pixel
 /// range than the range has room for degrades honestly (there is no invalid
 /// input to refuse — d3's band/point math is well-defined for any domain
@@ -152,6 +229,12 @@ pub(in crate::render) fn build_axis_scale(
     transform_lineages: &crate::transform::run::OutputLineages,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
+    // The `Mark::Text` ink demand this channel's axis carries (spec
+    // §6.13), already built by the caller (empty for the metadata-only
+    // placeholder pass, a non-default-padding channel, or a chart with no
+    // `Mark::Text` layer on it) — this function never computes it, so it
+    // never has to tell a placeholder pixel range from a real one.
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
     // Faceted + this channel resolves `ResolveMode::Shared`: the auto-inferred
     // domain also unions the global all-panels batch (`FINAL_OUTPUT_KEY`) so a
     // faceted raw field's positional domain spans every panel (T4). `false` for
@@ -363,7 +446,7 @@ pub(in crate::render) fn build_axis_scale(
         // matching on it explicitly means a future caller that did route an
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
-        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, warnings)
+        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, text_demand, warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
                     RenderError::InvalidBandPadding { channel, error: e, coord_flipped }
@@ -383,8 +466,7 @@ pub(in crate::render) fn build_axis_scale(
             });
     }
 
-    let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
-    if let Some(scale) = shared.and_then(|shared| shared_domain_axis_scale(&dtype, shared, pr, warnings)) {
+    if let Some(scale) = shared.and_then(|shared| shared_domain_axis_scale(&dtype, shared, pr, text_demand, warnings)) {
         return Ok(scale);
     }
 
@@ -393,6 +475,8 @@ pub(in crate::render) fn build_axis_scale(
             let (min, max) = resolve_numeric_extent(
                 channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
             )?;
+            let frac = resolve_padding_fraction(None, false);
+            let inset = inset_pixel_range(pr, frac, text_demand);
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
@@ -444,6 +528,8 @@ pub(in crate::render) fn build_axis_scale(
             let (min, max) = resolve_numeric_extent(
                 channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
             )?;
+            let frac = resolve_padding_fraction(None, false);
+            let inset = inset_pixel_range(pr, frac, text_demand);
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
@@ -466,9 +552,11 @@ fn shared_domain_axis_scale(
     dtype: &SpecDataType,
     shared: &SharedDomain,
     pr: (f64, f64),
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
 ) -> Option<ScaleKind> {
-    let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
+    let frac = resolve_padding_fraction(None, false);
+    let inset = inset_pixel_range(pr, frac, text_demand);
     match (dtype, shared) {
         (SpecDataType::Quantitative, SharedDomain::Numeric { lo, hi }) => Some(ScaleKind::Linear(
             LinearScale::new_internal(vec![*lo, *hi], vec![inset.0, inset.1], false, false),
@@ -508,7 +596,10 @@ pub(in crate::render) fn imposed_axis_scale(
     let dtype = binding.type_?;
     let pr = axis_pixel_range(channel, &dtype, pixel_range);
     let Some(scale) = binding.scale.as_ref().filter(|scale| !scale.is_system_injected()) else {
-        return shared_domain_axis_scale(&dtype, shared?, pr, warnings).map(Ok);
+        // An imposed member draws nothing of its own on this channel, so it
+        // contributes no text rows; its own (undrawn) axis stays at the
+        // plain default inset.
+        return shared_domain_axis_scale(&dtype, shared?, pr, &Default::default(), warnings).map(Ok);
     };
     // The group's domain, as the one column the scale reads: the member
     // holds no column of the bound field. A categorical scale reads the
@@ -554,7 +645,10 @@ pub(in crate::render) fn imposed_axis_scale(
         }),
     };
     let data_categories = || distinct_positional_categories(&batch, &binding.field, None);
-    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, warnings))
+    // An imposed member draws nothing of its own on this channel (see the
+    // `shared_domain_axis_scale` call above), so it contributes no text
+    // rows either.
+    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, &Default::default(), warnings))
 }
 
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
@@ -687,6 +781,11 @@ pub(in crate::render) fn build_from_scale_spec(
     sort_ctx: &SortContext<'_>,
     data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
     data_categories: &dyn Fn() -> Result<Vec<String>, RenderError>,
+    // The channel's text-edge demand (spec §6.13), already gated by the
+    // caller's `text_inset_applies` check: empty whenever this scale states
+    // an explicit `padding`/`domain`/`range`, so every continuous variant
+    // arm below can forward it unconditionally.
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::spec::encoding::ScaleSpec;
@@ -707,22 +806,22 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, zero: *zero, reverse: common.reverse };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
-            resolve_log_scale(channel, &enc.field, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, warnings)?
+            resolve_log_scale(channel, &enc.field, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, text_demand, warnings)?
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -747,19 +846,19 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Pow { exponent, common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
             // F-L04-06: `utc=true` survives resolution — the wire tag no
             // longer collapses into an indistinguishable `TimeScale` once
             // resolved (`new_internal` used to default it away here).
@@ -846,7 +945,7 @@ pub(in crate::render) fn build_from_scale_spec(
             // completely separate resolution path — `scale_resolve::color`),
             // so both are hard-coded `false` rather than threading a value
             // that could never mean anything else here.
-            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, &unsided_extent, pr, DomainAdjust::default())?;
+            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, &unsided_extent, pr, DomainAdjust::default(), text_demand)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }
     })
@@ -1027,6 +1126,7 @@ fn resolve_log_scale(
     pr: (f64, f64),
     data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
     coord_flipped: bool,
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::scale::log::LogSide;
@@ -1039,7 +1139,7 @@ fn resolve_log_scale(
 
     let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
     let unsided_extent = || Ok((lo, hi));
-    let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust)?;
+    let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, &unsided_extent, pr, adjust, text_demand)?;
     Ok(ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, nice)))
 }
 
@@ -1208,6 +1308,10 @@ fn resolve_continuous_domain_and_range(
     data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
     pr: (f64, f64),
     adjust: DomainAdjust,
+    // The channel's text-edge demand (spec §6.13), already gated by the
+    // caller's `text_inset_applies` check — empty whenever `domain`/`range`
+    // above is explicit, so this never needs to re-check that itself.
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
 ) -> Result<(Vec<f64>, Vec<f64>), RenderError> {
     let mut d = match domain {
         Some(d) => d.clone(),
@@ -1220,7 +1324,7 @@ fn resolve_continuous_domain_and_range(
         r.clone()
     } else {
         let frac = resolve_padding_fraction(adjust.padding, domain.is_some());
-        let inset = inset_pixel_range(pr, frac);
+        let inset = inset_pixel_range(pr, frac, text_demand);
         vec![inset.0, inset.1]
     };
     if adjust.zero && d.len() == 2 {
@@ -1309,7 +1413,7 @@ pub(in crate::render) fn apply_coord_domain_overrides(
 
     if let Some((lo, hi)) = x_domain_override {
         let pr = if expand {
-            inset_pixel_range(x_pixel_range, resolve_padding_fraction(None, false))
+            inset_pixel_range(x_pixel_range, resolve_padding_fraction(None, false), &Default::default())
         } else {
             x_pixel_range
         };
@@ -1327,7 +1431,7 @@ pub(in crate::render) fn apply_coord_domain_overrides(
 
     if let Some((lo, hi)) = y_domain_override {
         let pr = if expand {
-            inset_pixel_range(y_pixel_range, resolve_padding_fraction(None, false))
+            inset_pixel_range(y_pixel_range, resolve_padding_fraction(None, false), &Default::default())
         } else {
             y_pixel_range
         };
@@ -1502,7 +1606,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{band_point_pixel_range, ordinal_pixel_range};
+    use super::{band_point_pixel_range, coord_exempts_channel, ordinal_pixel_range, text_inset_applies};
     use crate::render::{RenderError, RenderWarning};
     use crate::scale::discrete::{CategoricalPlacement, DiscreteLayout};
     use arrow::record_batch::RecordBatch;
@@ -1818,7 +1922,7 @@ mod tests {
                 )
             })
         };
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2149,6 +2253,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 500.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -2312,7 +2417,7 @@ mod tests {
             }
             Ok((extent, tally))
         };
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), &mut warnings)
     }
 
     fn resolve_scale(
@@ -2430,6 +2535,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 500.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -2875,6 +2981,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -2965,6 +3072,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             shared,
             false,
@@ -3118,6 +3226,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -3188,6 +3297,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -3218,6 +3328,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 400.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -3460,6 +3571,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             pixel_range,
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -3535,5 +3647,124 @@ mod tests {
         base_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         rev_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(base_sorted, rev_sorted, "reverse reorders ticks, it does not pick a different set");
+    }
+
+    // ── spec §6.13: text_inset_applies / coord_exempts_channel ──
+
+    fn linear_scale(common: crate::spec::encoding::ContinuousScaleCommon) -> crate::spec::encoding::ScaleSpec {
+        crate::spec::encoding::ScaleSpec::Linear { common, nice: false, zero: false, system_injected: false }
+    }
+
+    fn plain_common() -> crate::spec::encoding::ContinuousScaleCommon {
+        reverse_common(None, None, false)
+    }
+
+    #[test]
+    fn text_inset_applies_with_no_scale_and_no_coord_exemption() {
+        assert!(text_inset_applies(None, false));
+    }
+
+    #[test]
+    fn text_inset_applies_coord_exempt_overrides_everything() {
+        assert!(!text_inset_applies(None, true));
+    }
+
+    #[test]
+    fn text_inset_applies_a_scale_object_with_unset_padding_domain_range() {
+        let scale = linear_scale(plain_common());
+        assert!(text_inset_applies(Some(&scale), false), "fm.LinearScale() with nothing set is still default padding");
+    }
+
+    #[test]
+    fn text_inset_applies_false_with_explicit_padding() {
+        let mut common = plain_common();
+        common.padding = Some(0.05);
+        let scale = linear_scale(common);
+        assert!(!text_inset_applies(Some(&scale), false));
+    }
+
+    #[test]
+    fn text_inset_applies_false_with_explicit_domain() {
+        let mut common = plain_common();
+        common.domain = Some(vec![0.0, 10.0]);
+        let scale = linear_scale(common);
+        assert!(!text_inset_applies(Some(&scale), false));
+    }
+
+    #[test]
+    fn text_inset_applies_false_with_explicit_range() {
+        let mut common = plain_common();
+        common.range = Some(vec![0.0, 400.0]);
+        let scale = linear_scale(common);
+        assert!(!text_inset_applies(Some(&scale), false));
+    }
+
+    #[test]
+    fn text_inset_applies_a_system_injected_scale_counts_as_no_scale() {
+        let scale = crate::spec::encoding::ScaleSpec::Linear {
+            common: plain_common(),
+            nice: false,
+            zero: true,
+            system_injected: true,
+        };
+        assert!(text_inset_applies(Some(&scale), false), "the bar zero-anchor is not something the user named");
+    }
+
+    #[test]
+    fn text_inset_applies_false_for_a_categorical_scale() {
+        let scale = crate::spec::encoding::ScaleSpec::Ordinal { domain: None, range: None, padding: 0.0 };
+        assert!(!text_inset_applies(Some(&scale), false), "a band/point axis carries no continuous padding to default");
+    }
+
+    #[test]
+    fn coord_exempts_channel_with_no_coord() {
+        assert!(!coord_exempts_channel(None, "x"));
+        assert!(!coord_exempts_channel(None, "y"));
+    }
+
+    #[test]
+    fn coord_exempts_channel_polar_exempts_both_channels() {
+        use crate::spec::coord::{CoordKind, PolarDirection, PolarThetaChannel};
+        let coord = CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        };
+        assert!(coord_exempts_channel(Some(&coord), "x"));
+        assert!(coord_exempts_channel(Some(&coord), "y"));
+    }
+
+    #[test]
+    fn coord_exempts_channel_geo_exempts_both_channels() {
+        use crate::spec::coord::{CoordKind, GeoProjection};
+        let coord = CoordKind::Geo { projection: GeoProjection::Mercator };
+        assert!(coord_exempts_channel(Some(&coord), "x"));
+        assert!(coord_exempts_channel(Some(&coord), "y"));
+    }
+
+    #[test]
+    fn coord_exempts_channel_cartesian_xlim_exempts_only_x() {
+        use crate::spec::coord::CoordKind;
+        let coord = CoordKind::Cartesian { x_domain: Some((0.0, 10.0)), y_domain: None, expand: true, clip: true };
+        assert!(coord_exempts_channel(Some(&coord), "x"));
+        assert!(!coord_exempts_channel(Some(&coord), "y"));
+    }
+
+    #[test]
+    fn coord_exempts_channel_fixed_ylim_exempts_only_y() {
+        use crate::spec::coord::CoordKind;
+        let coord = CoordKind::Fixed { ratio: 1.0, x_domain: None, y_domain: Some((0.0, 10.0)), expand: true, clip: true };
+        assert!(!coord_exempts_channel(Some(&coord), "x"));
+        assert!(coord_exempts_channel(Some(&coord), "y"));
+    }
+
+    #[test]
+    fn coord_exempts_channel_flip_exempts_neither_channel() {
+        use crate::spec::coord::CoordKind;
+        assert!(!coord_exempts_channel(Some(&CoordKind::Flip), "x"));
+        assert!(!coord_exempts_channel(Some(&CoordKind::Flip), "y"));
     }
 }

@@ -304,9 +304,9 @@ fn build_axis_input_x_vs_y_continuous_reverse_parity() {
     };
     let scale = linear_scale_0_10();
 
-    let mut x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme)
+    let mut x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme, Default::default())
         .expect("x axis input");
-    let mut y = build_axis_input(Channel::Y, Some(&y_enc), Some(&y_enc), &scale, 10, &theme)
+    let mut y = build_axis_input(Channel::Y, Some(&y_enc), Some(&y_enc), &scale, 10, &theme, Default::default())
         .expect("y axis input");
     // `build_axis_input` alone never folds in the theme default
     // (`AxesInput::apply_show_defaults` does that at chart-config-resolve
@@ -367,9 +367,9 @@ fn build_axis_input_y_ordinal_does_not_reverse() {
     };
     let scale = ordinal_scale_abc();
 
-    let x = build_axis_input(Channel::X, Some(&enc), Some(&enc), &scale, 10, &theme)
+    let x = build_axis_input(Channel::X, Some(&enc), Some(&enc), &scale, 10, &theme, Default::default())
         .expect("x axis input");
-    let y = build_axis_input(Channel::Y, Some(&enc), Some(&enc), &scale, 10, &theme)
+    let y = build_axis_input(Channel::Y, Some(&enc), Some(&enc), &scale, 10, &theme, Default::default())
         .expect("y axis input");
 
     assert_eq!(x.tick_labels, y.tick_labels, "ordinal y must not reverse");
@@ -402,6 +402,7 @@ fn build_axis_input_title_precedence() {
         &scale,
         10,
         &theme,
+        Default::default(),
     )
     .expect("axis input");
     assert_eq!(a.title.get().as_deref(), Some("spec"));
@@ -419,6 +420,7 @@ fn build_axis_input_title_precedence() {
         &scale,
         10,
         &theme,
+        Default::default(),
     )
     .expect("axis input");
     assert_eq!(*b.title.get(), None);
@@ -435,6 +437,7 @@ fn build_axis_input_title_precedence() {
         &scale,
         10,
         &theme,
+        Default::default(),
     )
     .expect("axis input");
     assert_eq!(c.title.get().as_deref(), Some("layer"));
@@ -3705,6 +3708,7 @@ fn tick_min_step_thinning_reformats_temporal_labels_instead_of_dropping_the_form
         padding_frac: scale.padding_fraction(),
         major: scale.tick_fractions(tick_count),
         minor: Vec::new(),
+        text_demand: Default::default(),
     });
     // A chart-level `configure_axis(label_format="date_iso", tick_min_step=...)`
     // shape: both fields are chart-level-only-owned (see
@@ -4401,6 +4405,7 @@ fn old_independent_x(
             padding_frac: scale.padding_fraction(),
             major: fractions,
             minor: Vec::new(),
+            text_demand: Default::default(),
         })
     };
     (labels, proj)
@@ -4428,6 +4433,7 @@ fn old_independent_y(
                 padding_frac: scale.padding_fraction(),
                 major: fractions,
                 minor: Vec::new(),
+                text_demand: Default::default(),
             }
         })
     };
@@ -4447,6 +4453,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     let (o_labels, o_proj) = old_independent_x(&scale, 10, None, None);
@@ -4468,6 +4475,7 @@ fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     let (o_labels, o_proj) = old_independent_x(&scale, 5, Some(".0%"), None);
@@ -4489,6 +4497,7 @@ fn build_axis_tick_inputs_y_matches_old_independent_reversed() {
         },
         true,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     let (o_labels, o_proj) = old_independent_y(&scale, 8, None, None);
@@ -4519,6 +4528,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert!(x_proj.is_none(), "ordinal scale yields no tick projection");
@@ -4531,6 +4541,7 @@ fn build_axis_tick_inputs_ordinal_has_no_projection() {
         },
         true,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert!(y_proj.is_none());
@@ -4560,6 +4571,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
         },
         false,
         shared_minor.clone(),
+        Default::default(),
     )
     .unwrap();
 
@@ -4573,6 +4585,7 @@ fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it(
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
 
@@ -4646,6 +4659,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
             },
             false,
             Vec::new(),
+            Default::default(),
         )
         .unwrap();
         assert_eq!(threaded, None, "Immediate mode threads nothing");
@@ -4667,6 +4681,7 @@ fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does()
             },
             false,
             Vec::new(),
+            Default::default(),
         )
         .unwrap();
         assert_eq!(
@@ -4693,6 +4708,7 @@ fn build_axis_tick_inputs_immediate_still_applies_a_numeric_format_itself() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert_eq!(
@@ -4721,6 +4737,7 @@ fn build_axis_tick_inputs_thread_refuses_time_format_on_non_temporal_scale() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap_err();
     assert_eq!(
@@ -4749,6 +4766,7 @@ fn build_axis_tick_inputs_immediate_refuses_time_format_on_non_temporal_scale() 
         },
         true,
         Vec::new(),
+        Default::default(),
     )
     .unwrap_err();
     assert_eq!(
@@ -4785,6 +4803,7 @@ fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert_eq!(threaded.as_deref(), Some(".1%"), "threaded like every d3 spec");
@@ -4794,6 +4813,7 @@ fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal
         TickFormatMode::Immediate { format: Some(".1%"), format_type: None },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert_eq!(threaded, None);
@@ -4832,6 +4852,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
             },
             false,
             Vec::new(),
+            Default::default(),
         )
         .unwrap();
         assert_eq!(thread, default_labels, "Thread, {spec}");
@@ -4845,6 +4866,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_d
             },
             false,
             Vec::new(),
+            Default::default(),
         )
         .unwrap();
         assert_eq!(immediate, default_labels, "Immediate, {spec}");
@@ -4873,6 +4895,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_refuses_on_non_tempo
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap_err();
     assert_eq!(thread, expected);
@@ -4885,6 +4908,7 @@ fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_refuses_on_non_tempo
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap_err();
     assert_eq!(immediate, expected);
@@ -4990,6 +5014,7 @@ fn build_axis_tick_inputs_undo_a_wrong_strftime_guess_and_refuse_ordinal_on_time
             TickFormatMode::Thread { format: Some(format.to_string()), format_type },
             false,
             Vec::new(),
+            Default::default(),
         );
         let immediate = build_axis_tick_inputs(
             scale,
@@ -4997,6 +5022,7 @@ fn build_axis_tick_inputs_undo_a_wrong_strftime_guess_and_refuse_ordinal_on_time
             TickFormatMode::Immediate { format: Some(format), format_type },
             false,
             Vec::new(),
+            Default::default(),
         );
         (thread, immediate)
     };
@@ -5212,6 +5238,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
             TickFormatMode::Thread { format: Some(format.to_string()), format_type },
             true,
             Vec::new(),
+            Default::default(),
         );
         let immediate = build_axis_tick_inputs(
             &time,
@@ -5219,6 +5246,7 @@ fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
             TickFormatMode::Immediate { format: Some(format), format_type },
             true,
             Vec::new(),
+            Default::default(),
         );
         (thread, immediate)
     };
@@ -5259,6 +5287,7 @@ fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert_eq!(threaded.as_deref(), Some("__ordinal__"));
@@ -5274,6 +5303,7 @@ fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
         },
         false,
         Vec::new(),
+        Default::default(),
     )
     .unwrap();
     assert_eq!(immediate, applied);
@@ -15374,7 +15404,7 @@ fn panel_value_bars(scene: &ferrum_scene::SceneGraph, axis: StackAxis) -> Vec<(f
                 StackAxis::X => area.w,
             };
             let (inset, end) =
-                crate::layout::geometry::inset_pixel_range((0.0, extent), crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC);
+                crate::layout::geometry::inset_pixel_range((0.0, extent), crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC, &Default::default());
             let mut bars: Vec<(f64, f64, f64)> = panel
                 .marks
                 .iter()

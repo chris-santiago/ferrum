@@ -9004,7 +9004,7 @@ _CONTROL_DIGESTS = {
     "F/bar-mean-color": "3d61496ff5e8aba078879d090bafeb1a3ab31cfd72eeb86cb39ec6c617c73aa0",
     "F/point-size-opacity": "0f9930eab400f34f690bbbb5d8086dfc2284512b0ef1dda6b586ff4aa37d38fa",
     "L/host-color-line": "99a33743ce01c54b26f67dbfaa45dc58f34b9e2e9514e28cdf236bccdf267f78",
-    "L/host-bar-mean-label": "358f05dc6992c4be27f63b1e4b37ad17849bc09d4f4293cb0561867de0d7dc5c",
+    "L/host-bar-mean-label": "4b0490b9eccca7c9c8973d5322b1e582068981407f9bc25e624f720df342506d",
     "+/both-color": "99a33743ce01c54b26f67dbfaa45dc58f34b9e2e9514e28cdf236bccdf267f78",
     "+/neither": "ab618fcb0f56aa5dc88e8f28c6c11214824166ef199be81771863ad707e4f386",
     "+/both-size": "356a7ea8ac422ec1379f30507987f35540a7f3933ec32ba8140799c0c2a6496e",

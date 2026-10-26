@@ -6,11 +6,13 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use super::{sided_min_max_f64, LeftOutTally, SidedExtent};
+use crate::render::prepare::LayerPrepared;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
+use crate::spec::position::StackValueAxis;
 use crate::transform::run::{OutputLineage, OutputLineages};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -1838,6 +1840,172 @@ fn bar_wants_zero(
     mark_style: Option<&crate::spec::mark_style::MarkKwargsSpec>,
 ) -> bool {
     mark == Mark::Bar && mark_style.and_then(|m| m.zero).unwrap_or(true)
+}
+
+/// One `Mark::Text` row's physical ink requirement on a continuous
+/// `channel`, before a scale's own range sign decides which end ("start"
+/// or "end") each side names
+/// ([`crate::render::scale_resolve::ScaleKind::text_edge_demand`]).
+/// `toward_lower`/`toward_higher` are the ink's extent toward the smaller
+/// and larger pixel coordinate respectively, with
+/// [`crate::layout::geometry::TEXT_INSET_FLOOR_PX`] and the mark's
+/// `dx`/`dy` already folded in; either may be negative (the ink is shifted
+/// away from that side, posing no constraint there).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TextEdgeRow {
+    pub(crate) value: f64,
+    pub(crate) toward_lower: f64,
+    pub(crate) toward_higher: f64,
+    /// Whether the axis these rows are about to demand a floor from is the
+    /// one whose own layers drew this row: always `true` as
+    /// [`text_edge_rows`] measures it (every row it returns is the
+    /// measuring chart's or leaf's own). A composite group's union
+    /// (`render::composite::assign_union`) re-stamps a sibling's copy
+    /// `false` for every OTHER member while keeping it `true` for its own
+    /// contributor, so [`crate::layout::geometry::EdgeNeed::own`] (which
+    /// this flows into unchanged through
+    /// [`crate::render::scale_resolve::ScaleKind::text_edge_demand`])
+    /// answers "does the axis resolving right now draw this mark" rather
+    /// than "did some member of the group draw it".
+    pub(crate) own: bool,
+}
+
+/// Every [`TextEdgeRow`] a continuous `channel`'s `Mark::Text` layers
+/// contribute (spec §6.13), scale-independent — built once per rendered
+/// channel by [`text_edge_rows`] and shared verbatim by a standalone
+/// chart's own axis and, unioned, by a composite group's shared axis.
+/// `pub(crate)` (not `pub(in crate::render)`, unlike most of this module):
+/// carried on [`seam::LeafResolveInput`](super::seam::LeafResolveInput),
+/// which is itself `pub(crate)`, so a narrower visibility here would make
+/// that field more private than its own containing struct.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TextEdgeRows(pub(crate) Vec<TextEdgeRow>);
+
+impl TextEdgeRows {
+    /// Append `other`'s rows, each stamped `own` (see [`TextEdgeRow::own`]):
+    /// `true` when appending a member's own measured rows into its own
+    /// union, `false` when appending a sibling's.
+    pub(in crate::render) fn extend_from(&mut self, other: &TextEdgeRows, own: bool) {
+        self.0.extend(other.0.iter().map(|row| TextEdgeRow { own, ..*row }));
+    }
+
+    pub(in crate::render) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Every `Mark::Text` row's ink requirement on `channel`, measured with
+/// `metrics` and each layer's own resolved mark style (spec §6.13), over
+/// `layers`: each already-prepared `LayerPrepared` paired with the batch it
+/// draws. A `LayerPrepared`'s encoding and `coord` are already resolved to
+/// the rendered coordinate space ([`LayerPrepared::in_its_coord`]), so
+/// `channel` ("x" or "y") is read straight off it with no flip logic; a
+/// caller that means the primary y slot only (excluding an `independent_y`
+/// layer) filters `layers` before calling. A stacking layer's stacked value
+/// is read through [`crate::render::position::layer_prepared_stack_preview`],
+/// the same stack the draw pass places that layer with, so a stacked text
+/// row is measured at its stacked value, consistent with the domain it is
+/// measured against — layered and unlayered alike, since every rendered
+/// layer is a `LayerPrepared`.
+pub(in crate::render) fn text_edge_rows<'a>(
+    channel: &str,
+    layers: impl IntoIterator<Item = (&'a LayerPrepared, &'a RecordBatch)>,
+    facet: Option<&crate::layout::facet::FacetSpec>,
+    theme: &crate::layout::ThemeInputs,
+    metrics: &crate::render::font::FontdueMetrics,
+) -> TextEdgeRows {
+    use crate::layout::geometry::TEXT_INSET_FLOOR_PX as FLOOR;
+    use crate::render::marks::text::{glyph_edge_extents, numeric_labels, text_glyphs};
+
+    let mut rows = Vec::new();
+
+    // A layer's column read, style resolve or glyph shaping failing here
+    // skips that layer's rows rather than raising: the draw pass measures
+    // the same layer with the same `resolve_mark_style`/`text_glyphs` calls
+    // and raises the identical typed error there, so this is not a silent
+    // degrade — it only avoids reporting the error twice.
+    let mut measure = |mark_style: Option<&crate::spec::mark_style::MarkKwargsSpec>,
+                        batch: &RecordBatch,
+                        encoding: &crate::spec::encoding::Encoding,
+                        value_field: &str| {
+        let Ok(values) = crate::render::arrow_cast::col_as_f64(batch, value_field) else { return };
+        let Ok(style) = crate::render::draw::resolve_mark_style(mark_style, theme, &Mark::Text) else { return };
+        let dx = style.text.dx.unwrap_or(0.0);
+        let dy = style.text.dy.unwrap_or(0.0);
+        let fallback: Vec<Option<String>> = encoding
+            .y
+            .as_ref()
+            .and_then(|e| crate::render::arrow_cast::col_as_f64(batch, &e.field).ok())
+            .map(|ys| numeric_labels(&ys))
+            .unwrap_or_default();
+        let Ok(glyphs) = text_glyphs(encoding, batch, &style.text, theme, &fallback) else { return };
+        for (i, v) in values.iter().enumerate() {
+            let Some(v) = v.filter(|v| v.is_finite()) else { continue };
+            let Some(glyph) = glyphs.get(i).and_then(|g| g.as_ref()) else { continue };
+            let ext = glyph_edge_extents(glyph, style.text.align.as_deref(), style.text.baseline.as_deref(), metrics);
+            let (toward_lower, toward_higher) = match channel {
+                "x" => (ext.left - dx, ext.right + dx),
+                "y" => (ext.above - dy, ext.below + dy),
+                _ => (0.0, 0.0),
+            };
+            rows.push(TextEdgeRow {
+                value: v,
+                toward_lower: FLOOR + toward_lower,
+                toward_higher: FLOOR + toward_higher,
+                own: true,
+            });
+        }
+    };
+
+    let axis = match channel {
+        "x" => StackValueAxis::X,
+        "y" => StackValueAxis::Y,
+        _ => return TextEdgeRows(rows),
+    };
+    for (layer, batch) in layers {
+        if layer.mark != Mark::Text {
+            continue;
+        }
+        let Some(field) = (match channel {
+            "x" => layer.encoding.x.as_ref(),
+            "y" => layer.encoding.y.as_ref(),
+            _ => None,
+        })
+        .map(|e| e.field.as_str()) else { continue };
+        let stacked = crate::render::position::layer_prepared_stack_preview(layer, axis, batch, facet)
+            .ok()
+            .flatten();
+        let effective = stacked.as_ref().unwrap_or(batch);
+        measure(layer.mark_style.as_ref(), effective, &layer.encoding, field);
+    }
+    TextEdgeRows(rows)
+}
+
+/// A primary axis's own [`TextEdgeRows`] on `channel`: every layer on `x`,
+/// but on `y` only the layers [`super::YSlotPlan::slot_for_layer`] places on
+/// the primary (shared) slot. A `y_slot_plan`'s secondary layers draw on
+/// their own slot's axis — `crate::render::prepare::build_secondary_y_axis_inputs`
+/// measures each one directly, on its own layer — so a primary axis never
+/// floors on a label it does not share. The one rule every caller measuring
+/// a primary x/y axis applies, instead of each repeating the filter inline.
+pub(in crate::render) fn primary_axis_text_rows<'a>(
+    channel: &str,
+    layers: impl IntoIterator<Item = (&'a LayerPrepared, &'a RecordBatch)>,
+    y_slot_plan: &super::YSlotPlan,
+    facet: Option<&crate::layout::facet::FacetSpec>,
+    theme: &crate::layout::ThemeInputs,
+    metrics: &crate::render::font::FontdueMetrics,
+) -> TextEdgeRows {
+    if channel == "y" {
+        let primary_slot = layers
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| y_slot_plan.slot_for_layer(*i) == 0)
+            .map(|(_, pair)| pair);
+        text_edge_rows(channel, primary_slot, facet, theme, metrics)
+    } else {
+        text_edge_rows(channel, layers, facet, theme, metrics)
+    }
 }
 
 /// Compute the unioned numeric/temporal extent for an axis field across
@@ -4969,6 +5137,7 @@ mod tests {
             &crate::transform::run::OutputLineages::new(),
             (0.0, 300.0),
             &spec,
+            &crate::layout::geometry::TextEdgeDemand::default(),
             false,
             None,
             false,
@@ -5596,5 +5765,174 @@ mod tests {
             std::ptr::eq(resolve_sort_batch(&ctx, "nowhere", SortOp::Sum), &pre),
             "a field in neither batch stays on batch, so the existing refusal names it"
         );
+    }
+
+    // ── spec §6.13: text_edge_rows ──
+
+    use crate::layout::geometry::TEXT_INSET_FLOOR_PX;
+    use crate::render::font::FontdueMetrics;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark_style::MarkKwargsSpec;
+
+    fn xy_batch(x: &[f64], y: &[f64]) -> RecordBatch {
+        columns_batch(vec![("x", f64_col(x)), ("y", f64_col(y))])
+    }
+
+    fn xy_encoding() -> Encoding {
+        Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn text_chart_spec(mark_style: Option<MarkKwargsSpec>) -> ChartSpec {
+        ChartSpec { mark: Mark::Text, encoding: xy_encoding(), mark_style, ..Default::default() }
+    }
+
+    fn theme() -> crate::layout::ThemeInputs {
+        crate::layout::ThemeInputs::default()
+    }
+
+    /// The `LayerPrepared` list `text_edge_rows` reads, built the same way
+    /// `prepare::build_layers` builds it for a real render: the chart's own
+    /// layer when `spec.layers` is unset, else each declared layer, each in
+    /// its own drawn coordinate space.
+    fn prepared_layers(spec: &ChartSpec) -> Vec<LayerPrepared> {
+        match &spec.layers {
+            None => vec![LayerPrepared::from_chart_only(spec)],
+            Some(layer_vec) => layer_vec.iter().map(|l| LayerPrepared::from_chart_and_layer(spec, l)).collect(),
+        }
+        .into_iter()
+        .map(LayerPrepared::in_its_coord)
+        .collect()
+    }
+
+    /// Every prepared layer of `spec` paired with `batch`, the one batch
+    /// every layer in these fixtures draws from (none names a `data_source`).
+    fn rows_over(spec: &ChartSpec, batch: &RecordBatch) -> TextEdgeRows {
+        let layers = prepared_layers(spec);
+        text_edge_rows("x", layers.iter().map(|l| (l, batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new())
+    }
+
+    #[test]
+    fn text_edge_rows_is_empty_without_a_text_layer() {
+        let spec = ChartSpec { mark: Mark::Point, encoding: xy_encoding(), ..Default::default() };
+        let batch = xy_batch(&[1.0, 5.0], &[0.0, 0.0]);
+        let rows = rows_over(&spec, &batch);
+        assert!(rows.0.is_empty());
+    }
+
+    /// Every row's own need clears the floor, regardless of its value —
+    /// `text_edge_rows` measures every row, not only the domain's own
+    /// endpoints, so a label anywhere on the axis gets its real need.
+    #[test]
+    fn text_edge_rows_floors_every_rows_need() {
+        let spec = text_chart_spec(None);
+        let batch = xy_batch(&[1.0, 3.0, 5.0], &[0.0, 0.0, 0.0]);
+        let rows = rows_over(&spec, &batch);
+        assert_eq!(rows.0.len(), 3);
+        for row in &rows.0 {
+            assert!(row.toward_lower >= TEXT_INSET_FLOOR_PX, "toward_lower {} must clear the floor", row.toward_lower);
+            assert!(row.toward_higher >= TEXT_INSET_FLOOR_PX, "toward_higher {} must clear the floor", row.toward_higher);
+        }
+    }
+
+    /// A wider label needs a wider clearance: binding `text=x` so each
+    /// row's own glyph widens with its own x value.
+    #[test]
+    fn text_edge_rows_measures_each_rows_own_label_width() {
+        let mut encoding = xy_encoding();
+        encoding.text = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+        let spec = ChartSpec { mark: Mark::Text, encoding, ..Default::default() };
+        let batch = xy_batch(&[2.0, 100000.0], &[0.0, 0.0]);
+        let rows = rows_over(&spec, &batch);
+        assert_eq!(rows.0.len(), 2);
+        let narrow = rows.0.iter().find(|r| r.value == 2.0).unwrap();
+        let wide = rows.0.iter().find(|r| r.value == 100000.0).unwrap();
+        assert!(wide.toward_lower > narrow.toward_lower, "\"100000\" needs more clearance than \"2\"");
+    }
+
+    /// A large positive `dx` shifts the glyph away from the left: the row's
+    /// `toward_lower` need drops (may go negative, meaning no constraint on
+    /// that side), while `toward_higher` grows by the same shift.
+    #[test]
+    fn text_edge_rows_dx_moves_the_need_from_one_side_to_the_other() {
+        let centered = text_chart_spec(None);
+        let shifted = text_chart_spec(Some(MarkKwargsSpec { dx: Some(1_000.0), ..Default::default() }));
+        let batch = xy_batch(&[1.0], &[0.0]);
+        let centered_rows = rows_over(&centered, &batch);
+        let shifted_rows = rows_over(&shifted, &batch);
+        assert!(centered_rows.0[0].toward_lower >= TEXT_INSET_FLOOR_PX);
+        assert!(shifted_rows.0[0].toward_lower < 0.0, "shifted 1000px right, the left side needs no clearance");
+        assert!(shifted_rows.0[0].toward_higher > centered_rows.0[0].toward_higher);
+    }
+
+    /// Text layered on points: the point layer contributes no rows (a point
+    /// has no glyph), only the text layer's own rows.
+    #[test]
+    fn text_edge_rows_layered_on_points_reads_only_the_text_layer() {
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let text_layer = Layer {
+            mark: Mark::Text,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            layers: Some(vec![point_layer, text_layer]),
+            encoding: xy_encoding(),
+            ..Default::default()
+        };
+        let batch = xy_batch(&[1.0, 5.0], &[0.0, 0.0]);
+        let rows = rows_over(&spec, &batch);
+        assert_eq!(rows.0.len(), 2, "only the text layer's rows, never the point layer's");
+    }
+
+    /// A layer whose mark is not `Text` contributes no rows at all.
+    #[test]
+    fn text_edge_rows_a_non_text_layer_contributes_nothing() {
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![point_layer]), encoding: xy_encoding(), ..Default::default() };
+        let batch = xy_batch(&[1.0, 5.0], &[0.0, 0.0]);
+        let rows = rows_over(&spec, &batch);
+        assert!(rows.0.is_empty());
+    }
+
+    /// Stacked text: a layered text's own stack preview is measured, not its
+    /// raw value. Every rendered layer is a `LayerPrepared`, so the stack
+    /// preview applies uniformly whether or not `spec.layers` is set.
+    #[test]
+    fn text_edge_rows_measures_a_layered_texts_stacked_value_not_its_raw_one() {
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        let text_layer = Layer {
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            position: Some(PositionAdjust::Stack { by: None, offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None }),
+            inherited_position: false,
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![text_layer]), encoding: Encoding::default(), ..Default::default() };
+        let batch = columns_batch(vec![
+            ("g", Arc::new(StringArray::from(vec!["a", "a"]))),
+            ("y", f64_col(&[1.0, 1.0])),
+        ]);
+        let layers = prepared_layers(&spec);
+        let rows = text_edge_rows("y", layers.iter().map(|l| (l, &batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new());
+        assert_eq!(rows.0.len(), 2, "both rows measured at their stacked (cumulative) y, not the raw 1.0 twice over");
+        let values: Vec<f64> = rows.0.iter().map(|r| r.value).collect();
+        assert!(values.iter().any(|v| (*v - 2.0).abs() < 1e-9), "the second row's stacked top should be 2.0, got {values:?}");
     }
 }

@@ -77,12 +77,49 @@ def data_bar_rects(svg: str) -> list[dict[str, str]]:
 #: no chrome (axes, gridlines, legend swatches) is. Non-greedy, and every
 #: caller below uses it only on single-panel charts, where the group does
 #: not nest.
-_MARK_GROUP_RE = re.compile(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', re.DOTALL)
+_MARK_GROUP_RE = re.compile(r'<g clip-path="url\(#(ferrum-clip-\d+)\)">(.*?)</g>', re.DOTALL)
+_CLIP_PATH_DEF_RE = re.compile(
+    r'<clipPath id="(ferrum-clip-\d+)"><rect x="([\d.]+)" y="([\d.]+)" '
+    r'width="([\d.]+)" height="([\d.]+)"/></clipPath>'
+)
+
+Frame = tuple[float, float, float, float]
+
+
+def mark_groups_by_frame(svg: str) -> list[tuple[Frame, str]]:
+    """Pair each plot-area clip group's contents with its own clip rect, by clip id.
+
+    Each group's `clip-path="url(#ferrum-clip-N)"` is matched to the
+    `<clipPath id="ferrum-clip-N">` that defines its frame, not by document
+    position -- a composite render can interleave clip definitions and mark
+    groups in an order a positional pairing would get wrong. A clip id
+    defined but never used by a group (a defined-but-unused panel) is
+    skipped. A GROUP whose clip id has no parsable
+    `<clipPath><rect x y width height/></clipPath>` definition -- a
+    malformed rect missing `x`/`y`, or using a coordinate form this
+    parser's regex does not match -- raises instead of being silently
+    dropped: a caller reading a missing frame as "no marks drawn" would
+    otherwise read a parse failure as a real answer.
+    """
+    frames = {
+        cid: (float(x), float(y), float(x) + float(w), float(y) + float(h))
+        for cid, x, y, w, h in _CLIP_PATH_DEF_RE.findall(svg)
+    }
+    out: list[tuple[Frame, str]] = []
+    for cid, content in _MARK_GROUP_RE.findall(svg):
+        if cid not in frames:
+            raise ValueError(
+                f"mark group {cid!r} has no parsable clip rect -- its "
+                "<clipPath><rect .../></clipPath> definition is missing, "
+                "or not in the x/y/width/height form this parser expects"
+            )
+        out.append((frames[cid], content))
+    return out
 
 
 def mark_groups(svg: str) -> list[str]:
     """Return each plot-area clip group's contents, one entry per panel, in document order."""
-    return _MARK_GROUP_RE.findall(svg)
+    return [content for _, content in mark_groups_by_frame(svg)]
 
 
 def mark_layer(svg: str) -> str:

@@ -5545,6 +5545,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let y = axis_input(
             AxisOrient::Left,
@@ -5669,6 +5670,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let mut y = axis_input(
             AxisOrient::Left,
@@ -6569,6 +6571,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let y = axis_input(
             AxisOrient::Left,
@@ -6801,6 +6804,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 0.5, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let axes = AxesInput {
             x,
@@ -7652,6 +7656,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let y = axis_input(
             AxisOrient::Left,
@@ -9588,7 +9593,7 @@ mod tests {
         anchors[18] = true;
 
         let mut x = AxisInput::new(AxisOrient::Bottom, None, labels, None);
-        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major, minor: vec![] });
+        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major, minor: vec![], text_demand: Default::default() });
         x.tick_anchors = anchors;
         x.overrides.domain.show = Some(true);
         x.overrides.grid.show = Some(true);
@@ -10333,6 +10338,7 @@ mod tests {
             padding_frac: 0.05,
             major: (0..=10).map(|i| f64::from(i) / 10.0).collect(),
             minor: vec![],
+            text_demand: Default::default(),
         });
         let y = axis_input(
             AxisOrient::Left,
@@ -10787,6 +10793,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         let axes = AxesInput {
             x: axis_input(AxisOrient::Bottom, None, vec![], None),
@@ -10897,6 +10904,7 @@ mod tests {
             padding_frac: 0.0,
             major: vec![0.0, 0.5, 1.0],
             minor: vec![],
+            text_demand: Default::default(),
         });
         axes.y.overrides.labels.font_size = Some(100.0);
         let m = MockMetrics {

@@ -60,7 +60,7 @@ pub(in crate::render) use self::domain::{
     add_distinct_source, admitted_aux_reads, admitted_color_reads, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
-    SortContext,
+    SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -72,6 +72,22 @@ pub(in crate::render) use self::seam::{
 
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{apply_coord_domain_overrides, build_axis_scale, PositionalFields};
+
+/// The `Mark::Text` ink demand (spec §6.13) each positional channel's axis
+/// carries into [`resolve_scales_with_leaf_context`], already built by the
+/// caller that knows the facet mode and the flip: `prepare::build_axes` for
+/// the primary axes, `scene_build::independent_panel_axis_inputs` for a
+/// per-panel independent axis, `prepare::build_secondary_y_axis_inputs` for
+/// a secondary y slot, and a composite leaf's own prepare pass. `Default`
+/// (both empty) for every metadata-only placeholder resolution — the
+/// provisional pass, an independent panel's own placeholder scale, and a
+/// secondary slot's placeholder pass — over which a demand's pixel values
+/// would be meaningless.
+#[derive(Debug, Clone, Default)]
+pub(in crate::render) struct TextEdgeDemands {
+    pub(in crate::render) x: crate::layout::geometry::TextEdgeDemand,
+    pub(in crate::render) y: crate::layout::geometry::TextEdgeDemand,
+}
 
 // D3 (spec §4.2): the chart-level scale-domain seam. `prepare` extracts the
 // neutral `AxisDomainConfig` from `ChartConfig` and calls this; the engine
@@ -85,6 +101,9 @@ pub(in crate::render) use self::domain::encoding_explicit_extent;
 // `connect_to` resolution — see the `mod positional` doc above for why this
 // is a re-export rather than a wider module visibility.
 pub(in crate::render) use self::positional::{data_pixel_x, data_pixel_y};
+// Spec §6.13's default-padding predicate for the text-edge demand, shared
+// by `prepare`'s secondary-y slot and the standalone build paths.
+pub(in crate::render) use self::positional::{coord_exempts_channel, text_inset_applies};
 // The drop-and-warn/refuse step for a `Log` channel's off-side rows
 // (`LogScaleRowsLeftOut`/`LogScaleNoValueOnSide`), shared with `render::composite`'s resolve pass so
 // a composite leaf's `Log` channel accounts for its left-out rows through the
@@ -715,6 +734,56 @@ impl ScaleKind {
                 }
             }
         }
+    }
+
+    /// Map `rows`' physical, scale-independent needs to this scale's own
+    /// domain fractions and orient them by the scale's range sign (spec
+    /// §6.13): `.0` maps to `frac=0`, `.1` to `frac=1`, so a row's
+    /// `toward_lower`/`toward_higher` becomes `start`/`end` when the range
+    /// increases and `end`/`start` when it decreases (a reversed or
+    /// inverted-y axis gets the right end), and its [`domain::TextEdgeRow::own`]
+    /// flows straight onto the resulting [`EdgeNeed::own`](crate::layout::geometry::EdgeNeed::own).
+    /// Empty when `rows` is `None` (the caller's `positional::text_inset_applies`
+    /// found the channel's padding is not the default), for an Ordinal
+    /// scale, or for a degenerate domain (`value_fractions` returns empty,
+    /// the same "no fractions on a degenerate domain" rule `padding_fraction`'s
+    /// recovery below follows).
+    pub(crate) fn text_edge_demand(
+        &self,
+        rows: Option<&domain::TextEdgeRows>,
+    ) -> crate::layout::geometry::TextEdgeDemand {
+        let Some(rows) = rows else { return Default::default() };
+        if matches!(self, Self::Ordinal(_)) {
+            return Default::default();
+        }
+        let admitted: Vec<&domain::TextEdgeRow> = rows
+            .0
+            .iter()
+            .filter(|r| r.value.is_finite() && self.admits_for_pixel(r.value))
+            .collect();
+        if admitted.is_empty() {
+            return Default::default();
+        }
+        let values: Vec<f64> = admitted.iter().map(|r| r.value).collect();
+        let fractions = self.value_fractions(&values);
+        if fractions.len() != values.len() {
+            return Default::default();
+        }
+        let (r0, r1) = self.pixel_range();
+        let increasing = r1 >= r0;
+        let needs = admitted
+            .iter()
+            .zip(fractions)
+            .map(|(row, frac)| {
+                let (start, end) = if increasing {
+                    (row.toward_lower, row.toward_higher)
+                } else {
+                    (row.toward_higher, row.toward_lower)
+                };
+                crate::layout::geometry::EdgeNeed { frac, start, end, own: row.own }
+            })
+            .collect();
+        crate::layout::geometry::TextEdgeDemand { rows: needs }
     }
 
     /// Continuous-axis scale-projection support: the padding fraction implied by
@@ -2184,6 +2253,7 @@ pub fn resolve_scales_with_outputs(
         x_pixel_range,
         y_pixel_range,
         theme,
+        &TextEdgeDemands::default(),
         None,
     )
 }
@@ -2291,6 +2361,12 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     layer_batch: &RecordBatch,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
+    // The secondary axis's text-edge demand (spec §6.13): empty for the
+    // placeholder-range call `build_secondary_y_axis_inputs` makes (over
+    // which a pixel demand would be meaningless), the real one for
+    // `resolve_layer_y_scale`'s panel-real call, read off the secondary
+    // `AxisInput` that placeholder pass already built.
+    y_text_demand: &crate::layout::geometry::TextEdgeDemand,
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
     let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
 
@@ -2318,6 +2394,7 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
         x_pixel_range,
         y_pixel_range,
         theme,
+        &TextEdgeDemands { x: Default::default(), y: y_text_demand.clone() },
         leaf_scales,
     )?;
     Ok((layer_scales.y, warnings))
@@ -2715,6 +2792,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
+    text_demands: &TextEdgeDemands,
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
@@ -2829,7 +2907,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 // Stack-aware x-axis: see `position::axis_batch`.
                 let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, pending, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
@@ -2840,7 +2918,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             (None, Some(y_enc)) => {
                 let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, pending, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
@@ -2919,12 +2997,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, x_shared, x_shared_domain, pending, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, &mut warnings)?,
     };
     let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, y_shared, y_shared_domain, pending, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the

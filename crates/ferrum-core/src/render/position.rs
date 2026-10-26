@@ -168,11 +168,28 @@ pub(crate) fn axis_batch<'a>(
     })
 }
 
+/// The stack preview of the batch an already-prepared layer draws, on the
+/// panel's `axis`: [`stack_preview`] over the position, encoding and coord
+/// the draw pass hands `apply_position` for that layer
+/// ([`LayerPrepared`](crate::render::prepare::LayerPrepared), already in its
+/// own coord). `None` when the layer stacks nothing on `axis`. The one
+/// LayerPrepared-taking body [`layer_stack_preview`] and a reader that
+/// already holds a prepared layer (spec §6.13's `text_edge_rows`) both call,
+/// so a layer's drawn stack is read the same way everywhere.
+pub(crate) fn layer_prepared_stack_preview(
+    drawn: &crate::render::prepare::LayerPrepared,
+    axis: StackValueAxis,
+    batch: &RecordBatch,
+    facet: Option<&crate::layout::facet::FacetSpec>,
+) -> Result<Option<RecordBatch>, crate::render::RenderError> {
+    let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
+    let encoding = position_encoding(drawn.mark, drawn.coord.as_ref(), &drawn.encoding);
+    stack_preview(batch, drawn.position.as_ref(), &encoding, coord_flipped, axis, facet)
+}
+
 /// The stack preview of the batch one layer of `spec` draws, on the panel's
-/// `axis`: [`stack_preview`] over the position, encoding and coord the draw
-/// pass hands `apply_position` for that layer
-/// ([`LayerPrepared`](crate::render::prepare::LayerPrepared) in its own
-/// coord). `None` when the layer stacks nothing on `axis`.
+/// `axis`: builds this layer's own [`LayerPrepared`] and defers to
+/// [`layer_prepared_stack_preview`].
 pub(crate) fn layer_stack_preview(
     spec: &ChartSpec,
     layer: &crate::spec::layer::Layer,
@@ -180,9 +197,7 @@ pub(crate) fn layer_stack_preview(
     batch: &RecordBatch,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     let drawn = crate::render::prepare::LayerPrepared::from_chart_and_layer(spec, layer).in_its_coord();
-    let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
-    let encoding = position_encoding(drawn.mark, drawn.coord.as_ref(), &drawn.encoding);
-    stack_preview(batch, drawn.position.as_ref(), &encoding, coord_flipped, axis, spec.facet.as_ref())
+    layer_prepared_stack_preview(&drawn, axis, batch, spec.facet.as_ref())
 }
 
 /// The stack a mark draws over `batch` under `position` (or, with no

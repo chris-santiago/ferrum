@@ -451,6 +451,8 @@ pub(crate) fn render_composite_scene(
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
             transform_lineages: &prep.transform_lineages,
+            x_text_rows: prep.x_text_rows.clone(),
+            y_text_rows: prep.y_text_rows.clone(),
         })
         .collect();
     // `warnings` opens with the resolve pass, the first stage that can produce
@@ -576,8 +578,22 @@ pub(crate) fn render_composite_scene(
     // leaf given the same override has that surface and applied it; per-leaf
     // data-condition warnings fan out untouched — see
     // `is_figure_level_dedupable`'s doc for which is which.
+    // Spec §6.13: each leaf's `TextInkPastFrame` already counts only that
+    // leaf's OWN overrunning rows (`own`-filtered by its own build), so a
+    // composite's shared axis is one render-wide fact, summed across the
+    // leaves that draw it, rather than one copy fanned out per leaf —
+    // merged separately below, by channel, in the order each channel is
+    // first seen.
+    let mut text_overrun: Vec<(String, usize)> = Vec::new();
     for (i, leaf_warnings) in leaf_warning_lists.iter().enumerate() {
         for w in leaf_warnings {
+            if let RenderWarning::TextInkPastFrame { channel, rows } = w {
+                match text_overrun.iter_mut().find(|(c, _)| c == channel) {
+                    Some((_, sum)) => *sum += rows,
+                    None => text_overrun.push((channel.clone(), *rows)),
+                }
+                continue;
+            }
             let applied_elsewhere = (0..n).any(|j| {
                 j != i && !leaf_warning_lists[j].contains(w) && same_config_surface(w, leaves[i].chart_config, leaves[j].chart_config)
             });
@@ -586,6 +602,9 @@ pub(crate) fn render_composite_scene(
             }
             warnings.push(w.clone());
         }
+    }
+    for (channel, rows) in text_overrun {
+        warnings.push(RenderWarning::TextInkPastFrame { channel, rows });
     }
 
     let merge_ctx = MergeCtx {

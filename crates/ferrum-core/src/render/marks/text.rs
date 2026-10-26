@@ -33,6 +33,7 @@
 //! unstacked text with a radius binding is placed as a point is, by the
 //! panel's polar projection of its Cartesian position.
 
+use arrow::record_batch::RecordBatch;
 use crate::layout::TextAnchor;
 use crate::render::arrow_cast::col_as_ordinal_category_str;
 use crate::render::draw::{
@@ -46,6 +47,211 @@ use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::{scene_build, RenderError};
 use crate::spec::coord::PolarThetaChannel;
+
+/// A glyph run's ink distance from its anchor point to each of its four
+/// sides, in panel pixels, after the mark's own rotation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::render) struct GlyphEdgeExtents {
+    pub(in crate::render) left: f64,
+    pub(in crate::render) right: f64,
+    pub(in crate::render) above: f64,
+    pub(in crate::render) below: f64,
+}
+
+/// One row's drawn label, resolved font size and rotation — every per-row
+/// input `build` folds into a `Mark::Text` glyph besides its position and
+/// paint. Built once by [`text_glyphs`] and read both by `build` (to draw
+/// the glyph) and by the text-inset measurement (to measure the SAME glyph
+/// `build` draws, spec §6.13).
+pub(in crate::render) struct TextGlyph {
+    pub(in crate::render) label: String,
+    pub(in crate::render) font_size: f64,
+    pub(in crate::render) angle: f64,
+}
+
+/// Each row's [`TextGlyph`] for a `Mark::Text` layer — the SAME resolution
+/// `build` draws with, extracted so a text-inset measurement
+/// (`scale_resolve::domain::text_edge_rows`) measures the glyph `build`
+/// actually places, not a second guess at it: the `text` channel (format,
+/// field temporality, the `#147` refusal), the `size`/`angle` encodings and
+/// the style's `limit` truncation. `None` for a row with no label — an
+/// unbound `text` channel and no entry in `fallback_labels` at that index,
+/// or (propagated via `?`) an unreadable bound `text` column (`#166`).
+///
+/// `fallback_labels` is the label a row shows with no `text` channel bound
+/// — `build`'s own [`LabelAnchors::fallback_labels`], index-aligned with
+/// `batch`'s rows, read by its caller through `cartesian_anchors` or
+/// `polar_anchors` so this function never has to decide between the
+/// Cartesian (`y` value) and polar (theta value) fallback rule itself; the
+/// text-inset measurement (spec §6.13, Cartesian-only — a polar layer
+/// contributes no rows) builds its own `y`-value fallback the same way
+/// `cartesian_anchors` does before calling this.
+pub(in crate::render) fn text_glyphs(
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    style: &crate::render::draw::TextStyle,
+    theme: &crate::layout::ThemeInputs,
+    fallback_labels: &[Option<String>],
+) -> Result<Vec<Option<TextGlyph>>, RenderError> {
+    let text_enc = encoding.text.as_ref();
+    let text_field = text_enc.map(|e| e.field.as_str());
+    let text_format = text_enc.and_then(|e| e.format.as_deref());
+    let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
+    let text_temporality = text_enc
+        .and_then(|enc| crate::render::prepare::field_temporality(enc, batch))
+        .unwrap_or(Temporality::NonTemporal);
+    if let Some(enc) = text_enc {
+        crate::render::prepare::refuse_format_temporality_mismatch_field(
+            enc,
+            batch,
+            text_format,
+            text_format_type,
+            "text",
+            crate::render::FormatSurface::Channel,
+        )?;
+    }
+    let texts: Option<Vec<Option<String>>> = match text_field {
+        None => None,
+        Some(f) => Some(col_as_str(batch, f).or_else(|_| {
+            col_as_f64(batch, f).map(|nums| {
+                nums.into_iter()
+                    .map(|opt_v| {
+                        opt_v.and_then(|v| {
+                            if !v.is_finite() {
+                                return None;
+                            }
+                            Some(format_value_with_spec(v, text_format, text_format_type, text_temporality))
+                        })
+                    })
+                    .collect()
+            })
+        })?),
+    };
+
+    let base_font_size = style.font_size.unwrap_or(theme.typography.label_font_size);
+    let base_angle = style.angle.unwrap_or(0.0);
+    let size_values: Option<Vec<Option<f64>>> =
+        encoding.size.as_ref().and_then(|e| col_as_f64(batch, &e.field).ok());
+    let angle_values: Option<Vec<Option<f64>>> =
+        encoding.angle.as_ref().and_then(|e| col_as_f64(batch, &e.field).ok());
+
+    let n_rows = texts.as_ref().map_or(fallback_labels.len(), |t| t.len());
+    let mut out = Vec::with_capacity(n_rows);
+    for i in 0..n_rows {
+        let raw_label = match &texts {
+            Some(t) => match t.get(i).and_then(|o| o.as_deref()) {
+                Some(s) => s.to_string(),
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            },
+            None => match fallback_labels.get(i).and_then(|o| o.as_deref()) {
+                Some(s) => s.to_string(),
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            },
+        };
+        // S7: truncate label to `limit` characters (including the ellipsis).
+        let label = match style.limit {
+            Some(limit) if limit > 0 && raw_label.chars().count() > limit => {
+                let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}")
+            }
+            _ => raw_label,
+        };
+        let font_size = size_values
+            .as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| *v > 0.0 && v.is_finite())
+            .unwrap_or(base_font_size);
+        let angle = angle_values
+            .as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .unwrap_or(base_angle);
+        out.push(Some(TextGlyph { label, font_size, angle }));
+    }
+    Ok(out)
+}
+
+/// Chrome and usvg's hardcoded fraction of the ascent that the hanging
+/// baseline (`dominant-baseline="hanging"`, which `baseline='top'` emits —
+/// see `svg_walk::emit_text`) sits below the anchor: a font's `BASE` table
+/// rarely carries a hanging-baseline entry, so usvg falls back to this
+/// share of the ascent, the same value browsers hardcode.
+const HANGING_BASELINE_ASCENT_SHARE: f64 = 0.8;
+
+/// The ink-bounding-box distance from `glyph`'s anchor point to each of its
+/// four sides (spec §6.13): the font line box (ascent/descent) unioned with
+/// the glyph run's own shaped ink — kerning, a negative first-glyph bearing,
+/// an overhanging last glyph, and a glyph taller than the ascent or deeper
+/// than the descent all widen the box past the plain advance; a run with
+/// none of those collapses to exactly the advance box. Built from `align`
+/// (the horizontal anchor — `TextAnchor::Start`/`Middle`/`End`, matching the
+/// `anchor` `build` resolves from `ctx.mark_style.text.align`), `baseline`
+/// (the vertical anchor, [`crate::render::draw::parse_text_baseline`]'s own
+/// vocabulary — the shift from the anchor down to the alphabetic baseline
+/// the SVG actually renders at, not assumed to sit at the ascent) and the
+/// glyph's own rotation (same sense `to_scene_text_style` draws with — the
+/// bounding-box extremes this computes are invariant to that sense, since
+/// every corner is folded through the same max). `metrics` is the caller's
+/// own parsed font, read once per render rather than once per measured row.
+pub(in crate::render) fn glyph_edge_extents(
+    glyph: &TextGlyph,
+    align: Option<&str>,
+    baseline: Option<&str>,
+    metrics: &crate::render::font::FontdueMetrics,
+) -> GlyphEdgeExtents {
+    let ink = metrics.shaped_ink(&glyph.label, glyph.font_size);
+
+    let anchor_x = match align {
+        Some("left") => 0.0,
+        Some("right") => ink.advance,
+        _ => ink.advance / 2.0,
+    };
+    let box_lo = ink.xmin.min(0.0);
+    let box_hi = ink.xmax.max(ink.advance);
+    let left_of_pen = anchor_x - box_lo;
+    let right_of_pen = box_hi - anchor_x;
+
+    // Distance from the anchor down to the alphabetic baseline the glyphs
+    // are actually shaped against — zero for the default (alphabetic)
+    // anchor, which already sits at the baseline.
+    let baseline_shift = match baseline.and_then(crate::render::draw::parse_text_baseline) {
+        Some(ferrum_scene::TextBaseline::Top) => HANGING_BASELINE_ASCENT_SHARE * ink.ascent,
+        Some(ferrum_scene::TextBaseline::Middle) => (ink.ascent - ink.descent) / 2.0,
+        Some(ferrum_scene::TextBaseline::Bottom) => -ink.descent,
+        // Alphabetic (the default) and every unrecognized/custom spelling:
+        // the anchor sits at the baseline, as `to_scene_text_style` falls
+        // back to `Alphabetic` for both `None` and a string
+        // `parse_text_baseline` does not recognize.
+        _ => 0.0,
+    };
+    let above_anchor = ink.ascent.max(ink.ymax) - baseline_shift;
+    let below_anchor = ink.descent.max(-ink.ymin) + baseline_shift;
+
+    let angle = glyph.angle.to_radians();
+    let (cos_a, sin_a) = (angle.cos(), angle.sin());
+    let corners = [
+        (-left_of_pen, -above_anchor),
+        (right_of_pen, -above_anchor),
+        (-left_of_pen, below_anchor),
+        (right_of_pen, below_anchor),
+    ];
+    let mut ext = GlyphEdgeExtents { left: 0.0, right: 0.0, above: 0.0, below: 0.0 };
+    for (u, v) in corners {
+        let ru = u * cos_a - v * sin_a;
+        let rv = u * sin_a + v * cos_a;
+        ext.left = ext.left.max(-ru);
+        ext.right = ext.right.max(ru);
+        ext.above = ext.above.max(-rv);
+        ext.below = ext.below.max(rv);
+    }
+    ext
+}
 
 /// How a text mark under `CoordPolar` places its labels when the panel's
 /// polar projection of its Cartesian position does not: the fields it reads
@@ -168,7 +374,7 @@ struct LabelAnchors {
 }
 
 /// [`format_numeric`] of each finite value, `None` elsewhere.
-fn numeric_labels(values: &[Option<f64>]) -> Vec<Option<String>> {
+pub(in crate::render) fn numeric_labels(values: &[Option<f64>]) -> Vec<Option<String>> {
     values.iter().map(|v| v.filter(|v| v.is_finite()).map(format_numeric)).collect()
 }
 
@@ -366,66 +572,11 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     };
     let n_rows = row_anchors.len();
 
-    // Explicit text channel (same resolution as draw()).
-    let text_enc = spec.encoding.text.as_ref();
-    let text_field = text_enc.map(|e| e.field.as_str());
-    let text_format = text_enc.and_then(|e| e.format.as_deref());
-    let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
-    // `#147` close (wave 6A T21): a time-typed format on a non-temporal text
-    // field refuses with the axes' own error, instead of rendering every
-    // label as a 1970 epoch date.
-    // The field's temporality decides whether an undeclared `%`-bearing spec
-    // is a date pattern, as the axis's scale does (`#147` T23), and is the
-    // one answer the refusal below checks against.
-    let text_temporality = text_enc
-        .and_then(|enc| crate::render::prepare::field_temporality(enc, ctx.batch))
-        .unwrap_or(Temporality::NonTemporal);
-    if let Some(enc) = text_enc {
-        crate::render::prepare::refuse_format_temporality_mismatch_field(
-            enc,
-            ctx.batch,
-            text_format,
-            text_format_type,
-            "text",
-            crate::render::FormatSurface::Channel,
-        )?;
-    }
-    let texts: Option<Vec<Option<String>>> = match text_field {
-        None => None,
-        Some(f) => {
-            // A `text=` bound to a field a position adjustment overwrote in
-            // place already reads the row's own value here: `ctx.spec`'s
-            // encoding is the DrawCtx-local copy `position::read_own_values`
-            // retargets onto the companion column that adjustment preserved
-            // it under (`scene_build`'s draw loop), so `f` already names
-            // that column, not the adjusted one, wherever this field was
-            // ever overwritten.
-            Some(col_as_str(ctx.batch, f).or_else(|_| {
-            col_as_f64(ctx.batch, f).map(|nums| {
-                nums.into_iter()
-                    .map(|opt_v| {
-                        opt_v.and_then(|v| {
-                            if !v.is_finite() {
-                                return None;
-                            }
-                            // ONE resolution (`#147`): the same
-                            // field-temporality classification the colorbar
-                            // uses for the identical pair, so a
-                            // `text=fm.Text(field, format="%Y/%m/%d")` channel
-                            // over a datetime field APPLIES its pattern.
-                            Some(format_value_with_spec(
-                                v,
-                                text_format,
-                                text_format_type,
-                                text_temporality,
-                            ))
-                        })
-                    })
-                    .collect()
-            })
-            })?)
-        }
-    };
+    // Each row's drawn label, font size and rotation (spec §6.13's shared
+    // glyph helper): the SAME resolution the text-inset measurement reads,
+    // so a later change to how text draws reaches both without a second
+    // edit.
+    let glyphs = text_glyphs(&spec.encoding, ctx.batch, &ctx.mark_style.text, ctx.theme, &fallback_labels)?;
 
     let anchor = match ctx.mark_style.text.align.as_deref() {
         Some("left") => TextAnchor::Start,
@@ -434,20 +585,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     };
     let dx = ctx.mark_style.text.dx.unwrap_or(0.0);
     let dy = ctx.mark_style.text.dy.unwrap_or(0.0);
-    let base_font_size = ctx.mark_style.text.font_size.unwrap_or(ctx.theme.typography.label_font_size);
-    let base_angle = ctx.mark_style.text.angle.unwrap_or(0.0);
     let base_opacity = ctx.mark_style.paint.opacity;
 
     // Per-row encoding channels (same pattern as point.rs).
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-
-    let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-
-    let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
@@ -510,30 +651,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
 
     for (i, position) in row_anchors.into_iter().enumerate() {
         let Some((px, py)) = position else { continue };
-
-        let raw_label: String = if let Some(t) = &texts {
-            match &t[i] {
-                Some(s) => s.clone(),
-                None => continue,
-            }
-        } else {
-            match &fallback_labels[i] {
-                Some(s) => s.clone(),
-                None => continue,
-            }
-        };
-
-        // S7: truncate label to `limit` characters (including the ellipsis).
-        let label = if let Some(limit) = ctx.mark_style.text.limit {
-            if limit > 0 && raw_label.chars().count() > limit {
-                let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
-                format!("{truncated}\u{2026}") // …
-            } else {
-                raw_label
-            }
-        } else {
-            raw_label
-        };
+        let Some(glyph) = &glyphs[i] else { continue };
 
         // Resolve per-row opacity (fill-opacity on text), through the
         // opacity scale when the channel resolved one.
@@ -543,20 +661,6 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             i,
             base_opacity,
         );
-
-        // Resolve per-row font-size from size encoding.
-        let row_font_size = size_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| *v > 0.0 && v.is_finite())
-            .unwrap_or(base_font_size);
-
-        // Resolve per-row angle (rotation) from angle encoding.
-        let row_angle = angle_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .unwrap_or(base_angle);
 
         // Resolve per-row fill paint: under `theme:contrast` every row reads
         // its own color-channel value as a cell to paint against (spec
@@ -583,13 +687,13 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         acc.push(SceneNode::Text {
             x: px + dx,
             y: py + dy,
-            content: label,
+            content: glyph.label.clone(),
             slot: None,
             style: to_scene_text_style(
                 row_paint,
-                row_font_size,
+                glyph.font_size,
                 anchor,
-                row_angle,
+                glyph.angle,
                 &ctx.theme.typography.font_family,
                 ctx.mark_style.text.font_weight.as_deref(),
                 ctx.mark_style.text.baseline.as_deref(),
@@ -618,6 +722,161 @@ pub(crate) mod tests {
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    // ── spec §6.13: glyph_edge_extents / text_glyphs ──
+
+    fn glyph(label: &str, font_size: f64, angle: f64) -> TextGlyph {
+        TextGlyph { label: label.to_string(), font_size, angle }
+    }
+
+    fn metrics() -> crate::render::font::FontdueMetrics {
+        crate::render::font::FontdueMetrics::new()
+    }
+
+    #[test]
+    fn glyph_edge_extents_default_align_centers_the_width_on_the_anchor() {
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, None, &metrics());
+        assert!((ext.left - ext.right).abs() < 1e-9, "middle align: {ext:?}");
+        assert!(ext.left > 0.0);
+    }
+
+    #[test]
+    fn glyph_edge_extents_left_align_puts_all_the_width_to_the_right() {
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, Some("left"), None, &metrics());
+        assert_eq!(ext.left, 0.0);
+        assert!(ext.right > 0.0);
+    }
+
+    #[test]
+    fn glyph_edge_extents_right_align_puts_all_the_width_to_the_left() {
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, Some("right"), None, &metrics());
+        assert_eq!(ext.right, 0.0);
+        assert!(ext.left > 0.0);
+    }
+
+    #[test]
+    fn glyph_edge_extents_alphabetic_baseline_has_more_above_than_below_for_a_capless_label() {
+        // Caps have no descender: the default (alphabetic) baseline still
+        // reserves some descent clearance (the font's own, not a per-glyph
+        // read — see the fn's doc), but strictly less than the ascent.
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, None, &metrics());
+        assert!(ext.above > ext.below, "ascent {} should exceed descent {}", ext.above, ext.below);
+    }
+
+    #[test]
+    fn glyph_edge_extents_top_baseline_reserves_only_the_hanging_shift_above_the_anchor() {
+        // usvg places the hanging baseline (what `baseline='top'` emits as
+        // `dominant-baseline="hanging"`) `HANGING_BASELINE_ASCENT_SHARE *
+        // ascent` below the anchor, not at the ascent: the anchor sits near
+        // the top of the glyph box, so only that small share of the ascent
+        // reaches above it, and the rest of the box plus the shift reaches
+        // below.
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, Some("top"), &metrics());
+        assert!(ext.above > 0.0 && ext.above < ext.below, "{ext:?}");
+    }
+
+    #[test]
+    fn glyph_edge_extents_bottom_baseline_puts_all_the_vertical_extent_above() {
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, Some("bottom"), &metrics());
+        assert_eq!(ext.below, 0.0);
+        assert!(ext.above > 0.0);
+    }
+
+    #[test]
+    fn glyph_edge_extents_middle_baseline_splits_the_vertical_extent_evenly() {
+        let g = glyph("AB", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, Some("middle"), &metrics());
+        assert!((ext.above - ext.below).abs() < 1e-9);
+    }
+
+    #[test]
+    fn glyph_edge_extents_a_90_degree_rotation_swaps_width_and_height_roles() {
+        // At a quarter turn, the label's width becomes its vertical extent
+        // and its vertical extent becomes its horizontal one (up to the
+        // ascent/descent asymmetry alphabetic baseline carries).
+        let flat = glyph("AB", 11.0, 0.0);
+        let turned = glyph("AB", 11.0, 90.0);
+        let m = metrics();
+        let flat_ext = glyph_edge_extents(&flat, None, None, &m);
+        let turned_ext = glyph_edge_extents(&turned, None, None, &m);
+        assert!(
+            (turned_ext.above - flat_ext.left).abs() < 1e-6 && (turned_ext.below - flat_ext.right).abs() < 1e-6,
+            "flat {flat_ext:?} vs turned {turned_ext:?}"
+        );
+    }
+
+    #[test]
+    fn glyph_edge_extents_is_zero_on_every_side_for_an_empty_label() {
+        let g = glyph("", 11.0, 0.0);
+        let ext = glyph_edge_extents(&g, None, None, &metrics());
+        assert_eq!((ext.left, ext.right), (0.0, 0.0));
+    }
+
+    fn batch_with_y(ys: &[f64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("y", DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(ys.to_vec()))]).unwrap()
+    }
+
+    #[test]
+    fn text_glyphs_falls_back_to_the_y_value_when_no_text_channel_is_bound() {
+        let encoding = Encoding { y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() };
+        let batch = batch_with_y(&[1.0, 2.0]);
+        let style = crate::render::draw::TextStyle::default();
+        let theme = ThemeInputs::default();
+        let fallback = vec![Some("1".to_string()), Some("2".to_string())];
+        let glyphs = text_glyphs(&encoding, &batch, &style, &theme, &fallback).unwrap();
+        assert_eq!(glyphs[0].as_ref().unwrap().label, "1");
+        assert_eq!(glyphs[1].as_ref().unwrap().label, "2");
+    }
+
+    #[test]
+    fn text_glyphs_reads_the_size_and_angle_encodings_per_row() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("y", DataType::Float64, false),
+            Field::new("size", DataType::Float64, false),
+            Field::new("angle", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![20.0, 30.0])),
+                Arc::new(Float64Array::from(vec![45.0, 90.0])),
+            ],
+        )
+        .unwrap();
+        let encoding = Encoding {
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            size: Some(EncodingSpec { field: "size".into(), ..Default::default() }),
+            angle: Some(EncodingSpec { field: "angle".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let style = crate::render::draw::TextStyle::default();
+        let theme = ThemeInputs::default();
+        let fallback = vec![Some("1".to_string()), Some("2".to_string())];
+        let glyphs = text_glyphs(&encoding, &batch, &style, &theme, &fallback).unwrap();
+        assert_eq!(glyphs[0].as_ref().unwrap().font_size, 20.0);
+        assert_eq!(glyphs[0].as_ref().unwrap().angle, 45.0);
+        assert_eq!(glyphs[1].as_ref().unwrap().font_size, 30.0);
+        assert_eq!(glyphs[1].as_ref().unwrap().angle, 90.0);
+    }
+
+    #[test]
+    fn text_glyphs_truncates_to_the_styles_limit() {
+        let encoding = Encoding { y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() };
+        let batch = batch_with_y(&[1.0]);
+        let style = crate::render::draw::TextStyle { limit: Some(1), ..Default::default() };
+        let theme = ThemeInputs::default();
+        let fallback = vec![Some("12345".to_string())];
+        let glyphs = text_glyphs(&encoding, &batch, &style, &theme, &fallback).unwrap();
+        assert_eq!(glyphs[0].as_ref().unwrap().label, "\u{2026}");
+    }
 
     #[test]
     fn text_emits_one_text_element_per_row() {

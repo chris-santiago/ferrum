@@ -34,6 +34,13 @@ rand_chacha = { version = "0.3", default-features = false }
 # Phase 7 (static-renderer) — exact pin per spec §8.
 # fontdue version bumps change glyph advances; refresh goldens via FERRUM_UPDATE_GOLDENS=1.
 fontdue = "=0.9.3"
+# spec §6.13 — the shaper usvg ~0.47 renders with (already in Cargo.lock as a
+# transitive usvg dependency, so pinning it directly builds no new crate).
+# Measuring a label's shaped ink (kerning, bearings) with the SAME shaper
+# usvg applies at render time keeps the text-edge inset's glyph extent equal
+# to what the SVG actually renders; a version bump changes shaped widths,
+# so this is pinned exactly like fontdue.
+rustybuzz = "=0.20.1"
 # Color type alias + future colorspace conversions. Range pin per spec §11 row 6.
 palette = "~0.7"
 # Phase 8b — perceptually-uniform sequential/diverging color ramps for stat marks.

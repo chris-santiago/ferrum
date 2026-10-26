@@ -742,6 +742,12 @@ pub struct TickProjection {
     /// (`theme.grid.minor` off) — `prepare.rs` only populates it when the gate is
     /// on, and "minor enabled" is derived from this vec being non-empty.
     pub minor: Vec<f64>,
+    /// The `Mark::Text` ink demand this axis carries (spec §6.13), threaded
+    /// through so `inset_pixel_range(base_range, padding_frac, text_demand)`
+    /// builds the SAME inset here that places the marks. Empty for every
+    /// axis no `Mark::Text` layer draws, which keeps `padding_frac`/`major`/
+    /// `minor`'s plain inset byte-identical on every chart without text.
+    pub text_demand: crate::layout::geometry::TextEdgeDemand,
 }
 
 impl AxisInput {
@@ -1260,12 +1266,13 @@ fn project_fractions(
     fractions: &[f64],
     base_range: (f64, f64),
     padding_frac: f64,
+    text_demand: &crate::layout::geometry::TextEdgeDemand,
     policy: NonFinitePolicy,
 ) -> Option<Vec<f64>> {
     if fractions.is_empty() {
         return None;
     }
-    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, padding_frac);
+    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, padding_frac, text_demand);
     let axis = Axis1D { lo, hi };
     match policy {
         NonFinitePolicy::DropAll => {
@@ -1306,6 +1313,7 @@ fn project_tick_positions(input: &AxisInput, base_range: (f64, f64)) -> Option<V
         &proj.major,
         base_range,
         proj.padding_frac,
+        &proj.text_demand,
         NonFinitePolicy::DropAll,
     )
 }
@@ -1367,6 +1375,7 @@ fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayou
         &proj.minor,
         base_range,
         proj.padding_frac,
+        &proj.text_demand,
         NonFinitePolicy::DropEach,
     ) else {
         return Vec::new();
@@ -5672,6 +5681,7 @@ mod tests {
                 padding_frac: 0.0,
                 major: Vec::new(),
                 minor,
+                text_demand: Default::default(),
             });
         }
         input
@@ -5686,6 +5696,7 @@ mod tests {
             &[0.0, 0.5, 1.0],
             (0.0, 100.0),
             0.0,
+            &Default::default(),
             NonFinitePolicy::DropAll,
         );
         assert_eq!(got, Some(vec![0.0, 50.0, 100.0]));
@@ -5699,6 +5710,7 @@ mod tests {
             &[0.0, f64::NAN, 1.0],
             (0.0, 100.0),
             0.0,
+            &Default::default(),
             NonFinitePolicy::DropAll,
         );
         assert_eq!(got, None);
@@ -5712,6 +5724,7 @@ mod tests {
             &[0.0, f64::INFINITY, 1.0],
             (0.0, 100.0),
             0.0,
+            &Default::default(),
             NonFinitePolicy::DropEach,
         );
         assert_eq!(got, Some(vec![0.0, 100.0]));
@@ -5720,11 +5733,11 @@ mod tests {
     #[test]
     fn project_fractions_empty_is_none_for_both_policies() {
         assert_eq!(
-            project_fractions(&[], (0.0, 100.0), 0.0, NonFinitePolicy::DropAll),
+            project_fractions(&[], (0.0, 100.0), 0.0, &Default::default(), NonFinitePolicy::DropAll),
             None
         );
         assert_eq!(
-            project_fractions(&[], (0.0, 100.0), 0.0, NonFinitePolicy::DropEach),
+            project_fractions(&[], (0.0, 100.0), 0.0, &Default::default(), NonFinitePolicy::DropEach),
             None
         );
     }
@@ -5943,6 +5956,7 @@ mod tests {
             padding_frac: 0.05,
             major: vec![0.0, 1.0],
             minor: vec![0.25],
+            text_demand: Default::default(),
         });
 
         let panel = Rect {
@@ -5982,6 +5996,7 @@ mod tests {
             padding_frac: 0.05,
             major: vec![0.25],
             minor: Vec::new(),
+            text_demand: Default::default(),
         });
         let (major_axis, _) = layout_x_axis(
             &major_input,
@@ -7837,6 +7852,7 @@ mod tests {
             padding_frac,
             major: fractions,
             minor: Vec::new(),
+            text_demand: Default::default(),
         });
         input
     }
