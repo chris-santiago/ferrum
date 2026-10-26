@@ -344,7 +344,15 @@ chart = (
     .encode(x="x:Q", y="y:Q")
     + fm.annotation.text(3.5, 8.2, "Anomaly", color="#c0392b", font_size=13)
     + fm.annotation.arrow(3.5, 8.0, 3.5, 6.5)
-    + fm.annotation.span("x", 3.0, 4.5, fill="#fee2e2", opacity=0.08, label="Anomalous region")
+    + fm.annotation.span(
+        "x",
+        3.0,
+        4.5,
+        fill="#fee2e2",
+        opacity=0.3,
+        label="Anomalous region",
+        label_position="middle",
+    )
 )
 ```
 

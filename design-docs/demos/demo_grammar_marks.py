@@ -502,10 +502,8 @@ def build_mark_function():
 
 def build_comp_scatter_rule():
     """Scatter + Rule — mark_point scatter + mark_rule horizontal reference (same data)."""
-    mean_y = float(np.mean(scatter_y))
-    df_with_ref = df_scatter.with_columns(pl.lit(mean_y).alias("ref_y"))
     scatter = (
-        fm.Chart(df_with_ref)
+        fm.Chart(df_scatter)
         .mark_point(opacity=0.5)
         .encode(
             x=fm.X("x", title="X"),
@@ -515,7 +513,7 @@ def build_comp_scatter_rule():
         .properties(width=W, height=H)
         .theme(THEME)
     )
-    rule = fm.Chart(df_with_ref).mark_rule().encode(y=fm.Y("ref_y")).theme(THEME)
+    rule = fm.Chart(df_scatter).mark_rule().encode(y=fm.Y("y", aggregate="mean")).theme(THEME)
     return (scatter + rule).properties(title="Scatter + Rule — reference at mean y")
 
 

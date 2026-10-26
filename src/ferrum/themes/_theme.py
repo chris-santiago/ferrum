@@ -110,10 +110,36 @@ area_opacity, opacity : optional
     strip_padding : float, optional
         Vertical padding around facet strip titles (default 6).
     cull_threshold : int, optional
-        Minimum number of pixels required between adjacent axis tick labels.
-        Labels are dropped until the remaining labels are at least this many
-        pixels apart. Default 8 (set in Rust). Set to ``0`` for no gap
-        requirement, which also disables dropping unless ``cull_labels=True``.
+        Minimum pixel gap required between adjacent axis tick labels,
+        judged pair by pair: each neighboring pair's own combined
+        half-widths are tested against the slot pitch, not every label
+        against the axis's single widest member, and a label with no real
+        neighbor tests against itself the same way. For the flat, wrap,
+        and font-shrink stages, the room a pair needs is the larger of
+        ``cull_threshold`` and a tolerance scaled to the slot width, so
+        ``cull_threshold=0`` still leaves that tolerance in force rather
+        than dropping to a bare pixel gap of zero; the rotate stage
+        instead budgets against the raw ``cull_threshold`` gap alone.
+        Before labels are dropped by stride to reach this gap, a
+        continuous x axis that doesn't fit flat or wrapped at full size
+        first tries an evenly spaced subset of its own ticks, accepting
+        the first stride whose survivors present flat or wrapped at the
+        full font and number at least three. The stride's origin depends
+        on the scale: a linear, power, or symlog axis counts from its own
+        nicest tick (zero when the axis spans it, else the tick divisible
+        by the largest power of ten, first among ties), so an axis
+        straddling zero or already on round ticks keeps its survivors
+        round instead of counting from whichever tick the scale happened
+        to generate first; a log axis keeps counting from its own
+        decades; a temporal axis counts from its first tick. This
+        thinning stage is skipped -- falling straight through to
+        font-shrinking, rotation, and elision, with only the axis's
+        band-height budget still able to drop labels by stride --
+        whenever dropping itself is disabled: an explicit
+        ``cull_labels=False``, or ``cull_threshold=0`` without an
+        explicit ``cull_labels=True``. Default 8 (set in Rust). Set to
+        ``0`` for no gap requirement beyond the tolerance, which also
+        disables dropping (and thinning) unless ``cull_labels=True``.
     cull_labels : bool, optional
         Whether the layout engine may DROP tick labels to reach
         ``cull_threshold``'s gap. Unset, it follows ``cull_threshold``
@@ -122,9 +148,12 @@ area_opacity, opacity : optional
         the combinations that coupling cannot express --
         ``Theme(cull_threshold=30, cull_labels=False)`` keeps a 30px gap
         driving the flat / wrap / font-shrink / rotate stages but never
-        drops a label. Every label survives regardless of density; which
-        *stage* the survivors land in does not: sparse enough and the gap
-        is satisfiable early (flat or a shallow rotation), dense enough and
+        drops a label -- and also skips the even-thinning stage described
+        under ``cull_threshold``, so a crowded continuous x axis under
+        ``cull_labels=False`` rotates (or elides) instead of thinning.
+        Every label survives regardless of density; which *stage* the
+        survivors land in does not: sparse enough and the gap is
+        satisfiable early (flat or a shallow rotation), dense enough and
         the cascade falls through every earlier stage to its last resort,
         rotated -90 degrees and possibly overlapping. Mid-label elision
         (truncation with an ellipsis), the nominal step after that, is

@@ -183,10 +183,9 @@ def build_bar(theme: Any) -> bytes:
 
 
 def build_heatmap(theme: Any) -> bytes:
-    """Correlation heatmap — showcases diverging colormap."""
+    """Correlation heatmap — showcases the theme's own diverging colormap."""
     chart = fm.heatmap(
         df_corr,
-        cmap="rdbu",
         center=0.0,
         annot=True,
         fmt=".2f",

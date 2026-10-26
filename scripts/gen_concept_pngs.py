@@ -57,7 +57,15 @@ def gen_customizing_annotations_example():
         fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
         + ann.text(3.5, 8.2, "Anomaly", color="#c0392b", font_size=13)
         + ann.arrow(3.5, 8.0, 3.5, 6.5)
-        + ann.span("x", 3.0, 4.5, fill="#fee2e2", opacity=0.08, label="Anomalous region")
+        + ann.span(
+            "x",
+            3.0,
+            4.5,
+            fill="#fee2e2",
+            opacity=0.3,
+            label="Anomalous region",
+            label_position="middle",
+        )
     )
     save_png(chart, f"{BASE}/customizing_annotations_example.png")
 

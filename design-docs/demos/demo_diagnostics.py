@@ -144,6 +144,7 @@ try:
     X_bc, y_bc = bc.data[:, :8], bc.target
     clf_bc = LogisticRegression(max_iter=300, random_state=42).fit(X_bc, y_bc)
     feature_names_bc = list(bc.feature_names[:8])
+    source_bc = fm.ModelSource(clf_bc, X_bc, y_bc, class_names=["malignant", "benign"])
 
     # Also try GBM on breast cancer for SHAP
     gbm_bc = GradientBoostingClassifier(n_estimators=50, random_state=42).fit(X_bc, y_bc)
@@ -345,13 +346,13 @@ def build_importance_chart():
 
 
 def build_gain_chart():
-    return fm.gain_chart(clf_bc, X_bc, y_bc, theme=THEME).properties(
+    return fm.gain_chart(source_bc, theme=THEME).properties(
         title="gain_chart() — Cumulative Gains", width=W, height=H
     )
 
 
 def build_lift_chart():
-    return fm.lift_chart(clf_bc, X_bc, y_bc, theme=THEME).properties(
+    return fm.lift_chart(source_bc, theme=THEME).properties(
         title="lift_chart() — Lift Curve", width=W, height=H
     )
 
