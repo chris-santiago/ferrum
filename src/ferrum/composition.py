@@ -775,139 +775,6 @@ def _unsupported_resolve_error(kind: str) -> ValueError:
 _RESOLVE_UNCHANGED = object()
 
 
-def compute_union_domain(charts, channel: str) -> Optional[dict]:
-    """Compute a ferrum scale dict spanning *channel* across *charts*.
-
-    Walks every layer of every chart, collects ``(field, data)`` pairs,
-    detects the scale type from the first binding's dtype, then either
-    unions numeric min/max (linear) or unique values (ordinal).  Time
-    domains use the same numeric union path but emit ``type="time"``.
-
-    ``_build_merged`` (the interactive one-panel merged
-    path) is the ONLY production caller left. Every other composition's
-    scale sharing -- ``_ChartLike.share_scale``, ``RepeatChart.expand()``
-    /``resolve=``, and HConcat/VConcat/ConcatChart/JointChart/ClusterMapChart's
-    own ``resolve=`` -- rides the Rust composite resolve pass instead
-    (``_composite_resolve_field``), which unions *transform-aware*
-    chart extents (e.g. a box mark's whisker reach, a KDE's density
-    support) rather than this function's raw column min/max. That
-    divergence is real and intentional for now: ``_build_merged`` renders
-    through the flat single-Chart entry (the interactive one-panel
-    contract), which has no composite tree to carry a resolve field, so
-    this raw-column union is the only mechanism available there. This is
-    unrelated to the per-layer independent-y mechanism GH #52 shipped
-    (2026-07-11, secondary y-axis) -- that work left x/color/size shared
-    resolution on this raw-column path unchanged -- and remains open; see
-    the "python overlay" S2 row in the code archaeology followups doc.
-
-    Parameters
-    ----------
-    charts : iterable of Chart
-        Charts whose channel will share a domain.
-    channel : str
-        Encoding channel name (``"x"``, ``"y"``, ``"color"``, ...).
-
-    Returns
-    -------
-    dict or None
-        ``{"type": "linear" | "ordinal" | "time", "domain": [...]}``
-        suitable for passing as ``scale=`` on an encoding channel.
-        Returns ``None`` when no chart binds the channel, no data is
-        available, or the dtype is unsupported.
-    """
-    from ferrum._render_prepare import (
-        _chart_bindings,
-        _classify_field,
-        _column_minmax,
-        _column_unique,
-    )
-
-    from ferrum._coerce import to_polars
-
-    bindings: list = []
-    for chart in charts:
-        data = getattr(chart, "_data", None)
-        if data is None:
-            continue
-        # The field readers below answer from a polars frame; pandas, PyArrow
-        # and LazyFrame data are converted here, once per chart.
-        data = to_polars(data)
-        for field in _chart_bindings(chart, channel):
-            if field is not None:
-                bindings.append((field, data))
-    if not bindings:
-        return None
-
-    first_field, first_data = bindings[0]
-    scale_type = _classify_field(first_data, first_field)
-    if scale_type is None:
-        return None
-
-    if scale_type in ("linear", "time"):
-        lo, hi = float("inf"), float("-inf")
-        for field, data in bindings:
-            extent = _column_minmax(data, field)
-            if extent is None:
-                continue
-            lo = min(lo, extent[0])
-            hi = max(hi, extent[1])
-        if lo == float("inf"):
-            return None
-        return {"type": scale_type, "domain": [lo, hi]}
-
-    # ordinal: union of unique values, preserving first-appearance order
-    seen: list = []
-    seen_set: set = set()
-    for field, data in bindings:
-        for v in _column_unique(data, field):
-            if v not in seen_set:
-                seen_set.add(v)
-                seen.append(v)
-    if not seen:
-        return None
-    return {"type": "ordinal", "domain": seen}
-
-
-def inject_scale(chart, channel: str, scale_dict: dict):
-    """Return a clone of *chart* with ``scale=scale_dict`` set on *channel*.
-
-    For layered charts each layer's encoding is updated independently.
-    Channels not currently bound on the chart (or on a particular layer)
-    are left untouched — no implicit binding is added.
-
-    Paired exclusively with ``compute_union_domain`` at
-    ``_build_merged`` -- the single remaining raw-column
-    scale-injection seam (see that function's docstring for why).
-    """
-    from ferrum.encoding.base import ChannelBase
-    from ferrum.chart import _channel_class_for
-
-    def _set_on(value):
-        if isinstance(value, ChannelBase):
-            return value._with_options(scale=scale_dict)
-        cls = _channel_class_for(channel)
-        if cls is None:
-            return value
-        return cls(value, scale=scale_dict)
-
-    new = chart._clone()
-    if new._layers:
-        # Every other field of the layer survives the rewrite.
-        new._layers = [
-            replace(
-                layer,
-                encoding={
-                    k: (_set_on(v) if k == channel else v) for k, v in layer.encoding.items()
-                },
-            )
-            for layer in new._layers
-        ]
-    else:
-        if channel in new._encoding:
-            new._encoding[channel] = _set_on(new._encoding[channel])
-    return new
-
-
 @dataclass
 class _LoweredTree:
     """An HConcat/VConcat lowered to the one-call Rust composite render path.
@@ -2063,9 +1930,9 @@ class _ChartLike(ConfigureMixin, _ChartOperatorMixin):
         already uses. No ``scale=`` domain dict is computed or injected here,
         and a "shared" union runs over transform-aware chart extents (e.g. a
         box mark's whisker reach, a KDE's density support), not raw column
-        min/max — see ``compute_union_domain`` for the one remaining
-        raw-column injection seam (``_build_merged``, the
-        interactive one-panel path; GH #52). ``**channels`` only ever
+        min/max. ``LayerChart._build_merged`` (the interactive one-panel
+        path) shares scales the same way — see that method's docstring.
+        ``**channels`` only ever
         touches scale resolution; when the existing ``resolve=`` is a
         [Resolve][ferrum.Resolve] with a ``legend`` field set, that legend field
         carries through unchanged onto the rebuilt composition. The merged
@@ -4121,16 +3988,18 @@ class LayerChart(_ChartLike):
     def _build_merged(self):
         """Merge member charts into a single multi-layer Chart via ``+``.
 
-        Applies ``resolve=`` scale sharing, ``title=``, and composition-level
-        configure layers when set.
+        Applies ``title=`` and composition-level configure layers when set.
 
-        This is the single remaining production call site for
-        :func:`compute_union_domain`/:func:`inject_scale`'s raw-column scale
-        injection (the one-panel interactive-render contract has no
-        composite tree to carry a resolve field — see those functions'
-        docstrings). Its union semantics for ``color``/``size`` may
-        therefore diverge from the static overlay tree's transform-aware
-        unions (:meth:`_composite_tree`); see GH #52.
+        A ``"shared"`` channel in ``resolve=`` needs no separate handling
+        here: the ``+`` reduction below already resolves one scale per
+        channel per panel over every layer that draws it (the same rule
+        the static overlay tree's :meth:`_composite_tree` applies), so a
+        member marked ``"shared"`` on x/color/size already draws with the
+        union its layers would get anyway. This one-panel interactive-render
+        contract has no composite tree to carry a resolve field, which is
+        why there is no Rust resolve-field plumbing here the way
+        :meth:`_composite_tree` has it — the merged chart's own per-layer
+        resolution stands in for it.
 
         Secondary y-axis (GH #52): when ``resolve={"y": "independent"}``,
         every merged wire layer contributed by a non-primary member chart
@@ -4209,14 +4078,6 @@ class LayerChart(_ChartLike):
                     layers[i] = replace(layers[i], independent_y=True)
                 result._layers = layers
             n_before = len(result._layers)
-        shared = [
-            ch for ch, mode in _resolve_scale_modes(self._resolve).items() if mode == "shared"
-        ]
-        if shared:
-            for channel in shared:
-                sd = compute_union_domain(self._charts, channel)
-                if sd is not None:
-                    result = inject_scale(result, channel, sd)
         if self._title is not None:
             result = result.properties(title=self._title)
         # Prepend composition-level configure layers so per-chart config wins.

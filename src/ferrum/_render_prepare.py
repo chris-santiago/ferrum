@@ -6,11 +6,10 @@ mixin invokes but that are not part of render dispatch itself: the
 annotation category-coordinate resolver.  Most of these are pure helpers
 driven by ``_RenderMixin._resolve_chart_config`` / ``_render_inputs`` in
 ``ferrum._render``; the per-channel field/column introspection helpers
-(``_chart_bindings``, ``_column_minmax``, ``_column_unique``,
-``_classify_field``) are also reused by ``ferrum.composition``'s cross-chart
-union-domain computation (``compute_union_domain``/``inject_scale``), since
-both are "which field is bound to this channel, and what does its data look
-like" questions on the same chart shapes.
+(``_chart_bindings``, used by this module's own
+:func:`_extract_ordinal_domain`, and ``_classify_field``, read by
+``ferrum._render``) answer "which field is bound to this channel, and what
+does its data look like" for a single chart.
 """
 
 from __future__ import annotations
@@ -133,8 +132,7 @@ def _chart_bindings(chart: Any, channel: str) -> Iterable[str | None]:
     Layered charts (``Chart + Chart`` composites) keep per-layer encoding
     dicts on ``_layers``; unlayered charts keep a single ``_encoding`` dict at
     the top level. Shared by :func:`_extract_ordinal_domain` (single-chart
-    ordinal-domain lookup) and ``ferrum.composition``'s cross-chart
-    union-domain computation.
+    ordinal-domain lookup).
     """
     layers = getattr(chart, "_layers", None)
     if layers:
@@ -143,50 +141,6 @@ def _chart_bindings(chart: Any, channel: str) -> Iterable[str | None]:
         return
     encoding = getattr(chart, "_encoding", {}) or {}
     yield _extract_field_name(encoding.get(channel))
-
-
-def _column_minmax(data, field: str) -> tuple | None:
-    """Return ``(min, max)`` of *field* in *data* as floats, or ``None``.
-
-    Temporal columns (``Date``/``Datetime``/``Time``) are cast to their
-    epoch-millisecond numeric representation before taking min/max --
-    the same units ``TimeScale(domain=[...])`` expects on the wire and
-    the same normalization ``ferrum._coerce.to_arrow_table`` applies to
-    every temporal column before it reaches the Rust renderer (``Date``
-    and non-ms ``Datetime`` both cast to ``Datetime("ms")``). Casting the
-    *column* (not calling Python's ``datetime.timestamp()`` on the
-    scalar ``col.min()``/``col.max()`` return value) avoids the stdlib's
-    local-timezone assumption for naive datetimes; ``float(a_datetime)``
-    also simply raises ``TypeError``, which is the bug this guards
-    against (reachable via ``LayerChart``'s interactive
-    ``compute_union_domain``/``inject_scale`` seam sharing a temporal
-    x/y -- see ``composition.py::LayerChart._build_merged``).
-    """
-    try:
-        col = data[field]
-    except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
-        return None
-
-    dtype = col.dtype
-    if dtype == pl.Date or isinstance(dtype, pl.Datetime):
-        col = col.cast(pl.Datetime("ms")).cast(pl.Int64)
-    elif dtype == pl.Time:
-        # Time has no epoch; nanoseconds-since-midnight -> ms-since-midnight.
-        col = col.cast(pl.Int64) / 1_000_000
-    lo, hi = col.min(), col.max()
-    if lo is None or hi is None:
-        return None
-    return (float(lo), float(hi))
-
-
-def _column_unique(data, field: str) -> list:
-    """Return the unique values of *field* in *data* as a list, preserving
-    appearance order."""
-    try:
-        col = data[field]
-    except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
-        return []
-    return col.unique(maintain_order=True).to_list()
 
 
 def _classify_field(data, field: str) -> str | None:

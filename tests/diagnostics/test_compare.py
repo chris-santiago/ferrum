@@ -508,40 +508,6 @@ def test_importance_chart_compare_svg_is_deterministic():
     )
 
 
-def test_compute_union_domain_ordinal_is_stable_across_calls():
-    """compute_union_domain over ordinal columns must return the same domain
-    every time it is called (order-preserving unique, not hash-order).
-
-    This is the unit-level guard for the ordinal-domain union helper.
-    """
-    import polars as pl
-
-    from ferrum.composition import compute_union_domain
-
-    # Build two minimal charts whose feature column has the same values but
-    # may be encountered in different orders by the uniqueness kernel.
-    features = ["f3", "f2", "f0", "f1"]
-
-    class _FakeChart:
-        def __init__(self, data, field):
-            self._data = data
-            self._encoding = {"y": field}
-            self._layers = None
-
-    df = pl.DataFrame({"feature": features})
-    chart_a = _FakeChart(df, "feature")
-    chart_b = _FakeChart(df, "feature")
-
-    # Call many times; hash-order nondeterminism manifests within ~10 calls.
-    domains = {tuple(compute_union_domain([chart_a, chart_b], "y")["domain"]) for _ in range(20)}
-    assert len(domains) == 1, (
-        f"compute_union_domain returned multiple orderings across 20 calls: {domains}"
-    )
-    # Domain must preserve first-appearance order from the data.
-    domain = list(next(iter(domains)))
-    assert domain == features, f"Expected {features}, got {domain}"
-
-
 def test_pdp_chart_compare_keeps_independent_feature_x():
     """pdp compose must keep each feature's own x range, NOT collapse the two
     features onto one shared x axis.

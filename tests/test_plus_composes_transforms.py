@@ -905,34 +905,27 @@ def test_a_binned_count_bar_beside_another_frame_counts_only_its_own_rows():
 
 
 # ---------------------------------------------------------------------------
-# LayerChart's shared-scale injection keeps every other field of a layer.
+# LayerChart's merged (interactive) path draws a filtered member's kept rows.
 # ---------------------------------------------------------------------------
 
 
 def test_a_shared_scale_keeps_an_encode_after_reaching_the_left_rows():
-    """Every kept left point lies inside the shared x domain, so all of them draw."""
+    """Every kept left point draws, whether or not resolve={"x": "shared"}
+    is set explicitly -- the merged path shares x the same way a plain
+    ``+`` chart does (one scale per channel resolved over every drawn
+    layer), so requesting "shared" explicitly changes nothing about which
+    rows draw."""
     left = pl.DataFrame({"value": [-2.0, -1.0, 1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
     composed = (fm.Chart(left).transform(_positive()).mark_point() + _uv_line()).encode(
         x="value", y="y"
     )
     other = fm.Chart(_UV).mark_point().encode(x="u", y="v")
-    chart = fm.LayerChart(composed, other, resolve={"x": "shared"})
-    assert chart._build_merged().to_svg().count("<circle") == 3 + _UV.height
-    assert "<html" in chart.interactive().to_html().lower()
+    chart_unset = fm.LayerChart(composed, other)
+    chart_shared = fm.LayerChart(composed, other, resolve={"x": "shared"})
 
-
-def test_injecting_a_shared_scale_changes_only_the_channel_it_sets():
-    from dataclasses import fields
-
-    from ferrum.composition import inject_scale
-
-    member = P() + fm.SecondaryY("value")
-    injected = inject_scale(member, "x", {"domain": [0.0, 1.0]})
-    for before, after in zip(member._layers, injected._layers, strict=True):
-        for f in fields(before):
-            if f.name != "encoding":
-                assert getattr(after, f.name) == getattr(before, f.name), f.name
-    assert any(layer.independent_y for layer in injected._layers)
+    assert chart_unset._build_merged().to_svg() == chart_shared._build_merged().to_svg()
+    assert chart_shared._build_merged().to_svg().count("<circle") == 3 + _UV.height
+    assert "<html" in chart_shared.interactive().to_html().lower()
 
 
 # ---------------------------------------------------------------------------

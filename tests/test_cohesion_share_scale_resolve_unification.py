@@ -2,18 +2,19 @@
 
 Phase B's verification-before-completion gate found ``share_scale()``/``expand()``
 still computed a shared scale by walking each member chart's RAW data column
-(``compute_union_domain`` + ``inject_scale``, injecting an explicit ``scale=``
-dict into each chart's encoding), while ``resolve=`` passed at construction time
-already routed through the Rust composite resolve pass -- a transform-aware
-union computed *after* each panel's stat transform runs. Two public routes to
-"shared scales" therefore could render DIFFERENT axes for the same intent, the
-exact drift class #45 fixed elsewhere in this phase.
+and injecting an explicit ``scale=`` dict into each chart's encoding, while
+``resolve=`` passed at construction time already routed through the Rust
+composite resolve pass -- a transform-aware union computed *after* each
+panel's stat transform runs. Two public routes to "shared scales" therefore
+could render DIFFERENT axes for the same intent, the exact drift class #45
+fixed elsewhere in this phase.
 
 Fix: ``share_scale()`` is now pure sugar for ``resolve=`` -- it merges the
 requested channels into the composition's ``_resolve`` dict and reconstructs
 via the same constructor ``resolve=`` already uses, so both entry points are
 byte-identical at render time. No ``scale=`` dict is computed or injected by
-``share_scale()``/``expand()`` anymore.
+``share_scale()``/``expand()``, nor by ``LayerChart``'s merged (interactive)
+path: neither mechanism injects an explicit scale onto a shared channel.
 
 This file's first test is the RED-proof: box-mark panels with disjoint value
 ranges, where the OLD raw-column injection and the Rust resolve pass computed
