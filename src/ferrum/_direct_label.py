@@ -16,6 +16,9 @@ import polars as pl
 from typing import TYPE_CHECKING
 
 from ferrum._metric_labels import _resolve_field
+from ferrum._validate import validate_choice
+
+_POSITIONS = ("end", "start")
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -71,6 +74,8 @@ def _direct_label_endpoint(
         Augmented chart with the text overlay applied.
     """
     from ferrum._coerce import to_arrow_table
+
+    validate_choice("_direct_label_endpoint", "position", position, _POSITIONS)
 
     x_col = x_col or _resolve_field(chart._encoding.get("x"))
     y_col = y_col or _resolve_field(chart._encoding.get("y"))
@@ -139,12 +144,22 @@ def _direct_label_endpoint(
 
         text_encoding["color"] = Color(color_field, legend=None)
 
+    # An "end" label sits to the right of the series' last (largest-x)
+    # point: left-aligned text starting 4px past it, in the gutter the
+    # text-edge inset already reserves, so the label's ink never falls
+    # inside the line's own x-range. A "start" label mirrors this to the
+    # left of the first (smallest-x) point: right-aligned text ending 4px
+    # before it.
+    endpoint_kwargs = (
+        {"align": "left", "dx": 4} if position == "end" else {"align": "right", "dx": -4}
+    )
+
     chart_aug = chart._clone()
     chart_aug._data = augmented
     return chart_aug.layer(
         _Layer(
             mark="text",
             encoding=text_encoding,
-            mark_kwargs={"align": "right", "dx": -4},
+            mark_kwargs=endpoint_kwargs,
         )
     )
