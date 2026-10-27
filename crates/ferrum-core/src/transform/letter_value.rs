@@ -598,6 +598,7 @@ fn compute_depths(
                 param: "k_depth".into(),
                 requested: raw_k.to_string(),
                 applied: k.to_string(),
+                panel: None,
             });
         }
         for depth in 1..=k {
@@ -1134,7 +1135,7 @@ mod tests {
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert!(matches!(
             &warnings[0],
-            TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+            TransformWarning::ParameterClamped { transform, group, param, requested, applied, .. }
                 if transform == "LetterValue" && group.is_none() && param == "k_depth"
                    && requested == "13" && applied == "12"
         ));

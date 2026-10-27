@@ -33,11 +33,13 @@ use crate::spec::position::{PositionAdjust, StackAnchor, StackValueAxis};
 ///
 /// `outputs` are the named outputs the axis reads beside `batch`: on a
 /// faceted shared axis the all-panels batch at [`FINAL_OUTPUT_KEY`] is
-/// replaced by its own stack preview, so every panel's axis spans the
-/// tallest panel's stack, not the unstacked rows.
+/// replaced by its own adjustment preview, so the axis spans the positions
+/// the adjustment draws on every panel, not the unadjusted rows. `Stack`'s
+/// `base` pairing is the only shape with a span partner — a continuous
+/// `Dodge`/`Jitter` preview carries no `base`.
 ///
 /// [`FINAL_OUTPUT_KEY`]: crate::transform::core::FINAL_OUTPUT_KEY
-pub(crate) struct StackedAxisBatch<'a> {
+pub(crate) struct AdjustedAxisBatch<'a> {
     pub(crate) batch: Cow<'a, RecordBatch>,
     pub(crate) base: Option<crate::spec::encoding::EncodingSpec>,
     pub(crate) outputs: Cow<'a, HashMap<String, RecordBatch>>,
@@ -101,24 +103,30 @@ pub(crate) fn read_own_values(encoding: &mut crate::spec::encoding::Encoding, ba
 }
 
 /// The batches an unlayered spec's value axis on `axis` resolves against,
-/// accounting for the stack its one mark draws ([`StackedAxisBatch`]).
+/// accounting for the position adjustment its one mark draws
+/// ([`AdjustedAxisBatch`]).
 ///
 /// `encoding` is the encoding the mark draws (post-`CoordFlip`), and `field`
 /// the axis's bound field: the preview applies only when that field is the
 /// encoding's value channel on `axis` and the mark stacks its value there
-/// ([`stack_preview`], which reads the explicit `Stack` and the encoding's
-/// `stack` shorthand as the draw pass does). Returning the stacked tops keeps
-/// stacked marks visible: `LinearScale` returns NaN for out-of-domain inputs
-/// and the drawers drop every row whose top falls past the domain.
+/// ([`position_preview`], which reads the explicit `Stack` and the
+/// encoding's `stack` shorthand as the draw pass does). Returning the
+/// stacked tops keeps stacked marks visible: `LinearScale` returns NaN for
+/// out-of-domain inputs and the drawers drop every row whose top falls past
+/// the domain. A continuous `Dodge` or data-space `Jitter` widens the same
+/// way: `field`'s column, if the adjustment rewrites it, carries the
+/// adjustment's own adjusted rows alone — never a union with the unadjusted
+/// ones — so the domain only ever grows to cover what the adjustment draws.
 ///
 /// A layered spec's axis resolves against the unstacked batches: each layer
-/// that stacks contributes the stack it draws, from the batch it draws, in
-/// the layered domain union (`scale_resolve::domain`), so a layer reading a
-/// statistic's output stacks there exactly as one reading the chart's rows,
-/// and an unstacked sibling keeps reading its own values. `include_final`
-/// is the facet-shared flag the axis resolves under: when set, the
-/// all-panels batch the union reads is stacked too, per panel. Refuses a
-/// facet field the panel split cannot read ([`stack_preview`]).
+/// that stacks (or dodges/jitters) contributes the batch it draws, from the
+/// batch it draws, in the layered domain union (`scale_resolve::domain`), so
+/// a layer reading a statistic's output widens there exactly as one reading
+/// the chart's rows, and an unadjusted sibling keeps reading its own values.
+/// `include_final` is the facet-shared flag the axis resolves under: when
+/// set, the all-panels batch the union reads is previewed too, per panel.
+/// Refuses a facet field the panel split cannot read ([`position_preview`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn axis_batch<'a>(
     spec: &ChartSpec,
     encoding: &crate::spec::encoding::Encoding,
@@ -127,28 +135,29 @@ pub(crate) fn axis_batch<'a>(
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
     include_final: bool,
-) -> Result<StackedAxisBatch<'a>, crate::render::RenderError> {
-    let unstacked = StackedAxisBatch {
+    color: Option<&crate::render::scale_resolve::ColorScale>,
+) -> Result<AdjustedAxisBatch<'a>, crate::render::RenderError> {
+    let unadjusted = AdjustedAxisBatch {
         batch: Cow::Borrowed(primary_batch),
         base: None,
         outputs: Cow::Borrowed(transform_outputs),
     };
     if spec.is_layered() {
-        return Ok(unstacked);
+        return Ok(unadjusted);
     }
     let value = match axis {
         StackValueAxis::X => encoding.x.as_ref(),
         StackValueAxis::Y => encoding.y.as_ref(),
     };
     if value.map(|e| e.field.as_str()) != Some(field) {
-        return Ok(unstacked);
+        return Ok(unadjusted);
     }
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
     let drawn = position_encoding(spec.mark, spec.coord.as_ref(), encoding);
     let preview = |batch: &RecordBatch| {
-        stack_preview(batch, spec.position.as_ref(), &drawn, coord_flipped, axis, spec.facet.as_ref())
+        position_preview(batch, spec.position.as_ref(), &drawn, coord_flipped, axis, spec.facet.as_ref(), color)
     };
-    let Some(stacked) = preview(primary_batch)? else { return Ok(unstacked) };
+    let Some(adjusted) = preview(primary_batch)? else { return Ok(unadjusted) };
     let all_panels = match include_final.then(|| transform_outputs.get(crate::transform::core::FINAL_OUTPUT_KEY)).flatten() {
         Some(all_panels) => preview(all_panels)?,
         None => None,
@@ -161,94 +170,324 @@ pub(crate) fn axis_batch<'a>(
         }
         None => Cow::Borrowed(transform_outputs),
     };
-    Ok(StackedAxisBatch {
-        batch: Cow::Owned(stacked),
-        base: Some(crate::spec::encoding::EncodingSpec { field: STACK_BASE_COLUMN.into(), ..Default::default() }),
-        outputs,
-    })
+    // Only `Stack` pairs a base column with the value it widens to (every
+    // stacked segment's span, from base to top); a `Dodge`/`Jitter` preview
+    // is the adjusted batch alone, with no span partner.
+    let base = matches!(
+        effective_position(spec.position.as_ref(), &drawn, coord_flipped)?.as_deref(),
+        Some(PositionAdjust::Stack { .. })
+    )
+    .then(|| crate::spec::encoding::EncodingSpec { field: STACK_BASE_COLUMN.into(), ..Default::default() });
+    Ok(AdjustedAxisBatch { batch: Cow::Owned(adjusted), base, outputs })
 }
 
-/// The stack preview of the batch an already-prepared layer draws, on the
-/// panel's `axis`: [`stack_preview`] over the position, encoding and coord
-/// the draw pass hands `apply_position` for that layer
+/// The position preview of the batch an already-prepared layer draws, on the
+/// panel's `axis`: [`position_preview`] over the position, encoding and
+/// coord the draw pass hands `apply_position` for that layer
 /// ([`LayerPrepared`](crate::render::prepare::LayerPrepared), already in its
-/// own coord). `None` when the layer stacks nothing on `axis`. The one
-/// LayerPrepared-taking body [`layer_stack_preview`] and a reader that
+/// own coord). `None` when the layer adjusts nothing on `axis`. The one
+/// LayerPrepared-taking body [`layer_position_preview`] and a reader that
 /// already holds a prepared layer (spec §6.13's `text_edge_rows`) both call,
-/// so a layer's drawn stack is read the same way everywhere.
-pub(crate) fn layer_prepared_stack_preview(
+/// so a layer's drawn position is read the same way everywhere. `color` is
+/// the panel's one resolved color scale ([`position_preview`]'s doc), the
+/// same scale the layer's own `Dodge` draws through.
+pub(crate) fn layer_prepared_position_preview(
     drawn: &crate::render::prepare::LayerPrepared,
     axis: StackValueAxis,
     batch: &RecordBatch,
     facet: Option<&crate::layout::facet::FacetSpec>,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
     let encoding = position_encoding(drawn.mark, drawn.coord.as_ref(), &drawn.encoding);
-    stack_preview(batch, drawn.position.as_ref(), &encoding, coord_flipped, axis, facet)
+    position_preview(batch, drawn.position.as_ref(), &encoding, coord_flipped, axis, facet, color)
 }
 
-/// The stack preview of the batch one layer of `spec` draws, on the panel's
-/// `axis`: builds this layer's own [`LayerPrepared`] and defers to
-/// [`layer_prepared_stack_preview`].
-pub(crate) fn layer_stack_preview(
+/// The position preview of the batch one layer of `spec` draws, on the
+/// panel's `axis`: builds this layer's own [`LayerPrepared`] and defers to
+/// [`layer_prepared_position_preview`].
+pub(crate) fn layer_position_preview(
     spec: &ChartSpec,
     layer: &crate::spec::layer::Layer,
     axis: StackValueAxis,
     batch: &RecordBatch,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     let drawn = crate::render::prepare::LayerPrepared::from_chart_and_layer(spec, layer).in_its_coord();
-    layer_prepared_stack_preview(&drawn, axis, batch, spec.facet.as_ref())
+    layer_prepared_position_preview(&drawn, axis, batch, spec.facet.as_ref(), color)
 }
 
-/// The stack a mark draws over `batch` under `position` (or, with no
-/// position, its encoding's `stack` shorthand: [`effective_position`]),
-/// previewed for the value axis `axis`: the stacked batch with every 0 base
-/// nulled ([`StackedAxisBatch`]). `None` when no stack applies, when its
-/// value lies on the other axis ([`resolve_stack_value_on_x`], the triad the
-/// draw pass reads), or when the stack fails; the draw pass's own stack then
-/// raises that error.
+/// Whether `drawn`'s own effective position adjustment is `Stack`: the
+/// layered counterpart of `axis_batch`'s inline `base` check, read the same
+/// way (`effective_position` over the layer's own post-flip encoding and
+/// position). `AxisReads::over` pairs a stack base column with a layer only
+/// when this is `true`, so a dodged or jittered layer's contribution never
+/// reads a span partner that only `Stack` writes.
+pub(crate) fn layer_prepared_stacks(
+    drawn: &crate::render::prepare::LayerPrepared,
+) -> Result<bool, crate::render::RenderError> {
+    let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
+    let encoding = position_encoding(drawn.mark, drawn.coord.as_ref(), &drawn.encoding);
+    Ok(matches!(
+        effective_position(drawn.position.as_ref(), &encoding, coord_flipped)?.as_deref(),
+        Some(PositionAdjust::Stack { .. })
+    ))
+}
+
+/// The batch the axis `axis` resolves against under the position adjustment
+/// a mark draws with (`position`, or with none, its encoding's `stack`
+/// shorthand: [`effective_position`]): `None` when no adjustment applies,
+/// when its drawn channel lies on the other axis, or when it fails; the draw
+/// pass's own adjustment then raises that error.
 ///
-/// The draw pass stacks each facet panel's rows apart, so rows of different
-/// panels (by `facet`'s fields the batch holds) never stack together here
-/// either: a batch spanning panels is stacked panel by panel. A batch
-/// holding no facet field repeats in every panel and stacks whole. A facet
-/// field the panel split cannot read is refused with the panel split's own
-/// error ([`crate::render::facet_key_column`]), never stacked across panels.
-/// A `stack` shorthand on both channels is refused as the draw pass refuses
-/// it ([`stack_shorthand`]).
+/// Every adjustment previews as the rows it actually draws, split per facet
+/// panel and concatenated back ([`adjusted_across_panels`]), so the axis
+/// spans exactly the positions the adjustment draws — never a wider union
+/// with the unadjusted rows, which would leave a phantom margin wherever the
+/// extreme group sits in a non-extreme slot. `Stack` previews as the
+/// stacked batch with every 0 base nulled ([`AdjustedAxisBatch`]), applying
+/// only when its value lies on `axis` ([`resolve_stack_value_on_x`], the
+/// triad the draw pass reads). A continuous `Dodge` or data-space `Jitter`
+/// previews as its adjusted rows alone. Ordinal `Jitter`/`Dodge` (pixel
+/// offsets, no data-space rewrite) and a `Dodge` span branch (an `x2`/`y2`
+/// span on the band axis, whose sub-slots never leave `[x, x2]`) preview as
+/// `None`, keeping the unadjusted extent, byte-identical.
 ///
-/// It stacks in first-appearance order (no color scale ranks the groups):
-/// the order moves segments within a bin, never a bin's positive or negative
-/// total, so the extent it previews is the drawn one. The warnings the stack
-/// would raise are the draw pass's to report, once, so they are discarded.
-pub(crate) fn stack_preview(
+/// An error from the adjustment itself (a malformed `Stack`/`Dodge`/
+/// `Jitter`, on these SAME rows) resolves to `None` here: the axis falls
+/// back to the unadjusted rows, and the draw pass raises that error once,
+/// in its own typed voice ([`adjusted_across_panels`]'s doc). A facet-split
+/// failure the draw pass cannot raise from here still propagates.
+///
+/// The draw pass applies each facet panel's rows apart, so rows of different
+/// panels (by `facet`'s fields the batch holds) never adjust together here
+/// either: a batch spanning panels is previewed panel by panel, exactly the
+/// per-panel row order (and so, for `Jitter`, the per-row seed) the draw
+/// pass itself uses. A batch holding no facet field repeats in every panel
+/// and previews whole. A facet field the panel split cannot read is refused
+/// with the panel split's own error ([`crate::render::facet_key_column`]),
+/// never split across panels. A `stack` shorthand on both channels is
+/// refused as the draw pass refuses it ([`stack_shorthand`]).
+///
+/// `Stack` previews in first-appearance order (no color scale ranks the
+/// groups): the order moves segments within a bin, never a bin's positive or
+/// negative total, so the extent it previews is the drawn one. `Dodge`
+/// orders its sub-band slots the same way [`apply_dodge`] does — by `color`'s
+/// domain order when it is resolved and the dodge-by field is the color
+/// field, else first-appearance order. `color` is the panel's own resolved
+/// color scale, the SAME one the real draw's `apply_dodge` reads
+/// (`position_preview`'s callers resolve it ahead of the positional axes
+/// precisely so this preview and the draw never disagree on sub-band
+/// order — a sorted or explicitly-domained legend must not drop a point
+/// the draw itself still places). The warnings either adjustment would
+/// raise are the draw pass's to report, once, so they are discarded here.
+pub(crate) fn position_preview(
     batch: &RecordBatch,
     position: Option<&PositionAdjust>,
     encoding: &crate::spec::encoding::Encoding,
     coord_flipped: bool,
     axis: StackValueAxis,
     facet: Option<&crate::layout::facet::FacetSpec>,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     let Some(effective) = effective_position(position, encoding, coord_flipped)? else { return Ok(None) };
-    let PositionAdjust::Stack { by, offset, anchor, value_axis } = effective.as_ref() else {
-        return Ok(None);
-    };
-    if resolve_stack_value_on_x(*value_axis, coord_flipped) != (axis == StackValueAxis::X) {
-        return Ok(None);
+    match effective.as_ref() {
+        PositionAdjust::Stack { by, offset, anchor, value_axis } => {
+            if resolve_stack_value_on_x(*value_axis, coord_flipped) != (axis == StackValueAxis::X) {
+                return Ok(None);
+            }
+            let stacked = adjusted_across_panels(batch, facet, |rows| {
+                let mut discard_warnings = Vec::new();
+                apply_stack(rows, by.as_deref(), offset, anchor, *value_axis, encoding, None, coord_flipped, &mut discard_warnings)
+            })?;
+            Ok(stacked.and_then(with_nonzero_bases))
+        }
+        PositionAdjust::Dodge { by, padding } => {
+            let x_is_ordinal = axis_reads_categorical(encoding.x.as_ref(), batch);
+            let y_is_ordinal = axis_reads_categorical(encoding.y.as_ref(), batch);
+            // The band axis `apply_dodge` itself resolves to, from the same
+            // dtype-based hint the real draw's `ResolvedScales` would agree
+            // with (ordinality is a property of the column and the user's
+            // declared type, never of how the axis happens to be resolved).
+            let band_on_y = match (x_is_ordinal, y_is_ordinal) {
+                (true, false) => false,
+                (false, true) => true,
+                _ => coord_flipped,
+            };
+            if (band_on_y && y_is_ordinal) || (!band_on_y && x_is_ordinal) {
+                // Both axes ordinal, or the band axis itself is ordinal:
+                // `Dodge` only emits pixel offsets, never a data-space
+                // rewrite, so there is nothing to widen.
+                return Ok(None);
+            }
+            let band_field = if band_on_y { encoding.y.as_ref() } else { encoding.x.as_ref() }.map(|e| e.field.as_str());
+            let this_field = match axis { StackValueAxis::X => encoding.x.as_ref(), StackValueAxis::Y => encoding.y.as_ref() }.map(|e| e.field.as_str());
+            if band_field.is_none() || band_field != this_field {
+                return Ok(None);
+            }
+            // A span row (a histogram bin's `x`+`x2`) subdivides its own
+            // `[x, x2]` interval in place: the sub-slots never leave the
+            // span, so previewing the adjusted rows would widen nothing
+            // the unadjusted span doesn't already cover. Detected the same
+            // way `apply_dodge` detects it: the band axis's own paired
+            // span channel is bound.
+            let span_bound = if band_on_y { encoding.y2.as_ref() } else { encoding.x2.as_ref() }.is_some();
+            if span_bound {
+                return Ok(None);
+            }
+            let scales = probe_scales(x_is_ordinal, y_is_ordinal, color);
+            adjusted_across_panels(batch, facet, |panel| {
+                let mut discard_warnings = Vec::new();
+                apply_dodge(panel, by.as_deref(), *padding, &scales, encoding, coord_flipped, &mut discard_warnings)
+            })
+        }
+        PositionAdjust::Jitter { axis: jitter_axis, width, seed } => {
+            let x_is_ordinal = axis_reads_categorical(encoding.x.as_ref(), batch);
+            let y_is_ordinal = axis_reads_categorical(encoding.y.as_ref(), batch);
+            let rewrites_x_field = matches!(jitter_axis, crate::spec::position::JitterAxis::X | crate::spec::position::JitterAxis::Both) && !x_is_ordinal;
+            let rewrites_y_field = matches!(jitter_axis, crate::spec::position::JitterAxis::Y | crate::spec::position::JitterAxis::Both) && !y_is_ordinal;
+            let this_field = match axis { StackValueAxis::X => encoding.x.as_ref(), StackValueAxis::Y => encoding.y.as_ref() }.map(|e| e.field.as_str());
+            // `field`'s column widens whenever JITTER REWRITES THAT COLUMN,
+            // by name — not only when `jitter_axis` names the channel this
+            // `axis` happens to be: `x` and `y` sharing one field both read
+            // the same rewritten column in place, so the second channel
+            // widens too, exactly as it reads the first channel's rewrite.
+            let touched = this_field.is_some()
+                && ((rewrites_x_field && encoding.x.as_ref().map(|e| e.field.as_str()) == this_field)
+                    || (rewrites_y_field && encoding.y.as_ref().map(|e| e.field.as_str()) == this_field));
+            if !touched {
+                return Ok(None);
+            }
+            let scales = probe_scales(x_is_ordinal, y_is_ordinal, color);
+            adjusted_across_panels(batch, facet, |panel| {
+                let mut discard_warnings = Vec::new();
+                apply_jitter(panel, jitter_axis, *width, *seed, &scales, encoding, &mut discard_warnings)
+            })
+        }
+        PositionAdjust::Identity => Ok(None),
     }
-    let mut discard_warnings = Vec::new();
-    let mut stack = |rows: &RecordBatch| {
-        apply_stack(rows, by.as_deref(), offset, anchor, *value_axis, encoding, None, coord_flipped, &mut discard_warnings).ok()
+}
+
+/// Whether `enc`'s column in `batch` resolves as a categorical axis
+/// (`ScaleKind::Ordinal`): the same declared-type-or-dtype reading
+/// [`column_reads_categorical`](crate::render::scale_resolve::column_reads_categorical)
+/// gives every other domain union, asked here (ahead of the axis's own
+/// scale resolving) so [`position_preview`]'s `Dodge`/`Jitter` branches
+/// route exactly as [`apply_dodge`]/[`apply_jitter`] will once the real
+/// scale resolves: a declared or dtype-categorical column is never
+/// rewritten in data space by either adjustment, so no preview widens it.
+fn axis_reads_categorical(enc: Option<&crate::spec::encoding::EncodingSpec>, batch: &RecordBatch) -> bool {
+    let Some(enc) = enc else { return false };
+    let located = crate::render::scale_resolve::locate_field(&enc.field, batch);
+    crate::render::scale_resolve::column_reads_categorical(enc, located)
+}
+
+/// A minimal [`ResolvedScales`] carrying `x`/`y`'s ordinality
+/// ([`axis_reads_categorical`]) and the panel's own resolved `color` scale,
+/// for calling the real [`apply_dodge`]/[`apply_jitter`] before the chart's
+/// real `x`/`y` scales exist to preview. Every other slot is empty: a
+/// `Dodge`'s own color-domain lookup ([`dodge_slot_domain`]) reads `color`
+/// here, the SAME scale the real draw's `apply_dodge` reads, so the
+/// preview's sub-band order can never diverge from the draw's
+/// (`position_preview`'s doc).
+fn probe_scales(
+    x_is_ordinal: bool,
+    y_is_ordinal: bool,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
+) -> ResolvedScales {
+    let probe = |is_ordinal: bool| {
+        if is_ordinal {
+            ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+                Vec::new(),
+                vec![0.0, 1.0],
+                crate::scale::discrete::DiscreteLayout::UNPADDED,
+            ))
+        } else {
+            ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 1.0], false, false))
+        }
     };
-    let stacked = match facet_panels(batch, facet)? {
-        None => stack(batch),
-        Some(panels) => panels
-            .iter()
-            .map(&mut stack)
-            .collect::<Option<Vec<_>>>()
-            .and_then(|stacked| arrow::compute::concat_batches(&stacked.first()?.schema(), &stacked).ok()),
+    ResolvedScales {
+        x: probe(x_is_ordinal),
+        y: probe(y_is_ordinal),
+        color: color.cloned(),
+        size: None,
+        shape: None,
+        opacity: None,
+        fill_opacity: None,
+        stroke_opacity: None,
+        stroke_dash: None,
+        stroke_width: None,
+        raster_cells: None,
+        x2: None,
+        y2: None,
+        y_slots: Default::default(),
+    }
+}
+
+/// `adjust`'s own output, split per facet panel ([`facet_panels`]) and
+/// concatenated back into one: the one combine step [`position_preview`]'s
+/// `Stack`, `Dodge` and `Jitter` branches all share, so the axis spans
+/// exactly the positions the adjustment draws, on every panel. `adjust`
+/// discards its own warnings — the draw pass reports those, once, on the
+/// batch it actually draws.
+///
+/// Faceted panels can retype their adjusted column differently (a
+/// single-group, no-op `Dodge` panel keeps its input dtype — `Int64`,
+/// `Float32`, `Timestamp` — untouched, while a genuinely dodged sibling
+/// retypes to `Float64` via `set_float64_column`), so concatenating more
+/// than one panel goes through [`crate::transform::concat::concat_by_name`],
+/// the crate's one schema-tolerant concat: a numeric dtype disagreement
+/// reconciles to `Float64` (the value every positional scale already reads
+/// through `col_as_f64`, so this can never narrow a later panel's own
+/// value into an earlier panel's dtype), and any other field already
+/// matches by construction (every panel's adjustment draws the same
+/// columns). A single panel (the unfaceted case, or a facet with only one
+/// held panel) is returned as is, with no concat at all.
+///
+/// An error FROM `adjust` itself — a malformed `Stack`/`Dodge`/`Jitter`, on
+/// the SAME rows the draw pass will adjust — resolves this whole call to
+/// `Ok(None)`: the axis falls back to the unadjusted rows, and the draw
+/// pass raises that same error once, in its own typed voice (carrying
+/// `coord_flipped` and the adjustment's own channel names), never this
+/// function's `ScaleResolutionFailed`. A facet-split failure (an
+/// unsupported facet dtype, which the draw pass cannot raise from a scale-
+/// resolution call site) still propagates: the preview must refuse rather
+/// than silently skip widening the axis. Likewise a genuine
+/// `concat_by_name` failure (any dtype disagreement `concat_by_name`
+/// itself cannot reconcile) propagates rather than resolving to `None`:
+/// the panels here are each ALREADY the adjustment's own successful
+/// output, not a second chance for `adjust`'s own error to hide in.
+fn adjusted_across_panels(
+    batch: &RecordBatch,
+    facet: Option<&crate::layout::facet::FacetSpec>,
+    adjust: impl Fn(&RecordBatch) -> Result<RecordBatch, crate::render::RenderError>,
+) -> Result<Option<RecordBatch>, crate::render::RenderError> {
+    let panels = facet_panels(batch, facet)?;
+    let per_panel: Vec<RecordBatch> = match &panels {
+        None => match adjust(batch) {
+            Ok(adjusted) => vec![adjusted],
+            Err(_) => return Ok(None),
+        },
+        Some(panels) => {
+            let mut out = Vec::with_capacity(panels.len());
+            for panel in panels {
+                match adjust(panel) {
+                    Ok(adjusted) => out.push(adjusted),
+                    Err(_) => return Ok(None),
+                }
+            }
+            out
+        }
     };
-    Ok(stacked.and_then(with_nonzero_bases))
+    match per_panel.len() {
+        0 => Ok(None),
+        1 => Ok(per_panel.into_iter().next()),
+        _ => {
+            let combined = crate::transform::concat::concat_by_name("position preview", per_panel)
+                .map_err(crate::render::RenderError::ScaleResolutionFailed)?;
+            Ok(Some(combined))
+        }
+    }
 }
 
 /// `batch` with its stack base column's 0 entries set to null. `apply_stack`
@@ -2976,33 +3215,46 @@ mod tests {
         assert!((ya.value(1) -  5.0).abs() < 1e-9, "row 1 mid={}", ya.value(1));
     }
 
-    /// A facet field the panel split cannot read is refused with the panel
+    /// A facet field the panel split cannot read (a dtype the ordinal-
+    /// category reader itself cannot stringify) is refused with the panel
     /// split's error, not stacked across panels as one stack.
     #[test]
     fn stack_preview_refuses_a_facet_field_the_panel_split_cannot_read() {
-        use arrow::array::Int64Array;
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::TimeUnit;
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
                 Field::new("x", DataType::Utf8, false),
                 Field::new("y", DataType::Float64, false),
                 Field::new("g", DataType::Utf8, false),
-                Field::new("h", DataType::Int64, false),
+                Field::new("h", DataType::Timestamp(TimeUnit::Millisecond, None), false),
             ])),
             vec![
                 Arc::new(StringArray::from(vec!["a", "a"])),
                 Arc::new(Float64Array::from(vec![1.0, 2.0])),
                 Arc::new(StringArray::from(vec!["g1", "g2"])),
-                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
             ],
         )
         .unwrap();
         let facet: crate::layout::facet::FacetSpec =
             serde_json::from_value(serde_json::json!({"field": "h", "mode": {"kind": "wrap", "ncols": 2}})).unwrap();
         let stack = PositionAdjust::Stack { by: None, offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
-        let preview = stack_preview(&batch, Some(&stack), &enc_xy("x", "y", Some("g")), false, StackValueAxis::Y, Some(&facet));
+        let preview = position_preview(&batch, Some(&stack), &enc_xy("x", "y", Some("g")), false, StackValueAxis::Y, Some(&facet), None);
         assert_eq!(
             preview.err().map(|e| e.to_string()),
-            Some(crate::render::RenderError::ScaleResolutionFailed("facet field 'h' must be Utf8".into()).to_string()),
+            Some(
+                crate::render::RenderError::UnsupportedDtype {
+                    field: "h".into(),
+                    dtype: format!(
+                        "{:?} (a facet field holds strings, integers, floats or booleans; cast \
+                         'h' to a string to facet by it)",
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                    ),
+                    context: Some("facet"),
+                }
+                .to_string()
+            ),
         );
     }
 
@@ -3047,7 +3299,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &batch, &no_outputs, false).unwrap().batch;
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &batch, &no_outputs, false, None).unwrap().batch;
         assert!(
             matches!(result, Cow::Borrowed(_)),
             "expected Borrowed fallback on stack failure"
@@ -3067,6 +3319,42 @@ mod tests {
         assert!(
             direct.is_err(),
             "apply_stack should fail on Boolean y column"
+        );
+    }
+
+    /// An adjustment error (here `Dodge`'s own "band column not found",
+    /// raised when the bound band field is absent from the batch) resolves
+    /// `position_preview` to `None`, exactly as `Stack`'s own fallback
+    /// above does: the axis falls back to the unadjusted rows, and
+    /// `apply_dodge` itself still raises the SAME error directly, in its
+    /// own typed voice, when the draw pass calls it.
+    #[test]
+    fn position_preview_dodge_error_falls_back_to_none() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        // `x` is bound but the batch carries no `x` column at all.
+        let encoding = Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let dodge = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let preview = position_preview(&batch, Some(&dodge), &encoding, false, StackValueAxis::X, None, None).unwrap();
+        assert!(preview.is_none(), "an adjustment error must resolve to None, not propagate as a ScaleResolutionFailed");
+
+        let direct = apply_dodge(&batch, Some("g"), 0.0, &probe_scales(false, false, None), &encoding, false, &mut Vec::new());
+        assert!(
+            matches!(direct, Err(crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", .. })),
+            "apply_dodge should fail with its own typed error when the band column is absent: {direct:?}"
         );
     }
 
@@ -3159,10 +3447,10 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "x", &b, &no_outputs, false).unwrap().batch;
+        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "x", &b, &no_outputs, false, None).unwrap().batch;
         assert!(matches!(x_result, Cow::Borrowed(_)), "x-side must be a no-op for a vertical stack");
 
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &b, &no_outputs, false).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &b, &no_outputs, false, None).unwrap().batch;
         match y_result {
             Cow::Owned(out) => {
                 let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -3223,7 +3511,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "val", &batch, &no_outputs, false).unwrap().batch;
+        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "val", &batch, &no_outputs, false, None).unwrap().batch;
         match x_result {
             Cow::Owned(out) => {
                 let val_idx = out.schema().index_of("val").unwrap();
@@ -3237,7 +3525,7 @@ mod tests {
             Cow::Borrowed(_) => panic!("expected x-side widening to succeed through the CoordFlip fallback"),
         }
 
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false, None).unwrap().batch;
         assert!(matches!(y_result, Cow::Borrowed(_)), "y-side must be a no-op once value has flipped to x");
     }
 
@@ -3290,7 +3578,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false, None).unwrap().batch;
         assert!(
             matches!(y_result, Cow::Borrowed(_)),
             "axis_batch_for_y must gate out (Cow::Borrowed) for a flipped numeric-category \
@@ -6835,6 +7123,651 @@ mod tests {
             assert_eq!(bits(&stack_bases(&out)), bits(&expected_bases), "{offset:?} bases");
         }
     }
+
+    // ── Adjusted positions widen the axis ───────────────────────────────
+
+    /// Render `spec` over `batch` with no explicit scale (auto-inferred
+    /// domain) and return the SVG plus the number of `<circle` marks it
+    /// drew — a jittered/dodged point the axis domain excludes is one the
+    /// mark drawer silently skips, so a drawn-count short of the row count
+    /// means a row was dropped.
+    fn render_point_svg(spec: &ChartSpec, batch: &RecordBatch) -> (String, usize) {
+        let out = crate::render::render_svg(
+            spec,
+            batch,
+            &crate::render::ThemeInputs::default(),
+            crate::render::Viewport { width: 640.0, height: 480.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("render");
+        let plot = out.layout.panels[0].plot_area;
+        let count = circles_in_rect(&out.bytes, plot);
+        (out.bytes, count)
+    }
+
+    /// The number of `<circle>` marks whose center falls inside `plot` — the
+    /// data points, never a legend swatch (drawn outside the plot area).
+    fn circles_in_rect(svg: &str, plot: Rect) -> usize {
+        circle_cxs_in_rect(svg, plot).len()
+    }
+
+    /// Every `<circle>` mark's `cx` whose center falls inside `plot`, in
+    /// document order — the per-point pixel positions `circles_in_rect`
+    /// only counts.
+    fn circle_cxs_in_rect(svg: &str, plot: Rect) -> Vec<f64> {
+        let mut out = Vec::new();
+        for frag in svg.split("<circle ").skip(1) {
+            let frag = &frag[..frag.find('>').unwrap_or(frag.len())];
+            let attr = |name: &str| -> Option<f64> {
+                let at = frag.find(&format!("{name}=\""))? + name.len() + 2;
+                frag[at..].find('"').and_then(|end| frag[at..at + end].parse().ok())
+            };
+            let (Some(cx), Some(cy)) = (attr("cx"), attr("cy")) else { continue };
+            if cx >= plot.x - 1e-6 && cx <= plot.x + plot.w + 1e-6 && cy >= plot.y - 1e-6 && cy <= plot.y + plot.h + 1e-6 {
+                out.push(cx);
+            }
+        }
+        out
+    }
+
+    fn jitter_spec(x_field: &str, y_field: &str, jitter_axis: JitterAxis, seed: Option<u64>) -> ChartSpec {
+        ChartSpec {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: enc_xy(x_field, y_field, None),
+            position: Some(PositionAdjust::Jitter { axis: jitter_axis, width: 0.5, seed }),
+            ..Default::default()
+        }
+    }
+
+    fn two_row_batch(v: Vec<f64>, y: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(v)), Arc::new(Float64Array::from(y))]).unwrap()
+    }
+
+    /// A data-space `Jitter` on `x` draws every row at every seed
+    /// 0-11, and the same for `seed=None`, `axis="y"`/`"both"`.
+    #[test]
+    fn jitter_widens_the_axis_domain_across_seeds_and_axes() {
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        for seed in (0u64..12).map(Some).chain([None]) {
+            for axis in [JitterAxis::X, JitterAxis::Y, JitterAxis::Both] {
+                let spec = jitter_spec("v", "y2", axis, seed);
+                let (svg, count) = render_point_svg(&spec, &batch);
+                assert_eq!(count, 2, "seed={seed:?} axis={axis:?}: {svg}");
+            }
+        }
+    }
+
+    /// The same widening applies when the
+    /// jittered column is `Int64`, not just `Float64`.
+    #[test]
+    fn jitter_widens_the_axis_domain_for_an_int64_column() {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Int64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![40, 60])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+        )
+        .unwrap();
+        let spec = jitter_spec("v", "y2", JitterAxis::X, Some(3));
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 2, "{svg}");
+    }
+
+    /// `x`/`y` sharing one field, with x-only jitter, still draws both rows
+    /// — the shared column `apply_jitter` rewrites for `x` is the same
+    /// column `y` reads, so `y`'s axis widens too rather than going stale
+    /// against the pre-jitter values.
+    #[test]
+    fn jitter_on_a_shared_x_y_field_widens_both_axes() {
+        let batch = two_row_batch(vec![40.0, 60.0], vec![40.0, 60.0]);
+        let spec = jitter_spec("v", "v", JitterAxis::X, Some(7));
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 2, "{svg}");
+    }
+
+    fn dodge_batch_4rows() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A continuous `Dodge(by="c")` over 4 rows (2 x-values, 2
+    /// groups) draws every row, with or without `color="c"` also bound.
+    #[test]
+    fn continuous_dodge_widens_the_band_axis_with_and_without_color() {
+        let batch = dodge_batch_4rows();
+        for with_color in [false, true] {
+            let mut encoding = enc_xy("x", "y", None);
+            if with_color {
+                encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+            }
+            let spec = ChartSpec {
+                mark: crate::spec::mark::Mark::Point,
+                encoding,
+                position: Some(PositionAdjust::Dodge { by: Some("c".into()), padding: 0.0 }),
+                ..Default::default()
+            };
+            let (svg, count) = render_point_svg(&spec, &batch);
+            assert_eq!(count, 4, "with_color={with_color}: {svg}");
+        }
+    }
+
+    /// When the first color group is absent at the extreme x, the
+    /// domain edge equals the drawn extreme exactly — no over-widening past
+    /// what the dodge actually draws.
+    #[test]
+    fn continuous_dodge_domain_matches_the_drawn_extreme_with_no_over_widening() {
+        // Group "p" only at x=1 and x=2; group "q" only at x=2 — "p" is the
+        // first-appearance group, present at the LOW extreme, absent at
+        // neither; flip it so the absent group sits at the high extreme:
+        // "q" never appears at x=1.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["p", "p", "q"])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: enc_xy("x", "y", Some("c")),
+            position: Some(PositionAdjust::Dodge { by: Some("c".into()), padding: 0.0 }),
+            ..Default::default()
+        };
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 3, "{svg}");
+        // The preview must match `apply_dodge`'s own per-row output exactly
+        // (the adjusted rows alone, never a union with the unadjusted rows):
+        // ask the real position-resolve path for the drawn x values and
+        // confirm the axis batch's extent equals their min/max exactly.
+        let empty_outputs = HashMap::new();
+        let drawn = crate::render::position::axis_batch(
+            &spec,
+            &spec.encoding,
+            StackValueAxis::X,
+            "x",
+            &batch,
+            &empty_outputs,
+            false,
+            None,
+        )
+        .unwrap();
+        let xs = crate::render::arrow_cast::col_as_f64(&drawn.batch, "x").unwrap();
+        let (lo, hi) = xs.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        // n_groups=2 (p, q), unique band values {1, 2} give bandwidth 1,
+        // sub_band 0.5: p's slot centers at -0.25, q's at +0.25. The drawn
+        // (adjusted) rows are (x=1, p) -> 0.75, (x=2, p) -> 1.75,
+        // (x=2, q) -> 2.25, so the preview bottoms out at 0.75 and tops out
+        // at 2.25: an over-widened preview (unioning the unadjusted [1, 2,
+        // 2], or including a hypothetical q at x=1 that never exists in
+        // this data) would read past either edge.
+        assert!((lo - 0.75).abs() < 1e-9, "lo={lo}");
+        assert!((hi - 2.25).abs() < 1e-9, "hi={hi}");
+    }
+
+    /// A sorted color legend orders the continuous `Dodge` sub-bands, and
+    /// the preview reads the same order: `x=[1,1,2]`, `c=[p,q,p]`,
+    /// `sort=descending` gives legend `[q, p]`, so the draw places 0.75,
+    /// 1.25 and 2.25, and the previewed domain spans them.
+    #[test]
+    fn continuous_dodge_with_a_sorted_color_domain_draws_every_point() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p"])),
+            ],
+        )
+        .unwrap();
+        let mut encoding = enc_xy("x", "y", Some("c"));
+        encoding.color.as_mut().unwrap().sort = Some(serde_json::json!("descending"));
+        let spec = ChartSpec {
+            mark: crate::spec::mark::Mark::Point,
+            encoding,
+            position: Some(PositionAdjust::Dodge { by: Some("c".into()), padding: 0.0 }),
+            ..Default::default()
+        };
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 3, "a sorted color legend must not drop a point the draw itself still places: {svg}");
+
+        // The preview's extent must equal the drawn extent exactly: ask
+        // `axis_batch` directly, with the real resolved (sorted) color
+        // scale, and confirm it matches the analytical drawn range above.
+        let color = crate::render::scale_resolve::ColorScale::Categorical {
+            domain: vec!["q".to_string(), "p".to_string()],
+            palette: std::borrow::Cow::Owned(Vec::new()),
+        };
+        let empty_outputs = HashMap::new();
+        let drawn = crate::render::position::axis_batch(
+            &spec,
+            &spec.encoding,
+            StackValueAxis::X,
+            "x",
+            &batch,
+            &empty_outputs,
+            false,
+            Some(&color),
+        )
+        .unwrap();
+        let xs = crate::render::arrow_cast::col_as_f64(&drawn.batch, "x").unwrap();
+        let (lo, hi) = xs.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!((lo - 0.75).abs() < 1e-9, "lo={lo}");
+        assert!((hi - 2.25).abs() < 1e-9, "hi={hi}");
+    }
+
+    /// A faceted seeded jitter draws every point in every panel, at the
+    /// same DATA-SPACE positions an unfaceted render of that panel's own
+    /// rows gives: `apply_jitter` seeds each row from its position WITHIN
+    /// the batch it is called on (`seed + i`, `i` the batch-local row
+    /// index), so the per-panel split must call it per panel, on each
+    /// panel's own 2-row batch, not once on the whole 4-row batch — which
+    /// would hand panel b's rows the indices 2 and 3 (seed+2, seed+3)
+    /// instead of the 0 and 1 (seed+0, seed+1) a standalone render of
+    /// panel b's own two rows uses. Compared directly through
+    /// `position_preview`, in data units: pixel/SVG comparison would also
+    /// have to account for each panel's own (narrower) plot width and
+    /// padding, which this skips entirely.
+    #[test]
+    fn faceted_jitter_draws_every_point_matching_the_unfaceted_render() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![40.0, 60.0, 41.0, 59.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            ],
+        )
+        .unwrap();
+        // Every point draws through the real render path too.
+        let mut spec = jitter_spec("v", "y2", JitterAxis::X, Some(5));
+        spec.facet = Some(crate::layout::facet::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        });
+        let out = crate::render::render_svg(
+            &spec,
+            &batch,
+            &crate::render::ThemeInputs::default(),
+            crate::render::Viewport { width: 640.0, height: 480.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("render");
+        let count: usize = out.layout.panels.iter().map(|panel| circles_in_rect(&out.bytes, panel.plot_area)).sum();
+        assert_eq!(count, 4, "{}", out.bytes);
+
+        // Now pin the per-panel seed in data space: `position_preview` over
+        // the whole faceted batch (splitting and concatenating per panel
+        // internally) must equal, row for row, `position_preview` called
+        // directly on each panel's own 2-row slice with no facet at all.
+        let encoding = enc_xy("v", "y2", None);
+        let jitter = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(5) };
+        let faceted = position_preview(&batch, Some(&jitter), &encoding, false, StackValueAxis::X, spec.facet.as_ref(), None)
+            .unwrap()
+            .expect("jitter widens the axis");
+        let faceted_v = crate::render::arrow_cast::col_as_f64(&faceted, "v").unwrap();
+        assert_eq!(faceted_v.len(), 4, "{faceted_v:?}");
+        for (lo, hi) in [(0usize, 2usize), (2, 4)] {
+            let panel_batch = batch.slice(lo, hi - lo);
+            let standalone = position_preview(&panel_batch, Some(&jitter), &encoding, false, StackValueAxis::X, None, None)
+                .unwrap()
+                .expect("jitter widens the axis");
+            let standalone_v = crate::render::arrow_cast::col_as_f64(&standalone, "v").unwrap();
+            assert_eq!(standalone_v.len(), 2, "{standalone_v:?}");
+            for (i, row) in (lo..hi).enumerate() {
+                assert_eq!(
+                    faceted_v[row].map(f64::to_bits),
+                    standalone_v[i].map(f64::to_bits),
+                    "row {row}: faceted={:?} standalone={:?}",
+                    faceted_v[row],
+                    standalone_v[i],
+                );
+            }
+        }
+    }
+
+    /// A `Jitter` layer placed as layer 1 of a layered spec (the
+    /// shape `+`/`Chart.layer`/`LayerChart` all lower to) draws every point.
+    #[test]
+    fn layered_jitter_widens_its_own_axis() {
+        use crate::spec::layer::Layer;
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        let layer = Layer {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: enc_xy("v", "y2", None),
+            position: Some(PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(9) }),
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: enc_xy("v", "y2", None),
+            layers: Some(vec![layer]),
+            ..Default::default()
+        };
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 2, "{svg}");
+    }
+
+    /// `CoordFlip` with jitter on the (now-horizontal) value axis
+    /// still draws every point.
+    #[test]
+    fn coord_flip_jitter_widens_the_flipped_value_axis() {
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        let mut spec = jitter_spec("v", "y2", JitterAxis::X, Some(11));
+        spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 2, "{svg}");
+    }
+
+    /// An explicit domain that excludes a jittered
+    /// point is unchanged — the point is still skipped, since the caller's
+    /// own domain always wins over the auto-inferred preview.
+    #[test]
+    fn explicit_domain_still_excludes_a_jittered_point() {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        let mut spec = jitter_spec("v", "y2", JitterAxis::X, Some(0));
+        spec.encoding.x.as_mut().unwrap().scale = Some(ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: Some(vec![39.5, 40.5]),
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+            zero: false,
+            system_injected: false,
+        });
+        let (svg, count) = render_point_svg(&spec, &batch);
+        assert_eq!(count, 1, "an explicit domain still clips the row it excludes: {svg}");
+    }
+
+    /// 0 rows draws the empty frame (no circles, no panic); 1 row
+    /// draws.
+    #[test]
+    fn jitter_zero_and_one_row_render_without_dropping() {
+        let zero = two_row_batch(vec![], vec![]);
+        let spec = jitter_spec("v", "y2", JitterAxis::X, Some(0));
+        let (_, count) = render_point_svg(&spec, &zero);
+        assert_eq!(count, 0);
+
+        let one = two_row_batch(vec![40.0], vec![1.0]);
+        let (svg, count) = render_point_svg(&spec, &one);
+        assert_eq!(count, 1, "{svg}");
+    }
+
+    /// Ordinal `Jitter`/`Dodge` (pixel offsets only) never
+    /// widen the axis — `position_preview` must return `None` for them, the
+    /// same as always.
+    #[test]
+    fn ordinal_jitter_and_dodge_preview_as_none() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("cat", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("cat", "y", Some("g"));
+        let jitter = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(0) };
+        assert!(position_preview(&batch, Some(&jitter), &enc, false, StackValueAxis::X, None, None).unwrap().is_none());
+        let dodge = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        assert!(position_preview(&batch, Some(&dodge), &enc, false, StackValueAxis::X, None, None).unwrap().is_none());
+    }
+
+    /// A span-branch continuous `Dodge` (histogram-style
+    /// bins, `x`+`x2`) previews as `None`, keeping the unadjusted span as
+    /// the domain: each group's sub-span always sits inside its row's own
+    /// `[x, x2]`, so previewing the adjusted rows would widen nothing the
+    /// unadjusted span doesn't already cover.
+    #[test]
+    fn span_branch_dodge_does_not_widen_the_domain() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap();
+        let mut enc = enc_xy("x", "y", Some("g"));
+        enc.x2 = Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() });
+        let dodge = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let preview = position_preview(&batch, Some(&dodge), &enc, false, StackValueAxis::X, None, None).unwrap();
+        assert!(preview.is_none(), "a span-branch Dodge must preview as None, never a (no-op) widened batch");
+    }
+
+    /// Panel `"A"` (one dodge group, `apply_dodge`'s `n_groups <= 1` early
+    /// return, which keeps `x`'s dtype untouched) and panel `"B"` (two
+    /// groups, the continuous branch's `col_as_f64` rewrite to
+    /// `Float64`), at the given `x` dtype, in facet order `A` then `B`
+    /// (`reverse_panels = false`) or `B` then `A` (`true`) — proving the
+    /// previewed extent does not depend on panel order: a cast toward
+    /// either panel's own schema (whichever is first, positionally)
+    /// would narrow the other panel's values instead of unioning them
+    /// numerically.
+    fn int64_dodge_facet_batch(reverse_panels: bool) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        // Panel A's own no-op x (1) sits INSIDE panel B's dodged span
+        // (0.75..2.25), so the union is exactly panel B's span when the
+        // reconciliation is correct, and exactly [0, 2] (panel B's values
+        // truncated to Int64) when it is not — the two are never
+        // confusable with "panel A alone happened to set the extent".
+        let (xs, ys, gs, fs): (Vec<i64>, Vec<f64>, Vec<&str>, Vec<&str>) = if reverse_panels {
+            (
+                vec![1, 1, 2, 2, 1],
+                vec![10.0, 20.0, 30.0, 40.0, 0.0],
+                vec!["p", "q", "p", "q", "same"],
+                vec!["B", "B", "B", "B", "A"],
+            )
+        } else {
+            (
+                vec![1, 1, 1, 2, 2],
+                vec![0.0, 10.0, 20.0, 30.0, 40.0],
+                vec!["same", "p", "q", "p", "q"],
+                vec!["A", "B", "B", "B", "B"],
+            )
+        };
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(gs)),
+                Arc::new(StringArray::from(fs)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The same shape as [`int64_dodge_facet_batch`], at `x` dtype
+    /// `Float32`, panel order `A` then `B` only (the Int64 fixture above
+    /// covers both orders) — but panel `"B"`'s THREE dodge groups (not
+    /// two), so its offsets land on thirds (`2/3`, `1`, `4/3`, `5/3`, `2`,
+    /// `7/3`): values with no exact `Float32` representation, unlike
+    /// `0.75`/`2.25` (both exact in binary at 2 bits past the point), so
+    /// a narrowing cast to `Int64` and this dtype's own lossy
+    /// widen-then-narrow round trip are indistinguishable for those two
+    /// values alone.
+    fn float32_dodge_facet_batch() -> RecordBatch {
+        use arrow::array::Float32Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float32, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float32Array::from(vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["same", "p", "q", "r", "p", "q", "r"])),
+                Arc::new(StringArray::from(vec!["A", "B", "B", "B", "B", "B", "B"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Returns (preview row count, min x, max x) for a faceted dodge
+    /// preview, asserting it widens the axis.
+    fn faceted_dodge_preview_extent(batch: &RecordBatch) -> (usize, f64, f64) {
+        let encoding = enc_xy("x", "y", Some("g"));
+        let dodge = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let facet = crate::layout::facet::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        };
+        let preview = position_preview(batch, Some(&dodge), &encoding, false, StackValueAxis::X, Some(&facet), None)
+            .unwrap()
+            .expect("panel B's dodge widens the axis");
+        let xs = crate::render::arrow_cast::col_as_f64(&preview, "x").unwrap();
+        let (lo, hi) = xs.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        (preview.num_rows(), lo, hi)
+    }
+
+    /// `adjusted_across_panels` unions every panel's own adjusted batch
+    /// through `concat_by_name`, reconciling a no-op panel's narrower
+    /// dtype to `Float64` rather than casting toward it, so the previewed
+    /// extent is bit-exact against an unfaceted preview of panel `"B"`'s
+    /// own 4 rows alone (`DODGE_ORACLE`'s own 0.75..2.25 span), and every
+    /// one of the 5 rows across both panels draws.
+    #[test]
+    fn faceted_int64_dodge_no_op_panel_before_dodged_panel_reconciles_to_float64() {
+        let batch = int64_dodge_facet_batch(false);
+        let (n, lo, hi) = faceted_dodge_preview_extent(&batch);
+        assert_eq!(n, 5, "all 5 points across both panels must draw");
+        assert!((lo - 0.75).abs() < 1e-9, "lo={lo}");
+        assert!((hi - 2.25).abs() < 1e-9, "hi={hi}");
+
+        let panel_b = batch.slice(1, 4);
+        let (n_standalone, slo, shi) = faceted_dodge_preview_extent(&panel_b);
+        assert_eq!(n_standalone, 4, "panel B alone is 4 rows");
+        assert_eq!(lo.to_bits(), slo.to_bits(), "lo={lo} slo={slo}");
+        assert_eq!(hi.to_bits(), shi.to_bits(), "hi={hi} shi={shi}");
+    }
+
+    /// The same fixture with the two panels in the OPPOSITE facet order
+    /// (`"B"` first, `"A"`'s no-op panel last): the reconciled extent is
+    /// identical, proving the reconciliation does not depend on panel
+    /// position — a cast to the first panel's own schema would instead
+    /// truncate panel `"B"`'s values when `"A"` is first, or truncate
+    /// panel `"A"`'s own (single, `Int64`, unchanged) row when `"B"` is
+    /// first, widening nothing for panel `"B"` either way.
+    #[test]
+    fn faceted_int64_dodge_reconciles_to_float64_regardless_of_panel_order() {
+        let ab = int64_dodge_facet_batch(false);
+        let ba = int64_dodge_facet_batch(true);
+        let (n_ab, lo_ab, hi_ab) = faceted_dodge_preview_extent(&ab);
+        let (n_ba, lo_ba, hi_ba) = faceted_dodge_preview_extent(&ba);
+        assert_eq!(n_ab, 5);
+        assert_eq!(n_ba, 5);
+        assert_eq!(lo_ab.to_bits(), lo_ba.to_bits(), "lo_ab={lo_ab} lo_ba={lo_ba}");
+        assert_eq!(hi_ab.to_bits(), hi_ba.to_bits(), "hi_ab={hi_ab} hi_ba={hi_ba}");
+        assert!((lo_ab - 0.75).abs() < 1e-9, "lo_ab={lo_ab}");
+        assert!((hi_ab - 2.25).abs() < 1e-9, "hi_ab={hi_ab}");
+    }
+
+    /// The same shape at `x` dtype `Float32`: `supported_numeric_dtype`
+    /// covers `Float32` too, so the reconciliation is not Int64-specific.
+    /// Bit-exact against an unfaceted preview of panel `"B"`'s own 6
+    /// rows alone, as [`faceted_int64_dodge_no_op_panel_before_dodged_panel_reconciles_to_float64`]
+    /// checks for `Int64` — casting panel `"B"`'s thirds-valued offsets
+    /// down to panel `"A"`'s `Float32` schema instead of unioning them
+    /// numerically would narrow them, a lossy round trip this comparison
+    /// catches where a fixed-tolerance check against `0.75`/`2.25` (both
+    /// exact in `Float32`) could not.
+    #[test]
+    fn faceted_float32_dodge_no_op_panel_before_dodged_panel_reconciles_to_float64() {
+        let batch = float32_dodge_facet_batch();
+        let (n, lo, hi) = faceted_dodge_preview_extent(&batch);
+        assert_eq!(n, 7, "all 7 points across both panels must draw");
+
+        let panel_b = batch.slice(1, 6);
+        let (n_standalone, slo, shi) = faceted_dodge_preview_extent(&panel_b);
+        assert_eq!(n_standalone, 6, "panel B alone is 6 rows");
+        assert_eq!(lo.to_bits(), slo.to_bits(), "lo={lo} slo={slo}");
+        assert_eq!(hi.to_bits(), shi.to_bits(), "hi={hi} shi={shi}");
+        assert!((lo - 2.0 / 3.0).abs() < 1e-6, "lo={lo}");
+        assert!((hi - 7.0 / 3.0).abs() < 1e-6, "hi={hi}");
+    }
+
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /

@@ -33,13 +33,14 @@ verdict reproduced through the public API.
 from __future__ import annotations
 
 import json
+import warnings
 
 import polars as pl
 import pytest
 
 import ferrum as fm
 from tests._wire_steps import all_steps
-from ferrum import Smooth
+from ferrum import Logistic, Robust, Smooth
 
 
 def _xy(n: int = 20) -> pl.DataFrame:
@@ -524,3 +525,230 @@ def test_smooth_gam_appears_in_the_registry_methods_vocabulary():
     from ferrum import _core
 
     assert "gam" in _core.transform_registry("smooth")["methods"]
+
+
+# ---------------------------------------------------------------------------
+# An undefined confidence band warns (naming the cause) instead of
+# vanishing. At `n <= p` fit parameters, the residual degrees of freedom
+# are zero, the fit interpolates the points exactly, and the band comes
+# back all-NaN -- the line still draws, and the warning names why the
+# ribbon never appeared. `Robust`'s own band-only degenerate branches
+# (singular design, zero sum of Huber weights) get the same treatment.
+# ---------------------------------------------------------------------------
+
+
+def _warnings_of(render) -> list[str]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        render()
+        return [str(w.message) for w in caught]
+
+
+def test_smooth_lm_n2_whole_frame_warns_interval_undefined_and_still_draws():
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    chart = fm.Chart(df).mark_smooth(method="lm", ci=0.95).encode(x="x", y="y")
+    svg = {}
+
+    def render():
+        svg["value"] = chart.to_svg()
+
+    msgs = _warnings_of(render)
+    assert svg["value"].count("<polyline") == 1, "the fit line still draws"
+    assert svg["value"].count("<path") == 0, "no ribbon: the band stayed undefined"
+    assert len(msgs) == 1
+    assert "IntervalUndefined" not in msgs[0], "Display text, not the variant name"
+    assert "ci=0.95" in msgs[0]
+    assert "2 points leave no residual degrees of freedom for a 2-parameter fit" in msgs[0]
+    assert "needs at least 3" in msgs[0]
+
+
+@pytest.mark.parametrize(
+    "method,n,x,y",
+    [
+        ("quadratic", 3, [1.0, 2.0, 3.0], [1.0, 4.0, 9.0]),
+        ("cubic", 4, [1.0, 2.0, 3.0, 4.0], [1.0, 8.0, 27.0, 64.0]),
+        ("log", 2, [1.0, 2.0], [1.0, 2.0]),
+        ("sqrt", 2, [1.0, 2.0], [1.0, 2.0]),
+    ],
+)
+def test_smooth_polynomial_class_methods_warn_with_the_parameter_count(method, n, x, y):
+    df = pl.DataFrame({"x": x, "y": y})
+    chart = fm.Chart(df).mark_smooth(method=method, ci=0.95).encode(x="x", y="y")
+    msgs = _warnings_of(chart.to_svg)
+    assert len(msgs) == 1
+    assert f"{n} points leave no residual degrees of freedom for a {n}-parameter fit" in msgs[0], (
+        msgs
+    )
+    assert f"needs at least {n + 1}" in msgs[0], msgs
+
+
+@pytest.mark.parametrize(
+    "method,x,y,degree",
+    [
+        ("quadratic", [1.0, 2.0], [1.0, 4.0], 2),
+        ("cubic", [1.0, 2.0, 3.0], [1.0, 8.0, 27.0], 3),
+    ],
+)
+def test_degree_below_fitting_minimum_refuses_without_warning_interval_undefined(
+    method, x, y, degree
+):
+    """A polynomial degree whose data is too sparse even to fit (not merely
+    too sparse for a band) is refused by the existing "needs at least"
+    construction-time check, never reaching the band-undefined warning."""
+    df = pl.DataFrame({"x": x, "y": y})
+    chart = fm.Chart(df).mark_smooth(method=method, ci=0.95).encode(x="x", y="y")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match=f"degree={degree} needs at least"):
+            chart.to_svg()
+    assert not any("undefined" in str(w.message) for w in caught)
+
+
+def test_lmplot_n2_warns_interval_undefined():
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+    msgs = _warnings_of(lambda: fm.lmplot(df, x="x", y="y", ci=95).to_svg())
+    assert len(msgs) == 1
+    assert "undefined" in msgs[0]
+    assert "2 points leave no residual degrees of freedom for a 2-parameter fit" in msgs[0]
+    assert "needs at least 3" in msgs[0]
+
+
+def test_smooth_faceted_sparse_panel_warns_naming_that_panel_only():
+    """A facet with one panel at n=2 and another well-supported: exactly
+    one warning, naming the sparse panel and the parameter count, with no
+    warning for the well-supported panel."""
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 1.0, 2.0, 3.0],
+            "y": [1.0, 2.0, 1.0, 3.0, 2.0],
+            "p": ["p1", "p1", "p2", "p2", "p2"],
+        }
+    )
+    chart = fm.Chart(df).mark_smooth(method="lm", ci=0.95).encode(x="x", y="y").facet(col="p")
+    msgs = _warnings_of(chart.to_svg)
+    assert len(msgs) == 1
+    assert "in facet panel p=p1" in msgs[0], msgs
+    assert "p=p2" not in msgs[0], msgs
+    assert "2 points leave no residual degrees of freedom for a 2-parameter fit" in msgs[0]
+    assert "needs at least 3" in msgs[0]
+
+
+def test_smooth_loess_partial_band_warns_with_the_grid_point_count():
+    """A constructed fixture whose bootstrap leaves some grid points with
+    fewer than 4 finite resamples: the line still draws and the warning
+    names exactly how many grid points lost their band, instead of
+    leaving silent holes in the ribbon."""
+    xs = [0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0, 5.0, 6.0]
+    ys = [x + 0.1 * (i % 3) for i, x in enumerate(xs)]
+    df = pl.DataFrame({"x": xs, "y": ys})
+    chart = (
+        fm.Chart(df)
+        .mark_smooth(method="loess", bandwidth=3.0 / 11.0, n=40, seed=4, ci=0.95)
+        .encode(x="x", y="y")
+    )
+    svg = {}
+
+    def render():
+        svg["value"] = chart.to_svg()
+
+    msgs = _warnings_of(render)
+    assert svg["value"].count("<polyline") == 1, "the fit line still draws"
+    assert len(msgs) == 1
+    assert "15 of 40 grid points" in msgs[0], msgs
+
+
+def test_logistic_large_offset_x_warns_interval_undefined_and_still_draws():
+    """A Wald variance that cancels catastrophically at large |x| relative
+    to x's spread is reachable through the public door (not a dead
+    branch): the fit line still draws, and the band is undefined at
+    exactly the grid points the cancellation hits."""
+    c = 37_000_000.0
+    x = [c - 0.5, c - 0.5, c + 0.5, c + 0.5] * 3
+    y = [0.0, 1.0, 0.0, 1.0] * 3
+    df = pl.DataFrame({"x": x, "y": y})
+    chart = (
+        fm.Chart(df)
+        .mark_smooth()
+        .encode(x="x:Q", y="y:Q")
+        .transform(Logistic(x="x", y="y", ci=0.95))
+    )
+    svg = {}
+
+    def render():
+        svg["value"] = chart.to_svg()
+
+    msgs = _warnings_of(render)
+    assert svg["value"].count("<polyline") == 1, "the fit line still draws"
+    assert len(msgs) == 1
+    assert "3 of 100 grid points" in msgs[0], msgs
+
+
+def test_robust_singular_design_warns_interval_undefined():
+    """A constant-`x` column, reached through `x_range` (which overrides
+    the earlier degenerate-x guard's own zero-variance check): the line
+    still fits flat through the data, but the sandwich covariance's
+    `X'X` is singular, so only the band is lost."""
+    df = pl.DataFrame({"x": [5.0, 5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_smooth()
+        .encode(x="x:Q", y="y:Q")
+        .transform(Robust(x="x", y="y", ci=0.95, x_range=(0.0, 10.0)))
+    )
+    msgs = _warnings_of(chart.to_svg)
+    assert len(msgs) == 1
+    assert "singular" in msgs[0]
+
+
+def test_robust_zero_sum_psi_prime_warns_interval_undefined():
+    """A tiny `huber_c` forces every ordinary residual past the Huber
+    threshold, so `sum(psi')` is zero and the sandwich covariance has no
+    scalar to scale by -- the fit line (an exact line through alternating
+    offsets) still draws."""
+    xs = [float(i) for i in range(6)]
+    ys = [2.0 * x + 1.0 + (0.5 if i % 2 == 0 else -0.5) for i, x in enumerate(xs)]
+    df = pl.DataFrame({"x": xs, "y": ys})
+    chart = (
+        fm.Chart(df)
+        .mark_smooth()
+        .encode(x="x:Q", y="y:Q")
+        .transform(Robust(x="x", y="y", ci=0.95, huber_c=1e-12))
+    )
+    msgs = _warnings_of(chart.to_svg)
+    assert len(msgs) == 1
+    assert "Huber" in msgs[0]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: (
+            fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]}))
+            .mark_smooth(method="lm", ci=None)
+            .encode(x="x", y="y")
+        ),
+        lambda: (
+            fm.Chart(pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [1.0, 3.0, 5.0, 7.0]}))
+            .mark_smooth(method="lm", ci=0.95)
+            .encode(x="x", y="y")
+        ),
+        lambda: (
+            fm.Chart(pl.DataFrame({"x": [1.0, 1.0, 2.0, 2.0], "y": [1.0, 2.0, 3.0, 4.0]}))
+            .mark_smooth(method="gam", ci=0.95)
+            .encode(x="x", y="y")
+        ),
+        lambda: (
+            fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]}))
+            .mark_smooth(method="loess", ci=0.95)
+            .encode(x="x", y="y")
+        ),
+    ],
+    ids=["ci-none", "n-ge-p-plus-2", "gam-below-4-distinct-x", "loess-n2"],
+)
+def test_interval_undefined_controls_never_warn(build):
+    """`ci=None`, a well-determined fit, gam below 4 distinct x (reported
+    via its own `DegenerateFit`, which also loses the line) and loess at
+    `n=2` (same) must never emit `IntervalUndefined`."""
+    chart = build()
+    msgs = _warnings_of(chart.to_svg)
+    assert not any("ci=" in m and "undefined" in m for m in msgs), msgs

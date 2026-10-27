@@ -88,8 +88,8 @@ use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    effective_share, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError,
-    LeafResolveInput,
+    effective_share, flatten_leaf_specs, resolve_composite_scales_nonpositional,
+    resolve_composite_scales_positional, CompositeResolveError, LeafResolveInput,
 };
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
@@ -436,6 +436,16 @@ pub(crate) fn render_composite_scene(
             None => source,
         },
     };
+    // `#172`(1): a non-leader overlay member whose own coord declares a
+    // panel-scoped property refuses before any layout runs, the same
+    // question `scene_build::unplaceable_layer_coord` asks of a merged-flat
+    // chart's `spec.layers`, asked here of `fm.layer`'s own leaves so a
+    // square heatmap (or any other panel-scoped coord) placed after the
+    // first member refuses on `fm.layer` exactly as it does on
+    // `chart + chart` / `.interactive()`.
+    if let Some((i, err)) = overlay_panel_scoped_coord_refusal(leaves, &overlay_groups) {
+        return Err(leaf_refusal(i, err));
+    }
     let mut prepared: Vec<prepare::PreparedInputs> = Vec::with_capacity(n);
     for (i, leaf) in leaves.iter().enumerate() {
         let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.viewport, leaf.chart_config, pass_one[i].as_ref())
@@ -453,6 +463,7 @@ pub(crate) fn render_composite_scene(
             transform_lineages: &prep.transform_lineages,
             x_text_rows: prep.x_text_rows.clone(),
             y_text_rows: prep.y_text_rows.clone(),
+            theme: leaf.theme,
         })
         .collect();
     // `warnings` opens with the resolve pass, the first stage that can produce
@@ -464,12 +475,20 @@ pub(crate) fn render_composite_scene(
     // tree, so the shared union and the figure legend band agree.
     let binned_shared = super::composite::binned_color_shared_by_default(tree, &resolve_inputs);
     let tree = binned_shared.as_ref().unwrap_or(tree);
-    let mut contexts = resolve_composite_scales(tree, &resolve_inputs, &mut warnings)?;
+    // The non-positional (color/size) half resolves first, then the
+    // overlay groups' own auxiliary scales, then the positional (x/y)
+    // half: a continuous `Dodge`'s sub-band order reads the panel's own
+    // resolved color scale (`composite::leaf_positional_domain`'s doc), so
+    // `out`/`contexts` must already carry every leaf's color/size
+    // resolution AND its overlay group's real auxiliary scales before any
+    // positional union runs.
+    let mut contexts = resolve_composite_scales_nonpositional(tree, &resolve_inputs, &mut warnings)?;
     // An overlay group's members are one layered chart: one auxiliary scale
     // per channel over every member, one legend per channel drawn by the
     // first member. Planned before any layout is measured, since it decides
     // which member reserves a legend gutter.
     plan_overlay_auxiliary(&overlay_groups_aux, leaves, &resolve_inputs, &prepared, &mut contexts, &mut warnings)?;
+    resolve_composite_scales_positional(tree, &resolve_inputs, &mut contexts, &mut warnings)?;
     drop(resolve_inputs);
     warn_overlay_labels_off_a_pie(&overlay_groups_aux, leaves, &prepared, &mut warnings);
     // `prepared` stays alive through the line/ribbon exemption pre-pass below
@@ -1096,6 +1115,59 @@ fn overlay_layer_indices(groups: &[Option<usize>]) -> Vec<Option<usize>> {
         .collect()
 }
 
+/// `#172`(1): the first leaf that is a non-leader member of an all-leaf
+/// `Overlay` group (`groups[i].is_some()`, [`plan_overlay_groups`]) whose own
+/// `coord` DIFFERS from the group leader's (`leaves[start].spec.coord`) and
+/// declares a panel-scoped property, with the typed refusal to raise for it.
+/// `None` when no such leaf exists.
+///
+/// Asks of each member's own, standalone `ChartSpec` the identical question
+/// `scene_build::unplaceable_layer_coord` asks of a merged-flat chart's
+/// `spec.layers` — the panel's chrome, aspect ratio and scale domains come
+/// from the first member, so a later member's own `xlim=`/`ylim=`/
+/// `expand=False`/`clip=False`/`CoordFixed(ratio=)` has nowhere honest to
+/// land, UNLESS it agrees with the leader's, in which case it declares
+/// nothing the panel does not already have. The agreement test mirrors
+/// Python's `_carry_layer_coord` (`composition.py`), which stamps a `+`
+/// operand's layer with a coord only when it differs from the host's — the
+/// same reason a layer only ever carries a coord on the merged-flat routes.
+/// `CoordKind` derives `PartialEq`, so comparing the deserialized values here
+/// asks the identical question `_carry_layer_coord` asks of the wire dicts.
+/// Run here, before any leaf is prepared or laid out, so a bare
+/// `fm.layer(...)` refuses exactly as `chart + chart` / `.interactive()` do,
+/// rather than rendering the member silently misaligned on the group's
+/// imposed rect ([`impose_shared_overlay_rects`]), which is untouched: an
+/// agreeing member's own `fixed_aspect` is a no-op on the leader's
+/// already-aspect-correct imposed rect, the same no-op the leader's own is.
+///
+/// The refusal is wrapped with `layer: None` — a leaf's `entry` names it
+/// fully (the member's own `layer_entry`: its layer 0's own entry, else its
+/// `spec.entry`, else `mark_{mark}`), and `leaf_refusal` fills the member's
+/// real overlay position afterward on every member shape, the convention
+/// [`RenderError::in_layer`]'s own doc states.
+fn overlay_panel_scoped_coord_refusal(
+    leaves: &[CompositeLeafInput<'_>],
+    overlay_groups: &[Option<usize>],
+) -> Option<(usize, RenderError)> {
+    overlay_groups.iter().enumerate().find_map(|(i, group)| {
+        let start = (*group)?;
+        let spec = leaves[i].spec;
+        let coord = spec.coord.as_ref()?;
+        if spec.coord == leaves[start].spec.coord {
+            return None; // agrees with the leader's: declares nothing new
+        }
+        let property = crate::spec::coord::panel_scoped_property(coord)?;
+        let mark = spec.mark;
+        let err = RenderError::LayerCoordUnplaceable {
+            coord: crate::spec::coord::public_spelling(coord),
+            mark,
+            reason: Box::new(crate::render::LayerCoordUnplaceableReason::PanelProperty(property)),
+        }
+        .in_layer_context(None, &prepare::layer_entry(spec, 0, mark));
+        Some((i, err))
+    })
+}
+
 fn plan_overlay_group_walk(
     node: &CompositeNode,
     leaf_cursor: &mut usize,
@@ -1484,6 +1556,21 @@ fn plan_size_dot_siblings(
 /// legend box, which the seam never suppresses, always sits outside the
 /// shared rect, so no leaf's marks can render across another leaf's chrome.
 ///
+/// **The panel's aspect is the leader's** (`#172`(1)): once the
+/// intersection succeeds, the group's leader's own `fixed_aspect`
+/// ([`crate::layout::fixed_aspect`], the one `CoordFixed` correction every
+/// standalone panel's layout already applies) shrinks the shared rect before
+/// every member is imposed onto it, so a square heatmap placed first in an
+/// overlay draws every sibling's marks on its square cells. A leader with no
+/// `CoordFixed` leaves the rect unchanged. `overlay_panel_scoped_coord_refusal`
+/// has already refused any non-leader member whose own coord DIFFERS from
+/// the leader's by the time this runs; a non-leader member whose coord
+/// AGREES with the leader's (the common shape: a member derived from the
+/// leader, e.g. `a.mark_line()` beside `a`) is never refused, and it lays
+/// out on the leader's already-aspect-correct rect with its own
+/// `fixed_aspect` a no-op there too, the same no-op the leader's own
+/// (applied a second time) already is.
+///
 /// **Suppression-aware** (spec §4.2): a non-primary member's scene title WILL
 /// be cleared at the merge seam, so its title band is excluded from its
 /// natural region ([`LeafScaleContext::suppress_chart_title`], set here before
@@ -1567,6 +1654,7 @@ fn impose_shared_overlay_rects(
         // viewport) would lay every member out on a zero rect.
         match rect {
             Some(rect) if rect.w > 0.0 && rect.h > 0.0 => {
+                let rect = crate::layout::fixed_aspect(rect, leaves[group[0]].spec);
                 for i in group {
                     contexts[i].imposed_plot_region = Some(rect);
                 }
@@ -7101,6 +7189,296 @@ mod tests {
             contexts.iter().all(|c| !c.suppress_chart_title),
             "the title suppression that anticipated the dedup must be undone too"
         );
+    }
+
+    #[test]
+    fn impose_shared_overlay_rects_applies_the_leaders_fixed_aspect() {
+        // `#172`(1): once the intersection succeeds, the LEADER's own
+        // `CoordFixed` aspect shrinks the SHARED rect before it is imposed
+        // on every member — the mechanism a square heatmap placed first in
+        // an `fm.layer(...)` overlay needs so a sibling's marks land on its
+        // square cells, not on the plain (un-corrected) intersection.
+        let mut leader_spec = scatter_spec();
+        leader_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(leader_spec.clone(), color_spec());
+        let h0 = LeafHold { spec: leader_spec, ..hold() };
+        let h1 = LeafHold {
+            spec: color_spec(),
+            batch: xyc_batch(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0], &[1.0, 2.0, 3.0]),
+            ..hold()
+        };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+
+        let mut groups = plan_overlay_groups(&tree, 2);
+        let mut contexts = vec![LeafScaleContext::default(); 2];
+        let natural: Vec<_> = (0..2)
+            .map(|i| natural_layout(&leaves[i], &contexts[i]).expect("leaf lays out").plot)
+            .collect();
+        let raw_intersection = natural[0].intersect(natural[1]);
+        assert!(
+            (raw_intersection.w - raw_intersection.h).abs() > 1.0,
+            "the plain intersection must not already be square, or this test proves nothing: {raw_intersection:?}"
+        );
+
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        impose_shared_overlay_rects(&leaves, &mut groups, &mut contexts, &mut warnings);
+
+        assert!(warnings.is_empty(), "an equalized group must warn about nothing: {warnings:?}");
+        let imposed = contexts[0].imposed_plot_region.expect("an equalized group imposes a rect");
+        assert_eq!(
+            contexts[1].imposed_plot_region,
+            Some(imposed),
+            "every member shares the leader's aspect-corrected rect"
+        );
+        assert!(
+            (imposed.w - imposed.h).abs() < 1e-6,
+            "the imposed rect must be square under the leader's ratio=1.0: {imposed:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_non_leader_panel_scoped_coord_refuses_before_any_layout() {
+        // `#172`(1): a non-leader member of a bare `fm.layer(...)`
+        // overlay whose own coord declares a panel-scoped property refuses
+        // before any layout runs, exactly as `chart + chart` / `.interactive()`
+        // do — a caller-placed member is named only by its position.
+        let mut member_spec = scatter_spec();
+        member_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(scatter_spec(), member_spec.clone());
+        let h0 = hold();
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("a non-leader member's fixed aspect must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("layer 1: fm.CoordFixed declares a fixed aspect ratio"),
+            "{msg}"
+        );
+        assert!(msg.contains("Move it to the first member"), "{msg}");
+    }
+
+    #[test]
+    fn overlay_non_leader_panel_scoped_coord_refuses_in_the_figure_voice() {
+        // The same refusal over a figure-built member (its own `entry` set,
+        // as a figure function like `heatmap()` stamps on its chart) is
+        // voiced by that call, and the overlay voice still carries the
+        // member's own position — unlike the merged-flat voice, which drops
+        // the index for a figure-built layer.
+        let mut member_spec = scatter_spec();
+        member_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        member_spec.entry = Some("heatmap".to_string());
+        let tree = overlay_tree(scatter_spec(), member_spec.clone());
+        let h0 = hold();
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("a figure-built non-leader member's fixed aspect must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("layer 1: heatmap: its coord declares a fixed aspect ratio"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("mark_point"),
+            "the synthetic entry must never leak into the figure voice: {msg}"
+        );
+    }
+
+    #[test]
+    fn overlay_leader_panel_scoped_coord_renders() {
+        // The control: the LEADER's own panel-scoped coord is exactly what
+        // the panel's aspect follows, so it must never refuse — only a
+        // NON-leader member's own panel-scoped coord does.
+        let mut leader_spec = scatter_spec();
+        leader_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(leader_spec.clone(), scatter_spec());
+        let h0 = LeafHold { spec: leader_spec, ..hold() };
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect("the leader's own CoordFixed must render, not refuse");
+    }
+
+    #[test]
+    fn overlay_member_whose_coord_matches_the_leaders_renders() {
+        // A non-leader member whose own coord AGREES with the leader's
+        // declares nothing the panel does not already have, the same
+        // agreement test Python's `_carry_layer_coord` makes before
+        // stamping a `+` operand's layer with a coord at all. The common
+        // shape: a member derived from the leader (`a.mark_line()` beside
+        // `a`). The member shares the leader's imposed, aspect-corrected
+        // rect.
+        let fixed = crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        };
+        let mut leader_spec = scatter_spec();
+        leader_spec.coord = Some(fixed.clone());
+        let mut member_spec = scatter_spec();
+        member_spec.coord = Some(fixed);
+        let tree = overlay_tree(leader_spec.clone(), member_spec.clone());
+        let h0 = LeafHold { spec: leader_spec, ..hold() };
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect("a member whose coord agrees with the leader's must render, not refuse");
+
+        let mut groups = plan_overlay_groups(&tree, 2);
+        let mut contexts = vec![LeafScaleContext::default(); 2];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        impose_shared_overlay_rects(&leaves, &mut groups, &mut contexts, &mut warnings);
+        // `imposed_plot_region` equality between members is not itself
+        // discriminating: `impose_shared_overlay_rects` always gives every
+        // member of an equalized group the identical rect, agreeing coord or
+        // not. What the agreement renders onto is: the shared rect still
+        // reflects the leader's own `CoordFixed(ratio=1.0)` (width equals
+        // height), the one fact that would be wrong if the member's own
+        // (agreeing) ratio were applied a second time or the group were
+        // never equalized at all.
+        let imposed = contexts[0].imposed_plot_region.expect("an equalized group imposes a rect");
+        assert_eq!(
+            contexts[1].imposed_plot_region, Some(imposed),
+            "the agreeing member shares the leader's own rect"
+        );
+        assert!(
+            (imposed.w - imposed.h).abs() < 1e-6,
+            "the shared rect must reflect the leader's CoordFixed ratio=1.0: {imposed:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_member_whose_xlim_matches_the_leaders_renders() {
+        // The same agreement rule for a panel-scoped `CoordCartesian`
+        // property (`xlim=`), not only `CoordFixed`.
+        let cart = crate::spec::coord::CoordKind::Cartesian {
+            x_domain: Some((0.0, 5.0)),
+            y_domain: None,
+            expand: true,
+            clip: true,
+        };
+        let mut leader_spec = scatter_spec();
+        leader_spec.coord = Some(cart.clone());
+        let mut member_spec = scatter_spec();
+        member_spec.coord = Some(cart);
+        let tree = overlay_tree(leader_spec.clone(), member_spec.clone());
+        let h0 = LeafHold { spec: leader_spec, ..hold() };
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect("a member whose xlim agrees with the leader's must render, not refuse");
+    }
+
+    #[test]
+    fn overlay_member_whose_coord_differs_from_the_leaders_still_refuses() {
+        // Negative control: the agreement rule does not widen into "any
+        // CoordFixed beside any CoordFixed renders" — a differing ratio is
+        // still a conflicting declaration and still refuses.
+        let mut leader_spec = scatter_spec();
+        leader_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let mut member_spec = scatter_spec();
+        member_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 2.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(leader_spec.clone(), member_spec.clone());
+        let h0 = LeafHold { spec: leader_spec, ..hold() };
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("a member whose ratio differs from the leader's must still refuse");
+        let CompositeRenderError::LeafRender { source, .. } = &err else {
+            panic!("expected LeafRender, got {err:?}");
+        };
+        match source.root() {
+            RenderError::LayerCoordUnplaceable { reason, .. } => {
+                assert!(
+                    matches!(&**reason, crate::render::LayerCoordUnplaceableReason::PanelProperty(_)),
+                    "expected the panel-property reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected LayerCoordUnplaceable, got {other:?}"),
+        }
+        let msg = source.to_string();
+        assert!(msg.contains("layer 1: fm.CoordFixed declares a fixed aspect ratio"), "{msg}");
+    }
+
+    #[test]
+    fn overlay_layered_non_leader_member_is_named_by_its_overlay_position() {
+        // A caller-layered member (its own `ChartSpec` already has
+        // `layers: Some([...])`, e.g. `(p + q).coord(CoordFixed(1))`) is
+        // named by its OVERLAY position, never by an index into its own
+        // internal `spec.layers`: `public_layer(member_spec, 0, mark)`
+        // can answer `Some(0)` for this shape (the member's own layer 0
+        // happens to be a plain primitive), but `in_layer`'s fill-if-None
+        // must not take that as the member's own position — doing so
+        // would misname the member "layer 0" (the leader) instead of its
+        // real overlay position.
+        let member_layers = vec![
+            crate::spec::layer::Layer { mark: Mark::Point, encoding: scatter_spec().encoding, ..Default::default() },
+            crate::spec::layer::Layer { mark: Mark::Line, encoding: scatter_spec().encoding, ..Default::default() },
+        ];
+        let mut member_spec = scatter_spec();
+        member_spec.layers = Some(member_layers);
+        member_spec.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(scatter_spec(), member_spec.clone());
+        let h0 = hold();
+        let h1 = LeafHold { spec: member_spec, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("a caller-layered member's own fixed aspect must still refuse");
+        let CompositeRenderError::LeafRender { source, .. } = &err else {
+            panic!("expected LeafRender, got {err:?}");
+        };
+        match source {
+            RenderError::InLayer { layer: Some(1), .. } => {}
+            other => panic!("expected the member named by its overlay position, got {other:?}"),
+        }
+        let msg = source.to_string();
+        assert!(msg.contains("layer 1: fm.CoordFixed"), "{msg}");
+        assert!(!msg.contains("layer 0:"), "{msg}");
     }
 
     #[test]

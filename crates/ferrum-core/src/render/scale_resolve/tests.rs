@@ -8576,9 +8576,10 @@ fn an_unlayered_overlay_member_binding_an_absent_column_refuses() {
     .unwrap();
     let outputs = HashMap::new();
     let (absent, other) = (chart("w"), chart("x"));
+    let theme = ThemeInputs::default();
     let members = [
-        LeafResolveInput { spec: &absent, encoding: &absent.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new(), x_text_rows: Default::default(), y_text_rows: Default::default() },
-        LeafResolveInput { spec: &other, encoding: &other.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new(), x_text_rows: Default::default(), y_text_rows: Default::default() },
+        LeafResolveInput { spec: &absent, encoding: &absent.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new(), x_text_rows: Default::default(), y_text_rows: Default::default(), theme: &theme },
+        LeafResolveInput { spec: &other, encoding: &other.encoding, final_batch: &rows, transform_outputs: &outputs, transform_lineages: &crate::transform::run::OutputLineages::new(), x_text_rows: Default::default(), y_text_rows: Default::default(), theme: &theme },
     ];
     let refusal = build_overlay_auxiliary_scales(&members, &absent.encoding, &ThemeInputs::default(), &mut Vec::new())
         .expect_err("member 0's color names a column its rows lack");

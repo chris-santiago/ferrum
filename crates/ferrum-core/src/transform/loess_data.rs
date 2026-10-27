@@ -78,6 +78,7 @@ fn apply_one_group(
             transform: "LoessData".into(),
             group: group.map(str::to_string),
             reason: "fewer than 3 usable (non-null/non-NaN) x/y points".into(),
+            panel: None,
         });
         return all_nan_output(spec);
     }

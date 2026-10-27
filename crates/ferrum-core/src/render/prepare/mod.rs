@@ -2013,7 +2013,7 @@ fn run_transforms_with_facet(
     let col_repeat = facet_repeat_mask(normalized, &fspec.repeat, &fspec.field)?;
     let mut dropped_nulls = vec![(
         fspec.field.as_str(),
-        null_facet_rows(crate::render::facet_key_column(normalized, &fspec.field)?, &col_repeat),
+        null_facet_rows(&crate::render::facet_key_column(normalized, &fspec.field)?, &col_repeat),
     )];
     let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if normalized.num_rows() == 0 {
         // Zero-row input has no facet VALUE to partition by at all -- there
@@ -2033,7 +2033,7 @@ fn run_transforms_with_facet(
         vec![((String::new(), fspec.row.is_some().then(String::new)), normalized.clone())]
     } else if let Some(row_field) = &fspec.row {
         let row_repeat = facet_repeat_mask(normalized, &fspec.repeat, row_field)?;
-        dropped_nulls.push((row_field.as_str(), null_facet_rows(crate::render::facet_key_column(normalized, row_field)?, &row_repeat)));
+        dropped_nulls.push((row_field.as_str(), null_facet_rows(&crate::render::facet_key_column(normalized, row_field)?, &row_repeat)));
         partition_batch_by_two_fields(
             normalized,
             (&fspec.field, &col_repeat),
@@ -2048,9 +2048,18 @@ fn run_transforms_with_facet(
             .map(|(col_val, batch)| ((col_val, None), batch))
             .collect()
     };
-    if partitions.is_empty() {
-        return Err(RenderError::EmptyDomain { channel: "facet".to_string(), field: fspec.field.clone() });
-    }
+    // Every row's facet key (the col field's, or in grid mode either field's)
+    // is null: `dropped_nulls` above already counts every row for its field,
+    // so the warning loop below reports the drop in full. This is the
+    // drop-and-warn rule at its limit, not a different input class, so it
+    // takes the same one-placeholder route the zero-row branch above takes
+    // (over an empty slice of the null-dropped batch) rather than refusing
+    // a frame the single-null-row case already renders.
+    let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if partitions.is_empty() {
+        vec![((String::new(), fspec.row.is_some().then(String::new)), normalized.slice(0, 0))]
+    } else {
+        partitions
+    };
 
     // Grid dims for the per-cell panel-size estimate (M2): grid mode's
     // nrows/ncols are explicit on the facet spec; wrap mode's ncols is
@@ -2113,9 +2122,20 @@ fn run_transforms_with_facet(
     let mut all_null_steps: Vec<StepAllNull<'_>> = Vec::new();
     for (key, partition_batch) in &partitions {
         let (col_value, row_value) = key;
+        let before_warnings = ctx.warnings.borrow().len();
         let (mut panel_outputs, panel_lineages) =
             apply_transforms_named(&effective_transforms, partition_batch, &ctx)
                 .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
+        // A per-group fit warning (`DegenerateFit`/`ParameterClamped`/
+        // `IntervalUndefined`) this partition's own run just pushed names
+        // which facet panel it ran in: two sparse panels at the same
+        // groupby size would otherwise report two identical,
+        // unattributable warnings. Stamped here, once per partition,
+        // mirroring `GroupKeyAllNull`'s own panel naming
+        // (`settle_all_null_partitions`/`facet_partition_label`) and voice.
+        for warning in ctx.warnings.borrow_mut()[before_warnings..].iter_mut() {
+            stamp_facet_panel(warning, fspec, key);
+        }
         for AllNullPartition { step, outcome } in ctx.all_null_partitions.borrow_mut().drain(..) {
             let index = all_null_steps.iter().position(|seen| seen.step == step).unwrap_or_else(|| {
                 all_null_steps.push(StepAllNull { step, outcome, partitions: HashSet::new() });
@@ -2280,10 +2300,32 @@ fn settle_all_null_partitions(
 /// `panels` field: `"f=F2"`, or `"f=F2, r=R1"` in grid mode — the same
 /// `col=value` shape [`crate::transform::context::describe_group_keys`]
 /// uses for a groupby key.
-fn facet_partition_label(fspec: &crate::layout::FacetSpec, (col, row): &FacetPartitionKey) -> String {
+pub(crate) fn facet_partition_label(fspec: &crate::layout::FacetSpec, (col, row): &FacetPartitionKey) -> String {
     match (&fspec.row, row) {
         (Some(row_field), Some(row_val)) => format!("{}={col}, {row_field}={row_val}", fspec.field),
         _ => format!("{}={col}", fspec.field),
+    }
+}
+
+/// Stamp `warning`'s `panel` field with `fspec`/`key`'s
+/// [`facet_partition_label`], when it is one of the three per-group fit
+/// warnings and does not already carry one (a reader of raw warnings from
+/// a composite leaf's own faceted run, re-run through this function, must
+/// not overwrite a panel its own facet already set). Every other warning
+/// kind is left untouched.
+fn stamp_facet_panel(
+    warning: &mut TransformWarning,
+    fspec: &crate::layout::FacetSpec,
+    key: &FacetPartitionKey,
+) {
+    let panel = match warning {
+        TransformWarning::DegenerateFit { panel, .. }
+        | TransformWarning::ParameterClamped { panel, .. }
+        | TransformWarning::IntervalUndefined { panel, .. } => panel,
+        _ => return,
+    };
+    if panel.is_none() {
+        *panel = Some(facet_partition_label(fspec, key));
     }
 }
 
@@ -3209,10 +3251,12 @@ fn build_axes(
     // `independent_y` layer's own text never floors the primary y it does
     // not share.
     let layer_pairs = || layers.iter().zip(layer_batches.iter().copied());
-    let own_x_rows =
-        crate::render::scale_resolve::primary_axis_text_rows("x", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics);
-    let own_y_rows =
-        crate::render::scale_resolve::primary_axis_text_rows("y", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics);
+    let own_x_rows = crate::render::scale_resolve::primary_axis_text_rows(
+        "x", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics, provisional_scales.color.as_ref(),
+    );
+    let own_y_rows = crate::render::scale_resolve::primary_axis_text_rows(
+        "y", layer_pairs(), y_slot_plan, spec.facet.as_ref(), theme, &metrics, provisional_scales.color.as_ref(),
+    );
     // A composite leaf whose channel shares a group's rows union measures
     // from THAT instead of its own rows alone — never a second guess at
     // what the group's other members already measured.
@@ -3399,7 +3443,7 @@ fn build_secondary_y_axis_inputs(
             false,
         );
         let y_rows = crate::render::scale_resolve::text_edge_rows(
-            "y", std::iter::once((layer, layer_batch)), spec.facet.as_ref(), theme, metrics,
+            "y", std::iter::once((layer, layer_batch)), spec.facet.as_ref(), theme, metrics, None,
         );
         let y_text_demand = y_scale.text_edge_demand(y_applies.then_some(&y_rows));
         let axis_input = build_axis_input(
@@ -5430,7 +5474,7 @@ mod grid_partition_tests {
         };
         assert_eq!(v(&partitions[0].1), [1.0, 3.0, 4.0]);
         assert_eq!(v(&partitions[1].1), [2.0, 3.0, 4.0]);
-        assert_eq!(null_facet_rows(crate::render::facet_key_column(&batch, "c").unwrap(), &repeat), 1);
+        assert_eq!(null_facet_rows(&crate::render::facet_key_column(&batch, "c").unwrap(), &repeat), 1);
     }
 
     /// A grid whose second frame lacks only the row field: its rows (2, 3)
@@ -5576,17 +5620,54 @@ mod grid_partition_tests {
         );
     }
 
-    /// Non-Utf8 column: `facet_key_column` on a Float64 column refuses with
-    /// the one facet-field message every partition and scan site raises.
+    /// A numeric facet column keys through the same ordinal-category
+    /// reader a dodge/stack `by=` column reads, rather than refusing —
+    /// `facet_key_column` on a Float64 column reads its labels.
     #[test]
-    fn facet_key_column_non_utf8_column_errors_must_be_utf8() {
+    fn facet_key_column_numeric_column_reads_ordinal_labels() {
         let batch = facet_key_column_batch();
-        let err = crate::render::facet_key_column(&batch, "v").unwrap_err();
+        let arr = crate::render::facet_key_column(&batch, "v").expect("Float64 facets through the ordinal reader");
+        assert_eq!(arr.value(0), "1");
+        assert_eq!(arr.value(1), "2");
+        assert_eq!(arr.value(2), "3");
+    }
+
+    /// An all-null `Null`-typed column (no further dtype to read) also
+    /// keys through the ordinal reader rather than refusing; every row
+    /// reads as a null facet key, the same shape the drop-and-warn route
+    /// already handles for a Utf8 column.
+    #[test]
+    fn facet_key_column_null_typed_column_reads_as_all_null() {
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Null, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arrow::array::NullArray::new(2))]).unwrap();
+        let arr = crate::render::facet_key_column(&batch, "n").expect("Null-typed facets through the ordinal reader");
+        assert_eq!(arr.len(), 2);
+        assert!(arr.is_null(0) && arr.is_null(1));
+    }
+
+    /// A dtype the ordinal reader itself cannot stringify (e.g. `Timestamp`)
+    /// refuses, naming the dtype, the accepted dtypes and the cast remedy.
+    #[test]
+    fn facet_key_column_unsupported_dtype_names_the_dtype_and_remedy() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::TimestampMillisecondArray::from(vec![Some(1_000i64)]))],
+        )
+        .unwrap();
+        let err = crate::render::facet_key_column(&batch, "t").unwrap_err();
         match &err {
-            RenderError::ScaleResolutionFailed(msg) => {
-                assert_eq!(msg, "facet field 'v' must be Utf8");
+            RenderError::UnsupportedDtype { field, dtype, context } => {
+                assert_eq!(field, "t");
+                assert!(dtype.contains("Timestamp"), "{dtype}");
+                assert!(dtype.contains("cast 't' to a string"), "{dtype}");
+                assert_eq!(*context, Some("facet"));
             }
-            other => panic!("expected ScaleResolutionFailed, got: {other:?}"),
+            other => panic!("expected UnsupportedDtype, got: {other:?}"),
         }
     }
 }

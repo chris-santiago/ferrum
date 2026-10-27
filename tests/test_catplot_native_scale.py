@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import Any
 
 import polars as pl
 import pytest
@@ -370,11 +371,12 @@ def test_native_scale_encode_x_door_bypasses_padding_and_typing():
     note left open: `encode`'s `x` is the layer-space category channel under
     both orientations, which is the convention the value-scale refusal and the
     scale propagation already read it in.
+
+    The axis previews the jittered positions as it does for ``Stack``, so
+    seeded jitter on this 30-row fixture draws all 30 circles through
+    `encode=`, with no `scale=` or domain, as the `x=` door does.
     """
     df = _three_group_df(1.0)
-    # Padding lost: the same 30-row jitter fixture that renders 30/30 through
-    # x= drops back to 17/30 through encode=, with no scale=/domain involved
-    # at all.
     svg_jitter = fm.catplot(
         df,
         x="cat",
@@ -385,7 +387,7 @@ def test_native_scale_encode_x_door_bypasses_padding_and_typing():
         seed=0,
         encode={"x": fm.X("cat")},
     ).to_svg()
-    assert len(_circle_cx(svg_jitter)) == 17
+    assert len(_circle_cx(svg_jitter)) == 30
 
     # Force-nominal typing lost under native_scale=False: the encode= door
     # still renders the numeric column at native (quantitative) positions,
@@ -518,7 +520,9 @@ def test_native_scale_true_jitter_default_example_padding_auto_extra_is_pinned()
         }
     )
     chart = fm.catplot(df, x="cat", y="val", kind="strip", native_scale=True, seed=0)
-    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    padded = chart.configure_padding(auto=False)
+    assert padded is not None
+    svg_auto_false = padded.to_svg()
     svg_default = chart.to_svg()
     assert 'font-size="11"' in svg_auto_false  # the full-font path
     clip_off = re.search(
@@ -627,7 +631,9 @@ def test_native_scale_true_aggregating_kind_places_estimates_proportionally():
 @pytest.mark.parametrize("kind", _ALL_CATPLOT_KINDS)
 def test_native_scale_false_all_kinds_accept_the_flag(kind):
     df = _string_cat_df()
-    kwargs = {"ci": 95, "n_boot": 200, "seed": 0} if kind in ("point", "bar") else {}
+    kwargs: dict[str, Any] = (
+        {"ci": 95, "n_boot": 200, "seed": 0} if kind in ("point", "bar") else {}
+    )
     svg = fm.catplot(df, x="cat", y="val", kind=kind, native_scale=False, **kwargs).to_svg()
     assert "<svg" in svg
 
@@ -651,7 +657,9 @@ def test_native_scale_true_numeric_kinds_accept_the_flag(kind):
             "val": [float(i) for i in range(15)],
         }
     )
-    kwargs = {"ci": 95, "n_boot": 200, "seed": 0} if kind in ("point", "bar") else {}
+    kwargs: dict[str, Any] = (
+        {"ci": 95, "n_boot": 200, "seed": 0} if kind in ("point", "bar") else {}
+    )
     svg = fm.catplot(df, x="cat", y="val", kind=kind, native_scale=True, **kwargs).to_svg()
     assert "<svg" in svg
 

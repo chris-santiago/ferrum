@@ -325,9 +325,6 @@ pub enum RenderError {
     /// passes. Display: `"column '<field>' has unsupported dtype: <dtype>"`
     /// or `"<context>: column '<field>' has unsupported dtype: <dtype>"`.
     UnsupportedDtype { field: String, dtype: String, context: Option<&'static str> },
-    /// The unioned numeric/temporal extent for an axis or color channel
-    /// produced no finite values (all rows null/NaN or empty after filter).
-    EmptyDomain { channel: String, field: String },
     SceneConstruction(String),
     HtmlBundleAssembly(String),
     /// An encoding channel that is not supported by the given mark type was
@@ -583,20 +580,32 @@ pub enum RenderError {
         required: &'static str,
     },
     /// A layer's own `coord` (`#172`(1)) cannot be placed on one layer of a panel
-    /// every layer shares. `layer` is the index in `spec.layers`, `coord` the
-    /// constructor the caller wrote, and `reason` which of the two ways it is
-    /// unplaceable — see [`LayerCoordUnplaceableReason`].
+    /// every layer shares. `coord` is the constructor the caller wrote, `mark`
+    /// the layer's own mark, and `reason` which of the two ways it is
+    /// unplaceable — see [`LayerCoordUnplaceableReason`]. No `layer` index field:
+    /// every producer raises this wrapped in [`Self::InLayer`]
+    /// (`in_layer_context(public_layer(...), &layer_entry(...))`, mirroring
+    /// `scene_build::in_layer_voice`), which owns the index — `None` for a layer
+    /// a desugaring call built (the index counts internal sub-layers the caller
+    /// never wrote), `Some` for a layer the caller placed directly. `mark` is
+    /// what [`Self::fmt_as`] asks [`prepare::voiced_layer`] to tell a caller-
+    /// placed layer (named only by that index) from a figure-built one (named
+    /// by its public entry too): see `fmt_as`'s arm for the two resulting
+    /// voices.
     ///
     /// ONE refusal with two reasons rather than two refusals, deliberately: a
     /// caller who wrote an unplaceable per-layer coord is owed the same sentence
     /// whichever property of it could not be honored, and must not be able to
-    /// tell from the message which gate spoke. The two producers are
+    /// tell from the message which gate spoke. The four producers are
     /// `scene_build::build_scene`'s chart-level gate (the panel-property reason,
-    /// asked before any geometry) and its per-layer gate (the channel-exchange
-    /// reason, which needs the resolved scales); both funnel every standalone
-    /// render and every composite leaf, so all three merged-flat routes (static
-    /// `chart + chart`, `resolve={"y": "independent"}`, `.interactive()`) refuse
-    /// identically.
+    /// asked before any geometry), its per-layer gate (the channel-exchange
+    /// reason, which needs the resolved scales), `composite::
+    /// refuse_unplaceable_overlay_members` (the channel-exchange reason over a
+    /// bare `fm.layer(...)`'s own leaves) and `composite_render`'s overlay
+    /// prelude (the panel-property reason over the same leaves, before any
+    /// layout); all funnel every standalone render and every composite leaf, so
+    /// every route (static `chart + chart`, `resolve={"y": "independent"}`,
+    /// `.interactive()`, and `fm.layer(...)`) refuses identically.
     ///
     /// REFUSE MALFORMED, and specifically not WARN DEGRADED: rendering with the
     /// declaration dropped is exactly the silent-substitution defect `#172`(1)
@@ -604,8 +613,8 @@ pub enum RenderError {
     /// partial sense in which one layer of a shared panel has its own axis domain,
     /// or in which a categorical column is drawn against a continuous axis.
     LayerCoordUnplaceable {
-        layer: usize,
         coord: &'static str,
+        mark: crate::spec::mark::Mark,
         /// Boxed, for `clippy::result_large_err` and nothing else: the reason's
         /// two owned strings would widen `RenderError` past the point where the
         /// composite wrappers that embed it (`CompositeResolveError`,
@@ -1240,7 +1249,6 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::ResvgFailed(_)
         | RenderError::PositionAdjustFailed { .. }
         | RenderError::UnsupportedDtype { .. }
-        | RenderError::EmptyDomain { .. }
         | RenderError::SceneConstruction(_)
         | RenderError::HtmlBundleAssembly(_)
         | RenderError::UnsupportedChannelCombination { .. }
@@ -1440,8 +1448,6 @@ impl std::fmt::Display for RenderError {
                 Some(ctx) => write!(f, "{ctx}: column '{field}' has unsupported dtype: {dtype}"),
                 None => write!(f, "column '{field}' has unsupported dtype: {dtype}"),
             },
-            Self::EmptyDomain { channel, field } =>
-                write!(f, "{channel}: no usable values found for field '{field}'"),
             Self::SceneConstruction(msg) =>
                 write!(f, "scene construction failed: {msg}"),
             Self::HtmlBundleAssembly(msg) =>
@@ -1531,44 +1537,13 @@ impl std::fmt::Display for RenderError {
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
             Self::MarkRequiresCoord { mark, .. } => self.fmt_as(mark, f),
-            // One frame, two reasons (see `LayerCoordUnplaceableReason`): the
-            // prefix, the "cannot be placed on one of them" spine and the closing
-            // instruction are shared verbatim, so a caller cannot tell which of
-            // the two gates refused them. Only the middle clause — what about
-            // this coord could not be honored — and the remedy specific to it
-            // differ.
-            Self::LayerCoordUnplaceable { layer, coord, reason } => {
-                let (cause, remedy) = match &**reason {
-                    LayerCoordUnplaceableReason::PanelProperty(property) => (
-                        format!("{coord} declares {property}, which belongs to the panel every layer shares"),
-                        "A per-layer coord may declare placement only: fm.CoordFlip, \
-                         fm.CoordPolar, fm.CoordGeo, or a bare fm.CoordCartesian().",
-                    ),
-                    LayerCoordUnplaceableReason::ExchangedChannelUnservable {
-                        channel,
-                        column,
-                        dtype,
-                        axis_kind,
-                    } => (
-                        format!(
-                            "{coord} leaves this layer's positional channels in the opposite \
-                             space from the panel's axes, and the panel's {channel} axis is \
-                             {axis_kind} while the column that lands on it ('{column}': \
-                             {dtype}) cannot be drawn against a {axis_kind} axis"
-                        ),
-                        "The panel's axes are resolved from the first member, so a member \
-                         whose channels sit in the opposite space can only be placed where \
-                         both of its columns suit the axes they land on.",
-                    ),
-                };
-                write!(
-                    f,
-                    "layer {layer}: {cause} — a layered chart (fm.layer(...) / chart + chart) \
-                     merges its members onto one panel, so this coord cannot be placed on one \
-                     of them. {remedy} Move it to the first member (whose coord IS the \
-                     panel's), or drop it."
-                )
-            }
+            // Every producer wraps this in `InLayer`, so reaching `Display`
+            // bare only happens for a hand-built or test-constructed value;
+            // voice it exactly as a caller-placed primitive layer's own mark
+            // would (`fmt_as`'s arm below), since that is the neutral default
+            // `prepare::voiced_layer` gives an entry it never saw.
+            Self::LayerCoordUnplaceable { mark, .. } =>
+                self.fmt_as(&format!("mark_{}", mark.as_str()), f),
             Self::LayerAxisColumnUnplaceable { layer, detail } => {
                 let LayerAxisColumnDetail { channel, field, dtype } = &**detail;
                 write!(
@@ -1905,6 +1880,58 @@ impl RenderError {
                 ),
             },
             Self::MarkRequiresCoord { required, .. } => write!(f, "{entry} requires a {required} coord"),
+            // One frame, two reasons (see `LayerCoordUnplaceableReason`): the
+            // "cannot be placed on one of them" spine and the closing
+            // instruction are shared verbatim, so a caller cannot tell which
+            // of the four producers refused them. Only the middle clause —
+            // what about this coord could not be honored — and the remedy
+            // specific to it differ.
+            //
+            // `lead` is the one thing that does differ by voice: a caller-
+            // placed layer (`entry` is `prepare::layer_entry`'s synthetic
+            // `mark_{mark}` fallback, `prepare::voiced_layer`'s own test for
+            // "nothing the caller wrote names this layer") is named only by
+            // its `InLayer` index, so the sentence opens on the coord alone.
+            // A figure-built layer's `entry` is the call that built it,
+            // which nothing else in this sentence would otherwise name, so
+            // the sentence opens on it.
+            Self::LayerCoordUnplaceable { coord, mark, reason } => {
+                let lead = if prepare::voiced_layer(0, entry, *mark).is_some() {
+                    (*coord).to_string()
+                } else {
+                    format!("{entry}: its coord")
+                };
+                let (cause, remedy) = match &**reason {
+                    LayerCoordUnplaceableReason::PanelProperty(property) => (
+                        format!("{lead} declares {property}, which belongs to the panel every layer shares"),
+                        "A per-layer coord may declare placement only: fm.CoordFlip, \
+                         fm.CoordPolar, fm.CoordGeo, or a bare fm.CoordCartesian().",
+                    ),
+                    LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+                        channel,
+                        column,
+                        dtype,
+                        axis_kind,
+                    } => (
+                        format!(
+                            "{lead} leaves this layer's positional channels in the opposite \
+                             space from the panel's axes, and the panel's {channel} axis is \
+                             {axis_kind} while the column that lands on it ('{column}': \
+                             {dtype}) cannot be drawn against a {axis_kind} axis"
+                        ),
+                        "The panel's axes are resolved from the first member, so a member \
+                         whose channels sit in the opposite space can only be placed where \
+                         both of its columns suit the axes they land on.",
+                    ),
+                };
+                write!(
+                    f,
+                    "{cause} — a layered chart (fm.layer(...) / chart + chart) \
+                     merges its members onto one panel, so this coord cannot be placed on one \
+                     of them. {remedy} Move it to the first member (whose coord IS the \
+                     panel's), or drop it."
+                )
+            }
             Self::UnsupportedChannelCombination { channel, hint, hint_alt_channel, coord_flipped, .. } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 let hint: std::borrow::Cow<str> = match hint_alt_channel {
@@ -3024,6 +3051,7 @@ mod tests {
                 transform: "Smooth".into(),
                 group: Some("g=a".into()),
                 reason: "fewer than 2 usable points".into(),
+                panel: None,
             }),
             RenderWarning::LogScaleRowsLeftOut {
                 channel: "size".into(),
@@ -3826,21 +3854,47 @@ pub fn render_scene_json(
 }
 
 /// The facet field `field` of `batch` as every facet reader reads it: a
-/// Utf8 column, refused otherwise (`UnknownColumn` when absent). The one
-/// reader of the panel split ([`filter_batch_by_facet`]), the prepare pass's
-/// facet value scans and null-row checks, and the stack preview's per-panel
-/// split (`position::stack_preview`), so every site splits rows into the
-/// same panels and refuses a facet column with one message.
-pub(crate) fn facet_key_column<'a>(
-    batch: &'a RecordBatch,
+/// `StringArray`, refused otherwise (`UnknownColumn` when absent). A `Utf8`
+/// column is read as-is (zero-copy clone); Int/UInt/Float/Boolean and an
+/// all-null `Null`-typed column key through the same ordinal-category
+/// reader a dodge/stack `by=` column reads
+/// ([`crate::render::arrow_cast::col_as_ordinal_category_str`]), so a facet
+/// field of one of those dtypes renders with its panels keyed by that
+/// reader's labels, rather than refusing. Any other dtype (e.g.
+/// `Timestamp`) still refuses with the one message every
+/// such column gets. The one reader of the panel split
+/// ([`filter_batch_by_facet`]), the prepare pass's facet value scans and
+/// null-row checks, and the stack preview's per-panel split
+/// (`position::position_preview`), so every site splits rows into the same
+/// panels and keys a non-Utf8 column the same way.
+pub(crate) fn facet_key_column(
+    batch: &RecordBatch,
     field: &str,
-) -> Result<&'a arrow::array::StringArray, RenderError> {
-    batch
+) -> Result<arrow::array::StringArray, RenderError> {
+    let col = batch
         .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .ok_or_else(|| RenderError::ScaleResolutionFailed(format!("facet field '{field}' must be Utf8")))
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+        return Ok(arr.clone());
+    }
+    let strs = crate::render::arrow_cast::col_as_ordinal_category_str(batch, field).map_err(|err| match err {
+        // The reader's own dtype detail, re-voiced with the facet
+        // context and a remedy: a facet field reads strings, integers,
+        // floats, booleans or an all-null column, and every other
+        // dtype (`Date32`, `Timestamp`, ...) is refused naming the
+        // actual dtype and the remedy, never a bare "must be Utf8".
+        RenderError::UnsupportedDtype { context: None, .. } => RenderError::UnsupportedDtype {
+            field: field.to_string(),
+            dtype: format!(
+                "{:?} (a facet field holds strings, integers, floats or booleans; cast \
+                 '{field}' to a string to facet by it)",
+                col.data_type()
+            ),
+            context: Some("facet"),
+        },
+        other => other,
+    })?;
+    Ok(arrow::array::StringArray::from(strs))
 }
 
 pub(crate) fn filter_batch_by_facet(

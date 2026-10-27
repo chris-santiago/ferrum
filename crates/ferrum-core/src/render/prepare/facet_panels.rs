@@ -26,6 +26,7 @@
 //!   for the sort is ordered by its rule for a value with no rows, and
 //!   [`RenderWarning::FacetSortPartial`] names it.
 
+use arrow::array::Array;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -193,7 +194,7 @@ fn value_counts(rows: &FacetRows<'_>, fields: &[&str]) -> Result<HashMap<Vec<Str
         for row in 0..layer.drawn.num_rows() {
             let key: Option<Vec<String>> = columns
                 .iter()
-                .map(|column| arrow::array::Array::is_valid(*column, row).then(|| column.value(row).to_string()))
+                .map(|column| column.is_valid(row).then(|| column.value(row).to_string()))
                 .collect();
             if let Some(key) = key {
                 *counts.entry(key).or_insert(0) += 1;
@@ -372,13 +373,31 @@ fn sort_batch(
             }
         }
     }
+    // `SortReads::Nothing` (the plain `"ascending"`/`"descending"` forms)
+    // reads no rows at all — `categories` stays empty, above — so this
+    // batch's only job for that form is to carry `field`'s REAL dtype,
+    // never a hardcoded `Utf8`, so `apply_sort_to_domain`'s numeric check
+    // (the same one an ordinal axis or a categorical legend already gets
+    // over this same column) can see it. A `Channel`/`Field` read still
+    // reads actual category STRINGS below (`col_as_str` in the loop
+    // above), so its column stays `Utf8` unchanged.
+    let category_column: ArrayRef = if matches!(reads, SortReads::Nothing) {
+        let real_dtype = rows
+            .layers
+            .iter()
+            .find_map(|l| l.drawn.schema().column_with_name(field).map(|(_, f)| f.data_type().clone()))
+            .unwrap_or(DataType::Utf8);
+        arrow::array::new_null_array(&real_dtype, categories.len())
+    } else {
+        Arc::new(StringArray::from(categories))
+    };
     let mut fields = vec![
-        Field::new(field, DataType::Utf8, true),
+        Field::new(field, category_column.data_type().clone(), true),
         Field::new(SORT_X, DataType::Float64, true),
         Field::new(SORT_Y, DataType::Float64, true),
     ];
     let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(categories)),
+        category_column,
         Arc::new(Float64Array::from(xs)),
         Arc::new(Float64Array::from(ys)),
     ];
@@ -421,8 +440,42 @@ mod tests {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
     }
 
+    /// Rows over an `Int64` facet field `f` and `y`.
+    fn int_rows(f: &[i64], y: &[f64]) -> RecordBatch {
+        let fields = vec![Field::new("f", DataType::Int64, true), Field::new("y", DataType::Float64, true)];
+        let columns: Vec<ArrayRef> = vec![Arc::new(arrow::array::Int64Array::from(f.to_vec())), Arc::new(Float64Array::from(y.to_vec()))];
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
     fn layer(batch: &RecordBatch) -> FacetLayerRows<'_> {
         FacetLayerRows { drawn: batch, sort: SortRows { batch, fallback: None, x_field: None, y_field: Some("y") } }
+    }
+
+    /// `sort="ascending"` on an `Int64` facet field orders panels by value
+    /// (`-3, 1, 2, 10`), not as text (`-3, 1, 10, 2`) — the same numeric
+    /// rule `apply_sort_to_domain` already gives an ordinal axis or a
+    /// categorical legend over the same column. `sort_batch` builds the
+    /// category column at the facet field's own dtype, so the numeric
+    /// check sees it.
+    #[test]
+    fn ascending_sort_orders_a_numeric_facet_field_by_value() {
+        let partitions = wrap_keys(&["10", "-3", "1", "2"]);
+        let batch = int_rows(&[10, -3, 1, 2], &[1.0, 2.0, 3.0, 4.0]);
+        let facet_rows = FacetRows { layers: vec![layer(&batch)], partitions: &partitions, coord_flipped: false };
+        let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("ascending")), None), &mut Vec::new()).unwrap();
+        assert_eq!(values(&groups), ["-3", "1", "2", "10"]);
+    }
+
+    /// `sort="descending"` on the same `Int64` field reverses the
+    /// value-ordered result (`10, 2, 1, -3`), not the text-reversed one
+    /// (`2, 10, 1, -3`).
+    #[test]
+    fn descending_sort_orders_a_numeric_facet_field_by_value() {
+        let partitions = wrap_keys(&["10", "-3", "1", "2"]);
+        let batch = int_rows(&[10, -3, 1, 2], &[1.0, 2.0, 3.0, 4.0]);
+        let facet_rows = FacetRows { layers: vec![layer(&batch)], partitions: &partitions, coord_flipped: false };
+        let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("descending")), None), &mut Vec::new()).unwrap();
+        assert_eq!(values(&groups), ["10", "2", "1", "-3"]);
     }
 
     fn spec(row: bool, sort: Option<serde_json::Value>, row_sort: Option<serde_json::Value>) -> FacetSpec {

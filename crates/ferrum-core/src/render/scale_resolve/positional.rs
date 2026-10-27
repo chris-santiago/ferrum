@@ -267,6 +267,13 @@ pub(in crate::render) fn build_axis_scale(
     // has ALREADY resolved. `false` for every standalone (flat/facet)
     // render → byte-identical.
     pending: bool,
+    // The panel's own resolved color scale — the caller's `build_auxiliary_scales`
+    // result, resolved ahead of this call precisely so a continuous `Dodge`'s
+    // sub-band order (`numeric_domain_union_over`'s `axis_previews`) reads the
+    // SAME scale the real draw's `apply_dodge` does. Threaded through both the
+    // explicit-scale `data_extent` closure below and the auto path's
+    // `resolve_numeric_extent`, so every continuous axis route agrees.
+    color: Option<&crate::render::scale_resolve::ColorScale>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     // The bound field is typed, and a caller's categorical scale takes its
@@ -407,6 +414,7 @@ pub(in crate::render) fn build_axis_scale(
                 include_final,
                 LayerUnion::CarryingScale(scale_spec),
                 side,
+                color,
             )
             .map_err(|e| match e {
                 RenderError::UnsupportedDtype { field, dtype, context: None } => {
@@ -473,7 +481,7 @@ pub(in crate::render) fn build_axis_scale(
     match dtype {
         SpecDataType::Quantitative => {
             let (min, max) = resolve_numeric_extent(
-                channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
+                channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final, color,
             )?;
             let frac = resolve_padding_fraction(None, false);
             let inset = inset_pixel_range(pr, frac, text_demand);
@@ -526,7 +534,7 @@ pub(in crate::render) fn build_axis_scale(
         }
         SpecDataType::Temporal => {
             let (min, max) = resolve_numeric_extent(
-                channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
+                channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final, color,
             )?;
             let frac = resolve_padding_fraction(None, false);
             let inset = inset_pixel_range(pr, frac, text_demand);
@@ -654,6 +662,7 @@ pub(in crate::render) fn imposed_axis_scale(
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
 /// auto-inferred extent. A composite shared domain that fits the axis was
 /// taken before this ([`shared_domain_axis_scale`]).
+#[allow(clippy::too_many_arguments)]
 fn resolve_numeric_extent(
     channel: &str,
     enc: &crate::spec::encoding::EncodingSpec,
@@ -662,6 +671,7 @@ fn resolve_numeric_extent(
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
     include_final: bool,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<(f64, f64), RenderError> {
     numeric_domain_union(
         channel,
@@ -671,6 +681,7 @@ fn resolve_numeric_extent(
         transform_outputs,
         spec,
         include_final,
+        color,
     )
 }
 
@@ -2257,6 +2268,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -2539,6 +2551,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -2985,6 +2998,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap()
@@ -3076,6 +3090,7 @@ mod tests {
             false,
             shared,
             false,
+            None,
             &mut warnings,
         )
         .unwrap()
@@ -3230,6 +3245,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
     }
@@ -3301,6 +3317,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -3332,6 +3349,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap()
@@ -3575,6 +3593,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .unwrap();

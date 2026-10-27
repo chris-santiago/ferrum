@@ -444,6 +444,50 @@ def pixel_for(ladder: dict[float, float], value: float) -> float:
     return ladder[lo] + (value - lo) * slope
 
 
+def value_for_pixel(ladder: dict[float, float], pixel: float) -> float:
+    """The data value a linear axis with this tick ladder places at ``pixel``.
+
+    ``pixel_for``'s inverse: fitted through the same two extreme ticks, so a
+    drawn mark's own pixel position reads back in data units independent of
+    whether those ticks are themselves "nice" round numbers.
+    """
+    lo, hi = min(ladder), max(ladder)
+    slope = (ladder[hi] - ladder[lo]) / (hi - lo)
+    return lo + (pixel - ladder[lo]) / slope
+
+
+def panel_x_ladder(
+    svg: str, frame: tuple[float, float, float, float], *, margin: float = 40.0
+) -> dict[float, float]:
+    """One facet panel's own x tick ladder (``{value: pixel}``), read off the
+    numeric tick row whose labels fall inside this panel's frame (plus a
+    small margin below it, where x-tick labels actually sit).
+
+    ``value_axis_ladders`` keys a ladder by the tick row's across-axis
+    position alone, which collides whenever two panels' tick rows share that
+    position: a COLUMN facet's panels sit side by side at one shared y, and a
+    ROW facet's panels share one x spanning the full width. Filtering to one
+    panel's own frame (x range for a column facet, y range plus ``margin``
+    for a row facet) first is what recovers that one panel's own ladder in
+    either layout.
+    """
+    x0, y0, x1, y1 = frame
+    entries = [
+        (x, y, v)
+        for x, y, v in numeric_text_entries(svg)
+        if x0 <= x <= x1 and y0 <= y <= y1 + margin
+    ]
+    rows: dict[int, dict[float, float]] = {}
+    for x, y, v in entries:
+        rows.setdefault(round(y), {})[v] = x
+    assert rows, f"no numeric tick labels inside frame {frame}"
+    ladder = rows[max(rows)]
+    assert len(ladder) >= MIN_LADDER_TICKS, (
+        f"need at least two x ticks inside frame {frame}; got {ladder}"
+    )
+    return ladder
+
+
 def assert_bars_start_on_the_zero_tick(svg: str, *, tol: float = 0.05) -> None:
     """Every data bar of a single-panel vertical bar chart grows from its y axis's 0 tick.
 

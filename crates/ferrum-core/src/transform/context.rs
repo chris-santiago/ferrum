@@ -57,11 +57,18 @@ pub(crate) enum TransformWarning {
     /// degenerate slice (`"g=A"`, `"g1=A, g2=2"`) when it is one groupby
     /// group or grouped-fit partition, `None` for a genuine whole-frame
     /// degrade; `reason` is a short user-facing clause naming why (e.g.
-    /// `"fewer than 2 usable points"`, `"zero x variance"`).
+    /// `"fewer than 2 usable points"`, `"zero x variance"`). `panel` names
+    /// the facet panel this fit ran in ([`facet_partition_label`]'s text),
+    /// `None` for an unfaceted chart (byte-identical text) — see
+    /// `run_transforms_with_facet`'s per-partition stamping.
+    ///
+    /// [`facet_partition_label`]: crate::render::prepare::facet_partition_label
     DegenerateFit {
         transform: String,
         group: Option<String>,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<String>,
     },
     /// A caller-requested parameter was silently clamped to a value the data
     /// (or the transform's own bounds) could actually support — e.g.
@@ -76,6 +83,10 @@ pub(crate) enum TransformWarning {
         param: String,
         requested: String,
         applied: String,
+        /// The facet panel this fit ran in, `None` for an unfaceted chart
+        /// (byte-identical text). See [`Self::DegenerateFit`]'s `panel` doc.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<String>,
     },
     /// A per-group (or per-row) fill/statistic could not be computed from
     /// that group's own data and fell back to a wider one instead of the
@@ -146,6 +157,62 @@ pub(crate) enum TransformWarning {
         field: String,
         rows: usize,
     },
+    /// A confidence band could not be computed even though its fit LINE
+    /// drew fine: zero or negative residual degrees of freedom, a singular
+    /// design, or a bootstrap/sandwich variance that came back non-finite.
+    /// The fit still draws; only the band is missing.
+    /// `group` is `None` for a genuine whole-frame band, `Some`
+    /// for one `groupby`/grouped-two-column-fit partition's. `reason` is
+    /// the user-facing clause already naming the cause, and the point
+    /// count when the band is undefined at only some grid points (e.g.
+    /// "2 points leave no residual degrees of freedom for a 2-parameter
+    /// fit; the band needs at least 3", "undefined at 3 of 50 grid
+    /// points").
+    ///
+    /// Distinct from [`Self::DegenerateFit`]: that variant reports the
+    /// whole fit (line and band both) lost; this one reports the line
+    /// alone surviving a band the data cannot support.
+    IntervalUndefined {
+        transform: String,
+        group: Option<String>,
+        ci: f64,
+        reason: String,
+        /// The facet panel this fit ran in, `None` for an unfaceted chart
+        /// (byte-identical text). See [`Self::DegenerateFit`]'s `panel` doc.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<String>,
+    },
+}
+
+/// Why a confidence band is undefined because `n` points leave zero or
+/// negative residual degrees of freedom for a `p`-parameter fit: the band
+/// needs at least one residual degree of freedom, i.e. `p + 1` points.
+/// Shared by every polynomial-family fit (`lm`, `log`, `sqrt`, `poly`) whose
+/// band comes from a t-distribution over `n - p` residual degrees of
+/// freedom, and by `Robust`'s own `n <= 2` case (worded identically to
+/// `lm`'s, since both lose the same residual degree of freedom), so the one
+/// reason text is worded identically everywhere it applies.
+pub(crate) fn zero_residual_dof_reason(n: usize, p: usize) -> String {
+    let point = if n == 1 { "point" } else { "points" };
+    format!(
+        "{n} {point} leave no residual degrees of freedom for a {p}-parameter fit; the band \
+         needs at least {}",
+        p + 1
+    )
+}
+
+/// A band undefined at only some of a fit's grid points: `cause` is the
+/// user-facing clause naming why (already stating the remedy, where one
+/// exists), `undefined` of `n_grid` points. Shared by every fit whose band
+/// fails per grid point rather than for the whole fit (`Logistic`'s Wald
+/// variance, `Robust`'s sandwich variance), so the "at K of N grid points"/
+/// "at every grid point" wording is one vocabulary.
+pub(crate) fn partial_band_reason(cause: &str, undefined: usize, n_grid: usize) -> String {
+    if undefined >= n_grid {
+        format!("{cause} at every grid point")
+    } else {
+        format!("{cause} at {undefined} of {n_grid} grid points")
+    }
 }
 
 /// Fold every `groupby`-scope null-key report into the one voice a facet or
@@ -359,29 +426,33 @@ impl std::fmt::Display for TransformWarning {
     /// `RenderWarning`'s own Display contract exactly.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransformWarning::DegenerateFit { transform, group, reason } => match group {
-                Some(g) => write!(
-                    f,
-                    "{transform}: could not fit group {g} ({reason}); it degraded to an \
-                     empty/flat output instead of failing the whole chart"
-                ),
-                None => write!(
-                    f,
-                    "{transform}: could not fit the data ({reason}); it degraded to an \
-                     empty/flat output instead of failing the whole chart"
-                ),
-            },
-            TransformWarning::ParameterClamped { transform, group, param, requested, applied } => {
+            TransformWarning::DegenerateFit { transform, group, reason, panel } => {
+                let in_panel = panel_clause(panel.as_deref());
                 match group {
                     Some(g) => write!(
                         f,
-                        "{transform}: {param}={requested} could not be honored for group {g}; \
-                         {applied} was used instead"
+                        "{transform}: could not fit group {g}{in_panel} ({reason}); it degraded \
+                         to an empty/flat output instead of failing the whole chart"
                     ),
                     None => write!(
                         f,
-                        "{transform}: {param}={requested} could not be honored; {applied} was \
-                         used instead"
+                        "{transform}: could not fit the data{in_panel} ({reason}); it degraded \
+                         to an empty/flat output instead of failing the whole chart"
+                    ),
+                }
+            }
+            TransformWarning::ParameterClamped { transform, group, param, requested, applied, panel } => {
+                let in_panel = panel_clause(panel.as_deref());
+                match group {
+                    Some(g) => write!(
+                        f,
+                        "{transform}: {param}={requested} could not be honored for group \
+                         {g}{in_panel}; {applied} was used instead"
+                    ),
+                    None => write!(
+                        f,
+                        "{transform}: {param}={requested} could not be honored{in_panel}; \
+                         {applied} was used instead"
                     ),
                 }
             }
@@ -425,7 +496,33 @@ impl std::fmt::Display for TransformWarning {
                      {pronoun} dropped; fill or filter the nulls in '{field}'"
                 )
             }
+            TransformWarning::IntervalUndefined { transform, group, ci, reason, panel } => {
+                let in_panel = panel_clause(panel.as_deref());
+                match group {
+                    Some(g) => write!(
+                        f,
+                        "{transform}: the ci={ci} band of group {g}{in_panel} is undefined \
+                         ({reason}); the fit line is drawn without it"
+                    ),
+                    None => write!(
+                        f,
+                        "{transform}: the ci={ci} band{in_panel} is undefined ({reason}); the \
+                         fit line is drawn without it"
+                    ),
+                }
+            }
         }
+    }
+}
+
+/// The " in facet panel f=F2" clause [`TransformWarning::DegenerateFit`],
+/// [`TransformWarning::ParameterClamped`] and [`TransformWarning::IntervalUndefined`]
+/// each splice into their Display text after the group clause; empty for an
+/// unfaceted fit (`panel: None`), keeping that text byte-identical.
+fn panel_clause(panel: Option<&str>) -> String {
+    match panel {
+        Some(p) => format!(" in facet panel {p}"),
+        None => String::new(),
     }
 }
 
@@ -683,6 +780,7 @@ impl TransformContext {
             transform: transform.to_string(),
             group: Some(group.to_string()),
             reason: failure.reason,
+            panel: None,
         });
         Ok(())
     }
@@ -720,11 +818,13 @@ mod tests {
                 transform: "Smooth".into(),
                 group: Some("g=a".into()),
                 reason: "fewer than 2 usable points".into(),
+                panel: None,
             },
             TransformWarning::DegenerateFit {
                 transform: "Smooth".into(),
                 group: None,
                 reason: "zero x variance".into(),
+                panel: Some("f=F2".into()),
             },
             TransformWarning::ParameterClamped {
                 transform: "Smooth".into(),
@@ -732,6 +832,7 @@ mod tests {
                 param: "k".into(),
                 requested: "200".into(),
                 applied: "6".into(),
+                panel: None,
             },
             TransformWarning::ParameterClamped {
                 transform: "LetterValue".into(),
@@ -739,6 +840,7 @@ mod tests {
                 param: "k_depth".into(),
                 requested: "14".into(),
                 applied: "12".into(),
+                panel: Some("f=F2".into()),
             },
             TransformWarning::FallbackApplied {
                 transform: "Impute".into(),
@@ -778,6 +880,22 @@ mod tests {
                 lowering: Some(vec![0]),
                 panels: vec!["f=F2".into(), "f=F3".into()],
             },
+            TransformWarning::IntervalUndefined {
+                transform: "Smooth".into(),
+                group: Some("g=a".into()),
+                ci: 0.95,
+                reason: "2 points leave no residual degrees of freedom for a 2-parameter fit; \
+                         the band needs at least 3"
+                    .into(),
+                panel: None,
+            },
+            TransformWarning::IntervalUndefined {
+                transform: "Smooth".into(),
+                group: None,
+                ci: 0.95,
+                reason: "undefined at 3 of 50 grid points".into(),
+                panel: Some("f=F2, r=R1".into()),
+            },
         ]
     }
 
@@ -798,7 +916,7 @@ mod tests {
     #[test]
     fn transform_warning_display_never_leaks_variant_names() {
         let leak_tokens =
-            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull", "NullKeyRowsDropped", "NullKeyScope"];
+            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull", "NullKeyRowsDropped", "NullKeyScope", "IntervalUndefined"];
         for w in all_variants() {
             let text = w.to_string();
             for token in leak_tokens {
@@ -816,6 +934,7 @@ mod tests {
             transform: "Smooth".into(),
             group: Some("g=a".into()),
             reason: "fewer than 2 usable points".into(),
+            panel: None,
         };
         assert!(with_group.to_string().contains("g=a"));
 
@@ -823,6 +942,7 @@ mod tests {
             transform: "Smooth".into(),
             group: None,
             reason: "fewer than 2 usable points".into(),
+            panel: None,
         };
         assert!(!without_group.to_string().contains("group"));
     }
@@ -863,6 +983,7 @@ mod tests {
             transform: "Smooth".into(),
             group: None,
             reason: "zero x variance".into(),
+            panel: None,
         });
         assert_eq!(
             ctx.warnings.borrow().len(),
@@ -882,6 +1003,7 @@ mod tests {
             transform: "Smooth".into(),
             group: None,
             reason: "zero x variance".into(),
+            panel: None,
         });
         assert_eq!(a.warnings.borrow().len(), 1);
         assert_eq!(b.warnings.borrow().len(), 0, "independent contexts must not share a sink");

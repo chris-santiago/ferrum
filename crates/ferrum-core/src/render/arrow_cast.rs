@@ -123,15 +123,19 @@ impl PanelAxisKind {
     }
 }
 
-/// Refuse `field` (of `dtype`), which `layer_index`'s own `coord` exchanged
-/// onto the panel's `channel` axis, when an `axis` of that kind cannot draw
-/// it. The one servability question behind
+/// Refuse `field` (of `dtype`), which a layer of mark `mark` whose own `coord`
+/// exchanged onto the panel's `channel` axis, when an `axis` of that kind
+/// cannot draw it. The one servability question behind
 /// [`super::LayerCoordUnplaceableReason::ExchangedChannelUnservable`], asked
 /// by every route that layers a member whose flip state differs from the
 /// panel's: a categorical axis serves what [`ensure_category_keyable`]
 /// admits, a continuous one what [`supported_numeric_dtype`] admits.
+///
+/// Carries no layer index: the caller wraps the `Err` in
+/// [`super::RenderError::in_layer_context`] (mirroring `scene_build::
+/// in_layer_voice`), the one place that index is known and voiced.
 pub(in crate::render) fn require_exchanged_column_servable(
-    layer_index: usize,
+    mark: crate::spec::mark::Mark,
     coord: &crate::spec::coord::CoordKind,
     channel: &'static str,
     field: &str,
@@ -146,8 +150,8 @@ pub(in crate::render) fn require_exchanged_column_servable(
         return Ok(());
     }
     Err(RenderError::LayerCoordUnplaceable {
-        layer: layer_index,
         coord: crate::spec::coord::public_spelling(coord),
+        mark,
         reason: Box::new(super::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
             channel,
             column: field.to_owned(),
@@ -238,6 +242,8 @@ pub(crate) fn col_as_str(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
 ///   `2000.0` → `"2000"`), so integer-valued float columns behave identically
 ///   to Int64 ordinal columns.
 /// - Boolean → `"true"` / `"false"` (same as `distinct_values_in_order`).
+/// - Null (an all-null column with no further dtype) → `None` for every
+///   row; there is no value to stringify, but the row count is kept.
 ///
 /// Returns `Err(UnsupportedDtype)` only for dtypes that cannot be sensibly
 /// turned into category strings (timestamps, durations, etc.).
@@ -288,6 +294,13 @@ pub(crate) fn col_as_ordinal_category_str(
     // Boolean — "true" / "false".
     if let Some(a) = col.as_any().downcast_ref::<arrow::array::BooleanArray>() {
         return Ok(a.iter().map(|v| v.map(|b| b.to_string())).collect());
+    }
+
+    // Null-typed column (every value null, with no further dtype to read):
+    // one `None` per row rather than a refusal — there is no value to
+    // stringify, but the row count is still knowable.
+    if col.data_type() == &DataType::Null {
+        return Ok(vec![None; col.len()]);
     }
 
     Err(RenderError::UnsupportedDtype {

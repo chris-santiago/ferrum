@@ -342,6 +342,7 @@ fn apply_one_group(
             transform: "Smooth".into(),
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            panel: None,
         });
         return match spec.output {
             SmoothOutput::Fitted => all_nan_output(spec),
@@ -410,6 +411,7 @@ fn apply_one_group(
                 transform: "Smooth".into(),
                 group: group.map(str::to_string),
                 reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
+                panel: None,
             });
         }
         return Ok(out);
@@ -464,7 +466,7 @@ fn apply_one_group(
         return Ok(out);
     }
 
-    let out = match spec.method {
+    let (out, band_undefined) = match spec.method {
         SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Loess => loess_fit(
             &xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed,
@@ -485,6 +487,18 @@ fn apply_one_group(
             transform: "Smooth".into(),
             group: group.map(str::to_string),
             reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
+            panel: None,
+        });
+    } else if let (Some(level), Some(reason)) = (spec.ci, band_undefined) {
+        // The fit line survived; only the band is undefined. Reported once
+        // the line's own degeneracy is ruled out, so a whole-fit loss
+        // stays DegenerateFit alone rather than also warning here.
+        ctx.warn(TransformWarning::IntervalUndefined {
+            transform: "Smooth".into(),
+            group: group.map(str::to_string),
+            ci: level,
+            reason,
+            panel: None,
         });
     }
     Ok(out)

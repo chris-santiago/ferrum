@@ -69,6 +69,11 @@ pub(crate) struct LeafResolveInput<'a> {
     /// rows from its spec and batch.
     pub(crate) x_text_rows: super::domain::TextEdgeRows,
     pub(crate) y_text_rows: super::domain::TextEdgeRows,
+    /// This leaf's own theme, read by [`super::super::composite::leaf_positional_domain`]
+    /// to resolve the leaf's own color scale (standalone, or its overlay
+    /// group's) ahead of its positional axis — the same `Dodge`-order rule
+    /// `resolve_scales_with_leaf_context` applies to a standalone chart.
+    pub(crate) theme: &'a crate::layout::ThemeInputs,
 }
 
 impl LeafResolveInput<'_> {

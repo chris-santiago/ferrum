@@ -646,11 +646,16 @@ class TestHeatmap:
         assert "domain" in scale
 
     def test_square(self, heat_data):
+        # square=True fixes the plot area's aspect (CoordFixed), not the
+        # chart's own width/height -- those stay unset (the chart's normal
+        # size) unless the caller sets them.
         chart = fe.heatmap(heat_data, annot=False, square=True)
-        d = json.loads(chart.to_spec().to_json())
-        # Square heatmap → width == height.
-        # Spec width/height land in the top-level "width" / "height" keys.
-        assert chart._width == chart._height
+        assert chart._width is None
+        assert chart._height is None
+        from ferrum.coord import CoordFixed
+
+        assert isinstance(chart._coord, CoordFixed)
+        assert chart._coord.ratio == pytest.approx(1.0)
 
     def test_vmin_vmax_explicit(self, heat_data):
         chart = fe.heatmap(heat_data, annot=False, vmin=0.0, vmax=10.0)

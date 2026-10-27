@@ -344,32 +344,21 @@ class TestEmptyDataSizing:
         )
         self._assert_root_size(svg, "300", "480")
 
-    # A one-column `square=True` heatmap sizes its side at 30px regardless of
-    # row count (pinned by this test's own name); at that side, the layout
-    # cannot fit the theme's left padding (16px) at all, so the render
-    # refuses with "layout failed: padding left=16 exceeds viewport
-    # dimension 30". Reproduced directly off a NON-empty one-column, one-row
-    # heatmap too (`fm.heatmap(pl.DataFrame({"a": [1.0]}), square=True)`
-    # raises the identical message): a 30px square is never renderable, at
-    # any row count. Pending a fix to the sizing or layout padding, this is
-    # a strict ``xfail`` rather than silently re-baselined on the refusal.
-    @pytest.mark.xfail(
-        strict=True,
-        raises=ValueError,
-        reason=(
-            "a one-column square=True heatmap's 30px side cannot fit the "
-            "theme's 16px padding, at any row count"
-        ),
-    )
     def test_heatmap_square_on_an_empty_table_draws_its_panel_empty(self):
-        """One value column keeps the square side at 30px even with no rows."""
+        """A zero-row heatmap draws its frame at the chart's normal size, not
+        a side scaled by row/column count -- `square=True` fixes the plot
+        area's aspect (`CoordFixed`), it never sets the viewport."""
         svg = self._render_and_warn(
             lambda: fm.heatmap(
                 pl.DataFrame({"a": pl.Series([], dtype=pl.Float64)}), square=True
             ).to_svg(),
             "its panel is drawn empty",
         )
-        assert re.search(r'width="30(\.0)?" height="30(\.0)?"', svg)
+        self._assert_root_size(svg, "640", "480")
+        from tests._svg_rects import plot_rect
+
+        x, y, w, h = plot_rect(svg)
+        assert abs(w - h) < 1e-3, (w, h)
 
 
 class TestPixelValidatorFamily:

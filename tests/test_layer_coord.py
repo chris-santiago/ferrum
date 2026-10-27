@@ -424,16 +424,17 @@ def test_panel_scoped_secondary_layer_coord_refuses_naming_it(coord, name):
     """A coord declaring a PANEL property cannot ride one layer of a panel.
 
     An aspect ratio and an axis domain belong to the panel every layer
-    shares, so there is no honest way to apply them to one layer of it. The
-    merged-flat routes refuse and the message names the coord it could not
-    place -- they do not render a chart with the declaration dropped, which is
-    what all three did for every per-layer coord before this fix.
+    shares, so there is no honest way to apply them to one layer of it. Every
+    route that merges members onto one shared panel refuses and the message
+    names the coord it could not place -- none of the four renders a chart
+    with the declaration silently dropped.
 
-    Asserted on all three merged-flat routes, because they are one path.
-    `fm.layer(...).to_svg()` is deliberately NOT here: the static shared-y
-    route keeps every member a separate composite leaf with its own scales and
-    its own coord, so nothing is merged and nothing is dropped -- that route's
-    behavior is unchanged by `#172`(1).
+    Asserted on all four routes: the two merged-flat ones (`+`, independent
+    y), `.interactive()` (always merged-flat), and the static composite
+    overlay `fm.layer(...).to_svg()`, whose own panel-property gate refuses a
+    non-first member's `CoordFixed` (the mechanism `heatmap(square=True)`
+    uses) rather than rendering it silently misaligned on the group's shared
+    rect.
     """
     flat = _control_chart() + _secondary_line(coord)
     layered = fm.layer(_control_chart(), _secondary_line(coord))
@@ -441,7 +442,7 @@ def test_panel_scoped_secondary_layer_coord_refuses_naming_it(coord, name):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         errors = []
-        for call in (flat.to_svg, layered._render_interactive, independent.to_svg):
+        for call in (flat.to_svg, layered.to_svg, layered._render_interactive, independent.to_svg):
             with pytest.raises(ValueError) as err:
                 call()
             errors.append(err)
@@ -449,6 +450,178 @@ def test_panel_scoped_secondary_layer_coord_refuses_naming_it(coord, name):
         message = str(err.value)
         assert name in message, f"the refusal must name the coord it dropped; got {message!r}"
         assert "layer 1" in message, f"the refusal must name the layer; got {message!r}"
+
+
+# ---------------------------------------------------------------------------
+# A member whose coord AGREES with the leader's declares nothing new. The
+# merged-flat stamp (`_carry_layer_coord`, composition.py) only ever puts a
+# coord on a `+` operand's layer when it DIFFERS from the host's, so the
+# overlay's own panel-property gate above must ask the same question before
+# refusing -- the common shape being a chart layered beside its own derived
+# mark (`a + a.mark_line()`), or the same figure call made twice over the
+# same frame.
+# ---------------------------------------------------------------------------
+
+
+def _matching_fixed_aspect_pair():
+    df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
+    lead = fm.Chart(df).mark_point().encode(x="x", y="y").coord(fm.CoordFixed(ratio=1.0))
+    return lead, lead.mark_line()
+
+
+def _matching_xlim_pair():
+    df = pl.DataFrame({"x": [1.0, 4.0], "y": [1.0, 4.0]})
+    lead = fm.Chart(df).mark_point().encode(x="x", y="y").coord(fm.CoordCartesian(xlim=(0.0, 5.0)))
+    return lead, lead.mark_line()
+
+
+_MATCH_HEATMAP_FRAME = pl.DataFrame({"row": ["r1", "r2"], "A": [1.0, 2.0], "B": [3.0, 4.0]})
+
+
+def _matching_heatmap_pair():
+    return (
+        fm.heatmap(_MATCH_HEATMAP_FRAME, annot=False, square=True),
+        fm.heatmap(_MATCH_HEATMAP_FRAME, annot=False, square=True),
+    )
+
+
+_MATCHING_COORD_CASES = {
+    "fixed_aspect": _matching_fixed_aspect_pair,
+    "matching_xlim": _matching_xlim_pair,
+    "matching_heatmap": _matching_heatmap_pair,
+}
+
+_MATCHING_COORD_ROUTES = {
+    "layer_static": lambda lead, member: fm.layer(lead, member).to_svg(),
+    "layer_interactive": lambda lead, member: fm.layer(lead, member)._render_interactive(),
+    "plus_static": lambda lead, member: (lead + member).to_svg(),
+}
+
+
+@pytest.mark.parametrize("case", list(_MATCHING_COORD_CASES))
+@pytest.mark.parametrize("route", list(_MATCHING_COORD_ROUTES))
+def test_a_member_whose_coord_matches_the_leaders_renders_on_every_route(route, case):
+    """A non-leader member's coord that EQUALS the leader's is honored, not
+    refused: an agreeing `CoordFixed`, an agreeing `xlim=`, or the same
+    figure call made twice over the same frame all declare nothing the
+    panel does not already have."""
+    lead, member = _MATCHING_COORD_CASES[case]()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _MATCHING_COORD_ROUTES[route](lead, member)  # must not raise
+
+
+def test_fm_layer_static_matching_fixed_aspect_members_land_on_the_same_rows():
+    """The geometric half of the fixed-aspect case: the point and line
+    layers read the same two rows through the same aspect-corrected rect,
+    so every line vertex lands on a drawn point."""
+    lead, member = _matching_fixed_aspect_pair()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg = fm.layer(lead, member).to_svg()
+    points = _circles(svg)
+    lines = polylines(svg)
+    assert len(lines) == 1, f"expected one line polyline, got {len(lines)}"
+    line_points = lines[0][1]
+    remaining = list(points)
+    for lx, ly in line_points:
+        match = next(
+            (p for p in remaining if abs(p[0] - lx) < 1e-3 and abs(p[1] - ly) < 1e-3), None
+        )
+        assert match is not None, (
+            f"line vertex ({lx}, {ly}) has no matching drawn point in {points}"
+        )
+        remaining.remove(match)
+
+
+class TestOverlayDifferingSquareHeatmapsStillRefuse:
+    """The negative control: two `square=True` heatmaps whose grids differ
+    in shape still refuse, on every route -- the agreement check above must
+    not widen into rendering a genuinely different panel-scoped coord."""
+
+    @staticmethod
+    def _heatmaps():
+        two_by_two = pl.DataFrame({"row": ["r1", "r2"], "A": [1.0, 2.0], "B": [3.0, 4.0]})
+        three_by_two = pl.DataFrame(
+            {"row": ["r1", "r2", "r3"], "A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]}
+        )
+        return (
+            fm.heatmap(two_by_two, annot=False, square=True),
+            fm.heatmap(three_by_two, annot=False, square=True),
+        )
+
+    @staticmethod
+    def _assert_refusal(message: str) -> None:
+        assert "fixed aspect ratio" in message, message
+        assert "first member" in message, message
+
+    def test_plus_static(self):
+        lead, member = self._heatmaps()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError) as err:
+                (lead + member).to_svg()
+        self._assert_refusal(str(err.value))
+
+    def test_layer_static(self):
+        lead, member = self._heatmaps()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError) as err:
+                fm.layer(lead, member).to_svg()
+        self._assert_refusal(str(err.value))
+
+    def test_layer_interactive(self):
+        lead, member = self._heatmaps()
+        layered = fm.layer(lead, member)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError) as err:
+                layered._render_interactive()
+        self._assert_refusal(str(err.value))
+
+
+# ---------------------------------------------------------------------------
+# `fm.layer(...)` names a non-leader member by its own overlay position on
+# every member shape, the same convention every other leaf-raised refusal
+# already uses: a caller-layered member's internal layer 0 is never the
+# overlay position, and a figure-built member's own call is its voice, not
+# an internal mark fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_fm_layer_static_names_a_caller_layered_members_coord_by_its_overlay_position():
+    """`fm.layer(p, (p + q).coord(CoordFixed(1)))`: the member's OWN layer 0
+    (the merged `p + q` chart's internal numbering) must not be confused
+    with its overlay position, which is 1."""
+    p = _control_chart()
+    q = _secondary_line()
+    member = (p + q).coord(fm.CoordFixed(ratio=1.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError) as err:
+            fm.layer(p, member).to_svg()
+    message = str(err.value)
+    assert "layer 1: fm.CoordFixed" in message, message
+    assert "layer 0:" not in message, message
+
+
+_FIGURE_EXCHANGE_FRAME = pl.DataFrame({"row": ["r1", "r2"], "A": [1.0, 2.0], "B": [3.0, 4.0]})
+
+
+def test_fm_layer_static_names_a_figure_members_coord_exchange_in_its_own_voice():
+    """`fm.layer(p, fm.heatmap(W).coord(CoordFlip()))` over a numeric x: the
+    heatmap's own categorical columns, exchanged, cannot land on the
+    panel's continuous x -- named `heatmap`, the call that built the layer,
+    not an internal mark fallback."""
+    p = _control_chart()
+    member = fm.heatmap(_FIGURE_EXCHANGE_FRAME, annot=False).coord(fm.CoordFlip())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError) as err:
+            fm.layer(p, member).to_svg()
+    message = str(err.value)
+    assert "layer 1: heatmap: its coord leaves" in message, message
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +902,7 @@ def test_the_current_build_declares_no_layer_coord_and_round_trips_byte_identica
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         merged = fm.layer(_control_chart(), _secondary_line())._build_merged()
+    assert isinstance(merged, fm.Chart)
     payload = merged.to_spec().to_json()
     assert all("coord" not in layer for layer in json.loads(payload)["layers"])
     assert ChartSpec.from_json(payload).to_json() == payload
@@ -738,6 +912,7 @@ def test_a_declared_layer_coord_rides_the_wire():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         merged = fm.layer(_control_chart(), _secondary_line(fm.CoordFlip()))._build_merged()
+    assert isinstance(merged, fm.Chart)
     spec_json = json.loads(merged.to_spec().to_json())
     layers = spec_json["layers"]
     assert "coord" not in layers[0], (

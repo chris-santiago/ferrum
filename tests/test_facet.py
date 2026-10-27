@@ -1,5 +1,7 @@
 """Tests for Chart.facet() fluent method."""
 
+import datetime
+import hashlib
 import re
 import warnings
 
@@ -9,6 +11,8 @@ import pytest
 import ferrum as fm
 from ferrum import Chart
 from ferrum._warn import reset_warnings
+from tests._svg_extents import panel_x_ladder, value_for_pixel
+from tests._svg_rects import mark_groups, mark_groups_by_frame, svg_elements
 
 
 def test_facet_with_col_only():
@@ -652,3 +656,410 @@ def test_facet_ncols_none_is_still_accepted():
     df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
     chart = Chart(df).mark_point().encode(x="x", y="x").facet(field="g")
     assert chart._facet.ncols is None
+
+
+# ---------------------------------------------------------------------------
+# An all-null facet field renders and warns, instead of refusing: the
+# existing null-drop rule (one row's null facet key drops that row and
+# warns) applies at its own limit, where every row is null, instead of a
+# separate refusal taking over there. A non-Utf8 (Int, Float, Boolean,
+# Null) facet column keys through the same ordinal-category reader a
+# dodge/stack `by=` column already reads, instead of being refused.
+# ---------------------------------------------------------------------------
+
+
+def _all_null_drop_warning(svg_warnings: list[str], field: str, count: int) -> bool:
+    plural = "rows" if count != 1 else "row"
+    verb = "have" if count != 1 else "has"
+    return any(
+        f"facet '{field}': {count} {plural} {verb} a null '{field}' and belong to no panel" in m
+        or f"facet '{field}': {count} {plural} {verb} a null '{field}' and belongs to no panel" in m
+        for m in svg_warnings
+    )
+
+
+def _no_panel_warning(svg_warnings: list[str]) -> bool:
+    return any("no facet panel is drawn" in m for m in svg_warnings)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda df: Chart(df).mark_point().encode(x="x", y="y").facet("f"),
+        lambda df: Chart(df).mark_point().encode(x="x", y="y").facet(row="f"),
+        lambda df: Chart(df).mark_point().encode(x="x", y="y", facet="f"),
+    ],
+    ids=["facet-field", "facet-row", "encode-facet"],
+)
+def test_all_null_facet_renders_and_warns_instead_of_refusing(build):
+    """Every one of these doors renders (an empty frame, no panel) and warns
+    the null-drop count the moment every row's facet key is null, instead
+    of refusing `"facet: no usable values found for field 'f'"`. The
+    all-null input is the drop-and-warn rule's own limit, not a different,
+    malformed input class: it warns the same way it would for one null row
+    among others."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=pl.Utf8)}
+    )
+    chart = build(df)
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_facet_grid_mode_names_the_all_null_dimension():
+    """Grid mode (row= and col= both bound): an all-null row field takes
+    the same route, naming the row field it dropped, even though the col
+    field is perfectly valid."""
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4],
+            "y": [1, 2, 3, 4],
+            "r": pl.Series([None, None, None, None], dtype=pl.Utf8),
+            "c": ["a", "a", "b", "b"],
+        }
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet(row="r", col="c")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "r", 4), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_facet_relplot_col_renders_and_warns():
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "g": pl.Series([None, None, None], dtype=pl.Utf8)}
+    )
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = fm.relplot(df, x="x", y="y", col="g").to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "g", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_facet_catplot_col_renders_and_warns():
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b", "c"],
+            "val": [1.0, 2.0, 3.0],
+            "g": pl.Series([None, None, None], dtype=pl.Utf8),
+        }
+    )
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = fm.catplot(df, x="cat", y="val", kind="strip", col="g").to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "g", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_facet_categorical_dtype_renders_and_warns():
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3],
+            "y": [1, 2, 3],
+            "f": pl.Series([None, None, None], dtype=pl.Utf8).cast(pl.Categorical),
+        }
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_facet_interactive_renders_and_warns():
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=pl.Utf8)}
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        chart.interactive()
+    msgs = [str(x.message) for x in w]
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_some_null_facet_is_unchanged():
+    """A control: some-null (not all-null) keeps its existing drop-and-warn
+    behavior unaffected -- this case was never refused. Pinned by SVG
+    digest, not just the warning text, so a change to the rendered panels
+    themselves (not only the warning) would fail here too."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "f": ["a", None, "b"]})
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 1), msgs
+    assert not _no_panel_warning(msgs), msgs
+    digest = hashlib.sha256(svg.encode()).hexdigest()
+    assert digest == "b0cbcb848b9cc86a7fe82f15a43b65a4fb246991afd235553ca2da68e9907922"
+
+
+def test_zero_rows_facet_is_unchanged():
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Int64),
+            "y": pl.Series([], dtype=pl.Int64),
+            "f": pl.Series([], dtype=pl.Utf8),
+        }
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _no_panel_warning(msgs), msgs
+    assert mark_groups(svg) == []
+
+
+def test_plus_with_one_all_null_frame_is_unchanged():
+    """A `+` composition whose host frame is all-null on the facet field
+    drops the host's rows with the all-null warning, and the other
+    operand's own f values (a, b) give the two panels, one circle each."""
+    df_all_null = pl.DataFrame(
+        {"x": [1, 2], "y": [1, 2], "f": pl.Series([None, None], dtype=pl.Utf8)}
+    )
+    df_valid = pl.DataFrame({"x": [3, 4], "y": [3, 4], "f": ["a", "b"]})
+    chart = Chart(df_all_null).mark_point().encode(x="x", y="y").facet("f")
+    other = Chart(df_valid).mark_point().encode(x="x", y="y")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = (chart + other).to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 2), msgs
+    groups = mark_groups(svg)
+    assert len(groups) == 2
+    for group in groups:
+        assert group.count("<circle") == 1
+
+
+def test_layer_frame_lacking_the_facet_field_is_unchanged():
+    """A layer whose own frame has no column named 'f' at all (as opposed
+    to an all-null one) repeats in every panel, as it always has -- a
+    missing column is not a null-key question. Each panel draws both the
+    host's own point for that panel's value and the field-less layer's
+    line."""
+    df_host = pl.DataFrame({"x": [1, 2], "y": [1, 2], "f": ["a", "b"]})
+    df_other = pl.DataFrame({"x": [1, 2], "y": [1, 2]})
+    host = Chart(df_host).mark_point().encode(x="x", y="y").facet("f")
+    other = Chart(df_other).mark_line().encode(x="x", y="y")
+    svg = (host + other).to_svg()
+    groups = mark_groups(svg)
+    assert len(groups) == 2
+    for group in groups:
+        assert group.count("<circle") == 1
+        assert group.count("<polyline") == 1
+
+
+def _panel_headers(svg: str, candidates: list[str]) -> list[str]:
+    """Column-strip panel-header text, in first-seen render order: the
+    one strip-label shape every facet renders (``font-size="12"``, no
+    ``font-weight``, not rotated), filtered to the candidate label set so
+    a chart or axis title sharing the same style never leaks in."""
+    seen: list[str] = []
+    for attrs, text in re.findall(r"<text([^>]*)>([^<]*)</text>", svg):
+        if 'font-size="12"' not in attrs or "font-weight" in attrs or "rotate(90" in attrs:
+            continue
+        if text in candidates and text not in seen:
+            seen.append(text)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "values,labels",
+    [
+        ([1, 1, 2, 2], ["1", "2"]),
+        ([1.5, 1.5, 2.5, 2.5], ["1.5", "2.5"]),
+        ([True, True, False, False], ["true", "false"]),
+    ],
+)
+def test_non_utf8_facet_column_renders_keyed_by_the_ordinal_category_reader(values, labels):
+    """An Int, Float or Boolean facet column renders one panel per
+    distinct value, keyed by the ordinal-category label reader a
+    dodge/stack `by=` column reads. The headers carry that reader's
+    labels in first-appearance order, and each panel's own rows (by `x`)
+    are the fixture rows whose `f` it names -- `x` in `{1, 2}` for the
+    first label, `{3, 4}` for the second -- not merely the right count."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [1, 2, 3, 4], "f": values})
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    svg = chart.to_svg()
+    assert _panel_headers(svg, labels) == labels
+    frames = mark_groups_by_frame(svg)
+    assert len(frames) == 2
+    expected_x = [{1.0, 2.0}, {3.0, 4.0}]
+    for (frame, content), expected in zip(frames, expected_x):
+        ladder = panel_x_ladder(svg, frame)
+        xs = {
+            round(value_for_pixel(ladder, float(p["cx"])))
+            for p in svg_elements(content, "circle", lambda a: a.get("r") != "4")
+        }
+        assert xs == expected
+
+
+def test_facet_sort_ascending_descending_orders_a_numeric_column_by_value():
+    """`facet(sort=)` on an Int column orders panels by value, not by the
+    stringified text of that value: `-3` sorts before `1`, not after
+    every digit string starting with a higher first character."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [1, 2, 3, 4], "f": [10, -3, 1, 2]})
+    labels = ["-3", "1", "2", "10"]
+    ascending = Chart(df).mark_point().encode(x="x", y="y").facet("f", sort="ascending").to_svg()
+    descending = Chart(df).mark_point().encode(x="x", y="y").facet("f", sort="descending").to_svg()
+    assert _panel_headers(ascending, labels) == ["-3", "1", "2", "10"]
+    assert _panel_headers(descending, labels) == ["10", "2", "1", "-3"]
+
+
+def test_ordinal_axis_sort_ascending_orders_a_numeric_column_by_value():
+    """The same numeric-by-value sort rule on an ordinal axis: `X(sort=
+    "ascending")` over an Int column reads tick labels in value order."""
+    df = pl.DataFrame({"v": [10, -3, 1, 2], "y": [1, 2, 3, 4]})
+    chart = Chart(df).mark_bar().encode(x=fm.X("v", type_="ordinal", sort="ascending"), y="y")
+    svg = chart.to_svg()
+    labels = {"-3", "1", "2", "10"}
+    ticks = [
+        text
+        for attrs, text in re.findall(r"<text([^>]*)>([^<]*)</text>", svg)
+        if 'text-anchor="middle"' in attrs and 'font-size="11"' in attrs and text in labels
+    ]
+    assert ticks == ["-3", "1", "2", "10"]
+
+
+def test_nominal_numeric_color_legend_sort_descending_orders_by_value():
+    """The same rule on a nominal color legend: `Color(type_="nominal",
+    sort="descending")` over an Int column lists legend entries in
+    descending value order, not descending text order. The x/y axes drawn
+    from the same four numbers would collide with a plain value filter, so
+    this reads only the text after the legend's own title ("c")."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [1, 2, 3, 4], "c": [10, -3, 1, 2]})
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", color=fm.Color("c", type_="nominal", sort="descending"))
+    )
+    svg = chart.to_svg()
+    texts = [text for _, text in re.findall(r"<text([^>]*)>([^<]*)</text>", svg)]
+    labels = {"-3", "1", "2", "10"}
+    entries: list[str] = []
+    for text in texts[texts.index("c") + 1 :]:
+        if text in labels and text not in entries:
+            entries.append(text)
+    assert entries == ["10", "2", "1", "-3"]
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [pl.Utf8, pl.Int64, pl.Float64, pl.Boolean],
+    ids=["utf8", "int64", "float64", "boolean"],
+)
+def test_all_null_non_utf8_facet_column_renders_and_warns(dtype):
+    """An all-null column of each dtype -- including a dtype-less (polars
+    `Null`) column, which reads the same as `None` through every row --
+    follows the same drop-and-warn route as an all-null Utf8 column,
+    instead of hitting a Utf8-only refusal first."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=dtype)}
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+def test_all_null_null_typed_facet_column_renders_and_warns():
+    """The dtype-less shape specifically: `pl.Series([None, None, None])`
+    with no explicit dtype is polars `Null`, not `Utf8` -- the all-null
+    rule and the non-Utf8 capability both reach it the same way they reach
+    every other dtype above."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None])})
+    assert df["f"].dtype == pl.Null
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    msgs = [str(x.message) for x in w]
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+
+
+@pytest.mark.parametrize(
+    "values,dtype",
+    [
+        (
+            [datetime.date(2020, 1, 1), datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)],
+            pl.Date,
+        ),
+        (
+            [
+                datetime.datetime(2020, 1, 1),
+                datetime.datetime(2020, 1, 2),
+                datetime.datetime(2020, 1, 1),
+            ],
+            pl.Datetime,
+        ),
+        (
+            [datetime.timedelta(days=1), datetime.timedelta(days=2), datetime.timedelta(days=1)],
+            pl.Duration,
+        ),
+    ],
+    ids=["date", "datetime", "duration"],
+)
+def test_temporal_facet_column_refuses_naming_the_accepted_dtypes(values, dtype):
+    """A temporal facet field is refused with a typed error naming the
+    accepted dtypes and the cast remedy."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series(values, dtype=dtype)})
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    with pytest.raises(ValueError) as excinfo:
+        chart.to_svg()
+    msg = str(excinfo.value)
+    assert "unsupported dtype" in msg, msg
+    assert "cast 'f' to a string to facet by it" in msg, msg
+    assert "must be Utf8" not in msg, msg
+
+
+def test_all_null_datetime_facet_column_refuses_the_same_way():
+    """The dtype decides before the nulls: an all-null `Datetime` column
+    still refuses as a temporal column, the same as a some-null one, not
+    the all-null drop-and-warn route every category dtype above takes."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=pl.Datetime)}
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    with pytest.raises(ValueError) as excinfo:
+        chart.to_svg()
+    msg = str(excinfo.value)
+    assert "unsupported dtype" in msg, msg
+    assert "cast 'f' to a string to facet by it" in msg, msg

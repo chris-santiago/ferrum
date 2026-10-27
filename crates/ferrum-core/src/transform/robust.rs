@@ -129,6 +129,7 @@ fn apply_one_group(
             transform: "Robust".into(),
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            panel: None,
         });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
@@ -152,6 +153,7 @@ fn apply_one_group(
             transform: "Robust".into(),
             group: group.map(str::to_string),
             reason: "zero x variance".into(),
+            panel: None,
         });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
@@ -233,68 +235,126 @@ fn apply_one_group(
 
     // Refresh scale + u for CI computation.
     s = mad_scale(&r_final);
-    if s == 0.0 {
-        // Exact fit: return grid with fitted line and zero-width / NaN CI.
-        let grid: Vec<f64> = grid_vec(x_min, x_max, n_grid);
-        let y_fit: Vec<f64> = grid.iter().map(|&xq| alpha + beta * xq).collect();
-        let nans = vec![f64::NAN; n_grid];
-        return build_fitted_batch(grid, y_fit, nans.clone(), nans, metrics);
-    }
-    for i in 0..xs.len() {
-        u_vec[i] = r_final[i] / s;
-    }
+    let n = xs.len();
 
     // Grid and fitted line.
     let grid: Vec<f64> = grid_vec(x_min, x_max, n_grid);
     let y_fit: Vec<f64> = grid.iter().map(|&xq| alpha + beta * xq).collect();
 
-    // Sandwich CI.
-    let (lo, hi) = match spec.ci {
-        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
-        Some(level) => {
-            if !(level > 0.0 && level < 1.0) {
-                return Err(PyValueError::new_err("Robust: ci must be in (0, 1)"));
-            }
-            let z = inv_normal_cdf(1.0 - (1.0 - level) / 2.0);
-            // Cov(β̂) = s² · (X'X)⁻¹ · Σψ²(u) / (Σψ'(u))²
-            let xtx_inv = match invert_2x2(xtx_unweighted(&xs)) {
-                Some(m) => m,
-                None => {
-                    return build_fitted_batch(
-                        grid, y_fit,
-                        vec![f64::NAN; n_grid], vec![f64::NAN; n_grid],
-                        metrics,
-                    );
+    // `band_undefined` collects WHY the band (not the line) is missing,
+    // across every branch below, reported once at the end — mirroring
+    // `smooth::apply_one_group`'s post-dispatch report, so a degenerate
+    // band is never reported from more than one place in this function.
+    let (lo, hi, band_undefined): (Vec<f64>, Vec<f64>, Option<String>) = if s == 0.0 {
+        // Exact fit (or every residual on the fitted line): the robust
+        // scale is 0, so the sandwich band has no width to compute. `n <=
+        // 2` is the same residual-degrees-of-freedom shape `lm` reports for
+        // a 2-point fit (a 2-point line is always exact, so this is the
+        // only way `n <= 2` reaches here); `n > 2` is a genuine zero-MAD
+        // degeneracy where at least half the points lie exactly on the
+        // fitted line.
+        let reason = if n <= 2 {
+            crate::transform::context::zero_residual_dof_reason(n, 2)
+        } else {
+            "the residuals' median absolute deviation is 0 (at least half the points lie on \
+             the line), so the robust scale gives the band no width"
+                .to_string()
+        };
+        (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid], Some(reason))
+    } else {
+        for i in 0..xs.len() {
+            u_vec[i] = r_final[i] / s;
+        }
+        match spec.ci {
+            None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid], None),
+            Some(level) => {
+                if !(level > 0.0 && level < 1.0) {
+                    return Err(PyValueError::new_err("Robust: ci must be in (0, 1)"));
                 }
-            };
-            let mut sum_psi_sq = 0.0_f64;
-            let mut sum_psi_prime = 0.0_f64;
-            for &ui in &u_vec {
-                let psi = huber_psi(ui, c);
-                sum_psi_sq += psi * psi;
-                sum_psi_prime += if ui.abs() <= c { 1.0 } else { 0.0 };
+                let z = inv_normal_cdf(1.0 - (1.0 - level) / 2.0);
+                // Cov(β̂) = s² · (X'X)⁻¹ · Σψ²(u) / (Σψ'(u))²
+                match invert_2x2(xtx_unweighted(&xs)) {
+                    // The line fit fine (IRLS converged); only the
+                    // sandwich covariance is undefined because the design
+                    // is singular.
+                    None => (
+                        vec![f64::NAN; n_grid],
+                        vec![f64::NAN; n_grid],
+                        Some(
+                            "the design is singular, so the sandwich covariance has no inverse"
+                                .to_string(),
+                        ),
+                    ),
+                    Some(xtx_inv) => {
+                        let mut sum_psi_sq = 0.0_f64;
+                        let mut sum_psi_prime = 0.0_f64;
+                        for &ui in &u_vec {
+                            let psi = huber_psi(ui, c);
+                            sum_psi_sq += psi * psi;
+                            sum_psi_prime += if ui.abs() <= c { 1.0 } else { 0.0 };
+                        }
+                        if sum_psi_prime <= 0.0 {
+                            // Every residual exceeds the Huber threshold,
+                            // so Σψ'(u) is zero and the sandwich covariance
+                            // has no scalar to scale by. The line still
+                            // drew; only the band is lost.
+                            (
+                                vec![f64::NAN; n_grid],
+                                vec![f64::NAN; n_grid],
+                                Some(
+                                    "every residual is beyond the Huber threshold, leaving no \
+                                     usable weights for the sandwich covariance"
+                                        .to_string(),
+                                ),
+                            )
+                        } else {
+                            let scalar = s * s * sum_psi_sq / (sum_psi_prime * sum_psi_prime);
+                            let cov = scale_2x2(xtx_inv, scalar);
+                            let mut lo = Vec::with_capacity(n_grid);
+                            let mut hi = Vec::with_capacity(n_grid);
+                            let mut undefined = 0usize;
+                            for &xq in &grid {
+                                let v = cov[0][0] + 2.0 * xq * cov[0][1] + xq * xq * cov[1][1];
+                                let se = if v >= 0.0 && v.is_finite() {
+                                    v.sqrt()
+                                } else {
+                                    undefined += 1;
+                                    f64::NAN
+                                };
+                                let eta = alpha + beta * xq;
+                                lo.push(eta - z * se);
+                                hi.push(eta + z * se);
+                            }
+                            // A negative or non-finite sandwich variance at
+                            // only some grid points is a numerical artifact
+                            // (x's spread tiny next to its magnitude), not a
+                            // lost fit, so only those points' band is
+                            // undefined.
+                            let reason = (undefined > 0).then(|| {
+                                crate::transform::context::partial_band_reason(
+                                    "the sandwich variance is negative (x's spread is tiny \
+                                     next to its magnitude; centering x avoids it)",
+                                    undefined,
+                                    n_grid,
+                                )
+                            });
+                            (lo, hi, reason)
+                        }
+                    }
+                }
             }
-            let scalar = if sum_psi_prime > 0.0 {
-                s * s * sum_psi_sq / (sum_psi_prime * sum_psi_prime)
-            } else {
-                f64::NAN
-            };
-            let cov = scale_2x2(xtx_inv, scalar);
-
-            let mut lo = Vec::with_capacity(n_grid);
-            let mut hi = Vec::with_capacity(n_grid);
-            for &xq in &grid {
-                let v = cov[0][0]
-                    + 2.0 * xq * cov[0][1]
-                    + xq * xq * cov[1][1];
-                let se = if v >= 0.0 && v.is_finite() { v.sqrt() } else { f64::NAN };
-                let eta = alpha + beta * xq;
-                lo.push(eta - z * se);
-                hi.push(eta + z * se);
-            }
-            (lo, hi)
         }
     };
+
+    if let (Some(level), Some(reason)) = (spec.ci, band_undefined) {
+        ctx.warn(TransformWarning::IntervalUndefined {
+            transform: "Robust".into(),
+            group: group.map(str::to_string),
+            ci: level,
+            reason,
+            panel: None,
+        });
+    }
 
     build_fitted_batch(grid, y_fit, lo, hi, metrics)
 }
@@ -1382,4 +1442,176 @@ mod tests {
         );
     }
 
+    // ── An undefined confidence band warns ────────────────────────────────
+
+    /// A singular `X'X`: `x_range` overrides the degenerate-x guard's
+    /// own extent (it reads zero-variance from `x_range`'s span, not the
+    /// data's), so a batch whose real `x` is constant reaches the sandwich
+    /// covariance's own singular-design check instead of the earlier
+    /// whole-fit `DegenerateFit` guard. The line (a flat OLS/IRLS fit
+    /// through the constant x) still draws; only the band is undefined.
+    #[test]
+    fn robust_singular_design_warns_interval_undefined() {
+        let batch = xy_batch(vec![5.0, 5.0, 5.0, 5.0], vec![1.0, 2.0, 3.0, 4.0]);
+        let mut s = spec(5, Some(0.95), 1.345, SmoothOutput::Fitted);
+        s.x_range = Some([0.0, 10.0]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("a constant x still fits a flat line");
+        assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()), "the band stays undefined");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                TransformWarning::IntervalUndefined { transform, group, ci, reason, .. }
+                    if transform == "Robust" && group.is_none() && *ci == 0.95 && reason.contains("singular")
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    /// A zero `Σψ'(u)`: an unreasonably tiny `huber_c` (built
+    /// directly, bypassing the PyO3 constructor's `> 0` validation, as a
+    /// constructed fixture) makes every finite residual exceed the Huber
+    /// threshold, so no row contributes to the sandwich covariance's
+    /// scalar. The line still draws; only the band is undefined.
+    #[test]
+    fn robust_zero_sum_psi_prime_warns_interval_undefined() {
+        let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+        // A small alternating offset keeps every residual nonzero (so the
+        // MAD scale is nonzero and the exact-fit early return never fires)
+        // without needing a real outlier -- `huber_c=1e-12` alone is what
+        // forces every one of these ordinary residuals past the threshold.
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| 2.0 * x + 1.0 + if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let batch = xy_batch(xs, ys);
+        let s = spec(5, Some(0.95), 1e-12, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("an exact line still fits");
+        assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()), "the band stays undefined");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                TransformWarning::IntervalUndefined { transform, reason, .. }
+                    if transform == "Robust" && reason.contains("Huber")
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    /// `n <= 2` leaves zero residual degrees of freedom for the 2-parameter
+    /// fit — the same shape `lm` reports, worded identically
+    /// (`zero_residual_dof_reason`). A 2-point fit is always exact, so this
+    /// is the only way `n <= 2` reaches the band-undefined report at all.
+    #[test]
+    fn robust_n_eq_2_warns_zero_residual_dof() {
+        let batch = xy_batch(vec![0.0, 1.0], vec![0.0, 2.0]);
+        let s = spec(5, Some(0.95), 1.345, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("a 2-point line always fits exactly");
+        assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()), "the band stays undefined");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                TransformWarning::IntervalUndefined { transform, group, ci, reason, .. }
+                    if transform == "Robust" && group.is_none() && *ci == 0.95
+                       && reason == "2 points leave no residual degrees of freedom for a 2-parameter fit; the band needs at least 3"
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    /// A zero-MAD exact fit (`n > 2`, every point exactly on the fitted
+    /// line) gives the robust scale no width to report a band with — a
+    /// genuine zero-MAD degeneracy, distinct from `n <= 2`'s residual-dof
+    /// shape above.
+    #[test]
+    fn robust_exact_fit_with_n_gt_2_warns_zero_mad() {
+        let xs = vec![0.0, 1.0, 2.0, 3.0];
+        let ys: Vec<f64> = xs.iter().map(|x| 2.0 * x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        let s = spec(5, Some(0.95), 1.345, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("an exact line always fits exactly");
+        assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()), "the band stays undefined");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                TransformWarning::IntervalUndefined { transform, group, ci, reason, .. }
+                    if transform == "Robust" && group.is_none() && *ci == 0.95
+                       && reason == "the residuals' median absolute deviation is 0 (at least half the points lie on the line), so the robust scale gives the band no width"
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    /// `ci=None` on either degenerate-band shape above stays silent — the
+    /// band was never requested, so there is nothing to report undefined.
+    #[test]
+    fn robust_degenerate_band_shapes_stay_silent_without_ci() {
+        for (xs, ys) in [
+            (vec![0.0, 1.0], vec![0.0, 2.0]),
+            (vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0]),
+        ] {
+            let batch = xy_batch(xs, ys);
+            let s = spec(5, None, 1.345, SmoothOutput::Fitted);
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&s, &batch, &ctx).expect("fits");
+            assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+            assert!(ctx.warnings.borrow().is_empty(), "got {:?}", ctx.warnings.borrow());
+        }
+    }
+
+    /// A negative or non-finite sandwich variance at only SOME grid
+    /// points — a numerical artifact of `x`'s spread being tiny next to
+    /// its magnitude, not a lost fit — warns with the point count, rather
+    /// than leaving holes in the band silently. Reached through the public
+    /// door with a real (not hand-built) fixture: `x` centered on a large
+    /// constant (`c = 1e9`) with a small spread (`0.1`), enough points
+    /// (`n = 12`) that the design is not singular (the earlier branch),
+    /// but the per-grid-point quadratic form still cancels at a few of the
+    /// 50 grid points.
+    #[test]
+    fn robust_negative_sandwich_variance_at_some_grid_points_warns_partial() {
+        let c = 1_000_000_000.0;
+        let spread = 0.1;
+        let n = 12;
+        let xs: Vec<f64> = (0..n).map(|i| c + (i as f64 - (n as f64 - 1.0) / 2.0) * spread).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| 2.0 * (x - c) + 1.0 + if i % 2 == 0 { 0.3 } else { -0.3 })
+            .collect();
+        let batch = xy_batch(xs, ys);
+        let s = spec(50, Some(0.95), 1.345, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("fits despite the extreme offset");
+        assert!(!col(&out, "y").iter().all(|v| v.is_nan()), "the line must draw");
+        let ci_lower = col(&out, "ci_lower");
+        assert!(ci_lower.iter().any(|v| v.is_nan()), "some grid points must stay undefined");
+        assert!(ci_lower.iter().any(|v| !v.is_nan()), "but not every grid point");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            TransformWarning::IntervalUndefined { transform, group, ci, reason, .. } => {
+                assert_eq!(transform, "Robust");
+                assert!(group.is_none());
+                assert_eq!(*ci, 0.95);
+                assert!(reason.contains("the sandwich variance is negative"), "{reason}");
+                assert!(reason.contains("of 50 grid points"), "{reason}");
+            }
+            other => panic!("expected IntervalUndefined, got {other:?}"),
+        }
+    }
 }

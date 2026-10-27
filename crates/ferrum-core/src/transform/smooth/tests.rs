@@ -1999,7 +1999,7 @@ fn gam_k_clamp_pushes_a_parameter_clamped_warning() {
     assert_eq!(warnings.len(), 1, "got {warnings:?}");
     assert!(matches!(
         &warnings[0],
-        TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+        TransformWarning::ParameterClamped { transform, group, param, requested, applied, .. }
             if transform == "Smooth" && group.is_none() && param == "k"
                && requested == &(distinct * 4).to_string() && applied == &distinct.to_string()
     ));
@@ -2040,7 +2040,7 @@ fn gam_k_clamp_pushes_a_parameter_clamped_warning_on_residuals_output() {
     assert_eq!(warnings.len(), 1, "got {warnings:?}");
     assert!(matches!(
         &warnings[0],
-        TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+        TransformWarning::ParameterClamped { transform, group, param, requested, applied, .. }
             if transform == "Smooth" && group.is_none() && param == "k"
                && requested == &(distinct * 4).to_string() && applied == &distinct.to_string()
     ));
@@ -2092,7 +2092,7 @@ fn lm_zero_variance_pushes_a_degenerate_fit_warning() {
     assert_eq!(warnings.len(), 1, "got {warnings:?}");
     assert!(matches!(
         &warnings[0],
-        TransformWarning::DegenerateFit { transform, group, reason }
+        TransformWarning::DegenerateFit { transform, group, reason, .. }
             if transform == "Smooth" && group.is_none() && reason.contains("lm")
     ));
 }
@@ -2487,4 +2487,202 @@ fn smooth_x_estimator_parses_through_the_agg_fn_subset() {
             );
         }
     });
+}
+
+// ── An undefined confidence band warns ───────────────────────────────────
+
+/// A minimal `lm`-method spec over `x`/`y`, with `ci`/`groupby` as the only
+/// knobs the tests below vary.
+fn lm_ci_spec(ci: Option<f64>, groupby: Vec<String>) -> SmoothSpec {
+    SmoothSpec {
+        x: "x".into(), y: "y".into(),
+        method: SmoothMethod::Lm,
+        ci,
+        bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+        x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+        inject_zero_ref: false, inject_metrics: false, x_range: None,
+        groupby,
+        name: None,
+    }
+}
+
+/// `lm` at `n=2` (whole frame): the line interpolates the two points exactly,
+/// but zero residual degrees of freedom leaves the band undefined. The line
+/// still draws; `IntervalUndefined` names the cause.
+#[test]
+fn lm_whole_frame_n2_warns_interval_undefined_and_still_draws_the_line() {
+    let batch = xy_batch(vec![1.0, 2.0], vec![3.0, 5.0]);
+    let ctx = TransformContext::default();
+    let spec = lm_ci_spec(Some(0.95), vec![]);
+    let out = apply_with_context(&spec, &batch, &ctx).expect("n=2 still fits a line");
+    assert!(!value_column_is_all_nan(&out, 1), "the fit line must be finite");
+    assert!(value_column_is_all_nan(&out, 2), "ci_lower must stay NaN");
+    assert!(value_column_is_all_nan(&out, 3), "ci_upper must stay NaN");
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(
+        matches!(
+            &warnings[0],
+            TransformWarning::IntervalUndefined { transform, group, ci, reason, .. }
+                if transform == "Smooth" && group.is_none() && *ci == 0.95
+                   && reason.contains("2 points") && reason.contains("2-parameter")
+        ),
+        "{warnings:?}"
+    );
+}
+
+/// Two groups, `a` at `n=2` (band undefined) and `b` at `n=5` (band fine):
+/// exactly one warning, naming group `a`; `b`'s own fit is unaffected.
+#[test]
+fn lm_grouped_warns_only_for_the_undersized_group() {
+    let xs_a = vec![1.0, 2.0];
+    let ys_a = vec![3.0, 5.0];
+    let xs_b: Vec<f64> = (0..5).map(|i| i as f64).collect();
+    let ys_b: Vec<f64> = xs_b.iter().map(|&x| 1.0 + x).collect();
+    let mut all_x = xs_a.clone();
+    all_x.extend(xs_b.clone());
+    let mut all_y = ys_a.clone();
+    all_y.extend(ys_b.clone());
+    let mut all_g: Vec<&str> = vec!["a"; xs_a.len()];
+    all_g.extend(vec!["b"; xs_b.len()]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(all_x)),
+            Arc::new(Float64Array::from(all_y)),
+            Arc::new(arrow::array::StringArray::from(all_g)),
+        ],
+    )
+    .unwrap();
+    let ctx = TransformContext::default();
+    let spec = lm_ci_spec(Some(0.95), vec!["g".into()]);
+    let _ = apply_with_context(&spec, &batch, &ctx).expect("mixed-size groups both fit a line");
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(
+        matches!(
+            &warnings[0],
+            TransformWarning::IntervalUndefined { transform, group, .. }
+                if transform == "Smooth" && group.as_deref() == Some("g=a")
+        ),
+        "{warnings:?}"
+    );
+
+    // Control: group `b` alone (ungrouped) bands byte-identically to its
+    // half of the grouped run, so the undersized sibling never perturbs it.
+    let batch_b = xy_batch(xs_b, ys_b);
+    let ctx_b = TransformContext::default();
+    let spec_b = lm_ci_spec(Some(0.95), vec![]);
+    let out_b = apply_with_context(&spec_b, &batch_b, &ctx_b).unwrap();
+    assert!(ctx_b.warnings.borrow().is_empty(), "group b alone must not warn");
+    assert!(!value_column_is_all_nan(&out_b, 2), "group b's band is defined");
+}
+
+/// `quadratic` (`degree=2`) at `n=3` leaves zero residual degrees of
+/// freedom for its 3-parameter design; the reason names the parameter
+/// count.
+#[test]
+fn poly_quadratic_n3_warns_with_the_parameter_count() {
+    let xs = vec![1.0, 2.0, 3.0];
+    let ys = vec![1.0, 4.0, 9.0];
+    let batch = xy_batch(xs, ys);
+    let ctx = TransformContext::default();
+    let spec = SmoothSpec {
+        method: SmoothMethod::Poly { degree: 2 },
+        ..lm_ci_spec(Some(0.95), vec![])
+    };
+    let out = apply_with_context(&spec, &batch, &ctx).expect("n=3 still fits a quadratic");
+    assert!(!value_column_is_all_nan(&out, 1));
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(
+        matches!(
+            &warnings[0],
+            TransformWarning::IntervalUndefined { transform, reason, .. }
+                if transform == "Smooth" && reason.contains("3 points") && reason.contains("3-parameter")
+        ),
+        "{warnings:?}"
+    );
+}
+
+/// `log` and `sqrt` at `n=2` each leave zero residual degrees of freedom
+/// for their 2-parameter design, the same as plain `lm`.
+#[test]
+fn log_and_sqrt_n2_warn_interval_undefined() {
+    for method in [SmoothMethod::LogX, SmoothMethod::SqrtX] {
+        let batch = xy_batch(vec![1.0, 2.0], vec![3.0, 5.0]);
+        let ctx = TransformContext::default();
+        let spec = SmoothSpec { method, ..lm_ci_spec(Some(0.95), vec![]) };
+        let out = apply_with_context(&spec, &batch, &ctx).expect("n=2 still fits a line");
+        assert!(!value_column_is_all_nan(&out, 1));
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            matches!(&warnings[0], TransformWarning::IntervalUndefined { transform, .. } if transform == "Smooth"),
+            "{warnings:?}"
+        );
+    }
+}
+
+/// Loess with a constructed fixture whose bootstrap leaves some grid
+/// points with fewer than 4 finite resamples: warns naming the point
+/// count, rather than silently leaving holes in the band.
+#[test]
+fn loess_partial_band_warns_with_the_point_count() {
+    // A heavily duplicated local design: 5 of the 11 rows sit at x=4, with
+    // the rest spread one-per-value. A local window (`k=3` here) centered
+    // near x=4 draws on that mass so often, under bootstrap resampling,
+    // that some grid points land with fewer than 4 finite resamples out of
+    // 200, while x=0..3 and x=5..6 anchor the fit everywhere else -- the
+    // line never goes all-NaN. Built, not read from a real dataset, to
+    // exercise exactly this partial-NaN bootstrap shape (`seed=4` is the
+    // one this module's `probe` run found; any seed near it reproduces the
+    // same shape since the collapse is structural, not seed-specific luck).
+    let xs = vec![0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0, 5.0, 6.0];
+    let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| x + 0.1 * ((i % 3) as f64)).collect();
+    let batch = xy_batch(xs, ys);
+    let ctx = TransformContext::default();
+    let spec = SmoothSpec {
+        method: SmoothMethod::Loess,
+        bandwidth: 3.0 / 11.0,
+        degree: 1,
+        n: 40,
+        seed: 4,
+        ..lm_ci_spec(Some(0.95), vec![])
+    };
+    let out = apply_with_context(&spec, &batch, &ctx).expect("loess still fits a line");
+    assert!(!value_column_is_all_nan(&out, 1));
+    let warnings = ctx.warnings.borrow();
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            TransformWarning::IntervalUndefined { transform, reason, .. }
+                if transform == "Smooth" && reason.contains("grid point")
+        )),
+        "expected an IntervalUndefined naming the undefined grid points, got {warnings:?}"
+    );
+}
+
+/// Controls: `ci=None` and a well-determined fit (`n >= p + 2`) never warn.
+#[test]
+fn interval_undefined_controls_do_not_warn() {
+    let ctx = TransformContext::default();
+    let spec = lm_ci_spec(None, vec![]);
+    let batch = xy_batch(vec![1.0, 2.0], vec![3.0, 5.0]);
+    let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+    assert!(ctx.warnings.borrow().is_empty(), "ci=None must never warn IntervalUndefined");
+
+    let ctx2 = TransformContext::default();
+    let spec2 = lm_ci_spec(Some(0.95), vec![]);
+    let xs: Vec<f64> = (0..4).map(|i| i as f64).collect();
+    let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x).collect();
+    let batch2 = xy_batch(xs, ys);
+    let out2 = apply_with_context(&spec2, &batch2, &ctx2).unwrap();
+    assert!(!value_column_is_all_nan(&out2, 2), "n=4 has a defined band");
+    assert!(ctx2.warnings.borrow().is_empty(), "a well-determined fit must not warn");
 }

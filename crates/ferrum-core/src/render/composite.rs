@@ -48,9 +48,9 @@ use crate::render::scale_resolve::{
     SortContext,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
-    column_reads_categorical, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
+    column_reads_categorical, resolve_color_scale, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, ColorScale, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
 };
-use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
+use crate::render::{prepare, ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::DataType as SpecDataType;
@@ -201,7 +201,49 @@ pub(crate) fn effective_share(
 ///
 /// `warnings` receives one [`RenderWarning::LayerScaleExcluded`] per `Overlay`
 /// member a caller's scale leaves out of the group's axis.
+///
+/// Test-only: `render_composite_scene`'s real pipeline calls
+/// [`resolve_composite_scales_nonpositional`] and
+/// [`resolve_composite_scales_positional`] directly, with
+/// `composite_render::plan_overlay_auxiliary` between them, so an `Overlay`
+/// group's real auxiliary scales are in `out` before any positional union
+/// runs. This wrapper runs the two halves back to back with no plan
+/// between, which every unit test in this module uses directly.
+#[cfg(test)]
 pub(crate) fn resolve_composite_scales(
+    tree: &CompositeNode,
+    leaves: &[LeafResolveInput<'_>],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Vec<LeafScaleContext>, CompositeResolveError> {
+    let mut out = resolve_composite_scales_nonpositional(tree, leaves, warnings)?;
+    resolve_composite_scales_positional(tree, leaves, &mut out, warnings)?;
+    Ok(out)
+}
+
+/// The non-positional (color/size) half of [`resolve_composite_scales`]:
+/// leaf-span union at each effective-shared node (GH #74). A node's
+/// effective mode is its explicit setting if any, else the nearest
+/// ancestor's effective mode (spec §6); the union spans every descendant
+/// leaf whose effective mode stays shared, through nested composites and
+/// spliced overlay subtrees.
+///
+/// Run BEFORE the positional half (`resolve_composite_scales_positional`),
+/// with [`composite_render::plan_overlay_auxiliary`] between the two in
+/// `render_composite_scene`'s real pipeline: a continuous `Dodge`'s
+/// sub-band order reads the panel's own resolved color scale
+/// (`leaf_positional_domain`'s doc), so color/size — and an `Overlay`
+/// group's real auxiliary scales — must already be in `out` before any
+/// positional union runs. [`resolve_composite_scales`] is the
+/// nonpositional-then-positional wrapper every test and non-composite-
+/// render caller uses, with no overlay-aux plan between the two (a leaf
+/// not in a grouped overlay resolves its own standalone color scale either
+/// way, so this is still correct — only a leaf whose color is left to an
+/// `Overlay` group's shared resolution, built by `plan_overlay_auxiliary`,
+/// differs from the real pipeline, and is exercised instead by
+/// `composite_render`'s own tests through the real two-call sequence).
+///
+/// [`composite_render::plan_overlay_auxiliary`]: super::composite_render::plan_overlay_auxiliary
+pub(crate) fn resolve_composite_scales_nonpositional(
     tree: &CompositeNode,
     leaves: &[LeafResolveInput<'_>],
     warnings: &mut Vec<RenderWarning>,
@@ -216,20 +258,32 @@ pub(crate) fn resolve_composite_scales(
     }
     let mut out = vec![LeafScaleContext::default(); n];
     let span: Vec<usize> = (0..n).collect();
-    // Positional x/y: tree-path pairing across congruent direct children
-    // (grids pair by column — pairplot/compare), node-local, no inheritance.
-    for channel in [Channel::X, Channel::Y] {
-        resolve_channel(tree, &span, channel, leaves, &mut out, warnings)?;
-    }
-    // Non-positional color/size: leaf-span union at each effective-shared node
-    // (GH #74). A node's effective mode is its explicit setting if any, else
-    // the nearest ancestor's effective mode (spec §6); the union spans every
-    // descendant leaf whose effective mode stays shared, through nested
-    // composites and spliced overlay subtrees.
     for channel in [Channel::Color, Channel::Size] {
         resolve_nonpositional(tree, &span, channel, ResolveMode::Independent, leaves, &mut out, warnings)?;
     }
     Ok(out)
+}
+
+/// The positional (x/y) half of [`resolve_composite_scales`]: tree-path
+/// pairing across congruent direct children (grids pair by column —
+/// pairplot/compare), node-local, no inheritance. `out` must already carry
+/// every leaf's non-positional resolution
+/// ([`resolve_composite_scales_nonpositional`]) and, for the real render
+/// pipeline, its overlay group's auxiliary scales
+/// (`composite_render::plan_overlay_auxiliary`), so `leaf_positional_domain`
+/// can resolve each leaf's own drawn color scale before unioning its axis.
+pub(crate) fn resolve_composite_scales_positional(
+    tree: &CompositeNode,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeResolveError> {
+    let n = leaf_count(tree);
+    let span: Vec<usize> = (0..n).collect();
+    for channel in [Channel::X, Channel::Y] {
+        resolve_channel(tree, &span, channel, leaves, out, warnings)?;
+    }
+    Ok(())
 }
 
 /// Collect the tree's leaves in pre-order as `(spec, data-index)` pairs — the
@@ -386,7 +440,7 @@ fn resolve_channel(
                 .collect();
             if *layout == CompositeLayout::Overlay {
                 let axis = overlay_axis(&group, channel, leaves);
-                refuse_unplaceable_overlay_members(&group, channel, &axis, leaves)?;
+                refuse_unplaceable_overlay_members(&group, channel, &axis, leaves, out)?;
                 warn_members_off_caller_scale(
                     &axis,
                     channel.as_str(),
@@ -525,7 +579,7 @@ fn resolve_group(
     let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
     let mut tally = LeftOutTally::new();
     for &idx in group {
-        if let Some(d) = leaf_channel_domain(&leaves[idx], channel, &mut tally)? {
+        if let Some(d) = leaf_channel_domain(&leaves[idx], channel, &mut tally, &out[idx])? {
             domains.push((idx, d));
         }
     }
@@ -1006,7 +1060,7 @@ fn resolve_caller_scale_group(
             let side = crate::scale::log::LogSide::of(common.domain.as_deref());
             let mut tally = LeftOutTally::new();
             for &idx in &members {
-                leaf_positional_domain(&leaves[idx], channel, selection, &mut tally)?;
+                leaf_positional_domain(&leaves[idx], channel, selection, &mut tally, &out[idx])?;
             }
             let field = members
                 .first()
@@ -1027,7 +1081,7 @@ fn resolve_caller_scale_group(
         let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
         let mut tally = LeftOutTally::new();
         for &idx in group {
-            if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection, &mut tally)? {
+            if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection, &mut tally, &out[idx])? {
                 domains.push((idx, d));
             }
         }
@@ -1139,6 +1193,7 @@ fn refuse_unplaceable_overlay_members<'a>(
     channel: Channel,
     axis: &AxisMembers<impl Iterator<Item = AxisMember<'a>> + Clone>,
     leaves: &[LeafResolveInput<'_>],
+    out: &[LeafScaleContext],
 ) -> Result<(), CompositeResolveError> {
     // The member whose caller scale establishes the continuous axis is the
     // one the others are judged against, whatever its position or its
@@ -1154,10 +1209,16 @@ fn refuse_unplaceable_overlay_members<'a>(
             };
             // A scratch `warnings` sink: this call only asks the first
             // member's domain for its KIND (continuous vs categorical) to
-            // judge `axis_kind` by; `resolve_group`/`resolve_caller_scale_group`
-            // resolve the group for real afterward (with the caller's own
-            // `warnings`), so pushing here too would double the count.
-            match leaf_channel_domain(&leaves[group[position]], channel, &mut LeftOutTally::new())? {
+            // judge `axis_kind` by, never its exact extent; `resolve_group`/
+            // `resolve_caller_scale_group` resolve the group for real
+            // afterward (with the caller's own `warnings`), so pushing here
+            // too would double the count. `out[group[position]]` is the
+            // REAL context (plan_overlay_auxiliary already ran): reading a
+            // scratch default here instead would force this leaf's color
+            // resolution standalone even when it is grouped, so a leaf with
+            // nothing on-side would refuse on its own before the group's
+            // resolve can rescue it.
+            match leaf_channel_domain(&leaves[group[position]], channel, &mut LeftOutTally::new(), &out[group[position]])? {
                 Some(SharedDomain::Numeric { .. }) => (position, PanelAxisKind::Continuous),
                 Some(SharedDomain::Ordinal(_)) => (position, PanelAxisKind::Categorical),
                 // `Samples` and `FixedBins` are binned colors' domains, never an axis's.
@@ -1208,14 +1269,24 @@ fn refuse_unplaceable_overlay_members<'a>(
             coord_flipped: false,
         };
         if let Some(coord) = exchanged_by {
+            let mark = leaf.spec.mark;
+            let entry = prepare::layer_entry(leaf.spec, 0, mark);
             require_exchanged_column_servable(
-                position,
+                mark,
                 coord,
                 channel.as_str(),
                 &enc.field,
                 located.col.data_type(),
                 axis_kind,
             )
+            // Named by the member's own overlay position on every member
+            // shape: `position` counts only the arguments the caller wrote
+            // into `fm.layer(...)`, never a member's own internal sub-layers,
+            // so it is never the index `voiced_layer` is built to drop. The
+            // entry is the member's own: `heatmap` for a figure-built member,
+            // the synthetic `mark_{mark}` fallback (voiced generically by
+            // `fmt_as`) for a bare caller member.
+            .map_err(|e| e.in_layer_context(Some(position), &entry))
             .map_err(to_resolve_error)?;
             continue;
         }
@@ -1237,9 +1308,10 @@ fn leaf_channel_domain(
     leaf: &LeafResolveInput<'_>,
     channel: Channel,
     tally: &mut LeftOutTally,
+    leaf_scales: &LeafScaleContext,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     match channel {
-        Channel::X | Channel::Y => leaf_positional_domain(leaf, channel, LayerUnion::Every, tally),
+        Channel::X | Channel::Y => leaf_positional_domain(leaf, channel, LayerUnion::Every, tally, leaf_scales),
         Channel::Color => leaf_color_domain(leaf),
         Channel::Size => leaf_size_domain(leaf, tally),
     }
@@ -1281,6 +1353,7 @@ fn leaf_positional_domain(
     channel: Channel,
     selection: LayerUnion<'_>,
     tally: &mut LeftOutTally,
+    leaf_scales: &LeafScaleContext,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
     // R3: `leaf.spec` is the leaf's ORIGINAL ChartSpec (`coord` untouched by
     // `prepare::build_layers`'s encoding swap), while `leaf.encoding` is
@@ -1347,6 +1420,54 @@ fn leaf_positional_domain(
 
     match dtype {
         SpecDataType::Quantitative | SpecDataType::Temporal => {
+            // This leaf's own drawn color scale: the overlay group's (built
+            // once over every member, under this leaf's own theme) for a
+            // grouped member, else this leaf's standalone color — the SAME
+            // resolver (`resolve_color_scale`) `scene_build::resolve_legend_color_scale`
+            // reads for the group's legend — over `leaf_scales`, which
+            // already carries this leaf's resolved non-positional (color/
+            // size) `SharedDomain` and overlay membership (both resolve
+            // before the positional pass). Threaded into the stack/dodge
+            // preview below and the numeric union, so a leaf's `Dodge`
+            // sub-band order never diverges from its own draw's.
+            let color: Option<ColorScale> = match leaf_scales.overlay_group() {
+                Some(group) => group.scales_for(leaf.theme).color().cloned(),
+                None => resolve_color_scale(
+                    leaf.spec,
+                    &leaf.spec.encoding,
+                    leaf.final_batch,
+                    leaf.transform_outputs,
+                    leaf.transform_lineages,
+                    leaf.theme,
+                    Some(leaf_scales),
+                )
+                .map_err(|source| {
+                    // Voiced as the color refusal it is (`resolve_color_scale`
+                    // resolves color here, never this positional `channel`),
+                    // the same fields the nonpositional pass's own
+                    // `leaf_color_domain` uses: `Channel::Color`, the leaf's
+                    // own color field, and `coord_flipped: false` (color is
+                    // never positional, so `CoordFlip` never touches it).
+                    // Falls back to this axis's own channel/field/flip only
+                    // if the leaf binds no color at all, which
+                    // `resolve_color_scale` would then have had nothing of
+                    // its own to fail resolving.
+                    match leaf.encoding.color.as_ref() {
+                        Some(color_enc) => CompositeResolveError::DomainResolve {
+                            source,
+                            channel: Channel::Color.as_str(),
+                            field: color_enc.field.clone(),
+                            coord_flipped: false,
+                        },
+                        None => CompositeResolveError::DomainResolve {
+                            source,
+                            channel: channel.as_str(),
+                            field: enc.field.clone(),
+                            coord_flipped,
+                        },
+                    }
+                })?,
+            };
             // An unlayered leaf that stacks its value on this channel spans
             // the stack it draws, as its own render resolves it
             // (`position::axis_batch`); a layered leaf's stacking layers
@@ -1363,6 +1484,7 @@ fn leaf_positional_domain(
                 leaf.final_batch,
                 leaf.transform_outputs,
                 false,
+                color.as_ref(),
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
                 source,
@@ -1390,6 +1512,7 @@ fn leaf_positional_domain(
                 false,
                 selection,
                 side,
+                color.as_ref(),
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
                 channel: channel.as_str(),
@@ -1970,7 +2093,7 @@ mod tests {
             };
             (l, batch)
         });
-        crate::render::scale_resolve::text_edge_rows(channel, pairs, o.spec.facet.as_ref(), &DEFAULT_THEME, &crate::render::font::FontdueMetrics::new())
+        crate::render::scale_resolve::text_edge_rows(channel, pairs, o.spec.facet.as_ref(), &DEFAULT_THEME, &crate::render::font::FontdueMetrics::new(), None)
     }
 
     fn input(o: &LeafOwned) -> LeafResolveInput<'_> {
@@ -1982,6 +2105,7 @@ mod tests {
             transform_lineages: &NO_LINEAGES,
             x_text_rows: leaf_own_text_rows(o, "x"),
             y_text_rows: leaf_own_text_rows(o, "y"),
+            theme: &DEFAULT_THEME,
         }
     }
 
@@ -3178,7 +3302,7 @@ mod tests {
             ..spec_with(e)
         };
         let leaf = owned(spec, batch);
-        match leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new()) {
+        match leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default()) {
             Ok(Some(SharedDomain::Numeric { hi, .. })) => assert_eq!(hi, 38.0),
             other => panic!("expected the member's numeric stacked extent, got {other:?}"),
         }
@@ -3187,7 +3311,7 @@ mod tests {
     #[test]
     fn leaf_positional_domain_refuses_a_layer_utf8_column_on_the_shared_y_axis() {
         let leaf = layer_utf8_y_leaf();
-        let err = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new())
+        let err = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect_err("a Utf8 layer column must refuse the static overlay route too");
         match err {
             CompositeResolveError::DomainResolve { source, channel, field, .. } => {
@@ -3518,11 +3642,15 @@ mod tests {
             panic!("unexpected composite error {err:?}");
         };
         assert_eq!(field, "cat");
+        match source {
+            RenderError::InLayer { layer: Some(1), .. } => {}
+            other => panic!("expected the member named by its position, got {other:?}"),
+        }
         assert_eq!(
-            *source,
-            RenderError::LayerCoordUnplaceable {
-                layer: 1,
+            source.root(),
+            &RenderError::LayerCoordUnplaceable {
                 coord: "fm.CoordFlip",
+                mark: Mark::Point,
                 reason: Box::new(crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
                     channel: "y",
                     column: "cat".to_string(),
@@ -3531,6 +3659,52 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// The same exchange refusal over a figure-built member (its own
+    /// `entry` set, as `heatmap()` stamps on its chart): named by its
+    /// overlay position AND its entry. `voiced_layer(position, &entry,
+    /// mark)` must not answer `None` for a figure entry (it is built to
+    /// drop the index for an internal sub-layer, not an overlay member's
+    /// own position) and drop the member's position from this route
+    /// alone.
+    #[test]
+    fn overlay_flipped_figure_member_is_named_by_its_overlay_position_and_entry() {
+        fn shared_frame() -> RecordBatch {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("cat", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                    Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0])),
+                ],
+            )
+            .unwrap()
+        }
+        let bar = overlay_leaf("cat", "v", shared_frame());
+        let mut point_flipped = overlay_flipped_leaf("cat", "v", shared_frame());
+        point_flipped.spec.entry = Some("heatmap".to_string());
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("v"), Some("cat"))],
+            shared_both(),
+        );
+        let inputs = [input(&bar), input(&point_flipped)];
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
+            .expect_err("the flipped member's category cannot land on the continuous y");
+        let CompositeResolveError::DomainResolve { channel: "y", source, .. } = &err else {
+            panic!("unexpected composite error {err:?}");
+        };
+        match source {
+            RenderError::InLayer { layer: Some(1), entry, .. } => {
+                assert_eq!(entry, "heatmap");
+            }
+            other => panic!("expected the figure member named by its position and entry, got {other:?}"),
+        }
+        let msg = source.to_string();
+        assert!(msg.contains("layer 1: heatmap: its coord leaves"), "{msg}");
     }
 
     /// Two members BOTH flipped the same way: the establishing member's
@@ -4531,7 +4705,11 @@ mod tests {
             let flat = flat.expect_err("+ refuses the exchanged column the panel axis cannot draw");
             assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal ({axis_kind} {channel})");
             match &flat {
-                RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordFlip", reason } => {
+                RenderError::InLayer { layer: Some(1), .. } => {}
+                other => panic!("+ refused for a layer not named by index: {other:?}"),
+            }
+            match flat.root() {
+                RenderError::LayerCoordUnplaceable { coord: "fm.CoordFlip", reason, .. } => {
                     assert_eq!(**reason, exchanged_unservable(channel, column, dtype, axis_kind))
                 }
                 other => panic!("+ refused with {other:?}"),
@@ -4573,7 +4751,11 @@ mod tests {
             let flat = flat.expect_err("+ refuses the exchanged column the panel axis cannot draw");
             assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal ({axis_kind} x)");
             match &flat {
-                RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordCartesian", reason } => {
+                RenderError::InLayer { layer: Some(1), .. } => {}
+                other => panic!("+ refused for a layer not named by index: {other:?}"),
+            }
+            match flat.root() {
+                RenderError::LayerCoordUnplaceable { coord: "fm.CoordCartesian", reason, .. } => {
                     assert_eq!(**reason, exchanged_unservable("x", column, dtype, axis_kind))
                 }
                 other => panic!("+ refused with {other:?}"),
@@ -4915,7 +5097,7 @@ mod tests {
         ]);
         let mut leaf = owned(spec, raw);
         leaf.outputs.insert("smooth".to_string(), smooth);
-        let domain = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new())
+        let domain = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect("every column is Float64");
         assert_eq!(domain, Some(SharedDomain::Numeric { lo: -0.2, hi: 20.0 }));
     }
@@ -4940,7 +5122,7 @@ mod tests {
         let mut leaf = owned(spec, merged);
         leaf.outputs.insert("lhs".to_string(), batch_of(vec![Some("a"), Some("b")], vec![1.0, 2.0]));
         leaf.outputs.insert("rhs".to_string(), batch_of(vec![Some("x"), Some("y")], vec![3.0, 4.0]));
-        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new())
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["a", "b", "x", "y"].iter().map(|s| s.to_string()).collect();
         assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
@@ -4974,7 +5156,7 @@ mod tests {
         .unwrap();
         let mut leaf = owned(spec, merged.clone());
         leaf.outputs.insert("_ident_0".to_string(), merged);
-        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new())
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
         assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));

@@ -16,7 +16,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::context::{TransformContext, Unfittable};
+use crate::transform::context::{TransformContext, TransformWarning, Unfittable};
 use crate::transform::context::describe_group_keys;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
@@ -159,15 +159,35 @@ fn fit(
             let z = inv_normal_cdf(1.0 - (1.0 - level) / 2.0);
             let mut lo = Vec::with_capacity(n_grid);
             let mut hi = Vec::with_capacity(n_grid);
+            let mut undefined = 0usize;
             for &xq in &grid {
                 // η = β0 + β1 x; Var(η) = [1, x] Σ [1, x]'
                 let v = cov[0][0]
                     + 2.0 * xq * cov[0][1]
                     + xq * xq * cov[1][1];
-                let se = if v >= 0.0 { v.sqrt() } else { f64::NAN };
+                let se = if v >= 0.0 { v.sqrt() } else { undefined += 1; f64::NAN };
                 let eta = beta[0] + beta[1] * xq;
                 lo.push(sigmoid(eta - z * se));
                 hi.push(sigmoid(eta + z * se));
+            }
+            // The fit line drew fine (IRLS converged); a negative Var(η)
+            // at some grid points is a numerical artifact of the Wald
+            // covariance (x's spread tiny next to its magnitude), not a
+            // lost fit, so only the band there is undefined.
+            if undefined > 0 {
+                let reason = crate::transform::context::partial_band_reason(
+                    "the Wald variance is negative (x's spread is tiny next to its magnitude; \
+                     centering x avoids it)",
+                    undefined,
+                    n_grid,
+                );
+                ctx.warn(TransformWarning::IntervalUndefined {
+                    transform: "Logistic".into(),
+                    group: group.map(|group| group.label.clone()),
+                    ci: level,
+                    reason,
+                    panel: None,
+                });
             }
             (lo, hi)
         }
@@ -860,6 +880,40 @@ mod tests {
             );
             let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
             assert_eq!(refused, format!("ValueError: Logistic: {reason}"), "{label}: ungrouped refuses");
+        }
+    }
+
+    /// A genuinely reachable cancellation shape, not a hand-built one: at
+    /// `x` centered on a large constant (`c = 37e6`) with a small spread
+    /// (`±0.5`), `Var(η) = [1, x] Σ [1, x]'` is positive in exact
+    /// arithmetic (its minimum over `x` is `1/Σw`), but floating-point
+    /// cancellation at `x`'s magnitude makes it compute negative at some
+    /// grid points. The fit line still converges fine; only the band is
+    /// undefined where it cancels.
+    #[test]
+    fn large_offset_x_reaches_the_wald_variance_cancellation_branch() {
+        let c = 37_000_000.0;
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for _ in 0..3 {
+            xs.extend([c - 0.5, c - 0.5, c + 0.5, c + 0.5]);
+            ys.extend([0.0, 1.0, 0.0, 1.0]);
+        }
+        let batch = xy_batch(xs, ys);
+        let spec = default_spec(100, Some(0.95));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert!(col(&out, "y").iter().all(|v| v.is_finite()), "the fit line must draw");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            TransformWarning::IntervalUndefined { transform, group, ci, reason, .. } => {
+                assert_eq!(transform, "Logistic");
+                assert!(group.is_none());
+                assert_eq!(*ci, 0.95);
+                assert!(reason.contains("of 100 grid points"), "{reason}");
+            }
+            other => panic!("expected IntervalUndefined, got {other:?}"),
         }
     }
 }

@@ -3075,9 +3075,12 @@ fn lay_out_plot(
 /// `rect` under the chart's `CoordFixed` aspect: the binding dimension
 /// shrunk so `w / h == ratio`, centred. Unchanged for any other coord, a
 /// non-positive ratio, or a collapsed (`Rect::ZERO`) panel. The one owner of
-/// the correction, read by [`layout_panel_axes`] and by
-/// [`PanelGeometry::extent`].
-fn fixed_aspect(rect: Rect, spec: &crate::spec::chart::ChartSpec) -> Rect {
+/// the correction, read by [`layout_panel_axes`], [`PanelGeometry::extent`]
+/// and (`pub(crate)`) `composite_render::impose_shared_overlay_rects`, which
+/// shrinks an all-leaf `Overlay` group's shared rect by the leader's aspect
+/// before imposing it on every member — no second implementation of the
+/// correction for the composite route.
+pub(crate) fn fixed_aspect(rect: Rect, spec: &crate::spec::chart::ChartSpec) -> Rect {
     let Some(crate::spec::coord::CoordKind::Fixed { ratio, .. }) = &spec.coord else {
         return rect;
     };

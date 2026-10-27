@@ -61,10 +61,10 @@ fn independent_y_incompatible_coord(spec: &ChartSpec) -> Option<&'static str> {
     spec.layers.iter().flatten().any(|layer| layer.independent_y).then(|| public_spelling(coord))
 }
 
-/// The `(layer index, coord spelling, panel-scoped property)` of the first
-/// layer whose OWN `coord` declares something that belongs to the whole panel —
-/// the combination `#172`(1) refuses. `None` when every layer's coord is a
-/// per-layer placement rule, which includes every spec that declares no
+/// The `(layer index, mark, coord spelling, panel-scoped property)` of the
+/// first layer whose OWN `coord` declares something that belongs to the whole
+/// panel — the combination `#172`(1) refuses. `None` when every layer's coord
+/// is a per-layer placement rule, which includes every spec that declares no
 /// per-layer coord at all.
 ///
 /// A layer's coord places that layer's marks; the panel's chrome, aspect ratio
@@ -79,7 +79,7 @@ fn independent_y_incompatible_coord(spec: &ChartSpec) -> Option<&'static str> {
 /// [`crate::spec::coord::panel_scoped_property`], beside the coord it is about;
 /// this function only finds the first offender and names the variant for the
 /// message.
-fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, &'static str, &'static str)> {
+fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, crate::spec::mark::Mark, &'static str, &'static str)> {
     spec.layers
         .iter()
         .flatten()
@@ -87,7 +87,7 @@ fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, &'static str, &'s
         .find_map(|(index, layer)| {
             let coord = layer.coord.as_ref()?;
             let property = crate::spec::coord::panel_scoped_property(coord)?;
-            Some((index, crate::spec::coord::public_spelling(coord), property))
+            Some((index, layer.mark, crate::spec::coord::public_spelling(coord), property))
         })
 }
 
@@ -133,14 +133,18 @@ pub fn build_scene(
     // here: every standalone render and every composite leaf passes through it,
     // so one check covers the merged-flat path's three public routes (static
     // `chart + chart`, `resolve={"y": "independent"}`, and `.interactive()`).
-    if let Some((layer, coord, property)) = unplaceable_layer_coord(spec) {
+    // Wrapped in the layer's voice (`public_layer`/`layer_entry`), mirroring
+    // `in_layer_voice` below: a caller-placed layer is named only by its
+    // index, a figure-built layer by its public entry too.
+    if let Some((layer, mark, coord, property)) = unplaceable_layer_coord(spec) {
         return Err(RenderError::LayerCoordUnplaceable {
-            layer,
             coord,
+            mark,
             reason: Box::new(crate::render::LayerCoordUnplaceableReason::PanelProperty(
                 property,
             )),
-        });
+        }
+        .in_layer_context(public_layer(spec, layer, mark), &layer_entry(spec, layer, mark)));
     }
 
     let background = config.background.or(Some(theme.colors.background_color));
@@ -1073,6 +1077,7 @@ pub(in crate::render) fn independent_panel_axis_inputs(
                         ctx.spec.facet.as_ref(),
                         ctx.theme,
                         metrics,
+                        scales.color.as_ref(),
                     );
                     let demand = scales.x.text_edge_demand(applies.then_some(&rows));
                     independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.coord_flipped, demand)
@@ -1091,6 +1096,7 @@ pub(in crate::render) fn independent_panel_axis_inputs(
                         ctx.spec.facet.as_ref(),
                         ctx.theme,
                         metrics,
+                        scales.color.as_ref(),
                     );
                     let demand = scales.y.text_edge_demand(applies.then_some(&rows));
                     independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.coord_flipped, demand)
@@ -1883,12 +1889,11 @@ fn build_panel_mark_batches(
         // `RenderError::InLayer`: its index on a layered chart (an unlayered
         // chart's one layer is the chart itself), and the public entry that
         // produced it, the layer's own, else the chart's, else the mark's.
-        // The coord-exchange gate below stays outside it, as the column gate
-        // in `prepare` does: theirs are the shared-panel refusals, raised in
-        // the same words by scale resolution and by the composite route's
-        // (`fm.layer`), neither of which runs inside a layer's draw, so each
-        // names its layer as `layer {i}: ` and `+` and `fm.layer` refuse
-        // alike.
+        // The coord-exchange gate below (`#172`(1)'s second reason) joins the
+        // same wrap, `composite::refuse_unplaceable_overlay_members` does the
+        // same for the composite route's (`fm.layer`'s) own leaves, so `+`
+        // and `fm.layer` name a caller-placed layer by index alone and a
+        // figure-built one by its entry too, identically.
         let entry = layer_entry(spec, li, layer.mark);
         let name_layer = |e: RenderError| in_layer_voice(e, spec, li, layer.mark, &entry);
 
@@ -2069,6 +2074,7 @@ fn build_panel_mark_batches(
         // join the chart-level gate at the top of this function.
         validate_layer_coord_exchange_is_servable(
             li,
+            layer.mark,
             // Read off the synthetic per-layer spec rather than re-cloning: this
             // is the same coord every mark builder below is answered with.
             layer_spec.coord.as_ref(),
@@ -2077,7 +2083,8 @@ fn build_panel_mark_batches(
             &layer_spec.encoding,
             own_batch,
             scales,
-        )?;
+        )
+        .map_err(name_layer)?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped).map_err(name_layer)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
@@ -3966,8 +3973,14 @@ fn validate_mark_encoding(
 /// cannot be read is a pre-existing shape with its own (unchanged) per-mark
 /// handling, and widening this gate to it would refuse charts that render today
 /// for a reason `#172`(1) is not about.
+///
+/// Returns the bare (unwrapped) refusal; the caller voices it in the layer's
+/// context (`name_layer`/`in_layer_voice`), so this function needs no `spec`
+/// or `entry` of its own.
+#[allow(clippy::too_many_arguments)]
 fn validate_layer_coord_exchange_is_servable(
     layer_index: usize,
+    mark: crate::spec::mark::Mark,
     layer_coord: Option<&crate::spec::coord::CoordKind>,
     layer_flipped: bool,
     chart_flipped: bool,
@@ -3997,7 +4010,7 @@ fn validate_layer_coord_exchange_is_servable(
             _ => crate::render::arrow_cast::PanelAxisKind::Continuous,
         };
         crate::render::arrow_cast::require_exchanged_column_servable(
-            layer_index,
+            mark,
             coord,
             channel,
             &enc.field,
@@ -10144,8 +10157,9 @@ mod tests {
     /// filtered to none -- takes the SAME path
     /// [`a_faceted_chart_with_no_rows_draws_no_panel_and_warns`] already
     /// does: no facet panel is drawn, and the chart warns once with
-    /// `faceted: true`. Rejects refusing with `RenderError::EmptyDomain`
-    /// because the facet field has no rows to partition by at all.
+    /// `faceted: true`. Draws instead of refusing, the same route an
+    /// all-null facet field takes: the facet field has no rows (or no
+    /// non-null value) to partition by at all.
     #[test]
     fn a_zero_row_faceted_chart_draws_no_panel_and_warns() {
         use crate::spec::encoding::{Encoding, EncodingSpec};
@@ -12029,12 +12043,11 @@ mod tests {
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a per-layer CoordFixed must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable {
-                layer,
-                coord,
-                reason,
-            } => {
-                assert_eq!(*layer, 1, "the offending layer is named by index");
+            RenderError::InLayer { layer: Some(1), .. } => {}
+            other => panic!("expected the offending layer named by index, got {other:?}"),
+        }
+        match err.root() {
+            RenderError::LayerCoordUnplaceable { coord, reason, .. } => {
                 assert_eq!(*coord, "fm.CoordFixed");
                 match &**reason {
                     crate::render::LayerCoordUnplaceableReason::PanelProperty(property) => {
@@ -12163,12 +12176,11 @@ mod tests {
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a flipped member whose y is categorical must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable {
-                layer,
-                coord,
-                reason,
-            } => {
-                assert_eq!(*layer, 1, "the offending layer is named by index");
+            RenderError::InLayer { layer: Some(1), .. } => {}
+            other => panic!("expected the offending layer named by index, got {other:?}"),
+        }
+        match err.root() {
+            RenderError::LayerCoordUnplaceable { coord, reason, .. } => {
                 assert_eq!(*coord, "fm.CoordFlip");
                 match &**reason {
                     crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
@@ -12220,7 +12232,11 @@ mod tests {
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a flipped member whose y is categorical must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable { layer: 1, coord, reason } => {
+            RenderError::InLayer { layer: Some(1), .. } => {}
+            other => panic!("expected the offending layer named by index, got {other:?}"),
+        }
+        match err.root() {
+            RenderError::LayerCoordUnplaceable { coord, reason, .. } => {
                 assert_eq!(*coord, "fm.CoordFlip");
                 assert!(
                     matches!(

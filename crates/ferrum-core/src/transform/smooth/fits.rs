@@ -19,7 +19,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use std::sync::Arc;
 
-use crate::transform::context::{TransformContext, TransformWarning};
+use crate::transform::context::{partial_band_reason, zero_residual_dof_reason, TransformContext, TransformWarning};
 use crate::transform::gam;
 use crate::transform::residuals;
 
@@ -363,25 +363,31 @@ fn eval_poly(coeffs: &[f64], x: f64) -> f64 {
     val
 }
 
-/// Global polynomial regression fit over a grid.
+/// Global polynomial regression fit over a grid. The second return value is
+/// [`zero_residual_dof_reason`]'s text when `ci` was requested but the
+/// residual degrees of freedom are zero or negative; `None` when no band
+/// was requested or one was computed.
 pub(super) fn poly_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize, degree: u8,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     let coeffs = poly_ols(xs, ys, degree as usize);
     if coeffs.is_empty() {
-        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()).map(|b| (b, None));
     }
 
     let y_fit: Vec<f64> = grid.iter().map(|&x| eval_poly(&coeffs, x)).collect();
 
     // Confidence interval: bootstrap residuals from the polynomial fit at input xs.
+    let mut band_undefined = None;
     let (lo, hi) = match ci {
         None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
         Some(level) => {
             let n = xs.len();
+            let p = degree as usize + 1;
             let dof = n as f64 - (degree as f64 + 1.0);
             if dof <= 0.0 {
+                band_undefined = Some(zero_residual_dof_reason(n, p));
                 (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid])
             } else {
                 let resid_ss: f64 = xs.iter().zip(ys)
@@ -406,7 +412,7 @@ pub(super) fn poly_fit(
         }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics).map(|b| (b, band_undefined))
 }
 
 /// Compute hat-matrix diagonal for polynomial design X (Vandermonde).
@@ -431,7 +437,7 @@ fn poly_hat_diagonal(xs: &[f64], degree: usize) -> Vec<f64> {
 pub(super) fn log_x_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     transformed_linear_fit(xs, ys, grid, ci, n_grid, |x| x.ln(), metrics)
 }
 
@@ -439,7 +445,7 @@ pub(super) fn log_x_fit(
 pub(super) fn sqrt_x_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     transformed_linear_fit(xs, ys, grid, ci, n_grid, |x| x.sqrt(), metrics)
 }
 
@@ -449,7 +455,7 @@ fn transformed_linear_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     transform: impl Fn(f64) -> f64,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     // Transform x values; filter to finite-transform pairs only.
     let pairs: Vec<(f64, f64)> = xs.iter().zip(ys.iter())
         .filter_map(|(&xi, &yi)| {
@@ -459,7 +465,7 @@ fn transformed_linear_fit(
         .collect();
 
     if pairs.len() < 2 {
-        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()).map(|b| (b, None));
     }
 
     let txs: Vec<f64> = pairs.iter().map(|(t, _)| *t).collect();
@@ -469,11 +475,14 @@ fn transformed_linear_fit(
 }
 
 /// OLS fit on pre-transformed x values; evaluate the fit at `transform(grid[i])`.
+/// The second return value is [`zero_residual_dof_reason`]'s text when `ci`
+/// was requested but the (post-filter) residual degrees of freedom are zero
+/// or negative.
 fn lm_fit_on(
     txs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     transform: &impl Fn(f64) -> f64,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     let n = txs.len();
     let mean_x: f64 = txs.iter().sum::<f64>() / n as f64;
     let mean_y: f64 = ys.iter().sum::<f64>() / n as f64;
@@ -481,7 +490,7 @@ fn lm_fit_on(
     let sxy: f64 = txs.iter().zip(ys).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
 
     if sxx == 0.0 {
-        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()).map(|b| (b, None));
     }
 
     let beta = sxy / sxx;
@@ -492,6 +501,7 @@ fn lm_fit_on(
         if t.is_finite() { alpha + beta * t } else { f64::NAN }
     }).collect();
 
+    let mut band_undefined = None;
     let (lo, hi) = match ci {
         None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
         Some(level) => {
@@ -500,6 +510,7 @@ fn lm_fit_on(
                 .sum();
             let dof = n as f64 - 2.0;
             if dof <= 0.0 {
+                band_undefined = Some(zero_residual_dof_reason(n, 2));
                 (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid])
             } else {
                 let sigma2 = resid_ss / dof;
@@ -523,7 +534,7 @@ fn lm_fit_on(
         }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics).map(|b| (b, band_undefined))
 }
 
 /// Generalized Linear Model fit (Gaussian family, Identity link — the
@@ -542,10 +553,16 @@ fn lm_fit_on(
 /// does; here that degrades to an all-NaN grid, matching every other
 /// method's degenerate-input handling in this file, rather than raising
 /// mid-batch.
+/// `glm`'s band has a separate, known inaccuracy (its dispersion is fixed
+/// at 1 rather than scaled by the residual variance) that is not the
+/// undefined-band shape this module reports elsewhere: `wald_band` always
+/// returns a finite band when it returns at all, so this never has a
+/// reason to give — the second return value is always
+/// `None`, kept only so this fits the same dispatch shape as its siblings.
 pub(super) fn glm_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     use crate::transform::glm::{fit_irls, link_inverse, wald_band, GlmFamily, GlmLink};
 
     let family = GlmFamily::Gaussian;
@@ -553,7 +570,7 @@ pub(super) fn glm_fit(
 
     let (beta, cov) = match fit_irls(xs, ys, family, link, GLM_SMOOTH_MAX_ITER, GLM_SMOOTH_TOL) {
         Ok(v) => v,
-        Err(_) => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()),
+        Err(_) => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()).map(|b| (b, None)),
     };
 
     let y_fit: Vec<f64> = grid.iter().map(|&x| link_inverse(link, beta[0] + beta[1] * x)).collect();
@@ -566,7 +583,7 @@ pub(super) fn glm_fit(
         Some(level) => wald_band(beta, cov, link, grid, level),
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics).map(|b| (b, None))
 }
 
 /// Generalized Additive Model fit — a penalized cubic B-spline (P-spline)
@@ -619,6 +636,7 @@ pub(super) fn report_gam_outcome(ctx: &TransformContext, group: Option<&str>, ou
             reason: "fewer than 4 distinct x values, zero x variance, or no usable \
                      smoothing parameter for a gam fit"
                 .into(),
+            panel: None,
         }),
         GamFitOutcome::Fit { requested, applied } if requested != applied => {
             // #162's named case: `k` is clamped down to the number of
@@ -630,6 +648,7 @@ pub(super) fn report_gam_outcome(ctx: &TransformContext, group: Option<&str>, ou
                 param: "k".into(),
                 requested: requested.to_string(),
                 applied: applied.to_string(),
+                panel: None,
             });
         }
         GamFitOutcome::Fit { .. } => {}
@@ -670,10 +689,13 @@ pub(super) fn gam_fit(
     Ok((out, outcome))
 }
 
+/// The second return value is [`zero_residual_dof_reason`]'s text when
+/// `ci` was requested but the residual degrees of freedom are zero or
+/// negative.
 pub(super) fn lm_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     let n = xs.len();
     let mean_x: f64 = xs.iter().sum::<f64>() / n as f64;
     let mean_y: f64 = ys.iter().sum::<f64>() / n as f64;
@@ -681,13 +703,14 @@ pub(super) fn lm_fit(
     let sxy: f64 = xs.iter().zip(ys).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
 
     if sxx == 0.0 {
-        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()).map(|b| (b, None));
     }
 
     let beta = sxy / sxx;
     let alpha = mean_y - beta * mean_x;
     let y_fit: Vec<f64> = grid.iter().map(|x| alpha + beta * x).collect();
 
+    let mut band_undefined = None;
     let (lo, hi) = match ci {
         None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
         Some(level) => {
@@ -695,7 +718,10 @@ pub(super) fn lm_fit(
                 .map(|(x, y)| (y - (alpha + beta * x)).powi(2))
                 .sum();
             let dof = (n as f64) - 2.0;
-            if dof <= 0.0 { (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]) }
+            if dof <= 0.0 {
+                band_undefined = Some(zero_residual_dof_reason(n, 2));
+                (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid])
+            }
             else {
                 let sigma2 = resid_ss / dof;
                 let t_crit = student_t_critical(level, dof);
@@ -711,7 +737,7 @@ pub(super) fn lm_fit(
         }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics).map(|b| (b, band_undefined))
 }
 
 /// Two-sided t-critical at level `level` (e.g., 0.95) with `dof` degrees of freedom.
@@ -764,11 +790,14 @@ fn inv_normal_cdf(p: f64) -> f64 {
     }
 }
 
+/// The second return value names how many of the `n_grid` grid points the
+/// bootstrap band left undefined (fewer than 4 finite resamples), `None`
+/// when `ci` was not requested or every grid point got a band.
 pub(super) fn loess_fit(
     xs: &[f64], ys: &[f64], grid: &[f64],
     bandwidth: f64, degree: u8, ci: Option<f64>, n_grid: usize, seed: u64,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, Option<String>)> {
     let n = xs.len();
     let k = ((bandwidth * n as f64).ceil() as usize).max((degree as usize) + 1);
     let k = k.min(n);
@@ -778,12 +807,23 @@ pub(super) fn loess_fit(
         loess_at_point_sorted(&sxs, &sys, x0, k, degree)
     ).collect();
 
+    let mut band_undefined = None;
     let (lo, hi) = match ci {
         None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
-        Some(level) => loess_bootstrap_ci(xs, ys, grid, k, degree, level, seed),
+        Some(level) => {
+            let (lo, hi, undefined) = loess_bootstrap_ci(xs, ys, grid, k, degree, level, seed);
+            if undefined > 0 {
+                band_undefined = Some(partial_band_reason(
+                    "the bootstrap resample left fewer than 4 finite values",
+                    undefined,
+                    n_grid,
+                ));
+            }
+            (lo, hi)
+        }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics).map(|b| (b, band_undefined))
 }
 
 /// Sort `(xs, ys)` by `xs` and return the sorted pair.
@@ -863,16 +903,18 @@ fn loess_at_point_sorted(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) 
     }
 }
 
-fn loess_bootstrap_ci(
+/// `(ci_lower, ci_upper, undefined_points)`: `undefined_points` is how many
+/// grid points left fewer than 4 finite bootstrap resamples.
+pub(super) fn loess_bootstrap_ci(
     xs: &[f64], ys: &[f64], grid: &[f64], k: usize, degree: u8, level: f64, seed: u64,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, usize) {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use rand::Rng;
 
     let n = xs.len();
     if n < 2 || level <= 0.0 || level >= 1.0 {
-        return (vec![f64::NAN; grid.len()], vec![f64::NAN; grid.len()]);
+        return (vec![f64::NAN; grid.len()], vec![f64::NAN; grid.len()], grid.len());
     }
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let n_boot: usize = 200;
@@ -897,17 +939,19 @@ fn loess_bootstrap_ci(
     let lo_q = alpha / 2.0; let hi_q = 1.0 - alpha / 2.0;
     let mut lo_out = Vec::with_capacity(grid.len());
     let mut hi_out = Vec::with_capacity(grid.len());
+    let mut undefined = 0;
     for s in samples.iter_mut() {
         s.retain(|v| v.is_finite());
         if s.len() < 4 {
             lo_out.push(f64::NAN); hi_out.push(f64::NAN);
+            undefined += 1;
             continue;
         }
         s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         lo_out.push(percentile_sorted(s, lo_q));
         hi_out.push(percentile_sorted(s, hi_q));
     }
-    (lo_out, hi_out)
+    (lo_out, hi_out, undefined)
 }
 
 fn percentile_sorted(s: &[f64], p: f64) -> f64 {

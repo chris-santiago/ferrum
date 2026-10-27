@@ -2025,6 +2025,206 @@ fn smooth_groupby_rank_deficient_degrades_symmetrically_with_facet() {
     );
 }
 
+/// A two-panel facet on field `"f"`: `"F1"` has 5 points (`lm`'s ci=0.95
+/// band is defined), `"F2"` has 2 points — the same undersized shape as
+/// `lm_whole_frame_n2_warns_interval_undefined_and_still_draws_the_line`'s
+/// own fixture (`crates/ferrum-core/src/transform/smooth/tests.rs`), whose
+/// zero residual degrees of freedom leaves the band undefined there too.
+fn facet_lm_ci_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("f", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, // "F1": n=5
+                1.0, 2.0, // "F2": n=2
+            ])),
+            Arc::new(Float64Array::from(vec![
+                1.0, 3.0, 5.0, 7.0, 9.0, // "F1": y = 1 + 2x
+                3.0, 5.0, // "F2"
+            ])),
+            Arc::new(StringArray::from(vec![
+                "F1", "F1", "F1", "F1", "F1", "F2", "F2",
+            ])),
+        ],
+    )
+    .unwrap()
+}
+
+/// A `ChartSpec` fitting `lm` with `ci=0.95` over `x`/`y`, faceted on `"f"`.
+fn smooth_lm_ci_facet_spec() -> ChartSpec {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+    let mut spec = base_spec();
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "f".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::FacetResolve::default(),
+    });
+    spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        x: "x".into(),
+        y: "y".into(),
+        method: SmoothMethod::Lm,
+        ci: Some(0.95),
+        bandwidth: 0.0,
+        degree: 1,
+        k: crate::transform::gam::DEFAULT_BASIS_DIM,
+        n: 5,
+        seed: 0,
+        x_bins: None,
+        x_estimator: None,
+        output: SmoothOutput::Fitted,
+        inject_zero_ref: false,
+        inject_metrics: false,
+        groupby: vec![],
+        name: None,
+        x_range: None,
+    })];
+    spec
+}
+
+/// Pins `stamp_facet_panel` at the unit level: a two-panel facet where
+/// one panel's `Smooth` has 2 rows and `ci=0.95` pushes exactly one
+/// `IntervalUndefined` whose `panel` is `Some("f=F2")`
+/// (`facet_partition_label`'s own text) and whose `Display` names the
+/// panel inline, while the well-supported panel raises none.
+#[test]
+fn smooth_facet_interval_undefined_names_the_sparse_panel() {
+    let spec = smooth_lm_ci_facet_spec();
+    let batch = facet_lm_ci_batch();
+    let viewport = crate::layout::Viewport {
+        width: 600.0,
+        height: 400.0,
+    };
+    let theme = crate::layout::ThemeInputs::default();
+
+    let (_, warnings, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+        .expect("a facet panel too sparse for lm's ci band must degrade, not fail the chart");
+
+    let interval_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| matches!(w, crate::transform::context::TransformWarning::IntervalUndefined { .. }))
+        .collect();
+    assert_eq!(interval_warnings.len(), 1, "got {warnings:?}");
+    match interval_warnings[0] {
+        crate::transform::context::TransformWarning::IntervalUndefined { panel, .. } => {
+            assert_eq!(panel.as_deref(), Some("f=F2"));
+        }
+        _ => unreachable!(),
+    }
+    let text = interval_warnings[0].to_string();
+    assert!(
+        text.contains(" in facet panel f=F2 "),
+        "Display must name the panel inline: {text}"
+    );
+}
+
+/// A two-panel facet on field `"f"`: `"F1"` has 12 distinct `x` values
+/// (gam's default `k=10` basis fits fine), `"F2"` has only 3 distinct `x`
+/// values — the same shape
+/// `gam_degenerate_pushes_a_degenerate_fit_warning_on_residuals_output`'s
+/// own fixture uses, where `gam::fit` returns `None` regardless of `k`.
+fn facet_gam_degenerate_batch() -> RecordBatch {
+    let mut xs: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let mut ys: Vec<f64> = xs.iter().map(|&x| x * x).collect();
+    let mut f: Vec<&str> = vec!["F1"; 12];
+    xs.extend(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    ys.extend(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    f.extend(vec!["F2"; 6]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("f", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(f)),
+        ],
+    )
+    .unwrap()
+}
+
+/// A `ChartSpec` fitting `gam` over `x`/`y`, faceted on `"f"`.
+fn smooth_gam_facet_spec() -> ChartSpec {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+    let mut spec = base_spec();
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "f".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::FacetResolve::default(),
+    });
+    spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        x: "x".into(),
+        y: "y".into(),
+        method: SmoothMethod::Gam,
+        ci: None,
+        bandwidth: 0.75,
+        degree: 1,
+        k: crate::transform::gam::DEFAULT_BASIS_DIM,
+        n: 20,
+        seed: 0,
+        x_bins: None,
+        x_estimator: None,
+        output: SmoothOutput::Fitted,
+        inject_zero_ref: false,
+        inject_metrics: false,
+        groupby: vec![],
+        name: None,
+        x_range: None,
+    })];
+    spec
+}
+
+/// The `DegenerateFit` variant of the same unit-level pin: `"F2"`'s own
+/// partition warns, named `"f=F2"`; the well-supported `"F1"` raises none.
+#[test]
+fn smooth_facet_degenerate_fit_names_the_sparse_panel() {
+    let spec = smooth_gam_facet_spec();
+    let batch = facet_gam_degenerate_batch();
+    let viewport = crate::layout::Viewport {
+        width: 600.0,
+        height: 400.0,
+    };
+    let theme = crate::layout::ThemeInputs::default();
+
+    let (_, warnings, _, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+        .expect("a facet panel too sparse for gam must degrade, not fail the chart");
+
+    let degenerate_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| matches!(w, crate::transform::context::TransformWarning::DegenerateFit { .. }))
+        .collect();
+    assert_eq!(degenerate_warnings.len(), 1, "got {warnings:?}");
+    match degenerate_warnings[0] {
+        crate::transform::context::TransformWarning::DegenerateFit { panel, .. } => {
+            assert_eq!(panel.as_deref(), Some("f=F2"));
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Regression guard: a genuine whole-frame call (no facet, no groupby,
 /// the batch itself too sparse for the requested degree) must still
 /// refuse with the typed `PyValueError` — the D9 closure this round
@@ -10294,10 +10494,13 @@ fn a_malformed_facet_repeat_is_refused() {
     assert!(matches!(err, RenderError::UnknownColumn { ref name } if name == "absent"), "{err}");
 }
 
-/// Every row null in the facet field leaves no panel at all: a typed error
-/// naming the field, not a missing pipeline tail.
+/// Every row null in the facet field leaves no panel at all, but this is
+/// the 2026-10-17 drop-and-warn rule at its limit, not a different input
+/// class: the run still produces the right (empty) `FINAL_OUTPUT_KEY`
+/// schema, over one placeholder partition, and reports the full null-row
+/// count rather than refusing.
 #[test]
-fn a_facet_with_no_values_is_refused() {
+fn a_facet_with_no_values_warns_and_draws_no_panel() {
     let spec = facet_repeat_spec("");
     let schema = Arc::new(Schema::new(vec![
         Field::new("c", DataType::Utf8, true),
@@ -10315,8 +10518,22 @@ fn a_facet_with_no_values_is_refused() {
     .expect("schema and columns agree");
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-    let err = run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect_err("no panel exists");
-    assert_eq!(err.to_string(), "facet: no usable values found for field 'c'");
+    let (outputs, warnings, _, partitions) =
+        run_transforms_with_facet(&spec, &batch, viewport, &theme, None).expect("renders instead of refusing");
+    let final_batch = outputs.get(crate::transform::core::FINAL_OUTPUT_KEY).expect("publishes the final output");
+    assert_eq!(final_batch.num_rows(), 0, "no row belongs to any panel");
+    assert_eq!(partitions.order.len(), 1, "one placeholder partition, never a real panel");
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            crate::transform::context::TransformWarning::NullKeyRowsDropped {
+                scope: crate::transform::context::NullKeyScope::Facet,
+                field,
+                rows: 2,
+            } if field == "c"
+        )),
+        "{warnings:?}"
+    );
 }
 
 /// The rows a layer reading its chart's data starts from, for the remedy a

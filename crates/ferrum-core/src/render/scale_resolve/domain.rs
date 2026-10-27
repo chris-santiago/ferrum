@@ -157,32 +157,36 @@ fn seed_reads<'a>(
 }
 
 /// Where each layer's reads on one axis come from, by layer index: the batch
-/// the layer draws ([`LayerSource::of`]), or, for a layer that stacks its
-/// value on the axis, the stack it draws ([`axis_stacks`]), whose value
-/// column holds the segment tops and whose base column, read as the value's
-/// span, holds the nonzero segment bases.
+/// the layer draws ([`LayerSource::of`]), or, for a layer whose own position
+/// preview produced one, the preview it draws ([`axis_previews`]). `base` is
+/// the per-layer stack-base pairing: `Some` only for a layer whose own
+/// effective position is `Stack` on this axis
+/// ([`crate::render::position::layer_prepared_stacks`]), so a dodged or
+/// jittered layer's contribution carries no span partner, as `axis_batch`'s
+/// unlayered `base` already decides it.
 struct AxisReads<'a> {
     sources: Vec<LayerSource<'a>>,
-    stacked: Vec<bool>,
+    base: Vec<Option<&'static str>>,
 }
 
 impl<'a> AxisReads<'a> {
-    /// Every layer read from the batch it draws, as an axis no layer stacks
+    /// Every layer read from the batch it draws, as an axis no layer adjusts
     /// on (a categorical one) reads them.
     fn unstacked(layers: &'a [Layer]) -> Self {
-        Self { sources: layers.iter().map(LayerSource::of).collect(), stacked: vec![false; layers.len()] }
+        Self { sources: layers.iter().map(LayerSource::of).collect(), base: vec![None; layers.len()] }
     }
 
-    /// Each layer read from its stack in `stacks` where it has one, else from
-    /// the batch it draws.
-    fn over(layers: &'a [Layer], stacks: &'a [Option<RecordBatch>]) -> Self {
+    /// Each layer read from its own preview in `previews` where it has one,
+    /// else from the batch it draws; `base` is each layer's own stack-base
+    /// pairing ([`axis_previews`]'s doc).
+    fn over(layers: &'a [Layer], previews: &'a [Option<RecordBatch>], base: Vec<Option<&'static str>>) -> Self {
         Self {
             sources: layers
                 .iter()
-                .zip(stacks)
-                .map(|(layer, stack)| stack.as_ref().map_or(LayerSource::of(layer), LayerSource::Batch))
+                .zip(previews)
+                .map(|(layer, preview)| preview.as_ref().map_or(LayerSource::of(layer), LayerSource::Batch))
                 .collect(),
-            stacked: stacks.iter().map(Option::is_some).collect(),
+            base,
         }
     }
 
@@ -193,7 +197,7 @@ impl<'a> AxisReads<'a> {
     /// The stack's base column for a layer that stacks on the axis: a
     /// stacked segment draws from its base to its top.
     fn base(&self, layer: usize) -> Option<&'static str> {
-        self.stacked[layer].then_some(crate::render::position::STACK_BASE_COLUMN)
+        self.base[layer]
     }
 
     /// The span a layer's seed read pairs with: `span`, its own `x2`/`y2`,
@@ -205,58 +209,103 @@ impl<'a> AxisReads<'a> {
     }
 }
 
-/// The stack each layer draws on the numeric axis `channel`, by layer index:
-/// [`crate::render::position::layer_stack_preview`] over the batch the layer
-/// draws, or `None` for a layer that stacks nothing there. A layer on the
+/// [`axis_previews`]'s per-layer result: each layer's own preview batch
+/// (`None` for a layer that adjusts nothing on the axis) paired with its
+/// stack-base column name (`Some` only for a layer whose effective
+/// position is `Stack`, [`AxisReads::over`]'s doc).
+type LayerAxisPreviews = (Vec<Option<RecordBatch>>, Vec<Option<&'static str>>);
+
+/// The position adjustment each layer draws on the numeric axis `channel`,
+/// by layer index: [`crate::render::position::layer_position_preview`] over
+/// the batch the layer draws, or `None` for a layer that adjusts nothing
+/// there. `Stack` previews its own stacked batch; a layer's continuous `Dodge` or
+/// data-space `Jitter` previews as its adjusted rows alone, so the layer's
+/// contributed batch spans exactly the positions it draws. A layer on the
 /// chart's data on a facet-shared axis (`include_final`) previews the
-/// all-panels batch too, stacked panel by panel, so every panel's axis spans
-/// the tallest panel's stack. A layer whose own coord exchanges its channels
-/// relative to the panel is left to
+/// all-panels batch too, panel by panel, so every panel's axis spans the
+/// widest panel's adjustment. A layer whose own coord exchanges its
+/// channels relative to the panel is left to
 /// `scene_build::validate_layer_coord_exchange_is_servable`, and an
-/// `independent_y` layer stacks on its own y axis, not this one; neither
-/// stacks here. Refuses a facet field the panel split cannot read
-/// (`position::stack_preview`).
-fn axis_stacks(
+/// `independent_y` layer adjusts on its own y axis, not this one; neither
+/// adjusts here. Refuses a facet field the panel split cannot read
+/// (`position::position_preview`). `color` is the panel's one resolved
+/// color scale, threaded to every layer's `Dodge` preview so its sub-band
+/// order never diverges from the draw's.
+fn axis_previews(
     spec: &ChartSpec,
     layers: &[Layer],
     channel: &str,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     include_final: bool,
-) -> Result<Vec<Option<RecordBatch>>, RenderError> {
+    color: Option<&crate::render::scale_resolve::ColorScale>,
+) -> Result<LayerAxisPreviews, RenderError> {
     use crate::spec::position::StackValueAxis;
     let axis = match channel {
         "x" => StackValueAxis::X,
         "y" => StackValueAxis::Y,
-        _ => return Ok(vec![None; layers.len()]),
+        _ => return Ok((vec![None; layers.len()], vec![None; layers.len()])),
     };
     let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
-    layers
-        .iter()
-        .enumerate()
-        .map(|(index, layer)| {
-            let exchanges = index != 0 && layer_flips(layer, spec.coord.as_ref()) != chart_flipped;
-            if exchanges || (axis == StackValueAxis::Y && layer.independent_y) {
-                return Ok(None);
-            }
-            let preview = |batch: &RecordBatch| crate::render::position::layer_stack_preview(spec, layer, axis, batch);
-            match LayerSource::of(layer) {
-                LayerSource::Chart => {
-                    let Some(rows) = preview(primary_batch)? else { return Ok(None) };
+    let mut previews = Vec::with_capacity(layers.len());
+    let mut bases = Vec::with_capacity(layers.len());
+    for (index, layer) in layers.iter().enumerate() {
+        let exchanges = index != 0 && layer_flips(layer, spec.coord.as_ref()) != chart_flipped;
+        if exchanges || (axis == StackValueAxis::Y && layer.independent_y) {
+            previews.push(None);
+            bases.push(None);
+            continue;
+        }
+        // Read the same way `axis_batch`'s own inline `base` check reads it
+        // for the unlayered case: this layer's effective position is
+        // `Stack` or it isn't, from its own post-flip encoding and
+        // position — never from whether its preview happened to return
+        // `Some` (a `Dodge`/`Jitter` preview is `Some` too: its own adjusted
+        // rows alone, never a union with the unadjusted ones).
+        let drawn = crate::render::prepare::LayerPrepared::from_chart_and_layer(spec, layer).in_its_coord();
+        let base = crate::render::position::layer_prepared_stacks(&drawn)?
+            .then_some(crate::render::position::STACK_BASE_COLUMN);
+        let preview =
+            |batch: &RecordBatch| crate::render::position::layer_position_preview(spec, layer, axis, batch, color);
+        let result = match LayerSource::of(layer) {
+            LayerSource::Chart => match preview(primary_batch)? {
+                None => None,
+                Some(rows) => {
                     let all_panels = match include_final.then(|| transform_outputs.get(FINAL_OUTPUT_KEY)).flatten() {
                         Some(all_panels) => preview(all_panels)?,
                         None => None,
                     };
-                    Ok(match all_panels {
-                        Some(all_panels) => arrow::compute::concat_batches(&rows.schema(), [&rows, &all_panels]).ok(),
+                    match all_panels {
+                        // `concat_by_name`, not a positional `concat_batches`: a
+                        // chart-data layer's own-panel preview and the all-panels
+                        // preview can disagree on dtype exactly the way two facet
+                        // panels can (an Int64/Float32/Timestamp no-op `Dodge`
+                        // beside a `Float64` dodged one), and a plain
+                        // `concat_batches` either errors or, via `.ok()`, drops
+                        // the whole layer's preview silently on any mismatch —
+                        // including a genuine column-count difference, which it
+                        // would otherwise align POSITIONALLY. Reconciles the
+                        // same way `position::adjusted_across_panels` does; a
+                        // real failure refuses instead of leaving the axis
+                        // unwidened with no warning.
+                        Some(all_panels) => Some(
+                            crate::transform::concat::concat_by_name("position preview", vec![rows, all_panels])
+                                .map_err(RenderError::ScaleResolutionFailed)?,
+                        ),
                         None => Some(rows),
-                    })
+                    }
                 }
-                LayerSource::Output(key) => transform_outputs.get(key).map_or(Ok(None), preview),
-                LayerSource::Batch(batch) => preview(batch),
-            }
-        })
-        .collect()
+            },
+            LayerSource::Output(key) => match transform_outputs.get(key) {
+                Some(batch) => preview(batch)?,
+                None => None,
+            },
+            LayerSource::Batch(batch) => preview(batch)?,
+        };
+        previews.push(result);
+        bases.push(base);
+    }
+    Ok((previews, bases))
 }
 
 /// The positional bindings `layer` draws on the shared `channel`: the
@@ -1479,6 +1528,48 @@ pub(in crate::render) struct SortContext<'a> {
     pub(in crate::render) coord_flipped: bool,
 }
 
+/// Whether `ctx.category_field`'s column in `ctx.batch` is numeric (`Int*`,
+/// `UInt*`, `Float*`): a sorted ordinal domain over such a column orders by
+/// value, not by its stringified text ([`apply_sort_to_domain`]'s doc).
+/// `false` when the column is absent from `ctx.batch` (a sort-field object's
+/// own domain-batch fallback never needs this; a plain `"ascending"`/
+/// `"descending"` always resolves `ctx.category_field` against `ctx.batch`
+/// itself) or is `Utf8`/`LargeUtf8`/`Categorical`/any other non-numeric
+/// dtype.
+fn numeric_category_column(ctx: &SortContext<'_>) -> bool {
+    ctx.batch
+        .column_by_name(ctx.category_field)
+        .is_some_and(|c| crate::render::arrow_cast::is_numeric(c.data_type()))
+}
+
+/// One domain entry's sort key under a numeric-valued sort: `(tier, value,
+/// text)`. Tier 0 is every entry that parses as a finite-or-infinite `f64`,
+/// ordered by `value`; tier 1 is an entry that parses as NaN (the ordinal
+/// reader's own NaN formatting, `"NaN"`); tier 2 is an entry that does not
+/// parse as a number at all (an explicit scale domain can name one that
+/// isn't). `text` breaks a tie within a tier — including putting multiple
+/// non-parsing entries in their own text order, the one case plain value
+/// comparison cannot order.
+fn numeric_domain_sort_key(s: &str) -> (u8, f64, &str) {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_nan() => (1, 0.0, s),
+        Ok(v) => (0, v, s),
+        Err(_) => (2, 0.0, s),
+    }
+}
+
+/// Ascending comparator for [`numeric_domain_sort_key`]; `"descending"`
+/// sorts ascending through this and then reverses the whole result, which
+/// is the one way to make the NaN tier land after every finite value AND
+/// before the non-parsing tier in BOTH directions at once.
+fn numeric_domain_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (ta, va, sa) = numeric_domain_sort_key(a);
+    let (tb, vb, sb) = numeric_domain_sort_key(b);
+    ta.cmp(&tb)
+        .then_with(|| va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| sa.cmp(sb))
+}
+
 /// Apply `encoding.sort` to an ordinal domain in place.
 ///
 /// Accepted forms (mirrors the Vega-Lite `sort` field):
@@ -1505,6 +1596,14 @@ pub(in crate::render) struct SortContext<'a> {
 /// [`RenderWarning::SortSpecIgnored`] is pushed onto `warnings` — never a silent
 /// no-op and never a panic. A malformed sort-field object refuses with
 /// [`RenderError::SortSpecMalformed`].
+///
+/// `"ascending"`/`"descending"` order a NUMERIC category column (`Int*`,
+/// `UInt*`, `Float*`) by value rather than as text, so `[-3, 1, 10, 2]`
+/// reads `-3, 1, 2, 10` rather than `-3, 1, 10, 2` — every categorical
+/// door (facet panels, ordinal axes, categorical legends) shares this one
+/// function, so a sorted numeric facet, axis and legend all order the same
+/// way. A `Utf8`/`Categorical` column (or one the explicit-domain fallback
+/// batch holds no column for) keeps plain text order, byte-identical.
 pub(in crate::render) fn apply_sort_to_domain(
     domain: &mut Vec<String>,
     sort: Option<&serde_json::Value>,
@@ -1514,10 +1613,19 @@ pub(in crate::render) fn apply_sort_to_domain(
     match sort {
         None => {}
         Some(serde_json::Value::String(s)) if s == "ascending" => {
-            domain.sort_unstable();
+            if numeric_category_column(ctx) {
+                domain.sort_by(|a, b| numeric_domain_cmp(a, b));
+            } else {
+                domain.sort_unstable();
+            }
         }
         Some(serde_json::Value::String(s)) if s == "descending" => {
-            domain.sort_unstable_by(|a, b| b.cmp(a));
+            if numeric_category_column(ctx) {
+                domain.sort_by(|a, b| numeric_domain_cmp(a, b));
+                domain.reverse();
+            } else {
+                domain.sort_unstable_by(|a, b| b.cmp(a));
+            }
         }
         Some(serde_json::Value::String(s))
             if matches!(s.as_str(), "x" | "-x" | "y" | "-y") =>
@@ -1901,18 +2009,24 @@ impl TextEdgeRows {
 /// the rendered coordinate space ([`LayerPrepared::in_its_coord`]), so
 /// `channel` ("x" or "y") is read straight off it with no flip logic; a
 /// caller that means the primary y slot only (excluding an `independent_y`
-/// layer) filters `layers` before calling. A stacking layer's stacked value
-/// is read through [`crate::render::position::layer_prepared_stack_preview`],
-/// the same stack the draw pass places that layer with, so a stacked text
-/// row is measured at its stacked value, consistent with the domain it is
-/// measured against — layered and unlayered alike, since every rendered
-/// layer is a `LayerPrepared`.
+/// layer) filters `layers` before calling. An adjusted layer's effective
+/// batch is read through
+/// [`crate::render::position::layer_prepared_position_preview`], the same
+/// position preview the axis domain reads: a stacking layer's text
+/// measures at its stacked value, and a dodged/jittered layer's
+/// text measures at its adjusted positions, so its ink reserve never
+/// under-measures wherever the adjustment actually draws it — layered and
+/// unlayered alike, since every rendered layer is a `LayerPrepared`.
+/// `color` is the panel's one resolved color scale, the same one the
+/// draw's `Dodge` reads, so a dodged text layer's ink measures at the same
+/// sub-band order the draw places it.
 pub(in crate::render) fn text_edge_rows<'a>(
     channel: &str,
     layers: impl IntoIterator<Item = (&'a LayerPrepared, &'a RecordBatch)>,
     facet: Option<&crate::layout::facet::FacetSpec>,
     theme: &crate::layout::ThemeInputs,
     metrics: &crate::render::font::FontdueMetrics,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> TextEdgeRows {
     use crate::layout::geometry::TEXT_INSET_FLOOR_PX as FLOOR;
     use crate::render::marks::text::{glyph_edge_extents, numeric_labels, text_glyphs};
@@ -1972,10 +2086,10 @@ pub(in crate::render) fn text_edge_rows<'a>(
             _ => None,
         })
         .map(|e| e.field.as_str()) else { continue };
-        let stacked = crate::render::position::layer_prepared_stack_preview(layer, axis, batch, facet)
+        let adjusted = crate::render::position::layer_prepared_position_preview(layer, axis, batch, facet, color)
             .ok()
             .flatten();
-        let effective = stacked.as_ref().unwrap_or(batch);
+        let effective = adjusted.as_ref().unwrap_or(batch);
         measure(layer.mark_style.as_ref(), effective, &layer.encoding, field);
     }
     TextEdgeRows(rows)
@@ -1995,6 +2109,7 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
     facet: Option<&crate::layout::facet::FacetSpec>,
     theme: &crate::layout::ThemeInputs,
     metrics: &crate::render::font::FontdueMetrics,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> TextEdgeRows {
     if channel == "y" {
         let primary_slot = layers
@@ -2002,9 +2117,9 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
             .enumerate()
             .filter(|(i, _)| y_slot_plan.slot_for_layer(*i) == 0)
             .map(|(_, pair)| pair);
-        text_edge_rows(channel, primary_slot, facet, theme, metrics)
+        text_edge_rows(channel, primary_slot, facet, theme, metrics, color)
     } else {
-        text_edge_rows(channel, layers, facet, theme, metrics)
+        text_edge_rows(channel, layers, facet, theme, metrics, color)
     }
 }
 
@@ -2086,6 +2201,7 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     [`super::positional::build_axis_scale`] — read the two together; this
 ///     doc owns the arithmetic and its eligibility terms, not the question of
 ///     which specs get here.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
     field: &str,
@@ -2094,6 +2210,7 @@ pub(in crate::render) fn numeric_domain_union(
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
     include_final: bool,
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<(f64, f64), RenderError> {
     numeric_domain_union_over(
         channel,
@@ -2105,6 +2222,7 @@ pub(in crate::render) fn numeric_domain_union(
         include_final,
         LayerUnion::Every,
         None,
+        color,
     )
     .map(|(e, _)| (e.lo, e.hi))
 }
@@ -2446,6 +2564,12 @@ pub(in crate::render) fn numeric_domain_union_over(
     include_final: bool,
     layer_union: LayerUnion<'_>,
     side: Option<crate::scale::log::LogSide>,
+    // The panel's own resolved color scale, threaded to every layer's
+    // `Dodge` preview ([`axis_previews`]) so a sorted or explicitly-domained
+    // legend's sub-band order never diverges from the draw's. `None` for
+    // every caller that is not itself resolving the axis a `Dodge` reads
+    // (a direct test, or a context with no color scale to offer).
+    color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<(SidedExtent, LeftOutTally), RenderError> {
     // `(mn, mx)` in a `Cell` while the closures below are live: `extent_only`
     // and `read`'s `take_extent_only` both need to update it, and a `Cell`
@@ -2615,8 +2739,8 @@ pub(in crate::render) fn numeric_domain_union_over(
     // kept for the layer loop below, so a layer drawing a seed read's field
     // from its batch is not read twice.
     let layers = spec.layers.as_deref().unwrap_or_default();
-    let stacks = axis_stacks(spec, layers, channel, primary_batch, transform_outputs, include_final)?;
-    let reads = AxisReads::over(layers, &stacks);
+    let (previews, bases) = axis_previews(spec, layers, channel, primary_batch, transform_outputs, include_final, color)?;
+    let reads = AxisReads::over(layers, &previews, bases);
     let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
     // Unlayered ([`ChartSpec::is_layered`]): with no layer there is no
@@ -3469,6 +3593,118 @@ mod tests {
         assert!(matches!(&warnings[0], RenderWarning::SortSpecIgnored { .. }));
     }
 
+    // --- Numeric ascending/descending orders by value, not as text ---------
+
+    fn int64_category_batch(values: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(arrow::array::Int64Array::from(values))]).unwrap()
+    }
+
+    fn uint64_category_batch(values: Vec<u64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(arrow::array::UInt64Array::from(values))]).unwrap()
+    }
+
+    fn float64_category_batch(values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(arrow::array::Float64Array::from(values))]).unwrap()
+    }
+
+    fn numeric_sort_ctx<'a>(batch: &'a RecordBatch) -> SortContext<'a> {
+        SortContext { category_field: "v", batch, fallback: None, x_field: None, y_field: None, coord_flipped: false }
+    }
+
+    /// `[-3, 10, 1, 2]` ascending reads `-3, 1, 2, 10` by value, not
+    /// `-3, 1, 10, 2` as text would order it.
+    #[test]
+    fn apply_sort_to_domain_orders_an_int64_column_by_value_ascending() {
+        let batch = int64_category_batch(vec![-3, 10, 1, 2]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["-3".to_string(), "10".to_string(), "1".to_string(), "2".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["-3", "1", "2", "10"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `descending` reverses the whole numeric-ordered result: `10, 2, 1, -3`.
+    #[test]
+    fn apply_sort_to_domain_orders_an_int64_column_by_value_descending() {
+        let batch = int64_category_batch(vec![-3, 10, 1, 2]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["-3".to_string(), "10".to_string(), "1".to_string(), "2".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("descending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["10", "2", "1", "-3"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A `UInt64` column orders by value the same way.
+    #[test]
+    fn apply_sort_to_domain_orders_a_uint64_column_by_value() {
+        let batch = uint64_category_batch(vec![10, 2, 1]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["10".to_string(), "2".to_string(), "1".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["1", "2", "10"]);
+    }
+
+    /// A `Float64` column orders by value, including negatives and
+    /// integer-valued floats stringified without a decimal point (`10`,
+    /// not `10.0`, matching `col_as_ordinal_category_str`'s own format).
+    #[test]
+    fn apply_sort_to_domain_orders_a_float64_column_by_value() {
+        let batch = float64_category_batch(vec![1.5, -0.5, 10.0]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["1.5".to_string(), "-0.5".to_string(), "10".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["-0.5", "1.5", "10"]);
+    }
+
+    /// A `NaN` category (the ordinal reader's own `"NaN"` text for a
+    /// Float64 NaN value) sorts after every finite number, both directions.
+    #[test]
+    fn apply_sort_to_domain_puts_nan_after_every_finite_number() {
+        let batch = float64_category_batch(vec![1.0, -2.0]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["NaN".to_string(), "1".to_string(), "-2".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["-2", "1", "NaN"], "ascending: NaN last");
+        let mut domain = vec!["NaN".to_string(), "1".to_string(), "-2".to_string()];
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("descending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["NaN", "1", "-2"], "descending: NaN first (the whole order reverses)");
+    }
+
+    /// An explicit scale domain can name an entry that isn't a number at
+    /// all (`"x"`) alongside a numeric column's own values: the numbers
+    /// order by value, and the non-parsing entry sorts after all of them.
+    #[test]
+    fn apply_sort_to_domain_puts_a_non_numeric_explicit_entry_after_every_number() {
+        let batch = int64_category_batch(vec![1, 2]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut domain = vec!["x".to_string(), "2".to_string(), "1".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["1", "2", "x"]);
+    }
+
+    /// A `Utf8`/`Categorical` column holding digit strings stays in plain
+    /// text order (`"10"` before `"2"`): the numeric-value rule applies
+    /// only to a numeric column, never to a string column whose VALUES
+    /// happen to look numeric.
+    #[test]
+    fn apply_sort_to_domain_keeps_text_order_for_a_utf8_column_of_digits() {
+        let batch = group_batch(vec!["10", "2"]);
+        let ctx = SortContext { category_field: "group", batch: &batch, fallback: None, x_field: None, y_field: None, coord_flipped: false };
+        let mut domain = vec!["10".to_string(), "2".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["10", "2"], "text order: '10' < '2' byte-wise");
+    }
+
     // --- R3: SortSpecIgnored (channel-shorthand family) ---------------------
 
     /// R3, unflipped shape: `SortContext.x_field`/`y_field` reflect an ordinary
@@ -3673,7 +3909,7 @@ mod tests {
         let spec: ChartSpec =
             serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
         let batch = abc_batch();
-        numeric_domain_union(channel, field, None, &batch, &HashMap::new(), &spec, false)
+        numeric_domain_union(channel, field, None, &batch, &HashMap::new(), &spec, false, None)
             .expect("every field in the fixture is Float64")
     }
 
@@ -3794,7 +4030,7 @@ mod tests {
         let spec: ChartSpec =
             serde_json::from_str(LAYER_UTF8_Y_SPEC_JSON).expect("spec JSON must deserialize");
         let batch = ab_s_batch();
-        let err = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+        let err = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false, None)
             .expect_err("a Utf8 layer column must refuse the shared numeric axis");
         assert_eq!(
             err,
@@ -3825,7 +4061,7 @@ mod tests {
         let spec: ChartSpec =
             serde_json::from_str(LAYER_ABSENT_Y_SPEC_JSON).expect("spec JSON must deserialize");
         let batch = ab_s_batch();
-        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("an absent layer field must not refuse");
         assert_eq!(extent, (1.0, 2.0), "the absent field must not widen or shrink the union");
     }
@@ -3837,7 +4073,7 @@ mod tests {
         let spec: ChartSpec = serde_json::from_str(LAYER_TEMPORAL_Y_SPEC_JSON)
             .expect("spec JSON must deserialize");
         let batch = ab_t_batch();
-        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("a Timestamp layer column must be admitted, not refused");
         assert_eq!(
             extent,
@@ -3879,7 +4115,7 @@ mod tests {
         .unwrap();
         let mut outputs = HashMap::new();
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), final_batch);
-        let err = numeric_domain_union("y", "a", None, &primary, &outputs, &spec, true)
+        let err = numeric_domain_union("y", "a", None, &primary, &outputs, &spec, true, None)
             .expect_err("z's Utf8 copy in the global batch must still refuse the render");
         assert_eq!(
             err,
@@ -3973,7 +4209,7 @@ mod tests {
         let primary = group_batch(vec!["a", "b"]);
         let mut outputs = HashMap::new();
         outputs.insert("summary".to_string(), catplot_summary_batch());
-        numeric_domain_union(channel, field, None, &primary, &outputs, &spec, false)
+        numeric_domain_union(channel, field, None, &primary, &outputs, &spec, false, None)
             .expect("every field in the fixture is Float64")
     }
 
@@ -4056,7 +4292,7 @@ mod tests {
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![50.0, 80.0]))])
                 .unwrap()
         };
-        let extent = numeric_domain_union("y", "val", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "val", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("val is Float64");
         assert_eq!(
             extent,
@@ -4140,6 +4376,7 @@ mod tests {
             &HashMap::new(),
             &spec,
             false,
+            None,
         )
         .expect("bin_start/bin_end are Float64");
         assert_eq!(
@@ -4191,7 +4428,7 @@ mod tests {
             .expect("lowered spec JSON must deserialize");
         let batch = y2_bound_bar_batch();
         let extent =
-            numeric_domain_union("y", "lo", Some("hi"), &batch, &HashMap::new(), &spec, false)
+            numeric_domain_union("y", "lo", Some("hi"), &batch, &HashMap::new(), &spec, false, None)
                 .expect("lo/hi are Float64");
         assert_eq!(
             extent,
@@ -4243,7 +4480,7 @@ mod tests {
             .expect("lowered spec JSON must deserialize");
         let batch = displot_hist_batch();
         let x_extent =
-            numeric_domain_union("x", "count", None, &batch, &HashMap::new(), &spec, false)
+            numeric_domain_union("x", "count", None, &batch, &HashMap::new(), &spec, false, None)
                 .expect("count is Float64");
         assert_eq!(
             x_extent,
@@ -4259,6 +4496,7 @@ mod tests {
             &HashMap::new(),
             &spec,
             false,
+            None,
         )
         .expect("bin_start/bin_end are Float64");
         assert_eq!(
@@ -4303,7 +4541,7 @@ mod tests {
                 .unwrap()
         };
         let extent =
-            numeric_domain_union("x", "feature", None, &batch, &HashMap::new(), &spec, false)
+            numeric_domain_union("x", "feature", None, &batch, &HashMap::new(), &spec, false, None)
                 .expect("feature is Float64 in this fixture");
         assert_eq!(
             extent,
@@ -4336,6 +4574,7 @@ mod tests {
             false,
             LayerUnion::CarryingScale(&scale),
             None,
+            None,
         )
         .expect("an all-null Float64 column is readable");
         assert_eq!((extent.lo, extent.hi), (0.0, 1.0));
@@ -4365,6 +4604,7 @@ mod tests {
                 false,
                 union,
                 None,
+                None,
             )
             .expect("an all-null Int64 column is readable");
             assert_eq!((extent.lo, extent.hi), (0.0, 1.0));
@@ -4387,7 +4627,7 @@ mod tests {
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![-3.0, -8.0]))])
                 .unwrap()
         };
-        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("score is Float64");
         assert_eq!(
             extent,
@@ -4416,7 +4656,7 @@ mod tests {
             let schema = Arc::new(Schema::new(vec![Field::new("score", DataType::Float64, false)]));
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![5.0]))]).unwrap()
         };
-        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("score is Float64");
         assert_eq!(
             extent,
@@ -4453,7 +4693,7 @@ mod tests {
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![50.0, 80.0]))])
                 .unwrap()
         };
-        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("score is Float64");
         assert_eq!(
             extent,
@@ -4488,7 +4728,7 @@ mod tests {
                 .unwrap()
         };
         let extent =
-            numeric_domain_union("y", "existing", None, &batch, &HashMap::new(), &spec, false)
+            numeric_domain_union("y", "existing", None, &batch, &HashMap::new(), &spec, false, None)
                 .expect("existing is Float64");
         assert_eq!(
             extent,
@@ -4874,7 +5114,7 @@ mod tests {
     fn a_stat_layer_reads_its_own_output_not_the_raw_column_of_the_same_name() {
         let spec = spec_from(SMOOTH_CI_SPEC_JSON);
         let (raw, outputs) = smooth_ci_batches();
-        let extent = numeric_domain_union("y", "ci_lower", Some("ci_upper"), &raw, &outputs, &spec, false)
+        let extent = numeric_domain_union("y", "ci_lower", Some("ci_upper"), &raw, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (-0.2, 20.0));
     }
@@ -4896,6 +5136,7 @@ mod tests {
             &spec,
             false,
             LayerUnion::CarryingScale(&scale),
+            None,
             None,
         )
         .expect("every column is Float64");
@@ -4928,7 +5169,7 @@ mod tests {
     fn a_user_column_sharing_a_layer_field_name_is_not_read_for_that_layer() {
         let spec = spec_from(ERRORBAR_SPEC_JSON);
         let (raw, outputs) = errorbar_batches();
-        let extent = numeric_domain_union("y", "v", None, &raw, &outputs, &spec, false)
+        let extent = numeric_domain_union("y", "v", None, &raw, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (-1.2, 2.0));
     }
@@ -4946,7 +5187,7 @@ mod tests {
             ("lower", f64_col(&[-100.0, -100.0, -100.0, -100.0])),
         ]);
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
-        let extent = numeric_domain_union("y", "v", None, &raw, &outputs, &spec, true)
+        let extent = numeric_domain_union("y", "v", None, &raw, &outputs, &spec, true, None)
             .expect("every column is Float64");
         assert_eq!(extent, (-1.2, 9.0), "the panel-spanning `v` reaches 9, the user's `lower` reaches nothing");
     }
@@ -4976,7 +5217,7 @@ mod tests {
     fn the_seed_field_is_read_from_layer_zeros_batch() {
         let spec = spec_from(OPERAND_BRANCHES_SPEC_JSON);
         let (merged, outputs) = operand_batches(&[1.0, 2.0]);
-        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false)
+        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 4.0));
     }
@@ -4987,7 +5228,7 @@ mod tests {
     fn an_empty_layer_batch_contributes_nothing() {
         let spec = spec_from(OPERAND_BRANCHES_SPEC_JSON);
         let (merged, outputs) = operand_batches(&[]);
-        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false)
+        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (3.0, 4.0));
     }
@@ -5001,7 +5242,7 @@ mod tests {
         const INHERITING: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"v"}},"data_source":"lhs"},{"mark":"point","encoding":{"x":{"field":"x"}}}]}"#;
         let spec = spec_from(INHERITING);
         let (merged, outputs) = operand_batches(&[1.0, 2.0]);
-        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false)
+        let extent = numeric_domain_union("y", "v", None, &merged, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 200.0));
     }
@@ -5111,7 +5352,7 @@ mod tests {
             ("rhs".to_string(), columns_batch(vec![("g", f64_col(&[1.0, 2.0])), ("w", f64_col(&[3.0, 4.0]))])),
             (FINAL_OUTPUT_KEY.to_string(), merged.clone()),
         ]);
-        let extent = numeric_domain_union("x", "g", None, &merged, &outputs, &spec, false)
+        let extent = numeric_domain_union("x", "g", None, &merged, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 2.0));
     }
@@ -5141,6 +5382,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             &mut warnings,
         )
         .expect("a band scale over a Utf8 column resolves");
@@ -5170,8 +5412,8 @@ mod tests {
         ]);
         let outputs =
             HashMap::from([("raster".to_string(), raster), (FINAL_OUTPUT_KEY.to_string(), raw.clone())]);
-        let x = numeric_domain_union("x", "x", None, &raw, &outputs, &spec, false).expect("Float64 columns");
-        let y = numeric_domain_union("y", "y", None, &raw, &outputs, &spec, false).expect("Float64 columns");
+        let x = numeric_domain_union("x", "x", None, &raw, &outputs, &spec, false, None).expect("Float64 columns");
+        let y = numeric_domain_union("y", "y", None, &raw, &outputs, &spec, false, None).expect("Float64 columns");
         assert_eq!((x, y), ((-1.5, 3.5), (10.5, 11.5)));
     }
 
@@ -5195,7 +5437,7 @@ mod tests {
             ("_ident_0".to_string(), source),
             (FINAL_OUTPUT_KEY.to_string(), filtered.clone()),
         ]);
-        let extent = numeric_domain_union("x", "a", None, &filtered, &outputs, &spec, false)
+        let extent = numeric_domain_union("x", "a", None, &filtered, &outputs, &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 6.0));
     }
@@ -5216,7 +5458,7 @@ mod tests {
             ("b", f64_col(&[1.0, 2.0, 3.0])),
             ("c", f64_col(&[100.0, 200.0, 300.0])),
         ]);
-        let extent = numeric_domain_union("x", "a", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("x", "a", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 300.0));
     }
@@ -5236,7 +5478,7 @@ mod tests {
             ("b", f64_col(&[1.0, 2.0, 3.0])),
             ("c", f64_col(&[100.0, 200.0, 300.0])),
         ]);
-        let extent = numeric_domain_union("x", "a", None, &batch, &HashMap::new(), &spec, false)
+        let extent = numeric_domain_union("x", "a", None, &batch, &HashMap::new(), &spec, false, None)
             .expect("every column is Float64");
         assert_eq!(extent, (1.0, 3.0));
     }
@@ -5453,7 +5695,7 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (_, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, true, LayerUnion::Every, side)
+        let (_, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, true, LayerUnion::Every, side, None)
             .expect("v is Float64 in this fixture");
         assert_eq!(tally.rows(), 2, "the whole frame has 2 off-side rows, not 3 (the panel's 1 double-counted): {tally:?}");
     }
@@ -5482,7 +5724,7 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, false, LayerUnion::Every, side)
+        let (extent, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, false, LayerUnion::Every, side, None)
             .expect("v is Float64 in this fixture");
         assert_eq!((extent.lo, extent.hi), (1.0, 10.0), "the panel's own on-side extent stays independent");
         assert_eq!(tally.rows(), 2, "the tally reads the whole frame regardless of facet resolution: {tally:?}");
@@ -5514,7 +5756,7 @@ mod tests {
         );
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
             .expect("f is Float64 in the 'box' output");
         assert_eq!((extent.lo, extent.hi), (1.0, 10.0));
         assert_eq!(tally.rows(), 1, "the one off-side row (-5) must be counted: {tally:?}");
@@ -5542,7 +5784,7 @@ mod tests {
         );
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
             .expect("f is Float64 in the 'box' output");
         assert_eq!(tally.rows(), 2);
         assert!(!tally.any_on_side());
@@ -5571,9 +5813,96 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), f_batch);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side)
+        let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
             .expect("f is Float64");
         assert_eq!(tally.rows(), 1, "'box' and FINAL are equal by content: counted once, not twice: {tally:?}");
+    }
+
+    /// A two-layer, faceted, shared-x (`include_final: true`) spec whose
+    /// establishing layer (index 0) binds `x`/`g` under `Dodge`.
+    /// `primary_batch` is panel `"A"`'s own one row (`x=1`, one dodge
+    /// group, `apply_dodge`'s `n_groups <= 1` no-op — `Int64` untouched);
+    /// `FINAL` is the whole (unpartitioned) 5-row batch, whose own
+    /// per-panel preview internally reconciles panel `"B"`'s two-group
+    /// dodge to `Float64`. `axis_previews`'s `LayerSource::Chart` arm then
+    /// concatenates panel `"A"`'s own-panel preview (`Int64`, 1 row) with
+    /// that already-reconciled `FINAL` preview (`Float64`, 5 rows) — a
+    /// second `concat_by_name` call, at the point `AxisReads::over` hands
+    /// the establishing layer's seed read a `LayerSource::Batch` built
+    /// from exactly this concatenation. A positional `concat_batches`/
+    /// `align_to_schema` cast here would either error or silently drop
+    /// the mismatched preview; the numeric union instead covers the full
+    /// dodged span.
+    #[test]
+    fn layered_faceted_dodge_seed_read_reconciles_to_float64() {
+        use arrow::array::{Float64Array, Int64Array};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        // Panel A's own no-op x (1) sits INSIDE panel B's dodged span
+        // (0.75..2.25), the same fixture shape `position.rs`'s own
+        // `int64_dodge_facet_batch` uses, so the reconciled extent and a
+        // cast-truncated one are never confusable with "panel A alone
+        // happened to set the extent".
+        let panel_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float64Array::from(vec![0.0])),
+                Arc::new(StringArray::from(vec!["same"])),
+                Arc::new(StringArray::from(vec!["A"])),
+            ],
+        )
+        .unwrap();
+        let whole_frame = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 1, 2, 2])),
+                Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["same", "p", "q", "p", "q"])),
+                Arc::new(StringArray::from(vec!["A", "B", "B", "B", "B"])),
+            ],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), whole_frame);
+
+        let dodge_layer = || Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            position: Some(crate::spec::position::PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 }),
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            layers: Some(vec![dodge_layer(), dodge_layer()]),
+            facet: Some(crate::layout::facet::FacetSpec {
+                field: "f".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                repeat: Vec::new(),
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            ..Default::default()
+        };
+
+        let (extent, _tally) =
+            numeric_domain_union_over("x", "x", None, &panel_a, &outputs, &spec, true, LayerUnion::Every, None, None)
+                .expect("the reconciled Float64 preview must be readable");
+        assert!((extent.lo - 0.75).abs() < 1e-9, "lo={}", extent.lo);
+        assert!((extent.hi - 2.25).abs() < 1e-9, "hi={}", extent.hi);
     }
 
     /// `layer_sort_rows` pairs a layer's pre-statistic rows (`batch`) with
@@ -5812,7 +6141,7 @@ mod tests {
     /// every layer in these fixtures draws from (none names a `data_source`).
     fn rows_over(spec: &ChartSpec, batch: &RecordBatch) -> TextEdgeRows {
         let layers = prepared_layers(spec);
-        text_edge_rows("x", layers.iter().map(|l| (l, batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new())
+        text_edge_rows("x", layers.iter().map(|l| (l, batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new(), None)
     }
 
     #[test]
@@ -5930,7 +6259,7 @@ mod tests {
             ("y", f64_col(&[1.0, 1.0])),
         ]);
         let layers = prepared_layers(&spec);
-        let rows = text_edge_rows("y", layers.iter().map(|l| (l, &batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new());
+        let rows = text_edge_rows("y", layers.iter().map(|l| (l, &batch)), spec.facet.as_ref(), &theme(), &FontdueMetrics::new(), None);
         assert_eq!(rows.0.len(), 2, "both rows measured at their stacked (cumulative) y, not the raw 1.0 twice over");
         let values: Vec<f64> = rows.0.iter().map(|r| r.value).collect();
         assert!(values.iter().any(|v| (*v - 2.0).abs() < 1e-9), "the second row's stacked top should be 2.0, got {values:?}");

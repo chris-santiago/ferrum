@@ -2904,11 +2904,23 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         }
         match (x_enc, y_enc) {
             (Some(x_enc), None) => {
+                // The aux (color/size/...) scales resolve BEFORE the
+                // positional axis so a continuous `Dodge`'s sub-band order
+                // reads the panel's own color scale (choice: one source of
+                // truth for every position-preview route). Held as a
+                // `Result` rather than `?`-propagated here: the positional
+                // axis still raises first, and the aux refusal/warnings
+                // still land after it, so precedence and warning order stay
+                // byte-identical to resolving aux last.
+                let mut aux_warnings = Vec::new();
+                let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
+                let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
                 // Stack-aware x-axis: see `position::axis_batch`.
-                let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
+                let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, &mut warnings)?;
+                warnings.extend(aux_warnings);
+                let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
                     dummy_unit_scale(y_pixel_range, false),
@@ -2916,10 +2928,14 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 ), warnings));
             }
             (None, Some(y_enc)) => {
-                let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
+                let mut aux_warnings = Vec::new();
+                let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
+                let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
+                let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, &mut warnings)?;
+                warnings.extend(aux_warnings);
+                let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
                     y,
@@ -2994,26 +3010,34 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         let (binding, domain) = leaf_scales?.imposed(channel)?;
         positional::imposed_axis_scale(channel.as_str(), binding, domain, pixel_range, warnings)
     };
-    let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared)?;
+    // The non-positional (aux) scales resolve before both positional axes —
+    // same reasoning as the single-axis branches above — so every
+    // continuous axis route (unlayered, layered, single- or two-axis) reads
+    // one color scale for its `Dodge` sub-band order.
+    let mut aux_warnings = Vec::new();
+    let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
+    let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
+    let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, &mut warnings)?,
     };
-    let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared)?;
+    let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
     apply_coord_domain_overrides(spec, &mut x, &mut y, x_pixel_range, y_pixel_range);
 
-    // The non-positional scales. On a layered spec each spans every layer
-    // that draws it, each read from the batch it draws; an unlayered spec
-    // reads the chart-level batch. FA-5 (force_cat), T3 (aux_shared) and that
-    // per-layer reading live in `build_auxiliary_scales`.
-    let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut warnings)?;
+    // Both positional axes resolved: now append the aux warnings and raise
+    // any aux refusal, so refusal precedence and warning order stay
+    // byte-identical to resolving aux last (FA-5 force_cat, T3 aux_shared
+    // and the per-layer reading live in `build_auxiliary_scales`).
+    warnings.extend(aux_warnings);
+    let aux = aux_result?;
 
     Ok((
         ResolvedScales {

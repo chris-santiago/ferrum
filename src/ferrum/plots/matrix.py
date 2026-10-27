@@ -620,7 +620,11 @@ def heatmap(
         When ``True`` and ``vmin``/``vmax`` are unset, clip the color scale
         to the 2nd and 98th percentiles of the data.
     square : bool, default False
-        Force equal width and height per cell so the heatmap is square.
+        Draw square cells: the plot area takes the cell grid's aspect
+        (columns drawn / rows drawn) inside the chart's normal or
+        caller-set size; the chart itself is not square. A layered chart
+        takes its aspect from its first member, so put a square heatmap
+        first; layered after another chart it is refused.
     mask : array-like, "upper", "lower", or None, optional
         Cell-masking control.  When ``"upper"``, only the upper triangle
         (including the diagonal) is shown.  When ``"lower"``, only the
@@ -920,7 +924,12 @@ def _heatmap_build(
                 )
             keep = [(r, c) for r in range(n_rows) for c in range(n_cols) if not mask_arr[r, c]]
 
-        # Build the filtered long-form DataFrame.
+        # Build the filtered long-form DataFrame. A mask that keeps no cell
+        # (every row of a zero-row table, or a mask that hides every cell)
+        # makes `rows_long` empty; `pl.DataFrame([])` from that has no
+        # columns at all, so an explicit schema keeps `id_col`/"column"/
+        # "value" readable and routes this chart into the ordinary
+        # zero-row draw-and-warn path instead of an unknown-column refusal.
         row_labels = pdf[id_col].to_list()
         rows_long: list[dict] = []
         for r, c in keep:
@@ -931,7 +940,13 @@ def _heatmap_build(
                     "value": pdf[value_cols[c]][r],
                 }
             )
-        melted_data = pl.DataFrame(rows_long)
+        melted_data = (
+            pl.DataFrame(rows_long)
+            if rows_long
+            else pl.DataFrame(
+                schema={id_col: pdf.schema[id_col], "column": pl.Utf8, "value": pl.Float64}
+            )
+        )
 
     # Build the chart: Unpivot to long format, then mark_rect.
     unpivot = Unpivot(
@@ -982,13 +997,6 @@ def _heatmap_build(
     rows = Chart(melted_data) if melted_data is not None else Chart(data)._with_statistics(unpivot)
     chart = rows.mark_rect(**rect_kwargs).encode(**enc)
 
-    # square=True → fix width=height proportions.
-    if square:
-        n_rows = tbl.num_rows
-        n_cols = len(value_cols)
-        side = 30 * max(n_rows, n_cols)
-        chart = chart.properties(width=side, height=side)
-
     # annot=True: a sibling label layer composed with `+` (mirrors lmplot's
     # fit operand, regression.py's build_fit_layers), not attached via
     # `chart.layer(...)`, so it does not inherit the cells chart's own
@@ -1016,6 +1024,30 @@ def _heatmap_build(
         ]
         label._mark = None
         chart = _merge_layers(chart, label, scatter_name="cells", fit_name="label")
+
+    # square=True: fix the plot area's aspect so cells are square, at the
+    # chart's normal or caller-set size (no viewport is set). `CoordFixed`
+    # is the layout's one aspect owner (ferrum-spec.md's `CoordFixed(ratio=)`
+    # note), so Python only has to supply the cell grid's ratio -- it cannot
+    # know the gutters (labels, legend, theme) a Python-computed viewport
+    # would need to dodge. The grid is the DRAWN bands, not the raw table
+    # shape: a mask path counts distinct bands in `melted_data` (hidden rows
+    # or columns shrink the grid, and an empty-schema `melted_data` from a
+    # mask that keeps no cell counts 0 of each); the unmasked path counts
+    # the drawn value columns -- 0 at zero rows, since no band is drawn --
+    # and the distinct (duplicate- and null-collapsing) id values, with
+    # `max(..., 1)` keeping the ratio defined (and the empty panel square)
+    # whenever either count is 0.
+    if square:
+        from ferrum.coord import CoordFixed
+
+        if melted_data is not None:
+            n_cols_drawn = len(set(melted_data["column"].to_list()))
+            n_rows_drawn = len(set(melted_data[id_col].to_list()))
+        else:
+            n_cols_drawn = len(value_cols) if tbl.num_rows else 0
+            n_rows_drawn = len(set(tbl[id_col].to_pylist()))
+        chart = chart.coord(CoordFixed(ratio=max(n_cols_drawn, 1) / max(n_rows_drawn, 1)))
 
     from ferrum.title import Title
 
