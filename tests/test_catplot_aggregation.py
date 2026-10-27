@@ -30,7 +30,11 @@ import ferrum as fm
 from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
 from ferrum.plots.distribution import _CATPLOT_PER_ROW_APPEARANCE_CHANNELS
 
-from _svg_extents import assert_bars_start_on_the_zero_tick, axis_tick_labels, y_axis_units_per_pixel
+from _svg_extents import (
+    assert_bars_start_on_the_zero_tick,
+    axis_tick_labels,
+    y_axis_units_per_pixel,
+)
 from _svg_rects import data_bar_rects, svg_elements
 
 # The whisker is a `rule` mark stroked with the theme's `label` token. Axis

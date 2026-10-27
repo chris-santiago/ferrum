@@ -717,15 +717,6 @@ pub(crate) fn depth_key(k: usize) -> String {
     format!("depth_{k}")
 }
 
-/// Every key [`secondary_outputs`] publishes for `spec`: its outliers and
-/// each named depth, each under its name.
-pub(crate) fn secondary_keys(spec: &LetterValueSpec) -> Vec<String> {
-    std::iter::once(OUTLIERS_KEY.to_string())
-        .chain((1..=K_MAX_NAMED).map(depth_key))
-        .map(|key| crate::transform::registry::secondary_key(spec.name.as_deref(), &key))
-        .collect()
-}
-
 /// Compute the secondary named outputs: outliers + depth_1..depth_12.
 ///
 /// Reads the combinations back off `primary_batch`: its `group` column and

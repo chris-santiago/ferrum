@@ -824,7 +824,9 @@ def test_a_rescue_that_would_cull_every_x_label_is_declined():
         warnings.simplefilter("always")
         assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
     assert off_warnings == []
-    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the left by 13\.5px"):
+    with pytest.warns(
+        UserWarning, match=r"x tick labels overflow the canvas on the left by 13\.5px"
+    ):
         svg_default = chart.to_svg()
     assert svg_default == svg_auto_false
 
@@ -873,7 +875,9 @@ def test_a_rescue_that_thins_the_x_labels_to_two_is_declined():
         warnings.simplefilter("always")
         assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
     assert off_warnings == []
-    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the right by 10\.3px"):
+    with pytest.warns(
+        UserWarning, match=r"x tick labels overflow the canvas on the right by 10\.3px"
+    ):
         svg_default = chart.to_svg()
     assert svg_default == svg_auto_false
 
@@ -917,7 +921,9 @@ def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
         warnings.simplefilter("always")
         assert chart.configure_padding(auto=False).to_svg() == svg_auto_false
     assert off_warnings == []
-    with pytest.warns(UserWarning, match=r"x tick labels overflow the canvas on the right by 24\.3px"):
+    with pytest.warns(
+        UserWarning, match=r"x tick labels overflow the canvas on the right by 24\.3px"
+    ):
         svg_default = chart.to_svg()
     assert svg_auto_false.count("<circle") == 2
     assert svg_default.count("<circle") == 2

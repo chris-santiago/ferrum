@@ -649,7 +649,7 @@ def test_a_plan_computing_nothing_has_no_step():
 
     plan = _statistic_plan({"x": fm.X("v"), "y": fm.Y("w")}, None)
     assert not plan.computes
-    with pytest.raises(ValueError, match="computes no statistic"):
+    with pytest.raises(RuntimeError, match="computes no statistic"):
         plan.step()
 
 

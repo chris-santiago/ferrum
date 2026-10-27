@@ -368,7 +368,7 @@ pub(crate) fn polar_channel_resolver<'a>(
 ///
 /// After the (color, detail) split above, each of `splits` subdivides every
 /// resulting group further by its per-row category, in order. A categorical
-/// `stroke_dash` (T12, spec §4.3) is one: the series partition key extends
+/// `stroke_dash` (spec §4.3) is one: the series partition key extends
 /// from (color, detail) to (color, detail, stroke_dash-field) so a
 /// categorical `stroke_dash` encoding draws one polyline (or, for `ribbon`,
 /// one closed-polygon band) per distinct style even within a single

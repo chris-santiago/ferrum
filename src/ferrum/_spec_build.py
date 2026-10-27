@@ -42,8 +42,8 @@ from ferrum._encode_lowering import (
     _statistic_plan,
     _theta_axis,
 )
-from ferrum._layer import CONTRAST_FILL, layer_mark
-from ferrum._layer_transforms import _POSITIONAL, _split_chain, _with_statistics_marker
+from ferrum._layer import _POSITIONAL_WIRE, CONTRAST_FILL, layer_mark
+from ferrum._layer_transforms import _split_chain, _with_statistics_marker
 from ferrum._override_apply import OverridePayload
 from ferrum._override_consume import (
     merge_encoding_scale as _merge_encoding_scale,
@@ -357,7 +357,7 @@ def _inherited_wire_channels(layer, encoding_dict: dict) -> list[str]:
         shadowed = (
             wire != channel and wire in layer.encoding and wire not in layer.inherited_channels
         )
-        positional = wire in ("x", "y", "x2", "y2")
+        positional = wire in _POSITIONAL_WIRE
         if wire in encoding_dict and wire not in out and not shadowed and not positional:
             out.append(wire)
     return out
@@ -475,7 +475,7 @@ def _layer_drawn_encoding(layer: dict, encoding: dict) -> dict:
     has_url = "url" in encoding or "url" in (layer.get("encoding") or {})
     kept = {}
     for channel, value in encoding.items():
-        if channel in _POSITIONAL:
+        if channel in _POSITIONAL_WIRE:
             field = value.get("field") if isinstance(value, dict) else None
             if field is None or drawn_positional_columns(mark, has_url, channel, field) == [field]:
                 kept[channel] = value
@@ -1212,7 +1212,7 @@ class SpecBuildMixin:
                 channel: value
                 for channel, value in enc.items()
                 if channel != "tooltip_fields"
-                and ("data_source" not in layer or channel not in _POSITIONAL)
+                and ("data_source" not in layer or channel not in _POSITIONAL_WIRE)
             }
             layer_enc["tooltip_fields"] = _auto_tooltip_fields(
                 _layer_drawn_encoding(layer, {**parent, **layer_enc})

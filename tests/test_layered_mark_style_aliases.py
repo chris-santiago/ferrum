@@ -31,7 +31,7 @@ from ferrum._overrides import _apply_overrides
 from ferrum._scene import _render_scene
 from ferrum._warn import reset_warnings
 from ferrum.encoding import _channel_class_map
-from ferrum.encoding._aliases import apply_channel_aliases
+from ferrum.encoding._aliases import _prose_list, apply_channel_aliases
 
 DF = pl.DataFrame(
     {
@@ -217,6 +217,21 @@ def test_detail_ignored_warning_reads_grammatically_for_every_drawer_count(drawe
         with pytest.warns(UserWarning) as record:
             fm.Chart(DF).mark_point().encode(**XY, detail="g").to_spec()
     assert str(record[0].message) == expected
+
+
+@pytest.mark.parametrize(
+    ("items", "conjunction", "expected"),
+    [
+        ([], "or", ""),
+        (["a"], "or", "a"),
+        (["a", "b"], "or", "a or b"),
+        (["a", "b", "c"], "or", "a, b, or c"),
+        (["a", "b", "c"], "and", "a, b, and c"),
+    ],
+)
+def test_prose_list_takes_a_conjunction(items, conjunction, expected):
+    """``_prose_list``'s conjunction is parameterized; every count keeps the Oxford comma rule."""
+    assert _prose_list(items, conjunction=conjunction) == expected
 
 
 def test_layered_detail_with_a_consuming_layer_does_not_warn():

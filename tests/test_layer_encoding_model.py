@@ -1827,10 +1827,16 @@ def test_an_off_side_log_aux_row_keeps_every_other_rows_data_index_and_key():
     at the wrong row in a sibling layer.
     """
     data = pl.DataFrame(
-        {"k": ["a", "b", "c", "d", "e"], "v": [1.0, -5.0, 10.0, None, 100.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
+        {
+            "k": ["a", "b", "c", "d", "e"],
+            "v": [1.0, -5.0, 10.0, None, 100.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
     )
-    aux_chart = fm.Chart(data).mark_point().encode(
-        x="y", y="y", size=fm.Size("v", scale=fm.LogScale()), key="k"
+    aux_chart = (
+        fm.Chart(data)
+        .mark_point()
+        .encode(x="y", y="y", size=fm.Size("v", scale=fm.LogScale()), key="k")
     )
     x_chart = fm.Chart(data).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="y", key="k")
 
@@ -1857,7 +1863,9 @@ def test_a_layered_log_aux_drop_keeps_each_layers_source_rows():
     data = pl.DataFrame({"v": [1.0, -5.0, 10.0, 100.0], "y": [1.0, 2.0, 3.0, 4.0]})
 
     def sized() -> fm.Chart:
-        return fm.Chart(data).mark_point().encode(x="y", y="y", size=fm.Size("v", scale=fm.LogScale()))
+        return (
+            fm.Chart(data).mark_point().encode(x="y", y="y", size=fm.Size("v", scale=fm.LogScale()))
+        )
 
     def ticked() -> fm.Chart:
         return fm.Chart(data).mark_tick().encode(x="v", y="y")
@@ -1927,7 +1935,9 @@ def _log_warn_doors(channel: str, data: pl.DataFrame, scale: Any) -> dict[str, C
         # auxiliary channel (``Chart.share_scale`` takes only x/y): an
         # auxiliary scale always resolves over the whole frame regardless
         # of faceting, so this door exists only for x/y.
-        doors["Fc-independent"] = lambda: binder().facet("c").share_scale(**{channel: "independent"})
+        doors["Fc-independent"] = lambda: (
+            binder().facet("c").share_scale(**{channel: "independent"})
+        )
     return doors
 
 
@@ -2281,7 +2291,9 @@ def test_a_positive_row_under_a_stated_negative_domain_is_left_out_and_warned(ch
         return
 
     on_side = [v for v in vs if v < 0.0]
-    expected = [_drawn_value(channel, log_map(v, _NEGATIVE_DOMAIN, range_, base=10.0)) for v in on_side]
+    expected = [
+        _drawn_value(channel, log_map(v, _NEGATIVE_DOMAIN, range_, base=10.0)) for v in on_side
+    ]
     values = _quiet(lambda: _mark_values(chart, channel))
     assert values == pytest.approx(expected, abs=1e-6)
 
@@ -2473,8 +2485,10 @@ def _static_style_values(svg: str, mark: str, channel: str) -> list[float]:
         elements = svg_elements(layer, "path", lambda a: True)
     else:
         tag = _MARK_SVG_TAG[mark]
-        keep = (lambda a: a.get("stroke") not in THEME_CHROME_STROKES) if tag == "line" else (
-            lambda a: True
+        keep = (
+            (lambda a: a.get("stroke") not in THEME_CHROME_STROKES)
+            if tag == "line"
+            else (lambda a: True)
         )
         elements = svg_elements(layer, tag, keep)
     if channel == "opacity":
@@ -2540,7 +2554,12 @@ def _unbound_default(mark: str, channel: str, data: pl.DataFrame) -> float:
     a null row still draws at, interactively."""
     chart = _off_side_unbound_chart(mark, channel, data)
     if channel == "size" and mark in _SINGLE_NODE_MARKS:
-        node = next(n for p in _quiet(lambda: _scene(chart))["panels"] for b in p["marks"] for n in b["nodes"])
+        node = next(
+            n
+            for p in _quiet(lambda: _scene(chart))["panels"]
+            for b in p["marks"]
+            for n in b["nodes"]
+        )
         return node["style"]["width"]
     return _off_side_interactive_values(chart, mark, channel)[0]
 
@@ -2703,7 +2722,9 @@ def test_a_log_off_side_row_is_absent_on_every_mark_that_draws_the_channel(mark,
     else:
         tag = _MARK_SVG_TAG[mark]
         keep = (
-            (lambda a: a.get("stroke") not in THEME_CHROME_STROKES) if tag == "line" else (lambda a: True)
+            (lambda a: a.get("stroke") not in THEME_CHROME_STROKES)
+            if tag == "line"
+            else (lambda a: True)
         )
         assert len(svg_elements(layer, tag, keep)) == 7
 
@@ -2723,7 +2744,9 @@ def test_a_log_off_side_row_is_absent_on_every_mark_that_draws_the_channel(mark,
     if not (is_single_node and channel != "size"):
         on_side_zs = [10.0, 30.0, 25.0, 35.0, 40.0, 45.0]
         raw_domain = (min(on_side_zs), max(on_side_zs))
-        domain = niced_log_domain(*raw_domain, 10.0) if channel in _AUX_NICES_DATA_DOMAIN else raw_domain
+        domain = (
+            niced_log_domain(*raw_domain, 10.0) if channel in _AUX_NICES_DATA_DOMAIN else raw_domain
+        )
         expected = [default] + [
             _expected_off_side_value(mark, channel, log_map(z, domain, range_, base=10.0))
             for z in on_side_zs
@@ -2839,7 +2862,9 @@ def test_a_transform_scale_maps_size_on_a_line_as_a_tapered_stroke_width(kind):
     mapped_area = [math.pi * (w / 2.0) ** 2 for w in widths]
     twin_data = df.with_columns(pl.Series("z", mapped_area))
     identity_scale = fm.LinearScale(domain=list(range_), range=list(range_))
-    twin = mk("line", data=twin_data, x="v", y="y", size=fm.Size("z", scale=identity_scale, legend=None))
+    twin = mk(
+        "line", data=twin_data, x="v", y="y", size=fm.Size("z", scale=identity_scale, legend=None)
+    )
     assert _first_path_d(_quiet(chart.to_svg)) == _first_path_d(_quiet(twin.to_svg))
 
 
@@ -2939,12 +2964,20 @@ def test_pow_and_sqrt_map_a_negative_value_with_the_same_fraction_on_x_and_aux(k
     assert x_fractions == pytest.approx(aux_fractions, abs=1e-3)
 
     aux_scale = _TRANSFORM_SCALES[kind](domain=list(domain), range=[0.0, 1.0])
-    aux_chart = fm.Chart(data).mark_point().encode(x="y", y="y", opacity=fm.Opacity("v", scale=aux_scale))
+    aux_chart = (
+        fm.Chart(data).mark_point().encode(x="y", y="y", opacity=fm.Opacity("v", scale=aux_scale))
+    )
     aux_values = _quiet(lambda: _mark_values(aux_chart, "opacity"))
     assert aux_values == pytest.approx(x_fractions, abs=1e-3)
 
-    linear_twin = fm.Chart(data).mark_point().encode(
-        x="y", y="y", opacity=fm.Opacity("v", scale=fm.LinearScale(domain=list(domain), range=[0.0, 1.0]))
+    linear_twin = (
+        fm.Chart(data)
+        .mark_point()
+        .encode(
+            x="y",
+            y="y",
+            opacity=fm.Opacity("v", scale=fm.LinearScale(domain=list(domain), range=[0.0, 1.0])),
+        )
     )
     linear_values = _quiet(lambda: _mark_values(linear_twin, "opacity"))
     assert linear_values != pytest.approx(aux_values, abs=1e-3)
@@ -4881,9 +4914,7 @@ def _beside_bars_label_pairs(svg: str) -> set[tuple[str, str, str]]:
         if fill != _CHROME_TEXT
     ]
     g_of_x = _label_g_map([x for x, _y, _text in labels])
-    return {
-        (g_of_x[x], _STACK_ORDER_FILL_TO_C[segments[(x, y)]], text) for x, y, text in labels
-    }
+    return {(g_of_x[x], _STACK_ORDER_FILL_TO_C[segments[(x, y)]], text) for x, y, text in labels}
 
 
 def _interactive_beside_bars_label_pairs(chart: Any) -> set[tuple[str, str, str]]:
@@ -4957,7 +4988,9 @@ def test_a_stacked_labels_text_prints_its_own_value_not_the_stack_top(door):
         chart = text
     else:
         bars = (
-            fm.Chart(_STACK_ORDER_ROWS).mark_bar(position=fm.Stack()).encode(x="g", y="y", color="c")
+            fm.Chart(_STACK_ORDER_ROWS)
+            .mark_bar(position=fm.Stack())
+            .encode(x="g", y="y", color="c")
         )
         chart = bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
     svg = _quiet(chart.to_svg)
@@ -5008,17 +5041,25 @@ def test_a_stacked_label_on_a_null_row_prints_nothing():
         if door == "alone":
             dodge_chart, stack_chart = dodge_text, stack_text
         else:
-            dodge_bars = fm.Chart(rows).mark_bar(position=fm.Dodge()).encode(x="g", y="y", color="c")
-            stack_bars = fm.Chart(rows).mark_bar(position=fm.Stack()).encode(x="g", y="y", color="c")
+            dodge_bars = (
+                fm.Chart(rows).mark_bar(position=fm.Dodge()).encode(x="g", y="y", color="c")
+            )
+            stack_bars = (
+                fm.Chart(rows).mark_bar(position=fm.Stack()).encode(x="g", y="y", color="c")
+            )
             dodge_chart = dodge_bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
             stack_chart = stack_bars.layer(fm.Layer(mark="text", encoding={"text": "y"}))
         dodge_svg = _quiet(dodge_chart.to_svg)
         stack_svg = _quiet(stack_chart.to_svg)
-        assert _stacked_label_contents(stack_svg) == _stacked_label_contents(dodge_svg) == [
-            "1",
-            "3",
-            "4",
-        ]
+        assert (
+            _stacked_label_contents(stack_svg)
+            == _stacked_label_contents(dodge_svg)
+            == [
+                "1",
+                "3",
+                "4",
+            ]
+        )
         assert (
             _interactive_stacked_label_contents(stack_chart)
             == _interactive_stacked_label_contents(dodge_chart)
@@ -5149,15 +5190,21 @@ _SELECTION_DEDUP_ROWS = pl.DataFrame({"g": ["a", "a"], "v": [60.0, 40.0], "c": [
 #: Each case's chart, built with ``x``/``y``/the position adjustment already
 #: set; the test adds ``tooltip=``/the selection itself.
 _SELECTION_DEDUP_CASES: dict[str, Callable[[], fm.Chart]] = {
-    "stack": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
-    .mark_bar(position=fm.Stack(by="c"))
-    .encode(x="g", y="v", color="c"),
-    "dodge-continuous": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
-    .mark_point(position=fm.Dodge(by="c"))
-    .encode(x="v", y="v", color="c"),
-    "jitter-data-space": lambda: fm.Chart(_SELECTION_DEDUP_ROWS)
-    .mark_point(position=fm.Jitter(width=0.5, seed=1))
-    .encode(x="v", y="v"),
+    "stack": lambda: (
+        fm.Chart(_SELECTION_DEDUP_ROWS)
+        .mark_bar(position=fm.Stack(by="c"))
+        .encode(x="g", y="v", color="c")
+    ),
+    "dodge-continuous": lambda: (
+        fm.Chart(_SELECTION_DEDUP_ROWS)
+        .mark_point(position=fm.Dodge(by="c"))
+        .encode(x="v", y="v", color="c")
+    ),
+    "jitter-data-space": lambda: (
+        fm.Chart(_SELECTION_DEDUP_ROWS)
+        .mark_point(position=fm.Jitter(width=0.5, seed=1))
+        .encode(x="v", y="v")
+    ),
 }
 
 
@@ -10139,6 +10186,62 @@ def test_X5_a_bin_statistic_no_channel_draws_is_refused_naming_the_parameter(cas
     assert str(exc.value) == _undrawn_statistic(param, spelling)
 
 
+def test_X5_three_raw_axes_join_with_the_oxford_comma():
+    """Three channels drawing raw rows beside an undrawn Bin statistic join with
+    the Oxford comma too, not a bare ``and`` chain."""
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(
+            x=fm.X("v", bin=fm.Bin("v", groupby=["c"])),
+            y="y",
+            size="z",
+            opacity="r",
+        )
+    )
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(chart))
+    assert str(exc.value) == (
+        "x=X('v', bin=Bin(...)) declares groupby, but no channel draws the Bin's "
+        "statistic: 'y', 'size', and 'opacity' draw raw rows, so each row would be "
+        "placed at its bin and groupby dropped. Bind a channel to one of the Bin's "
+        "output columns ('count', 'density'), or remove groupby from bin=Bin(...) to "
+        "place each row at its bin."
+    )
+
+
+def test_X5_a_bin_with_three_statistic_parameters_joins_them_with_the_oxford_comma():
+    """A Bin declaring groupby, cumulative and aggregates together joins all three with
+    the Oxford comma, both in the declared-parameters clause and in its removal
+    instruction, the same prose-list rule as every other 3+-item refusal."""
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(
+            x=fm.X(
+                "v",
+                bin=fm.Bin(
+                    "v",
+                    groupby=["c"],
+                    cumulative=True,
+                    aggregates=[fm.AggregateOp("z", "mean", "mean_z")],
+                ),
+            ),
+            y="y",
+        )
+    )
+    with pytest.raises(ValueError) as exc:
+        _quiet(lambda: _render(chart))
+    assert str(exc.value) == (
+        "x=X('v', bin=Bin(...)) declares groupby, cumulative, and aggregates, but no "
+        "channel draws the Bin's statistic: 'y' draws raw rows, so each row would be "
+        "placed at its bin and groupby, cumulative, and aggregates dropped. Bind a "
+        "channel to one of the Bin's output columns ('count', 'density', 'mean_z'), or "
+        "remove groupby, cumulative, and aggregates from bin=Bin(...) to place each row "
+        "at its bin."
+    )
+
+
 #: Rects the flat chart draws: (output drawn, output plus a raw color).
 _DECLARED_RECTS = {
     "groupby": (6, 32),
@@ -10557,6 +10660,42 @@ def test_V7_a_binned_colors_bin_declaring_a_statistic_or_grouping_is_refused_on_
     with pytest.raises(ValueError) as refused:
         _quiet(build)
     assert str(refused.value) == _color_bin_refusal(cls, param, spelling)
+
+
+def test_V7_a_binned_colors_bin_declaring_three_parameters_joins_them_with_the_oxford_comma():
+    """Three declared parameters on a binned color's Bin join with the Oxford
+    comma in both the declared-parameters clause and the removal
+    instruction, the same prose-list rule as the positional Bin refusal."""
+
+    def build():
+        return (
+            fm.Chart(df)
+            .mark_point()
+            .encode(
+                x="v",
+                y="y",
+                color=fm.Color(
+                    "z",
+                    bin=fm.Bin(
+                        "z",
+                        groupby=["c"],
+                        cumulative=True,
+                        aggregates=[fm.AggregateOp("z", "mean", "mean_z")],
+                    ),
+                ),
+            )
+        )
+
+    with pytest.raises(ValueError) as refused:
+        _quiet(build)
+    assert str(refused.value) == (
+        "color=Color('z', bin=Bin(...)) declares groupby, cumulative, and aggregates, "
+        "but bin= on Color builds a binned color scale: each row keeps its 'z' and is "
+        "colored by its bin, and no statistic is computed, so groupby, cumulative, and "
+        "aggregates would be ignored. Remove groupby, cumulative, and aggregates from "
+        "bin=Bin(...); to compute it, use .transform(fm.Bin('z', ...)) and bind its "
+        "output column."
+    )
 
 
 @pytest.mark.parametrize("door", sorted(_vocabulary_doors("color", lambda: None)))
@@ -12598,8 +12737,10 @@ def test_zero_row_data_renders_as_its_filter_emptied_twin(door):
     elif door == "+":
         filtered_chart = (P() + P(y="r")).transform(_nothing_above())
     elif door == "L":
-        filtered_chart = P().transform(_nothing_above()).layer(
-            fm.Layer(mark="line", encoding={"x": "v", "y": "y"})
+        filtered_chart = (
+            P()
+            .transform(_nothing_above())
+            .layer(fm.Layer(mark="line", encoding={"x": "v", "y": "y"}))
         )
     elif door == "LCs":
         filtered_chart = fm.LayerChart(
@@ -14113,10 +14254,22 @@ _OWN_GROUPBY_ROWS = pl.DataFrame(
         "c": (["p"] * 4 + ["q"] * 4) * 2,
         "v": [1.0, 2.0, 3.0, 4.0] * 4,
         "y": [
-            3.0, 4.2, 5.1, 6.3,
-            2.0, 1.3, 4.5, 3.8,
-            5.0, 6.5, 4.2, 7.1,
-            1.0, 3.3, 2.8, 4.6,
+            3.0,
+            4.2,
+            5.1,
+            6.3,
+            2.0,
+            1.3,
+            4.5,
+            3.8,
+            5.0,
+            6.5,
+            4.2,
+            7.1,
+            1.0,
+            3.3,
+            2.8,
+            4.6,
         ],
     }
 )
@@ -14125,7 +14278,9 @@ _OWN_GROUPBY_ROWS = pl.DataFrame(
 def _own_groupby_smooth(ci: float | None = None) -> fm.Chart:
     """``mark_smooth``'s own ``groupby=``, with no grouping channel bound."""
     return (
-        fm.Chart(_OWN_GROUPBY_ROWS).mark_smooth(method="lm", ci=ci, groupby=["c"]).encode(x="v", y="y")
+        fm.Chart(_OWN_GROUPBY_ROWS)
+        .mark_smooth(method="lm", ci=ci, groupby=["c"])
+        .encode(x="v", y="y")
     )
 
 
@@ -14267,9 +14422,9 @@ def test_a_diagnostic_composites_lines_follow_their_grouping_channels():
     # `["x", "y"] * 4`, matching g's own `["a", "b"] * 4`) leaves each x-bin
     # with only one h value and the composite draws nothing at all.
     band_rows = df.with_columns(h=pl.Series(["x", "x", "y", "y"] * 2))
-    errorband_plus_line = mk(
-        "errorband", band_rows, x="g", y="y", color="h"
-    ) + mk("line", band_rows, x="g", y="mean(y)", color="h")
+    errorband_plus_line = mk("errorband", band_rows, x="g", y="y", color="h") + mk(
+        "line", band_rows, x="g", y="mean(y)", color="h"
+    )
     scene = _quiet(lambda: _scene(errorband_plus_line))
     got: Counter = Counter()
     for panel in scene["panels"]:
@@ -14289,23 +14444,22 @@ def test_a_diagnostic_composites_lines_follow_their_grouping_channels():
 #: groupby.
 _BIN_GROUPBY_DOORS: dict[str, Callable[[Any], fm.Chart]] = {
     "F": lambda bin_: fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"),
-    "+": lambda bin_: (
-        fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()") + P()
+    "+": lambda bin_: fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()") + P(),
+    "L": lambda bin_: (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x=fm.X("v", bin=bin_), y="count()")
+        .layer(fm.Layer(mark="point", encoding={"x": "v", "y": "y"}))
     ),
-    "L": lambda bin_: fm.Chart(df)
-    .mark_line()
-    .encode(x=fm.X("v", bin=bin_), y="count()")
-    .layer(fm.Layer(mark="point", encoding={"x": "v", "y": "y"})),
     "LCs": lambda bin_: fm.LayerChart(
         fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"), P()
     ),
     "LCm": lambda bin_: fm.LayerChart(
         fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()"), P()
     )._build_merged(),
-    "Fc": lambda bin_: fm.Chart(df)
-    .mark_line()
-    .encode(x=fm.X("v", bin=bin_), y="count()")
-    .facet("g"),
+    "Fc": lambda bin_: (
+        fm.Chart(df).mark_line().encode(x=fm.X("v", bin=bin_), y="count()").facet("g")
+    ),
 }
 
 
@@ -15515,6 +15669,25 @@ def test_a_figures_explicit_metrics_warns_once_on_every_door_the_same_way(case, 
         assert rendered == _quiet(lambda: default_build().to_svg())
     else:
         assert rendered == _quiet(lambda: default_build().interactive().scene_json)
+
+
+def test_a_figures_explicit_metrics_warning_reads_grammatically_for_three_grouping_fields():
+    """Three grouping fields join with the Oxford comma, not a bare ``and`` chain.
+
+    ``lmplot``'s composite grouping (color, shape, detail all bound) can
+    hold more than one field; the warning's field list goes through the
+    same prose-list rule as every other 3+-item refusal.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fm.lmplot(
+            df, x="v", y="y", show_metrics=True, encode={"color": "c", "shape": "g", "detail": "k"}
+        ).to_svg()
+    messages = [str(w.message) for w in caught if "corner is not drawn" in str(w.message)]
+    assert messages == [
+        "lmplot: show_metrics=True has no single fit to describe: the fit is computed "
+        "per group of 'c', 'g', and 'k', so the R²/RMSE/MAE corner is not drawn"
+    ]
 
 
 @pytest.mark.parametrize("output", ["static", "interactive"])

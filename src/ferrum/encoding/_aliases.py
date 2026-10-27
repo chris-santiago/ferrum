@@ -222,13 +222,18 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
     return mk
 
 
-def _prose_list(items: list[str]) -> str:
-    """Join *items* as English prose: "", "a", "a and b", or "a, b, and c"."""
+def _prose_list(items: list[str], *, conjunction: str = "and") -> str:
+    """Join *items* as English prose with the Oxford comma.
+
+    "", "a", "a <conjunction> b", or "a, b, <conjunction> c". The one
+    prose-list rule for every user-facing message that joins 3+ items;
+    callers quote each item at the call site when the message wants quotes.
+    """
     if not items:
         return ""
     if len(items) <= 2:
-        return " and ".join(items)
-    return ", ".join(items[:-1]) + f", and {items[-1]}"
+        return f" {conjunction} ".join(items)
+    return ", ".join(items[:-1]) + f", {conjunction} {items[-1]}"
 
 
 def _warn_detail_ignored(mark: str | None) -> None:

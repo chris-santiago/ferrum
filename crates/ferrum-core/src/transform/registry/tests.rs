@@ -2103,29 +2103,6 @@ fn assert_secondary_outputs_match(
             &format!("{kind} secondary output '{key}'"),
         );
     }
-    assert_secondary_keys_name_every_published_key(kind, &spec, input);
-}
-
-/// The keys a step says it can publish ([`TransformSpec::secondary_keys`],
-/// what a binned color's demand resolves a reader's `data_source` against
-/// before the run) are exactly the keys its real `secondary_outputs`
-/// publishes, unnamed (bare) and named.
-fn assert_secondary_keys_name_every_published_key(kind: &str, spec: &TransformSpec, input: &RecordBatch) {
-    let mut wire = serde_json::to_value(spec).unwrap();
-    let mut named_wire = wire.clone();
-    wire.as_object_mut().unwrap().remove("name");
-    named_wire["name"] = serde_json::json!("s");
-    for wire in [wire, named_wire] {
-        let spec: TransformSpec = serde_json::from_value(wire).unwrap();
-        let primary = spec.apply(input).unwrap_or_else(|e| panic!("{kind}: apply failed: {e}"));
-        let published: Vec<String> = spec
-            .secondary_outputs(input, &primary, &crate::transform::context::TransformContext::default())
-            .unwrap_or_else(|e| panic!("{kind}: secondary_outputs failed: {e}"))
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        assert_eq!(spec.secondary_keys(), published, "{kind} named {:?}: secondary_keys drifted from the published keys", crate::transform::core::spec_name(&spec));
-    }
 }
 
 #[test]

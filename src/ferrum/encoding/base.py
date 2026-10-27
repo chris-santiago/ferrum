@@ -11,6 +11,7 @@ from ferrum._validate import validate_choice
 from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
 from ferrum.legend import Legend, _normalize_legend
+from ferrum.encoding._aliases import _prose_list
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.position import STACK_OFFSETS, _validate_stack_offset
 
@@ -912,7 +913,7 @@ class ChannelBase:
             if name in declaration.statistics or declaration.bin_wire.get(name)
         ]
         if declared:
-            params = " and ".join(dict.fromkeys(declared))
+            params = _prose_list(list(dict.fromkeys(declared)))
             raise ValueError(
                 f"{declaration.written} declares {params}, but bin= on {cls} builds a binned "
                 f"color scale: each row keeps its {self.field!r} and is colored by its bin, "

@@ -388,8 +388,7 @@ impl TransformSpec {
     /// like `LetterValue` need to classify each original row.
     ///
     /// `ctx` is the step's context, under which `LetterValue` keys its input
-    /// rows' combinations as its partition keyed them. The keys it can
-    /// publish are [`Self::secondary_keys`].
+    /// rows' combinations as its partition keyed them.
     pub(crate) fn secondary_outputs(
         &self,
         input: &RecordBatch,
@@ -415,21 +414,6 @@ impl TransformSpec {
         arm! {
             Qq      => qq,
             Linkage => linkage,
-        }
-    }
-}
-
-impl TransformSpec {
-    /// Every key [`Self::secondary_outputs`] can publish for this step, from
-    /// the same constants its module names them with (bare for an unnamed
-    /// step, under its name otherwise): what a reader of the run's outputs
-    /// can name before the run.
-    pub(crate) fn secondary_keys(&self) -> Vec<String> {
-        match self {
-            Self::Qq(s) => crate::transform::qq::secondary_keys(s),
-            Self::Linkage(s) => crate::transform::linkage::secondary_keys(s),
-            Self::LetterValue(s) => crate::transform::letter_value::secondary_keys(s),
-            _ => Vec::new(),
         }
     }
 }

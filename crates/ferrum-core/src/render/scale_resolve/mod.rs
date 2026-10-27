@@ -2167,9 +2167,9 @@ pub(crate) fn validate_numeric_aux_scale(
 /// `ferrum._core.auxiliary_scale_channels()`: the names of
 /// [`AUXILIARY_SCALE_CHANNELS`], the channels [`build_auxiliary_scales`]
 /// builds a scale for, in [`AuxiliaryScales`] field order, published so
-/// Python reads the set of channels Rust scales at chart level instead of
-/// deriving it from its own channel metadata. Registered in `lib.rs`, typed
-/// in `src/ferrum/_core.pyi`.
+/// the Python test suite parametrizes over the channels Rust scales at
+/// chart level rather than keeping its own list. Registered in `lib.rs`,
+/// typed in `src/ferrum/_core.pyi`.
 #[pyo3::pyfunction]
 pub(crate) fn auxiliary_scale_channels() -> Vec<String> {
     AUXILIARY_SCALE_CHANNELS.iter().map(|channel| channel.name.to_string()).collect()
@@ -3034,7 +3034,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
 
     // Both positional axes resolved: now append the aux warnings and raise
     // any aux refusal, so refusal precedence and warning order stay
-    // byte-identical to resolving aux last (FA-5 force_cat, T3 aux_shared
+    // byte-identical to resolving aux last (FA-5 force_cat, aux_shared
     // and the per-layer reading live in `build_auxiliary_scales`).
     warnings.extend(aux_warnings);
     let aux = aux_result?;

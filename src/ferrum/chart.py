@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
-from ferrum._layer import _Layer, _PendingMark, inherited_positional_taken
+from ferrum._layer import _POSITIONAL_WIRE, _Layer, _PendingMark, inherited_positional_taken
 from ferrum._compose import (
     attach_to_rows,
     carried_by,
@@ -64,7 +64,7 @@ from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin, _validate_sort_object
 from ferrum.marks.base import MarkBase
-from ferrum.position import _STACKABLE_MARKS, stack_honored, warn_stack_ignored  # noqa: F401  (_STACKABLE_MARKS re-exported for chart importers)
+from ferrum.position import stack_honored, warn_stack_ignored
 
 # Re-exported from this module so existing ``from ferrum.chart import ...``
 # importers keep resolving after the cohesion split (CHART-01/02): the canonical
@@ -136,10 +136,9 @@ def _viewport_dimension(entry: str, value: Any, *, param: str) -> Any:
     return _voiced(entry, lambda voice: coerce_viewport_value(f"{voice}({param}=...)", value))
 
 
-_POSITIONAL_CHANNELS = ("x", "y", "x2", "y2")
 # The channels a written record keeps: the positional ones, and the polar
 # ones a ``CoordPolar`` draws as x/y/x2/y2 once ``to_spec`` lowers them.
-_WRITTEN_CHANNELS = _POSITIONAL_CHANNELS + ("theta", "theta2", "radius", "radius2")
+_WRITTEN_CHANNELS = _POSITIONAL_WIRE + ("theta", "theta2", "radius", "radius2")
 
 
 def _written_bindings(chart: "Chart") -> dict:
@@ -250,7 +249,7 @@ def _fill_chart_positional(layers: list, chart: "Chart") -> list:
             if written is None:
                 written = _written_bindings(chart)
             source = written
-        offered = [ch for ch in _POSITIONAL_CHANNELS if ch in source and ch not in layer.encoding]
+        offered = [ch for ch in _POSITIONAL_WIRE if ch in source and ch not in layer.encoding]
         taken = inherited_positional_taken(layer.mark, _own_channels(layer), offered)
         filled = {ch: copy.copy(source[ch]) for ch in offered if ch in taken}
         out.append(

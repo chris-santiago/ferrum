@@ -1343,12 +1343,13 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
     if show_metrics is True:
         import warnings
 
-        from ferrum._compose import _quoted
         from ferrum._warn import user_stacklevel
+        from ferrum.encoding._aliases import _prose_list
 
+        grouping_prose = _prose_list([repr(g) for g in grouping])
         warnings.warn(
             f"{entry}: show_metrics=True has no single fit to describe: the fit is "
-            f"computed per group of {_quoted(grouping)}, so the R²/RMSE/MAE corner "
+            f"computed per group of {grouping_prose}, so the R²/RMSE/MAE corner "
             "is not drawn",
             stacklevel=user_stacklevel(),
         )

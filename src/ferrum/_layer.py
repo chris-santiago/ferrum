@@ -16,6 +16,7 @@ from typing import Any, Optional
 from ferrum._core import (
     mark_draws_inherited,
     mark_inherited_positional,
+    mark_stacks_polar_theta,
     mark_style_fields,
     marks_drawing_constant_size,
     style_table_marks,
@@ -30,6 +31,7 @@ from ferrum._core import (
 _FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
 
+#: The positional wire channels, in wire order, read by every door.
 _POSITIONAL_WIRE = ("x", "y", "x2", "y2")
 
 #: The internal ``"theme:contrast"`` paint sentinel (spec §6.5): written in
@@ -349,6 +351,21 @@ def drawn_style_fields(mark: str) -> frozenset[str] | None:
     if mark not in _STYLE_TABLE_MARKS:
         return None
     return frozenset(mark_style_fields(mark))
+
+
+@functools.cache
+def stacks_polar_theta(mark: str) -> bool:
+    """Whether a layer drawing *mark* stacks the theta channel of a ``CoordPolar`` itself.
+
+    Rust's one per-mark table (``ferrum._core.mark_stacks_polar_theta``)
+    answers: an arc always sweeps its theta into a pie, and a text stacks
+    its theta into that sweep and sits at its wedge's mid-angle. ``False``
+    when *mark* has no row in the style table (a composite name such as
+    ``"boxplot"``), so a composite name never reaches the Rust lookup.
+    """
+    if mark not in _STYLE_TABLE_MARKS:
+        return False
+    return mark_stacks_polar_theta(mark)
 
 
 def layer_draws(mark: str | None, field_name: str) -> bool:

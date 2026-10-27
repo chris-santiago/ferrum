@@ -361,15 +361,6 @@ pub(crate) const QQ_LINE_COLUMNS: &[(&str, DataType)] = &[
     ("qq_line_y_end", DataType::Float64),
 ];
 
-/// Every key [`secondary_outputs`] can publish for `spec`: its line, when it
-/// emits one.
-pub(crate) fn secondary_keys(spec: &QQSpec) -> Vec<String> {
-    match spec.emit_line {
-        true => vec![crate::transform::registry::secondary_key(spec.name.as_deref(), QQ_LINE_KEY)],
-        false => Vec::new(),
-    }
-}
-
 /// Compute the secondary `qq_line` named output from the primary points batch.
 ///
 /// Returns `vec![("qq_line", line_batch)]` when `emit_line=true`, else empty.

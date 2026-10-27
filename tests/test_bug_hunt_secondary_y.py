@@ -144,7 +144,12 @@ def test_all_empty_independent_y_layerchart_renders_valid_svg():
     assert svg.startswith("<svg")
     _assert_no_bad_tokens(svg)
     messages = [str(w.message) for w in caught]
-    assert messages.count("the chart has no rows to draw after its transforms; its panel is drawn empty") == 1
+    assert (
+        messages.count(
+            "the chart has no rows to draw after its transforms; its panel is drawn empty"
+        )
+        == 1
+    )
 
 
 def test_one_empty_layer_under_independent_y_renders():

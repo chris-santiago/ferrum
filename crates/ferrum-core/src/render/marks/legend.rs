@@ -317,7 +317,7 @@ pub fn build_legend(
                     // to `Line`, which is what makes the dash visible at all (a
                     // `Circle` carrying a dash draws byte-identically to one
                     // without). Every other `Line`-kind entry carries `None` and
-                    // draws solid, byte-identical to pre-T12. An entry's own
+                    // draws solid, the same as an entry with no dash binding. An entry's own
                     // `symbol_line_width` (a size entry's dot diameter, a
                     // stroke-width entry's mapped width) outranks both widths.
                     let line_w = entry

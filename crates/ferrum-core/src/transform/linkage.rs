@@ -472,14 +472,6 @@ fn schema_from(columns: &[(&str, DataType)]) -> Arc<Schema> {
     ))
 }
 
-/// Every key [`secondary_outputs`] publishes for `spec`, each under its name.
-pub(crate) fn secondary_keys(spec: &LinkageSpec) -> Vec<String> {
-    [LINKAGE_KEY, ORDER_KEY, COORDS_KEY, SEGMENTS_KEY]
-        .into_iter()
-        .map(|key| crate::transform::registry::secondary_key(spec.name.as_deref(), key))
-        .collect()
-}
-
 /// Compute the three secondary named outputs (order, coords, segments).
 ///
 /// `linkage_batch` is the RecordBatch returned by `apply()` — it has the

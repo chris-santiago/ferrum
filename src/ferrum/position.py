@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from ferrum._layer import stacks_polar_theta
 from ferrum._validate import validate_choice
 
 
@@ -36,22 +37,25 @@ from ferrum._validate import validate_choice
 # before forwarding to Rust (``chart.py::_strip_unstackable``).
 _STACKABLE_MARKS = frozenset(["bar", "area"])
 
-# Marks that honor ``stack=`` on the channel a ``CoordPolar`` theta draws as:
-# an arc always sweeps its theta into a pie, and a text stacks its theta into
-# that sweep and sits at its wedge's mid-angle
-# (``crates/ferrum-core/src/render/marks/text.rs``); Rust's
-# ``Mark::stacks_polar_theta`` names the same two. Without ``stack=`` a polar
-# text sits on its own theta value.
-_THETA_STACKABLE_MARKS = frozenset(["arc", "text"])
+# Whether a mark honors ``stack=`` on the channel a ``CoordPolar`` theta draws
+# as -- an arc always sweeps its theta into a pie, and a text stacks its
+# theta into that sweep and sits at its wedge's mid-angle
+# (``crates/ferrum-core/src/render/marks/text.rs``) -- is Rust's
+# ``Mark::stacks_polar_theta``, read through :func:`ferrum._layer.stacks_polar_theta`
+# rather than mirrored as a Python set. Without ``stack=`` a polar text sits
+# on its own theta value.
 
 
 def stack_honored(mark: str | None, *, polar_theta: bool) -> bool:
     """Whether *mark* honors a ``stack=`` on a channel it draws.
 
-    ``bar`` and ``area`` honor it on any channel; ``arc`` and ``text`` on
-    the channel a ``CoordPolar`` theta draws as (*polar_theta*).
+    ``bar`` and ``area`` honor it on any channel; on the channel a
+    ``CoordPolar`` theta draws as (*polar_theta*), the marks Rust's
+    ``Mark::stacks_polar_theta`` names (arc, text) honor it too.
     """
-    return mark in _STACKABLE_MARKS or (polar_theta and mark in _THETA_STACKABLE_MARKS)
+    return mark in _STACKABLE_MARKS or (
+        polar_theta and mark is not None and stacks_polar_theta(mark)
+    )
 
 
 def warn_stack_ignored(stack_val: object, mark: str | None) -> None:

@@ -36,6 +36,7 @@ from ferrum.encoding._aliases import resolved_channel
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, _POLAR_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer import (
+    _POSITIONAL_WIRE,
     _Layer,
     draws_inherited_color,
     inherited_positional_taken,
@@ -385,10 +386,9 @@ def _resolve_layer_statistics(layers: list, chart) -> tuple[list, list]:
     return new_layers, statistics
 
 
-_POSITIONAL = ("x", "y", "x2", "y2")
 # The channels a composition keeps from its left operand rather than scoping
 # them to that operand's layers.
-_CHART_CHANNELS = frozenset(_POSITIONAL) | _POLAR_CHANNELS | _FACET_CHANNELS
+_CHART_CHANNELS = frozenset(_POSITIONAL_WIRE) | _POLAR_CHANNELS | _FACET_CHANNELS
 
 
 def _effective_encoding(layer: _Layer, parent: dict) -> dict:
@@ -434,12 +434,14 @@ def _effective_encoding(layer: _Layer, parent: dict) -> dict:
         for channel, value in parent.items()
         if (
             not named
-            or channel not in _POSITIONAL
+            or channel not in _POSITIONAL_WIRE
             or (layer.data_source is None and channel in bound)
         )
         and (channel in bound or resolved_channel(channel) not in own)
     }
-    offered = [channel for channel in _POSITIONAL if channel in inherited and channel not in bound]
+    offered = [
+        channel for channel in _POSITIONAL_WIRE if channel in inherited and channel not in bound
+    ]
     taken = inherited_positional_taken(layer.mark, own_channels, offered)
     inherited = {
         channel: value
@@ -511,7 +513,9 @@ def _with_carried(layer: _Layer, encoding: dict) -> _Layer:
     own = set(_own_channels(layer))
     # The grouping key is never inherited on the wire: Rust has no binding to
     # complete it from.
-    carried = [c for c in encoding if c not in own and c not in _POSITIONAL and c != GROUPING_KEY]
+    carried = [
+        c for c in encoding if c not in own and c not in _POSITIONAL_WIRE and c != GROUPING_KEY
+    ]
     listed = tuple(dict.fromkeys([*layer.inherited_channels, *carried]))
     if encoding == layer.encoding and listed == layer.inherited_channels:
         return layer
@@ -591,7 +595,7 @@ def _layers_over_parent(layers: list, parent: dict, coord: object = None) -> lis
         layer = _with_carried(layer, _carried_bindings(layer, parent, effective))
         # A stack-less copy of an inherited x/y/x2/y2 stays inherited on the
         # wire, as the parent's binding it replaces would be.
-        positional = [channel for channel in unstacked if channel in _POSITIONAL]
+        positional = [channel for channel in unstacked if channel in _POSITIONAL_WIRE]
         if positional:
             listed = tuple(dict.fromkeys([*layer.inherited_positional, *positional]))
             layer = replace(layer, inherited_positional=listed)

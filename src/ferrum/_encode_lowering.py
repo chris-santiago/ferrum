@@ -460,9 +460,10 @@ class _StatisticPlan:
 
         Raises
         ------
-        ValueError
+        RuntimeError
             If the plan computes nothing (:attr:`computes`); its caller
-            branches on that first.
+            branches on that first, so reaching this is an internal
+            invariant violation, not a caller mistake.
         """
         if self.bin is not None and self.declaration is not None:
             return _build_bin_transform(
@@ -472,7 +473,7 @@ class _StatisticPlan:
             from ferrum import Aggregate
 
             return Aggregate(_aggregate_ops(list(self.aggregates)), groupby=list(self.groupby))
-        raise ValueError("_StatisticPlan.step: the plan computes no statistic, so it has no step")
+        raise RuntimeError("a statistic plan that computes no statistic has no step")
 
 
 def _statistic_plan(encoding: dict, facet) -> _StatisticPlan:
@@ -589,16 +590,16 @@ def _undrawn_bin_statistic(bin_axis: str, encoding: dict, declaration: _BinDecla
     row is placed at its bin, so the statistic the user's Bin declares would
     be dropped.
     """
-    from ferrum.encoding._aliases import _channel_field
+    from ferrum.encoding._aliases import _channel_field, _prose_list
 
-    params = " and ".join(declaration.statistics)
+    params = _prose_list(list(declaration.statistics))
     raw = [
         axis
         for axis, ch in encoding.items()
         if axis != bin_axis and isinstance(_channel_field(ch), str)
     ]
     drawn = (
-        f"{' and '.join(repr(axis) for axis in raw)} "
+        f"{_prose_list([repr(axis) for axis in raw])} "
         f"{'draws' if len(raw) == 1 else 'draw'} raw rows"
         if raw
         else "no channel draws a value"

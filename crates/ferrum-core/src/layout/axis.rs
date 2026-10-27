@@ -224,6 +224,25 @@ impl Default for LabelGapPolicy {
     }
 }
 
+/// The three values [`cascade_collision_recovery`]'s cull-by-stride paths
+/// read off `AxisInput` and the axis's own projection, bundled so they
+/// travel together into one parameter instead of three positional ones a
+/// caller could transpose.
+#[derive(Debug, Clone, Copy)]
+struct TickCullFrame<'a> {
+    /// Which tick positions sit on an explicit value anchor
+    /// (`AxisInput.tick_anchors`): `anchored_visibility`/`cull_by_stride`
+    /// phase a stride's kept ticks onto those anchors rather than an
+    /// arbitrary offset.
+    anchors: &'a [bool],
+    /// The stride phase ticks are counted from (`AxisInput.tick_origin`, or
+    /// `0` when the axis has none).
+    origin: usize,
+    /// Whether a scale projects this axis at all: gates stage D's
+    /// continuous-x thinning, which a categorical or scale-less axis skips.
+    continuous: bool,
+}
+
 /// A cascade slot paired with the bit that records whether a higher-precedence
 /// source has already spoken for it.
 ///
@@ -3251,7 +3270,6 @@ fn cull_by_stride<P>(
 /// `resolve_presentation` — see that function's doc for why a stride computed against
 /// -90°'s footprint doesn't by itself justify keeping -90° rotation once
 /// the stride opens up more room per surviving label.
-#[allow(clippy::too_many_arguments)]
 fn cascade_collision_recovery(
     labels: &[String],
     slot_w: f64,
@@ -3259,9 +3277,7 @@ fn cascade_collision_recovery(
     label_gap: LabelGapPolicy,
     label_overlap: Option<LabelOverlap>,
     metrics: &dyn TextMetrics,
-    anchors: &[bool],
-    is_continuous: bool,
-    origin: usize,
+    frame: TickCullFrame<'_>,
 ) -> CascadeResult {
     let n = labels.len();
     let all_visible = vec![true; n];
@@ -3289,7 +3305,7 @@ fn cascade_collision_recovery(
                 labels: labels.to_vec(),
                 angle: 0.0,
                 font_size: None,
-                visible: anchored_visibility(n, 2, anchors, 0),
+                visible: anchored_visibility(n, 2, frame.anchors, 0),
                 strategy: CascadeStrategy::Culled { stride: 2 },
             };
         }
@@ -3312,7 +3328,7 @@ fn cascade_collision_recovery(
     // `resolve_presentation`) only when D's thinning gate below might apply;
     // a categorical or non-culling axis goes straight to the S0-S3 cascade
     // a few lines down (D is skipped, so these axes never reach a stride).
-    if is_continuous && label_gap.may_cull() {
+    if frame.continuous && label_gap.may_cull() {
         if let Some(result) =
             resolve_presentation_unshrunk(labels, slot_w, label_font_size, label_gap, metrics)
         {
@@ -3330,8 +3346,8 @@ fn cascade_collision_recovery(
             labels,
             slot_w,
             2..=n,
-            anchors,
-            origin,
+            frame.anchors,
+            frame.origin,
             |survivors, survivor_w| {
                 if survivors.len() < super::MIN_EVENLY_THINNED_X_LABELS {
                     return None;
@@ -3439,8 +3455,8 @@ fn cascade_collision_recovery(
                 labels,
                 slot_w,
                 [stride as usize],
-                anchors,
-                origin,
+                frame.anchors,
+                frame.origin,
                 |survivors, survivor_w| {
                     Some(resolve_presentation(
                         survivors,
@@ -3454,7 +3470,7 @@ fn cascade_collision_recovery(
             );
             let (visible, presentation) = match culled {
                 Some((_, visible, presentation)) => (visible, presentation),
-                None => (anchored_visibility(n, stride as usize, anchors, origin), None),
+                None => (anchored_visibility(n, stride as usize, frame.anchors, frame.origin), None),
             };
             let (final_labels, angle, font_size) = match presentation {
                 Some(presentation) => (
@@ -3643,7 +3659,11 @@ pub(super) fn lay_out_x_tick_labels(
     // to project through at all: a categorical axis's `band_centers` and
     // the scale-less `compute_layout` carrier (neither `projected`) both
     // skip it.
-    let is_continuous = projected.is_some();
+    let frame = TickCullFrame {
+        anchors: &input.tick_anchors,
+        origin: input.tick_origin.unwrap_or(0),
+        continuous: projected.is_some(),
+    };
 
     let (ticks, warning) = if let Some(override_angle) = input.overrides.labels.angle {
         // label_angle_override always bypasses the cascade (spec SS7). Shared
@@ -3670,9 +3690,7 @@ pub(super) fn lay_out_x_tick_labels(
             label_gap,
             input.overrides.labels.overlap,
             metrics,
-            &input.tick_anchors,
-            is_continuous,
-            input.tick_origin.unwrap_or(0),
+            frame,
         );
         let is_elision_strategy = matches!(cascade.strategy, CascadeStrategy::Elided { .. });
         let ticks: Vec<TickLayout> = cascade
@@ -4037,9 +4055,11 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Parity),
             &m,
-            &[],
-            true,
-            1, // a non-zero origin, which Parity must ignore
+            TickCullFrame {
+                anchors: &[],
+                origin: 1, // a non-zero origin, which Parity must ignore
+                continuous: true,
+            },
         );
         assert_eq!(result.visible, vec![true, false, true, false, true, false]);
     }
@@ -4094,6 +4114,16 @@ mod tests {
     /// leaves unchanged.
     fn legacy_gap(cull_threshold: u32) -> LabelGapPolicy {
         LabelGapPolicy::from_cull_threshold(cull_threshold)
+    }
+
+    /// The frame most cascade unit tests build against: no scale projecting
+    /// the axis, no anchors, no stride phase.
+    fn scale_less_frame() -> TickCullFrame<'static> {
+        TickCullFrame {
+            anchors: &[],
+            origin: 0,
+            continuous: false,
+        }
     }
 
     /// Test helper: `AxisInput::new` plus the theme-default fold
@@ -6192,7 +6222,7 @@ mod tests {
         // "AAAA"=4*10=40 <= 90 -> no collision -> S0 flat.
         let labels: Vec<String> = vec!["AAAA".into(), "BBBB".into(), "CCCC".into(), "DDDD".into()];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Flat);
@@ -6218,7 +6248,7 @@ mod tests {
         ];
         let m = mock(10.0);
         let result =
-            cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+            cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(
             result.strategy,
             CascadeStrategy::Flat,
@@ -6247,7 +6277,7 @@ mod tests {
         let labels: Vec<String> = (0..9).map(|_| "AAAAA".to_string()).collect();
         let m = mock(10.0);
         let result =
-            cascade_collision_recovery(&labels, 50.0, 11.0, legacy_gap(8), None, &m, &[], true, 0);
+            cascade_collision_recovery(&labels, 50.0, 11.0, legacy_gap(8), None, &m, TickCullFrame { anchors: &[], origin: 0, continuous: true });
         assert_eq!(
             result.strategy,
             CascadeStrategy::Culled { stride: 2 },
@@ -6270,7 +6300,7 @@ mod tests {
         let labels: Vec<String> = (0..9).map(|_| "AAAAA".to_string()).collect();
         let m = mock(10.0);
         let result =
-            cascade_collision_recovery(&labels, 50.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+            cascade_collision_recovery(&labels, 50.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -60.0 },
@@ -6290,7 +6320,7 @@ mod tests {
         let labels: Vec<String> = (0..4).map(|_| "AAAA".to_string()).collect();
         let m = mock(10.0);
         let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m, &[], true, 0);
+            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m, TickCullFrame { anchors: &[], origin: 0, continuous: true });
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -60.0 },
@@ -6317,7 +6347,7 @@ mod tests {
             "minimal_context".into(),
         ];
         let m = mock(6.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Wrapped);
@@ -6345,7 +6375,7 @@ mod tests {
             measure: |text: &str, font_size: f64| text.chars().count() as f64 * font_size * 0.5,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 60.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 60.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(result.angle, 0.0);
         assert_eq!(result.strategy, CascadeStrategy::FontReduced);
         let expected_fs = 11.0 * 0.82;
@@ -6372,7 +6402,7 @@ mod tests {
             "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -60.0 });
         assert_eq!(result.angle, -60.0);
         assert!(result.font_size.is_none());
@@ -6403,7 +6433,7 @@ mod tests {
             "STUVWX".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
         assert_eq!(result.angle, -45.0);
     }
@@ -6424,7 +6454,7 @@ mod tests {
         // "LONGCATEGORY00".."LONGCATEGORY19" = 14 chars * 10px/char = 140px each.
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 // max footprint at -90 ~= line_h = 13.2; stride is the additive
@@ -6450,7 +6480,7 @@ mod tests {
     fn cascade_cull_threshold_zero_never_culls() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         assert!(
             !matches!(result.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=0 must never cull; got {:?}",
@@ -6473,7 +6503,7 @@ mod tests {
     fn cascade_genuinely_fitting_rotation_wins_over_culling() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 22.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 22.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -6500,7 +6530,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         // 20 > 8 (cull_threshold) -> culling eligible.
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
@@ -6530,14 +6560,14 @@ mod tests {
         };
         let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
 
-        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         assert!(
             matches!(disabled.strategy, CascadeStrategy::Elided { .. }),
             "cull_threshold=0 must disable culling entirely; expected Elided, got {:?}",
             disabled.strategy
         );
 
-        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(1), None, &m, &[], false, 0);
+        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(1), None, &m, scale_less_frame());
         assert!(
             matches!(enabled.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=1 must enable culling; expected Culled, got {:?}",
@@ -6633,7 +6663,7 @@ mod tests {
         let slot_w = 40.0;
 
         // `{gap: 0, cull: false}`: 36px of budget for a 20px label -> S0 flat.
-        let no_gap = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let no_gap = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         assert!(
             matches!(no_gap.strategy, CascadeStrategy::Flat),
             "no gap requirement must resolve flat here; got {:?}",
@@ -6642,7 +6672,7 @@ mod tests {
         assert!(no_gap.visible.iter().all(|v| *v));
 
         // `{gap: 30, cull: true}`: 6px of budget -> every stage fails -> S4 culls.
-        let gap_cull = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(30), None, &m, &[], false, 0);
+        let gap_cull = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(30), None, &m, scale_less_frame());
         assert!(
             matches!(gap_cull.strategy, CascadeStrategy::Culled { .. }),
             "a 30px gap with culling allowed must cull; got {:?}",
@@ -6662,9 +6692,7 @@ mod tests {
             LabelGapPolicy::from_cull_threshold(30).with_overrides(None, Some(false)),
             None,
             &m,
-            &[],
-            false,
-            0,
+            scale_less_frame(),
         );
         assert!(
             gap_no_cull.visible.iter().all(|v| *v),
@@ -6694,7 +6722,7 @@ mod tests {
         let policy = LabelGapPolicy::from_cull_threshold(0).with_overrides(None, Some(true));
         assert_eq!(policy.gap_px(), 0);
 
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, policy, None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, policy, None, &m, scale_less_frame());
         assert!(
             matches!(result.strategy, CascadeStrategy::Culled { .. }),
             "culling permitted at gap 0 must still cull a genuinely overlapping axis; \
@@ -6747,7 +6775,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         match result.strategy {
             CascadeStrategy::Elided { count } => {
                 assert!(count > 0, "expected some labels elided");
@@ -6781,7 +6809,7 @@ mod tests {
     fn cascade_s5_realistic_widths_falls_back_to_rotated_not_elision() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m, scale_less_frame());
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -6823,7 +6851,7 @@ mod tests {
         .map(String::from)
         .collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 12.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 12.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 2, "expected stride 2, got {stride}");
@@ -6863,7 +6891,7 @@ mod tests {
     fn cascade_culled_survivors_stay_rotated_when_still_too_wide() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 3, "expected stride 3, got {stride}");
@@ -6896,7 +6924,7 @@ mod tests {
         let label_pad_eff = 2.0;
 
         let cascade_result =
-            cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m, &[], false, 0);
+            cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(cascade_result.angle, 0.0);
         assert!(cascade_result.visible.iter().any(|v| !v), "fixture assumption: culled");
 
@@ -6955,7 +6983,7 @@ mod tests {
         ];
         let m = mock(5.0); // fixed_width: chars * 5
         let slot_w = 600.0 / 9.0; // ~66.67
-        let result = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let result = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         // Verify: no elision.
         assert!(
             !matches!(result.strategy, CascadeStrategy::Elided { .. }),
@@ -8171,9 +8199,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::ShowAll),
             &m,
-            &[],
-            false,
-            0,
+            scale_less_frame(),
         );
         assert_eq!(result.strategy, CascadeStrategy::Flat);
         assert_eq!(result.angle, 0.0);
@@ -8199,9 +8225,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Parity),
             &m,
-            &[],
-            false,
-            0,
+            scale_less_frame(),
         );
         assert_eq!(result.strategy, CascadeStrategy::Culled { stride: 2 });
         let visible: Vec<bool> = result.visible;
@@ -8225,9 +8249,7 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Rotate),
             &m,
-            &[],
-            false,
-            0,
+            scale_less_frame(),
         );
         let steepest = *ANGLE_CASCADE.last().unwrap();
         assert_eq!(
@@ -8253,26 +8275,20 @@ mod tests {
             legacy_gap(8),
             Some(LabelOverlap::Greedy),
             &m,
-            &[],
-            false,
-            0,
+            scale_less_frame(),
         );
-        let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m, &[], false, 0);
+        let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m, scale_less_frame());
         assert_eq!(greedy.strategy, default.strategy);
         assert_eq!(greedy.angle, default.angle);
         assert_eq!(greedy.visible, default.visible);
         assert_eq!(greedy.labels, default.labels);
     }
 
-    /// S1 (batch B design review): a zero-height slot used to make the
-    /// Greedy arm's `slots_since_kept * slot_h` product `NaN` on the very
-    /// first label (`INFINITY * 0.0`), and `NaN >= line_h` is `false` —
-    /// silently dropping the first label instead of always keeping it as
-    /// the cascade's anchor. Positions no
-    /// longer multiply by a slot height at all — the first label's "clears
-    /// the last kept one" test is `last_kept.is_none()`, true regardless of
-    /// position — so three equal (zero-height-slot) positions still keep
-    /// the first.
+    /// A zero-height slot no longer makes the Greedy arm drop the first
+    /// label: positions never multiply by a slot height, so the first
+    /// label's "clears the last kept one" test is `last_kept.is_none()`,
+    /// true regardless of position — three equal (zero-height-slot)
+    /// positions still keep the first.
     #[test]
     fn resolve_y_overlap_greedy_zero_slot_height_keeps_first_label() {
         let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];

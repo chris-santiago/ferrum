@@ -34,9 +34,9 @@ _REPO = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 
 _TEXT = re.compile(r"<text([^>]*)>(.*?)</text>", re.S)
-_ROTATE = re.compile(r'rotate\(([-\d.]+)')
+_ROTATE = re.compile(r"rotate\(([-\d.]+)")
 _FONT_SIZE = re.compile(r'font-size="([\d.]+)"')
-_CLIP_RECT = re.compile(r'<clipPath[^>]*><rect ([^>]*)/?>')
+_CLIP_RECT = re.compile(r"<clipPath[^>]*><rect ([^>]*)/?>")
 _ATTR = re.compile(r'([\w-]+)="([^"]*)"')
 
 
@@ -114,7 +114,16 @@ def test_sparse_continuous_x_keeps_every_label_flat_at_full_font():
     assert len(labels) == 10
     assert all(size == "11" and rot == 0.0 for _, size, rot in labels)
     assert [t for t, _, _ in labels] == [
-        "-2.5", "-2", "-1.5", "-1", "-0.5", "0", "0.5", "1", "1.5", "2",
+        "-2.5",
+        "-2",
+        "-1.5",
+        "-1",
+        "-0.5",
+        "0",
+        "0.5",
+        "1",
+        "1.5",
+        "2",
     ]
 
 
@@ -216,7 +225,13 @@ def test_facet_panels_thin_independently():
 def test_narrow_facet_panel_thins_a_shared_continuous_axis():
     rng = np.random.default_rng(0)
     df = pl.DataFrame({"x": rng.normal(size=200), "y": rng.normal(size=200), "g": ["a", "b"] * 100})
-    chart = fm.Chart(df).mark_point().encode(x="x", y="y").properties(width=240, height=200).facet(col="g")
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .properties(width=240, height=200)
+        .facet(col="g")
+    )
     svg = chart.to_svg()
     panels = _facet_panels(svg)
     for panel in panels:
@@ -244,7 +259,9 @@ def test_categorical_axis_gets_the_measure_but_never_thins():
     assert len(wide_labels) == 18
     assert all(size == "11" and rot == 0.0 for _, size, rot in wide_labels)
 
-    narrow = fm.Chart(cats).mark_bar().encode(x="c", y="v").properties(width=360, height=300).to_svg()
+    narrow = (
+        fm.Chart(cats).mark_bar().encode(x="c", y="v").properties(width=360, height=300).to_svg()
+    )
     narrow_labels = _x_tick_labels(narrow)
     # Still every category -- rotated rather than thinned away.
     assert len(narrow_labels) == 9
@@ -326,7 +343,10 @@ def test_no_qualifying_stride_falls_through_to_rotation():
     assert len(labels) == 4
     assert all(rot == -90.0 for _, _, rot in labels)
     assert [t for t, _, _ in labels] == [
-        "0.000000", "1,000.000000", "2,000.000000", "3,000.000000",
+        "0.000000",
+        "1,000.000000",
+        "2,000.000000",
+        "3,000.000000",
     ]
 
 
@@ -425,9 +445,7 @@ def test_every_y_axis_is_unaffected_by_x_thinning():
 _GRAMMAR_MARKS = load_script(
     "demo_grammar_marks_thinning_pin", _REPO / "design-docs/demos/demo_grammar_marks.py"
 )
-_THEMES_DEMO = load_script(
-    "demo_themes_thinning_pin", _REPO / "design-docs/themes/demo_themes.py"
-)
+_THEMES_DEMO = load_script("demo_themes_thinning_pin", _REPO / "design-docs/themes/demo_themes.py")
 _SHOWCASE = load_script(
     "generate_showcase_pngs_thinning_pin", _REPO / "scripts/generate-showcase-pngs.py"
 )
@@ -469,9 +487,7 @@ def _scatter_theme_chart(theme) -> fm.Chart:
     )
 
 
-@pytest.mark.parametrize(
-    "theme_name", ["paper_ink", "arctic_signal", "slate_citrus"]
-)
+@pytest.mark.parametrize("theme_name", ["paper_ink", "arctic_signal", "slate_citrus"])
 def test_scatter_theme_cards_thin_to_seven_labels(theme_name):
     theme = getattr(fm.themes, theme_name)
     svg = _scatter_theme_chart(theme).to_svg()
@@ -492,9 +508,7 @@ def test_gapminder_bubble_card_thins_to_five_labels():
 def test_pdp_chart_card_thins_each_panel_independently():
     svg = _DIAGNOSTICS_DEMO.build_pdp_chart().to_svg()
     panels = _facet_panels(svg)
-    f0, f1 = (
-        {k: float(v) for k, v in panel.items()} for panel in panels
-    )
+    f0, f1 = ({k: float(v) for k, v in panel.items()} for panel in panels)
     f0_labels = _x_tick_labels(svg, f0)
     f1_labels = _x_tick_labels(svg, f1)
     assert [t for t, _, _ in f0_labels] == ["4.4", "5", "5.6", "6.2", "6.8", "7.4"]

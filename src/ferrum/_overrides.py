@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._entry import EntryRefusal
 from ferrum._layer import drop_orphaned_conditionals, merge_style
+from ferrum.encoding._aliases import _prose_list
 from ferrum.marks.base import layer_honors, refuse_untaken_layer_style, resolve_layer_style
 
 if TYPE_CHECKING:
@@ -293,7 +294,7 @@ def undrawn_sub_layer_message(
     boxplot's outliers under ``outliers=False``); *drawn* are those it drew.
     Both doors that aim style at a sub-layer by name refuse with it.
     """
-    undrawn = " or ".join(repr(name) for name in names)
+    undrawn = _prose_list([repr(name) for name in names], conjunction="or")
     return lambda voice: (
         f"{_sub_layer_call(voice, door, names)}: this call draws no {undrawn} sub-layer, so "
         f"nothing would take the style; it draws {sorted(drawn)}"

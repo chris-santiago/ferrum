@@ -475,14 +475,6 @@ def _paired(before: tuple, after: tuple) -> list:
     return [by_name.get(layer.name) for layer in before]
 
 
-def _quoted(fields: list[str]) -> str:
-    """*fields* as quoted prose: ``'c'``, ``'c' and 'g'``."""
-    quoted = [repr(field) for field in fields]
-    return (
-        " and ".join(quoted) if len(quoted) <= 2 else ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
-    )
-
-
 def _redrawn(layer: _Layer, before: _Layer, after: _Layer) -> _Layer:
     """*layer*, built as *before*, with every field *after* draws differently from *before*.
 

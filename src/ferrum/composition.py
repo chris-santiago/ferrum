@@ -1303,8 +1303,8 @@ def _lower_any(
 
     Every non-overlay layout (hconcat/vconcat/wrap/grid) reaches an empty-data
     leaf through :func:`_lower_leaf_node`, which lowers it to a
-    ``{"kind": "hole"}`` cell (sized under hconcat/vconcat per Task 10-rust;
-    ignored by grid/wrap cell math per spec/Task 8a): a grid cell has no data
+    ``{"kind": "hole"}`` cell (sized under hconcat/vconcat; ignored by
+    grid/wrap cell math): a grid cell has no data
     of its own to draw a frame from, so a hole is the only sizeable
     placeholder. Only ``LayerChart``'s overlay lowering (which does not route
     through this generic composite branch) reaches
@@ -1526,8 +1526,9 @@ def _lower_leaf_node(
     :func:`_lower_overlay_leaf_node`). An empty-data leaf (``num_rows == 0``)
     lowers to a ``{"kind": "hole"}`` placeholder, sized from the viewport the
     leaf would otherwise have rendered at, so it occupies the same space a
-    drawn leaf would -- required under hconcat/vconcat (Task 10-rust's
-    ``HoleSizeRequired``) and harmlessly ignored by grid/wrap cell math.
+    drawn leaf would -- required under hconcat/vconcat (Rust refuses an
+    unsized hole there with ``HoleSizeRequired``) and harmlessly ignored by
+    grid/wrap cell math.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
     if data.num_rows == 0:

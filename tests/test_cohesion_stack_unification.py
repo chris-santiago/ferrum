@@ -26,7 +26,7 @@ import pytest
 
 import ferrum as fm
 from ferrum import position
-from ferrum.position import STACK_OFFSETS, _STACKABLE_MARKS, _STACK_ELIGIBLE
+from ferrum.position import STACK_OFFSETS, _STACKABLE_MARKS, _STACK_ELIGIBLE, stack_honored
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +183,13 @@ def test_two_capability_sets_are_distinct():
     assert _STACKABLE_MARKS < _STACK_ELIGIBLE  # base-consumers are a strict subset
 
 
-def test_chart_module_reexports_stackable_marks():
-    """``chart.py`` still exposes ``_STACKABLE_MARKS`` (now imported from position)."""
-    from ferrum.chart import _STACKABLE_MARKS as chart_stackable
-
-    assert chart_stackable is _STACKABLE_MARKS
+def test_stack_honored_reads_rust_theta_predicate():
+    """``stack_honored`` reads Rust's ``Mark::stacks_polar_theta`` for the theta half."""
+    assert stack_honored("arc", polar_theta=True) is True
+    assert stack_honored("text", polar_theta=True) is True
+    assert stack_honored("point", polar_theta=True) is False
+    assert stack_honored("arc", polar_theta=False) is False
+    # A composite name has no row in Rust's style table, so it never reaches
+    # the lookup and reads unhonored rather than raising.
+    assert stack_honored("boxplot", polar_theta=True) is False
+    assert stack_honored(None, polar_theta=True) is False

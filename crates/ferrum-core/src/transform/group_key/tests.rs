@@ -913,7 +913,7 @@ fn pooled_group_key_nulls_a_varying_column() {
 
 /// Alternating nulls across TWO columns: `h` is null on even rows and real
 /// on odd rows; `k` is the opposite. Neither column is entirely null, so
-/// the old (cycle-6b) rule kept each one's first non-null value — `h`'s
+/// a first-non-null rule would keep each one's first non-null value — `h`'s
 /// from row 1, `k`'s from row 0 — stamping the pooled fit `(h="P", k="Q")`,
 /// a combination no row in the batch actually has. Both must null out: `h`
 /// is null on SOME rows (not constant, and not entirely null either), and

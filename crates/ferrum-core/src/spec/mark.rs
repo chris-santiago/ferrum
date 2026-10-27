@@ -619,6 +619,17 @@ pub(crate) fn mark_drawn_channels(mark: &str) -> pyo3::PyResult<Vec<&'static str
     Ok(InheritedChannel::ALL.into_iter().filter(|c| mark.draws_channel(*c)).map(InheritedChannel::as_str).collect())
 }
 
+/// `ferrum._core.mark_stacks_polar_theta(mark)`: whether `mark` stacks the
+/// theta channel of a `CoordPolar` itself ([`Mark::stacks_polar_theta`]).
+/// Python's stack-honoring decision reads this rather than keeping its own
+/// copy of which marks sweep theta into a pie. Refuses an unknown mark.
+/// Registered in `lib.rs`.
+#[pyo3::pyfunction]
+pub(crate) fn mark_stacks_polar_theta(mark: &str) -> pyo3::PyResult<bool> {
+    let mark = parse_mark_arg(mark)?;
+    Ok(mark.stacks_polar_theta())
+}
+
 impl fmt::Display for Mark {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -745,6 +756,16 @@ mod tests {
         );
         assert!(mark_drawn_channels("point").unwrap().contains(&"shape"));
         assert!(mark_drawn_channels("nope").is_err());
+    }
+
+    /// The published predicate matches `Mark::stacks_polar_theta`, and refuses
+    /// an unknown mark.
+    #[test]
+    fn mark_stacks_polar_theta_publishes_the_predicate() {
+        assert!(mark_stacks_polar_theta("arc").unwrap());
+        assert!(mark_stacks_polar_theta("text").unwrap());
+        assert!(!mark_stacks_polar_theta("point").unwrap());
+        assert!(mark_stacks_polar_theta("nope").is_err());
     }
 
     /// A rule or tick declaring exactly one of `x`/`y` with no span is a

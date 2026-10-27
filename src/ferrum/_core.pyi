@@ -1033,7 +1033,9 @@ def aux_legend_channels() -> list[str]: ...
 
 # The channels Rust builds a panel's auxiliary (non-positional) scale for, in
 # its ``AuxiliaryScales`` order, each filled from the first layer that draws
-# the channel and resolved over every layer that draws it.
+# the channel and resolved over every layer that draws it. Published so the
+# Python test suite parametrizes over the channels Rust scales at chart
+# level rather than keeping its own list.
 def auxiliary_scale_channels() -> list[str]: ...
 
 # Every ``MarkKwargsSpec`` wire key (the ``mark_style`` dict's keys), in
@@ -1085,6 +1087,13 @@ def mark_draws_inherited(mark: str, channel: str) -> bool: ...
 # (``Mark::draws_channel``). A binding on any other channel is never read by
 # the mark's builder. An unknown mark raises ``ValueError``.
 def mark_drawn_channels(mark: str) -> list[str]: ...
+
+# Whether primitive ``mark`` stacks the theta channel of a ``CoordPolar``
+# itself: from Rust's one per-mark table (``Mark::stacks_polar_theta``).
+# Python's stack-honoring decision reads this rather than keeping its own
+# copy of which marks sweep theta into a pie. An unknown mark raises
+# ``ValueError``.
+def mark_stacks_polar_theta(mark: str) -> bool: ...
 
 # The columns ``bin`` computes, from Rust's one Bin column builder:
 # ``bin_start``, ``bin_end``, ``count``, ``density``, then ``agg_value`` when

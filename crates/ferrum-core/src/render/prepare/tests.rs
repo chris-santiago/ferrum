@@ -9487,10 +9487,8 @@ fn an_all_null_log_y_column_resolves_the_no_value_domain() {
 }
 
 /// A `size` binding whose column is ALL null builds no scale, draws every
-/// mark at the unbound default, and adds no legend -- unaffected by this
-/// cycle's Log/infinity work, which never touches a column with nothing to
-/// map. Guarded against a literal captured from the pre-task tree
-/// (`/tmp/bir-base-T42`) rather than re-derived, so a change to any
+/// mark at the unbound default, and adds no legend. Guarded against a
+/// captured byte baseline rather than re-derived, so a change to any
 /// upstream default (the point radius, grid line count, tick ladder) would
 /// fail this test exactly as it would a hand-inspected byte diff.
 #[test]

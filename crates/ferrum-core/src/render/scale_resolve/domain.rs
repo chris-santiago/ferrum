@@ -2680,9 +2680,11 @@ pub(in crate::render) fn numeric_domain_union_over(
             Some(LayerSource::Batch(batch)) => take(batch, &mut found)?,
             Some(LayerSource::Chart) | None => {
                 let final_col = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(f));
-                let covered_by_final = include_final && final_col.is_some();
-                if covered_by_final {
-                    take(transform_outputs.get(FINAL_OUTPUT_KEY).expect("checked above"), &mut found)?;
+                let final_batch = transform_outputs
+                    .get(FINAL_OUTPUT_KEY)
+                    .filter(|_| include_final && final_col.is_some());
+                if let Some(batch) = final_batch {
+                    take(batch, &mut found)?;
                 } else {
                     // EXTENT only here — the panel's own domain stays
                     // independent (or there is no `FINAL` to union with);

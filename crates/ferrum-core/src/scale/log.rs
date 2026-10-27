@@ -434,7 +434,7 @@ impl LogScaleData {
                     .flat_map(|e| steps.iter().map(move |&k| k as f64 * base.powi(e as i32)))
                     .filter(|&v| Self::within_tick_tolerance(v, lo, hi))
                     .collect();
-                candidate.sort_by(|a, b| a.partial_cmp(b).expect("finite magnitudes"));
+                candidate.sort_by(f64::total_cmp);
                 candidate.dedup();
                 if candidate.len() <= count && best.as_ref().is_none_or(|b| candidate.len() > b.len()) {
                     best = Some(candidate);

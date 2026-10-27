@@ -224,7 +224,7 @@ pub fn build_color_scale(
             Ok(numeric_extent(col))
         };
         let panel_extent = continuous_extent(located.col, &c_enc.field)?;
-        // A layered spec's color spans every layer's own column. Otherwise, T3:
+        // A layered spec's color spans every layer's own column. Otherwise,
         // when faceted (Shared), union the per-panel extent with the global
         // FINAL_OUTPUT_KEY batch so marks normalize through the same domain as
         // the global colorbar legend.
