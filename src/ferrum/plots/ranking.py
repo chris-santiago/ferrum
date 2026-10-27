@@ -169,7 +169,8 @@ def rank_chart(
 
     _warn_deprecated_dispatcher("rank_chart", "rank", "rank1d_chart / rank2d_chart")
     if rank == "1d":
-        return rank1d_chart(
+        return _rank1d_chart_impl(
+            "rank_chart",
             data_or_source,
             X,
             y,
@@ -184,7 +185,8 @@ def rank_chart(
             layers=layers,
             theme=theme,
         )
-    return rank2d_chart(
+    return _rank2d_chart_impl(
+        "rank_chart",
         data_or_source,
         X,
         y,
@@ -202,6 +204,87 @@ def rank_chart(
 # ---------------------------------------------------------------------------
 # rank1d_chart
 # ---------------------------------------------------------------------------
+
+
+def _rank1d_chart_impl(
+    entry: str,
+    data_or_source: Any = _UNSET,
+    X: Any = None,
+    y: Any = None,
+    *,
+    source: Any = _UNSET,  # deprecated keyword alias for ``data_or_source``
+    algorithm: str | None = None,
+    top_k: int | None = None,
+    orient: str = "horizontal",
+    color_field: str | None = None,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+) -> "Chart":
+    """``rank1d_chart``'s body, voiced as *entry* (``rank1d_chart`` itself, or ``rank_chart``).
+
+    Every self-naming refusal below reads *entry* rather than the literal
+    ``"rank1d_chart"``, so a call that reached this through the deprecated
+    ``rank_chart`` dispatcher names ``rank_chart``. See ``rank1d_chart``
+    for the parameter documentation.
+    """
+    import ferrum
+
+    data_or_source = _resolve_first_param(
+        data_or_source,
+        source,
+        canonical_name="data_or_source",
+        alias_name="source",
+        func_name=entry,
+    )
+    if data_or_source is _UNSET:
+        raise TypeError(f"{entry}() missing required argument: 'data_or_source'")
+
+    algo = algorithm or "shapiro"
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank1d(algorithm=algo)
+    elif _is_raw_tabular_data(data_or_source):
+        input_data = data_or_source if X is None else X
+        if algo == "covariance":
+            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
+
+            if y is None:
+                raise ValueError(f"{entry}(algorithm='covariance') requires y.")
+            df = rank1d_compute_with_y(input_data, y, algorithm=algo)
+        else:
+            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
+
+            df = rank1d_compute(input_data, algorithm=algo)
+    else:
+        # #216: a fitted estimator (not raw data, not already a ModelSource)
+        # must route through _resolve_source for EVERY algorithm, not just
+        # "covariance" -- falling through to the raw-data branch above would
+        # hand the estimator object itself to np.asarray()/
+        # polars_or_array_to_record_batch() and leak an internal TypeError
+        # instead of the typed ModelSource refusal (is_raw_data hoisted out
+        # of the covariance-only arm it used to live in).
+        ms = _resolve_source(
+            data_or_source,
+            X,
+            y,
+            random_state=random_state,
+        )
+        df = ms.rank1d(algorithm=algo)
+    return _rank1d_chart_from_dataframe(
+        df,
+        algorithm=algo,
+        orient=orient,
+        top_k=top_k,
+        color_field=color_field,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 @_figure_entry
@@ -286,54 +369,17 @@ def rank1d_chart(
     >>> import ferrum as fm
     >>> fm.rank1d_chart(model, X_train, algorithm="shapiro")
     """
-    import ferrum
-
-    data_or_source = _resolve_first_param(
+    return _rank1d_chart_impl(
+        "rank1d_chart",
         data_or_source,
-        source,
-        canonical_name="data_or_source",
-        alias_name="source",
-        func_name="rank1d_chart",
-    )
-    if data_or_source is _UNSET:
-        raise TypeError("rank1d_chart() missing required argument: 'data_or_source'")
-
-    algo = algorithm or "shapiro"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank1d(algorithm=algo)
-    elif _is_raw_tabular_data(data_or_source):
-        input_data = data_or_source if X is None else X
-        if algo == "covariance":
-            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
-
-            if y is None:
-                raise ValueError("rank1d_chart(algorithm='covariance') requires y.")
-            df = rank1d_compute_with_y(input_data, y, algorithm=algo)
-        else:
-            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
-
-            df = rank1d_compute(input_data, algorithm=algo)
-    else:
-        # #216: a fitted estimator (not raw data, not already a ModelSource)
-        # must route through _resolve_source for EVERY algorithm, not just
-        # "covariance" -- falling through to the raw-data branch above would
-        # hand the estimator object itself to np.asarray()/
-        # polars_or_array_to_record_batch() and leak an internal TypeError
-        # instead of the typed ModelSource refusal (is_raw_data hoisted out
-        # of the covariance-only arm it used to live in).
-        ms = _resolve_source(
-            data_or_source,
-            X,
-            y,
-            random_state=random_state,
-        )
-        df = ms.rank1d(algorithm=algo)
-    return _rank1d_chart_from_dataframe(
-        df,
-        algorithm=algo,
-        orient=orient,
+        X,
+        y,
+        source=source,
+        algorithm=algorithm,
         top_k=top_k,
+        orient=orient,
         color_field=color_field,
+        random_state=random_state,
         mark=mark,
         encode=encode,
         properties=properties,
@@ -345,6 +391,67 @@ def rank1d_chart(
 # ---------------------------------------------------------------------------
 # rank2d_chart
 # ---------------------------------------------------------------------------
+
+
+def _rank2d_chart_impl(
+    entry: str,
+    data_or_source: Any = _UNSET,
+    X: Any = None,
+    y: Any = None,
+    *,
+    source: Any = _UNSET,  # deprecated keyword alias for ``data_or_source``
+    algorithm: str | None = None,
+    annot: bool = True,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+) -> "Chart":
+    """``rank2d_chart``'s body, voiced as *entry* (``rank2d_chart`` itself, or ``rank_chart``).
+
+    Every self-naming refusal below reads *entry* rather than the literal
+    ``"rank2d_chart"``, so a call that reached this through the deprecated
+    ``rank_chart`` dispatcher names ``rank_chart``. See ``rank2d_chart``
+    for the parameter documentation.
+    """
+    import ferrum
+
+    data_or_source = _resolve_first_param(
+        data_or_source,
+        source,
+        canonical_name="data_or_source",
+        alias_name="source",
+        func_name=entry,
+    )
+    if data_or_source is _UNSET:
+        raise TypeError(f"{entry}() missing required argument: 'data_or_source'")
+
+    algo = algorithm or "pearson"
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank2d(algorithm=algo)
+    elif _is_raw_tabular_data(data_or_source):
+        from ferrum.diagnostics._internal._rank_helpers import rank2d_compute
+
+        input_data = data_or_source if X is None else X
+        df = rank2d_compute(input_data, algorithm=algo)
+    else:
+        # #216: same is_raw_data hoist as rank1d_chart -- a fitted estimator
+        # must resolve through ModelSource for every algorithm, not leak
+        # into np.asarray() as a raw-data fallback.
+        ms = _resolve_source(data_or_source, X, y, random_state=random_state)
+        df = ms.rank2d(algorithm=algo)
+    return _rank2d_chart_from_dataframe(
+        df,
+        algorithm=algo,
+        annot=annot,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 @_figure_entry
@@ -406,36 +513,15 @@ def rank2d_chart(
     >>> import ferrum as fm
     >>> fm.rank2d_chart(model, X_train, algorithm="pearson")
     """
-    import ferrum
-
-    data_or_source = _resolve_first_param(
+    return _rank2d_chart_impl(
+        "rank2d_chart",
         data_or_source,
-        source,
-        canonical_name="data_or_source",
-        alias_name="source",
-        func_name="rank2d_chart",
-    )
-    if data_or_source is _UNSET:
-        raise TypeError("rank2d_chart() missing required argument: 'data_or_source'")
-
-    algo = algorithm or "pearson"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank2d(algorithm=algo)
-    elif _is_raw_tabular_data(data_or_source):
-        from ferrum.diagnostics._internal._rank_helpers import rank2d_compute
-
-        input_data = data_or_source if X is None else X
-        df = rank2d_compute(input_data, algorithm=algo)
-    else:
-        # #216: same is_raw_data hoist as rank1d_chart -- a fitted estimator
-        # must resolve through ModelSource for every algorithm, not leak
-        # into np.asarray() as a raw-data fallback.
-        ms = _resolve_source(data_or_source, X, y, random_state=random_state)
-        df = ms.rank2d(algorithm=algo)
-    return _rank2d_chart_from_dataframe(
-        df,
-        algorithm=algo,
+        X,
+        y,
+        source=source,
+        algorithm=algorithm,
         annot=annot,
+        random_state=random_state,
         mark=mark,
         encode=encode,
         properties=properties,

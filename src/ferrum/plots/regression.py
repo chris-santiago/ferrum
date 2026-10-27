@@ -498,9 +498,10 @@ def _required_field_name(value: Any, *, entry: str, param: str) -> str:
 
     *entry* is the public function the caller invoked and *param* the
     parameter being narrowed, so the refusal names what they wrote.
-    ``regplot`` passes neither: it delegates to ``lmplot`` and therefore
-    reads as ``lmplot``, which is how its other refusals already read
-    (``truncate=False``, ``x_bins=`` on a dedicated method).
+    ``regplot`` passes ``"regplot"``: it runs ``lmplot``'s body directly
+    (:func:`_lmplot_impl`) and speaks as itself, which is how its other
+    refusals already read (``truncate=False``, ``x_bins=`` on a dedicated
+    method).
     """
     name = _field_name(value)
     if name is None:
@@ -511,8 +512,8 @@ def _required_field_name(value: Any, *, entry: str, param: str) -> str:
     return name
 
 
-def _log_scaled_x(value: Any, field: str) -> Any:
-    """``lmplot(logx=True)``'s x channel, for either spelling of ``x``.
+def _log_scaled_x(entry: str, value: Any, field: str) -> Any:
+    """``lmplot(logx=True)``'s x channel, for either spelling of ``x``, voiced as *entry*.
 
     A bare column name becomes ``X(name, scale=log)``. A channel object the
     caller built themselves is REBUILT with the log scale added -- same
@@ -530,7 +531,7 @@ def _log_scaled_x(value: Any, field: str) -> Any:
         return X(field, scale={"type": "log"})
     if value.option("scale") is not None:
         raise ValueError(
-            "lmplot(logx=True, x=<channel with its own scale=>): two instructions "
+            f"{entry}(logx=True, x=<channel with its own scale=>): two instructions "
             "for one x scale. Keep your scale= and drop logx=True, or pass x as a "
             "column name and let logx set the log scale."
         )
@@ -618,23 +619,27 @@ def _fit_chart_from_named_transform(
 
 @dataclass(frozen=True)
 class _FitRequest:
-    """Everything ``lmplot`` resolved before building its fit, in one value.
+    """Everything ``_lmplot_impl`` resolved before building its fit, in one value.
 
     Each ``_build_*_fit`` below reads the fields its method uses and ignores
     the rest, so the dispatch hands every builder the same argument instead
     of each call site picking a per-method subset. All fields are resolved
-    once in ``lmplot``; none is re-derived here.
+    once in ``_lmplot_impl``; none is re-derived here.
 
-    ``x``/``y`` are the caller's channels (``x`` already carries ``logx``'s
-    log scale); ``x_field``/``y_field`` are their resolved column names.
-    ``grouping`` is the fields the fit groups by (spec §6.4's composite
-    grouping of the hue and every grouping channel the caller binds), and
-    ``grouping_bindings`` the bindings of those channels, which the fit
-    chart binds itself so each per-group curve draws its group's color.
-    ``has_scatter`` says whether a scatter layer will be composed beside the
-    fit, which decides the smooth path's layer shape.
+    ``entry`` is the public call the caller made (``lmplot`` or
+    ``regplot``), so a builder's own refusal names it rather than
+    ``lmplot`` unconditionally. ``x``/``y`` are the caller's channels
+    (``x`` already carries ``logx``'s log scale); ``x_field``/``y_field``
+    are their resolved column names. ``grouping`` is the fields the fit
+    groups by (spec §6.4's composite grouping of the hue and every grouping
+    channel the caller binds), and ``grouping_bindings`` the bindings of
+    those channels, which the fit chart binds itself so each per-group
+    curve draws its group's color. ``has_scatter`` says whether a scatter
+    layer will be composed beside the fit, which decides the smooth path's
+    layer shape.
     """
 
+    entry: str
     data: Any
     x: Any
     y: Any
@@ -680,7 +685,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         x_estimator=req.x_estimator,
         show_metrics=req.metrics,
         **_grouped(req),
-        **_smooth_degree_kwargs(method, req.order, "lmplot"),
+        **_smooth_degree_kwargs(method, req.order, req.entry),
         **({"x_range": req.x_range} if req.x_range is not None else {}),
     )
     if not req.has_scatter:
@@ -839,9 +844,9 @@ def _build_fit(method: str, req: _FitRequest) -> Chart:
     """
     builder = _FIT_BUILDERS.get(method)
     if builder is None:
-        validate_choice("lmplot", "method", method, _VALID_METHODS)
+        validate_choice(req.entry, "method", method, _VALID_METHODS)
         raise LookupError(
-            f"lmplot: method={method!r} is accepted but has no fit builder in "
+            f"{req.entry}: method={method!r} is accepted but has no fit builder in "
             "ferrum.plots.regression._FIT_BUILDERS"
         )
     return builder(method, req)
@@ -850,6 +855,276 @@ def _build_fit(method: str, req: _FitRequest) -> Chart:
 # ---------------------------------------------------------------------------
 # Public figure functions
 # ---------------------------------------------------------------------------
+
+
+def _lmplot_impl(
+    entry: str,
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    hue: Any = None,
+    col: Any = None,
+    row: Any = None,
+    method: str = "lm",
+    ci: Any = 95,
+    order: int | None = None,
+    scatter: bool = True,
+    scatter_kws: Any = None,
+    line_kws: Any = None,
+    truncate: bool = True,
+    x_bins: Any = None,
+    x_estimator: Any = None,
+    x_jitter: Any = None,
+    logx: bool = False,
+    show_metrics: bool | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+    **encode_kwargs: Any,
+) -> Chart:
+    """``lmplot``'s body, voiced as *entry* (``lmplot`` itself, or ``regplot``).
+
+    Every self-naming refusal and warning below reads *entry* rather than
+    the literal ``"lmplot"``, so a call that reached this through
+    ``regplot`` names ``regplot``. See ``lmplot`` for the parameter
+    documentation.
+    """
+    validate_choice(entry, "method", method, _VALID_METHODS)
+    # x_estimator= is refused here naming entry, not by Smooth's own Rust
+    # text or a raw PyO3 TypeError.
+    validate_optional_choice(entry, "x_estimator", x_estimator, x_estimator_accepted_values())
+
+    # x_bins/x_estimator: `Logistic`/`Glm`/`Robust` expose no binning
+    # parameters at all (`transform_registry` lists none for any of the
+    # three), so there is nothing to forward -- refuse rather than silently
+    # drop, the same "no silent parameter drop" principle `truncate=False`
+    # already enforces two methods of this same trio above. Either kwarg
+    # alone is refused: an `x_estimator=` with no `x_bins=` would otherwise
+    # be a second, quieter no-op with nothing to act on.
+    if method in _DEDICATED_FIT_METHODS and (x_bins is not None or x_estimator is not None):
+        bad = "x_bins" if x_bins is not None else "x_estimator"
+        raise ValueError(
+            f"{entry}(method={method!r}, {bad}=...) is not "
+            f"supported -- the {method!r} transform has no x_bins/x_estimator "
+            "binning parameters to pre-aggregate the fit input. Use a "
+            "mark_smooth-routed method (lm, loess, quadratic, cubic, log, "
+            "sqrt, gam) or leave x_bins=None (the default)."
+        )
+
+    data = to_polars(data)
+
+    # The fit's column names, resolved ONCE and non-optionally. Every consumer
+    # below -- the fit layers' axis titles, `desugar_smooth`'s field
+    # arguments, the x_range/jitter column lookups -- needs a real column
+    # name, and each used to re-derive it through `_field_name`, whose
+    # `str | None` return no call site checked (#199's type hole).
+    x_field = _required_field_name(x, entry=entry, param="x")
+    y_field = _required_field_name(y, entry=entry, param="y")
+
+    # Normalize CI: spec accepts ci=95 (percent) or ci=None.
+    ci_frac = (ci / 100.0) if ci is not None else None
+
+    # Schwabish SB-followup (2026-05-12): the corner-metrics overlay is
+    # supplied by the Smooth/Robust Rust transform via
+    # ``inject_metrics=True`` (threaded through ``mark_smooth
+    # (show_metrics=True)`` for smooth-routed methods, and directly on
+    # ``Robust(...)`` below for ``method="robust"``), so R²/RMSE/MAE is
+    # computed once in Rust and surfaced as ``_metrics_text`` /
+    # ``_metrics_y`` columns on the fit-grid output — no Python-side
+    # duplication. ``inject_metrics`` is generic (verified against
+    # ``smooth.rs``: every ``SmoothMethod`` arm accepts it, computed
+    # against the raw input regardless of fit shape), so this applies
+    # uniformly to every smooth-routed method and to ``"robust"``.
+    # ``"logistic"``/``"glm"`` expose no ``inject_metrics`` param at all
+    # (``transform_registry`` lists none), so those two stay excluded
+    # regardless of ``show_metrics=``. Computed below, once the grouping is
+    # known: a per-group fit has no single corner to report.
+
+    # truncate: True = clip to data range (current Smooth/Robust default).
+    # False = extend fit line to the full x-axis domain boundary via
+    # SmoothSpec/RobustSpec.x_range (spec §4 WI-7 — wired end-to-end for
+    # every mark_smooth-routed method and for "robust"). "logistic"/"glm"
+    # accept no x_range at all (transform_registry confirms neither lists
+    # it), so extending their fit line past the data range isn't possible
+    # without a Rust-side transform change — truncate=False refuses for
+    # those two rather than silently clipping anyway -- no silent parameter
+    # drop.
+    # The x_range is resolved from the chart's x column min/max at Python
+    # desugar time; the Rust transform uses it as the evaluation domain.
+    # When truncate=True (default) x_range stays None → clips to observed data.
+    x_range = None
+    if not truncate:
+        if method in ("logistic", "glm"):
+            raise ValueError(
+                f"{entry}(method={method!r}, truncate=False) is not "
+                f"supported -- the {method!r} transform has no x_range "
+                "parameter to extend the fit line past the observed data "
+                "range. Use method='robust' (accepts x_range), a "
+                "mark_smooth-routed method (lm, loess, quadratic, cubic, "
+                "log, sqrt, gam), or leave truncate=True (the default)."
+            )
+        # Compute the axis-domain extent here so lmplot does not need a
+        # provisional scale pass. The Rust Smooth/Robust transform will
+        # evaluate the fit line over [x_min, x_max] of the full dataset
+        # regardless of which rows each facet panel sees.
+        # seaborn behaviour: extend to the axis limits, which are the data
+        # range padded by 5% on each side (matching the typical auto-scale margin).
+        try:
+            _df = data.collect() if hasattr(data, "collect") else data
+            x_col_name = x_field
+            if hasattr(_df, "to_arrow"):
+                _x_series = _df[x_col_name]
+                _x_min = float(_x_series.min())
+                _x_max = float(_x_series.max())
+                _margin = (_x_max - _x_min) * 0.05
+                x_range = [_x_min - _margin, _x_max + _margin]
+        except (AttributeError, KeyError):
+            x_range = None
+
+    # `x_jitter` offsets the scatter's x column by writing a Float64 noise
+    # array back into it (`apply_jitter`, `render/position.rs`), which fails
+    # Arrow's schema check on any other numeric dtype: `Jitter: ... expected
+    # Int64 but found Float64`. Widen the column once, here, so BOTH charts
+    # built below share it -- the merged chart carries the scatter chart's own
+    # data, so casting one and not the other would put two dtypes on one
+    # column. Gated on `scatter` because `x_jitter` adjusts nothing without a
+    # scatter layer to adjust, and on the dtype so a Float64 column is
+    # untouched (a non-numeric x is left alone too: the renderer refuses it in
+    # its own terms rather than failing here on a cast).
+    #
+    # Until this batch the defect was visible on 3 of the 4 ci/show_metrics
+    # combinations and hidden on the 4th only because the scatter layer was
+    # reading the fit's own (Float64) grid there -- the corruption F-L10-02
+    # closes. DELETE CONDITION: when `apply_jitter` coerces the column it
+    # writes, the way the transform engine already coerces its inputs
+    # (`numeric_util::coerce_to_float64`, batch D M1). `catplot(native_scale=
+    # True)` carries the same workaround for the same renderer behavior.
+    if scatter and x_jitter is not None:
+        jitter_frame = to_polars(data)
+        jitter_column = x_field
+        dtype = jitter_frame.schema.get(jitter_column)
+        if dtype is not None and dtype.is_numeric() and dtype != pl.Float64:
+            data = jitter_frame.with_columns(pl.col(jitter_column).cast(pl.Float64))
+
+    # Shared encoding.
+    #
+    # `hue` is typed Nominal once here and reused on every layer below. It is
+    # a group discriminator: it drives Smooth's `groupby=`, so one fit and one
+    # CI band are produced per level. Left to infer, a numeric hue column read
+    # as Continuous collapsed all of those back into a single rendered fit and
+    # a single band -- a materially wrong statistical chart, drawn silently.
+    # The scatter layer takes the same typing rather than the `point` carve-out
+    # because it shares one color scale with the fit layers in the same layered
+    # chart; typing only the fit half would ask that one scale to be Continuous
+    # and Nominal at once. See `nominal_color_channel` for the rule.
+    hue_ch = nominal_color_channel(hue)
+
+    # `logx` is part of the x channel every layer is built with, not a
+    # post-hoc fixup applied to finished charts: resolving it once here means
+    # the scatter, the `mark_smooth`-routed fit and the dedicated-transform
+    # fit all take the same channel object. (It used to be two
+    # implementations at the bottom of this function, chosen on whether the
+    # fit chart happened to have `_layers` yet.)
+    x_enc = _log_scaled_x(entry, x, x_field) if logx else x
+
+    enc: dict = {"x": x_enc, "y": y}
+    if hue is not None:
+        enc["color"] = hue_ch
+    enc.update(encode_kwargs)
+
+    # Every fit method groups by the hue and by every grouping channel the
+    # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
+    # as a bare keyword (merged into `enc` above) or through the `encode=`
+    # dict `_finalize_chart` applies later: spec §6.4's composite grouping,
+    # computed once here, so each method fits one curve per group as a
+    # composite statistic does. The fit binds the same channels, so each
+    # curve draws its group's color.
+    bound = {**enc, **(encode or {})}
+    grouping = tuple(_encode_grouping(bound))
+    grouping_bindings = {
+        channel: value
+        for channel, value in bound.items()
+        if channel in COMPOSITE_GROUPING_CHANNELS and value is not None
+    }
+    # One R²/RMSE/MAE corner describes one fit: none under any grouping.
+    # "logistic"/"glm" expose no single-fit corner at all (neither transform
+    # has `inject_metrics`), excluded before `_metrics_applied` so neither
+    # warns under `show_metrics=True`, matching their docs above.
+    metrics_applied = method not in ("logistic", "glm") and _metrics_applied(
+        entry, show_metrics, list(grouping)
+    )
+
+    # ---- Scatter layer (optional) --------------------------------------
+    scatter_layer = None
+    if scatter:
+        s = Chart(data)
+        skw = _style_kws(entry, "scatter_kws", "point", scatter_kws)
+        if x_jitter is not None:
+            s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)), **skw)
+        else:
+            s = s.mark_point(**skw)
+        s = s.encode(**enc)
+        scatter_layer = s
+
+    # ---- Fit layer (per method) ----------------------------------------
+    # Every `_FIT_BUILDERS` entry forwards `lkw` at CONSTRUCTION, to the fit line
+    # alone. It used to be rewritten onto the finished chart's `_layers` for
+    # the `mark_smooth`-routed methods instead, which dropped it silently
+    # whenever those layers were not materialized yet -- the `scatter=False`
+    # branch, whose chart still carries a pending stat mark until render
+    # (#199).
+    lkw = _style_kws(entry, "line_kws", "line", line_kws)
+
+    fit = _build_fit(
+        method,
+        _FitRequest(
+            entry=entry,
+            data=data,
+            x=x_enc,
+            y=y,
+            x_field=x_field,
+            y_field=y_field,
+            grouping=grouping,
+            grouping_bindings=grouping_bindings,
+            ci=ci_frac,
+            line_kwargs=lkw,
+            x_bins=x_bins,
+            x_estimator=x_estimator,
+            order=order,
+            x_range=x_range,
+            metrics=metrics_applied,
+            has_scatter=scatter_layer is not None,
+        ),
+    )
+
+    # Compose scatter + fit. (When ``metrics_applied``, the fit chart
+    # already carries the metrics-text layer reading the Smooth output.)
+    if scatter_layer is None:
+        out = fit
+    else:
+        out = _merge_layers(scatter_layer, fit, scatter_name="scatter", fit_name="fit")
+
+    # Faceting.
+    if col is not None or row is not None:
+        if col is not None and row is not None:
+            out = out.facet(row=row, col=col)
+        elif col is not None:
+            out = out.facet(col=col)
+        else:
+            out = out.facet(row=row)
+
+    return _finalize_chart(
+        out,
+        entry=entry,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 @_figure_entry
@@ -1077,237 +1352,32 @@ def lmplot(
 
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
-    validate_choice("lmplot", "method", method, _VALID_METHODS)
-    # x_estimator= is refused here naming lmplot, not by Smooth's own Rust
-    # text or a raw PyO3 TypeError.
-    validate_optional_choice("lmplot", "x_estimator", x_estimator, x_estimator_accepted_values())
-
-    # x_bins/x_estimator: `Logistic`/`Glm`/`Robust` expose no binning
-    # parameters at all (`transform_registry` lists none for any of the
-    # three), so there is nothing to forward -- refuse rather than silently
-    # drop, the same "no silent parameter drop" principle `truncate=False`
-    # already enforces two methods of this same trio above. Either kwarg
-    # alone is refused: an `x_estimator=` with no `x_bins=` would otherwise
-    # be a second, quieter no-op with nothing to act on.
-    if method in _DEDICATED_FIT_METHODS and (x_bins is not None or x_estimator is not None):
-        bad = "x_bins" if x_bins is not None else "x_estimator"
-        raise ValueError(
-            f"lmplot(method={method!r}, {bad}=...) is not "
-            f"supported -- the {method!r} transform has no x_bins/x_estimator "
-            "binning parameters to pre-aggregate the fit input. Use a "
-            "mark_smooth-routed method (lm, loess, quadratic, cubic, log, "
-            "sqrt, gam) or leave x_bins=None (the default)."
-        )
-
-    data = to_polars(data)
-
-    # The fit's column names, resolved ONCE and non-optionally. Every consumer
-    # below -- the fit layers' axis titles, `desugar_smooth`'s field
-    # arguments, the x_range/jitter column lookups -- needs a real column
-    # name, and each used to re-derive it through `_field_name`, whose
-    # `str | None` return no call site checked (#199's type hole).
-    x_field = _required_field_name(x, entry="lmplot", param="x")
-    y_field = _required_field_name(y, entry="lmplot", param="y")
-
-    # Normalize CI: spec accepts ci=95 (percent) or ci=None.
-    ci_frac = (ci / 100.0) if ci is not None else None
-
-    # Schwabish SB-followup (2026-05-12): the corner-metrics overlay is
-    # supplied by the Smooth/Robust Rust transform via
-    # ``inject_metrics=True`` (threaded through ``mark_smooth
-    # (show_metrics=True)`` for smooth-routed methods, and directly on
-    # ``Robust(...)`` below for ``method="robust"``), so R²/RMSE/MAE is
-    # computed once in Rust and surfaced as ``_metrics_text`` /
-    # ``_metrics_y`` columns on the fit-grid output — no Python-side
-    # duplication. ``inject_metrics`` is generic (verified against
-    # ``smooth.rs``: every ``SmoothMethod`` arm accepts it, computed
-    # against the raw input regardless of fit shape), so this applies
-    # uniformly to every smooth-routed method and to ``"robust"``.
-    # ``"logistic"``/``"glm"`` expose no ``inject_metrics`` param at all
-    # (``transform_registry`` lists none), so those two stay excluded
-    # regardless of ``show_metrics=``. Computed below, once the grouping is
-    # known: a per-group fit has no single corner to report.
-
-    # truncate: True = clip to data range (current Smooth/Robust default).
-    # False = extend fit line to the full x-axis domain boundary via
-    # SmoothSpec/RobustSpec.x_range (spec §4 WI-7 — wired end-to-end for
-    # every mark_smooth-routed method and for "robust"). "logistic"/"glm"
-    # accept no x_range at all (transform_registry confirms neither lists
-    # it), so extending their fit line past the data range isn't possible
-    # without a Rust-side transform change — truncate=False refuses for
-    # those two rather than silently clipping anyway -- no silent parameter
-    # drop.
-    # The x_range is resolved from the chart's x column min/max at Python
-    # desugar time; the Rust transform uses it as the evaluation domain.
-    # When truncate=True (default) x_range stays None → clips to observed data.
-    x_range = None
-    if not truncate:
-        if method in ("logistic", "glm"):
-            raise ValueError(
-                f"lmplot(method={method!r}, truncate=False) is not "
-                f"supported -- the {method!r} transform has no x_range "
-                "parameter to extend the fit line past the observed data "
-                "range. Use method='robust' (accepts x_range), a "
-                "mark_smooth-routed method (lm, loess, quadratic, cubic, "
-                "log, sqrt, gam), or leave truncate=True (the default)."
-            )
-        # Compute the axis-domain extent here so lmplot does not need a
-        # provisional scale pass. The Rust Smooth/Robust transform will
-        # evaluate the fit line over [x_min, x_max] of the full dataset
-        # regardless of which rows each facet panel sees.
-        # seaborn behaviour: extend to the axis limits, which are the data
-        # range padded by 5% on each side (matching the typical auto-scale margin).
-        try:
-            _df = data.collect() if hasattr(data, "collect") else data
-            x_col_name = x_field
-            if hasattr(_df, "to_arrow"):
-                _x_series = _df[x_col_name]
-                _x_min = float(_x_series.min())
-                _x_max = float(_x_series.max())
-                _margin = (_x_max - _x_min) * 0.05
-                x_range = [_x_min - _margin, _x_max + _margin]
-        except (AttributeError, KeyError):
-            x_range = None
-
-    # `x_jitter` offsets the scatter's x column by writing a Float64 noise
-    # array back into it (`apply_jitter`, `render/position.rs`), which fails
-    # Arrow's schema check on any other numeric dtype: `Jitter: ... expected
-    # Int64 but found Float64`. Widen the column once, here, so BOTH charts
-    # built below share it -- the merged chart carries the scatter chart's own
-    # data, so casting one and not the other would put two dtypes on one
-    # column. Gated on `scatter` because `x_jitter` adjusts nothing without a
-    # scatter layer to adjust, and on the dtype so a Float64 column is
-    # untouched (a non-numeric x is left alone too: the renderer refuses it in
-    # its own terms rather than failing here on a cast).
-    #
-    # Until this batch the defect was visible on 3 of the 4 ci/show_metrics
-    # combinations and hidden on the 4th only because the scatter layer was
-    # reading the fit's own (Float64) grid there -- the corruption F-L10-02
-    # closes. DELETE CONDITION: when `apply_jitter` coerces the column it
-    # writes, the way the transform engine already coerces its inputs
-    # (`numeric_util::coerce_to_float64`, batch D M1). `catplot(native_scale=
-    # True)` carries the same workaround for the same renderer behavior.
-    if scatter and x_jitter is not None:
-        jitter_frame = to_polars(data)
-        jitter_column = x_field
-        dtype = jitter_frame.schema.get(jitter_column)
-        if dtype is not None and dtype.is_numeric() and dtype != pl.Float64:
-            data = jitter_frame.with_columns(pl.col(jitter_column).cast(pl.Float64))
-
-    # Shared encoding.
-    #
-    # `hue` is typed Nominal once here and reused on every layer below. It is
-    # a group discriminator: it drives Smooth's `groupby=`, so one fit and one
-    # CI band are produced per level. Left to infer, a numeric hue column read
-    # as Continuous collapsed all of those back into a single rendered fit and
-    # a single band -- a materially wrong statistical chart, drawn silently.
-    # The scatter layer takes the same typing rather than the `point` carve-out
-    # because it shares one color scale with the fit layers in the same layered
-    # chart; typing only the fit half would ask that one scale to be Continuous
-    # and Nominal at once. See `nominal_color_channel` for the rule.
-    hue_ch = nominal_color_channel(hue)
-
-    # `logx` is part of the x channel every layer is built with, not a
-    # post-hoc fixup applied to finished charts: resolving it once here means
-    # the scatter, the `mark_smooth`-routed fit and the dedicated-transform
-    # fit all take the same channel object. (It used to be two
-    # implementations at the bottom of this function, chosen on whether the
-    # fit chart happened to have `_layers` yet.)
-    x_enc = _log_scaled_x(x, x_field) if logx else x
-
-    enc: dict = {"x": x_enc, "y": y}
-    if hue is not None:
-        enc["color"] = hue_ch
-    enc.update(encode_kwargs)
-
-    # Every fit method groups by the hue and by every grouping channel the
-    # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
-    # as a bare keyword (merged into `enc` above) or through the `encode=`
-    # dict `_finalize_chart` applies later: spec §6.4's composite grouping,
-    # computed once here, so each method fits one curve per group as a
-    # composite statistic does. The fit binds the same channels, so each
-    # curve draws its group's color.
-    bound = {**enc, **(encode or {})}
-    grouping = tuple(_encode_grouping(bound))
-    grouping_bindings = {
-        channel: value
-        for channel, value in bound.items()
-        if channel in COMPOSITE_GROUPING_CHANNELS and value is not None
-    }
-    # One R²/RMSE/MAE corner describes one fit: none under any grouping.
-    # "logistic"/"glm" expose no single-fit corner at all (neither transform
-    # has `inject_metrics`), excluded before `_metrics_applied` so neither
-    # warns under `show_metrics=True`, matching their docs above.
-    metrics_applied = method not in ("logistic", "glm") and _metrics_applied(
-        "lmplot", show_metrics, list(grouping)
-    )
-
-    # ---- Scatter layer (optional) --------------------------------------
-    scatter_layer = None
-    if scatter:
-        s = Chart(data)
-        skw = _style_kws("lmplot", "scatter_kws", "point", scatter_kws)
-        if x_jitter is not None:
-            s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)), **skw)
-        else:
-            s = s.mark_point(**skw)
-        s = s.encode(**enc)
-        scatter_layer = s
-
-    # ---- Fit layer (per method) ----------------------------------------
-    # Every `_FIT_BUILDERS` entry forwards `lkw` at CONSTRUCTION, to the fit line
-    # alone. It used to be rewritten onto the finished chart's `_layers` for
-    # the `mark_smooth`-routed methods instead, which dropped it silently
-    # whenever those layers were not materialized yet -- the `scatter=False`
-    # branch, whose chart still carries a pending stat mark until render
-    # (#199).
-    lkw = _style_kws("lmplot", "line_kws", "line", line_kws)
-
-    fit = _build_fit(
-        method,
-        _FitRequest(
-            data=data,
-            x=x_enc,
-            y=y,
-            x_field=x_field,
-            y_field=y_field,
-            grouping=grouping,
-            grouping_bindings=grouping_bindings,
-            ci=ci_frac,
-            line_kwargs=lkw,
-            x_bins=x_bins,
-            x_estimator=x_estimator,
-            order=order,
-            x_range=x_range,
-            metrics=metrics_applied,
-            has_scatter=scatter_layer is not None,
-        ),
-    )
-
-    # Compose scatter + fit. (When ``metrics_applied``, the fit chart
-    # already carries the metrics-text layer reading the Smooth output.)
-    if scatter_layer is None:
-        out = fit
-    else:
-        out = _merge_layers(scatter_layer, fit, scatter_name="scatter", fit_name="fit")
-
-    # Faceting.
-    if col is not None or row is not None:
-        if col is not None and row is not None:
-            out = out.facet(row=row, col=col)
-        elif col is not None:
-            out = out.facet(col=col)
-        else:
-            out = out.facet(row=row)
-
-    return _finalize_chart(
-        out,
-        entry="lmplot",
+    return _lmplot_impl(
+        "lmplot",
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        col=col,
+        row=row,
+        method=method,
+        ci=ci,
+        order=order,
+        scatter=scatter,
+        scatter_kws=scatter_kws,
+        line_kws=line_kws,
+        truncate=truncate,
+        x_bins=x_bins,
+        x_estimator=x_estimator,
+        x_jitter=x_jitter,
+        logx=logx,
+        show_metrics=show_metrics,
         mark=mark,
         encode=encode,
         properties=properties,
         layers=layers,
         theme=theme,
+        **encode_kwargs,
     )
 
 
@@ -1912,7 +1982,8 @@ def regplot(
             "axes-level regression plot and does not facet. Use "
             f"lmplot(..., {bad}=...) instead."
         )
-    return lmplot(
+    return _lmplot_impl(
+        "regplot",
         data,
         x=x,
         y=y,

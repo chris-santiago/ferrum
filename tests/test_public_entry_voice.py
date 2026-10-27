@@ -273,6 +273,34 @@ def test_a_flat_chart_entry_does_not_reach_another_operands_layers() -> None:
     assert [layer.get("entry") for layer in spec["layers"]] == ["relplot", None]
 
 
+def test_regplot_names_itself_not_the_lmplot_it_is_built_from() -> None:
+    """``regplot`` builds through ``lmplot``'s own body, but its refusal names ``regplot``."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.regplot(_DF, x="x", y="y", method="logistic", truncate=False)
+    assert str(exc_info.value).startswith("regplot(method='logistic', truncate=False)")
+
+
+def test_regplot_col_refusal_still_names_lmplot_as_the_remedy() -> None:
+    """``regplot``'s own facet refusal keeps pointing at ``lmplot``, the call that facets."""
+    with pytest.raises(TypeError) as exc_info:
+        fm.regplot(_DF, x="x", y="y", col="g")
+    assert "Use lmplot(..., col=...) instead." in str(exc_info.value)
+
+
+def test_regplot_logx_refusal_on_a_pre_scaled_x_names_regplot() -> None:
+    """``regplot(logx=True, x=<channel with its own scale=>)`` refuses naming ``regplot``, not ``lmplot``."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.regplot(_DF, x=fm.X("x", scale={"type": "linear"}), y="y", logx=True)
+    assert str(exc_info.value).startswith("regplot(logx=True, x=<channel with its own scale=>)")
+
+
+def test_rank_chart_names_itself_not_the_sibling_it_dispatches_to() -> None:
+    """``rank_chart``'s deprecated dispatch to ``rank1d_chart`` keeps ``rank_chart``'s voice."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.rank_chart(_DF.drop("g", "h"), rank="1d", algorithm="covariance")
+    assert str(exc_info.value) == "rank_chart(algorithm='covariance') requires y."
+
+
 # ── A visualizer's refusals speak as the class ──────────────────────────────
 
 

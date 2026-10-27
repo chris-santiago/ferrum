@@ -15534,9 +15534,7 @@ def test_a_figure_regroups_under_a_grouping_bound_after_the_call(door):
 
 #: show_metrics=True, per entry: a maker of its chart, taking show_metrics=
 #: and encode= as the figure's own constructor keywords, and the voice its
-#: warning speaks as (regplot forwards its body to lmplot directly, as
-#: `_required_field_name(entry="lmplot", ...)` already does for a refusal,
-#: so its warning speaks as lmplot too).
+#: warning speaks as (every figure speaks as itself, regplot included).
 _METRICS_WARN_ENTRIES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
     "residplot": (
         lambda show_metrics=None, encode=None: _resid(show_metrics=show_metrics, encode=encode),
@@ -15570,7 +15568,7 @@ _METRICS_WARN_ENTRIES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
         lambda show_metrics=None, encode=None: fm.regplot(
             df, x="v", y="y", show_metrics=show_metrics, encode=encode
         ),
-        "lmplot",
+        "regplot",
     ),
     "lmplot-facet": (
         lambda show_metrics=None, encode=None: fm.lmplot(
@@ -15582,12 +15580,11 @@ _METRICS_WARN_ENTRIES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
 
 #: Per entry: the doors it is built under. Composition doors (the rebuild
 #: mechanism, generic over every entry) are exercised for every entry --
-#: every entry here routes through Smooth, residplot and regplot included
-#: (regplot forwards its whole body into lmplot); every entry gets the
-#: direct and post-hoc single-operand doors, where the fix's per-method
-#: gating lives. The faceted entry's `+right` door also drops its own
-#: facet with the generic "primary layer wins" composition warning,
-#: pinned on its own below rather than skipped.
+#: every entry here routes through Smooth, residplot and regplot included;
+#: every entry gets the direct and post-hoc single-operand doors, where
+#: the fix's per-method gating lives. The faceted entry's `+right` door
+#: also drops its own facet with the generic "primary layer wins"
+#: composition warning, pinned on its own below rather than skipped.
 _METRICS_WARN_DOORS: dict[str, tuple[str, ...]] = {
     "residplot": ("encode=", ".encode", "+left", "+right", "nested"),
     "lmplot-lm": ("encode=", ".encode", "+left", "+right", "nested"),

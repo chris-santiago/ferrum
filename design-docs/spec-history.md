@@ -4594,6 +4594,8 @@ parameter is forwarded to `lmplot` unchanged.
 
 ## 3.15 Sklearn-Protocol Visualizers
 
+> **2026-10-27.** `regplot`'s "its refusals read as `lmplot`'s" is corrected: `regplot` speaks as itself, the same as every other public figure (`ferrum.plots._helpers._figure_entry`'s contract). Its own warnings and refusals (an unsupported `truncate=False`/`x_bins=` combination, `show_metrics=True` with no single fit to describe, an unset required `x=`/`y=`) now name `regplot`, not `lmplot`; the one exception is `regplot(col=...)`/`regplot(row=...)`, whose refusal still names `lmplot` as the remedy, since that is the call that facets. The deprecated `rank_chart` shim gets the same correction: its forwarded refusals and its own deprecation warning name `rank_chart`, not `rank1d_chart`/`rank2d_chart`. Separately, a figure's statistics (and a composite mark's, resolved before its grouping was known) are now rebuilt once per distinct grouping rather than once per render: rendering the same chart more than once no longer re-fits the model or reissues a build-time warning on every `to_svg`/`to_json`/`to_spec`/`.interactive()` call. No SVG byte moves.
+
 > **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`
 > delegates to `float(self.model.score(X, y))` whenever the wrapped model
 > exposes a `.score` method, and returns `0.0` only for genuinely no-model

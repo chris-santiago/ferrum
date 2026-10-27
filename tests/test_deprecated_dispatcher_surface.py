@@ -68,21 +68,26 @@ def test_shap_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_rank_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``rank_chart(rank="1d")`` warns then delegates to ``rank1d_chart``."""
+    """``rank_chart(rank="1d")`` warns then delegates to ``rank1d_chart``'s body.
+
+    ``rank_chart`` calls the private ``_rank1d_chart_impl`` directly (not the
+    public, decorated ``rank1d_chart``), so the result carries one replay
+    record voiced as ``rank_chart`` rather than two nested ones.
+    """
     import ferrum.plots.ranking as ranking
 
     calls: list[str] = []
 
-    def _fake_rank1d(*args, **kwargs):
-        calls.append("1d")
+    def _fake_rank1d_impl(entry, *args, **kwargs):
+        calls.append(entry)
         return ferrum.Chart(None).mark_point()
 
-    monkeypatch.setattr(ranking, "rank1d_chart", _fake_rank1d)
+    monkeypatch.setattr(ranking, "_rank1d_chart_impl", _fake_rank1d_impl)
 
     with pytest.warns(DeprecationWarning, match="rank_chart"):
         result = ferrum.rank_chart(object(), rank="1d")
 
-    assert calls == ["1d"]
+    assert calls == ["rank_chart"]
     assert result._entry == "rank_chart"
 
 

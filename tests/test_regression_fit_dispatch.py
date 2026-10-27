@@ -29,6 +29,7 @@ from ferrum.plots.regression import (
 
 def _request() -> regression._FitRequest:
     return regression._FitRequest(
+        entry="lmplot",
         data=pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 2.5, 4.0]}),
         x="x",
         y="y",

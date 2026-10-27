@@ -27,6 +27,7 @@ it).
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -62,6 +63,37 @@ ROWS_KEY = "_rows"
 #: A pass-through step: the chain of an operand branch over the composition's
 #: own frame with no step of its own.
 _PASS_THROUGH = {"type": "identity"}
+
+
+def _memoized(rebuild: Callable[..., Any]) -> Callable[..., Any]:
+    """*rebuild*, answering a repeated call with arguments equal to an earlier one from its memo.
+
+    *rebuild* is a pure function of its arguments: two calls with equal
+    (``==``) arguments build the same chart, so the second call need not run
+    it again -- in particular, need not re-invoke a figure function and
+    re-raise its build-time warnings. The memo is a short list of ``(args,
+    result)`` pairs compared with ``==``, not a ``dict`` keyed by the
+    arguments: ``rebuild``'s arguments are themselves plain ``dict``s
+    (``own``, ``parent``), which Python refuses as a dict key outright
+    (unhashable), so a hash-based cache is not an option here regardless of
+    what the bindings inside them define. Held in this call's own
+    closure -- never a module-level cache. A :class:`_CompositeSource`
+    record owns its own memo through the *rebuild* closure it carries, and a
+    chart clone shares that closure (and so the memo) with the record it was
+    cloned from, since cloning never rebuilds the record itself.
+    """
+    memo: list[tuple[tuple, Any]] = []
+
+    @functools.wraps(rebuild)
+    def memoized(*args: Any) -> Any:
+        for key, result in memo:
+            if key == args:
+                return result
+        result = rebuild(*args)
+        memo.append((args, result))
+        return result
+
+    return memoized
 
 
 @dataclass(frozen=True)
@@ -106,7 +138,9 @@ def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _Co
     Its rebuild resolves *pre*'s pending mark again
     (:func:`ferrum._desugar._resolve_pending_impl`, the one place a
     composite's statistics are built), *pre*'s grouping bindings replaced by
-    the new own ones.
+    the new own ones. The rebuild is memoized (:func:`_memoized`), so
+    rendering the same chart more than once under the same grouping resolves
+    the mark again only the first time, not once per render.
     """
     from ferrum._desugar import _resolve_pending_impl
     from ferrum.composition import _expand_layers
@@ -116,6 +150,8 @@ def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _Co
         return composite_source(
             pre, _resolve_pending_impl(chart, parent=parent, facet=facet), parent
         )
+
+    rebuild = _memoized(rebuild)
 
     before = len(_split_chain(list(pre._transforms or []))[1])
     lowered = _split_chain(list(resolved._transforms or []))[1]
@@ -156,6 +192,11 @@ def figure_recorded(chart: Any, call: Callable[[dict], Any]) -> Any:
     one that reads their own statistics and layers from the rebuilt figure.
     A chart that is no figure chart (a pending mark records itself when it
     resolves), or whose operands lowered no statistic, is returned as is.
+
+    *call* runs through one shared, memoized closure (:func:`_memoized`):
+    rendering the same chart more than once regroups by the same bindings
+    each time, so the figure is called again only the first time a given
+    grouping is seen, not once per render.
     """
     from dataclasses import replace
 
@@ -186,6 +227,8 @@ def figure_recorded(chart: Any, call: Callable[[dict], Any]) -> Any:
             },
         }
         return call(extra)
+
+    rebuilt = _memoized(rebuilt)
 
     grouping = tuple(built.items())
     new = chart._clone()
