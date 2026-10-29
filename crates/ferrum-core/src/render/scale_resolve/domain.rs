@@ -37,8 +37,12 @@ pub(in crate::render) fn locate_field<'a>(field: &str, primary_batch: &'a Record
 
 /// Where the batch a layer draws lives: the chart's data (the primary batch,
 /// joined on a faceted shared axis by the all-panels batch at
-/// [`FINAL_OUTPUT_KEY`]), the one named output its `data_source` names, or,
-/// for a member of an overlay group of leaves, the batch that member draws.
+/// [`FINAL_OUTPUT_KEY`]), the one named output its `data_source` names, a
+/// layer's own position-adjusted preview batch, or, for a member of an
+/// overlay group of leaves, the batch that member draws together with the
+/// [`OutputLineage`] the read's own key named before the group collapsed it
+/// ([`Self::lineage_key`]) — `None` when that key's run published no
+/// lineage, same as every other source's lookup.
 ///
 /// A layer's positional contribution to an axis is read from this batch and
 /// no other: a same-named column in another batch is data the layer never
@@ -49,6 +53,7 @@ enum LayerSource<'a> {
     Chart,
     Output(&'a str),
     Batch(&'a RecordBatch),
+    Member(&'a RecordBatch, Option<&'a OutputLineage>),
 }
 
 impl<'a> LayerSource<'a> {
@@ -69,7 +74,7 @@ impl<'a> LayerSource<'a> {
         match self {
             LayerSource::Chart => Some(primary_batch),
             LayerSource::Output(key) => transform_outputs.get(key),
-            LayerSource::Batch(batch) => Some(batch),
+            LayerSource::Batch(batch) | LayerSource::Member(batch, _) => Some(batch),
         }
     }
 
@@ -85,6 +90,20 @@ impl<'a> LayerSource<'a> {
         let batch = self.batch(primary_batch, transform_outputs)?;
         let col = batch.column_by_name(field)?;
         Some(LocatedColumn { batch, col: col.as_ref() })
+    }
+
+    /// The lineage key this source names before an overlay group collapses
+    /// it to [`LayerSource::Member`] ([`overlay_aux_reads`],
+    /// [`overlay_raster_cell_reads`]): [`FINAL_OUTPUT_KEY`] for the chart's
+    /// own data, the named output otherwise. `None` for a source that never
+    /// names a key directly (a position preview's [`LayerSource::Batch`], or
+    /// an already-collapsed [`LayerSource::Member`]).
+    fn lineage_key(self) -> Option<&'a str> {
+        match self {
+            LayerSource::Chart => Some(FINAL_OUTPUT_KEY),
+            LayerSource::Output(key) => Some(key),
+            LayerSource::Batch(_) | LayerSource::Member(..) => None,
+        }
     }
 }
 
@@ -300,7 +319,17 @@ fn axis_previews(
                 Some(batch) => preview(batch)?,
                 None => None,
             },
-            LayerSource::Batch(batch) => preview(batch)?,
+            // This match's scrutinee is `LayerSource::of(layer)`, which
+            // returns only `Chart`/`Output` — never `Batch` (a position
+            // preview is this function's own OUTPUT, built below, not an
+            // input to it here) or `Member` (only `overlay_aux_reads`/
+            // `overlay_raster_cell_reads` construct it). Both arms of this
+            // pattern are unreachable for this scrutinee; kept, folded
+            // together, to satisfy the compiler's exhaustiveness check over
+            // the shared enum. A `Member`'s embedded lineage plays no role
+            // in a position preview either way, so folding it with `Batch`
+            // costs nothing even if it were reached.
+            LayerSource::Batch(batch) | LayerSource::Member(batch, _) => preview(batch)?,
         };
         previews.push(result);
         bases.push(base);
@@ -522,11 +551,6 @@ pub struct AuxRead<'a> {
     source: LayerSource<'a>,
     field: &'a str,
     kind: AuxReadKind<'a>,
-    /// The rows an overlay member's bin-grouped statistic consumed for this
-    /// read (`OutputLineage::binned_rows`), resolved against the member's own lineages
-    /// before its batch is carried as [`LayerSource::Batch`]; `None` for
-    /// every other read, which looks its origin up by its source key.
-    origin: Option<&'a RecordBatch>,
 }
 
 /// What an [`AuxRead`] holds: a column of its batch, bound by `binding`; or
@@ -666,47 +690,55 @@ impl<'a> AuxRead<'a> {
             LayerSource::Chart => {
                 super::shared_categorical_batch(primary_batch, self.field, transform_outputs, facet_shared)
             }
-            LayerSource::Output(_) | LayerSource::Batch(_) => self.source.batch(primary_batch, transform_outputs)?,
+            LayerSource::Output(_) | LayerSource::Batch(_) | LayerSource::Member(..) => {
+                self.source.batch(primary_batch, transform_outputs)?
+            }
         };
         batch.column_by_name(self.field).map(|_| batch)
     }
 
-    /// The rows a bin-grouped statistic consumed for this read: what the
-    /// run recorded in the lineage of the output it draws
-    /// (`OutputLineage::binned_rows`; the chart rows' for a layer with no
-    /// `data_source`), or an overlay member's, resolved before its batch
-    /// was carried. `None` when no statistic of that output's own grouped
-    /// the read's field.
+    /// The lineage of the output this read draws: a `Member`'s own carried
+    /// lineage (resolved once, against the member's own run, before the
+    /// overlay group collapsed its source), else `transform_lineages`'s
+    /// entry for the key this source names ([`LayerSource::lineage_key`]).
+    /// `None` for a [`LayerSource::Batch`] (a position preview; never this
+    /// read's own source) and for a `Member` whose run published none.
+    fn lineage<'b>(&self, transform_lineages: &'b OutputLineages) -> Option<&'b OutputLineage>
+    where
+        'a: 'b,
+    {
+        match self.source {
+            LayerSource::Chart | LayerSource::Output(_) => transform_lineages.get(self.source.lineage_key()?),
+            LayerSource::Member(_, lineage) => lineage,
+            LayerSource::Batch(_) => None,
+        }
+    }
+
+    /// The rows a bin-grouped statistic consumed for this read: what
+    /// [`Self::lineage`] recorded (`OutputLineage::binned_rows`; the chart
+    /// rows' for a layer with no `data_source`). `None` when no statistic of
+    /// that output's own grouped the read's field, or `lineage` has none.
     fn published_origin<'b>(&self, transform_lineages: &'b OutputLineages) -> Option<&'b RecordBatch>
     where
         'a: 'b,
     {
-        let key = match self.source {
-            LayerSource::Chart => FINAL_OUTPUT_KEY,
-            LayerSource::Output(key) => key,
-            LayerSource::Batch(_) => return self.origin,
-        };
-        transform_lineages.get(key)?.binned_rows(self.field)
+        self.lineage(transform_lineages)?.binned_rows(self.field)
     }
 
     /// The rows a data-aware legend sort reads for this read's own value,
     /// when the sort's field is this read's statistic's raw input rather
-    /// than its aggregated output: the same lineage key
-    /// [`Self::published_origin`] maps, read through
-    /// `OutputLineage::pre_statistic_rows` instead of `binned_rows`. `fallback`
-    /// (the read's own, already-drawn batch) when no lineage is recorded
-    /// for that key, and for an overlay-collapsed read, whose `source` no
-    /// longer names one.
+    /// than its aggregated output: [`Self::lineage`], read through
+    /// `OutputLineage::pre_statistic_rows` instead of `binned_rows`.
+    /// `fallback` (the read's own, already-drawn batch) when `lineage` has
+    /// none — a `Member` reads only its own carried lineage here, never the
+    /// `transform_lineages` map a caller passes for the whole group (which
+    /// `build_overlay_auxiliary_scales` fills with the group's first
+    /// member's lineages, not necessarily this read's own).
     fn pre_statistic_rows<'b>(&self, fallback: &'b RecordBatch, transform_lineages: &'b OutputLineages) -> &'b RecordBatch
     where
         'a: 'b,
     {
-        let key = match self.source {
-            LayerSource::Chart => FINAL_OUTPUT_KEY,
-            LayerSource::Output(key) => key,
-            LayerSource::Batch(_) => return fallback,
-        };
-        transform_lineages.get(key).map_or(fallback, |lineage| lineage.pre_statistic_rows(fallback))
+        self.lineage(transform_lineages).map_or(fallback, |lineage| lineage.pre_statistic_rows(fallback))
     }
 
     /// The batch a binned color's edges read this column read's values from:
@@ -892,14 +924,14 @@ pub(in crate::render) fn aux_reads<'a>(
         if drawn == InheritedChannel::Color {
             if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, cells) {
                 let kind = AuxReadKind::RasterCells { cmap, entry: layer.entry.as_deref() };
-                reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind, origin: None });
+                reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind });
                 continue;
             }
         }
         if source.locate(field, primary_batch, transform_outputs).is_none() {
             continue;
         }
-        reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding }, origin: None });
+        reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding } });
     }
     reads
 }
@@ -959,7 +991,7 @@ pub(in crate::render) fn raster_cell_reads<'a>(
             return None;
         }
         let cmap = style.and_then(|style| style.cmap.as_deref());
-        Some(AuxRead { layer: index, mark, source, field, kind: AuxReadKind::RasterCells { cmap, entry }, origin: None })
+        Some(AuxRead { layer: index, mark, source, field, kind: AuxReadKind::RasterCells { cmap, entry } })
     };
     match spec.layers.as_deref() {
         Some(layers) => layers
@@ -999,8 +1031,8 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
             Some(layers) => {
                 for read in aux_reads(layers, &input.spec.encoding, channel, final_batch, transform_outputs) {
                     let Some(batch) = read.source.batch(final_batch, transform_outputs) else { continue };
-                    let origin = read.published_origin(input.transform_lineages);
-                    reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), origin, ..read });
+                    let lineage = read.source.lineage_key().and_then(|key| input.transform_lineages.get(key));
+                    reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Member(batch, lineage), ..read });
                 }
                 first_layer += layers.len();
             }
@@ -1010,13 +1042,13 @@ pub(in crate::render) fn overlay_aux_reads<'a>(
                 let field = binding.field.as_str();
                 let located =
                     locate_field(field, final_batch).ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+                let lineage = input.transform_lineages.get(FINAL_OUTPUT_KEY);
                 reads.push(AuxRead {
                     layer: first_layer - 1,
                     mark: input.spec.mark,
-                    source: LayerSource::Batch(located.batch),
+                    source: LayerSource::Member(located.batch, lineage),
                     field,
                     kind: AuxReadKind::Column { binding },
-                    origin: input.transform_lineages.get(FINAL_OUTPUT_KEY).and_then(|origin| origin.binned_rows(field)),
                 });
             }
         }
@@ -1034,7 +1066,8 @@ pub(in crate::render) fn overlay_raster_cell_reads<'a>(members: &[super::LeafRes
     for input in members {
         for read in raster_cell_reads(input.spec, &input.spec.encoding, input.final_batch, input.transform_outputs) {
             let Some(batch) = read.source.batch(input.final_batch, input.transform_outputs) else { continue };
-            reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), ..read });
+            let lineage = read.source.lineage_key().and_then(|key| input.transform_lineages.get(key));
+            reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Member(batch, lineage), ..read });
         }
         first_layer += input.spec.layers.as_ref().map_or(1, Vec::len);
     }
@@ -2684,7 +2717,15 @@ pub(in crate::render) fn numeric_domain_union_over(
                     take(batch, &mut found)?;
                 }
             }
-            Some(LayerSource::Batch(batch)) => take(batch, &mut found)?,
+            // `Batch` is reached here (a layer's own position-adjusted
+            // preview batch, built by `axis_previews`, read through
+            // `AxisReads::over`'s `seed.source`/`reads.source(index)`);
+            // `Member` is not (only `overlay_aux_reads`/
+            // `overlay_raster_cell_reads` construct it, never `seed_reads`/
+            // `AxisReads`). A `Member`'s embedded lineage plays no role in
+            // this numeric union either way, so folding it with `Batch`
+            // costs nothing even if it were reached.
+            Some(LayerSource::Batch(batch) | LayerSource::Member(batch, _)) => take(batch, &mut found)?,
             Some(LayerSource::Chart) | None => {
                 let final_col = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(f));
                 let final_batch = transform_outputs

@@ -8933,6 +8933,189 @@ mod tests {
         }
     }
 
+    /// A raw batch of a category column `g`, a value column `v` an
+    /// aggregate sums into the bar's drawn `y`, and a column `w` the
+    /// aggregate's output drops, read only by the legend's data-aware sort:
+    /// `sum(w)` is a=9, c=5, b=1, so a descending sort orders the legend
+    /// `a, c, b` — distinct from the aggregate's own insertion order
+    /// `a, b, c`, so the two are never accidentally equal.
+    fn category_sort_batch() -> RecordBatch {
+        use arrow::array::StringArray;
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("w", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![5.0, 4.0, 0.5, 0.5, 3.0, 2.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A bar member over [`category_sort_batch`]: its own `y` is the chart's
+    /// aggregate (`sum(v)` as `sum_v`, grouped by `g`), and its `color` is
+    /// `g` sorted by the raw `w` column the aggregate's output does not
+    /// carry — so a correct legend sort must read `w` from the rows the
+    /// aggregate consumed, not from its drawn output.
+    fn bar_color_sort_hold() -> LeafHold {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "transforms": [
+                {"type": "identity", "statistics": true},
+                {"type": "aggregate", "ops": [{"field": "v", "fn": "sum", "as": "sum_v"}], "groupby": ["g"]},
+            ],
+            "encoding": {
+                "x": {"field": "g"},
+                "y": {"field": "sum_v"},
+                "color": {"field": "g", "sort": {"field": "w", "op": "sum", "order": "descending"}},
+            },
+        }))
+        .expect("bar spec");
+        color_hold_with(spec, category_sort_batch(), ThemeInputs::default())
+    }
+
+    /// The same bar member as [`bar_color_sort_hold`], but declared as one
+    /// layer of a two-layer leaf (a `bar.layer(text)` member): the bar layer
+    /// draws the chart-level `color`/`sort` it does not rebind, and the text
+    /// layer draws its own `text` field, declining the inherited color (a
+    /// text's color it does not own), so it contributes no read.
+    fn layered_bar_color_sort_hold() -> LeafHold {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "transforms": [
+                {"type": "identity", "statistics": true},
+                {"type": "aggregate", "ops": [{"field": "v", "fn": "sum", "as": "sum_v"}], "groupby": ["g"]},
+            ],
+            "encoding": {
+                "x": {"field": "g"},
+                "y": {"field": "sum_v"},
+                "color": {"field": "g", "sort": {"field": "w", "op": "sum", "order": "descending"}},
+            },
+            "layers": [
+                {"mark": "bar"},
+                {"mark": "text", "encoding": {"text": {"field": "sum_v"}}},
+            ],
+        }))
+        .expect("layered bar spec");
+        color_hold_with(spec, category_sort_batch(), ThemeInputs::default())
+    }
+
+    /// A point member over its own unrelated `x`/`y` frame, drawing no
+    /// color: the sibling [`scatter_spec`] fixture already used throughout
+    /// this module for a plain, uncolored overlay member.
+    fn point_hold() -> LeafHold {
+        hold()
+    }
+
+    /// The order `g`'s three categories appear in `scene`'s legend text
+    /// nodes (title and swatch labels alike), filtered to just `a`/`b`/`c`
+    /// so a title or other legend text never shifts the comparison.
+    fn category_legend_order(scene: &SceneGraph) -> Vec<String> {
+        legend_labels(scene)
+            .into_iter()
+            .filter(|label| ["a", "b", "c"].contains(&label.as_str()))
+            .collect()
+    }
+
+    /// A static `LayerChart` overlay's legend data-aware sort reads the
+    /// drawing member's own pre-statistic rows on both member orders: `sum(w)`
+    /// orders the legend `a, c, b` whether the bar is the first or the
+    /// second member, with no sort warning. Rejects falling back to the
+    /// aggregate's drawn output (which lacks `w`) and warning
+    /// `SortSpecIgnored`, and rejects reading the wrong member's lineage
+    /// when the bar is not the group's first member.
+    #[test]
+    fn an_overlay_legend_sorts_by_the_drawing_members_own_pre_statistic_rows() {
+        for bar_first in [true, false] {
+            let bar = bar_color_sort_hold();
+            let point = point_hold();
+            let holds = if bar_first { [bar, point] } else { [point, bar] };
+            let node = holds_node(CompositeLayout::Overlay, &holds, 0, None);
+            let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+            let (scene, warnings) = render_composite_scene(&node, &leaves, &ThemeInputs::default())
+                .unwrap_or_else(|e| panic!("bar_first={bar_first}: expected to render, refused with {e}"));
+            assert_eq!(
+                category_legend_order(&scene),
+                vec!["a", "c", "b"],
+                "bar_first={bar_first}: sum(w) descending orders a, c, b"
+            );
+            assert!(
+                !warnings.iter().any(|w| matches!(w, RenderWarning::SortSpecIgnored { .. })),
+                "bar_first={bar_first}: a readable sort field must not warn: {warnings:?}"
+            );
+        }
+    }
+
+    /// The same sort reads the right rows when the sorting binding belongs
+    /// to a layered member (a `bar.layer(text)` member beside a plain point
+    /// member): `a, c, b`, no warning.
+    #[test]
+    fn an_overlay_legend_sorts_by_a_layered_members_own_pre_statistic_rows() {
+        let holds = [layered_bar_color_sort_hold(), point_hold()];
+        let node = holds_node(CompositeLayout::Overlay, &holds, 0, None);
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        let (scene, warnings) = render_composite_scene(&node, &leaves, &ThemeInputs::default())
+            .unwrap_or_else(|e| panic!("expected to render, refused with {e}"));
+        assert_eq!(category_legend_order(&scene), vec!["a", "c", "b"], "sum(w) descending orders a, c, b");
+        assert!(
+            !warnings.iter().any(|w| matches!(w, RenderWarning::SortSpecIgnored { .. })),
+            "a readable sort field must not warn: {warnings:?}"
+        );
+    }
+
+    /// A layered member whose bar layer reads a named `data_source` (its own
+    /// aggregate, published under `"agg"`) rather than the chart's data: the
+    /// named transform does not advance the chain, so `FINAL_OUTPUT_KEY`
+    /// still names the chart's raw rows while `"agg"` names the bar's own
+    /// aggregated output. The bar layer inherits the chart's `color`/`sort`
+    /// binding and draws it from `agg` (which lacks `w`); a sibling text
+    /// layer reads the chart's own (unaggregated) data directly.
+    fn named_output_layered_bar_color_sort_hold() -> LeafHold {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "transforms": [
+                {"type": "identity", "statistics": true},
+                {"type": "aggregate", "ops": [{"field": "v", "fn": "sum", "as": "sum_v"}], "groupby": ["g"], "name": "agg"},
+            ],
+            "encoding": {
+                "color": {"field": "g", "sort": {"field": "w", "op": "sum", "order": "descending"}},
+            },
+            "layers": [
+                {"mark": "bar", "data_source": "agg", "encoding": {"x": {"field": "g"}, "y": {"field": "sum_v"}}},
+                {"mark": "text", "encoding": {"x": {"field": "g"}, "y": {"field": "v"}, "text": {"field": "v"}}},
+            ],
+        }))
+        .expect("named-output layered bar spec");
+        color_hold_with(spec, category_sort_batch(), ThemeInputs::default())
+    }
+
+    /// The same sort reads the right rows when the sorting layer's lineage
+    /// lives under its own named `data_source` key rather than the chart's
+    /// `FINAL_OUTPUT_KEY`: `a, c, b`, no warning. Rejects reading the
+    /// chart's `FINAL_OUTPUT_KEY` lineage instead of the bar layer's own
+    /// `agg` key, which carries only the aggregate's drawn output (no `w`)
+    /// and would warn `SortSpecIgnored` and fall back to insertion order.
+    #[test]
+    fn an_overlay_legend_sorts_by_a_layered_members_own_named_output_lineage() {
+        let holds = [named_output_layered_bar_color_sort_hold(), point_hold()];
+        let node = holds_node(CompositeLayout::Overlay, &holds, 0, None);
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        let (scene, warnings) = render_composite_scene(&node, &leaves, &ThemeInputs::default())
+            .unwrap_or_else(|e| panic!("expected to render, refused with {e}"));
+        assert_eq!(category_legend_order(&scene), vec!["a", "c", "b"], "sum(w) descending orders a, c, b");
+        assert!(
+            !warnings.iter().any(|w| matches!(w, RenderWarning::SortSpecIgnored { .. })),
+            "a readable sort field must not warn: {warnings:?}"
+        );
+    }
+
     /// Concat panels over the same frame sharing a binned color with derived
     /// edges cut the edges that frame cuts alone: Sturges over its 8 values
     /// (0..7) gives 4 bins (0, 1.75, 3.5, 5.25, 7). Pooling the frame once per
