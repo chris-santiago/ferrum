@@ -584,7 +584,7 @@
       "docs/site/gallery/gallery.md"
     ],
     "generator": "design-docs/demos/demo_diagnostics.py:gain_chart",
-    "inspected": "2026-10-26",
+    "inspected": "2026-10-28",
     "verdict": "ok"
   },
   {
@@ -686,7 +686,7 @@
       "docs/site/gallery/gallery.md"
     ],
     "generator": "design-docs/demos/demo_diagnostics.py:learning_curve_chart",
-    "inspected": "2026-10-26",
+    "inspected": "2026-10-28",
     "verdict": "ok"
   },
   {
@@ -695,7 +695,7 @@
       "docs/site/gallery/gallery.md"
     ],
     "generator": "design-docs/demos/demo_diagnostics.py:lift_chart",
-    "inspected": "2026-10-26",
+    "inspected": "2026-10-28",
     "verdict": "ok"
   },
   {
@@ -1103,7 +1103,7 @@
       "docs/site/gallery/gallery.md"
     ],
     "generator": "design-docs/demos/demo_diagnostics.py:validation_curve_chart",
-    "inspected": "2026-10-26",
+    "inspected": "2026-10-28",
     "verdict": "ok"
   },
   {
