@@ -826,18 +826,20 @@ struct ReadExtent {
 /// in layer order, one per layer: every layer that draws the channel,
 /// reading the field it draws from the batch it draws ([`LayerSource::of`]).
 /// A layer draws the channel when its mark draws it
-/// ([`Mark::draws_channel`]) and its batch carries the column it binds there.
-/// The column gate (`prepare::validate_layer_columns`) has already refused
-/// every drawn binding whose column a layer's batch lacks, but for an
-/// inherited one a statistic's output drops, which that layer draws without:
-/// so a layer whose batch lacks the column is exactly a layer that does not
-/// draw it. A layer binding the channel itself draws its own field; a layer
-/// binding nothing there draws the chart-level binding, which `prepare` gives
-/// a layer on the chart's data (`inherit_from`) and a layer on its own output
-/// (`inherit_non_positional`) alike, unless its mark draws only a binding it
-/// owns ([`Mark::draws_inherited`]: a text's color). The same layer-to-batch rule the
-/// positional union reads by ([`seed_reads`]), without its positional-only
-/// skip of `data_source` layers.
+/// ([`crate::render::drawn::DrawFacts::draws`]) and its batch carries the
+/// column it binds there. The column gate (`prepare::validate_layer_columns`)
+/// has already refused every drawn binding whose column a layer's batch
+/// lacks, but for an inherited one a statistic's output drops, which that
+/// layer draws without: so a layer whose batch lacks the column is exactly a
+/// layer that does not draw it. A layer binding the channel itself draws its
+/// own field; a layer binding nothing there draws the chart-level binding,
+/// which `prepare` gives a layer on the chart's data (`inherit_from`) and a
+/// layer on its own output (`inherit_non_positional`) alike, unless its mark
+/// draws only a binding it owns ([`Mark::draws_inherited`]: a text's color),
+/// it is a line yielding an inherited width to one it owns, or it is a
+/// segment with no arrowhead reading `fill_opacity`. The same layer-to-batch
+/// rule the positional union reads by ([`seed_reads`]), without its
+/// positional-only skip of `data_source` layers.
 ///
 /// A raster image draws `color` through its cells when its binding names the
 /// field they hold ([`crate::render::marks::image::image_draws_color`]): its
@@ -856,40 +858,45 @@ pub(in crate::render) fn aux_reads<'a>(
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
 ) -> Vec<AuxRead<'a>> {
+    use crate::spec::layer::InheritedChannel;
     let mut reads: Vec<AuxRead<'a>> = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
-        // A layer reads its own binding, or, when its mark takes an inherited
-        // binding of the channel ([`Mark::draws_inherited`]), the one Python
-        // listed on it or the chart's: a text yields no read for a color it
-        // does not own.
         let drawn = channel.drawn_as();
-        if !layer.owns(drawn) && !layer.mark.draws_inherited(drawn) {
-            continue;
-        }
-        // A contrast-ink text binds `color` to read the scale, not to paint
-        // it: skipped here exactly as a declined inherited color is, so it
-        // never establishes the scale, widens its domain, or contributes to
-        // its legend (`undrawn_channel_warnings` separately counts it as
-        // bound-but-undrawn).
-        if drawn == crate::spec::layer::InheritedChannel::Color
-            && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref())
-        {
-            continue;
-        }
+        // A layer's own binding, or, when its mark takes an inherited
+        // binding of the channel ([`Mark::draws_inherited`]), the one Python
+        // listed on it or the chart's.
         let Some(binding) = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())
         else {
             continue;
         };
         let field = binding.field.as_str();
         let source = LayerSource::of(layer);
-        if channel.drawn_as() == crate::spec::layer::InheritedChannel::Color {
-            if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, primary_batch, transform_outputs) {
+        // A raster image's cells, read only for `color`: the one field
+        // [`crate::render::drawn::DrawFacts::draws`] needs to tell a
+        // drawing raster image from one whose binding names another field.
+        let cells = (drawn == InheritedChannel::Color)
+            .then(|| source.batch(primary_batch, transform_outputs).and_then(crate::render::marks::image::raster_value_field))
+            .flatten();
+        let facts = crate::render::drawn::DrawFacts::of_layer(layer, chart_encoding, cells);
+        // A text yields no read for a color it does not own (declined); a
+        // contrast-ink text's own color reads the scale without painting a
+        // hue from it; a yielding line's inherited width and an arrowless
+        // segment's `fill_opacity` are no read either — all judged by the
+        // one rule, so none of them establishes the scale, widens its
+        // domain, or contributes to its legend
+        // (`undrawn_channel_warnings` separately counts each as
+        // bound-but-undrawn).
+        if facts.draws(drawn).is_err() {
+            continue;
+        }
+        if drawn == InheritedChannel::Color {
+            if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, cells) {
                 let kind = AuxReadKind::RasterCells { cmap, entry: layer.entry.as_deref() };
                 reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind, origin: None });
                 continue;
             }
         }
-        if !layer.mark.draws_channel(channel.drawn_as()) || source.locate(field, primary_batch, transform_outputs).is_none() {
+        if source.locate(field, primary_batch, transform_outputs).is_none() {
             continue;
         }
         reads.push(AuxRead { layer: index, mark: layer.mark, source, field, kind: AuxReadKind::Column { binding }, origin: None });
@@ -900,15 +907,15 @@ pub(in crate::render) fn aux_reads<'a>(
 /// The colormap a raster image `layer` draws its cells in, when it draws
 /// color through them ([`crate::render::marks::image::image_draws_color`]):
 /// `Some(cmap)` (itself `None` when the layer names no colormap); `None` for
-/// every other layer.
+/// every other layer. `cells` is the field this layer's cells hold, already
+/// read once from its batch by the one caller, `aux_reads`, which also
+/// builds its `DrawFacts` from it — so the batch is read once per color
+/// read, not once here and once there for the same layer.
 fn raster_cells_drawn<'a>(
     layer: &'a Layer,
     chart_encoding: &crate::spec::encoding::Encoding,
-    primary_batch: &RecordBatch,
-    transform_outputs: &HashMap<String, RecordBatch>,
+    cells: Option<&'a str>,
 ) -> Option<Option<&'a str>> {
-    let batch = LayerSource::of(layer).batch(primary_batch, transform_outputs)?;
-    let cells = crate::render::marks::image::raster_value_field(batch);
     crate::render::marks::image::image_draws_color(layer.mark, &layer.encoding, chart_encoding, cells)
         .then(|| layer.mark_style.as_ref().and_then(|style| style.cmap.as_deref()))
 }
@@ -5669,6 +5676,75 @@ mod tests {
             [0],
             "only the rect's read reaches the domain; the contrast text's wider rows are excluded"
         );
+    }
+
+    /// A line with its own `stroke_width` yields an inherited `size` to it:
+    /// its read never reaches the size domain, so a point beside it (also
+    /// inheriting the chart's `size`, drawing it) establishes the size
+    /// domain alone, narrow to the point's own rows rather than widened by
+    /// the line's.
+    #[test]
+    fn aux_reads_excludes_a_line_that_yields_an_inherited_size_to_its_own_stroke_width() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let own_stroke_width = Some(MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() });
+        let layers = vec![
+            Layer { mark: Mark::Line, mark_style: own_stroke_width, ..Default::default() },
+            Layer { mark: Mark::Point, ..Default::default() },
+        ];
+        let chart = Encoding { size: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)])),
+            vec![Arc::new(arrow::array::Float64Array::from(vec![1.0]))],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "size").expect("size");
+        let outputs = HashMap::new();
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [1], "the yielding line's read is excluded");
+    }
+
+    /// Every layer yielding `size` to a width it owns leaves the channel
+    /// with no drawing layer at all.
+    #[test]
+    fn aux_reads_is_empty_when_every_layer_yields_size() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let own_stroke_width = |w: f64| Some(MarkKwargsSpec { stroke_width: Some(w), ..Default::default() });
+        let layers = vec![
+            Layer { mark: Mark::Line, mark_style: own_stroke_width(3.0), ..Default::default() },
+            Layer { mark: Mark::Line, mark_style: own_stroke_width(5.0), ..Default::default() },
+        ];
+        let chart = Encoding { size: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)])),
+            vec![Arc::new(arrow::array::Float64Array::from(vec![1.0]))],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "size").expect("size");
+        let outputs = HashMap::new();
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert!(reads.is_empty(), "both lines yield size to their own width: {} read(s)", reads.len());
+    }
+
+    /// A segment with no arrowhead reads `fill_opacity` to fill nothing (it
+    /// has no fill without `arrow=True`), so its read never reaches the
+    /// fill_opacity domain.
+    #[test]
+    fn aux_reads_excludes_an_arrowless_segments_fill_opacity() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        let encoding = Encoding { fill_opacity: Some(EncodingSpec { field: "o".into(), ..Default::default() }), ..Default::default() };
+        let layers = vec![Layer { mark: Mark::Segment, encoding: encoding.clone(), ..Default::default() }];
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("o", DataType::Float64, true)])),
+            vec![Arc::new(arrow::array::Float64Array::from(vec![0.5]))],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "fill_opacity").expect("fill_opacity");
+        let chart = Encoding::default();
+        let outputs = HashMap::new();
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        assert!(reads.is_empty(), "an arrowless segment fills nothing: {} read(s)", reads.len());
     }
 
     /// A faceted-SHARED (`include_final: true`) read of

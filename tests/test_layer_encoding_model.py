@@ -52,6 +52,11 @@ import pytest
 
 import ferrum as fm
 from tests._aux_scale_oracle import log_map, niced_log_domain, pow_map
+from tests._legends import chrome_texts as _chrome_texts
+from tests._legends import clip_groups as _clip_groups
+from tests._legends import interactive_legend_set, legend_set
+from tests._legends import svg_root as _svg_root
+from tests._legends import tag as _tag
 from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
 from tests._wire_steps import all_steps, operand_branches
@@ -126,29 +131,6 @@ _FORBIDDEN_TITLES = ("bin_start", "bin_end", "agg_value")
 _CHROME_TEXT = "#6b7280"
 
 
-def _tag(element: ET.Element) -> str:
-    return element.tag.rsplit("}", 1)[-1]
-
-
-def _svg_root(svg: str) -> ET.Element:
-    return ET.fromstring(svg)
-
-
-def _clip_groups(root: ET.Element) -> list[ET.Element]:
-    """Each outermost plot-area clip group, in document order."""
-    out: list[ET.Element] = []
-
-    def walk(element: ET.Element) -> None:
-        if _tag(element) == "g" and element.get("clip-path", "").startswith("url(#ferrum-clip-"):
-            out.append(element)
-            return
-        for child in element:
-            walk(child)
-
-    walk(root)
-    return out
-
-
 def _signature(element: ET.Element) -> tuple:
     """What a mark element draws, without where: its tag, style attributes and text."""
     attrs = tuple(sorted((k, v) for k, v in element.attrib.items() if k not in _GEOMETRY_ATTRS))
@@ -216,29 +198,6 @@ def census(svg: str) -> Counter:
 def tag_counts(svg: str) -> dict[str, int]:
     counts = Counter(signature[0] for signature in census(svg).elements())
     return dict(counts)
-
-
-def _chrome_texts(svg: str) -> list[ET.Element]:
-    root = _svg_root(svg)
-    inside = {id(e) for group in _clip_groups(root) for e in group.iter()}
-    return [e for e in root.iter() if _tag(e) == "text" and id(e) not in inside]
-
-
-def legend_set(svg: str) -> dict[str, tuple[str, ...]]:
-    """Each legend's title and entries, read off the chrome: a bold start-anchored title, then its entries."""
-    legends: dict[str, list[str]] = {}
-    title: str | None = None
-    title_x = 0.0
-    for e in _chrome_texts(svg):
-        text = "".join(e.itertext()).strip()
-        if e.get("text-anchor") != "start" or "transform" in e.attrib:
-            continue
-        if e.get("font-weight") == "600" and e.get("font-size") != "13":
-            title, title_x = text, float(e.get("x", "0"))
-            legends.setdefault(title, [])
-        elif title is not None and float(e.get("x", "0")) >= title_x:
-            legends[title].append(text)
-    return {t: tuple(entries) for t, entries in legends.items()}
 
 
 def chrome_text(svg: str) -> list[str]:
@@ -6840,21 +6799,6 @@ def test_V10_the_static_overlay_draws_one_legend_over_both_members(channel):
     assert legend_set(static) == legend_set(merged)
     assert list(legend_set(static)) == [field]
     assert _legend_title_count(static, field) == 1
-
-
-def interactive_legend_set(chart: Any) -> dict[str, tuple[str, ...]]:
-    """Each interactive legend's title and its entry labels, in order."""
-    legends: dict[str, list[str]] = {}
-    title: str | None = None
-    for node in _scene(chart)["legend"]:
-        if node["type"] != "text":
-            continue
-        if (node.get("style") or {}).get("font_weight") == {"custom": "600"}:
-            title = node["content"]
-            legends[title] = []
-        elif title is not None:
-            legends[title].append(node["content"])
-    return {t: tuple(entries) for t, entries in legends.items()}
 
 
 # ---------------------------------------------------------------------------

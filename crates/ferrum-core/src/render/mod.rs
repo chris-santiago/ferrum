@@ -13,6 +13,7 @@ pub(crate) mod svg;
 pub(crate) mod embed_font;
 pub(crate) mod scale_resolve;
 pub(crate) mod prepare;
+pub(crate) mod drawn;
 pub(crate) mod rasterize;
 pub(crate) mod draw;
 pub(crate) mod png;
@@ -2617,37 +2618,29 @@ pub enum RenderWarning {
         field: String,
     },
     /// An auxiliary-scale channel (color, size, shape, the opacity family,
-    /// stroke dash, stroke width) is bound, but no mark of any layer binding
-    /// it draws the channel (`Mark::draws_channel`), so it builds no scale and
-    /// no legend: WARN DEGRADED, once per channel, before any scale resolves
-    /// (`prepare::undrawn_channel_warnings`). Voiced as
-    /// [`Self::StatisticDroppedChannel`] is, naming the first layer binding
-    /// the channel: `layer` is its index when the caller placed it, `entry`
-    /// the public call that built it, `mark` its mark; `channel` is the wire
-    /// name and `field` the bound column. `cells` is the field a raster
-    /// image's cells hold when the layer is one: it colors by that field and
-    /// draws a `color` naming it, so the message names it. `grouped` is set
-    /// when a statistic the chart planned grouped by `field`
-    /// (`prepare::SeriesGrouping::by_channel`): the binding did split the
-    /// statistic, and its groups are drawn alike, so the message says that
-    /// instead of calling the binding ignored.
+    /// stroke dash, stroke width) is bound, but no layer binding it draws
+    /// the channel ([`crate::render::drawn::DrawFacts::draws`]), so it
+    /// builds no scale and no legend: WARN DEGRADED, once per channel,
+    /// before any scale resolves (`prepare::undrawn_channel_warnings`).
+    /// Voiced as [`Self::StatisticDroppedChannel`] is, naming the first
+    /// layer binding the channel: `layer` is its index when the caller
+    /// placed it, `entry` the public call that built it, `mark` its mark;
+    /// `channel` is the wire name and `field` the bound column. `reason` is
+    /// why that layer does not draw it; `grouped` is set when a statistic
+    /// the chart planned grouped by `field`
+    /// (`prepare::SeriesGrouping::by_channel`) and `reason` is the plain
+    /// [`crate::render::drawn::Undrawn::NotDrawn`] case: the binding did
+    /// split the statistic, and its groups are drawn alike, so the message
+    /// says that instead of calling the binding ignored.
     ChannelNotDrawn {
         layer: Option<usize>,
         entry: String,
         mark: crate::spec::mark::Mark,
         channel: String,
         field: String,
-        cells: Option<String>,
+        reason: crate::render::drawn::Undrawn,
         #[serde(default)]
         grouped: bool,
-        /// Set instead of `grouped` (the two never both hold) when the first
-        /// binding layer is a contrast-ink text
-        /// ([`crate::render::marks::text::reads_color_for_contrast`]): it
-        /// reads the channel only to pick an ink against the cells it
-        /// labels, so the message says that rather than calling the
-        /// binding ignored.
-        #[serde(default)]
-        contrast_ink: bool,
     },
 }
 
@@ -2933,48 +2926,58 @@ impl std::fmt::Display for RenderWarning {
                      does not carry '{field}', so it draws without {channel}"
                 )
             }
-            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, cells, grouped, contrast_ink } => {
+            RenderWarning::ChannelNotDrawn { layer, entry, mark, channel, field, reason, grouped } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
-                match cells {
-                    Some(cells) => write!(
+                match reason {
+                    crate::render::drawn::Undrawn::RasterCells { cells } => write!(
                         f,
                         "{entry}: {channel} '{field}' has no effect: the image colors its cells by their \
                          '{cells}' values (field=) and does not read {channel}='{field}', so it gets no \
                          scale and no legend; it was ignored"
                     ),
-                    None if *contrast_ink => write!(
+                    crate::render::drawn::Undrawn::ContrastInk => write!(
                         f,
                         "{entry}: {channel} '{field}' has no effect: the labels read {channel} only to pick \
                          an ink against the cells under them, no layer draws that {channel}, so it gets no \
                          scale and no legend; each label is judged against the theme mark color, the fill \
                          an unstyled cell paints"
                     ),
-                    None => {
-                        // A mark that draws the channel only when it binds it
-                        // declined an inherited binding.
-                        let declined = crate::spec::layer::InheritedChannel::from_wire(channel)
-                            .is_some_and(|c| mark.draws_channel(c) && !mark.draws_inherited(c));
-                        let why = if declined {
-                            format!("a {mark} mark draws only a {channel} it binds itself")
-                        } else {
-                            format!("this {mark} mark does not")
-                        };
-                        match grouped {
-                            true => write!(
-                                f,
-                                "{entry}: {channel} '{field}' groups the statistic by '{field}', one per value, \
-                                 but no layer's mark draws {channel} ({why}), so the groups are drawn alike \
-                                 with no scale and no legend; bind color= to tell them apart"
-                            ),
-                            false => write!(
-                                f,
-                                "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
-                                 ({why}), so it gets no scale and no legend; it was ignored"
-                            ),
-                        }
+                    crate::render::drawn::Undrawn::YieldedWidth { winner, value, inherited } => {
+                        let draws = if *inherited { "draws the width it also inherits" } else { "draws its own width" };
+                        write!(
+                            f,
+                            "{entry}: {channel} '{field}' has no effect: the {mark} {draws} \
+                             ({winner}={value}), which outranks an inherited {channel}, so {channel} gets no \
+                             scale and no legend; it was ignored",
+                            winner = winner.as_str(),
+                        )
                     }
+                    crate::render::drawn::Undrawn::ArrowlessSegmentFill => write!(
+                        f,
+                        "{entry}: {channel} '{field}' has no effect: a segment fills only the arrowheads \
+                         arrow=True adds, so {channel} gets no scale and no legend; it was ignored"
+                    ),
+                    crate::render::drawn::Undrawn::DeclinedInherited => write!(
+                        f,
+                        "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
+                         (a {mark} mark draws only a {channel} it binds itself), so it gets no scale and no \
+                         legend; it was ignored"
+                    ),
+                    crate::render::drawn::Undrawn::NotDrawn => match grouped {
+                        true => write!(
+                            f,
+                            "{entry}: {channel} '{field}' groups the statistic by '{field}', one per value, \
+                             but no layer's mark draws {channel} (this {mark} mark does not), so the groups \
+                             are drawn alike with no scale and no legend; bind color= to tell them apart"
+                        ),
+                        false => write!(
+                            f,
+                            "{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} \
+                             (this {mark} mark does not), so it gets no scale and no legend; it was ignored"
+                        ),
+                    },
                 }
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {

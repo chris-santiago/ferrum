@@ -397,7 +397,26 @@ impl LayerPrepared {
         }
     }
 
-    /// The inherited width bindings this layer gives up to a width it owns.
+    /// This layer's drawing facts, the borrowed view
+    /// [`crate::render::drawn::DrawFacts::draws`] decides every non-positional
+    /// channel from: `encoding` and `parent` are the same completed
+    /// encoding, since a prepared layer's completion has already folded its
+    /// chart-level fallback in.
+    pub(in crate::render) fn draw_facts(&self) -> crate::render::drawn::DrawFacts<'_> {
+        crate::render::drawn::DrawFacts {
+            mark: self.mark,
+            encoding: &self.encoding,
+            parent: &self.encoding,
+            mark_style: self.mark_style.as_ref(),
+            color_is_own: self.color_is_own,
+            size_is_own: self.size_is_own,
+            stroke_width_is_own: self.stroke_width_is_own,
+            cells: self.raster_value_field.as_deref(),
+        }
+    }
+
+    /// The inherited width bindings this layer gives up to a width it owns
+    /// ([`crate::render::drawn::DrawFacts::yielded_widths`]).
     ///
     /// A line's `size` and `stroke_width` both set its width, and a line that
     /// binds both itself refuses (`RenderError::LineWidthConflict`). An
@@ -415,19 +434,7 @@ impl LayerPrepared {
     /// the layer's drawing encoding, and [`Self::drawn_size_field`] (the size
     /// legend's question) reads the same answer.
     pub(in crate::render) fn yielded_widths(&self) -> YieldedWidths {
-        if self.mark != crate::spec::mark::Mark::Line {
-            return YieldedWidths::default();
-        }
-        let kwargs = self.mark_style.as_ref();
-        let owns_size = self.size_is_own || kwargs.is_some_and(|m| m.size.is_some());
-        let owns_stroke_width =
-            self.stroke_width_is_own || kwargs.is_some_and(|m| m.stroke_width.is_some());
-        let size_inherited = self.encoding.size.is_some() && !self.size_is_own;
-        let stroke_width_inherited = self.encoding.stroke_width.is_some() && !self.stroke_width_is_own;
-        YieldedWidths {
-            size: size_inherited && (owns_size || owns_stroke_width || stroke_width_inherited),
-            stroke_width: stroke_width_inherited && (owns_size || owns_stroke_width),
-        }
+        self.draw_facts().yielded_widths()
     }
 
     /// The `size` field this layer draws, after width precedence: `None` when
@@ -436,7 +443,10 @@ impl LayerPrepared {
     /// ([`Self::yielded_widths`]).
     pub(in crate::render) fn drawn_size_field(&self) -> Option<&str> {
         let size = self.encoding.size.as_ref()?;
-        (self.mark.draws_size_channel() && !self.yielded_widths().size).then_some(size.field.as_str())
+        self.draw_facts()
+            .draws(crate::spec::layer::InheritedChannel::Size)
+            .is_ok()
+            .then_some(size.field.as_str())
     }
 
     /// The field this layer draws on the opacity-family `channel`: `None`
@@ -447,12 +457,8 @@ impl LayerPrepared {
         &self,
         channel: crate::render::scale_resolve::OpacityChannel,
     ) -> Option<&str> {
-        use crate::render::scale_resolve::OpacityChannel;
         let binding = channel.slot(&self.encoding).as_ref()?;
-        let arrowless_segment_fill = self.mark == crate::spec::mark::Mark::Segment
-            && channel == OpacityChannel::Fill
-            && !self.mark_style.as_ref().and_then(|m| m.arrow).unwrap_or(false);
-        (self.mark.draws_opacity_channel(channel) && !arrowless_segment_fill).then_some(binding.field.as_str())
+        self.draw_facts().draws(channel.as_inherited()).is_ok().then_some(binding.field.as_str())
     }
 
     /// The `stroke_width` field this layer draws, after width precedence:
@@ -461,7 +467,9 @@ impl LayerPrepared {
     /// `stroke_width` to a width of its own ([`Self::yielded_widths`]).
     pub(in crate::render) fn drawn_stroke_width_field(&self) -> Option<&str> {
         let width = self.encoding.stroke_width.as_ref()?;
-        (self.mark.draws_stroke_width_channel() && !self.yielded_widths().stroke_width)
+        self.draw_facts()
+            .draws(crate::spec::layer::InheritedChannel::StrokeWidth)
+            .is_ok()
             .then_some(width.field.as_str())
     }
 
@@ -506,31 +514,20 @@ impl LayerPrepared {
             .collect()
     }
 
-    /// Whether this layer draws its binding on the channel `wire` names. A positional channel is judged by layer completion
+    /// Whether this layer draws its binding on the channel `wire` names
+    /// ([`crate::render::drawn::DrawFacts::reads`]). A positional channel is
+    /// judged by layer completion
     /// ([`crate::spec::layer::Layer::completed_encoding`]), so every one it
-    /// keeps is drawn. A raster image draws `color` bound to the field its
-    /// cells hold ([`crate::render::marks::image::image_draws_color`] over
-    /// [`Self::raster_value_field`]).
+    /// keeps is drawn. A contrast-ink text's color is still drawn here (its
+    /// builder reads the column to pick an ink, [`Self::drawn_encoding`]'s
+    /// doc): `reads` treats that case as read, since the scale question it
+    /// answers elsewhere (`undrawn_channel_warnings`,
+    /// `scale_resolve::domain::aux_reads`) is a different one from "does the
+    /// builder read this column".
     fn draws_binding(&self, wire: &str) -> bool {
-        use crate::render::scale_resolve::OpacityChannel;
         use crate::spec::layer::InheritedChannel as C;
-        match C::from_wire(wire) {
-            None => true,
-            Some(C::Color) if self.raster_value_field.is_some() => self.draws_raster_color(),
-            Some(C::Size) => self.drawn_size_field().is_some(),
-            Some(C::StrokeWidth) => self.drawn_stroke_width_field().is_some(),
-            Some(C::Opacity) => self.drawn_opacity_field(OpacityChannel::Opacity).is_some(),
-            Some(C::FillOpacity) => self.drawn_opacity_field(OpacityChannel::Fill).is_some(),
-            Some(C::StrokeOpacity) => self.drawn_opacity_field(OpacityChannel::Stroke).is_some(),
-            Some(other) => self.mark.draws_channel(other),
-        }
-    }
-
-    /// Whether this layer is a raster image drawing `color` through its cells
-    /// ([`crate::render::marks::image::image_draws_color`] over its completed
-    /// encoding and [`Self::raster_value_field`]).
-    fn draws_raster_color(&self) -> bool {
-        crate::render::marks::image::image_draws_color(self.mark, &self.encoding, &self.encoding, self.raster_value_field.as_deref())
+        let Some(channel) = C::from_wire(wire) else { return true };
+        self.draw_facts().reads(channel)
     }
 
     /// Whether this layer's own `stroke=`/`fill=` mark kwarg names a real
@@ -2385,7 +2382,11 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// ([`RenderError::GroupKeyMisplaced`]): on the chart-level encoding, or on a
 /// layer whose mark draws the color it inherits
 /// ([`crate::spec::mark::Mark::draws_inherited`]). The key is a text's, for a
-/// color it inherits but does not draw.
+/// color it inherits but does not draw. This judges whether a layer may
+/// carry a `group` key at all, the spec-level completion fact
+/// [`crate::spec::layer::Layer::completed_encoding`] applies at
+/// construction — not whether a binding in hand draws, which is
+/// [`crate::render::drawn::DrawFacts::draws`]'s question.
 fn refuse_misplaced_group_keys(spec: &ChartSpec) -> Result<(), RenderError> {
     use crate::spec::layer::InheritedChannel;
     if spec.encoding.group.is_some() {
@@ -2535,75 +2536,53 @@ fn establishing_binding(
             let reads = crate::render::scale_resolve::aux_reads(raw, &spec.encoding, channel, primary_batch, transform_outputs);
             layers.get(reads.first()?.layer())?
         }
-        None => layers.first().filter(|layer| {
-            layer.mark.draws_channel(channel.drawn_as())
-                && !(channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
-                    && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref()))
-        })?,
+        None => layers.first().filter(|layer| layer.draw_facts().draws(channel.drawn_as()).is_ok())?,
     };
     channel.binding(&drawer.encoding).clone()
 }
 
 /// One [`RenderWarning::ChannelNotDrawn`] per auxiliary-scale channel some
-/// layer binds but no binding layer's mark draws (a color a layer inherits
-/// but its mark does not take, [`crate::spec::mark::Mark::draws_inherited`],
-/// or a color a contrast-ink text binds to read, not paint,
-/// [`crate::render::marks::text::reads_color_for_contrast`], both count as
-/// bound and not drawn)
-/// ([`crate::spec::mark::Mark::draws_channel`]; a raster image draws only a
-/// `color` naming the field its cells hold,
-/// [`crate::render::marks::image::image_draws_color`]): the channel builds no
-/// scale and no legend ([`establishing_binding`]). It names the first layer
+/// layer binds but no binding layer's mark draws
+/// ([`crate::render::drawn::DrawFacts::draws`]): the channel builds no scale
+/// and no legend ([`establishing_binding`]). It names the first layer
 /// binding the channel, and says whether a statistic the chart planned
 /// grouped by the binding's field ([`SeriesGrouping::by_channel`]): then the
 /// groups are drawn, alike, rather than the binding having no effect. A channel a drawing mark's
 /// statistic drops is not this case: the column gate warns about that one.
 fn undrawn_channel_warnings(spec: &ChartSpec, layers: &[LayerPrepared]) -> Vec<RenderWarning> {
+    use crate::render::drawn::Undrawn;
     let mut warnings = Vec::new();
     for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
-        // Each layer's binding of the channel, whether it is one the layer's
-        // mark declined (a color it inherits but does not draw,
-        // `Mark::draws_inherited`, held as its `group` key or left on the
-        // chart, which its completed encoding no longer carries), and
-        // whether it is a contrast-ink text's own color (bound to read the
-        // scale, not to paint a hue from it).
-        let mut binding = layers.iter().enumerate().filter_map(|(i, layer)| {
+        // Each candidate layer, with the rule's own reason already asked:
+        // a layer whose completed encoding carries the binding asks it
+        // directly; one that does not (a text declining an inherited
+        // color, which `Layer::completed_encoding` already dropped) asks
+        // it too, and is a candidate only when the reason is
+        // `DeclinedInherited`, naming the field from its `group` key or
+        // the chart's own color, as the completion dropped it from.
+        let mut candidates = layers.iter().enumerate().filter_map(|(i, layer)| {
             if let Some(enc) = channel.binding(&layer.encoding).as_ref() {
-                let contrast_ink = channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
-                    && crate::render::marks::text::reads_color_for_contrast(layer.mark, layer.mark_style.as_ref());
-                return Some((i, layer, enc, false, contrast_ink));
+                return Some((i, layer, enc, layer.draw_facts().draws(channel.drawn_as()).err()));
             }
-            let declined = channel.drawn_as() == crate::spec::layer::InheritedChannel::Color
-                && spec.layers.is_some()
-                && !layer.mark.draws_inherited(channel.drawn_as());
-            declined
-                .then(|| layer.encoding.group.as_ref().or(spec.encoding.color.as_ref()))
-                .flatten()
-                .map(|enc| (i, layer, enc, true, false))
+            spec.layers.as_ref()?;
+            let Err(Undrawn::DeclinedInherited) = layer.draw_facts().draws(channel.drawn_as()) else { return None };
+            let enc = layer.encoding.group.as_ref().or(spec.encoding.color.as_ref())?;
+            Some((i, layer, enc, Some(Undrawn::DeclinedInherited)))
         });
-        let Some((first, layer, enc, declined, contrast_ink)) = binding.next() else { continue };
-        let drawn = |layer: &LayerPrepared, declined: bool, contrast_ink: bool| {
-            !declined
-                && !contrast_ink
-                && match layer.raster_value_field.is_some() && channel.name == "color" {
-                    true => layer.draws_raster_color(),
-                    false => layer.mark.draws_channel(channel.drawn_as()),
-                }
-        };
-        if drawn(layer, declined, contrast_ink)
-            || binding.any(|(_, layer, _, declined, contrast_ink)| drawn(layer, declined, contrast_ink))
-        {
+        let Some((first, layer, enc, reason)) = candidates.next() else { continue };
+        let Some(reason) = reason else { continue };
+        if candidates.any(|(_, _, _, r)| r.is_none()) {
             continue;
         }
+        let grouped = matches!(reason, Undrawn::NotDrawn) && layer.grouping_series.by_channel.contains(&enc.field);
         warnings.push(RenderWarning::ChannelNotDrawn {
             layer: public_layer(spec, first, layer.mark),
             entry: layer_entry(spec, first, layer.mark),
             mark: layer.mark,
             channel: channel.name.to_string(),
             field: enc.field.clone(),
-            cells: layer.raster_value_field.clone().filter(|_| channel.name == "color"),
-            grouped: !declined && !contrast_ink && layer.grouping_series.by_channel.contains(&enc.field),
-            contrast_ink,
+            reason,
+            grouped,
         });
     }
     warnings
@@ -2987,7 +2966,15 @@ fn layer_column_reads<'a>(
         .iter()
         .filter(move |c| c.declared_by(layer_index))
         .filter(move |c| {
-            InheritedChannel::from_wire(c.encoding.channel.as_str()).is_none_or(|ch| layer.mark.draws_channel(ch))
+            // A conditional's value pair is not itself a bound field: every
+            // layer that declares a conditional carries its own copy of it
+            // whatever it binds or inherits, so this asks only the mark and
+            // its style, never a binding fact (a declined inherited color,
+            // a yielded width, a raster's cell field) — a conditional
+            // `fill_opacity` on an arrowless segment is not a read either,
+            // as a bound one is not.
+            InheritedChannel::from_wire(c.encoding.channel.as_str())
+                .is_none_or(|ch| layer.draw_facts().reads_conditional(ch))
         })
         .flat_map(move |c| {
             let channel = c.encoding.channel.as_str();

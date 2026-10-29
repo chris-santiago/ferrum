@@ -10976,6 +10976,163 @@ fn a_conditional_field_branch_naming_an_absent_column_refuses() {
     );
 }
 
+/// A conditional color field branch is read wherever the mark and its style
+/// read `color` at all, whatever that layer binds or inherits: a text with
+/// no color of its own is still a `color`-reading mark
+/// ([`crate::spec::mark::Mark::draws_channel`]), so its own conditional
+/// naming a missing column refuses as any bound `color` would, both plain
+/// and contrast-ink.
+#[test]
+fn a_texts_conditional_color_field_branch_refuses_whether_or_not_it_owns_color() {
+    use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+    let conditional = crate::spec::chart::ChartConditional {
+        encoding: ConditionalEncoding {
+            selection_name: "pick".into(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Field { name: "missing".into() },
+            if_not: EncodingValue::Color { value: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 } },
+        },
+        layers: Some(vec![1]),
+    };
+    let text_layer = |mark_style: serde_json::Value| {
+        serde_json::json!({
+            "mark": "text",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}},
+            "mark_style": mark_style,
+        })
+    };
+    for mark_style in [serde_json::json!({}), serde_json::json!({"fill": "theme:contrast"})] {
+        let layers = serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            text_layer(mark_style),
+        ]);
+        let mut spec = column_gate_spec(serde_json::json!([]), layers);
+        spec.conditionals = vec![conditional.clone()];
+        assert_eq!(gate_refusal(&spec).to_string(), gate_message("color", "missing", None, false));
+    }
+}
+
+/// A raster image's conditional color field branch is never a read: the
+/// mark table excludes `Image` from `color` outright (it draws color only
+/// through its cells, a binding fact the conditional's mark-and-style
+/// question does not ask), so a conditional naming a column the user's own
+/// rows hold — but the raster output's cells batch does not — renders
+/// instead of refusing against a batch the conditional was never read
+/// from.
+#[test]
+fn a_raster_images_conditional_color_field_branch_is_never_a_read() {
+    use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![-4.0, -2.0, 6.0, 8.0])),
+        ],
+    )
+    .expect("batch");
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "z"}},
+        "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "mean", "field": "z", "resolution": 2, "name": "raster"}],
+        "layers": [{"mark": "image", "data_source": "raster", "entry": "mark_raster", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}],
+    }))
+    .expect("spec");
+    // `x` is in the user's own rows but not in the raster output's cells
+    // batch (x_min/x_max/y_min/y_max/width/height/pixel_data only).
+    spec.conditionals = vec![crate::spec::chart::ChartConditional {
+        encoding: ConditionalEncoding {
+            selection_name: "pick".into(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Field { name: "x".into() },
+            if_not: EncodingValue::Color { value: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 } },
+        },
+        layers: Some(vec![0]),
+    }];
+    prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("a raster's conditional color is not a read, so it is never checked against the cells batch");
+}
+
+/// A line's own conditional `size` is a read wherever a line draws `size`
+/// at all (the mark table), never judged by whether that line also yields
+/// an inherited size or stroke_width to a width of its own: the conditional
+/// still refuses naming a missing column, though the same line's bound
+/// inherited `size` would be excluded from the chart's scale.
+#[test]
+fn a_lines_own_conditional_size_refuses_though_it_yields_an_inherited_one() {
+    use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+    let layers = serde_json::json!([
+        {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "size": {"field": "z"}}},
+        {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"stroke_width": 3.0}},
+    ]);
+    let mut spec = column_gate_spec(serde_json::json!([]), layers);
+    // The chart-level `size` the line inherits (and, owning `stroke_width`
+    // itself, yields): present so the conditional's own read is proven
+    // independent of that bound-read exclusion, not merely coincidental
+    // with there being no inherited size at all.
+    spec.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+    spec.conditionals = vec![crate::spec::chart::ChartConditional {
+        encoding: ConditionalEncoding {
+            selection_name: "pick".into(),
+            channel: ChannelName::Size,
+            if_selected: EncodingValue::Field { name: "nope".into() },
+            if_not: EncodingValue::Size { value: 10.0 },
+        },
+        layers: Some(vec![1]),
+    }];
+    assert_eq!(gate_refusal(&spec).to_string(), gate_message("size", "nope", None, false));
+}
+
+/// A segment's conditional `fill_opacity` is a read only with `arrow=True`,
+/// the same arrowhead rule a bound `fill_opacity` answers to: an arrowless
+/// segment's conditional naming a missing column renders, and the
+/// `arrow=True` control refuses.
+#[test]
+fn a_segments_conditional_fill_opacity_follows_the_arrowhead_rule() {
+    use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+    let conditional = crate::spec::chart::ChartConditional {
+        encoding: ConditionalEncoding {
+            selection_name: "pick".into(),
+            channel: ChannelName::FillOpacity,
+            if_selected: EncodingValue::Field { name: "nope".into() },
+            if_not: EncodingValue::FillOpacity { value: 0.5 },
+        },
+        layers: Some(vec![1]),
+    };
+    let layer = |mark_style: serde_json::Value| {
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {
+                "mark": "segment",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "x2": {"field": "x"}, "y2": {"field": "y"}},
+                "mark_style": mark_style,
+            },
+        ])
+    };
+    let mut arrowless = column_gate_spec(serde_json::json!([]), layer(serde_json::json!({})));
+    arrowless.conditionals = vec![conditional.clone()];
+    assert!(
+        gate_render(&arrowless, &column_gate_batch()).0.is_ok(),
+        "an arrowless segment's conditional fill_opacity is not a read"
+    );
+
+    let mut arrowed = column_gate_spec(serde_json::json!([]), layer(serde_json::json!({"arrow": true})));
+    arrowed.conditionals = vec![conditional];
+    assert_eq!(gate_refusal(&arrowed).to_string(), gate_message("fill_opacity", "nope", None, false));
+}
+
 /// A column the layer's own statistic produces is in the layer's own rows:
 /// a layer reading `stats` draws `mean_z` on color and passes.
 #[test]
@@ -11407,8 +11564,598 @@ fn a_text_only_chart_with_a_parent_color_warns_it_is_not_drawn() {
     assert!(!prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
 }
 
+/// A `branch` transform that republishes [`column_gate_batch`]'s rows under
+/// `name`, with `z` scaled by 100 (10..40 becomes 1000..4000): a line
+/// reading it through `data_source` carries values the point's own rows
+/// (still 10..40) never do, so a size domain that reached past 1000 could
+/// only have come from the line's read, not the point's.
+fn wide_z_branch(name: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "type": "branch",
+        "name": name,
+        "transforms": [{"type": "calculate", "as_field": "z", "expr": "datum.z * 100.0"}],
+    }])
+}
+
+/// The `(lo, hi)` a prepared chart's `size` scale maps from, over a linear
+/// scale: the one fact that tells whether the line's wide branch
+/// ([`wide_z_branch`]) reached the domain.
+fn size_domain(prep: &PreparedInputs) -> (f64, f64) {
+    match prep.provisional_scales.size.as_ref().expect("a size scale").inner {
+        crate::render::scale_resolve::ScaleKind::Linear(ref linear) => {
+            let [lo, hi] = linear.domain_pair();
+            (lo, hi)
+        }
+        ref other => panic!("expected a linear size scale, got {other:?}"),
+    }
+}
+
+/// A line with its own `stroke_width` yields an inherited `size` to it, in
+/// either `+` order: the size domain comes only from the point beside it
+/// (10..40), never widened by the line's own rows (scaled to 1000..4000 by
+/// [`wide_z_branch`] so a leak is unmistakable), and nothing warns since the
+/// point draws. When every layer yields (two width-owning lines), `size`
+/// gets no scale or legend at all, and warns once naming the yield.
+#[test]
+fn a_line_that_yields_size_does_not_establish_or_widen_the_size_scale() {
+    let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}});
+    let line = |stroke_width: f64, data_source: Option<&str>| {
+        let mut layer = serde_json::json!({
+            "mark": "line",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "mark_style": {"stroke_width": stroke_width},
+        });
+        if let Some(source) = data_source {
+            layer["data_source"] = serde_json::json!(source);
+        }
+        layer
+    };
+    for layers in
+        [serde_json::json!([line(3.0, Some("wide")), point.clone()]), serde_json::json!([point.clone(), line(3.0, Some("wide"))])]
+    {
+        let mut spec = column_gate_spec(wide_z_branch("wide"), layers);
+        spec.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+        let prep = gate_prepare(&spec).expect("prepares");
+        assert_eq!(size_domain(&prep), (10.0, 40.0), "the point's own z, never the line's wide branch");
+        assert!(
+            !prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })),
+            "the point draws size, so nothing warns"
+        );
+    }
+
+    let mut both_lines =
+        column_gate_spec(serde_json::json!([]), serde_json::json!([line(3.0, None), line(5.0, None)]));
+    both_lines.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+    let prep = gate_prepare(&both_lines).expect("prepares");
+    assert!(prep.provisional_scales.size.is_none(), "every layer yields size to its own width");
+    assert!(prep.aux_legends.is_empty(), "and no legend");
+    let undrawn: Vec<String> =
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(ToString::to_string).collect();
+    assert_eq!(
+        undrawn,
+        ["layer 0: mark_line: size 'z' has no effect: the line draws its own width (stroke_width=3), which \
+          outranks an inherited size, so size gets no scale and no legend; it was ignored"]
+    );
+}
+
+/// An attached `Chart.layer` line inheriting the host's size with its own
+/// `stroke_width` does not widen the size domain either: the same yield
+/// rule applies whether the line reaches the chart through `+` or an
+/// attached layer, and the line's wide branch ([`wide_z_branch`]) never
+/// reaches the domain.
+#[test]
+fn an_attached_line_with_its_own_width_does_not_widen_the_size_domain() {
+    let mut spec = column_gate_spec(
+        wide_z_branch("wide"),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"stroke_width": 3.0}, "data_source": "wide"},
+        ]),
+    );
+    spec.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+    let prep = gate_prepare(&spec).expect("prepares");
+    assert_eq!(size_domain(&prep), (10.0, 40.0), "the point's own z, never the line's wide branch");
+    assert!(!prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
+}
+
+/// Between two widths a line only inherits, `stroke_width` outranks `size`
+/// (the documented precedence), and the message says so accurately: the
+/// line draws a width it also only inherits, not "its own" (the own-width
+/// voice is pinned already, by `a_line_that_yields_size_does_not_establish_or_widen_the_size_scale`).
+/// A line owning `size` as a literal mark kwarg, inheriting `stroke_width`,
+/// still speaks in the own-width voice, naming `size`.
+#[test]
+fn a_line_inheriting_both_widths_warns_that_it_draws_the_width_it_also_inherits() {
+    let chart = serde_json::json!({"size": {"field": "v"}, "stroke_width": {"field": "w"}});
+    let spec = drawn_channel_spec(chart, &[("line", serde_json::json!({})), ("line", serde_json::json!({}))]);
+    let prep = drawn_channel_prepared(&spec);
+    let undrawn: Vec<String> =
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(ToString::to_string).collect();
+    assert_eq!(
+        undrawn,
+        ["layer 0: mark_line: size 'v' has no effect: the line draws the width it also inherits \
+          (stroke_width='w'), which outranks an inherited size, so size gets no scale and no legend; it was \
+          ignored"]
+    );
+
+    let chart = serde_json::json!({"stroke_width": {"field": "w"}});
+    let mut own_size_literal = drawn_channel_spec(chart, &[("line", serde_json::json!({}))]);
+    own_size_literal.layers.as_mut().expect("layers")[0].mark_style =
+        Some(crate::spec::mark_style::MarkKwargsSpec { size: Some(4.0), ..Default::default() });
+    let prep = drawn_channel_prepared(&own_size_literal);
+    let undrawn: Vec<String> =
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(ToString::to_string).collect();
+    assert_eq!(
+        undrawn,
+        ["layer 0: mark_line: stroke_width 'w' has no effect: the line draws its own width (size=4), which \
+          outranks an inherited stroke_width, so stroke_width gets no scale and no legend; it was ignored"]
+    );
+}
+
+/// A `mark_segment` without `arrow=True` fills nothing, so an encoded
+/// `fill_opacity` warns naming the arrowhead rule instead of building a
+/// scale or legend; `arrow=True` draws it.
+#[test]
+fn an_arrowless_segments_fill_opacity_warns_instead_of_drawing() {
+    let arrowless = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "segment", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "x2": {"field": "x"}, "y2": {"field": "y"}, "fill_opacity": {"field": "z"}}},
+        ]),
+    );
+    let prep = gate_prepare(&arrowless).expect("prepares");
+    assert!(prep.provisional_scales.fill_opacity.is_none(), "an arrowless segment fills nothing");
+    assert!(prep.aux_legends.is_empty());
+    let undrawn: Vec<String> =
+        prep.warnings.iter().filter(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })).map(ToString::to_string).collect();
+    assert_eq!(
+        undrawn,
+        ["layer 0: mark_segment: fill_opacity 'z' has no effect: a segment fills only the arrowheads arrow=True \
+          adds, so fill_opacity gets no scale and no legend; it was ignored"]
+    );
+
+    let mut arrowed = serde_json::to_value(&arrowless).expect("serializes");
+    arrowed["layers"][0]["mark_style"] = serde_json::json!({"arrow": true});
+    let arrowed: ChartSpec = serde_json::from_value(arrowed).expect("deserializes");
+    let prep = gate_prepare(&arrowed).expect("prepares");
+    assert!(prep.provisional_scales.fill_opacity.is_some(), "arrow=True fills the arrowheads");
+    assert!(!prep.warnings.iter().any(|w| matches!(w, RenderWarning::ChannelNotDrawn { .. })));
+}
+
 // ── `"theme:contrast"` sentinel: a contrast-ink text binds color without
 // drawing it (spec §6.5) ──────────────────────────────────────────────────
+
+/// Checks that every reader of the drawn-channel rule agrees, for layer
+/// `row` of `spec` over `batch`, on whether it draws `channel_name`,
+/// against a literal `expect_reason`/`expect_column_read` this test never
+/// computes from `DrawFacts` itself: (a) `scale_resolve::aux_reads` lists
+/// the layer iff drawn (`expect_reason` is `None`); (b) the rendering
+/// encoding's channel slot is established (`establishing_binding`'s
+/// answer) iff drawn; (c) the prepared layer's `drawn_encoding` carries the
+/// binding iff `expect_column_read`; (d) `undrawn_channel_warnings`' one
+/// `ChannelNotDrawn` for the channel (through `prep.warnings`, none when
+/// drawn) names `expect_reason`; (f) the raw-side (`DrawFacts::of_layer`)
+/// and prepared-side (`LayerPrepared::draw_facts`) answers agree. `cells`
+/// is the raster cell field a raw-side image reads; `None` for every other
+/// row. Every caller also asks (e), the conditional read, through
+/// [`conditional_is_read`], since it needs its own conditional spec.
+fn assert_drawn_channel_parity(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    row: usize,
+    channel_name: &'static str,
+    cells: Option<&str>,
+    expect_reason: Option<crate::render::drawn::Undrawn>,
+    expect_column_read: bool,
+) {
+    use crate::render::drawn::Undrawn;
+    let channel = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS
+        .into_iter()
+        .find(|c| c.name == channel_name)
+        .unwrap_or_else(|| panic!("{channel_name} is not an auxiliary-scale channel"));
+    let prep = prepare_render_inputs(
+        spec,
+        batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{channel_name} row {row} prepares: {e}"));
+    let raw_layers = spec.layers.as_deref().expect("a layered spec");
+    let drawn = expect_reason.is_none();
+
+    let reads =
+        crate::render::scale_resolve::aux_reads(raw_layers, &spec.encoding, channel, prep.final_batch(), &prep.transform_outputs);
+    assert_eq!(reads.iter().any(|r| r.layer() == row), drawn, "{channel_name} row {row}: aux_reads (a)");
+
+    assert_eq!(
+        channel.binding(prep.rendering_encoding()).is_some(),
+        drawn,
+        "{channel_name} row {row}: establishing binding (b)"
+    );
+
+    assert_eq!(
+        channel.binding(&prep.layers[row].drawn_encoding()).is_some(),
+        expect_column_read,
+        "{channel_name} row {row}: drawn_encoding column read (c)"
+    );
+
+    let undrawn: Vec<&Undrawn> = prep
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            RenderWarning::ChannelNotDrawn { channel: c, reason, .. } if c == channel_name => Some(reason),
+            _ => None,
+        })
+        .collect();
+    match &expect_reason {
+        Some(reason) => assert_eq!(undrawn, vec![reason], "{channel_name} row {row}: warning reason (d)"),
+        None => assert!(undrawn.is_empty(), "{channel_name} row {row}: unexpected warning {undrawn:?} (d)"),
+    }
+
+    let raw_facts = crate::render::drawn::DrawFacts::of_layer(&raw_layers[row], &spec.encoding, cells);
+    let prepared_facts = prep.layers[row].draw_facts();
+    assert_eq!(
+        raw_facts.draws(channel.drawn_as()),
+        prepared_facts.draws(channel.drawn_as()),
+        "{channel_name} row {row}: raw vs prepared DrawFacts (f)"
+    );
+}
+
+/// Whether a conditional on `channel` naming a column no batch holds,
+/// declared by `layer_index` of a clone of `spec` over `batch`, is read:
+/// refused through the column gate (`prepare_render_inputs`) rather than
+/// rendered. The literal (e) of the drawn-channel parity table.
+fn conditional_is_read(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    layer_index: usize,
+    channel: ferrum_scene::ChannelName,
+    if_not: ferrum_scene::EncodingValue,
+) -> bool {
+    let mut spec = spec.clone();
+    spec.conditionals = vec![crate::spec::chart::ChartConditional {
+        encoding: ferrum_scene::ConditionalEncoding {
+            selection_name: "pick".into(),
+            channel,
+            if_selected: ferrum_scene::EncodingValue::Field { name: "absent_column_zzz".into() },
+            if_not,
+        },
+        layers: Some(vec![layer_index]),
+    }];
+    match prepare_render_inputs(
+        &spec,
+        batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    ) {
+        Err(RenderError::LayerUnknownColumn { ref name, .. }) if name == "absent_column_zzz" => true,
+        Ok(_) => false,
+        Err(e) => panic!("unexpected refusal: {e}"),
+    }
+}
+
+/// The drawn-channel rule's parity table: one literal row per refined
+/// shape (yielded size, yielded stroke_width, both widths inherited, the
+/// arrowless segment, contrast-ink, raster cells, declined text color, a
+/// non-drawing mark, and the drawn controls), each checked through every
+/// reader by [`assert_drawn_channel_parity`] and [`conditional_is_read`].
+/// Literal expectations, never computed from `DrawFacts`, so the test
+/// cannot restate the rule as its own oracle: a missed reader, or a
+/// reader that disagrees with the others, fails the row it reaches.
+#[test]
+fn the_drawn_channel_rule_agrees_across_every_reader() {
+    use crate::render::drawn::Undrawn;
+    use crate::spec::layer::InheritedChannel;
+    use ferrum_scene::{ChannelName, Color, EncodingValue};
+    let batch = drawn_channel_batch();
+    let label = || {
+        serde_json::json!({"mark": "label", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}}})
+    };
+
+    // Row 1: a line with its own stroke_width=3 yields an inherited size.
+    // One layer: every other mark that inherits `size` (`inherit_non_positional`
+    // runs regardless of mark) would become a second candidate the warning
+    // could name instead, so isolating the line's own reason needs it alone.
+    {
+        let chart = serde_json::json!({"size": {"field": "v"}});
+        let mut spec = drawn_channel_spec(chart, &[("line", serde_json::json!({}))]);
+        spec.layers.as_mut().expect("layers")[0].mark_style =
+            Some(crate::spec::mark_style::MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() });
+        assert_drawn_channel_parity(
+            &spec,
+            &batch,
+            0,
+            "size",
+            None,
+            Some(Undrawn::YieldedWidth { winner: InheritedChannel::StrokeWidth, value: "3".into(), inherited: false }),
+            false,
+        );
+        assert!(
+            conditional_is_read(&spec, &batch, 0, ChannelName::Size, EncodingValue::Size { value: 10.0 }),
+            "a line's own conditional size is a read even though it yields a bound inherited one (e)"
+        );
+    }
+
+    // Row 2: a line with its own size=4 yields an inherited stroke_width.
+    {
+        let chart = serde_json::json!({"stroke_width": {"field": "w"}});
+        let mut spec = drawn_channel_spec(chart, &[("line", serde_json::json!({}))]);
+        spec.layers.as_mut().expect("layers")[0].mark_style =
+            Some(crate::spec::mark_style::MarkKwargsSpec { size: Some(4.0), ..Default::default() });
+        assert_drawn_channel_parity(
+            &spec,
+            &batch,
+            0,
+            "stroke_width",
+            None,
+            Some(Undrawn::YieldedWidth { winner: InheritedChannel::Size, value: "4".into(), inherited: false }),
+            false,
+        );
+        assert!(conditional_is_read(&spec, &batch, 0, ChannelName::StrokeWidth, EncodingValue::StrokeWidth { value: 2.0 }));
+    }
+
+    // Row 3: a line inheriting both widths yields size to the also-inherited
+    // stroke_width, and still draws stroke_width itself.
+    {
+        let chart = serde_json::json!({"size": {"field": "v"}, "stroke_width": {"field": "w"}});
+        let spec = drawn_channel_spec(chart, &[("line", serde_json::json!({}))]);
+        assert_drawn_channel_parity(
+            &spec,
+            &batch,
+            0,
+            "size",
+            None,
+            Some(Undrawn::YieldedWidth { winner: InheritedChannel::StrokeWidth, value: "'w'".into(), inherited: true }),
+            false,
+        );
+        assert!(conditional_is_read(&spec, &batch, 0, ChannelName::Size, EncodingValue::Size { value: 10.0 }));
+        assert_drawn_channel_parity(&spec, &batch, 0, "stroke_width", None, None, true);
+        assert!(conditional_is_read(&spec, &batch, 0, ChannelName::StrokeWidth, EncodingValue::StrokeWidth { value: 2.0 }));
+    }
+
+    // Row 4: an arrowless segment's own fill_opacity fills nothing; arrow=True draws it.
+    {
+        let layer = |mark_style: serde_json::Value| {
+            serde_json::json!({
+                "mark": "segment",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "x2": {"field": "x"}, "y2": {"field": "y"}, "fill_opacity": {"field": "v"}},
+                "mark_style": mark_style,
+            })
+        };
+        let spec_of = |mark_style: serde_json::Value| -> ChartSpec {
+            serde_json::from_value(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                "layers": [{"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}, layer(mark_style)],
+            }))
+            .expect("spec deserializes")
+        };
+        let arrowless = spec_of(serde_json::json!({}));
+        assert_drawn_channel_parity(&arrowless, &batch, 1, "fill_opacity", None, Some(Undrawn::ArrowlessSegmentFill), false);
+        assert!(
+            !conditional_is_read(&arrowless, &batch, 1, ChannelName::FillOpacity, EncodingValue::FillOpacity { value: 0.5 }),
+            "an arrowless segment's conditional fill_opacity is not a read (e)"
+        );
+
+        let arrowed = spec_of(serde_json::json!({"arrow": true}));
+        assert_drawn_channel_parity(&arrowed, &batch, 1, "fill_opacity", None, None, true);
+        assert!(conditional_is_read(&arrowed, &batch, 1, ChannelName::FillOpacity, EncodingValue::FillOpacity { value: 0.5 }));
+    }
+
+    // Row 5: a contrast-ink text owns its own color; the column is still
+    // read (the builder picks an ink from it), but it never draws a scale.
+    {
+        let spec = column_gate_spec(serde_json::json!([]), serde_json::json!([label(), contrast_text_layer("z")]));
+        assert_drawn_channel_parity(&spec, &column_gate_batch(), 1, "color", None, Some(Undrawn::ContrastInk), true);
+        assert!(
+            conditional_is_read(&spec, &column_gate_batch(), 1, ChannelName::Color, EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } }),
+            "a contrast-ink text's conditional color is still read (e)"
+        );
+    }
+
+    // Row 6: a raster image draws color only through its own cells.
+    {
+        let raster_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("z", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![-4.0, -2.0, 6.0, 8.0])),
+            ],
+        )
+        .expect("batch");
+        let spec_of = |color: &str| -> ChartSpec {
+            serde_json::from_value(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": color}},
+                "transforms": [{"type": "raster", "x": "x", "y": "y", "aggregate": "mean", "field": "z", "resolution": 2, "name": "raster"}],
+                "layers": [{"mark": "image", "data_source": "raster", "entry": "mark_raster", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}}],
+            }))
+            .expect("spec")
+        };
+        let other_field = spec_of("x");
+        assert_drawn_channel_parity(
+            &other_field,
+            &raster_batch,
+            0,
+            "color",
+            Some("z"),
+            Some(Undrawn::RasterCells { cells: "z".into() }),
+            false,
+        );
+        assert!(
+            !conditional_is_read(&other_field, &raster_batch, 0, ChannelName::Color, EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } }),
+            "a raster image's conditional color is never a read, whatever its binding (e)"
+        );
+
+        let own_field = spec_of("z");
+        assert_drawn_channel_parity(&own_field, &raster_batch, 0, "color", Some("z"), None, true);
+    }
+
+    // Row 7: a layered text declines an inherited color it does not own.
+    // The sibling is a second declining text, not another mark: unlike
+    // `size`, a text's own completion drops a declined `color` outright
+    // (`Layer::completed_encoding`), so this is the one mark whose sibling
+    // cannot become a spurious same-channel candidate with a different
+    // (`NotDrawn`) reason -- every other mark's `draws_inherited(Color)` is
+    // `true`, so it would carry the inherited binding too.
+    {
+        let declining_text = serde_json::json!({"mark": "text", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "g"}}});
+        let mut spec = column_gate_spec(serde_json::json!([]), serde_json::json!([declining_text.clone(), declining_text]));
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), ..Default::default() });
+        assert_drawn_channel_parity(&spec, &column_gate_batch(), 1, "color", None, Some(Undrawn::DeclinedInherited), false);
+        assert!(
+            conditional_is_read(&spec, &column_gate_batch(), 1, ChannelName::Color, EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } }),
+            "a text's own conditional color is a read whether or not it owns a bound one (e)"
+        );
+    }
+
+    // Row 8: a bar never draws size, bound or not.
+    {
+        let bar = serde_json::json!({"mark": "bar", "encoding": {"x": {"field": "x"}, "y": {"field": "z"}, "size": {"field": "z"}}});
+        let spec = column_gate_spec(serde_json::json!([]), serde_json::json!([label(), bar]));
+        assert_drawn_channel_parity(&spec, &column_gate_batch(), 1, "size", None, Some(Undrawn::NotDrawn), false);
+        assert!(!conditional_is_read(&spec, &column_gate_batch(), 1, ChannelName::Size, EncodingValue::Size { value: 10.0 }));
+    }
+
+    // Row 9: drawn controls -- a point inheriting size, and a line owning
+    // size with no width of its own.
+    {
+        let chart = serde_json::json!({"size": {"field": "v"}});
+        let spec = drawn_channel_spec(chart, &[("point", serde_json::json!({}))]);
+        assert_drawn_channel_parity(&spec, &batch, 0, "size", None, None, true);
+
+        let spec = drawn_channel_spec(serde_json::json!({}), &[("line", serde_json::json!({"size": {"field": "v"}}))]);
+        assert_drawn_channel_parity(&spec, &batch, 0, "size", None, None, true);
+    }
+}
+
+/// `grouped` is a fact about a planned statistic ([`SeriesGrouping::by_channel`]),
+/// not about the drawn-channel rule's reason, so it is set only alongside
+/// the plain [`Undrawn::NotDrawn`] reason: a raster's `color` field also
+/// bound on `shape` and grouped by a planned statistic still voices
+/// `RasterCells`, with `grouped` false, and a yielding line's `size` field
+/// grouped the same way still voices `YieldedWidth`, with `grouped` false.
+/// Fails if `undrawn_channel_warnings`'s `grouped` computation reverts to
+/// `by_channel.contains(&enc.field)` alone, regardless of `reason`.
+#[test]
+fn grouped_is_set_only_alongside_the_plain_not_drawn_reason() {
+    use crate::render::drawn::Undrawn;
+    use crate::spec::layer::InheritedChannel;
+    use crate::spec::mark_style::MarkKwargsSpec;
+
+    let raster_spec = ChartSpec {
+        mark: Mark::Image,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "f".into(), ..Default::default() }),
+            shape: Some(EncodingSpec { field: "f".into(), ..Default::default() }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut raster_layer = LayerPrepared::from_chart_only(&raster_spec);
+    raster_layer.raster_value_field = Some("z".into());
+    raster_layer.grouping_series = SeriesGrouping { by_channel: vec!["f".into()], by_step: Vec::new() };
+    let warnings = undrawn_channel_warnings(&raster_spec, std::slice::from_ref(&raster_layer));
+    let color = warnings.iter().find_map(|w| match w {
+        RenderWarning::ChannelNotDrawn { channel, reason, grouped, .. } if channel == "color" => Some((reason.clone(), *grouped)),
+        _ => None,
+    });
+    match color {
+        Some((reason, grouped)) => {
+            assert_eq!(reason, Undrawn::RasterCells { cells: "z".into() });
+            assert!(!grouped, "RasterCells is not the plain NotDrawn reason, so grouped must be false");
+        }
+        None => panic!("expected a color ChannelNotDrawn warning, got {warnings:?}"),
+    }
+
+    let line_spec = ChartSpec {
+        mark: Mark::Line,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            size: Some(EncodingSpec { field: "f".into(), ..Default::default() }),
+            ..Default::default()
+        },
+        mark_style: Some(MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() }),
+        ..Default::default()
+    };
+    let mut line_layer = LayerPrepared::from_chart_only(&line_spec);
+    // An unlayered chart's own binding is trivially "own"; flip it to
+    // simulate the inherited size `yielded_widths` yields to the line's
+    // own `stroke_width` kwarg (the shape this reason needs).
+    line_layer.size_is_own = false;
+    line_layer.grouping_series = SeriesGrouping { by_channel: vec!["f".into()], by_step: Vec::new() };
+    let warnings = undrawn_channel_warnings(&line_spec, std::slice::from_ref(&line_layer));
+    let size = warnings.iter().find_map(|w| match w {
+        RenderWarning::ChannelNotDrawn { channel, reason, grouped, .. } if channel == "size" => Some((reason.clone(), *grouped)),
+        _ => None,
+    });
+    match size {
+        Some((reason, grouped)) => {
+            assert_eq!(reason, Undrawn::YieldedWidth { winner: InheritedChannel::StrokeWidth, value: "3".into(), inherited: false });
+            assert!(!grouped, "YieldedWidth is not the plain NotDrawn reason, so grouped must be false");
+        }
+        None => panic!("expected a size ChannelNotDrawn warning, got {warnings:?}"),
+    }
+}
+
+/// [`crate::render::drawn::DrawFacts::draws`]'s declined-inherited color
+/// check reads `color_is_own`, never merely "is a color binding present":
+/// a text whose own `encoding.color` carries the chart's color (the wire
+/// shape Python writes for an inherited channel the layer did not bind
+/// itself) still declines it, the same as a text with no binding in hand
+/// at all, reading the chart's color only through `parent`.
+#[test]
+fn draw_facts_declines_an_inherited_color_whether_or_not_its_own_encoding_carries_it() {
+    use crate::render::drawn::{DrawFacts, Undrawn};
+    use crate::spec::layer::InheritedChannel;
+
+    let field = |name: &str| Some(EncodingSpec { field: name.to_string(), ..Default::default() });
+
+    // No binding in hand: `encoding` carries nothing; the chart's color is
+    // read only through `parent`.
+    let own = Encoding::default();
+    let parent = Encoding { color: field("g"), ..Default::default() };
+    let facts = DrawFacts {
+        mark: Mark::Text,
+        encoding: &own,
+        parent: &parent,
+        mark_style: None,
+        color_is_own: false,
+        size_is_own: false,
+        stroke_width_is_own: false,
+        cells: None,
+    };
+    assert_eq!(facts.draws(InheritedChannel::Color), Err(Undrawn::DeclinedInherited));
+
+    // A binding in hand: the layer's own `encoding.color` carries the
+    // chart's color too, but `color_is_own` still answers false.
+    let own_carries_it = Encoding { color: field("g"), ..Default::default() };
+    let facts = DrawFacts {
+        mark: Mark::Text,
+        encoding: &own_carries_it,
+        parent: &own_carries_it,
+        mark_style: None,
+        color_is_own: false,
+        size_is_own: false,
+        stroke_width_is_own: false,
+        cells: None,
+    };
+    assert_eq!(facts.draws(InheritedChannel::Color), Err(Undrawn::DeclinedInherited));
+}
 
 /// A hand-built contrast-ink text layer over [`column_gate_batch`]: its own
 /// `color` on `field`, `text` on `g`, and `fill="theme:contrast"`.

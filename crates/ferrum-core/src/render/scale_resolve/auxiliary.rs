@@ -723,6 +723,17 @@ impl OpacityChannel {
             OpacityChannel::Stroke => "stroke_opacity",
         }
     }
+
+    /// This channel as the [`crate::spec::layer::InheritedChannel`] the
+    /// drawn-channel rule ([`crate::render::drawn::DrawFacts::draws`]) takes.
+    pub(in crate::render) fn as_inherited(self) -> crate::spec::layer::InheritedChannel {
+        use crate::spec::layer::InheritedChannel;
+        match self {
+            OpacityChannel::Opacity => InheritedChannel::Opacity,
+            OpacityChannel::Fill => InheritedChannel::FillOpacity,
+            OpacityChannel::Stroke => InheritedChannel::StrokeOpacity,
+        }
+    }
 }
 
 /// Build the [`OpacityScale`] for one opacity-family channel, if it is bound.
