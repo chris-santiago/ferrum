@@ -392,6 +392,12 @@ pub(in crate::render) struct SortRows<'a> {
     pub(in crate::render) y_field: Option<&'a str>,
 }
 
+/// `Ok(None)` only for an unlayered spec (or an empty layer list) -- there
+/// is no establishing layer to read. A layered spec always has one
+/// ([`establishing_axis_layer`] falls back to layer 0 when no layer draws
+/// the channel), so this propagates a `data_source` naming no published
+/// output as the same refusal [`layer_sort_rows`] raises, rather than
+/// resolving to the chart's own rows.
 pub(in crate::render) fn establishing_sort_rows<'a>(
     channel: &str,
     spec: &'a ChartSpec,
@@ -399,40 +405,47 @@ pub(in crate::render) fn establishing_sort_rows<'a>(
     transform_outputs: &'a HashMap<String, RecordBatch>,
     lineages: &'a OutputLineages,
     include_final: bool,
-) -> Option<SortRows<'a>> {
-    let (_, layer) = establishing_axis_layer(spec, spec.layers.as_deref()?, channel)?;
-    Some(layer_sort_rows(spec, layer, primary_batch, transform_outputs, lineages, include_final))
+) -> Result<Option<SortRows<'a>>, RenderError> {
+    let Some(layers) = spec.layers.as_deref() else { return Ok(None) };
+    let Some((index, layer)) = establishing_axis_layer(spec, layers, channel) else { return Ok(None) };
+    layer_sort_rows(spec, index, layer, primary_batch, transform_outputs, lineages, include_final).map(Some)
 }
 
-/// The rows a data-aware sort reads for one `layer`: its pre-statistic rows
-/// (`prepare::pre_statistic_rows`) -- what a sort naming a raw field its own
-/// statistic consumed reads -- paired with its final rows
-/// (`prepare::layer_final_rows`) as the fallback a sort naming the
-/// statistic's own output reads instead ([`SortRows::fallback`]'s doc).
-/// Shared by the establishing axis sort and the facet panel sort, which
-/// reads each panel value's first drawing layer.
+/// The rows a data-aware sort reads for one `layer`, found at `layer_index`
+/// in `spec`'s layers: its pre-statistic rows (`prepare::pre_statistic_rows`)
+/// -- what a sort naming a raw field its own statistic consumed reads --
+/// paired with its final rows (`prepare::layer_final_rows`) as the fallback
+/// a sort naming the statistic's own output reads instead
+/// ([`SortRows::fallback`]'s doc). Shared by the establishing axis sort and
+/// the facet panel sort, which reads each panel value's first drawing
+/// layer. A `data_source` naming no published output refuses with the same
+/// text `prepare_render_inputs` raises for that key, rather than silently
+/// sorting over the chart's own rows.
 pub(in crate::render) fn layer_sort_rows<'a>(
     spec: &'a ChartSpec,
+    layer_index: usize,
     layer: &'a Layer,
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
     lineages: &'a OutputLineages,
     include_final: bool,
-) -> SortRows<'a> {
+) -> Result<SortRows<'a>, RenderError> {
     let batch = crate::render::prepare::pre_statistic_rows(
+        layer_index,
         layer.data_source.as_deref(),
         lineages,
         primary_batch,
         transform_outputs,
         include_final,
-    );
-    let fallback = crate::render::prepare::layer_final_rows(layer.data_source.as_deref(), primary_batch, transform_outputs, include_final);
-    SortRows {
+    )?;
+    let fallback =
+        crate::render::prepare::layer_final_rows(layer_index, layer.data_source.as_deref(), primary_batch, transform_outputs, include_final)?;
+    Ok(SortRows {
         batch,
         fallback: Some(fallback),
         x_field: drawn_channel_slots(spec, layer, "x").value,
         y_field: drawn_channel_slots(spec, layer, "y").value,
-    }
+    })
 }
 
 /// The two batches an unlayered chart's data-aware sort reads: its
@@ -6083,7 +6096,7 @@ mod tests {
             ..Default::default()
         };
         let spec = ChartSpec { layers: Some(vec![layer.clone()]), ..Default::default() };
-        let rows = layer_sort_rows(&spec, &layer, &primary, &transform_outputs, &lineages, false);
+        let rows = layer_sort_rows(&spec, 0, &layer, &primary, &transform_outputs, &lineages, false).expect("a published key reads");
         assert_eq!(rows.y_field, Some("mean_y"));
         assert!(
             rows.batch.schema().column_with_name("mean_y").is_none(),
@@ -6096,6 +6109,90 @@ mod tests {
             "fallback is the layer's final rows, which carry the aggregate's output"
         );
         assert_eq!(fallback.num_rows(), 2, "the layer's final rows are one per category");
+    }
+
+    /// A layer whose `data_source` names no published output refuses with
+    /// the same text `prepare_render_inputs` raises for that key, rather
+    /// than silently sorting over the chart's own rows.
+    #[test]
+    fn layer_sort_rows_refuses_a_data_source_naming_no_published_output() {
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["a"]))],
+        )
+        .unwrap();
+        let transform_outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let lineages: OutputLineages = HashMap::new();
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: crate::spec::encoding::Encoding {
+                x: Some(crate::spec::encoding::EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            data_source: Some("ghost".into()),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer.clone()]), ..Default::default() };
+        let err = match layer_sort_rows(&spec, 0, &layer, &primary, &transform_outputs, &lineages, false) {
+            Err(err) => err,
+            Ok(_) => panic!("an unpublished data_source key must refuse"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "transform failed: layer 0 data_source 'ghost' not found in transform outputs; available keys: []"
+        );
+    }
+
+    /// An establishing layer whose `data_source` names no published output
+    /// never falls back to the chart's own rows through `build_axis_scale`:
+    /// `establishing_sort_rows` propagates the same refusal
+    /// `layer_sort_rows` raises instead of returning `None` (which its
+    /// caller would read as "no establishing layer" and substitute the
+    /// chart rows).
+    #[test]
+    fn establishing_sort_rows_propagates_a_layers_unpublished_data_source_refusal() {
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["a"]))],
+        )
+        .unwrap();
+        let transform_outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let lineages: OutputLineages = HashMap::new();
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: crate::spec::encoding::Encoding {
+                x: Some(crate::spec::encoding::EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            data_source: Some("ghost".into()),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let err = match establishing_sort_rows("x", &spec, &primary, &transform_outputs, &lineages, false) {
+            Err(err) => err,
+            Ok(_) => panic!("an unpublished data_source key must refuse, not read as \"no establishing layer\""),
+        };
+        assert_eq!(
+            err.to_string(),
+            "transform failed: layer 0 data_source 'ghost' not found in transform outputs; available keys: []"
+        );
+    }
+
+    /// A spec with no layers still reads `None` ("no establishing layer"):
+    /// the refusal above is specific to a layer whose own `data_source` is
+    /// unpublished, not a blanket change to the "no establishing layer"
+    /// case an unlayered chart already hits every render.
+    #[test]
+    fn establishing_sort_rows_keeps_none_for_no_establishing_layer() {
+        let primary =
+            RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])), vec![Arc::new(StringArray::from(vec!["a"]))])
+                .unwrap();
+        let transform_outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let lineages: OutputLineages = HashMap::new();
+        let spec = ChartSpec { layers: None, ..Default::default() };
+        let rows = establishing_sort_rows("x", &spec, &primary, &transform_outputs, &lineages, false)
+            .expect("an unlayered spec never reaches the readers' refusal");
+        assert!(rows.is_none(), "an unlayered spec has no establishing layer");
     }
 
     /// `chart_sort_rows` pairs an unlayered chart's pre-statistic rows with

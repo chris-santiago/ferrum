@@ -1476,15 +1476,7 @@ pub fn prepare_render_inputs(
             None => &transformed,
             Some(name) => match transform_outputs.get(name) {
                 Some(batch) => batch,
-                None => {
-                    let mut keys: Vec<&str> = transform_outputs.keys().map(|s| s.as_str()).collect();
-                    keys.sort_unstable();
-                    return Err(RenderError::TransformFailed(format!(
-                        "layer {i} data_source '{name}' not found in transform outputs; \
-                         available keys: [{}]",
-                        keys.join(", ")
-                    )));
-                }
+                None => return Err(unpublished_data_source(i, name, &transform_outputs)),
             },
         };
         layer_batches.push(batch);
@@ -1724,7 +1716,7 @@ pub fn prepare_render_inputs(
             &facet_partitions,
             chart_fields,
             coord_flipped,
-        );
+        )?;
         facet_panels::facet_groups(&rows, fspec, &mut scale_warnings)?
     } else {
         Vec::new()
@@ -3030,28 +3022,49 @@ fn chart_rows_schema(layer: &LayerPrepared, pipeline: &PipelineBatches<'_>) -> S
     }
 }
 
+/// The refusal for a layer's `data_source` naming a key nothing published:
+/// built once so every site that could reach it (the per-layer batch
+/// resolution loop above, [`layer_final_rows`], [`pre_statistic_rows`])
+/// raises the same typed error with the same text.
+fn unpublished_data_source(layer_index: usize, name: &str, transform_outputs: &HashMap<String, RecordBatch>) -> RenderError {
+    let mut keys: Vec<&str> = transform_outputs.keys().map(|s| s.as_str()).collect();
+    keys.sort_unstable();
+    RenderError::TransformFailed(format!(
+        "layer {layer_index} data_source '{name}' not found in transform outputs; \
+         available keys: [{}]",
+        keys.join(", ")
+    ))
+}
+
 /// Where a layer's own rows live, whole: its named data source's output, or
 /// the chart rows when it has none. [`pre_statistic_rows`]'s counterpart
 /// that keeps a statistic's own OUTPUT columns (an aggregate's result, a
 /// bin's edges) instead of stripping back to its input -- read by a
 /// data-aware sort whose value field IS that output, since the field the
-/// sort names then lives only here.
+/// sort names then lives only here. A `data_source` naming no published
+/// output is refused with [`unpublished_data_source`], the same refusal
+/// `prepare_render_inputs` raises for the same key, rather than silently
+/// substituting the chart's own rows.
 ///
 /// Every output already spans every panel, so a faceted channel reads the
 /// same key.
 pub(in crate::render) fn layer_final_rows<'b>(
+    layer_index: usize,
     data_source: Option<&str>,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     include_final: bool,
-) -> &'b RecordBatch {
+) -> Result<&'b RecordBatch, RenderError> {
     let chart_rows = || match include_final {
         true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(primary_batch),
         false => primary_batch,
     };
-    match data_source.and_then(|key| transform_outputs.get(key)) {
-        Some(batch) => batch,
-        None => chart_rows(),
+    match data_source {
+        None => Ok(chart_rows()),
+        Some(key) => match transform_outputs.get(key) {
+            Some(batch) => Ok(batch),
+            None => Err(unpublished_data_source(layer_index, key, transform_outputs)),
+        },
     }
 }
 
@@ -3064,21 +3077,23 @@ pub(in crate::render) fn layer_final_rows<'b>(
 ///   shared across facet panels (`include_final`).
 /// - A layer with a `data_source` starts from the rows its statistics
 ///   consumed when it reads a statistic's output, else from the rows it
-///   reads ([`OutputLineage::pre_statistic_rows`]).
+///   reads ([`OutputLineage::pre_statistic_rows`]). A `data_source` naming
+///   no published output refuses the same way [`layer_final_rows`] does.
 pub(in crate::render) fn pre_statistic_rows<'b>(
+    layer_index: usize,
     data_source: Option<&str>,
     lineages: &'b OutputLineages,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     include_final: bool,
-) -> &'b RecordBatch {
+) -> Result<&'b RecordBatch, RenderError> {
     let Some(key) = data_source else {
-        return layer_final_rows(data_source, primary_batch, transform_outputs, include_final);
+        return layer_final_rows(layer_index, data_source, primary_batch, transform_outputs, include_final);
     };
     match (transform_outputs.get(key), lineages.get(key)) {
-        (Some(batch), Some(lineage)) => lineage.pre_statistic_rows(batch),
-        (Some(batch), None) => batch,
-        (None, _) => layer_final_rows(data_source, primary_batch, transform_outputs, include_final),
+        (Some(batch), Some(lineage)) => Ok(lineage.pre_statistic_rows(batch)),
+        (Some(batch), None) => Ok(batch),
+        (None, _) => layer_final_rows(layer_index, data_source, primary_batch, transform_outputs, include_final),
     }
 }
 

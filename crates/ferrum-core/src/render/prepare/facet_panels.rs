@@ -66,7 +66,8 @@ impl<'a> FacetRows<'a> {
     /// The rows of `spec`'s layers, or of the chart for an unlayered spec,
     /// whose sort shorthand reads `chart_fields` (the rendered x and y).
     /// `layer_batches` is the batch each layer draws, as the render resolved
-    /// it, in layer order.
+    /// it, in layer order. Propagates a layer's `data_source` naming no
+    /// published output as the same refusal `layer_sort_rows` raises.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         spec: &'a ChartSpec,
@@ -77,22 +78,25 @@ impl<'a> FacetRows<'a> {
         partitions: &'a FacetPartitions,
         chart_fields: (Option<&'a str>, Option<&'a str>),
         coord_flipped: bool,
-    ) -> Self {
+    ) -> Result<Self, RenderError> {
         let layers = match spec.layers.as_deref() {
             Some(layers) => layers
                 .iter()
+                .enumerate()
                 .zip(layer_batches)
-                .map(|(layer, drawn)| FacetLayerRows {
-                    drawn,
-                    sort: layer_sort_rows(spec, layer, transformed, transform_outputs, lineages, false),
+                .map(|((i, layer), drawn)| {
+                    Ok(FacetLayerRows {
+                        drawn,
+                        sort: layer_sort_rows(spec, i, layer, transformed, transform_outputs, lineages, false)?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, RenderError>>()?,
             None => vec![FacetLayerRows {
                 drawn: transformed,
                 sort: chart_sort_rows(transformed, lineages.get(FINAL_OUTPUT_KEY), chart_fields.0, chart_fields.1),
             }],
         };
-        Self { layers, partitions, coord_flipped }
+        Ok(Self { layers, partitions, coord_flipped })
     }
 }
 
@@ -811,5 +815,34 @@ mod tests {
         let groups = facet_groups(&facet_rows, &spec(false, Some(serde_json::json!("-y")), None), &mut warnings).unwrap();
         assert_eq!(values(&groups), ["c", "b", "a"]);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A layer whose `data_source` names no published output refuses
+    /// through `FacetRows::new`, the same text `layer_sort_rows` raises for
+    /// that key, rather than silently sorting the facet's panels over the
+    /// chart's own rows.
+    #[test]
+    fn facet_rows_new_refuses_a_data_source_naming_no_published_output() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark::Mark;
+
+        let batch = rows(&["a", "b"], None, &[1.0, 2.0]);
+        let partitions = wrap_keys(&["a", "b"]);
+        let transform_outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let lineages: OutputLineages = HashMap::new();
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding { x: Some(EncodingSpec { field: "f".into(), ..Default::default() }), ..Default::default() },
+            data_source: Some("ghost".into()),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let layer_batches: Vec<&RecordBatch> = vec![&batch];
+        let err = match FacetRows::new(&spec, &batch, &transform_outputs, &lineages, &layer_batches, &partitions, (None, None), false) {
+            Err(err) => err,
+            Ok(_) => panic!("an unpublished data_source key must refuse, not sort over the chart rows"),
+        };
+        assert_eq!(err.to_string(), "transform failed: layer 0 data_source 'ghost' not found in transform outputs; available keys: []");
     }
 }

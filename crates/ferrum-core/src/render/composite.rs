@@ -892,7 +892,9 @@ fn sort_member_categories(
     channel: Channel,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
+    let coord_flipped = leaf.coord_flipped();
     let rows = establishing_sort_rows(channel.as_str(), leaf.spec, leaf.final_batch, leaf.transform_outputs, leaf.transform_lineages, false)
+        .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped })?
         .unwrap_or_else(|| {
             chart_sort_rows(
                 leaf.final_batch,
@@ -901,7 +903,6 @@ fn sort_member_categories(
                 leaf.encoding.y.as_ref().map(|e| e.field.as_str()),
             )
         });
-    let coord_flipped = leaf.coord_flipped();
     let sort_ctx = SortContext {
         category_field: &enc.field,
         batch: rows.batch,

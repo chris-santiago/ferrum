@@ -287,12 +287,14 @@ pub(in crate::render) fn build_axis_scale(
     // batch with its own fields. Under a facet-shared channel the rows span
     // every panel, so each panel's sort agrees with the global axis order.
     let sort_rows = |include_final: bool| {
-        super::domain::establishing_sort_rows(channel, spec, primary_batch, transform_outputs, transform_lineages, include_final).unwrap_or_else(|| {
-            let batch = match include_final {
-                true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(seed.batch),
-                false => seed.batch,
-            };
-            super::domain::chart_sort_rows(batch, transform_lineages.get(FINAL_OUTPUT_KEY), positional_fields.x, positional_fields.y)
+        super::domain::establishing_sort_rows(channel, spec, primary_batch, transform_outputs, transform_lineages, include_final).map(|rows| {
+            rows.unwrap_or_else(|| {
+                let batch = match include_final {
+                    true => transform_outputs.get(FINAL_OUTPUT_KEY).unwrap_or(seed.batch),
+                    false => seed.batch,
+                };
+                super::domain::chart_sort_rows(batch, transform_lineages.get(FINAL_OUTPUT_KEY), positional_fields.x, positional_fields.y)
+            })
         })
     };
     let dtype = infer_spec_type(enc, seed.col.data_type());
@@ -370,7 +372,7 @@ pub(in crate::render) fn build_axis_scale(
         (injected, None) => injected.filter(|_| !yields_to_auto_path),
     };
     if let Some(scale_spec) = explicit_scale {
-        let rows = sort_rows(include_final);
+        let rows = sort_rows(include_final)?;
         let sort_ctx = SortContext {
             category_field: &enc.field,
             batch: rows.batch,
@@ -512,7 +514,7 @@ pub(in crate::render) fn build_axis_scale(
             // `sort_ctx.batch`. When the channel resolves Shared
             // (`include_final`), each panel sorts over the rows of every
             // panel, so its order agrees with the global/provisional axis.
-            let rows = sort_rows(include_final);
+            let rows = sort_rows(include_final)?;
             let sort_ctx = SortContext {
                 category_field: &enc.field,
                 batch: rows.batch,

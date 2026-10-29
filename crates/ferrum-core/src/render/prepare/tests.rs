@@ -3522,6 +3522,69 @@ fn unknown_data_source_raises_clear_error() {
     );
 }
 
+/// Ties the three readers' refusal to `prepare_render_inputs`'s OWN
+/// refusal, not merely to the shared constructor both call: this pins the
+/// literal text `prepare_render_inputs` raises for a hand-built wire spec
+/// with an unpublished `data_source`, then asserts `layer_final_rows`,
+/// `pre_statistic_rows` and `layer_sort_rows` return that exact text for
+/// the same layer index and the pipeline's own published outputs for this
+/// spec. A drift between `prepare_render_inputs`'s per-layer loop and the
+/// readers -- in either direction -- fails this test against the literal
+/// string, not against each other.
+#[test]
+fn prepare_and_every_reader_refuse_an_unpublished_data_source_with_the_same_text() {
+    pyo3::Python::initialize();
+    use crate::spec::layer::Layer;
+    // Pipeline publishes "step1" (and keeps "__final__" as the source,
+    // since a named step fans out); layer asks for "missing".
+    let mut spec = spec_with_one_bin(Some("step1".into()));
+    let layer = Layer {
+        mark: Mark::Point,
+        encoding: Encoding::default(),
+        data_source: Some("missing".into()),
+        ..Default::default()
+    };
+    spec.layers = Some(vec![layer.clone()]);
+    let batch = price_weight_batch();
+
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_err();
+    let expected = "transform failed: layer 0 data_source 'missing' not found in transform outputs; available keys: [__final__, step1]";
+    assert_eq!(err.to_string(), expected);
+
+    // The SAME pipeline run `prepare_render_inputs` applies before it
+    // resolves any layer's batch, so every reader below is judged against
+    // the outputs map prepare itself produced for this spec.
+    let (outputs, lineages) =
+        crate::transform::core::apply_transforms_named(&spec.transforms, &batch, &TransformContext::default()).expect("the pipeline runs");
+
+    assert_eq!(
+        layer_final_rows(0, Some("missing"), &batch, &outputs, false).unwrap_err().to_string(),
+        expected,
+        "layer_final_rows must refuse with prepare's own text"
+    );
+    assert_eq!(
+        pre_statistic_rows(0, Some("missing"), &lineages, &batch, &outputs, false).unwrap_err().to_string(),
+        expected,
+        "pre_statistic_rows must refuse with prepare's own text"
+    );
+    let sort_rows_err = match crate::render::scale_resolve::layer_sort_rows(&spec, 0, &layer, &batch, &outputs, &lineages, false) {
+        Err(err) => err,
+        Ok(_) => panic!("layer_sort_rows must refuse an unpublished data_source key"),
+    };
+    assert_eq!(sort_rows_err.to_string(), expected, "layer_sort_rows must refuse with prepare's own text");
+}
+
 #[test]
 fn prepare_coord_flip_swaps_x_y_in_each_layer() {
     use crate::spec::coord::CoordKind;
@@ -12352,13 +12415,61 @@ fn a_layers_pre_statistic_rows_are_the_rows_its_statistic_consumed() {
         crate::transform::core::apply_transforms_named(&transforms, &rows, &TransformContext::default()).expect("the pipeline runs");
     let primary = rows.slice(0, 1);
     let read = |source: Option<&str>, include_final: bool| {
-        pre_statistic_rows(source, &lineages, &primary, &outputs, include_final).num_rows()
+        pre_statistic_rows(0, source, &lineages, &primary, &outputs, include_final).expect("a published key reads").num_rows()
     };
     assert_eq!(read(None, false), 1, "chart rows");
     assert_eq!(read(None, true), 2, "every panel's chart rows");
     assert_eq!(read(Some("b"), false), 3, "the user's rows");
     assert_eq!(read(Some("b_box"), false), 3, "a branch statistic's consumed rows");
     assert_eq!(read(Some("stats"), false), 2, "a top-level statistic's consumed rows, after the user's filter");
+}
+
+/// A `data_source` naming no published output refuses with the same typed
+/// error [`prepare_render_inputs`] raises for the same key, rather than
+/// silently resolving to the chart's own rows: the same invariant on both
+/// readers that keep a layer's rows ([`layer_final_rows`],
+/// [`pre_statistic_rows`]), with every published key still reading its
+/// rows unchanged.
+#[test]
+fn layer_final_rows_refuses_a_data_source_naming_no_published_output() {
+    let primary = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)])),
+        vec![Arc::new(Float64Array::from(vec![1.0]))],
+    )
+    .expect("primary rows");
+    let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+    outputs.insert("published".to_string(), primary.clone());
+
+    let err = layer_final_rows(2, Some("ghost"), &primary, &outputs, false).expect_err("an unpublished key refuses");
+    assert_eq!(err.to_string(), unpublished_data_source(2, "ghost", &outputs).to_string());
+
+    let published = layer_final_rows(0, Some("published"), &primary, &outputs, false).expect("a published key reads");
+    assert!(std::ptr::eq(published, outputs.get("published").unwrap()), "a published key returns its own rows unchanged");
+
+    let chart_rows = layer_final_rows(0, None, &primary, &outputs, false).expect("no data_source reads the chart rows");
+    assert!(std::ptr::eq(chart_rows, &primary), "no data_source still reads the chart rows unchanged");
+}
+
+/// The same refusal on [`pre_statistic_rows`], which falls back to
+/// [`layer_final_rows`] whenever the named key is absent from both the
+/// transform outputs and the lineage map.
+#[test]
+fn pre_statistic_rows_refuses_a_data_source_naming_no_published_output() {
+    let primary = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)])),
+        vec![Arc::new(Float64Array::from(vec![1.0]))],
+    )
+    .expect("primary rows");
+    let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+    outputs.insert("published".to_string(), primary.clone());
+    let lineages: crate::transform::run::OutputLineages = HashMap::new();
+
+    let err = pre_statistic_rows(1, Some("ghost"), &lineages, &primary, &outputs, false).expect_err("an unpublished key refuses");
+    assert_eq!(err.to_string(), unpublished_data_source(1, "ghost", &outputs).to_string());
+
+    let published =
+        pre_statistic_rows(0, Some("published"), &lineages, &primary, &outputs, false).expect("a published key reads");
+    assert!(std::ptr::eq(published, outputs.get("published").unwrap()), "a published key returns its own rows unchanged");
 }
 
 /// A data-aware sort orders a layered axis by the establishing layer's own
