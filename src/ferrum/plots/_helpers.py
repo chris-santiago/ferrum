@@ -18,6 +18,7 @@ from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
 from ferrum._layer import set_style
 from ferrum.color import to_hex
+from ferrum.encoding import X
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
 
@@ -191,6 +192,35 @@ def _field_name(value: Any) -> str | None:
     if value is None:
         return None
     return value.field if hasattr(value, "field") else str(value)
+
+
+def _log_scaled_x(entry: str, value: Any, field: str, *, param: str) -> Any:
+    """Return the caller's x channel, with a log scale added, voiced as *entry*/*param*.
+
+    A bare column name becomes ``X(field, scale=log)``. A channel object the
+    caller built themselves is REBUILT with the log scale added -- same
+    class, same field, its own kwargs preserved (the idiom
+    ``nominal_color_channel`` uses for the same situation) -- rather than
+    replaced by ``X(field, ...)``, which would silently drop their
+    ``title=``/``axis=``, or passed to ``X(...)`` as a field, which raises
+    ``X: field must be str ... got X`` since a channel constructor refuses a
+    non-``str`` field.
+
+    A channel that already carries its own ``scale=`` is two instructions for
+    one scale slot, so it is refused rather than silently overruled in either
+    direction. *param* names the keyword the caller wrote (``lmplot``'s
+    ``logx``, ``displot``'s ``log_scale``), so the refusal reads in their own
+    voice.
+    """
+    if not hasattr(value, "field"):
+        return X(field, scale={"type": "log"})
+    if value.option("scale") is not None:
+        raise ValueError(
+            f"{entry}({param}=True, x=<channel with its own scale=>): two "
+            f"instructions for one x scale. Keep your scale= and drop {param}=True, "
+            f"or pass x as a column name and let {param} set the log scale."
+        )
+    return value._with_options(scale={"type": "log"})
 
 
 def _title_legend(chart: "Chart", channel: str, title: str) -> "Chart":

@@ -35,7 +35,11 @@ from ferrum import (
 from ferrum._coerce import to_polars
 from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
-from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby
+from ferrum._encode_lowering import (
+    COMPOSITE_GROUPING_CHANNELS,
+    _composite_groupby,
+    _rebind_positional,
+)
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
@@ -56,6 +60,7 @@ from ferrum.plots._helpers import (
     _grid_panels,
     _inject_cook_outliers,
     _inject_metrics_corner,
+    _log_scaled_x,
     _merge_layers,
     _overlay_metrics_corner,
     _resolve_source,
@@ -511,32 +516,6 @@ def _required_field_name(value: Any, *, entry: str, param: str) -> str:
             f"default. Pass a column name, or an encoding object wrapping one."
         )
     return name
-
-
-def _log_scaled_x(entry: str, value: Any, field: str) -> Any:
-    """``lmplot(logx=True)``'s x channel, for either spelling of ``x``, voiced as *entry*.
-
-    A bare column name becomes ``X(name, scale=log)``. A channel object the
-    caller built themselves is REBUILT with the log scale added -- same
-    class, same field, its own kwargs preserved (the idiom
-    ``nominal_color_channel`` uses for the same situation) -- rather than
-    replaced by ``X(field, ...)``, which would silently drop their
-    ``title=``/``axis=``, or passed to ``X(...)`` as a field, which is what
-    used to raise ``X: field must be str ... got X``.
-
-    A channel that already carries its own ``scale=`` is two instructions for
-    one scale slot, so it is refused rather than silently overruled in either
-    direction.
-    """
-    if not hasattr(value, "field"):
-        return X(field, scale={"type": "log"})
-    if value.option("scale") is not None:
-        raise ValueError(
-            f"{entry}(logx=True, x=<channel with its own scale=>): two instructions "
-            "for one x scale. Keep your scale= and drop logx=True, or pass x as a "
-            "column name and let logx set the log scale."
-        )
-    return value._with_options(scale={"type": "log"})
 
 
 def _fit_chart_from_named_transform(
@@ -1034,7 +1013,7 @@ def _lmplot_impl(
     # fit all take the same channel object. (It used to be two
     # implementations at the bottom of this function, chosen on whether the
     # fit chart happened to have `_layers` yet.)
-    x_enc = _log_scaled_x(entry, x, x_field) if logx else x
+    x_enc = _log_scaled_x(entry, x, x_field, param="logx") if logx else x
 
     enc: dict = {"x": x_enc, "y": y}
     if hue is not None:
@@ -1470,9 +1449,16 @@ def residplot(
     data : DataFrame-like
         Input data accepted by ``Chart(data)``.
     x : str
-        Column name for the horizontal axis (predictor; required).
+        Column name for the horizontal axis (predictor; required). An
+        encoding object (``fm.X("col", scale=..., axis=..., format=...,
+        title=...)``) is also accepted, and every option it carries reaches
+        the point layer's own x binding, the same re-pointing rule
+        ``displot``'s histogram and ECDF kinds use.
     y : str
-        Column name used to compute residuals (response; required).
+        Column name used to compute residuals (response; required). An
+        encoding object is accepted the same way as ``x=``, and its options
+        reach the residual axis; its default title is ``"<y> residual"``
+        rather than the field itself.
     lowess : bool, default False
         Overlay a lowess smoother on the residuals using
         ``Smooth(method="loess")``.
@@ -1727,9 +1713,16 @@ def residplot(
     declared_x, declared_y = declared_title(x), declared_title(y)
     x_title = x_field if declared_x is None else declared_x
     residual_title = f"{y_field} residual" if declared_y is None else declared_y
+    # The caller's own x/y binding (a channel object or a bare field name)
+    # re-pointed at the residual batch's columns through the same
+    # re-pointing rule `kind="hist"` runs at resolve time, so a `scale=`,
+    # `axis=` or `format=` the caller wrote on either channel survives. The
+    # y side's default title is this function's own "<y> residual", not the
+    # field itself, which is the one difference from the bare re-point: an
+    # explicit title (including a suppressing `None`) still wins either way.
     enc: dict = {
-        "x": X(_resid_x, title=x_title),
-        "y": Y("residual", title=residual_title),
+        "x": _rebind_positional(_resid_x, x, X),
+        "y": _rebind_positional("residual", y, Y, title=residual_title),
     }
     if color is not None:
         enc["color"] = color

@@ -574,6 +574,37 @@ def _rebind_channel(ch: ChannelBase, column: str, title: str | None = None) -> C
     return ch.__class__(column, **kwargs)
 
 
+def _rebind_positional(
+    column: str,
+    orig: ChannelBase | str | None,
+    cls: type[ChannelBase],
+    *,
+    title: str | None = None,
+) -> ChannelBase:
+    """The bare-name-or-channel face of :func:`_rebind_channel`.
+
+    A figure that re-points a caller's own positional binding at a
+    statistic's output column calls this rather than hand-building a fresh
+    channel, so the caller's options survive regardless of whether they
+    bound a channel object or a plain field name. *orig* is the caller's
+    original binding at that slot: a :class:`ChannelBase` is rebuilt through
+    :func:`_rebind_channel` (every kwarg kept, *title* forwarded as that
+    call's own title default); a bare field name or ``None`` gets a fresh
+    quantitative channel titled *title*, or, when *title* is unset, by the
+    field itself when it differs from *column*. Shared by
+    :func:`ferrum._desugar._apply_remap` (every ``bin=``/``aggregate=``
+    lowering, with ``title=None``, so a bare field still titles by itself)
+    and a figure that supplies its own default title (e.g. ``residplot``'s
+    ``"<y> residual"``).
+    """
+    if isinstance(orig, ChannelBase):
+        return _rebind_channel(orig, column, title=title)._with_options(type="Q")
+    if title is None:
+        field = orig if isinstance(orig, str) else None
+        title = field if (field and column != field) else None
+    return cls(column, type="Q", title=title) if title else cls(column, type="Q")
+
+
 def _count_axes(encoding: dict, agg_axes: list[str]) -> list[str]:
     """The channels of *agg_axes* asking for a fieldless ``count()``: they read the Bin's count."""
     return [

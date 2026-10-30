@@ -52,7 +52,7 @@ from ferrum._layer import (
     set_style,
     titled_encoding,
 )
-from ferrum._encode_lowering import _composite_groupby, _over, _rebind_channel
+from ferrum._encode_lowering import _composite_groupby, _over, _rebind_positional
 from ferrum._layer_transforms import _with_statistics_marker
 from ferrum.encoding.base import ChannelBase, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
@@ -432,7 +432,7 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
 
     Modifies *encoding* in place.  When *orig_encoding* is provided and the
     caller bound the remapped channel, the remapped ``x``/``y`` is rebuilt
-    through :func:`ferrum._encode_lowering._rebind_channel` -- the same
+    through :func:`ferrum._encode_lowering._rebind_positional` -- the same
     re-pointing rule a binned channel's lowering uses -- so every option the
     caller wrote on that channel (``title``, ``axis``, ``format``, ``scale``,
     ...) survives; only the now-resolved ``bin``/``aggregate`` kwargs are
@@ -453,15 +453,6 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
         original field name for the title stamp.  ``None`` disables both.
     """
     from ferrum.encoding import X, X2, Y, Y2
-
-    def _rebind_positional(
-        column: str, orig: ChannelBase | str | None, cls: type[ChannelBase]
-    ) -> ChannelBase:
-        if isinstance(orig, ChannelBase):
-            return _rebind_channel(orig, column)._with_options(type="Q")
-        field = orig if isinstance(orig, str) else None
-        title = field if (field and column != field) else None
-        return cls(column, type="Q", title=title) if title else cls(column, type="Q")
 
     if "x" in remap:
         x_orig = orig_encoding.get("x") if orig_encoding is not None else None

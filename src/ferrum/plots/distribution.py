@@ -28,6 +28,7 @@ from ferrum import (
 from ferrum._coerce import to_polars
 from ferrum._core import validate_bin_rule
 from ferrum._desugar import (
+    _apply_remap,
     _explicit_positional_scale,
     _propagate_layer_scale,
     _scale_domain,
@@ -48,6 +49,7 @@ from ferrum.plots._helpers import (
     _field_name,
     _figure_entry,
     _finalize_chart,
+    _log_scaled_x,
 )
 
 
@@ -444,6 +446,31 @@ def _reject_displot_without_x(*, kind: str, x: Any, y: Any, kde: bool, rug: bool
         )
 
 
+def _reject_ecdf_field_y(*, kind: str, y: Any) -> None:
+    """Refuse a ``kind="ecdf"`` call whose ``y=`` names a field.
+
+    ``kind="ecdf"`` draws the cumulative count of the variable ``x=`` names
+    on ``y``, so a second variable has nowhere to go. Re-pointing a field-
+    bearing ``y=`` at the Bin's count column, the way the plain re-point
+    below handles ``x=``, would silently mislabel the count axis with the
+    caller's field name -- a worse outcome than refusing outright. A
+    fieldless ``fm.Y(title=..., scale=..., axis=..., format=...)`` is the
+    documented way to style the count axis, and is not refused here:
+    :func:`_field_name` reads ``None`` off it.
+    """
+    if kind != "ecdf" or y is None:
+        return
+    bound = _field_name(y)
+    if bound is None:
+        return
+    raise ValueError(
+        f"displot(kind='ecdf', y={bound!r}) is not supported -- kind='ecdf' draws "
+        "the cumulative count of the variable x= names on y, so a second variable "
+        "has nowhere to go. Drop y=, or style the count axis with "
+        "fm.Y(title=..., scale=...) and no field."
+    )
+
+
 def _warn_inert_bins(*, kind: str, bins: Any) -> None:
     """Warn when the caller named a binning rule the ``kind=`` cannot act on.
 
@@ -519,10 +546,18 @@ def displot(
         the other axis themselves, and by the ``kde=``/``rug=`` overlays,
         which are drawn against this same variable.
     y : str or encoding, optional
-        Column name for the distribution variable (vertical axis).  Honored
-        by ``kind="rug"`` only -- a tick mark draws against either axis.  The
-        other three kinds refuse a ``y=``-only call by name rather than
-        rendering something the caller did not ask for.
+        Column name for the distribution variable (vertical axis), or a
+        second variable.  ``kind="rug"`` honors it as a second distribution
+        variable -- a tick mark draws against either axis.  ``kind="kde"``
+        honors a ``y=`` bound alongside ``x=`` too, but draws it
+        differently: together they produce a bivariate KDE (a filled
+        contour) instead of two separate curves.  ``kind="hist"`` and
+        ``kind="kde"`` both refuse a ``y=``-only call (no ``x=``) by name
+        rather than rendering something the caller did not ask for.
+        ``kind="ecdf"`` draws the cumulative count of ``x=`` on ``y``, so it
+        refuses a ``y=`` that names a field (with or without ``x=``); a
+        fieldless ``fm.Y(title=..., scale=..., axis=..., format=...)``
+        styles that count axis instead.
     hue : str or encoding, optional
         Column name to map to color (one distribution per level).
     col : str, optional
@@ -541,7 +576,12 @@ def displot(
         ``kind="kde"``).  Also drives the ``kde=True`` overlay curve (below),
         so a cumulative histogram's overlay is a matching CDF, not a PDF.
     log_scale : bool, default False
-        Apply a ``log`` scale to the ``x`` axis.
+        Apply a ``log`` scale to the ``x`` axis.  Resolved on the caller's
+        own ``x=`` binding before the ``kind=`` dispatch, so every kind and
+        every ``kde=``/``rug=`` overlay inherits it from that one binding,
+        and a channel ``x=`` is rebuilt with the log scale added, keeping
+        its other options.  A channel ``x=`` that already carries its own
+        ``scale=`` is refused -- two instructions for one scale.
     stat : {"count", "density"}, default "count"
         Statistic to plot on the value axis for ``kind="hist"``.
         ``"density"`` normalises so the total area integrates to 1.
@@ -626,6 +666,11 @@ def displot(
         If ``kind="hist"``, ``"kde"`` or ``"ecdf"`` is used without ``x=``,
         or if ``kde=``/``rug=`` requests an overlay on a call that binds no
         ``x=``.  Both name ``displot`` and the variable actually bound.
+    ValueError
+        If ``kind="ecdf"`` is used with a ``y=`` that names a field.
+    ValueError
+        If ``log_scale=True`` is used with a channel ``x=`` that already
+        carries its own ``scale=``.
 
     Warns
     -----
@@ -662,6 +707,7 @@ def displot(
     # built -- including the overlay case, which used to render a chart
     # missing the mark it was asked for.
     _reject_displot_without_x(kind=kind, x=x, y=y, kde=kde, rug=rug)
+    _reject_ecdf_field_y(kind=kind, y=y)
     height, aspect = _checked_figure_size("displot", height=height, aspect=aspect)
 
     return _displot_build(
@@ -774,6 +820,15 @@ def _displot_build(
         enc["color"] = nominal_color_channel(hue)
     enc.update(encode_kwargs)
 
+    # `log_scale` is resolved on the x channel here, before the kind
+    # dispatch, so the re-pointing rule each kind runs below (the
+    # dispatcher's own re-point for hist/kde/rug, `ecdf`'s `_apply_remap`
+    # further below) carries the scale onto whatever column ends up bound,
+    # and a layered `kde=`/`rug=` overlay inherits it from that same
+    # chart-level binding instead of reading a linear axis.
+    if log_scale and "x" in enc:
+        enc["x"] = _log_scaled_x("displot", enc["x"], _field_name(enc["x"]), param="log_scale")
+
     # Mark + transforms by kind.
     if kind == "hist":
         # When `multiple` requires per-group binning (stack/fill/dodge) and a
@@ -823,10 +878,9 @@ def _displot_build(
     elif kind == "ecdf":
         # ECDF: cumulative bin → step line.  `x is not None` here by
         # `_reject_displot_without_x`.
-        from ferrum.encoding import X as _X_ecdf
 
-        # The original field name, for the Bin field and the axis title --
-        # through the same shared extraction point `hue_field` uses above.
+        # The original field name, for the Bin field -- through the same
+        # shared extraction point `hue_field` uses above.
         _ecdf_x_name = _field_name(x)
         # `hue_field` (the unwrapped name resolved once above) is the Bin
         # transform's groupby. Without a groupby, Bin's output schema drops
@@ -845,20 +899,20 @@ def _displot_build(
             )
         )
         chart = chart.mark_line()
-        # Re-route encoding to bin output columns, titled as the caller's own
-        # x channel would title a plain chart's axis: their title= (an empty
-        # one suppresses it), else the original variable name.
         # Derived from the registry (spec §4.6 / M6a) rather than hardcoded:
         # these read the cumulative Bin transform chained two lines above, so
         # a Rust-side rename of either bin output column raises here instead
         # of silently rendering an empty step line.
         _bin_cols = registry_output_columns("bin", ["bin_start", "count"])
-        _ecdf_x_title = declared_title(x)
-        enc["x"] = _X_ecdf(
-            _bin_cols["bin_start"],
-            title=_ecdf_x_name if _ecdf_x_title is None else _ecdf_x_title,
+        # Re-point the caller's own x (and fieldless y, if any) at the Bin's
+        # output columns through the same re-pointing rule `kind="hist"` runs
+        # at resolve time, so every option the caller wrote on either channel
+        # -- `title=`, `scale=`, `axis=`, `format=` -- survives.
+        _apply_remap(
+            enc,
+            {"x": _bin_cols["bin_start"], "y": _bin_cols["count"]},
+            orig_encoding=dict(enc),
         )
-        enc["y"] = _bin_cols["count"]
     elif kind == "rug":
         chart = chart.mark_tick()
 
@@ -1007,12 +1061,6 @@ def _displot_build(
                 lname = base if count == 0 else f"{base}_{count + 1}"
                 named.append(_dc_replace(ly, name=lname))
         chart._layers = named
-
-    # log_scale on x.
-    if log_scale and x is not None:
-        from ferrum.encoding import X
-
-        chart = chart.encode(x=X(x, scale={"type": "log"}))
 
     # Faceting.
     if col is not None or row is not None:
