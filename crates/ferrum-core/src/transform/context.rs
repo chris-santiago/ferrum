@@ -30,10 +30,10 @@ use arrow::record_batch::RecordBatch;
 /// the same single delivery point every other render warning already uses.
 /// Emitting one of these must never change the transform's OUTPUT: the
 /// degrade this reports (an all-NaN fit, a clamped parameter, a
-/// whole-column-fallback fill, …) already happened before this batch;
-/// batch-D's "the group's own degenerate output still contributes its rows
-/// and its key" doctrine (`group_key.rs`'s doc) is unchanged by this
-/// channel — it only makes the degradation observable.
+/// whole-column-fallback fill, …) already happened before this warning is
+/// raised; the rule that the group's own degenerate output still
+/// contributes its rows and its key (`group_key.rs`'s doc) is unchanged by
+/// this channel — it only makes the degradation observable.
 /// `tag = "kind"`, not `"type"`: `RenderWarning::Transform` wraps this enum
 /// as a newtype variant (mirroring `RenderWarning::Layout(LayoutWarning)`),
 /// and `RenderWarning` itself already owns the outer `"type"` tag — the same

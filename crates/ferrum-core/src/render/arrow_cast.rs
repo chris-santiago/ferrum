@@ -621,8 +621,7 @@ impl LeftOutTally {
 /// The `None`-side call of [`sided_min_max_f64`], which owns the dtype
 /// match so a `Log` channel's sided fold and every other channel's full
 /// fold read one body instead of two that could drift. Every row counts
-/// toward `(lo, hi)` under `None` (`left_out` is always `0`), so this is
-/// byte-identical to the dtype match this function used to run itself.
+/// toward `(lo, hi)` under `None` (`left_out` is always `0`).
 pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
     sided_min_max_f64(col, None).map(|e| (e.lo, e.hi))
 }
@@ -698,8 +697,8 @@ pub(crate) fn sided_min_max_f64(
             let mut hi = f64::NEG_INFINITY;
             let mut left_out = 0usize;
             let mut left_out_info = LeftOut { zero: false, opposite: None };
-            // Only NaN is filtered: an infinity reaches `on_side` (choice
-            // A(3)) so an off-side infinity counts toward `left_out`
+            // Only NaN is filtered: an infinity reaches `on_side`, so an
+            // off-side infinity counts toward `left_out`
             // instead of silently passing the finiteness filter the on-
             // side test ran behind. It never folds into `lo`/`hi` itself —
             // only a FINITE on-side value narrows the extent; an on-side
@@ -942,11 +941,8 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
     }
 
-    /// The fix case): `sided_min_max_f64`
-    /// used to filter non-finite values out before the `on_side` test, so an
-    /// off-side infinity was silently dropped from both the extent AND the
-    /// left-out tally. An infinite value now only skips the NaN filter; it
-    /// counts toward `left_out` when off-side (never folded into `lo`/`hi`,
+    /// `sided_min_max_f64` only skips the NaN filter for an infinite value;
+    /// it counts toward `left_out` when off-side (never folded into `lo`/`hi`,
     /// which stay the finite on-side extent), and a non-finite left-out value
     /// contributes to neither `left_out_zero` nor `left_out_opposite` (those
     /// only characterize a FINITE left-out value, for the remedy text).

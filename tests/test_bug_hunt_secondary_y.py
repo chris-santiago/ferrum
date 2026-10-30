@@ -2,7 +2,7 @@
 bug-hunter agent.
 
 Targets: ``ferrum.structural.SecondaryY`` + ``chart._desugar_secondary_y``
-(the S4 field guard on the base chart's normalized column names),
+(the field guard on the base chart's normalized column names),
 ``LayerChart._build_merged`` / ``_y_independent`` routing,
 ``composition._lower_any`` / ``_contains_independent_y_layer`` (nesting
 conflict detection), and ``_spec_build._build_layers_list``'s
@@ -119,7 +119,7 @@ def test_all_null_secondary_column_renders_without_nan():
 
 
 def test_zero_row_base_plus_secondary_y_draws_its_frame():
-    """Zero-row polars frame still exposes its schema, so the S4 field guard
+    """Zero-row polars frame still exposes its schema, so the field guard
     passes and the render must draw the chart's frame over zero rows (the
     same path a filter-emptied chart already takes), not divide by len or
     index [0]."""
@@ -258,7 +258,7 @@ def test_secondary_axis_title_override_renders():
 
 
 # ---------------------------------------------------------------------------
-# Type boundaries — the S4 field guard across input kinds and non-string
+# Type boundaries — the field guard across input kinds and non-string
 # field values. Every input kind is normalized to polars before the check.
 # ---------------------------------------------------------------------------
 

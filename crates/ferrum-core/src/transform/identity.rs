@@ -20,7 +20,7 @@ pub(crate) struct IdentitySpec {
     /// group a binned color by its bins
     /// ([`crate::transform::color_bin_group`]). Wire
     /// `{"type": "identity", "statistics": true}`; omitted when false, so
-    /// every other identity serializes as before.
+    /// every other identity serializes unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub statistics: bool,
 }

@@ -1197,7 +1197,7 @@ fn sync_tick_placement_to_tick_values(
     // an explicit `tick_values=` replaces
     // `tick_labels` wholesale (`apply_label_format_to_axis`, just above in
     // the resync ladder), so the anchors and origin it shipped describe a
-    // ladder that no longer exists — recomputed from the override's own
+    // ladder the wholesale replacement invalidates — recomputed from the override's own
     // values here, before the projection early-return below, so this runs
     // for every axis `tick_values=` reaches (primary x/y and every
     // secondary y). `tick_anchors` is empty for every non-`Log` scale,

@@ -6,8 +6,7 @@ channels' standing clamp contract: ``numeric_aux_scale_kind`` in
 ``crates/ferrum-core/src/render/scale_resolve/auxiliary.rs`` always passes
 ``clamp=true`` regardless of scale kind). Shared by
 ``test_layer_encoding_model.py``'s door cells and
-``test_appearance_kwarg_matrix.py``'s channel-population matrix, so a fix to
-this math fixes both call sites.
+``test_appearance_kwarg_matrix.py``'s channel-population matrix.
 """
 
 from __future__ import annotations

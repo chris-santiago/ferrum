@@ -635,7 +635,7 @@ class _FitRequest:
     are their resolved column names, and ``x_title``/``y_title`` the names
     the fit layers title their axes with: the caller's ``title=`` on that
     channel, else the column name. ``grouping`` is the fields the fit
-    groups by (spec §6.4's composite grouping of the hue and every grouping
+    groups by (the composite grouping of the hue and every grouping
     channel the caller binds), and ``grouping_bindings`` the bindings of
     those channels, which the fit chart binds itself so each per-group
     curve draws its group's color. ``has_scatter`` says whether a scatter
@@ -1044,7 +1044,7 @@ def _lmplot_impl(
     # Every fit method groups by the hue and by every grouping channel the
     # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
     # as a bare keyword (merged into `enc` above) or through the `encode=`
-    # dict `_finalize_chart` applies later: spec §6.4's composite grouping,
+    # dict `_finalize_chart` applies later: the composite grouping,
     # computed once here, so each method fits one curve per group as a
     # composite statistic does. The fit binds the same channels, so each
     # curve draws its group's color.
@@ -1266,7 +1266,7 @@ def lmplot(
         When ``True`` (default), the fit line spans only the observed data
         range (min to max of ``x``). When ``False``, extends the fit line
         across the axis-domain extent (the data range padded 5% on each
-        side) via the transform's ``x_range`` support (spec §4 WI-7) --
+        side) via the transform's ``x_range`` support --
         supported for every ``mark_smooth``-routed method and for
         ``method="robust"``. Not supported for ``method="logistic"`` or
         ``"glm"`` (neither transform accepts ``x_range``); passing
@@ -1392,7 +1392,7 @@ def lmplot(
 
 
 def _encode_grouping(bindings: dict) -> list[str]:
-    """Return the composite grouping fields (spec §6.4) the caller's own *bindings* bind.
+    """Return the composite grouping fields the caller's own *bindings* bind.
 
     Each grouping channel's value is read as ``encode()`` reads it
     (shorthand included), so ``"c:N"`` groups by ``c``; ``None`` binds

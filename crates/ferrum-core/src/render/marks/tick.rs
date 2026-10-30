@@ -221,8 +221,8 @@ fn build_geometry(
             // panel-w term. `bandwidth_over(panel.w)` divides that term by
             // the y scale's own slot count and applies its padding
             // fraction, so this arm stays on the same domain count and the
-            // same drawn-band fraction as its sibling arms (F-L04-03, spec
-            // §4A) instead of a batch count and no padding. `None` is
+            // same drawn-band fraction as its sibling arms (F-L04-03)
+            // instead of a batch count and no padding. `None` is
             // unreachable — this branch is gated on an ordinal y.
             //
             // GH #66 sub-band clamp NOT applicable here: Dodge offsets

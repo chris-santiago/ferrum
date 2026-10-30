@@ -200,7 +200,7 @@ def _binned_channels(encoding: dict) -> list[tuple[str, ChannelBase]]:
 
 
 def _statistic_groupby(encoding: dict, facet) -> list[str]:
-    """The fields one layer's statistic groups by (spec §6.4), in channel order.
+    """The fields one layer's statistic groups by, in channel order.
 
     Every field the encoding draws that its statistic neither aggregates nor
     bins, plus the facet fields, so a faceted layer computes its statistic
@@ -245,7 +245,7 @@ def _statistic_groupby(encoding: dict, facet) -> list[str]:
     return fields
 
 
-#: The channels a composite mark's statistic groups by (spec §6.4): color under
+#: The channels a composite mark's statistic groups by: color under
 #: every spelling that draws as it, detail, shape and stroke_dash.
 COMPOSITE_GROUPING_CHANNELS = frozenset(
     ("color", "fill", "stroke", "detail", "shape", "stroke_dash")
@@ -253,7 +253,7 @@ COMPOSITE_GROUPING_CHANNELS = frozenset(
 
 
 def _composite_groupby(encoding: dict, facet) -> list[str]:
-    """The fields a composite mark's statistic groups by (spec §6.4's composite grouping).
+    """The fields a composite mark's statistic groups by (its composite grouping).
 
     :func:`_statistic_groupby` restricted to the grouping channels
     (:data:`COMPOSITE_GROUPING_CHANNELS`, a :class:`_GroupingOnly`'s members
@@ -291,7 +291,7 @@ def _over(nearer: dict, farther: dict) -> dict:
 
     Channel identity is the resolved channel (``fill`` and ``stroke`` draw
     as ``color``), so a nearer ``fill`` shadows a farther ``color``, as an
-    own binding shadows its parent's (spec §6.3).
+    own binding shadows its parent's.
     """
     from ferrum.encoding._aliases import resolved_channel
 
@@ -402,7 +402,7 @@ def _encoding_statistics(encoding: dict) -> tuple[list, list]:
 
 @dataclass(frozen=True)
 class _StatisticPlan:
-    """One layer's statistic, read off its effective encoding (spec §6.4).
+    """One layer's statistic, read off its effective encoding.
 
     The flat chart and every layer build theirs with :func:`_statistic_plan`
     and run its :meth:`step`, so the two paths compute one statistic per
@@ -477,7 +477,7 @@ class _StatisticPlan:
 
 
 def _statistic_plan(encoding: dict, facet) -> _StatisticPlan:
-    """The statistic plan of a layer drawing *encoding* under *facet* (spec §6.4).
+    """The statistic plan of a layer drawing *encoding* under *facet*.
 
     A ``bin=`` channel makes the plan a ``Bin`` (:func:`_lower_bin_encoding`);
     otherwise any ``aggregate=`` channel makes it one ``Aggregate``, grouped by
@@ -625,7 +625,7 @@ def _lower_bin_encoding(
     pending_aggregates: list[_PendingAggregate],
     facet,
 ) -> _StatisticPlan:
-    """The statistic plan of an encoding with a ``bin=`` channel (spec §4.2, §6.6).
+    """The statistic plan of an encoding with a ``bin=`` channel.
 
     A ``Bin`` replaces its input batch's schema with its own columns (or, per
     row, appends its start and end columns), so every channel it feeds is

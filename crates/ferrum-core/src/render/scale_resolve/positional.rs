@@ -105,7 +105,7 @@ fn continuous_common(scale: &crate::spec::encoding::ScaleSpec) -> Option<&crate:
     }
 }
 
-/// Whether a continuous `channel`'s text-edge demand (spec §6.13) applies:
+/// Whether a continuous `channel`'s text-edge demand applies:
 /// true exactly when `resolve_padding_fraction` would return the plain
 /// `DEFAULT_SCALE_PADDING_FRAC` (no `padding=`, no explicit `domain=`) AND
 /// no explicit `range=` bypasses the inset AND the coord sets no
@@ -229,8 +229,8 @@ pub(in crate::render) fn build_axis_scale(
     transform_lineages: &crate::transform::run::OutputLineages,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
-    // The `Mark::Text` ink demand this channel's axis carries (spec
-    // §6.13), already built by the caller (empty for the metadata-only
+    // The `Mark::Text` ink demand this channel's axis carries, already
+    // built by the caller (empty for the metadata-only
     // placeholder pass, a non-default-padding channel, or a chart with no
     // `Mark::Text` layer on it) — this function never computes it, so it
     // never has to tell a placeholder pixel range from a real one.
@@ -493,7 +493,7 @@ pub(in crate::render) fn build_axis_scale(
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
             // The chart-level column AND every layer's own column for this
-            // channel (task 12c) — the ordinal sibling of the Quantitative
+            // channel — the ordinal sibling of the Quantitative
             // arm's `numeric_domain_union` just above, so both axes answer
             // "does the shared domain cover every layer" the same way. A
             // layered chart whose layers name the same positional field
@@ -548,12 +548,12 @@ pub(in crate::render) fn build_axis_scale(
 }
 
 /// The auto-path axis scale of `dtype` over a composite group's `shared`
-/// domain (D4b), or `None` when the domain's kind does not fit the axis (a
+/// domain, or `None` when the domain's kind does not fit the axis (a
 /// numeric domain on a categorical axis, or the reverse; never produced for
 /// one leaf by the resolve pass), leaving the axis its own data. The shared
 /// extent receives the same padding/`nice` treatment as a facet-shared
 /// panel. A shared ordinal vector arrives ALREADY ordered (the resolve
-/// pass's order-preserving union, D2) and is authoritative: local data-aware
+/// pass's order-preserving union) and is authoritative: local data-aware
 /// re-sorting is skipped, because each leaf would compute the sort aggregate
 /// from its OWN batch and different leaves could reorder the "shared" domain
 /// differently (there is no cross-leaf merged batch to sort on, unlike
@@ -781,8 +781,8 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 /// resolved domain maps, or every finite value under `None`) — the `Log`
 /// arm asks for its own side even under an explicit domain, to count the
 /// rows the other side leaves out; every other continuous arm asks with
-/// `None` only when it states no `domain`, exactly as before this closure
-/// carried a side at all (see [`resolve_continuous_domain_and_range`]'s own
+/// `None` only when it states no `domain`, since only the `Log` arm ever
+/// carries a side (see [`resolve_continuous_domain_and_range`]'s own
 /// `None`-side adaptation of it).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn build_from_scale_spec(
@@ -794,7 +794,7 @@ pub(in crate::render) fn build_from_scale_spec(
     sort_ctx: &SortContext<'_>,
     data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
     data_categories: &dyn Fn() -> Result<Vec<String>, RenderError>,
-    // The channel's text-edge demand (spec §6.13), already gated by the
+    // The channel's text-edge demand, already gated by the
     // caller's `text_inset_applies` check: empty whenever this scale states
     // an explicit `padding`/`domain`/`range`, so every continuous variant
     // arm below can forward it unconditionally.
@@ -933,8 +933,8 @@ pub(in crate::render) fn build_from_scale_spec(
         //
         // These discretizing/diverging positional scales degrade to
         // `ScaleKind::Linear` before minor-tick generation is reached, so
-        // they receive linear-subdivided minor ticks (semantic corner,
-        // archaeology R7).
+        // they receive linear-subdivided minor ticks — tracked as a known
+        // semantic corner in design-docs/superpowers/followups/2026-05-15-code-archaeology.md.
         //
         // #152 deliberately does NOT call `validate_explicit_continuous_shape`
         // here: `positional_extent()` (below) already normalizes a Some(..)
@@ -943,9 +943,10 @@ pub(in crate::render) fn build_from_scale_spec(
         // fixes cannot reach this arm — a different domain shape (Diverging's
         // 3-element `[lo, mid, hi]`) is what this family actually carries.
         // #152's frozen report is specifically the 7 `ContinuousScaleCommon`
-        // variants' `domain`/`range` fields (`scale/linear.rs:134`'s panic);
-        // widening the same refusal onto this sibling family's OWN degenerate
-        // extents is a separate, undisclosed change this task does not make.
+        // variants' `domain`/`range` fields (the length panic a one-number
+        // domain raised); widening the same refusal onto this sibling family's OWN
+        // degenerate extents is a separate, undisclosed change this does not
+        // make.
         ScaleSpec::Sequential { .. }
         | ScaleSpec::Diverging { .. }
         | ScaleSpec::Quantize { .. }
@@ -1321,7 +1322,7 @@ fn resolve_continuous_domain_and_range(
     data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
     pr: (f64, f64),
     adjust: DomainAdjust,
-    // The channel's text-edge demand (spec §6.13), already gated by the
+    // The channel's text-edge demand, already gated by the
     // caller's `text_inset_applies` check — empty whenever `domain`/`range`
     // above is explicit, so this never needs to re-check that itself.
     text_demand: &crate::layout::geometry::TextEdgeDemand,
@@ -1500,8 +1501,7 @@ impl AxisDomainConfig {
     }
 }
 
-/// Apply one axis's chart-level scale-domain config to its resolved scale
-/// (D3, spec §4.2).
+/// Apply one axis's chart-level scale-domain config to its resolved scale.
 ///
 /// Precedence, per the decision doc: an encoding-level `scale=` domain wins
 /// ENTIRELY and silently — it is the more specific surface, so the documented
@@ -1630,9 +1630,9 @@ mod tests {
     use crate::scale::symlog::SymlogScale;
     use crate::scale::time::TimeScale;
 
-    // ── Batch B design review S4 (2026-09-03): `ScaleKind::niced_domain` ────
+    // ── `ScaleKind::niced_domain` ────────────────────────────────────────────
     //
-    // Reviewer-prescribed property test: `configure_axis(nice=True)`'s
+    // A property test: `configure_axis(nice=True)`'s
     // dispatch point (`ScaleKind::niced_domain`) must land on exactly the
     // domain each continuous kind's OWN `nice=True` construction produces —
     // the encoding-level `Scale(nice=True)` surface — for all five
@@ -2279,7 +2279,7 @@ mod tests {
     }
 
     // ── explicitness gates: degenerate inputs (ported from
-    // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
+    // tests/bug_hunt_band_point_range.rs) ────────────────────────────────────
 
     /// A wire range with MORE than 2 entries truncates to the first two and
     /// still counts as explicit — matching the pyclass constructor's
@@ -2679,7 +2679,7 @@ mod tests {
     /// shape is normalized to exactly 2 elements (or `None`) by
     /// `ScaleSpec::positional_extent()` before it ever reaches the funnel,
     /// so the length refusal above cannot apply to it, and a degenerate
-    /// extent must keep rendering exactly as before this task (a Sequential
+    /// extent must keep rendering unchanged (a Sequential
     /// color scale used positionally is a corner case, not one #152's
     /// frozen report names). Pinned so a future refactor that folds this
     /// family through `validate_explicit_continuous_shape` too must
@@ -3670,7 +3670,7 @@ mod tests {
         assert_eq!(base_sorted, rev_sorted, "reverse reorders ticks, it does not pick a different set");
     }
 
-    // ── spec §6.13: text_inset_applies / coord_exempts_channel ──
+    // ── text_inset_applies / coord_exempts_channel ──
 
     fn linear_scale(common: crate::spec::encoding::ContinuousScaleCommon) -> crate::spec::encoding::ScaleSpec {
         crate::spec::encoding::ScaleSpec::Linear { common, nice: false, zero: false, system_injected: false }

@@ -810,7 +810,7 @@ pub struct PreparedInputs {
     /// router all read it instead of re-deriving the mapping. Empty (default)
     /// for every chart with no independent-y layer — the byte-stable path.
     pub y_slot_plan: crate::render::scale_resolve::YSlotPlan,
-    /// This chart's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// This chart's own `Mark::Text` rows on `x`/`y`, measured
     /// before any composite union is applied ([`PreparedAxes::x_text_rows`]/
     /// `y_text_rows`). A composite tree's resolve pass reads these to union
     /// a group's members' rows without re-measuring them.
@@ -1024,7 +1024,7 @@ fn build_axis_input(
     tick_count: usize,
     theme: &crate::layout::ThemeInputs,
     // The `Mark::Text` ink demand this channel's panel-real axis carries
-    // (spec §6.13; empty when no `Mark::Text` layer draws it), carried onto
+    // (empty when no `Mark::Text` layer draws it), carried onto
     // the built `TickProjection` so layout applies the SAME inset the marks
     // resolve with.
     text_demand: crate::layout::geometry::TextEdgeDemand,
@@ -1071,7 +1071,7 @@ fn build_axis_input(
         title.claim();
     }
 
-    // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
+    // Resolve the tick label format. A per-channel `Axis(label_format=,
     // label_format_type=)` takes precedence over the shorthand
     // `encoding.format`/`format_type`. Chart-level
     // `configure_axis(label_format_raw=...)` is applied later in `render/mod.rs`
@@ -1082,7 +1082,7 @@ fn build_axis_input(
     // The shorthand pair as written still meets the one refusal rule, so
     // `X("n:Q", format=".1f", format_type="time", axis=Axis(label_format_type=
     // "number"))` refuses as `X("n:Q", format=".1f", format_type="time")` does
-    // (`#147`, wave 6A T21 cycle 3). Independent facet axes are covered too:
+    // (`#147`). Independent facet axes are covered too:
     // this global axis is built before any per-panel one.
     //
     // Only a TIME-typed shorthand is checked as written: that is the half an
@@ -1090,9 +1090,8 @@ fn build_axis_input(
     // axis). A number-format shorthand an `Axis` retypes `"time"` is read as
     // the merged pair, so `X("d:T", format=".2f", axis=Axis(
     // label_format_type="time"))` falls back to the temporal default exactly
-    // as `X("d:T", format=".2f", format_type="time")` does (`#147` T23
-    // cycle 2, user ruling: the merged pair gives its one-place spelling's
-    // answer).
+    // as `X("d:T", format=".2f", format_type="time")` does (`#147`: the
+    // merged pair gives its one-place spelling's answer).
     let shorthand_is_time_typed = |e: &crate::spec::encoding::EncodingSpec| {
         crate::render::format::FormatKind::resolve_on(
             e.format.as_deref(),
@@ -1233,7 +1232,7 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 /// `drop_placeholder_only_warnings` drops what the placeholder
 /// `(0.0, 1.0)`-pixel-range pass cannot honestly judge at all
 /// (`GroupCardinalityDegenerate`'s bandwidth question). This predicate names
-/// the different failure this batch introduced: a warning the placeholder
+/// a different failure: a warning the placeholder
 /// pass judges CORRECTLY (a color scheme name lookup does not depend on the
 /// pixel range) but which is a whole-chart fact, not a per-panel one — so
 /// once a real panel exists to judge it again, the provisional copy is a
@@ -1263,7 +1262,7 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 ///   shared property is "restated per panel, not re-measured per panel", which
 ///   is what this predicate has always actually meant.
 /// - `ShapePaletteOverflowed`, `StrokeDashPaletteOverflowed` — every
-///   `RenderWarning` `scale_resolve::auxiliary` pushes (`#120`(7) + N2). These
+///   `RenderWarning` `scale_resolve::auxiliary` pushes. These
 ///   are whole-chart facts even though they look data-dependent (a
 ///   distinct-category count): `build_auxiliary_scales`
 ///   resolves every one of these channels with `facet_aux_shared(spec)` —
@@ -1667,7 +1666,7 @@ pub fn prepare_render_inputs(
         .chain(drop_placeholder_only_warnings(provisional_scale_warnings))
         .collect();
     let mut provisional_scales = provisional_scales;
-    // D3 (spec §4.2): chart-level `domain_min`/`domain_max`/`nice`/`zero`
+    // Chart-level `domain_min`/`domain_max`/`nice`/`zero`
     // reshape the resolved positional domains BEFORE the axes derive their
     // ticks from them, so the axis labels and the mark placement describe the
     // same domain.
@@ -2096,8 +2095,8 @@ fn run_transforms_with_facet(
     // different value scales and making positions non-comparable. By fixing
     // the extent to the global range before partitioning, all panels and
     // groups share the same value axis. This is the correct default for
-    // faceted density / histogram / violin / 2-D density / heatmap charts
-    // (archaeology bug #7; extended to Kde2D/Bin2D by R5).
+    // faceted density / histogram / violin / 2-D density / heatmap charts,
+    // including Kde2D/Bin2D.
     let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, normalized);
 
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
@@ -2340,9 +2339,9 @@ fn transform_refusal(refusal: String, ctx: &TransformContext) -> RenderError {
 /// between panels.
 ///
 /// The reconciliation itself lives in [`crate::transform::concat::concat_by_name`],
-/// which this thin wrapper only supplies the error voice for (R1 design
-/// finding 3 hoisted it there so `transform::smooth::apply_grouped` could stop
-/// carrying a weaker second implementation). See that function for the
+/// which this thin wrapper only supplies the error voice for: the union-of-fields
+/// logic was hoisted there so `transform::smooth::apply_grouped` could stop
+/// carrying a weaker second implementation. See that function for the
 /// union-of-fields algorithm and its guarantees.
 fn concat_batches_by_name(
     key: &str,
@@ -2776,19 +2775,8 @@ pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::sp
 }
 
 /// Refuse a layer of a layered spec that names a column absent from that
-/// layer's own resolved batch, on any channel it draws (spec §4/§6; the
-/// model's P7), and report the inherited reads a statistic sub-layer drops.
-///
-/// **Why this gate exists.** A layer ≥ 1 naming a missing column used to
-/// reach the mark builders, whose column reads skip a column that is not
-/// there (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs` for
-/// positions; `marks::channels::row_colors_from_scale` and the per-row
-/// tooltip, href, description and key readers for the rest): the layer
-/// vanished from the render, or drew without the channel, with no error and
-/// no warning. Those readers are deliberately unchanged — they are correct
-/// for the per-row null/dtype cases they were written for; the drift they
-/// could not distinguish (a column that isn't there at all) is caught here
-/// instead, once, upstream of all of them.
+/// layer's own resolved batch, on any channel it draws, and
+/// report the inherited reads a statistic sub-layer drops.
 ///
 /// **Where it runs, and why there.** Once per layer, in
 /// `prepare_render_inputs`, before any scale is resolved: the auxiliary scale
@@ -2817,7 +2805,7 @@ pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::sp
 /// layer's own binding, a layer over the user's rows (no `data_source`, or
 /// a `Branch` output) and a column found nowhere still refuse.
 ///
-/// **Scope (normative, spec §4).**
+/// **Scope (normative).**
 /// - Every layer of a layered spec is judged, layer 0 included: a channel's
 ///   scale, axis and legend are read only from the batch of a layer that
 ///   draws it, so a layer 0 binding to a column only another layer's rows
@@ -2828,8 +2816,9 @@ pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::sp
 ///   ([`crate::render::marks::image::drawn_columns`]), so those
 ///   are the columns judged on its axes. A tooltip entry is judged on its
 ///   own field, so an `x`/`y` entry on a raster image, whose one-row batch
-///   holds the extent rather than the source column, is dropped with ruling
-///   W's warning (the image reads a statistic's output).
+///   holds the extent rather than the source column, is dropped with a
+///   [`RenderWarning::StatisticDroppedChannel`] (the image reads a
+///   statistic's output).
 /// - The batch is the layer's OWN resolved batch — base data for
 ///   `data_source: None`, the named transform output otherwise — never a
 ///   union of batches. A field that exists only in some sibling transform
@@ -3163,7 +3152,7 @@ pub(crate) struct PreparedAxes {
     pub(crate) y_tick_count: usize,
     pub(crate) secondary_y_scales: Vec<crate::render::scale_resolve::ScaleKind>,
     pub(crate) secondary_y_tick_counts: Vec<usize>,
-    /// This chart's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// This chart's own `Mark::Text` rows on `x`/`y`, measured
     /// before any composite union is applied — i.e. `leaf_scales`'s own
     /// union when one was given, else what this chart's layers measure on
     /// their own. Carried out so a composite tree's resolve pass
@@ -3185,7 +3174,7 @@ fn build_axes(
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     chart_config: &crate::render::chart_config::ChartConfig,
-    // Composite seam (spec §6.13): `Some` only for a composite leaf whose
+    // Composite seam: `Some` only for a composite leaf whose
     // positional channel shares a domain across the tree. When that leaf's
     // channel also carries a group `Mark::Text` rows union
     // (`LeafScaleContext::x_text_rows`/`y_text_rows`, built by
@@ -3197,7 +3186,7 @@ fn build_axes(
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<PreparedAxes, RenderError> {
-    // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
+    // Per-channel `Axis(tick_count=N)` controls the
     // target tick count for continuous + temporal axes (default 10). Limiting it
     // is what de-clutters dense temporal axes (e.g. a 72-row series no longer
     // renders 72 overlapping ticks). Read before tick generation so the count
@@ -3216,7 +3205,7 @@ fn build_axes(
     let cartesian_axes_suppressed =
         crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
-    // Parsed once per render (spec §6.13): every `Mark::Text` row this pass
+    // Parsed once per render: every `Mark::Text` row this pass
     // and `build_secondary_y_axis_inputs` measure shares this one font.
     let metrics = crate::render::font::FontdueMetrics::new();
 
@@ -3243,7 +3232,7 @@ fn build_axes(
     if coord_flipped {
         chart_encoding.flip_positional();
     }
-    // The primary axes' own text-edge demand (spec §6.13): built once here,
+    // The primary axes' own text-edge demand: built once here,
     // off the provisional (domain-correct, pixel-placeholder) scale and the
     // chart's REAL batch — a row's ink extent does not depend on the pixel
     // range, so this is the SAME demand the panel-real mark resolve builds
@@ -3406,7 +3395,7 @@ fn build_secondary_y_axis_inputs(
                 &Default::default(),
             )?;
         warnings.extend(drop_placeholder_only_warnings(layer_scale_warnings));
-        // D3 (spec §4.2) at the `axis_y2` position: reshape THIS layer's own y
+        // Chart-level scale-domain config at the `axis_y2` position: reshape THIS layer's own y
         // domain before `build_axis_input` below derives its ticks from the
         // scale, exactly as the primary pair is reshaped before `build_axes`.
         // Reported here (the one chart-level application);
@@ -3445,7 +3434,7 @@ fn build_secondary_y_axis_inputs(
         // optional — the compiler forces it before `?` can propagate a
         // `RenderError`.
         let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
-        // The secondary axis's own text-edge demand (spec §6.13), measured
+        // The secondary axis's own text-edge demand, measured
         // on this layer's REAL batch (unlike the placeholder-range scale
         // resolve above, a row's ink extent does not depend on the pixel
         // range at all): the slot's own layer, over its own data, matching
@@ -3678,7 +3667,7 @@ fn apply_impute(batch: &RecordBatch, spec: &ChartSpec) -> RecordBatch {
 pub(crate) const DEFAULT_TICK_COUNT: usize = 10;
 
 /// The effective major-tick count for one axis, resolved at the documented
-/// cascade in ONE place (D3 flexibility campaign + D12, spec §4.9):
+/// cascade in ONE place:
 /// per-channel `fm.Axis(tick_count=)` > chart-level `configure_axis(
 /// tick_count=)` (per-axis section before the shared one, via
 /// `ChartConfig::axis_field`) > [`DEFAULT_TICK_COUNT`].
@@ -3700,7 +3689,7 @@ fn resolve_axis_tick_count(
         .unwrap_or(DEFAULT_TICK_COUNT)
 }
 
-/// One axis's chart-level scale-domain config (D3, spec §4.2), lifted out of
+/// One axis's chart-level scale-domain config, lifted out of
 /// `ChartConfig` into the neutral shape `scale_resolve` accepts.
 fn axis_domain_config(
     chart_config: &crate::render::chart_config::ChartConfig,
@@ -3714,8 +3703,8 @@ fn axis_domain_config(
     }
 }
 
-/// Apply the chart-level scale-domain config to ONE axis position (D3, spec
-/// §4.2). The primitive every position routes through, so the
+/// Apply the chart-level scale-domain config to ONE axis position. The
+/// primitive every position routes through, so the
 /// section→encoding→gate correspondence is expressed once.
 ///
 /// `enc` is the RESOLVED (post-`CoordFlip`) encoding for this axis: an
@@ -3728,8 +3717,7 @@ fn axis_domain_config(
 /// domain is a binning artifact, any ordinal family — pins nothing, so it has
 /// no domain for the config to lose to and the config must still apply.
 /// Testing mere presence made all four fields silently inert for those
-/// encodings, which is the parsed-but-dropped class this task exists to
-/// remove.
+/// encodings — the parsed-but-dropped class this gate exists to prevent.
 pub(in crate::render) fn apply_axis_domain_config_for(
     scale: &mut crate::render::scale_resolve::ScaleKind,
     enc: Option<&crate::spec::encoding::EncodingSpec>,
@@ -3748,7 +3736,7 @@ pub(in crate::render) fn apply_axis_domain_config_for(
 }
 
 /// Apply the chart-level scale-domain config to BOTH primary positional scales
-/// of one resolution pass (D3, spec §4.2).
+/// of one resolution pass.
 ///
 /// Two passes need this and must agree: this module's provisional resolution
 /// (before the axes derive their ticks from the domain) and
@@ -4246,7 +4234,7 @@ pub(crate) fn adjust_axis_ticks(
                 });
             }
 
-            // Quality-review S3 fix (2026-09-03): a chart-level TIME format
+            // A chart-level TIME format
             // (`labels.format`'s `format_type == "time"`) is applied AFTER this fn runs,
             // by `render::config_apply::apply_label_format_to_axis`, which re-derives raw
             // epoch-ms values via `scale.temporal_tick_values(tick_count)` —
@@ -4373,26 +4361,26 @@ pub(crate) fn resolve_axis_label_format(
 ///   is threaded (the strings are already final; re-parsing them downstream
 ///   would fail). Returns `(formatted, None)`.
 /// - **Numeric** axis (or any non-temporal): a d3 spec is threaded forward as the
-///   `label_format_override` (D3 root-cause fix for `prepare.rs:538`), and the
+///   `label_format_override`, and the
 ///   labels are returned unchanged. `render::config_apply::apply_label_format_to_axis`
 ///   then applies it centrally — lossless because numeric label strings reparse
 ///   to f64. Threading (not pre-applying) also lets chart-level
 ///   `configure_axis` defer to the per-channel override via its `is_none()` gate.
 ///   The ordinal preset takes this path whatever `format_type` says, on a
-///   non-temporal scale; on a temporal one it is refused (`#147` T22).
+///   non-temporal scale; on a temporal one it is refused (`#147`).
 /// - **Time-typed, naming no pattern** ([`FormatKind::TemporalDefault`], e.g.
 ///   `".2f"` + `"time"`): nothing is threaded and the scale's own labels stand.
 ///
-/// Errors (#133, spec §4.2 amended 2026-09-11) when a time-typed format is
+/// Errors (#133) when a time-typed format is
 /// applied to a scale whose `temporal_tick_values` returns `None` — i.e. the
 /// resolved [`crate::render::scale_resolve::ScaleKind`] is not `Time` at all,
 /// not merely a length-drift between a fresh tick computation and the cached
 /// labels (drift keeps its pre-existing string-reparse fallback, since the
-/// scale genuinely IS temporal there); when the ordinal preset (`#147` T22)
-/// or a d3 number format (`#147` T23) meets a `Time` scale; and when the
+/// scale genuinely IS temporal there); when the ordinal preset (`#147`)
+/// or a d3 number format (`#147`) meets a `Time` scale; and when the
 /// spec does not parse under the grammar it resolved to, e.g. an undeclared
 /// `"%Y"` on a non-`Time` scale, which is d3 there (`InvalidFormatSpec`,
-/// `#147` T22). `channel` is the RESOLVED token this
+/// `#147`). `channel` is the RESOLVED token this
 /// call acted on; `coord_flipped` is always constructed `false` here — the
 /// caller boundary (`build_axis_input`'s two call chains) corrects it via R3,
 /// the same discipline `InvalidAxisOrient` uses.
@@ -4450,17 +4438,16 @@ fn apply_axis_format_or_thread(
         // Time-typed, naming no pattern (`".2f"` + `"time"`): on a temporal
         // scale (a non-temporal one was refused above, #133) the scale's own
         // spacing-keyed labels stand, the same fallback the colorbar and text
-        // mark give the identical pair. Threading the spec instead re-seeded
-        // it untyped and applied it as d3 (`2001.00` on year ticks), the
-        // `#147` close finding (wave 6A T17).
+        // mark give the identical pair. Threading the spec instead re-seeds
+        // it untyped and applies it as d3 (`2001.00` on year ticks, `#147`).
         return Ok((labels, None));
     }
-    // D3, or the ordinal preset on a non-temporal scale: thread the spec to
-    // the override, apply later.
+    // A d3 format (`FormatKind::D3`) or the ordinal preset, on a
+    // non-temporal scale: thread the spec to the override, apply later.
     Ok((labels, Some(fmt)))
 }
 
-/// #133 (spec §4.2 amended 2026-09-11): refuse when `format_type`
+/// #133: refuse when `format_type`
 /// unambiguously declares `"time"` but the resolved `scale` is not temporal
 /// at all — a non-`Time` [`crate::render::scale_resolve::ScaleKind`] (the
 /// case `scale.temporal_tick_values` answers `None`), never a length-drift on
@@ -4578,11 +4565,8 @@ pub(in crate::render) fn field_temporality(
 /// temporal value and d3 otherwise), and its kind must match that
 /// temporality. A time-typed kind (`Strftime` or `TemporalDefault`) refuses
 /// on a value that is not temporal. On a value that is, the ordinal preset
-/// refuses (`#147` close, wave 6A T22) and so does a d3 number format
-/// (`#147` close, wave 6A T23, user ruling): the surfaces used to give three
-/// answers to each, the calendar year (`2001st`, `2001.00`) on the shared
-/// axis, the format dropped on an independent facet axis, and the epoch-ms
-/// count on the legend and text. A matching kind must parse under its
+/// refuses (`#147`) and so does a d3 number format
+/// (`#147`). A matching kind must parse under its
 /// grammar (`InvalidFormatSpec`, the declaration-time gate's own error).
 /// The two wrappers above answer "is it temporal" for their surface; this
 /// answers everything else.
@@ -4700,7 +4684,7 @@ type AxisTickInputs = (Vec<String>, Vec<bool>, Option<usize>, Option<TickProject
 /// behavior). An ordinal scale yields no projection (`None`), matching uniform-
 /// slot placement.
 ///
-/// `text_demand` (spec §6.13) is likewise supplied by the caller rather than
+/// `text_demand` is likewise supplied by the caller rather than
 /// read off `scale`: `scale` here is the metadata-only placeholder `(0, 1)`-range
 /// resolution (`scale.padding_fraction()`'s own precondition), over which the
 /// demand's pixel needs would be meaningless, so the caller passes the SAME
@@ -4870,7 +4854,7 @@ pub(crate) fn apply_tick_format(
                 Some(ms) => format_time(ms, DAY_MS),
                 None => raw,
             },
-            // D3, or the ordinal preset whatever `format_type` says.
+            // A d3 format (`FormatKind::D3`) or the ordinal preset, whatever `format_type` says.
             FormatKind::D3(_) | FormatKind::Ordinal => match raw.parse::<f64>() {
                 Ok(v) => kind.format(v),
                 Err(_) => raw, // ordinal category name — pass through

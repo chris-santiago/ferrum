@@ -61,7 +61,7 @@ pub(crate) struct LeafResolveInput<'a> {
     /// Each of the leaf's outputs' lineage, keyed like `transform_outputs`
     /// (`PreparedInputs::transform_lineages`).
     pub(crate) transform_lineages: &'a crate::transform::run::OutputLineages,
-    /// This leaf's own `Mark::Text` rows on `x`/`y` (spec §6.13), measured
+    /// This leaf's own `Mark::Text` rows on `x`/`y`, measured
     /// once by its own prepare pass before any composite union
     /// ([`crate::render::prepare::PreparedInputs::x_text_rows`]/
     /// `y_text_rows`). `resolve_group` unions these across a positional
@@ -318,7 +318,7 @@ pub(crate) struct LeafScaleContext {
     pub(crate) y: Option<SharedDomain>,
     pub(crate) color: Option<SharedDomain>,
     pub(crate) size: Option<SharedDomain>,
-    /// This positional channel's `Mark::Text` edge rows (spec §6.13), unioned
+    /// This positional channel's `Mark::Text` edge rows, unioned
     /// across every group member's own rows (`resolve_group`, the same
     /// [`super::text_edge_rows`] builder every member's own prepare pass
     /// would otherwise call standalone) and set on EVERY member that shares

@@ -597,7 +597,7 @@ pub(crate) fn render_composite_scene(
     // leaf given the same override has that surface and applied it; per-leaf
     // data-condition warnings fan out untouched — see
     // `is_figure_level_dedupable`'s doc for which is which.
-    // Spec §6.13: each leaf's `TextInkPastFrame` already counts only that
+    // Each leaf's `TextInkPastFrame` already counts only that
     // leaf's OWN overrunning rows (`own`-filtered by its own build), so a
     // composite's shared axis is one render-wide fact, summed across the
     // leaves that draw it, rather than one copy fanned out per leaf —
@@ -6243,11 +6243,10 @@ mod tests {
         (spec, batch)
     }
 
-    /// The fix case): a static composite's
-    /// pass one prepared every leaf standalone, before the group resolved,
-    /// so an all-off-side member's own Log resolve refused the WHOLE
-    /// overlay — a leaf with nothing on-side must draw nothing beside a
-    /// sibling that does, exactly as the flat `+`/`Chart.layer` doors do.
+    /// A static composite's all-off-side member must not refuse the WHOLE
+    /// overlay through its own Log resolve — a leaf with nothing on-side
+    /// draws nothing beside a sibling that does, exactly as the flat
+    /// `+`/`Chart.layer` doors do.
     #[test]
     fn an_overlay_member_with_nothing_on_side_draws_nothing_beside_one_that_does() {
         for channel in ["y", "size"] {
@@ -6788,7 +6787,7 @@ mod tests {
         }
     }
 
-    /// Choice A's source-row remap on TWO more doors beside the plain/
+    /// The source-row remap on TWO more doors beside the plain/
     /// layered ones [`a_log_aux_drop_keeps_source_rows_on_every_mark`] and
     /// [`a_layered_log_aux_drop_keeps_each_layers_source_rows`] already pin
     /// (`crates/ferrum-core/src/render/prepare/tests.rs`): a composite
@@ -6950,14 +6949,11 @@ mod tests {
         }
     }
 
-    // -- P2 (2026-08-27 findings): overlay chrome suppression -----------------
+    // -- Overlay chrome suppression -------------------------------------------
 
     #[test]
     fn overlay_merge_suppresses_chrome_on_children_after_the_first() {
-        // P2 (design review, 2026-08-27): a shared-resolve overlay used to
-        // render every child leaf as a full standalone panel (its own grid +
-        // axes + chart title), so a 2-layer overlay emitted two full sets of
-        // chrome sharing one rect. Only child 0's grid/axes must survive the
+        // Only child 0's grid/axes must survive the
         // merge; both children's MARKS must still be present — layering
         // content is the whole point, only the duplicated chrome is dropped.
         let tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
@@ -6996,7 +6992,7 @@ mod tests {
 
     #[test]
     fn overlay_merge_keeps_only_child_0_title_when_children_differ() {
-        // The scene-level-title half of the P2 merge contract (design §6):
+        // The scene-level-title half of the overlay merge rule:
         // two overlay children carrying DIFFERENT chart titles (the shape a
         // LayerChart with mismatched per-layer titles hits) must merge to
         // exactly child 0's title text, not both overprinting at one origin.
@@ -7672,9 +7668,10 @@ mod tests {
         // plot rect — the intersection of the leaves' natural regions. A
         // color-encoded layer 0 reserves a legend gutter a plain layer 1 does
         // not, so their STANDALONE `plot_area`s diverge even though
-        // composite-shared x/y forces identical DOMAINS (the reviewer's pre-fix
-        // repro: panel widths ~520 vs ~567, a ~47px cx divergence for the same
-        // datum). Both leaves here share the SAME x/y data
+        // composite-shared x/y forces identical DOMAINS (without the
+        // shared rect, panel widths diverge ~520 vs ~567, a ~47px cx
+        // divergence for the same datum). Both leaves here share the SAME
+        // x/y data
         // (`[1,2,3]`/`[10,20,30]`) so any pixel divergence can only come from
         // the legend gutter, not the domain.
         let tree = overlay_tree(color_spec(), scatter_spec());
@@ -12020,7 +12017,7 @@ mod tests {
     }
 
     /// Composites that are not one overlay group draw each leaf's own legend:
-    /// an hconcat or vconcat of two colored leaves draws two, as before.
+    /// an hconcat or vconcat of two colored leaves draws two.
     #[test]
     fn a_concat_of_colored_leaves_keeps_each_leafs_legend() {
         let batch = aux_batch();

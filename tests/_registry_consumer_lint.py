@@ -93,8 +93,8 @@ _ENCODING_CONTAINERS = frozenset({"encoding", "mark_kwargs", "remap"})
 #: Keyword arguments that are not themselves an encoding-channel name (so
 #: ``_channel_vocabulary()``'s reflection over ``ferrum.encoding`` does not
 #: find them) but whose value a consumer treats exactly like one -- it ends
-#: up bound to a real channel downstream. ``_Layer.contrast_against`` (spec
-#: §6.5) is one: ``_build_layers_list`` assigns its value straight into the
+#: up bound to a real channel downstream. ``_Layer.contrast_against``
+#: is one: ``_build_layers_list`` assigns its value straight into the
 #: layer's own ``color`` encoding when no caller fill reached the layer, so
 #: a literal here names a column precisely as a ``color=`` keyword would.
 _CHANNEL_EQUIVALENT_KEYWORDS = frozenset({"contrast_against"})

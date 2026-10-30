@@ -284,19 +284,16 @@ impl LogScaleData {
     ///    instead of overshooting it.
     /// 4. The integer powers of `base` within `[lo, hi]`, kept with a
     ///    tolerance at the domain ends, when there are at least `count - 2`
-    ///    of them (subsumes the former `span_decades >= count` branch: a
-    ///    wide domain's powers alone already clear that bar, so it is
-    ///    unchanged).
+    ///    of them (a wide domain's powers alone clear that bar).
     /// 5. Otherwise, for an integer `base`, multiples `k * base^e` with `k`
     ///    drawn from increasingly dense step sets — `{1, 3}`, `{1, 2, 5}`,
     ///    `{1..9}` for base 10, `{1..base-1}` for another integer base —
-    ///    taking the DENSEST set whose tick count is AT MOST `count` — not
-    ///    the first set reaching `count - 2`, which could, and did, skip
-    ///    past a set that fits the budget straight to one so dense a later
-    ///    stride cull drops a decade in favor of a non-decade multiple:
-    ///    over `[1, 100]` at `count` 10, `{1, 2, 5}` (7 ticks) fits; the old
-    ///    rule passed over it for `{1..9}` (19 ticks) because 7 fell short
-    ///    of `count - 2 = 8`. When no multiple set fits the budget either
+    ///    taking the DENSEST set whose tick count is AT MOST `count` —
+    ///    not the first set reaching `count - 2`, which can skip past a
+    ///    set that fits the budget: over `[1, 100]` at `count` 10,
+    ///    `{1, 2, 5}` (7 ticks) fits, while a first-reaching rule would
+    ///    pass over it for `{1..9}` (19 ticks) because 7 falls short of
+    ///    `count - 2 = 8`. When no multiple set fits the budget either,
     ///    the powers themselves, which
     ///    always fit (step 4 already returned when they numbered at least
     ///    `count - 2`, so reaching here they number fewer than that, hence
@@ -307,8 +304,7 @@ impl LogScaleData {
     ///
     /// Sign mirroring (a negative domain) and `should_reverse` (a
     /// descending domain) are applied last, to whichever of 1-6 produced the
-    /// magnitudes, exactly as before this rule replaced the two-branch
-    /// (decade-powers vs. linear-in-log-space) one it supersedes.
+    /// magnitudes.
     fn ticks(&self, count: usize) -> Vec<f64> {
         let neg = self.domain[0] < 0.0;
         let sign: f64 = if neg { -1.0 } else { 1.0 };
@@ -384,9 +380,7 @@ impl LogScaleData {
         // Step 3 more powers than the budget
         // allows — thin to every Nth power at a nice integer-exponent step,
         // so a very wide span stays within `count` instead of overshooting
-        // it (today's bug: falling straight to `nice_ticks(lo, hi, count)`
-        // in VALUE space labeled arbitrary linear subdivisions like `30000`
-        // over a multi-decade span).
+        // it.
         //
         // Thinned over the FIRST and LAST IN-DOMAIN exponents (`powers`'
         // own first/last entries), not the floor/ceil-extended `lo_exp`/
@@ -964,12 +958,11 @@ mod tests {
         assert_eq!(s.ticks(5), vec![5.0]);
     }
 
-    /// The fix case. 2 decades at count 10 — powers alone
-    /// (3: 1, 10, 100) fall short of `count - 2 = 8`, `{1, 3}` (5 ticks) and
+    /// 2 decades at count 10 — powers alone
+    /// (3: 1, 10, 100) fall short of `count - 2 = 8`; `{1, 3}` (5 ticks) and
     /// `{1, 2, 5}` (7 ticks) both fit the `count` budget, `{1..9}` (19 ticks)
-    /// does not. The DENSEST that fits is `{1, 2, 5}` — the old "first
-    /// reaching `count - 2`" rule skipped past it straight to `{1..9}`,
-    /// which no stride cull from index 0 keeps every decade of.
+    /// does not. The densest-fit rule picks `{1, 2, 5}`, not `{1..9}`, which
+    /// no stride cull from index 0 keeps every decade of.
     #[test]
     fn log_breaks_picks_the_densest_set_within_the_count_budget() {
         let s = d([1.0, 100.0], [0.0, 1.0], 10.0, false);
@@ -995,11 +988,12 @@ mod tests {
         assert_eq!(s.ticks(10), expected);
     }
 
-    /// The fix case a domain so wide its own
-    /// powers overshoot `count` falls back to linear `nice_ticks` today
-    /// (`[1, 1e5]` at count 10 labels `10000..100000`); under the fix it
-    /// thins the powers themselves to every Nth decade instead, so a log
-    /// axis over 5-6 decades still labels only powers of the base.
+    /// A domain whose powers (fewer than `count - 2`) have no dense
+    /// multiple set that fits `count` either (`{1, 3}` over `[1, 1e5]` at
+    /// `count` 10 is already 11 ticks) labels every power instead of
+    /// falling back to linear `nice_ticks` (which would label `[1, 1e5]`
+    /// at `count` 10 as `10000..100000`), so a log axis over 5-6 decades
+    /// still labels only powers of the base.
     #[test]
     fn log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits() {
         let s = d([1.0, 1e5], [0.0, 1.0], 10.0, false);
@@ -1043,11 +1037,16 @@ mod tests {
         assert_eq!(s.ticks(4), vec![-1e12, -1e10, -1e8, -1e6, -1e4, -1e2, -1.0]);
     }
 
-    /// A domain whose powers fit the dense-multiple-set rule as before this
-    /// choice landed is untouched: the new "thin past the budget" and
-    /// "fall back to the powers" branches only fire when the OLD rule's gap
-    /// (powers too few for the dense sets, no dense set fitting `count`
-    /// either) left no answer but a linear fallback.
+    /// Every case here but one picks the densest multiple set that fits
+    /// `count`, not merely the first set reaching `count - 2`. The thin
+    /// branch (`[1, 1e12]` at `count` 10, the one exception: 13 powers)
+    /// fires only when the in-domain powers outnumber `count`, and here it
+    /// keeps every power at nice step 1. The fall-back branch, which
+    /// returns the powers themselves rather than a linear fallback, fires
+    /// only when the powers number fewer than `count - 2` and no dense set
+    /// fits `count` either —
+    /// `log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits`
+    /// above pins that case.
     #[test]
     fn log_breaks_keep_the_fitting_sets_unchanged() {
         let s = d([1.0, 100.0], [0.0, 1.0], 10.0, false);
@@ -1070,7 +1069,7 @@ mod tests {
         assert_eq!(s.ticks(32).len(), 28, "the {{1,2,5}} ladder over 1..1e9 is 28 values");
     }
 
-    /// Decision B's step-3 thinning must run over the first and last
+    /// Step-3 thinning must run over the first and last
     /// IN-DOMAIN exponents, not the floor/ceil-extended `lo_exp`/`hi_exp`
     /// the `powers` list is built from (those extend past the domain on
     /// purpose, to catch every power `within_tick_tolerance` admits) --
@@ -1122,9 +1121,9 @@ mod tests {
 
     /// A degenerate positive domain (a constant-valued data column) has no
     /// span to round outward: `nice()` returns it unchanged, mirroring the
-    /// negative case (`log_nice_negative_single_point_domain`). Before this
-    /// guard, `[5, 5]` widened to `[1, 10]`, so a constant column's `scale()`
-    /// no longer landed at the range midpoint once niced (size and
+    /// negative case (`log_nice_negative_single_point_domain`). Without this
+    /// guard, `[5, 5]` would widen to `[1, 10]`, moving a constant column's
+    /// `scale()` off the range midpoint once niced (size and
     /// stroke-width's data-derived domain is niced by default).
     #[test]
     fn log_nice_degenerate_positive_domain_returns_it_unchanged() {
@@ -1278,7 +1277,7 @@ mod tests {
         assert_eq!(y, 0.0);
     }
 
-    // ── `LogSide` / `admits`: an off-side value is left out, not clamped ───
+    // ── `LogSide` / `on_side`: an off-side value is left out, not clamped ──
 
     #[test]
     fn log_side_of_no_domain_is_always_positive() {
@@ -1295,13 +1294,11 @@ mod tests {
         assert_eq!(LogSide::of(Some(&[-1000.0, -1.0])), LogSide::Negative);
     }
 
-    /// The fix case): `admits` folded
-    /// "non-finite" into "off-side" with no distinction, so neither an
-    /// on-side nor an off-side infinity ever reached the renamed `on_side`
-    /// gate as a value — both silently drew at the channel's default
-    /// instead. `on_side` is now the sign alone: an infinity matching the
-    /// domain's sign is on-side (admitted), the opposite one is not; only
-    /// `NaN` and `0.0` are rejected regardless of sign.
+    /// `on_side` is the sign alone: an infinity matching the domain's sign
+    /// is on-side (admitted), the opposite one is not; only `NaN` and `0.0`
+    /// are rejected regardless of sign. Being non-finite never makes a
+    /// value off-side: an off-side infinity is left out and counted like
+    /// any off-side value.
     #[test]
     fn on_side_is_the_sign() {
         let positive = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
@@ -1323,7 +1320,7 @@ mod tests {
     /// `on_side` is unaffected by `clamp`: clamp decides what an ADMITTED,
     /// out-of-domain-bound value maps to, not which values are admitted.
     #[test]
-    fn admits_is_unaffected_by_clamp() {
+    fn on_side_is_unaffected_by_clamp() {
         let clamped = d([1.0, 1000.0], [0.0, 3.0], 10.0, true);
         assert!(!clamped.on_side(0.0));
         assert!(!clamped.on_side(-5.0));

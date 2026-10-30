@@ -795,7 +795,7 @@ fn compute_one_group(
     // look up each aggregate's value for exactly the same rows a bin counts.
     let (clean, row_idx) = clean_float64_values_indexed(&arr, only_indices);
 
-    // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
+    // Empty input → empty output (stat_bin is the exception that allows empty)
     if clean.is_empty() {
         return Ok(empty_bin_columns(aggs.len()));
     }
@@ -3701,8 +3701,8 @@ mod tests {
         assert!(aggregate_wire.starts_with(&body), "Aggregate refuses with the same text: {aggregate_wire}");
     }
 
-    /// A `Bin` without the new fields writes the same bytes as before; the
-    /// new fields round-trip when set.
+    /// A `Bin` without the new fields writes the same bytes as a `Bin` that
+    /// never had them; the new fields round-trip when set.
     #[test]
     fn per_row_and_aggregates_wire_is_additive() {
         let plain = bin_json(r#"{"field":"x"}"#);

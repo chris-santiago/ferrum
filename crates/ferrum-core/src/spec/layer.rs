@@ -701,7 +701,7 @@ mod tests {
 
     /// `reads_chart_data` is read from the wire when set and omitted when
     /// false, so a layer that does not read its chart's data through a named
-    /// output serializes exactly as before the field existed.
+    /// output serializes identically to a `Layer` that never had the field.
     #[test]
     fn reads_chart_data_round_trips_and_is_omitted_when_false() {
         let flagged: Layer = serde_json::from_value(serde_json::json!({
@@ -720,7 +720,8 @@ mod tests {
 
     /// `inherited_channels` round-trips under the wire keys `Encoding` itself
     /// uses, and is omitted when empty so a layer that inherited nothing onto
-    /// its own encoding serializes exactly as before the field existed.
+    /// its own encoding serializes identically to a `Layer` that never had
+    /// the field.
     #[test]
     fn inherited_channels_round_trips_and_is_omitted_when_empty() {
         let listed = Layer {

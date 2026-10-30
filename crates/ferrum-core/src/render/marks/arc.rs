@@ -204,8 +204,8 @@ pub(crate) fn band_wedges(
         }
     }
     // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
-    // categories, and untouched by the F-L04-03 band-geometry work (spec §3
-    // non-goals): the band is an angle, not read off the theta axis's resolved
+    // categories, and untouched by the F-L04-03 band-geometry work: the band
+    // is an angle, not read off the theta axis's resolved
     // scale (which spans the plot width, not the circle), so there is no pixel
     // range, no `padding_inner`/`padding_outer`/`align` and no `bandwidth()` to
     // ask. Padding here is `pad_angle`, a separate radial-chart concept.

@@ -710,7 +710,7 @@ class SpecBuildMixin:
             if inherited_detail is not None:
                 layer_enc.setdefault("detail", inherited_detail)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
-            # Contrast reading (spec §6.5): a layer carrying `contrast_against`
+            # Contrast reading: a layer carrying `contrast_against`
             # binds its own color to it and paints the sentinel ink ONLY when
             # no caller fill reached this layer -- every style door (figure
             # `mark=`, the composite catch-all, `layer_kwargs=`, a literal
@@ -949,8 +949,8 @@ class SpecBuildMixin:
     def _build_facet_dict(self) -> dict:
         """Convert internal _facet to the JSON dict Rust's FacetSpec expects.
 
-        Delegates to :func:`ferrum._facet.build_facet_dict`; the facet machinery
-        lives in ``_facet.py`` (cohesion finding C2/C10). On a ``+``
+        Delegates to :func:`ferrum._facet.build_facet_dict`, which keeps the
+        facet machinery in one module rather than duplicated here. On a ``+``
         composition over different frames, each operand frame lacking a facet
         field is declared under ``repeat`` by its row marker, so Rust draws
         its rows in every panel along that field
@@ -971,7 +971,7 @@ class SpecBuildMixin:
 
     @staticmethod
     def _resolve_statistic(resolved, effective_transforms: list, enc: dict) -> _ResolvedStatistic:
-        """Run a single chart's encoding statistic: its one ``Aggregate`` or ``Bin`` (spec §6.4).
+        """Run a single chart's encoding statistic: its one ``Aggregate`` or ``Bin``.
 
         The chart is one layer, so its statistic is the plan
         :func:`~ferrum._encode_lowering._statistic_plan` reads off *enc*,

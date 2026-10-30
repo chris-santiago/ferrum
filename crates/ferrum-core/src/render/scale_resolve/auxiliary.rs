@@ -130,8 +130,7 @@ pub(in crate::render) enum NumericAuxKind {
 }
 
 impl Default for NumericAuxKind {
-    /// No `scale=` at all resolves through the plain linear path, as before
-    /// this type existed.
+    /// No `scale=` at all resolves through the plain linear path.
     fn default() -> Self {
         NumericAuxKind::Linear { nice: false, zero: false }
     }
@@ -289,8 +288,7 @@ impl DrawableInterval {
 /// is removed at the draw seam ([`log_aux_drawn_rows`]), not here:
 /// this function only resolves the domain/range the IN-range rows map
 /// through. Every other kind reads `extent` unsided (`left_out` is always
-/// `0` there), byte-identical to before this function could fail or warn at
-/// all.
+/// `0` there).
 #[allow(clippy::too_many_arguments)]
 fn numeric_aux_scale_kind(
     channel: &'static str,
@@ -428,7 +426,7 @@ fn sorted_categorical_domain(
 /// dtype refusal and an exclusion.
 ///
 /// `side`: a `Log` channel's side of zero (`None` for every other scale
-/// type, byte-identical to before this parameter existed). Every path —
+/// type). Every path —
 /// unlayered, unlayered-faceted, and layered alike — reads its
 /// `left_out`/`left_out_zero`/`left_out_opposite` from the same sided fold
 /// the positional union uses: the facet-shared case counts from the
@@ -742,7 +740,7 @@ impl OpacityChannel {
 /// explicit `[lo, hi]` domain, which wins outright (mirroring the positional
 /// explicit-scale bypass). Range: the theme opacity band
 /// `[sizes.opacity_min, sizes.opacity_max]`, unless `scale=` carries an explicit
-/// `[lo, hi]` range (spec §4.3), clamped to a legal alpha. The `scale=` passes
+/// `[lo, hi]` range, clamped to a legal alpha. The `scale=` passes
 /// the [`numeric_aux_scale`] gate, which also accepts `LogScale`/`PowScale`/
 /// `SqrtScale` (resolved through that scale's own transform instead of
 /// linear), so `reverse`/`nice` are honored (`zero` only on `LinearScale`)

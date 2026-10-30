@@ -52,7 +52,7 @@ from tests._wcag import (
 
 
 def test_the_public_mark_text_door_still_refuses_the_sentinel_as_a_color() -> None:
-    """``"theme:contrast"`` is not public color vocabulary (spec §6.5).
+    """``"theme:contrast"`` is not public color vocabulary.
 
     It reaches the renderer only through an internal `_Layer`, the same way
     `"theme:label"` reaches it through `marks/composite.py`'s hand-built

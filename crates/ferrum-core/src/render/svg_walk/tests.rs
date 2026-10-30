@@ -607,7 +607,7 @@ fn emit_text_negative_opacity_clamps_to_zero_alpha() {
     );
 }
 
-// ── `glyph_edge_extents` vs usvg's own rendered ink (spec §6.13) ──
+// ── `glyph_edge_extents` vs usvg's own rendered ink ──
 
 /// Builds a full SVG containing exactly one `<text>` node at `(x, y)`, on a
 /// canvas large enough that no case in the matrix below clips.

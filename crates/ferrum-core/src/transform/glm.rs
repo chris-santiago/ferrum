@@ -1040,7 +1040,7 @@ mod tests {
         let parsed: GlmSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, grouped);
         let ungrouped = serde_json::to_string(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None)).unwrap();
-        assert!(!ungrouped.contains("groupby"), "an ungrouped spec serializes as before: {ungrouped}");
+        assert!(!ungrouped.contains("groupby"), "an ungrouped spec omits groupby: {ungrouped}");
     }
 
     /// A group that cannot be fit draws no fit (its curve is all NaN) and a

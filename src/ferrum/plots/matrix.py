@@ -1005,7 +1005,7 @@ def _heatmap_build(
     # label's own `color` reads the same object the cells' `color` draws
     # (`enc["color"]`, already resolved above through the encode_kwargs
     # override, the scale wrap and the title wrap), so each label reads its
-    # own cell's hue and paints the contrast ink against it (spec §6.5)
+    # own cell's hue and paints the contrast ink against it
     # instead of one fixed theme ink. `rows` is reused here rather than
     # rebuilt: `.mark_rect(...).encode(...)` above already cloned away from
     # it, so it is still the plain, markless rows chart.

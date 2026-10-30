@@ -9475,12 +9475,12 @@ mod tests {
         }
     }
 
-    /// The fix case a stride-2-from-zero
-    /// anchored cull (decades at 0, 9, 18 kept unconditionally, every other
-    /// even index among the rest) and a stride-4-from-zero one are both
-    /// `anchored_visibility` outputs for SOME stride, so both must count as
-    /// even — `thins_x_labels_evenly` used to reject both as irregular
-    /// (neither equals a plain `stride_visibility`).
+    /// A stride-2-from-zero anchored cull (decades at 0, 9, 18 kept
+    /// unconditionally, every other even index among the rest) and a
+    /// stride-4-from-zero one are both `anchored_visibility` outputs for
+    /// SOME stride, so both must count as even: `thins_x_labels_evenly`
+    /// does not reject either as irregular (neither equals a plain
+    /// `stride_visibility`).
     #[test]
     fn thins_x_labels_evenly_accepts_a_decade_anchored_cull() {
         let axis = dense_ladder_axis_layout(&[0, 2, 4, 6, 9, 11, 13, 15, 18]);
@@ -9490,8 +9490,8 @@ mod tests {
     }
 
     /// Guard: a drawn mask no stride's anchored visibility produces (index 1
-    /// drawn with nothing else between the decades) still rejects, exactly
-    /// as before the anchor-aware check above was added.
+    /// drawn with nothing else between the decades) still rejects,
+    /// unaffected by the anchor-aware check above.
     #[test]
     fn thins_x_labels_evenly_still_rejects_an_irregular_log_cull() {
         let axis = dense_ladder_axis_layout(&[0, 1, 9, 18]);
@@ -9572,13 +9572,13 @@ mod tests {
         assert!(!thins_x_labels_evenly(&axis));
     }
 
-    /// The fix case `thins_x_labels_evenly`
-    /// read only the generated ticks' drawn mask, so an anchored Log cull
-    /// that keeps every decade (not a plain stride) was classed as
-    /// irregular — `padding.auto` then rejected the layout that kept the
-    /// dense `{1..9}` ladder's decades in favor of its `auto=false`
-    /// fallback, exactly as if a real label had been lost. A continuous x
-    /// axis whose 19-label ladder (anchors at 0, 9, 18 — the decades 1, 10,
+    /// An anchored Log cull that keeps every decade (not a plain stride)
+    /// counts as even, because `thins_x_labels_evenly` compares the drawn
+    /// mask against `anchored_visibility`, anchors included. So
+    /// `padding.auto` keeps the layout that keeps the dense `{1..9}`
+    /// ladder's decades rather than its `auto=false` fallback, which would
+    /// treat it as if a real label had been lost. A continuous x axis
+    /// whose 19-label ladder (anchors at 0, 9, 18 — the decades 1, 10,
     /// 100) culls to an anchored mask must keep the `padding.auto` layout
     /// (every decade drawn), not fall back.
     #[test]

@@ -1538,7 +1538,7 @@ def _has_y_slot_axis(chart, y_slot: str) -> bool:
 
 #: The coordinate systems that move y off the vertical axis, so a secondary
 #: (independent) y axis has no place: a chart declaring one with an
-#: independent-y layer is refused (user ruling 2026-10-20).
+#: independent-y layer is refused.
 _Y2_REFUSING_COORDS = frozenset({"CoordFlip", "CoordPolar", "CoordGeo"})
 
 

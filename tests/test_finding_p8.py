@@ -1,16 +1,5 @@
 """Regression tests — Finding P8 (2026-08-27 design-review remediation batch).
 
-P8: ``_spec_build.py``'s polar remap (``SpecBuildMixin._with_polar_channels_lowered``)
-used to synthesize a
-phantom positional channel for theta-only ``mark_arc`` charts under
-``CoordPolar`` (``enc["y"] = enc["x"]`` when ``theta="x"``, mirrored for
-``theta="y"``) so Rust's ``scale_resolve`` — which unconditionally required
-both x and y — wouldn't error. That dummy channel leaked into
-``Chart.to_dict()`` (a phantom ``y``/``x`` bound to the theta field the user
-never encoded) and, because ``build_nominal_theta`` in ``arc.rs`` reads the
-dummy as the radius column, a numeric-but-ordinal theta silently drove wedge
-radius off the theta values (latent aliasing bug).
-
 The companion Rust task (Task 11, committed) added a ``Mark::Arc`` arm to
 ``render::scale_resolve::resolve_scales_with_leaf_context``'s single-axis
 exemption block (mirroring the existing ``Tick``/``Rule`` single-axis

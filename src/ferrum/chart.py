@@ -2236,7 +2236,7 @@ class Chart(
             cond = channel._kwargs.get("condition")
             if cond is not None:
                 # ChannelClass(field=..., condition=<ConditionalSpec>): the
-                # H9 sibling of the encode(<channel>=cond) form above --
+                # sibling of the encode(<channel>=cond) form above --
                 # same translation (stamp the channel from the encode key,
                 # append to _conditionals, auto-register the selection),
                 # except the base field encoding also has to be preserved.

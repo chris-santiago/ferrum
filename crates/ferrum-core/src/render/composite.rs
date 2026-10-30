@@ -223,7 +223,7 @@ pub(crate) fn resolve_composite_scales(
 /// The non-positional (color/size) half of [`resolve_composite_scales`]:
 /// leaf-span union at each effective-shared node (GH #74). A node's
 /// effective mode is its explicit setting if any, else the nearest
-/// ancestor's effective mode (spec §6); the union spans every descendant
+/// ancestor's effective mode; the union spans every descendant
 /// leaf whose effective mode stays shared, through nested composites and
 /// spliced overlay subtrees.
 ///
@@ -700,7 +700,7 @@ fn assign_union(
         return Ok(());
     };
 
-    // Spec §6.13: a shared numeric x/y group's `Mark::Text` rows are the
+    // A shared numeric x/y group's `Mark::Text` rows are the
     // union of every contributing member's own, already measured by that
     // member's own prepare pass before this resolve ran
     // ([`LeafResolveInput::x_text_rows`]/`y_text_rows`) and gated by that
@@ -1093,7 +1093,7 @@ fn resolve_caller_scale_group(
             let side = crate::scale::log::LogSide::of(common.domain.as_deref());
             let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
             // Only a FINITE member domain folds into the group's extent —
-            // `leaf_positional_domain` no longer sanitizes an all-off-side
+            // `leaf_positional_domain` does not sanitize an all-off-side
             // member's empty extent to a placeholder `(0.0, 1.0)`, so this
             // union never sees that placeholder in the first place; skipping
             // non-finite entries here is still the right rule regardless,
@@ -2276,7 +2276,7 @@ mod tests {
         assert_eq!(ctx[0].y, None);
     }
 
-    /// Spec §6.13: a shared numeric x/y group's `Mark::Text` rows are the
+    /// A shared numeric x/y group's `Mark::Text` rows are the
     /// union of every member's own (already measured by that member's own
     /// prepare pass, gated by that member's own default-padding predicate),
     /// set on EVERY member — so a point leaf with no `Mark::Text` of its own
@@ -3493,19 +3493,6 @@ mod tests {
         LeafOwned { spec, encoding: rendering, batch, outputs: outs }
     }
 
-    /// `resolve_caller_scale_group` used to hardcode `coord_flipped: false`
-    /// in its Log refusal, so a flipped overlay's all-off-side Log channel
-    /// named "shared y domain" (the POST-flip axis) instead of "shared x
-    /// domain" (the channel the user actually wrote `x=` on).
-    ///
-    /// This refusal is reachable only once `leaf_positional_domain` stops
-    /// sanitizing an all-off-side member's empty extent to a FINITE
-    /// `(0.0, 1.0)` before the group's min/max fold ever sees it — with
-    /// that placeholder in place, `resolve_log_extent`'s `!has_values`
-    /// branch never fires through `resolve_composite_scales`, so the
-    /// scenario this test builds renders `Ok` (both leaves resolving to the
-    /// `(0, 1)` placeholder) rather than refusing. Fixed alongside that
-    /// placeholder fix, so the two land and prove out together.
     #[test]
     fn a_flipped_overlay_groups_log_refusal_names_the_users_channel() {
         let leaf0 = overlay_flipped_log_x_leaf(&[-5.0, -7.0]);
@@ -3524,11 +3511,9 @@ mod tests {
         );
     }
 
-    /// The fix case the
-    /// same hardcoded `coord_flipped: false` recurred at
-    /// `establishing_categories`'s `distinct_values_in_order` call —
-    /// `coord_flipped` is now `leaf.coord_flipped()` there too, so a flipped
-    /// member's own column-enumeration refusal also names the user's
+    /// `establishing_categories`'s `distinct_values_in_order` call reads
+    /// `leaf.coord_flipped()`, not a hardcoded `coord_flipped: false`, so a
+    /// flipped member's own column-enumeration refusal also names the user's
     /// channel.
     #[test]
     fn a_flipped_overlay_categorys_refusal_names_the_users_channel() {
@@ -3562,7 +3547,7 @@ mod tests {
     }
 
     /// An overlay member over `log_scale` reading `v` from `values`, no
-    /// flip: the shared Y choice-H's group resolution exercises.
+    /// flip: used by the test below.
     fn overlay_log_y_leaf(values: &[f64]) -> LeafOwned {
         let log_scale = crate::spec::encoding::ScaleSpec::Log {
             base: 10.0,
@@ -3586,12 +3571,11 @@ mod tests {
         owned(spec_with(e), batch)
     }
 
-    /// The fix case): `leaf_positional_domain`
-    /// folded an all-off-side member's empty extent to `(0.0, 1.0)` via
-    /// `finite_or_default` before handing it to the group, which then
-    /// unioned that placeholder into the Log domain — an all-off-side
-    /// member must contribute its COUNT to the group, never a `0..1`
-    /// placeholder into the group's own extent.
+    /// An all-off-side member must contribute its COUNT to the group, never
+    /// a `0..1` placeholder into the group's own extent: `leaf_positional_domain`
+    /// does not fold an all-off-side member's empty extent to `(0.0, 1.0)`
+    /// via `finite_or_default` before handing it to the group, which would
+    /// union that placeholder into the Log domain.
     #[test]
     fn an_all_off_side_member_never_unions_zero_into_the_group_domain() {
         let leaf0 = overlay_log_y_leaf(&[1.0, 10.0, 100.0]);
@@ -3978,8 +3962,8 @@ mod tests {
     /// with every row on-side. `leaf_positional_domain` pushes the SAME
     /// `RenderWarning::LogScaleRowsLeftOut` x/y and every numeric auxiliary
     /// channel already push theirs through (`resolve_log_extent`) — a
-    /// composite leaf no longer stays silent where a flat layered chart
-    /// would warn, and the group still reports exactly one warning for the
+    /// composite leaf warns wherever a flat layered chart would, and the
+    /// group still reports exactly one warning for the
     /// whole overlay, not one per member.
     #[test]
     fn an_overlay_groups_log_caller_scale_warns_once_for_the_whole_frame() {
@@ -4041,8 +4025,7 @@ mod tests {
     /// (`sided_aux_numeric_union`, the same fold the layered flat route
     /// uses) before pushing `resolve_log_extent`'s warning, so the group
     /// reports ONE `LogScaleRowsLeftOut` with BOTH layers' rows combined —
-    /// not two per-layer warnings, and not the old silently-dropped
-    /// `left_out: 0`.
+    /// not two per-layer warnings.
     #[test]
     fn a_shared_size_groups_layered_leaf_warns_once_with_both_layers_rows() {
         use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};

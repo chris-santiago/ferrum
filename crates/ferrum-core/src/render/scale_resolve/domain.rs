@@ -624,7 +624,7 @@ impl<'a> AuxRead<'a> {
 
     /// The refusal of a raster image's cells under a categorical color scale
     /// ([`RenderError::RasterColorNotQuantitative`]), voiced by the image
-    /// layer's public call (ruling F: `mark_raster`, else `layer {i}:
+    /// layer's public call (`mark_raster`, else `layer {i}:
     /// mark_image`); `None` for a column read.
     pub(in crate::render) fn raster_color_refusal(&self, reason: crate::render::RasterColorReason) -> Option<RenderError> {
         let AuxReadKind::RasterCells { entry, .. } = self.kind else { return None };
@@ -1152,7 +1152,7 @@ pub(in crate::render) enum ColorReads {
 /// other than `establishing`'s is excluded too, with the same one
 /// [`RenderWarning::LayerScaleExcluded`], decided in the same pass so a read
 /// warns at most once. Its marks still draw through the panel's scale; a
-/// read with no bin rule joins as before.
+/// read with no bin rule simply joins.
 pub(in crate::render) fn admitted_color_reads<'a>(
     reads: &[AuxRead<'a>],
     establishing: &crate::spec::encoding::EncodingSpec,
@@ -1485,7 +1485,7 @@ pub(in crate::render) fn locate_seed_field<'a>(
 /// the color resolver (`color.rs::scale_explicit_domain`, which seeds a
 /// colorbar's extent) and by the chart-level scale-domain config
 /// (`prepare::apply_axis_domain_config_for`, whose four fields lose to it
-/// silently, D3/spec §4.2).
+/// silently).
 ///
 /// Delegates to [`ScaleSpec::positional_extent`](crate::spec::encoding::ScaleSpec::positional_extent),
 /// which is compiler-enforced exhaustive over the scale variants and already
@@ -1510,7 +1510,7 @@ pub(in crate::render) fn encoding_explicit_extent(
 /// and when no domain is declared (the caller falls back to data first-appearance
 /// order).
 ///
-/// Shared by every ordinal auxiliary channel's D1 explicit-domain path — color
+/// Shared by every ordinal auxiliary channel's explicit-domain path — color
 /// (`color.rs`'s categorical resolver), shape, and stroke-dash
 /// (`auxiliary.rs`'s `build_shape_scale`/`build_stroke_dash_scale`, #123) — so
 /// the one resolution rule lives once rather than three times.
@@ -1611,10 +1611,13 @@ fn numeric_domain_sort_key(s: &str) -> (u8, f64, &str) {
     }
 }
 
-/// Ascending comparator for [`numeric_domain_sort_key`]; `"descending"`
-/// sorts ascending through this and then reverses the whole result, which
-/// is the one way to make the NaN tier land after every finite value AND
-/// before the non-parsing tier in BOTH directions at once.
+/// Ascending comparator for [`numeric_domain_sort_key`]: every number (finite
+/// or infinite) orders by value, the NaN tier lands after every one of them
+/// — including `+inf` — and before the non-parsing tier. `"descending"` sorts
+/// ascending through this and then reverses the whole result, so the tier
+/// order flips too — the non-parsing tier comes first, then NaN, then every
+/// number last. NaN stays sandwiched between the other two tiers in both
+/// directions; which tier comes first does not.
 fn numeric_domain_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (ta, va, sa) = numeric_domain_sort_key(a);
     let (tb, vb, sb) = numeric_domain_sort_key(b);
@@ -1728,8 +1731,8 @@ pub(in crate::render) fn apply_sort_to_domain(
 /// reordered by the per-category aggregate (default op = sum) of the field bound
 /// to the named channel.
 ///
-/// **The shorthand names an AUTHORED channel** (#95, user-adjudicated; spec
-/// §5/§8). `sort="-y"` means "descending by whatever the user's own
+/// **The shorthand names an AUTHORED channel** (#95). `sort="-y"` means
+/// "descending by whatever the user's own
 /// `.encode(y=...)` bound", which under `CoordFlip` is the field that RENDERS
 /// on x. Before this was pinned, the flipped spelling aggregated the category
 /// column itself, fell back to insertion order, and warned — so the only
@@ -1749,7 +1752,7 @@ fn apply_channel_shorthand_sort(
     } else {
         (SortOrder::Ascending, shorthand)
     };
-    // #95 (AUTHORED semantics, spec §5/§8): `channel` is the literal substring
+    // #95 (AUTHORED semantics): `channel` is the literal substring
     // of the `shorthand` STRING the user wrote (`sort="-y"` → `"y"`), so it
     // names the channel their own `.encode(y=...)` bound — the PRE-flip space.
     // `ctx.x_field`/`ctx.y_field` name the RENDERED channels. Move the
@@ -1915,11 +1918,10 @@ fn sort_domain_by_aggregate(
 
 /// Would Python's own single-chart zero-anchor injection have anchored this
 /// layer on this channel? The eligibility half of the bar zero-anchor rule
-/// (T5r; narrowed cycle 2 — spec-review issue 1; extended cycle 2 —
-/// rust-quality-review findings 1-3), extracted from `numeric_domain_union`'s
+/// (T5r), extracted from `numeric_domain_union`'s
 /// union loop so the concept is nameable and directly unit-testable rather
-/// than reachable only end-to-end through a 285-line function (batch-F close
-/// review). `numeric_domain_union` owns the *arithmetic* (the two guarded
+/// than reachable only end-to-end through a 285-line function.
+/// `numeric_domain_union` owns the *arithmetic* (the two guarded
 /// assignments that widen the resolved extent to zero); this owns the
 /// *question*.
 ///
@@ -1929,8 +1931,7 @@ fn sort_domain_by_aggregate(
 /// of every read below live in one space. `value_field_contributed` says
 /// whether the layer's value-slot field actually resolved to data in some
 /// batch, so a merely-DECLARED field (wrong `data_source`, not loaded yet)
-/// cannot force a zero-anchor on the strength of its name alone (spec-review
-/// finding 3).
+/// cannot force a zero-anchor on the strength of its name alone.
 ///
 /// The terms mirror the single-chart injection's guards
 /// (`_spec_build.py::_build_encoding_specs`'s zero-anchor block), not just
@@ -1948,7 +1949,7 @@ fn sort_domain_by_aggregate(
 ///       `_explanation.py::desugar_shap_waterfall`'s (`x=x0`, `x2=x1`,
 ///       `y=feature`) has its value on `x` and is excluded by guard (b): its
 ///       value channel carries `x2`.
-///   (b) `not _y2_bound` there (the D3 rule) — when this layer's OWN value
+///   (b) `not _y2_bound` there — when this layer's OWN value
 ///       channel carries a paired span field (`y2`, or `x2` on an x value
 ///       channel — `layer_fields[1]`), the extent is taken literally from
 ///       `[value, span]` and force-anchoring to zero would distort a domain
@@ -1957,7 +1958,7 @@ fn sort_domain_by_aggregate(
 ///       `y2_bound_bar_layer_never_zero_extends` below pins the vertical one.
 ///   (c) the layer's own opt-out ([`bar_wants_zero`]) — `layer.mark_style.zero == Some(false)`,
 ///       the per-layer mirror of `mark_bar(zero=False)` / `_mark_zero`
-///       (`spec::mark_style::MarkKwargsSpec::zero`, T5r cycle 2). Live and
+///       (`spec::mark_style::MarkKwargsSpec::zero`, T5r). Live and
 ///       user-reachable today via the generic per-layer `mark=` passthrough
 ///       on layered figure functions — e.g. `fm.catplot(..., kind="bar",
 ///       mark={"bar": {"zero": False}})` resolves the value axis to the raw
@@ -2032,7 +2033,7 @@ pub(crate) struct TextEdgeRow {
 }
 
 /// Every [`TextEdgeRow`] a continuous `channel`'s `Mark::Text` layers
-/// contribute (spec §6.13), scale-independent — built once per rendered
+/// contribute, scale-independent — built once per rendered
 /// channel by [`text_edge_rows`] and shared verbatim by a standalone
 /// chart's own axis and, unioned, by a composite group's shared axis.
 /// `pub(crate)` (not `pub(in crate::render)`, unlike most of this module):
@@ -2056,7 +2057,7 @@ impl TextEdgeRows {
 }
 
 /// Every `Mark::Text` row's ink requirement on `channel`, measured with
-/// `metrics` and each layer's own resolved mark style (spec §6.13), over
+/// `metrics` and each layer's own resolved mark style, over
 /// `layers`: each already-prepared `LayerPrepared` paired with the batch it
 /// draws. A `LayerPrepared`'s encoding and `coord` are already resolved to
 /// the rendered coordinate space ([`LayerPrepared::in_its_coord`]), so
@@ -2198,7 +2199,7 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     curve inside (0.05, 0.95).
 ///   - On an unlayered spec the one mark draws `primary_batch`. When the
 ///     field is absent from it, every named output holding it is read
-///     (Phase 8b composite-mark rule — e.g. boxplot whisker fields living in
+///     (the composite-mark rule — e.g. boxplot whisker fields living in
 ///     the `box` named output).
 ///   - When `include_final` is set (faceted chart, this channel resolves
 ///     `ResolveMode::Shared`), the chart's data also takes in the global
@@ -2211,8 +2212,7 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     `false`, keeping the per-panel-only behavior byte-identical.
 ///   - Every OTHER layer's fields for this channel are unioned too, read in
 ///     the channel's own coordinate space — see the `spec.layers` loop below.
-///   - **Bar zero-anchor (T5r, catplot aggregation; narrowed cycle 2 per
-///     spec-review issue 1 and rust-quality-review findings 1-3).** When a
+///   - **Bar zero-anchor (T5r, catplot aggregation).** When a
 ///     `Mark::Bar` layer binds this channel's VALUE slot (never its position
 ///     slot — `"y"` unflipped, `"x"` under `CoordFlip`, in the channel's own
 ///     coordinate space, same `coord_flipped` normalization the layer-union
@@ -2226,7 +2226,7 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     `ScaleSpec`. The eligibility question — all four conditions, and why
 ///     each one mirrors a guard of the single-chart injection
 ///     (`_spec_build.py::_build_encoding_specs`: `axis == "y"`,
-///     `_y2_bound`'s D3 rule, `_mark_zero`) — lives in
+///     `_y2_bound`, `_mark_zero`) — lives in
 ///     [`layer_wants_bar_zero_anchor`], which owns the per-term rationale;
 ///     this function owns only the arithmetic. A single (non-layered)
 ///     `mark_bar` never reaches this function at all: Python's
@@ -2242,18 +2242,6 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     Scoped to `spec.layers` only (never `spec.mark`), so a genuinely
 ///     unlayered spec's auto path is untouched — byte-identical, because a
 ///     single-chart bar never reaches the auto path in the first place.
-///
-///     One entry path is newer than the paragraph above and not implied by it
-///     (#247A): a FLAT layered spec whose chart-level encoding carries the
-///     injected bar scale used to return at `build_axis_scale`'s explicit-scale
-///     bypass and never arrive here at all. That bypass now yields when the
-///     scale is `system_injected`, so `bar + point` reaches this union where it
-///     previously could not. The gate that decides it, and the reason
-///     provenance rather than deleting the injection was the route, are
-///     documented at that bypass in
-///     [`super::positional::build_axis_scale`] — read the two together; this
-///     doc owns the arithmetic and its eligibility terms, not the question of
-///     which specs get here.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
@@ -2595,7 +2583,7 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
 /// [`numeric_domain_union`] with the layer selection spelled out.
 ///
 /// `side`: a `Log` channel's side of zero (always `None` for every other
-/// continuous type, exactly as before this parameter existed). Every
+/// continuous type, since only `Log` ever sets it). Every
 /// contributing column folds through [`sided_min_max_f64`] instead of
 /// [`column_min_max_f64`] (a `None`-side call of the same function, so a
 /// non-`Log` caller's `(lo, hi)` is byte-identical); the rows this union's
@@ -2694,7 +2682,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     // callsite. A layer on its own named output reads that output alone,
     // which is already the all-panels one.
     //
-    // Choice C's whole-frame tally rule: a Chart-source field is always
+    // The whole-frame tally rule: a Chart-source field is always
     // COUNTED from the all-panels column when the chart publishes one,
     // whatever this read's own facet resolution. `include_final` still
     // governs the EXTENT fold alone (a true per-panel domain for an
@@ -2772,7 +2760,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                         }
                     }
                     if side.is_some() {
-                        // Choice C's whole-frame tally rule: `FINAL`'s
+                        // The whole-frame tally rule: `FINAL`'s
                         // column when the chart publishes one, else the
                         // panel's own (an unfaceted call, or a field not
                         // yet in `FINAL` — the panel IS the whole frame
@@ -2857,7 +2845,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     // nothing.
     //
     // Also covers each OTHER layer's paired channel field (x2 for "x", y2 for
-    // "y") — batch-A Task 13. Before this, a layer's OWN x2/y2 was never
+    // "y"). Before this, a layer's OWN x2/y2 was never
     // unioned in here (only its bare x/y was), which this module's own
     // doc comment above already names as required "when a layer's
     // data_source points at a named transform whose output extends past the
@@ -2872,8 +2860,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     // the far endpoint and the reference diagonal silently drew 0 nodes even
     // though `marks/rule.rs`'s four-numeric branch resolved correctly.
     if let Some(layers) = &spec.layers {
-        // COORDINATE SPACE (spec §4.4, "Extended 2026-09-02, T13 quality
-        // review", ruling 1). `channel`/`field` name the axis being resolved,
+        // COORDINATE SPACE (T13). `channel`/`field` name the axis being resolved,
         // i.e. the POST-flip space: the caller derived them from the rendering
         // encoding `prepare::build_layers` already swapped. `spec.layers`, by
         // contrast, is the spec as AUTHORED — `prepare` swaps its own
@@ -2894,7 +2881,7 @@ pub(in crate::render) fn numeric_domain_union_over(
         // blowout described above, one level down.
         //
         // Flipping the layer's encoding costs a clone, so it is skipped for the
-        // (overwhelmingly common) unflipped layer exactly as before.
+        // (overwhelmingly common) unflipped layer.
         //
         // The panel's own flip state (spec.coord alone, not any layer's
         // effective one) — needed below to tell a layer whose OWN coord
@@ -2959,13 +2946,11 @@ pub(in crate::render) fn numeric_domain_union_over(
                 };
             // Union every declared field for this layer on this channel, and
             // remember whether the VALUE slot (index 0) actually resolved to
-            // data in some batch — `value_field_contributed` below. One pass
-            // replaces what used to be a separate "union everything, then
-            // separately ask `.is_some()`" step: a layer's field can be
-            // absent from every batch (wrong `data_source`, not loaded yet),
+            // data in some batch — `value_field_contributed` below. A layer's
+            // field can be absent from every batch (wrong `data_source`, not loaded yet),
             // and the bar zero-anchor rule below must not fire on the
             // strength of the field's declared NAME alone when it never
-            // contributed a single value (spec-review finding 3).
+            // contributed a single value.
             let source = reads.source(layer_index);
             let mut value_field_contributed = false;
             for (i, lf) in layer_fields.into_iter().enumerate() {
@@ -3056,9 +3041,7 @@ pub(in crate::render) fn numeric_domain_union_over(
         // The SAME widening `resolve_continuous_domain_and_range` applies for a
         // `ScaleSpec::Linear { zero: true }`, through the one helper both call
         // (`positional::extend_extent_to_zero`) rather than a second copy of its
-        // two comparisons — this block used to restate them, and the restatement
-        // was already drifting: it claimed to mirror a block that had itself
-        // become a call to the helper. Applied here as well as there because an
+        // two comparisons. Applied here as well as there because an
         // auto-path spec reaches this function instead of that one (see this
         // function's doc comment).
         //
@@ -3072,8 +3055,8 @@ pub(in crate::render) fn numeric_domain_union_over(
     // Degenerate domain: a single row or all-equal values produce mn == mx.
     // As of GH #104, `scale::core::degenerate_ratio` already makes every
     // continuous scale's `scale()` finite (a centered midpoint) for a
-    // zero-span domain, so this expansion is no longer needed to keep marks
-    // from vanishing — `to_pixel_f64` no longer returns NaN there. It stays
+    // zero-span domain, so this expansion is not needed to keep marks
+    // from vanishing: `to_pixel_f64` does not return NaN there. It stays
     // for a reason #104 doesn't touch: this is the *domain itself* (the
     // axis's displayed extent, tick generation, "nice" rounding), not the
     // per-value pixel projection. A literal `[d, d]` domain still collapses
@@ -3209,18 +3192,16 @@ pub(in crate::render) fn establishing_categories(
 /// column for this channel**.
 ///
 /// The shared-axis invariant is "the resolved domain covers every layer's
-/// extent". The numeric side has enforced it since long before this function
-/// existed — [`numeric_domain_union`]'s `spec.layers` loop, whose own doc
+/// extent". The numeric side already enforces it —
+/// [`numeric_domain_union`]'s `spec.layers` loop, whose own doc
 /// explains why (a cross-DataFrame `a + b` merge renames the RHS columns, so the
 /// chart-level field covers the LHS data ALONE). The ordinal side had no
 /// equivalent, so the same shape lost the RHS layer's categories entirely: no
 /// band existed for them, and every mark of that layer was silently dropped for
-/// want of one. Measured before this function: `Chart({cat:[a,b,c]}) +
-/// Chart({cat:[x,y,z]})`, both `mark_point().encode(x="cat:N", y="v:Q")`, drew
-/// **3 circles for 6 rows** under x labels `['a','b','c']`.
+/// want of one.
 ///
 /// **Order: first appearance, in layer order.** Walk the chart-level column,
-/// then the layers in spec order, appending each previously-unseen category.
+/// then the layers in spec order, appending each category not yet seen.
 /// This is not a new semantic: [`crate::render::arrow_cast::distinct_values_in_order`]
 /// already orders categories by first appearance *within* a column, and this
 /// extends that same rule across the layer boundary rather than introducing a
@@ -3352,19 +3333,18 @@ pub(in crate::render) fn positional_category_union(
         // which is what keeps "this layer's category column" and "this layer's
         // own opposite coordinate" in one space.
         //
-        // WHOSE space is per layer, and the read is therefore INSIDE the loop
-        // (`#172`(1), close review F1): the layer `prepare::build_layers` swaps
+        // WHOSE space is per layer, and the read is therefore INSIDE the loop:
+        // the layer `prepare::build_layers` swaps
         // is the one whose OWN effective coord flips, so that is the layer whose
-        // authored `y` occupies this x axis. This loop read the CHART's flip for
-        // every layer until then — hoisted above the loop, where a per-layer
-        // answer cannot be expressed — and a member carrying its own `CoordFlip`
-        // therefore contributed its AUTHORED channel: measured, `bar(x="cat:N")
-        // + point(x="v2:Q", y="cat2:N").coord(CoordFlip())` enumerated the
-        // point layer's value column as three spurious bands (`['a','b','c',
-        // '4','5','6']`) while the layer's real post-flip categories never
-        // reached the ladder at all, so it drew 0 of its 3 circles. That is
-        // precisely the defect this function exists to fix, reopened one level
-        // down for the shape per-layer coord made expressible.
+        // authored `y` occupies this x axis. Reading the CHART's flip once,
+        // hoisted above the loop, cannot express a per-layer answer: a
+        // member carrying its own `CoordFlip` would contribute its
+        // AUTHORED channel instead of the post-flip one —
+        // `bar(x="cat:N") + point(x="v2:Q", y="cat2:N").coord(CoordFlip())`
+        // would enumerate the point layer's value column as three spurious
+        // bands (`['a','b','c', '4','5','6']`) while the layer's real
+        // post-flip categories never reach the ladder at all, so it would
+        // draw 0 of its 3 circles.
         let coord_flipped = crate::spec::coord::flips_positional_channels(
             layer.effective_coord(spec.coord.as_ref()),
         );
@@ -3397,8 +3377,8 @@ pub(in crate::render) fn positional_category_union(
             continue;
         };
         // A column that cannot be a category KEY cannot be a category BAND
-        // either, so it contributes nothing and that is lossless (close review
-        // F2). The two halves of that sentence are one dtype set by
+        // either, so it contributes nothing and that is lossless. The two
+        // halves of that sentence are one dtype set by
         // construction: [`crate::render::arrow_cast::ensure_category_keyable`]
         // admits exactly what `distinct_values_in_order` (this ladder) and
         // `col_as_ordinal_category_str` (the per-row key every mark builder
@@ -3413,18 +3393,6 @@ pub(in crate::render) fn positional_category_union(
         // the render instead of quietly shortening the ladder. That distinction
         // is the point — this skip is provably lossless, an `unwrap_or` would
         // also have hidden failures that are not.
-        //
-        // Without it the ordinal side REFUSED where its numeric sibling shrugs
-        // (`numeric_domain_union`'s `union_field(lf).unwrap_or(false)`, "the
-        // field may not exist in all batches"): measured,
-        // `bar(x="cat:N") + line(x="when:T")` raised `column 'when' has
-        // unsupported dtype: Timestamp(...)` for a composition that rendered
-        // before this function existed. A temporal-x layer beside a
-        // categorical-x layer is not malformed, so REFUSE MALFORMED does not
-        // reach it; the layer simply places no mark on a band axis, exactly as
-        // it did before, and the mark builders reach the same verdict about the
-        // same column independently (`col_as_positional_category_str(..)
-        // Err(_) => empty`).
         //
         // Deliberately NOT a `type_`/dtype INFERENCE gate
         // (`infer_spec_type(layer_enc, ..)`), which is a different question —
@@ -3504,13 +3472,13 @@ mod tests {
 
     // --- layer_wants_bar_zero_anchor: per-term unit tests --------------------
     //
-    // The rule used to be a five-term boolean inlined in `numeric_domain_union`,
-    // reachable only end-to-end through a whole spec + batch fixture (the
-    // `*_SPEC_JSON` tests below still cover that integration). Extracted
-    // (batch-F close review), each term gets a direct negative case here: flip
-    // exactly one input away from the eligible baseline and the answer must
-    // flip too. That is what makes "would Python's injection have anchored
-    // this layer?" a checkable question rather than an emergent one.
+    // `layer_wants_bar_zero_anchor` is a five-term boolean that the
+    // `*_SPEC_JSON` tests below reach only end to end, through a whole
+    // spec + batch fixture. Here each term gets a direct negative case:
+    // flip exactly one input away from the eligible baseline and the
+    // answer must flip too. That is what makes "would Python's injection
+    // have anchored this layer?" a checkable question rather than an
+    // emergent one.
 
     fn zero_anchor_layer(mark: Mark, zero: Option<bool>) -> Layer {
         Layer {
@@ -3629,9 +3597,8 @@ mod tests {
     }
 
 
-    /// A well-formed sort-field object
-    /// naming a field the batch does not carry still warns exactly as
-    /// before -- only the MALFORMED-SHAPE arm was deleted.
+    /// A well-formed sort-field object naming a field the batch does not
+    /// carry still warns.
     #[test]
     fn apply_sort_to_domain_unresolvable_well_formed_object_still_warns() {
         let batch = group_batch(vec!["a", "b"]);
@@ -3727,9 +3694,11 @@ mod tests {
     }
 
     /// A `NaN` category (the ordinal reader's own `"NaN"` text for a
-    /// Float64 NaN value) sorts after every finite number, both directions.
+    /// Float64 NaN value) sorts after every finite number ascending, but
+    /// before them descending: the whole order reverses, not just the
+    /// finite tier.
     #[test]
-    fn apply_sort_to_domain_puts_nan_after_every_finite_number() {
+    fn apply_sort_to_domain_flips_nan_position_with_sort_direction() {
         let batch = float64_category_batch(vec![1.0, -2.0]);
         let ctx = numeric_sort_ctx(&batch);
         let mut domain = vec!["NaN".to_string(), "1".to_string(), "-2".to_string()];
@@ -3830,14 +3799,11 @@ mod tests {
     /// straight out of the `shorthand` STRING the user wrote, never derived
     /// from which resolved slot was consulted.
     ///
-    /// Re-reasoned for `#95` (not re-baselined): the fields were previously
-    /// `x_field: Some("weight"), y_field: None`, which under AUTHORED
-    /// semantics no longer describes an unbound authored `y` at all — it
-    /// describes an authored `y` bound to `weight`, which now RESOLVES.
-    /// Keeping the old fixture would have made this test pass on a different
-    /// message ("cannot read sort value field") and quietly stopped pinning
-    /// R3's actual claim. The asserted string is unchanged, because R3's
-    /// claim is unchanged.
+    /// For `#95`: a fixture of `x_field: Some("weight"), y_field: None`
+    /// would describe an authored `y` bound to `weight`, which RESOLVES.
+    /// That fixture would pass on a different message ("cannot read sort
+    /// value field") without pinning R3's claim, so this one leaves
+    /// post-flip x unbound instead.
     #[test]
     fn sort_shorthand_missing_channel_names_users_own_text_under_flip() {
         let batch = group_batch(vec!["a", "b"]);
@@ -3940,20 +3906,19 @@ mod tests {
         );
     }
 
-    // ── Task 13 (spec §4.4, "Extended 2026-09-02, T13 quality review",
-    // ruling 1): the layer union reads each layer's fields in the coordinate
-    // space of the channel being resolved ─────────────────────────────────────
+    // ── T13: the layer union reads each layer's fields in the coordinate
+    // space of the channel being resolved ────────────────────────
     //
     // Two properties, pinned together because one is the other's control:
     //   1. a layer's `x2`/`y2` past its bare `x`/`y` widens THAT channel's
-    //      domain (the batch-A T13 union fix — `mark_qq(line=True)`'s reference
+    //      domain (T13 — `mark_qq(line=True)`'s reference
     //      diagonal was unreachable without it), and
     //   2. under `CoordFlip` it widens the OTHER axis, because `spec.layers`
     //      is the AUTHORED encoding while `channel`/`field` name the rendered
     //      (post-flip) axis.
     //
     // Both `*_SPEC_JSON`s are the VERBATIM `chart.to_dict()` of the public-API
-    // call in their doc comment (captured 2026-09-02), parsed through the same
+    // call in their doc comment, parsed through the same
     // serde path `ChartSpec.from_json` uses, so they cannot drift from what
     // Python lowers.
 
@@ -3962,7 +3927,7 @@ mod tests {
     const LAYERED_Y2_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "rule", "encoding": {"y": {"field": "a"}, "y2": {"field": "big"}}}]}"#;
 
     /// The same layering with `.coord(fm.CoordFlip())` on the primary chart —
-    /// the reviewer's A/B probe. `prepare::build_layers` swaps the RENDERING
+    /// an A/B probe. `prepare::build_layers` swaps the RENDERING
     /// encodings, so the resolved x axis holds `a` and the y axis holds `b`,
     /// while `layers` below still reads exactly as authored.
     const LAYERED_Y2_FLIPPED_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "rule", "encoding": {"y": {"field": "a"}, "y2": {"field": "big"}}}], "coord": {"kind": "flip"}}"#;
@@ -4027,7 +3992,7 @@ mod tests {
     /// still never reaches the rule's own far endpoint on the axis that
     /// endpoint actually occupies, while y (unasserted once x fails, `(1.0,
     /// 2000.0)` when checked alone) blows out to 2000 on an axis no mark uses
-    /// there. That pair is the reviewer's live A/B probe.
+    /// there.
     #[test]
     fn coord_flipped_layer_paired_endpoint_widens_the_other_axis() {
         assert_eq!(
@@ -4043,7 +4008,7 @@ mod tests {
         );
     }
 
-    // ── #120(9) + N1: a layer column that cannot serve the shared numeric
+    // ── a layer column that cannot serve the shared numeric
     // axis is refused ─────────────────────────────────────────────────────
     //
     // `numeric_domain_union_over`'s per-layer loop reads every OTHER layer's
@@ -4218,26 +4183,26 @@ mod tests {
     //
     // `catplot(kind="bar")` renders a `bar` layer (one mean per category) plus
     // a `rule` "whisker" layer (the bootstrap CI), both reading a named
-    // `Summary` transform output via `data_source`. Before this fix the
-    // auto-inferred cross-layer union (this function) had no zero rule at
-    // all, so the value axis stopped at the union of `mean`/`lower`/`upper`
-    // and bars looked truncated at the panel bottom. An explicit per-layer
+    // `Summary` transform output via `data_source`. Without a zero rule,
+    // the auto-inferred cross-layer union (this function) would stop the
+    // value axis at the union of `mean`/`lower`/`upper`, truncating the
+    // bars at the panel bottom. An explicit per-layer
     // `scale={"zero": True}` (the mechanism a plain single-chart `mark_bar`
     // uses, injected by `_spec_build.py`) was measured and rejected: it
     // routes through `build_from_scale_spec`, which resolves the domain from
     // ONE column, so it silently clipped the whisker layer's own extent (3 of
-    // 4 upper CI whiskers vanished off-panel) — see commit 32117b00 and
+    // 4 upper CI whiskers vanished off-panel) — see
     // this function's own doc comment
     // ("Bar zero-anchor") above.
 
     /// Verbatim `chart.to_dict()` JSON for `fm.catplot(df, x="cat", y="val",
-    /// kind="bar")` (captured 2026-09-10, T5r, with `df` mapping `cat` to
+    /// kind="bar")` (T5r, with `df` mapping `cat` to
     /// two groups and `val` to values whose bootstrap mean/CI land around
     /// 50-90). Two layers: `bar` on the transform's `mean` output, `whisker`
     /// (a `rule`) on `lower`/`upper`, both via `data_source: "summary"`.
     const CATPLOT_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"val"}},"transforms":[{"type":"summary","field":"val","groupby":["cat"],"error_fn":"ci","ci":0.95,"n_boot":1000,"seed":0,"name":"summary"}],"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"mean","title":"val"}},"data_source":"summary","position":{"type":"identity"},"name":"bar"},{"mark":"rule","encoding":{"x":{"field":"cat"},"y":{"field":"lower","title":"val"},"y2":{"field":"upper"}},"mark_style":{"stroke":"theme:label","stroke_dash":[]},"data_source":"summary","position":{"type":"identity"},"name":"whisker"}]}"#;
 
-    /// The same call with `orient="h"` (captured 2026-09-10, T5r). The
+    /// The same call with `orient="h"` (T5r). The
     /// authored encoding is untouched (the value field is still authored on
     /// `y`); only `coord` gains `{"kind": "flip"}`, so the RENDERED x axis is
     /// where the bar's value lives and where the zero-anchor must land.
@@ -4298,13 +4263,15 @@ mod tests {
             .expect("every field in the fixture is Float64")
     }
 
-    /// Before this fix, the union of `mean` (50..80), `lower` (40..70), and
-    /// `upper` (60..90) is `(40.0, 90.0)` — the domain the coder's report
-    /// found truncated relative to zero. The `bar` layer's own field
+    /// Without the zero rule, the union of `mean` (50..80), `lower`
+    /// (40..70), and `upper` (60..90) would be `(40.0, 90.0)`, truncated
+    /// relative to zero. The `bar` layer's own field
     /// (`mean`) participates in the y-channel union, so the zero-anchor
     /// widens the lower bound to 0, while the whisker's own `upper` extent
-    /// (90) stays reachable — the exact property the report's rejected
-    /// explicit-`ScaleSpec` fix could not preserve.
+    /// (90) stays reachable — the exact property an explicit per-layer
+    /// `scale={"zero": True}` (rejected in the bar zero-anchor section
+    /// header above) could not
+    /// preserve.
     ///
     /// RED (verified in place): commenting out the `if bar_zero_wanted`
     /// block in `numeric_domain_union` makes this fail with `(40.0, 90.0)`.
@@ -4342,7 +4309,7 @@ mod tests {
     /// block makes this fail with `(40.0, 90.0)` too — proving the anchor
     /// follows the coordinate-space normalization, not just the unflipped
     /// case. Also genuinely discriminating on the flip normalization itself
-    /// (rust-quality-review finding, re-measured T5r cycle 2): dropping
+    /// (re-measured T5r): dropping
     /// `flip_positional` from the detection (reading `layer.encoding`
     /// directly) makes this fail too, with `(50.0, 80.0)` — the bar's `cat`
     /// field is absent from every batch in this fixture, so the mutant's
@@ -4388,23 +4355,22 @@ mod tests {
         );
     }
 
-    // ── T5r cycle 2 (spec-review issue 1): the two dropped guards ───────────
+    // ── T5r: the two dropped guards ───────────
     //
-    // The cycle-1 rule fired for whatever channel was being resolved, as long
+    // The original rule fired for whatever channel was being resolved, as long
     // as a `Mark::Bar` layer bound it — no distinction between the bar's
     // VALUE axis and its POSITION axis, and no exclusion for a layer whose
     // own value channel already carries a paired span field. Both guards
     // mirror `_spec_build.py::_build_encoding_specs`'s single-chart
     // injection exactly (`axis == "y"`, `not _y2_bound`). Missing them let a
     // `displot(kind="hist")` histogram bar's `x`/`x2` bin-range POSITION
-    // widen to zero — a live regression in this same batch's T4 feature,
-    // caught by spec review, not by the cycle-1 test suite (none of the four
-    // cycle-1 tests exercised a bar layer's position channel or a `y2`-bound
-    // bar).
+    // widen to zero — a live regression in the histogram bar's position
+    // channel, not covered by the earlier tests (none of them exercised a
+    // bar layer's position channel or a `y2`-bound bar).
 
     /// Verbatim `chart.to_dict()` JSON for `fm.displot(df, x="val",
-    /// kind="hist", kde=True)` (captured 2026-09-10, T5r cycle 2) — the exact
-    /// shape the spec reviewer measured live: a `bar` histogram layer whose
+    /// kind="hist", kde=True)` (T5r) — the exact
+    /// shape measured live: a `bar` histogram layer whose
     /// POSITION channel is `x`/`x2` (the bin range) and whose VALUE channel
     /// is `y` (`count`). The sibling `kde` line layer reads a named
     /// `"kde_overlay"` output this test's fixture omits — its own field,
@@ -4413,9 +4379,9 @@ mod tests {
     /// the assertion below.
     const DISPLOT_HIST_KDE_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"transforms":[{"type":"kde","field":"val","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":512,"cumulative":false,"shared_extent":false,"kernel":"gaussian","count_scale":{"kind":"sturges"},"name":"kde_overlay"},{"type":"bin","field":"val","nice":true,"cumulative":false,"shared_extent":false}],"layers":[{"mark":"bar","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"position":{"type":"identity"},"name":"histogram"},{"mark":"line","encoding":{"x":{"field":"value"},"y":{"field":"density"}},"data_source":"kde_overlay","position":{"type":"identity"},"name":"kde"}],"position":{"type":"identity"}}"#;
 
-    /// Bin edges offset well clear of zero (50..89), matching the spec
-    /// reviewer's reproduction data — a domain that reaches zero can only be
-    /// explained by the (wrong) position-channel anchor, never by the data.
+    /// Bin edges offset well clear of zero (50..89), so a domain that
+    /// reaches zero can only be explained by the (wrong) position-channel
+    /// anchor, never by the data.
     fn displot_hist_batch() -> RecordBatch {
         use arrow::array::Float64Array;
         let schema = Arc::new(Schema::new(vec![
@@ -4434,13 +4400,13 @@ mod tests {
         .unwrap()
     }
 
-    /// Before the value-channel guard (cycle 1), this incorrectly returned
-    /// `(0.0, 89.0)` — the bar layer's POSITION channel (`x`/`x2`, the bin
-    /// range) got the anchor only its VALUE channel (`y`, `count`) is
-    /// supposed to get. Measured live by the spec reviewer:
-    /// `displot(x="val", kind="hist", kde=True)` with data in `[50, 89]`
-    /// rendered its x axis `0…90`, squeezing every bar into the right ~44%
-    /// of the panel.
+    /// With neither the value-channel guard nor the span guard, this would
+    /// return `(0.0, 89.0)` — the bar layer's POSITION channel (`x`/`x2`,
+    /// the bin range) would get the anchor only its VALUE channel (`y`,
+    /// `count`) is supposed to get. On `displot(x="val", kind="hist",
+    /// kde=True)` with data in `[50, 89]`, the unguarded x axis would
+    /// render `0…90`, squeezing every bar into the right ~44% of the
+    /// panel.
     ///
     /// This fixture's position channel also carries `x2` (`bin_end`), so
     /// guard (b) (span-suppression) independently protects it too —
@@ -4474,14 +4440,13 @@ mod tests {
 
     /// Verbatim `chart.to_dict()` JSON for
     /// `fm.Chart(df).mark_bar().encode(x="cat", y="lo", y2="hi") +
-    /// fm.Chart(df).mark_point().encode(x="cat", y="lo")` (captured
-    /// 2026-09-10, T5r cycle 2) — a bar layer whose own VALUE channel
-    /// carries a paired span field, reachable from the public `Chart` API
-    /// (`.encode(y2=...)` is a generically honored channel on any mark).
-    /// Mirrors the D3 rule (`_spec_build.py::_build_encoding_specs`'s
-    /// `_y2_bound`/`_zero_anchor_wanted`) already applies to the
-    /// single-chart case: an explicit `[y, y2]` extent is taken literally
-    /// and must not be force-anchored to zero.
+    /// fm.Chart(df).mark_point().encode(x="cat", y="lo")` (T5r) — a bar
+    /// layer whose own VALUE channel carries a paired span field, reachable
+    /// from the public `Chart` API (`.encode(y2=...)` is a generically
+    /// honored channel on any mark). Mirrors the rule
+    /// `_spec_build.py::_build_encoding_specs`'s `_y2_bound`/`_zero_anchor_wanted`
+    /// already applies to the single-chart case: an explicit `[y, y2]`
+    /// extent is taken literally and must not be force-anchored to zero.
     const Y2_BOUND_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}}},{"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"lo"}}}]}"#;
 
     fn y2_bound_bar_batch() -> RecordBatch {
@@ -4500,7 +4465,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The D3 rule: a bar layer that binds its OWN value channel's paired
+    /// A bar layer that binds its OWN value channel's paired
     /// span field (`y2` here) must not be force-anchored to zero — the
     /// extent stays taken literally from `[lo, hi]` (50..90), exactly the
     /// pre-anchor union.
@@ -4523,7 +4488,7 @@ mod tests {
         );
     }
 
-    // ── T5r cycle 2 (rust-quality-review): discriminating flip test, the
+    // ── T5r: discriminating flip test, the
     // remaining two arithmetic arms, and the `zero=False` opt-out ──────────
 
     /// `DISPLOT_HIST_KDE_SPEC_JSON` with `.coord(fm.CoordFlip())` appended —
@@ -4594,7 +4559,7 @@ mod tests {
     }
 
     /// Verbatim `chart.to_dict()` JSON for `fm.Chart(df).mark_rank1d(orient="vertical")`
-    /// (captured 2026-09-10, T5r cycle 2) — a REAL single-bar-layer
+    /// (T5r) — a REAL single-bar-layer
     /// production shape (`marks/diagnostic/_ranking.py`,
     /// `desugar_rank1d`'s vertical orientation: `x=feature`, `y=score`).
     /// Reused (with different fixture batches) for the `mx < 0.0` arm and
@@ -4754,7 +4719,7 @@ mod tests {
     /// `SINGLE_BAR_LAYER_SPEC_JSON` with `"mark_style": {"zero": false}`
     /// hand-added to the bar layer — the per-layer mirror of the
     /// single-chart `mark_bar(zero=False)` opt-out (`MarkKwargsSpec::zero`,
-    /// T5r cycle 2). Hand-authored rather than captured from a live call on
+    /// T5r). Hand-authored rather than captured from a live call on
     /// THIS fixture's own shape (`mark_rank1d`), but the field itself is
     /// live and user-reachable on the wire this test pins: see
     /// `MarkKwargsSpec::zero`'s doc comment for the verbatim, measured
@@ -4792,12 +4757,11 @@ mod tests {
     /// layer whose declared value field (`phantom`) is absent from every
     /// batch (no `data_source` resolves it, and it isn't in the primary
     /// batch either) — the bar layer's NAME alone must not force a
-    /// zero-anchor when its own field never contributed a value
-    /// (rust-quality-review finding 3).
+    /// zero-anchor when its own field never contributed a value.
     const PHANTOM_FIELD_BAR_LAYER_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"point","encoding":{"y":{"field":"existing"}}},{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"phantom"}}}]}"#;
 
     /// RED (verified in place): replacing `value_field_contributed` with
-    /// `layer_fields[0].is_some()` (the cycle-1 shape, "declared" instead of
+    /// `layer_fields[0].is_some()` ("declared" instead of
     /// "contributed") makes this fail with `(0.0, 20.0)` — the bar layer's
     /// merely-declared `phantom` field forces the anchor even though it
     /// never resolves to data anywhere.
@@ -4883,8 +4847,8 @@ mod tests {
     ///
     /// `c, a` from the chart-level column then `b` from the RHS layer's. A
     /// sorting union answers `["a","b","c"]`; a union that walked the layers
-    /// before the seed answers `["b","c","a"]`; the pre-fix code answers
-    /// `["c","a"]`.
+    /// before the seed answers `["b","c","a"]`; a union that never reads the
+    /// RHS layer's own column at all answers `["c","a"]`.
     #[test]
     fn layer_categories_join_the_ladder_in_first_appearance_order() {
         assert_eq!(
@@ -4986,7 +4950,7 @@ mod tests {
         );
     }
 
-    /// The flip is per LAYER, not per chart (`#172`(1), close review F1): a
+    /// The flip is per LAYER, not per chart: a
     /// member carrying its OWN `CoordFlip` inside an unflipped chart widens each
     /// axis from the channel it occupies POST-flip, exactly as the chart-level
     /// case above does.
@@ -5034,12 +4998,7 @@ mod tests {
     }
 
     /// A layer whose own column cannot be a category KEY contributes nothing,
-    /// and says so by skipping rather than by refusing the render (close review
-    /// F2). A `Timestamp` layer field beside a categorical axis is the measured
-    /// shape: `bar(x="cat:N") + line(x="when:T")` raised
-    /// `UnsupportedDtype` for a composition that rendered before this function
-    /// existed, where `numeric_domain_union`'s layer loop shrugs at the same
-    /// class of unreadable field.
+    /// and says so by skipping rather than by refusing the render.
     ///
     /// The `Err` is still reachable — the enumeration below the gate keeps its
     /// `?`. What the gate removes is the one case where refusing is provably
@@ -5831,7 +5790,8 @@ mod tests {
     /// `[-5, 1, 10, 7, 100, -3]` (2 off-side, including this panel's own
     /// rows verbatim, as a real faceted concat would produce). The tally's
     /// `rows()` is exactly 2 (the whole frame's), not 3 (this panel's 1
-    /// plus the global's 2, the pre-fix double count).
+    /// plus the global's 2 — double-counting this panel's own rows against
+    /// the whole frame).
     #[test]
     fn a_shared_facet_log_tally_does_not_double_count_the_panel_against_final() {
         use arrow::array::Float64Array;
@@ -6334,7 +6294,7 @@ mod tests {
         );
     }
 
-    // ── spec §6.13: text_edge_rows ──
+    // ── text_edge_rows ──
 
     use crate::layout::geometry::TEXT_INSET_FLOOR_PX;
     use crate::render::font::FontdueMetrics;

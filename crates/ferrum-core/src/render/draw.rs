@@ -658,7 +658,7 @@ pub enum PaintSource {
     /// byte-identically (T8 quality-review c2, spec §4.1 2026-09-01 amendment,
     /// spec §7).
     UserClear,
-    /// Resolved from the `"theme:contrast"` sentinel (spec §6.5): an internal
+    /// Resolved from the `"theme:contrast"` sentinel: an internal
     /// paint token, matched in [`resolve_mark_style`] (not in
     /// [`resolve_paint_color`]) ahead of parsing, valid only as a `Mark::Text`
     /// layer's own `fill=`, that asks for a per-row contrast ink instead of a
@@ -947,7 +947,7 @@ impl MarkStyle {
     }
 }
 
-/// The `"theme:contrast"` sentinel (spec §6.5): an internal paint token with
+/// The `"theme:contrast"` sentinel: an internal paint token with
 /// the same status as `"theme:label"`, emitted verbatim by ferrum's own
 /// figure desugars, never something a user types. Not part of the public
 /// color vocabulary, and valid in exactly one slot: a `Mark::Text` layer's
@@ -2033,7 +2033,7 @@ fn lookup_color(scale: Option<&ColorScale>, cat_value: Option<&str>, num_value: 
     }
 }
 
-/// Resolve one row's `"theme:contrast"` ink (spec §6.5): the row's own
+/// Resolve one row's `"theme:contrast"` ink: the row's own
 /// color-channel value, read the same way [`resolve_fill_color`] reads it,
 /// painted through [`color::contrast_ink`](super::color::contrast_ink)
 /// against the theme's font color and background. A row whose color does
@@ -2654,7 +2654,7 @@ mod tests {
         assert_eq!(style.paint.fill.blue,  0x66, "sentinel fill.blue must be label_color.blue");
     }
 
-    // --- `theme:contrast` sentinel (spec §6.5) ──────────────────────────────
+    // --- `theme:contrast` sentinel ──────────────────────────────
 
     use crate::render::color::{contrast_ink, from_rgb, from_rgba};
     use crate::render::scale_resolve::ColorScale;
@@ -2686,11 +2686,10 @@ mod tests {
     /// the per-row contrast ink.
     ///
     /// Written against literal `"theme:contrast"` (not the named constant)
-    /// and checking only that the call does not refuse: at the pre-fix
-    /// code this is the one assertion the RED proof can make without
-    /// referencing a symbol that does not exist yet (`CONTRAST_SENTINEL`,
-    /// `PaintSource::Contrast`) — the sentinel used to fall through to
-    /// `parse_color`, which rejects it, so this failed before the fix.
+    /// and checking only that the call does not refuse: this is the one
+    /// assertion that does not need `CONTRAST_SENTINEL` or
+    /// `PaintSource::Contrast` to exist, since without them the sentinel
+    /// falls through to `parse_color`, which rejects it.
     #[test]
     fn resolve_mark_style_fill_contrast_sentinel_does_not_refuse() {
         let theme = ThemeInputs::default();
@@ -2714,7 +2713,7 @@ mod tests {
     /// font-color paint. Marks that draw no `fill` at all (`Mark::style_fields`: line, rule,
     /// segment, image) refuse earlier, for an unrelated reason
     /// (`MarkStyleNotDrawn`); this test is scoped to marks that draw `fill`,
-    /// so every case reaches the color resolution this fix changes.
+    /// so every case reaches the sentinel's color resolution.
     #[test]
     fn resolve_mark_style_fill_contrast_sentinel_refuses_on_every_non_text_mark() {
         let theme = ThemeInputs::default();
@@ -2733,8 +2732,8 @@ mod tests {
     /// that draws it: every such mark refuses it the same way. `Mark::Text`
     /// draws no `stroke` at all (`Mark::style_fields`), so it is excluded
     /// here for the same reason line/rule/segment/image are excluded from
-    /// the `fill=` test above — this test is scoped to marks the color
-    /// resolution this fix changes is actually reachable through.
+    /// the `fill=` test above — this test is scoped to marks the
+    /// sentinel's color resolution is actually reachable through.
     #[test]
     fn resolve_mark_style_stroke_contrast_sentinel_refuses_on_every_mark() {
         let theme = ThemeInputs::default();

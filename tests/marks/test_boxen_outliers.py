@@ -215,8 +215,8 @@ def test_letter_value_used_directly_fences_at_the_outermost_values():
     transform's own ``outliers`` secondary output renders exactly the
     independently predicted count, ties at the fence excluded (mirrors
     ``test_boxen_ties_at_the_outermost_letter_value_are_not_flagged``'s
-    n=9/k_depth="full" fixture). The output's declared schema -- E5's
-    ``group``/``value``/``is_outlier``, only flagged rows emitted -- is
+    n=9/k_depth="full" fixture). The output's declared schema
+    (``group``/``value``/``is_outlier``, only flagged rows emitted) is
     unchanged: a missing or renamed column raises here before the render
     assertion runs."""
     schema = registry_secondary_columns(

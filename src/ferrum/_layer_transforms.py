@@ -143,7 +143,7 @@ class _StatisticsMarker:
     statistic's output reads the rows the statistic started from, and a
     column the caller's steps lack is refused with the statistic remedy when
     a step after the marker computes it. Serialized as an unnamed
-    pass-through identity, which never advances the chain (spec §6.7).
+    pass-through identity, which never advances the chain.
 
     Every instance is the same marker: two compare equal.
     """
@@ -613,8 +613,7 @@ def _stack_judged(layer: _Layer, effective: dict, coord: object) -> tuple[dict, 
     any channel, arc and text on the channel a ``CoordPolar`` theta draws
     as), and as a stack-less copy otherwise, so a point or line under a
     stacked parent binding draws every row. The layer's own bindings are
-    judged where its wire is built. Returns the judged encoding and the
-    channels whose stack was removed.
+    judged where its wire is built.
     """
     mark = layer_mark(layer.mark)
     theta_axis = _theta_axis(coord)

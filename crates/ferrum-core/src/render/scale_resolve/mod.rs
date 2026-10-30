@@ -73,7 +73,7 @@ pub(in crate::render) use self::seam::{
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{apply_coord_domain_overrides, build_axis_scale, PositionalFields};
 
-/// The `Mark::Text` ink demand (spec §6.13) each positional channel's axis
+/// The `Mark::Text` ink demand each positional channel's axis
 /// carries into [`resolve_scales_with_leaf_context`], already built by the
 /// caller that knows the facet mode and the flip: `prepare::build_axes` for
 /// the primary axes, `scene_build::independent_panel_axis_inputs` for a
@@ -101,7 +101,7 @@ pub(in crate::render) use self::domain::encoding_explicit_extent;
 // `connect_to` resolution — see the `mod positional` doc above for why this
 // is a re-export rather than a wider module visibility.
 pub(in crate::render) use self::positional::{data_pixel_x, data_pixel_y};
-// Spec §6.13's default-padding predicate for the text-edge demand, shared
+// The default-padding predicate for the text-edge demand, shared
 // by `prepare`'s secondary-y slot and the standalone build paths.
 pub(in crate::render) use self::positional::{coord_exempts_channel, text_inset_applies};
 // The drop-and-warn/refuse step for a `Log` channel's off-side rows
@@ -221,9 +221,7 @@ impl ScaleKind {
     /// Log/infinity feature existed. That matters because `clamp=true` on
     /// a NON-`Log` scale maps an infinite input to a FINITE range-end pixel
     /// inside its own `scale_internal` arithmetic (`f64::INFINITY.clamp(lo,
-    /// hi)` is finite, not NaN), so without this gate a clamped Linear/
-    /// Sqrt/Pow/Symlog/Time channel would newly draw an infinity it used to
-    /// drop silently. An unclamped non-`Log` scale is
+    /// hi)` is finite, not NaN). An unclamped non-`Log` scale is
     /// unaffected either way (its own dispatch already maps an infinite
     /// input to a non-finite pixel, caught by `to_pixel_f64`'s own
     /// `is_finite` check).
@@ -737,8 +735,8 @@ impl ScaleKind {
     }
 
     /// Map `rows`' physical, scale-independent needs to this scale's own
-    /// domain fractions and orient them by the scale's range sign (spec
-    /// §6.13): `.0` maps to `frac=0`, `.1` to `frac=1`, so a row's
+    /// domain fractions and orient them by the scale's range sign:
+    /// `.0` maps to `frac=0`, `.1` to `frac=1`, so a row's
     /// `toward_lower`/`toward_higher` becomes `start`/`end` when the range
     /// increases and `end`/`start` when it decreases (a reversed or
     /// inverted-y axis gets the right end), and its [`domain::TextEdgeRow::own`]
@@ -1873,7 +1871,7 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 
 /// The non-positional scales a chart spec resolves, in the order
 /// [`build_auxiliary_scales`] builds them. A named bundle rather than a tuple:
-/// the appearance family (spec §4.3) took it to eight members, well past the point
+/// the appearance family took it to eight members, well past the point
 /// where positional `let (a, b, c, …)` destructuring at the three call sites
 /// reads as anything.
 #[derive(Debug, Clone, Default)]
@@ -2361,7 +2359,7 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     layer_batch: &RecordBatch,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
-    // The secondary axis's text-edge demand (spec §6.13): empty for the
+    // The secondary axis's text-edge demand: empty for the
     // placeholder-range call `build_secondary_y_axis_inputs` makes (over
     // which a pixel demand would be meaningless), the real one for
     // `resolve_layer_y_scale`'s panel-real call, read off the secondary
@@ -2906,8 +2904,8 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             (Some(x_enc), None) => {
                 // The aux (color/size/...) scales resolve BEFORE the
                 // positional axis so a continuous `Dodge`'s sub-band order
-                // reads the panel's own color scale (choice: one source of
-                // truth for every position-preview route). Held as a
+                // reads the panel's own color scale: one source of
+                // truth for every position-preview route. Held as a
                 // `Result` rather than `?`-propagated here: the positional
                 // axis still raises first, and the aux refusal/warnings
                 // still land after it, so precedence and warning order stay

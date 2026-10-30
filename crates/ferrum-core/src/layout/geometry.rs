@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_SCALE_PADDING_FRAC: f64 = 0.05;
 pub(crate) const SCALE_PADDING_MAX_PX: f64 = 8.0;
 
 /// The minimum ink clearance a `mark_text` glyph on a continuous positional
-/// scale keeps from the plot frame, at default padding (spec §6.13). Folded
+/// scale keeps from the plot frame, at default padding. Folded
 /// into each row's own [`EdgeNeed`] by
 /// `render::scale_resolve::domain::text_edge_rows`.
 pub(crate) const TEXT_INSET_FLOOR_PX: f64 = 4.0;
@@ -55,8 +55,8 @@ pub(crate) struct EdgeNeed {
     pub(crate) own: bool,
 }
 
-/// Every [`EdgeNeed`] a continuous axis's `Mark::Text` layers place on it
-/// (spec §6.13), shared verbatim by [`inset_pixel_range`] (marks) and
+/// Every [`EdgeNeed`] a continuous axis's `Mark::Text` layers place on it,
+/// shared verbatim by [`inset_pixel_range`] (marks) and
 /// [`crate::layout::axis::TickProjection`] (ticks) so the two can never
 /// diverge. Empty is the byte-identical default: no `Mark::Text` layer
 /// draws the channel, an Ordinal or degenerate scale, or non-default
@@ -173,8 +173,8 @@ fn solve_text_edge_inset(span: f64, base_pad: f64, rows: &[EdgeNeed]) -> (f64, f
 /// The indices (into `demand.rows`) of this axis's OWN rows
 /// ([`EdgeNeed::own`]) that `inset_pixel_range`'s per-end solve, at a real
 /// pixel span of `span`, still leaves unmet (the `TEXT_INSET_MIN_SPAN_SHARE`
-/// clamp bound) — read by a per-render ledger that decides whether to warn
-/// (spec §6.13), never by the tick projection, which evaluates
+/// clamp bound) — read by a per-render ledger that decides whether to warn,
+/// never by the tick projection, which evaluates
 /// `inset_pixel_range` alone. A sibling's row (`own: false`) still shapes
 /// the solve (so its wider label still widens a shared inset) but is never
 /// counted here, so a channel shared by several axes or composite leaves
@@ -205,7 +205,7 @@ pub(crate) fn text_edge_overrun_rows(span: f64, padding_frac: f64, demand: &Text
 
 /// Inset a pixel range by the resolved padding band (capped at
 /// `SCALE_PADDING_MAX_PX`), widened per end to satisfy `demand`'s own
-/// `Mark::Text` ink requirements (spec §6.13; see [`solve_text_edge_inset`]).
+/// `Mark::Text` ink requirements (see [`solve_text_edge_inset`]).
 /// Handles inverted ranges (the y-axis range is `(high_px, low_px)` for
 /// quantitative scales). An empty `demand` returns exactly the plain
 /// `min(span*frac, cap)` pair, so a chart with no `Mark::Text` layer on this
@@ -408,7 +408,7 @@ mod tests {
         Rect { x, y, w, h }
     }
 
-    // ── spec §6.13: inset_pixel_range's text-edge demand solve ──
+    // ── inset_pixel_range's text-edge demand solve ──
 
     fn need(frac: f64, start: f64, end: f64) -> EdgeNeed {
         EdgeNeed { frac, start, end, own: true }

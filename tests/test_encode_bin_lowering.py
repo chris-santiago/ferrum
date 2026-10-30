@@ -518,7 +518,7 @@ def test_a_grouped_bin_folds_its_aggregate_per_bin_and_group():
 def test_a_binned_color_keeps_every_row_and_adds_no_bin_step():
     """``Color(bin=True)`` maps its field through a binned scale over the unchanged rows.
 
-    Rejects the row-replacing ``Bin`` it used to lower to, which dropped the
+    Rejects the row-replacing ``Bin``, which dropped the
     column ``y`` reads and refused with ``unknown column 'w'``.
     """
     chart = fm.Chart(_df()).mark_point().encode(x="v", y="w", color=fm.Color("w", bin=True))

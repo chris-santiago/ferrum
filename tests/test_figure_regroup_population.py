@@ -231,7 +231,7 @@ def _figure_population() -> set[str]:
 #: The statistical mixin plus the six per-domain diagnostic mixins
 #: (``ferrum.marks._chart_methods_diagnostic.DiagnosticMarksMixin``'s own
 #: bases) -- together, every mixin a ``mark_*`` method reaching
-#: ``Chart._set_composite_mark`` (chart.py:1426) is declared on.
+#: ``Chart._set_composite_mark`` is declared on.
 _COMPOSITE_MARK_MIXINS = (
     StatisticalMarksMixin,
     ClassificationMarksMixin,
@@ -507,7 +507,7 @@ _COMPOSITE_ONLY_GROUPING_FIELDS: dict[str, tuple[str, str]] = {
     # which falls back to a synthetic row index) means the center heatmap
     # panel's own row axis is literally "species", a column the caller
     # wrote. The dendrogram panels' own segments don't carry it, so it
-    # warns-and-drops there (per §3.1) rather than refusing.
+    # warns-and-drops there rather than refusing.
     "clustermap": ("species", "species"),
 }
 
@@ -729,11 +729,32 @@ def _rebuild_runtime_error_messages() -> list[str]:
     return messages
 
 
+#: Every raise site in ``_compose.py`` that guards a rebuild shape invariant,
+#: named for the refusal its message states:
+_REBUILD_GUARD_SITES = (
+    # _figure_source: a figure changed between one chart and a composition.
+    "_figure_source (chart-vs-composition shape change)",
+    # _figure_source: a figure drew fewer operands than before.
+    "_figure_source (fewer operands drawn)",
+    # _regrouped_alone: a single-operand chart drew a different mark.
+    "_regrouped_alone (different mark drawn)",
+    # _with_run_replaced: the statistics run no longer holds the exact
+    # steps its composite mark lowered.
+    "_with_run_replaced (lowered steps not found)",
+    # _redrawn_layers: the chart lost layers its statistics drew before.
+    "_redrawn_layers (layers lost)",
+    # _paired: a composite mark drew a different number of layers.
+    "_paired (different layer count)",
+    # _paired: a chart drew a layer its statistics never drew before.
+    "_paired (layer never drawn before)",
+)
+
+
 def test_the_rebuild_invariants_stay_internal_runtime_errors() -> None:
     """Every structural-invariant guard in ``_compose.py`` that refuses an
     impossible rebuild shape raises ``RuntimeError`` -- the project's
     internal-invariant type -- naming what could not be rebuilt. The sweep
     above proves no public call reaches any of them."""
     messages = _rebuild_runtime_error_messages()
-    assert len(messages) == 7
+    assert len(messages) == len(_REBUILD_GUARD_SITES)
     assert all(message.endswith("rebuilt") for message in messages)

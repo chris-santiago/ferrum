@@ -271,7 +271,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let Some(BandVertices { pixels: vertices, curve_axis, shared_is_ordinal }) = vertex_pixels(ctx) else { return empty() };
     let groups = series_groups(ctx);
     // A categorical `stroke_dash` field extends ribbon's series partition
-    // key (spec §4.3) — read again here (beside `series_groups`' own read,
+    // key — read again here (beside `series_groups`' own read,
     // which folds it into the grouping key) for the per-group dash
     // resolution below.
     let dash_cols = stroke_dash_column_loader(ctx);

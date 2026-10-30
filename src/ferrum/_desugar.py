@@ -607,7 +607,7 @@ class _ResolveContext:
     #: :func:`_prep_axis_titles`.
     x_title: str | None = None
     y_title: str | None = None
-    #: The chart's composite grouping (spec §6.4): the fields its color,
+    #: The chart's composite grouping: the fields its color,
     #: detail, shape and stroke_dash bind, then its facet fields
     #: (:func:`~ferrum._encode_lowering._composite_groupby`).
     grouping: tuple[str, ...] = ()
@@ -671,7 +671,7 @@ def _prep_boxen_palette_color_conflict(ctx: _ResolveContext) -> None:
     """Refuse ``mark_boxen(palette=...)`` under a color the bands draw.
 
     ``palette`` colors each depth band through a per-layer ``fill=`` style
-    kwarg (design spec §4.4, #91). The chart's color, under any spelling
+    kwarg (#91). The chart's color, under any spelling
     (``color=``, ``fill=`` or ``stroke=``) and whether written on the chart
     or on a composition it is an operand of, is boxen's hue, as it is
     ``mark_boxplot``'s: the bands group by it and draw it, and an encoded
@@ -726,9 +726,9 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
     which is why boxen's ``_PENDING_PREP`` tuple omits
     ``_prep_color_field``), then its ``groupby``, the chart's grouping
     fields (``ctx.grouping``, which a chart-level ``.encode(color=...)``
-    joins). Estimating depth from other groups reproduces the cycle-1
-    symptom (a ramp normalized against a depth the chart doesn't render)
-    through a new mechanism.
+    joins). Estimating depth from other groups reproduces the same symptom
+    (a ramp normalized against a depth the chart doesn't render) through a
+    new mechanism.
 
     The chart's facet field(s), when present (``ctx.chart._facet``), are
     folded into :func:`_boxen_materialized_depth`'s groupby (batch-E close
@@ -1275,10 +1275,10 @@ def _resolve_pending_impl(
     *parent* is the grouping bindings of the compositions the chart is an
     operand of, nearest first (``ferrum._compose.regrouped``), and *facet*
     their facet. The mark's statistics group by the chart's own grouping
-    bindings, then each parent binding on a channel the chart binds under
-    no spelling (spec §6.4's composite grouping over the effective
-    encoding), within *facet*'s panels; without a *parent*, by the chart's
-    own bindings within its own facet.
+    bindings, then each parent binding on a channel the chart binds under no
+    spelling (the composite grouping over the effective encoding), within
+    *facet*'s panels; without a *parent*, by the chart's own bindings
+    within its own facet.
     """
     if chart._pending_stat_mark is None:
         return chart

@@ -720,12 +720,12 @@ fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
     );
 }
 
-// --- archaeology R5: 2-D facet extent pin (Kde2D / Bin2D) -------------------
+// --- 2-D facet extent pin (Kde2D / Bin2D) -----------------------------------
 
 /// A three-column batch: Float64 `x`, Float64 `y`, and a Utf8 facet field `p`.
 /// Panel "A" lives at x in 0..1, y in 0..1; panel "B" lives at x in 10..11,
 /// y in 100..101. The two panels' x AND y ranges are fully DISJOINT, so a
-/// per-panel extent (the pre-R5 bug) would give panel A x∈[0,1]/y∈[0,1] and
+/// per-panel extent (the earlier, incorrect behavior) would give panel A x∈[0,1]/y∈[0,1] and
 /// panel B x∈[10,11]/y∈[100,101). The pin computes the global extent over the
 /// whole batch → x∈[0,11], y∈[0,101] for BOTH panels.
 fn extent_pin_batch_2d() -> RecordBatch {
@@ -3620,7 +3620,7 @@ fn prepare_coord_flip_swaps_x_y_in_each_layer() {
     assert_eq!(prepared.axes.y.title.get().as_deref(), Some("price"));
 }
 
-// --- D3 (flexibility campaign): per-channel Axis(label_format, tick_count) ---
+// --- Per-channel Axis(label_format, tick_count) -----------------------------
 
 /// Build an `EncodingSpec` carrying a per-channel `axis` from a JSON object,
 /// deserialized through the typed `AxisStyleSpec` (so the test exercises the
@@ -3933,7 +3933,7 @@ fn tick_min_step_thins_dense_ticks() {
     }
 }
 
-/// Quality-review S3 fix (2026-09-03): a chart-level TIME format must
+/// A chart-level TIME format must
 /// survive `tick_min_step` thinning, not silently revert to the DEFAULT
 /// spacing-keyed granularity. Root cause: `render::config_apply::apply_label_format_to_axis`
 /// (which runs AFTER this fn) re-derives raw temporal values via
@@ -5389,7 +5389,7 @@ fn refuse_ordinal_format_on_a_temporal_field() {
     );
 }
 
-/// `#147` close (wave 6A T23, user ruling), the two untyped cells on a
+/// `#147`: the two untyped cells on a
 /// temporal value, decided once by the rule owner for every surface:
 ///
 /// 1. A d3 number format (`.2f`, `,.0f`, `d`, or a `"number"`-typed
@@ -6844,7 +6844,7 @@ fn an_independent_y_line_on_the_bars_field_spans_its_own_data() {
 
 /// An independent-y bar on the same field still reaches 0, and only through
 /// the anchor scale it carries on its own `y` (the one the Python bar
-/// producer injects); the chart's anchor no longer reaches it.
+/// producer injects); the chart's anchor never reaches it.
 #[test]
 fn an_independent_y_bar_reaches_zero_only_through_its_own_anchor() {
     let (lo, _) =
@@ -8348,8 +8348,8 @@ fn a_mixed_sign_or_zero_touching_log_column_draws_three_marks_on_every_channel()
     }
 }
 
-/// Choice D's `tick_anchors`/`tick_labels` lockstep holds per facet panel,
-/// not only on the chart-level shared axis the other choice-D tests read:
+/// `tick_anchors`/`tick_labels` lockstep holds per facet panel,
+/// not only on the chart-level shared axis the sibling tests below read:
 /// an independent-x Log facet gives each panel its own `AxisInput`
 /// (`AxesInput::panels`), with `tick_anchors.len() == tick_labels.len()`
 /// and the `true` entries exactly the power labels -- panel `a`'s own
@@ -8581,12 +8581,11 @@ fn a_flat_log_axis_under_coord_flip_warns_with_the_users_channel() {
     assert!(!text.starts_with("x scale:"), "{text}");
 }
 
-/// Cycle 4c's concern 1, closed: `RenderError::LogScaleNoValueOnSide`'s own
-/// `Display` has the identical bug `LogScaleRowsLeftOut` had before choice
-/// F concern 2 -- under `CoordFlip`, `y=fm.Y('v', scale=LogScale())` over a
-/// column with NOTHING on the positive side refuses with `channel: "x"`
-/// (the post-flip resolved token) and `coord_flipped: false`, so the
-/// message names the wrong axis. The flat (unfaceted) route.
+/// Under `CoordFlip`, `y=fm.Y('v', scale=LogScale())` over a
+/// column with NOTHING on the positive side refuses with the resolved
+/// token `channel: "x"`, but the real `coord_flipped: true` is threaded
+/// through, so `RenderError::LogScaleNoValueOnSide`'s `Display` names the
+/// user's `y` axis, not the resolved `x`. The flat (unfaceted) route.
 #[test]
 fn a_flat_log_axis_no_value_refusal_names_the_users_channel_under_coord_flip() {
     let batch = one_column_batch(vec![Some(-5.0), Some(-7.0)]);
@@ -8668,7 +8667,7 @@ fn a_faceted_log_axis_no_value_refusal_names_the_users_channel_under_coord_flip(
 
 /// [`one_column_batch`] plus a string key column `k` (`extract_keys`'s own
 /// key column), for the Log aux drop's source-row remap tests: the key must
-/// name the same row after the drop as before it.
+/// name the same row before and after the drop.
 fn one_column_batch_with_key(values: Vec<Option<f64>>, keys: &[&str]) -> RecordBatch {
     let n = values.len();
     RecordBatch::try_new(
@@ -8701,12 +8700,11 @@ fn numeric_aux_chart_keyed(channel: &str, scale: serde_json::Value) -> ChartSpec
         .expect("the keyed spec deserializes")
 }
 
-/// The fix case): the Log aux drop used to
-/// renumber `data_indices` by position in the FILTERED batch (the builder's
-/// own numbering), disagreeing with the x/y drop, which already names
-/// source rows. Keys stayed right (`extract_keys` reads the filtered batch
-/// with the builder's own indices), but `data_indices` did not, so a point
-/// selection keyed by `data_idx` named the wrong row in a sibling layer.
+/// The Log aux drop's `data_indices` name source rows, like the x/y
+/// drop's, so they name the same rows as `keys` (which `extract_keys`
+/// reads from the filtered batch with the builder's own indices), and a
+/// point selection keyed by `data_idx` names the right row in a sibling
+/// layer.
 #[test]
 fn a_log_aux_drop_keeps_source_row_indices_like_the_x_drop() {
     let batch = one_column_batch_with_key(
@@ -8881,7 +8879,7 @@ fn an_infinite_positional_value_is_silently_dropped_on_every_mark_under_linear()
 
 /// Only a `Log` scale's matching-sign infinity goes through the relaxed
 /// check (`ScaleKind::admits_for_pixel`); every OTHER scale kind must
-/// behave EXACTLY as before this whole feature existed, on all nine mark
+/// behave EXACTLY as though this feature were absent, on all nine mark
 /// families, including `point` -- a clamped Linear, Sqrt, Pow or Symlog
 /// channel drops `+inf`/`-inf` again, not clamps it to the range end.
 /// `clamp=true` is the reason this needs its own guard, distinct from
@@ -8970,7 +8968,7 @@ fn a_clamped_non_log_scale_still_drops_matching_sign_infinity_on_every_mark() {
 /// gating, every mark but `point` still gates its positional read on
 /// `is_finite()`, so the infinite row never reaches `to_pixel_f64`'s own
 /// on-side clamp and is silently dropped — one fewer node/vertex than the
-/// control. After the fix, both variants draw the SAME row count: `+inf`
+/// control. Both variants draw the SAME row count: `+inf`
 /// clamps to the range end exactly as the domain's own boundary value does
 /// (`to_pixel_f64`'s Log arm maps both to the same range-end pixel via
 /// `LogScaleData::scale`'s `clamp` branch). `arc` has no equivalent: its
@@ -9141,13 +9139,10 @@ fn a_log_aux_drop_is_identical_static_and_interactive() {
     assert_eq!(static_scene.panels[0].marks, interactive_scene.panels[0].marks);
 }
 
-/// The fix case): an off-side infinity used
-/// to be dropped from the left-out tally entirely (`admits`'s finiteness
-/// check folded "non-finite" into "off-side" with no distinction), so a
-/// `-inf` under a positive `Log` size mapped to the channel's unbound
-/// default and no warning counted it. `on_side` now admits an infinity
-/// matching the domain's sign, so a `-inf` on a positive scale is correctly
-/// off-side: not drawn, and counted.
+/// `on_side` admits only an infinity matching the domain's sign, so a
+/// `-inf` on a positive `Log` scale is off-side: not drawn, counted in the
+/// left-out tally, and never mapped to the channel's unbound default with
+/// no warning.
 #[test]
 fn an_off_side_infinity_is_not_drawn_and_is_counted() {
     let batch = one_column_batch(vec![Some(1.0), Some(f64::NEG_INFINITY), Some(10.0), Some(100.0)]);
@@ -9293,7 +9288,7 @@ fn a_clamped_log_x_places_plus_infinity_at_the_range_end() {
 }
 
 /// `NaN`/`null` are unaffected by the off-side-drop rule: they draw at the
-/// unbound channel's own default, exactly as before.
+/// unbound channel's own default.
 #[test]
 fn a_nan_or_null_log_aux_row_draws_at_the_default() {
     let batch = one_column_batch(vec![Some(1.0), Some(f64::NAN), None, Some(10.0)]);
@@ -9468,9 +9463,7 @@ fn a_constant_log_column_maps_to_the_range_midpoint_on_every_channel() {
 /// An all-null column under `Log` builds no scale on size/opacity/
 /// stroke_width — matching `LinearScale`'s own no-value path via the new
 /// guard `build_size_scale` gained (`build_opacity_channel_scale`/
-/// `build_stroke_width_scale` already had it) — not the old artifact where
-/// `resolve_log_extent`'s `(0.0, 1.0)` all-null default sanitized under `Log`
-/// into a fabricated `1e-6..1` legend.
+/// `build_stroke_width_scale` already had it).
 #[test]
 fn an_all_null_log_aux_column_builds_no_scale_matching_linear() {
     let all_null = one_column_batch(vec![None, None, None, None]);
@@ -9495,9 +9488,7 @@ fn an_all_null_log_aux_column_builds_no_scale_matching_linear() {
 /// An all-null column under `Log` on x resolves the `[1, base]` no-value
 /// domain (d3's `scaleLog` default, the log-space twin
 /// of every other continuous channel's `(0.0, 1.0)` unit-interval
-/// fallback), drawing no marks and no refusal — not the old `1e-6..1`
-/// artifact from reusing the `(0.0, 1.0)` Linear default under a `Log`
-/// sanitize.
+/// fallback), drawing no marks and no refusal.
 #[test]
 fn an_all_null_log_x_column_resolves_the_one_decade_no_value_domain() {
     pyo3::Python::initialize();
@@ -9620,11 +9611,11 @@ fn prepared(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
     prep
 }
 
-/// The fix case `tick_anchors` was computed
-/// once from `tick_values_raw(tick_count)` and never updated when
-/// `tick_min_step` later thinned `tick_labels`/`proj.major` — a length
-/// mismatch anchors' own stride-fallback guard silently absorbed, so a
-/// decade could be culled by the stride that follows.
+/// `tick_anchors` follows `tick_min_step`'s later thinning of
+/// `tick_labels`/`proj.major`, not only the initial
+/// `tick_values_raw(tick_count)` computation, so no length mismatch
+/// reaches anchors' own stride-fallback guard and a decade is never culled
+/// by the stride that follows.
 #[test]
 fn log_tick_anchors_follow_tick_min_step() {
     let (spec, batch) = log_x_chart_with_axis_override(serde_json::json!({"tick_min_step": 3.0}));
@@ -9786,7 +9777,7 @@ fn a_log_x_axis_keeps_its_decades_at_narrow_widths() {
 
 /// Every text label drawn on `axis`'s own [`ferrum_scene::Panel::axes`]
 /// chrome, as `(content, position along axis)` — `y` for a y axis, `x` for
-/// an x axis (the greedy-y fix only needs `y`, but the walk is the same
+/// an x axis (the greedy-y case only needs `y`, but the walk is the same
 /// either way and this mirrors [`categories_and_marks`]'s shape).
 fn axis_text_positions(panel: &ferrum_scene::Panel, on_y: bool) -> Vec<(String, f64)> {
     fn walk(nodes: &[ferrum_scene::SceneNode], on_y: bool, out: &mut Vec<(String, f64)>) {
@@ -9805,13 +9796,13 @@ fn axis_text_positions(panel: &ferrum_scene::Panel, on_y: bool) -> Vec<(String, 
     out
 }
 
-/// The fix case `resolve_y_overlap`'s
-/// `Greedy` policy judged distance in CASCADE SLOTS (`cascade_slot_h`, the
-/// tightest adjacent gap) rather than the real pixel positions labels draw
-/// at, and kept every anchor (Log decade) unconditionally rather than
-/// greedily among themselves — so at narrow heights a Log y axis drew
-/// decades closer than one line apart, and at wider heights a non-decade
-/// survived right next to a decade. No two drawn labels may sit closer than
+/// `resolve_y_overlap`'s `Greedy` policy judges distance by the real pixel
+/// positions labels draw at, not CASCADE SLOTS (`cascade_slot_h`, the
+/// tightest adjacent gap), and treats every anchor (Log decade) greedily
+/// among themselves rather than keeping each unconditionally, so a Log y
+/// axis never draws decades closer than one line apart at narrow heights,
+/// and never leaves a non-decade surviving right next to a decade at wider
+/// ones. No two drawn labels may sit closer than
 /// `line_height(11)` = 13.2px, at any of these heights, and `1`/`10`/`100`
 /// must all be drawn once the panel is tall enough to fit them.
 #[test]
@@ -9895,7 +9886,8 @@ fn regex_text_labels(svg: &str) -> Vec<&str> {
 /// log-space and not merely containing the powers: over `[1, 1000]`, the
 /// integer powers of 10 alone meet the legend's `count - 2 = 3` target, so
 /// `1`, `10`, `100` and `1000` all label the legend — not the fractional
-/// exponents (`316.2278`, …) the pre-fix tick rule gave instead of `1000`.
+/// exponents (`316.2278`, …) a linear subdivision of log-space would give
+/// instead of `1000`.
 /// `Pow`/`Sqrt` legends list their own (linear-domain) nice ticks the same
 /// way. Replaces the containment-only
 /// `a_log_size_legends_ticks_are_the_scales_own_breaks`.
@@ -9961,16 +9953,14 @@ fn a_log_size_legend_over_twelve_decades_lists_every_other_power() {
     assert_eq!(&labels[1..], ["1", "100", "10000", "1e6", "1e8", "1e10", "1e12"]);
 }
 
-/// `breaks_log`'s step-3 thinning bug reached the legend too:
-/// a `nice=False` legend over `[3, 7e12]` (non-power ends) used to list
-/// `"1"`, below the data's own minimum of `3` -- `breaks_log` thinned over
-/// the floor-extended exponent `0` (`10^0 = 1`), not the first IN-DOMAIN
-/// exponent `1` (`10^1 = 10`). Every legend entry must be `>=` the data
-/// minimum. Uses `opacity`, not `size`: `size`/`stroke_width` always nice a
+/// A `nice=False` legend over `[3, 7e12]` (non-power ends) must not list
+/// `"1"`, below the data's own minimum of `3`.
+/// Every legend entry must be `>=` the data minimum. Uses `opacity`, not
+/// `size`: `size`/`stroke_width` always nice a
 /// data-derived domain regardless of the scale's own `nice=` (their
 /// `nice_data_domain: true` ORs into the formula unconditionally), which
 /// would round `[3, 7e12]` out to `[1, 1e13]` and make `"1"` a genuinely
-/// in-domain power rather than a sign of this bug; `opacity` passes
+/// in-domain power; `opacity` passes
 /// `false` there, so `nice=False` actually keeps the domain at its literal
 /// `[3, 7e12]`.
 #[test]
@@ -10063,7 +10053,7 @@ fn a_log_axis_over_five_or_six_decades_labels_only_powers() {
 /// columns' left-out rows into ONE whole-frame
 /// `RenderWarning::LogScaleRowsLeftOut` naming the chart-level field (`c1`,
 /// the establishing layer's) and the COMBINED count (3), not two separate
-/// warnings and not the old silently-dropped `left_out: 0`. The three
+/// warnings. The three
 /// positive-side rows across both layers still draw.
 #[test]
 fn a_layered_log_size_channel_warns_once_for_the_whole_frame() {
@@ -10556,8 +10546,8 @@ fn a_malformed_facet_repeat_is_refused() {
 }
 
 /// Every row null in the facet field leaves no panel at all, but this is
-/// the 2026-10-17 drop-and-warn rule at its limit, not a different input
-/// class: the run still produces the right (empty) `FINAL_OUTPUT_KEY`
+/// the null-facet-rows-dropped-with-a-warning rule at its limit, not a
+/// different input class: the run still produces the right (empty) `FINAL_OUTPUT_KEY`
 /// schema, over one placeholder partition, and reports the full null-row
 /// count rather than refusing.
 #[test]
@@ -10897,8 +10887,8 @@ fn a_binding_on_a_channel_the_mark_does_not_draw_is_not_judged() {
 /// The gate answers before any scale reads a column: a later layer that
 /// establishes a chart-wide scale (no earlier layer draws the channel) from
 /// a column its rows lack refuses in the gate's words, not as the scale
-/// builder's unlocated column. Spec §4.5's example, `color`, then `size` and
-/// `opacity`.
+/// builder's unlocated column. Exercised here in sequence: `color`, then
+/// `size` and `opacity`.
 #[test]
 fn a_later_layer_establishing_a_scale_from_an_absent_column_refuses_in_the_gates_words() {
     for (wire, mark) in [("color", "line"), ("size", "point"), ("opacity", "point")] {
@@ -11866,7 +11856,7 @@ fn an_arrowless_segments_fill_opacity_warns_instead_of_drawing() {
 }
 
 // ── `"theme:contrast"` sentinel: a contrast-ink text binds color without
-// drawing it (spec §6.5) ──────────────────────────────────────────────────
+// drawing it ──────────────────────────────────────────────────
 
 /// Checks that every reader of the drawn-channel rule agrees, for layer
 /// `row` of `spec` over `batch`, on whether it draws `channel_name`,
@@ -14238,9 +14228,7 @@ fn a_planned_composite_statistics_own_groupby_splits_its_ribbon_and_line_layers(
 
 /// `mark_density`'s own `groupby=` (`Kde(groupby=[...])`, lowered behind
 /// the marker) splits its area the same way `mark_smooth`'s does, with no
-/// channel bound: every other composite statistic that draws a line,
-/// area or ribbon over its own `groupby=` is covered by the same fix
-/// (`transform::run::groupby_is_chart_planned`), not re-handled per mark.
+/// channel bound.
 #[test]
 fn a_planned_densitys_own_groupby_splits_its_area_with_no_channel() {
     let rows = grouped_series_rows();
@@ -15944,7 +15932,7 @@ fn a_binned_layer_with_another_bin_rule_is_excluded_and_draws_through_the_first(
 /// A plain `z` point beside a binned `z` area: the area forces a categorical
 /// scale over `z`, which no bin rule cut, so the area is excluded with one
 /// `LayerScaleExcluded` and draws one band per raw value (two, 1 and 9), each
-/// in its category's palette color, as before.
+/// in its category's palette color.
 #[test]
 fn a_binned_area_under_a_categorical_color_is_excluded() {
     let rows = binned_line_rows([1.0, 9.0, 1.0, 9.0, 1.0, 9.0, 1.0, 9.0]);
@@ -17219,8 +17207,7 @@ fn position_of(value: serde_json::Value) -> Option<crate::spec::position::Positi
 /// shorthand; an own x or y shorthand blocks both; a shorthand Python filled
 /// from a parent (`inherited_positional`) does not block; an inherited
 /// `Stack` yields to an own `stack=False` while any other inherited position
-/// agrees with it. Rejects the old `layer.position.or(spec.position)`, which
-/// handed every inherited position to a layer whatever it wrote.
+/// agrees with it.
 #[test]
 fn a_layer_draws_its_own_position_and_an_inherited_one_yields_to_its_shorthand() {
     let dodge = serde_json::json!({"type": "dodge"});
@@ -18009,14 +17996,15 @@ mod domain_rows_left_out_tests {
         );
     }
 
-    /// The main-door fix's other reachable shape: a composite mark whose
-    /// statistic layer is its own tail, not an unlayered chart at all —
-    /// `displot(kind="hist", kde=True)` promotes the histogram's bar mark
-    /// into a REAL `spec.layers` entry (`src/ferrum/plots/distribution.py`'s
-    /// "Convert single-mark chart to layered mode" step) with no
-    /// `data_source` of its own, so `validate_layer_columns`'s
-    /// `raw.is_none()` short-circuit does not apply to it either — this is
-    /// the layer `reads_statistic_output`'s fix must also reach. Same
+    /// Another shape `reads_statistic_output`'s `FINAL_OUTPUT_KEY`
+    /// resolution must reach: a composite mark whose statistic layer is
+    /// its own tail, not an unlayered chart at all — `displot(kind="hist",
+    /// kde=True)` promotes the histogram's bar mark into a REAL
+    /// `spec.layers` entry (`src/ferrum/plots/distribution.py`'s "Convert
+    /// single-mark chart to layered mode" step) with no `data_source` of
+    /// its own, so `reads_statistic_output` must still classify this
+    /// layer as a statistic layer, as it does the unlayered chart's one
+    /// layer above. Same
     /// fixture and domain as the one-end case above, laid out as one
     /// explicit layer instead of the flat chart.
     #[test]

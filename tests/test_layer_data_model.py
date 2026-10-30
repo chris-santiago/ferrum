@@ -421,7 +421,7 @@ def test_a_data_layer_over_the_hosts_own_frame_follows_the_same_frame_rule():
 
 
 def test_a_data_layer_keeps_its_name_color_and_conditional_as_plus_does():
-    """V1: the layer's own color stays on its layer, as on the ``+`` spelling."""
+    """The layer's own color stays on its layer, as on the ``+`` spelling."""
     sel = fm.selection_point(fields=["w"], name="pick")
     cond = sel.when(fm.Color("w")).otherwise(fm.value("#cccccc"))
     encoding = {"x": "v", "y": "w", "color": fm.Color("w", condition=cond)}
@@ -500,7 +500,7 @@ _REENCODE_CASES = {
 
 
 def test_a_right_operands_secondary_y_keeps_its_hosts_written_x():
-    """Spec §4.1 parent rule, cell X1: a secondary layer on a right operand takes its host's written ``x``.
+    """A secondary layer on a right operand takes its host's written ``x``.
 
     The histogram host wrote ``x="v"``, so a later ``.encode(x="y")`` on the
     composition, the host's own parent, does not reach it. Rejects filling
@@ -793,8 +793,9 @@ def test_no_door_mutates_the_callers_chart(base, call):
 
 
 # ---------------------------------------------------------------------------
-# Byte-identical controls: the SVG and spec JSON the commit before the layer
-# data model rendered for the same charts.
+# Byte-identical controls: the pinned SVG and spec JSON bytes for a
+# representative sweep of layering and composition doors (operand merges,
+# secondary-y, facets, binned counts, per-layer transforms).
 # ---------------------------------------------------------------------------
 
 
@@ -850,8 +851,8 @@ _CONTROLS: dict[str, Callable[[], Any]] = {
     ),
     "plus-each-own-conditional": lambda: _each_with_own_conditional(),
     "ungrouped-binned-count": lambda: _binned_count(),
-    # Renders since encoding statistics became per layer (the commit before
-    # the layer data model refused it), so its pins are this cycle's own.
+    # The attached rule computes its own mean(v) aggregate, per layer;
+    # these bytes pin that render.
     "ungrouped-binned-count-layer-rule": lambda: _binned_count().layer(
         fm.Layer(mark="rule", encoding={"y": fm.Y("v", aggregate="mean")})
     ),
@@ -1143,10 +1144,10 @@ def _point_glyph_ys(marks: str) -> list[float]:
 def test_a_finer_layer_statistic_groups_by_its_own_channels(channel):
     """A layer's mean per (g, c) is computed over the raw rows, not over the bars' means.
 
-    G6: the layer's own grouping channel draws, with a legend, exactly as the
+    The layer's own grouping channel draws, with a legend, exactly as the
     same point chart draws it alone -- `shape` draws a square glyph for its
-    second category, not only circles, and its own legend. V12/X4: `size`
-    and `opacity` bind the string column `c` exactly as `encode()` does, so
+    second category, not only circles, and its own legend. `size` and
+    `opacity` bind the string column `c` exactly as `encode()` does, so
     they refuse at render with the same message a standalone chart raises;
     the statistic still plans its groupby over `c` before that refusal, so
     this row also pins that the grouping itself does not depend on whether
@@ -1156,8 +1157,9 @@ def test_a_finer_layer_statistic_groups_by_its_own_channels(channel):
     layer = fm.Layer(mark=mark, encoding={"y": fm.Y("y", aggregate="mean"), **grouping})
     chart = _aggregated_bar("mean", None).layer(layer)
     groupbys = [step["groupby"] for step in _steps(chart, "aggregate")]
-    # V3: the layer's own channel never reaches the host, whose bars keep
-    # their grain (rejects D1-B and promotion: the bars would split by c).
+    # The layer's own channel never reaches the host, whose bars keep their
+    # grain: a grain-preserving leak that still recolors or regroups a
+    # sibling, or promotes the binding to the chart, would split the bars by c.
     assert groupbys == [["g"], ["g", "c"]]
     if channel in _REFUSED_VALUE_CHANNELS:
         with pytest.raises(ValueError) as exc:
@@ -1191,7 +1193,7 @@ def test_a_finer_layer_statistic_groups_by_its_own_channels(channel):
 
 @pytest.mark.parametrize("channel", ["size", "opacity"])
 def test_a_finer_layer_statistic_groups_by_a_numeric_value_channel(channel):
-    """X2 (L, finer channel; spec §4.2 groupby): a layer's own size/opacity groups its statistic.
+    """A layer's own size/opacity groups its statistic.
 
     Beside the string-column refusal above: a `size`/`opacity` binding on a
     numeric column groups the layer's statistic the same way, and draws it
@@ -1245,9 +1247,9 @@ def test_a_different_layer_statistic_reads_the_raw_rows():
 
 
 def test_a_right_operand_statistic_never_groups_by_the_left_operands_color():
-    """V3/G4: the left operand's color is its own, so the right keeps its grain.
+    """The left operand's color is its own, so the right keeps its grain.
 
-    Rejects D1-C (the left's encoding as the composition's): the right
+    Rejects treating the left's encoding as the composition's: the right
     operand's sum would group by c too.
     """
     chart = _aggregated_bar("mean", "c") + fm.Chart(_BARS).mark_point().encode(x="g", y="sum(y)")
@@ -2013,7 +2015,7 @@ def test_a_drawn_channels_aggregate_is_computed_per_layer(channel):
     layer = fm.Layer(mark=mark, encoding={channel: cls("z", aggregate="mean")})
     chart = fm.Chart(_numeric_bars()).mark_bar().encode(x="g", y="mean(y)").layer(layer)
     # The attached layer computes its own aggregate; the bars, which never
-    # see the layer's binding (spec §4.6 V3), compute only their mean y.
+    # see the layer's binding, compute only their mean y.
     steps = _steps(chart, "aggregate")
     assert [sorted(op["as"] for op in step["ops"]) for step in steps] == [
         ["mean_y"],
@@ -2115,7 +2117,7 @@ def _aggregated_part(channel: str, cls: type, agg: str = "mean") -> fm.Chart:
 
 @pytest.mark.parametrize("channel", list(_OPACITY_CLASSES))
 def test_an_aggregated_opacity_beside_raw_points_leaves_the_raw_points_at_the_default(channel):
-    """V5: the raw points draw as they do alone; only the aggregating layer varies its opacity.
+    """The raw points draw as they do alone; only the aggregating layer varies its opacity.
 
     Rejects promotion: the raw points would draw their own z through the
     aggregating layer's opacity scale.
@@ -2137,7 +2139,7 @@ _LEGEND_TITLE = 'font-weight="600" text-anchor="start">{}<'
 
 
 def test_an_aggregated_size_beside_raw_points_is_titled_by_its_column():
-    """V5/V11: the raw points keep the default radius; the size legend is titled ``mean_z``."""
+    """The raw points keep the default radius; the size legend is titled ``mean_z``."""
     chart = _points_beside("size", fm.Size)
     svg = chart.to_svg()
     assert svg.count(_LEGEND_TITLE.format("mean_z")) == 1
@@ -2146,7 +2148,7 @@ def test_an_aggregated_size_beside_raw_points_is_titled_by_its_column():
 
 
 def test_an_aggregated_color_beside_raw_points_spans_only_the_drawing_layer():
-    """V5/V10: the legend's domain is the one drawing layer's means per g (20..65).
+    """The legend's domain is the one drawing layer's means per g (20..65).
 
     Rejects promotion: the raw points' own z (10..90) would widen it.
     """
@@ -2161,7 +2163,7 @@ def test_an_aggregated_color_beside_raw_points_spans_only_the_drawing_layer():
 
 
 def test_a_color_domain_spans_two_layers_that_compute_different_values():
-    """V10: each layer binds its own sum; the union spans per (g, y) 10..90 and per g 40..130."""
+    """Each layer binds its own sum; the union spans per (g, y) 10..90 and per g 40..130."""
     raw = fm.Chart(_SCALED).mark_point().encode(x="g", y="y", color=fm.Color("z", aggregate="sum"))
     chart = raw + _aggregated_part("color", fm.Color, agg="sum")
     values = _legend_values(chart.to_svg())
@@ -2181,7 +2183,7 @@ def test_a_faceted_aggregated_size_renders_every_panels_points():
 
 # Each channel class and the encode() key that builds it. The span ends and the
 # polar channels draw the value they are bound to, so they honor aggregate=
-# (test_layer_encoding_model.py's S2 and P2 cells).
+# (test_layer_encoding_model.py's span_aggregate and polar_aggregate cells).
 _NO_VALUE_CHANNELS = {
     "Detail": "detail",
     "Shape": "shape",
@@ -2264,8 +2266,9 @@ _MIXED_CASES: dict[str, tuple[Callable[[], Any], str]] = {
         "color",
     ),
     "size": (lambda: _mixed_point(size="z") + _mixed_point(size="g"), "size"),
-    # The opacity family draws a legend the commit before the layer data model
-    # did not; with it suppressed, the marks render those same bytes.
+    # The opacity family draws a legend by default; legend=None on this
+    # operand suppresses it so the marks render with no opacity legend,
+    # matching the digest pinned below for this case.
     "opacity": (
         lambda: _mixed_point(opacity=fm.Opacity("z", legend=None)) + _mixed_point(opacity="g"),
         "opacity",
@@ -2286,8 +2289,10 @@ _MIXED_CASES: dict[str, tuple[Callable[[], Any], str]] = {
     ),
 }
 
-# The SVG each mixed chart renders, as the commit before the layer data model
-# rendered it.
+# The pinned SVG bytes of each mixed-type route: layer 0's binding
+# establishes the scale (and its legend, unless ``legend=None`` suppresses
+# it); layer 1's differently-typed binding stays out of that scale, and its
+# marks draw through it.
 _MIXED_SVG_DIGESTS = {
     "color-quantitative-then-nominal": "e7cff10ee6b066b24ba9cc095246333b33b7e1a6af51943f2e9af6156846eef5",
     "color-quantitative-then-nominal-layer": "e7cff10ee6b066b24ba9cc095246333b33b7e1a6af51943f2e9af6156846eef5",
@@ -2389,10 +2394,10 @@ _RAW_BESIDE_PARTS = {
 
 @pytest.mark.parametrize("channel", list(_RAW_BESIDE))
 def test_a_right_operands_statistic_leaves_the_left_operands_rows_raw(channel):
-    """V5: the left draws its raw rows uncolored and unsized; one legend titled ``mean_z``.
+    """The left draws its raw rows uncolored and unsized; one legend titled ``mean_z``.
 
     Rejects promotion: the left would draw its raw z through the scale, and
-    rejects D1-B's grain leak: the left would aggregate by (g, y).
+    rejects a grain-preserving leak: the left would aggregate by (g, y).
     """
     chart = _RAW_BESIDE[channel]()
     svg = chart.to_svg()
@@ -2432,7 +2437,7 @@ def test_a_layered_operand_keeps_its_chart_level_statistic_on_its_own_layers():
 
 
 def test_a_left_operands_statistic_in_the_other_order_leaves_the_raw_rows_raw():
-    """V5 reversed: the legend spans only the means; the raw points draw uncolored."""
+    """Reversed order: the legend spans only the means; the raw points draw uncolored."""
     chart = _mean_points(color=fm.Color("z", aggregate="mean")) + _raw_points()
     svg = chart.to_svg()
     assert svg.count(_LEGEND_TITLE.format("mean_z")) == 1

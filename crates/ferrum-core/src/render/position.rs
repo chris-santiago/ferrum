@@ -27,8 +27,9 @@ use crate::spec::position::{PositionAdjust, StackAnchor, StackValueAxis};
 /// takes. In the preview batch the base column holds only the nonzero bases:
 /// a 0 base is a stack's origin, not a data extent, and it follows the
 /// unstacked baseline rule (0 enters the domain only through zero anchoring),
-/// so zero and normalize stacks resolve exactly as before while a center
-/// stack, whose runs start at a nonzero shift, covers its lowest base. The
+/// so the stripped zero bases do not affect zero or normalize stacks'
+/// resolved domain, while a center stack, whose runs start at a nonzero
+/// shift, covers its lowest base. The
 /// draw pass runs its own `apply_stack` and reads the full base column.
 ///
 /// `outputs` are the named outputs the axis reads beside `batch`: on a
@@ -187,7 +188,7 @@ pub(crate) fn axis_batch<'a>(
 /// ([`LayerPrepared`](crate::render::prepare::LayerPrepared), already in its
 /// own coord). `None` when the layer adjusts nothing on `axis`. The one
 /// LayerPrepared-taking body [`layer_position_preview`] and a reader that
-/// already holds a prepared layer (spec §6.13's `text_edge_rows`) both call,
+/// already holds a prepared layer (`text_edge_rows`) both call,
 /// so a layer's drawn position is read the same way everywhere. `color` is
 /// the panel's one resolved color scale ([`position_preview`]'s doc), the
 /// same scale the layer's own `Dodge` draws through.

@@ -34,7 +34,7 @@ _FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", 
 #: The positional wire channels, in wire order, read by every door.
 _POSITIONAL_WIRE = ("x", "y", "x2", "y2")
 
-#: The internal ``"theme:contrast"`` paint sentinel (spec §6.5): written in
+#: The internal ``"theme:contrast"`` paint sentinel: written in
 #: exactly one place, :meth:`ferrum._spec_build.SpecBuildMixin._build_layers_list`,
 #: when a layer carries :attr:`_Layer.contrast_against` and no caller fill.
 #: Never written directly at a producer site; see ``contrast_against``'s
@@ -214,7 +214,7 @@ class _Layer:
     #: ``mark_kwargs`` this layer reaches the wire build with carries no
     #: ``fill`` (no caller painted this layer), ``_build_layers_list`` binds
     #: this layer's own ``color`` to it and paints the ``CONTRAST_FILL``
-    #: sentinel ink against it (spec §6.5): each label reads its own cell's
+    #: sentinel ink against it: each label reads its own cell's
     #: color and picks a contrasting ink, never drawing a hue of its own
     #: (``reads_color_for_contrast`` in Rust). A caller fill -- a literal
     #: color, or a clear such as ``"none"`` -- already reached ``mark_kwargs``

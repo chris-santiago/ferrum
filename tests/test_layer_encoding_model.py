@@ -1,4 +1,4 @@
-"""The layer encoding model's rule table, cell by cell, on every door (spec §4.6, §6.1-§6.3).
+"""The layer encoding model's rule table, cell by cell, on every door.
 
 A layer's effective encoding is its own bindings merged over exactly one
 parent's, channel by channel, and never over a sibling's: a host for a layer
@@ -7,7 +7,7 @@ composition itself for a ``+`` operand's layer, and nothing for a
 ``fm.LayerChart`` member. The one cross-sibling flow is the axis: a layer that
 binds no x/y takes layer 0's written x/y.
 
-Every case is keyed by its spec §4.6 cell id and door code (§6.1):
+Every case is keyed by a short behavior tag and a door code:
 
 - F flat chart, L ``Chart.layer(fm.Layer(...))``, LD ``fm.Layer(data=...)``;
 - ``+`` / ``+rev`` the composition and its operands reversed (``+s`` over one
@@ -17,22 +17,22 @@ Every case is keyed by its spec §4.6 cell id and door code (§6.1):
   ``resolve={"y": "independent"}`` and ``.interactive()``;
 - Fc faceted.
 
-A rendering case asserts the oracle census (§6.2): each layer draws what it
+A rendering case asserts the oracle census: each layer draws what it
 draws alone, so the chart's marks equal the sum of its parts' marks rendered
 standalone (geometry left out, every style attribute kept, since the panel's
 shared axes move positions), its legend set equals the parts' (where the
 case names one), and no axis or legend text is an internal column. It also
 runs under I: the interactive scene's marks equal the parts' interactive
 marks, and ``.interactive().to_html()`` renders. A refusal asserts the exact
-string. The wire seam (§6.3) is read off every case: each layer's wire
-encoding completed by the chart-level encoding names the fields its part
-draws alone, and the chart-level encoding carries no binding written only on
-one operand or layer.
+string. The wire seam is read off every case: each layer's wire encoding
+completed by the chart-level encoding names the fields its part draws alone,
+and the chart-level encoding carries no binding written only on one operand
+or layer.
 
-Each test names the rejected alternative it discriminates against (spec §10):
-D1-B (a grain-preserving leak still recolors or regroups a sibling), D1-C
-(the left operand's encoding is the composition's, and a later binding is
-promoted to the chart).
+Each test names the rejected alternative it discriminates against: the
+grain-preserving leak (a sibling's binding still recolors or regroups it)
+and the sibling-encoding leak (the left operand's encoding becomes the
+composition's, and a later binding is promoted to the chart).
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ from tests._wire_steps import all_steps, operand_branches
 
 SY = fm.SecondaryY
 
-# Spec §4.6 fixtures: duplicate (g, y) rows on purpose (rows 0 and 2 share (a, 3.0)).
+# Fixtures: duplicate (g, y) rows on purpose (rows 0 and 2 share (a, 3.0)).
 df = pl.DataFrame(
     {
         "v": [1.0, 2.0, 2.5, 3.0, 4.0, 4.5, 6.0, 7.0],
@@ -119,7 +119,7 @@ def mean(cls: type, field: str = "z") -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Census and oracle (spec §6.2)
+# Census and oracle
 # ---------------------------------------------------------------------------
 
 _MARK_TAGS = ("circle", "rect", "path", "line", "polyline", "polygon", "text")
@@ -374,7 +374,7 @@ def _steps_at_any_depth(chart: Any) -> list[dict]:
 
 
 def check_wire_seam(case: Case) -> None:
-    """Spec §6.3: each layer's completed wire encoding draws what its part draws alone."""
+    """Each layer's completed wire encoding draws what its part draws alone."""
     chart = _quiet(case.build)
     if not isinstance(chart, (fm.Chart, fm.LayerChart)):
         return
@@ -429,7 +429,7 @@ def _cases(prefix: str, doors: dict[str, Case]) -> dict[str, Case]:
 
 
 # ---------------------------------------------------------------------------
-# V1: a value channel's binding never crosses siblings
+# A value channel's binding never crosses siblings
 # ---------------------------------------------------------------------------
 
 # Channel -> (bound field, the mark a binder draws it with).
@@ -451,25 +451,27 @@ def _binder(channel: str) -> Callable[[], fm.Chart]:
     return lambda: mk(mark, **{"x": "v", "y": "y", channel: value})
 
 
-def _v1_cases() -> dict[str, Case]:
+def _value_binding_cases() -> dict[str, Case]:
     cases: dict[str, Case] = {}
     for channel, (value, _mark) in _VALUE_CHANNELS.items():
         binder = _binder(channel)
         legends = legend_set(_quiet(lambda binder=binder: binder().to_svg()))
-        cases |= _cases(f"V1/{channel}/binder-then-line", plus_doors(binder, line, legends=legends))
+        cases |= _cases(
+            f"value_binding/{channel}/binder-then-line", plus_doors(binder, line, legends=legends)
+        )
         bound_line = lambda channel=channel, value=value: line(**{channel: value})  # noqa: E731
         bound_legends = legend_set(_quiet(lambda bound_line=bound_line: bound_line().to_svg()))
         cases |= _cases(
-            f"V1/{channel}/point-then-bound-line",
+            f"value_binding/{channel}/point-then-bound-line",
             plus_doors(P, bound_line, legends=bound_legends),
         )
-        cases[f"V1/{channel}/L-own"] = Case(
+        cases[f"value_binding/{channel}/L-own"] = Case(
             lambda channel=channel, value=value: P().layer(layer("line", **{channel: value})),
             (P, bound_line),
             legends=bound_legends,
             chart_level=None,
         )
-        cases[f"V1/{channel}/L-inherited"] = Case(
+        cases[f"value_binding/{channel}/L-inherited"] = Case(
             lambda channel=channel, value=value: P(**{channel: value}).layer(layer("line")),
             (
                 lambda channel=channel, value=value: P(**{channel: value}),
@@ -480,21 +482,22 @@ def _v1_cases() -> dict[str, Case]:
     return cases
 
 
-_V1 = _v1_cases()
+_VALUE_BINDING = _value_binding_cases()
 
 
-@pytest.mark.parametrize("case", sorted(_V1))
-def test_V1_a_value_binding_never_crosses_siblings(case):
-    """V1: ``P(color="c") + line`` draws one polyline; the legend lists the binder's values only.
+@pytest.mark.parametrize("case", sorted(_VALUE_BINDING))
+def test_a_value_binding_never_crosses_siblings(case):
+    """``P(color="c") + line`` draws one polyline; the legend lists the binder's values only.
 
-    Rejects D1-C: the left's color would split the line, and a right or
-    attached binding promoted to the chart would recolor the points.
+    Rejects the sibling-encoding leak: the left's color would split the line,
+    and a right or attached binding promoted to the chart would recolor the
+    points.
     """
-    check_rendering(_V1[case])
+    check_rendering(_VALUE_BINDING[case])
 
 
-def test_V1_the_left_operands_color_leaves_the_line_whole():
-    """V1 named repro: one polyline on every route (rejects D1-C: 2 polylines)."""
+def test_the_left_operands_color_leaves_the_line_whole():
+    """One polyline on every route (rejects the sibling-encoding leak: 2 polylines)."""
     for door, built in plus_doors(lambda: P(color="c"), line).items():
         chart = _quiet(built.build)
         if built.static:
@@ -504,8 +507,8 @@ def test_V1_the_left_operands_color_leaves_the_line_whole():
 
 
 @pytest.mark.parametrize("order", ["bound-first", "bound-later"])
-def test_V1_a_tooltip_reaches_only_its_own_layer_in_interactive_output(order):
-    """V1 (I): the line's tooltip field never becomes the points' tooltip.
+def test_a_tooltip_reaches_only_its_own_layer_in_interactive_output(order):
+    """Interactively, the line's tooltip field never becomes the points' tooltip.
 
     Rejects tooltip promotion: the points would report ``z``.
     """
@@ -518,12 +521,12 @@ def test_V1_a_tooltip_reaches_only_its_own_layer_in_interactive_output(order):
 
 
 # ---------------------------------------------------------------------------
-# V1 by name: a composition's binding names each layer's own column
+# A composition's binding names each layer's own column
 # ---------------------------------------------------------------------------
 
 _ABC = {"g": ("a", "b", "c")}
 
-_V1_BY_NAME: dict[str, Case] = {
+_VALUE_BINDING_BY_NAME: dict[str, Case] = {
     "+e/overlap": Case(
         lambda: (P(df) + line(df2)).encode(color="g"),
         (lambda: P(df, color="g"), lambda: line(df2, color="g")),
@@ -555,21 +558,21 @@ _V1_BY_NAME: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V1_BY_NAME))
-def test_V1_by_name_a_compositions_binding_colors_each_layer_by_its_own_column(case):
-    """V1: ``(P(df) + line(df2)).encode(color="g")`` colors both by their own ``g``; one legend a, b, c.
+@pytest.mark.parametrize("case", sorted(_VALUE_BINDING_BY_NAME))
+def test_by_name_a_compositions_binding_colors_each_layer_by_its_own_column(case):
+    """``(P(df) + line(df2)).encode(color="g")`` colors both by their own ``g``; one legend a, b, c.
 
     Rejects reading the left's column on the right's rows (the line would
     draw a null group).
     """
-    check_rendering(_V1_BY_NAME[case])
+    check_rendering(_VALUE_BINDING_BY_NAME[case])
 
 
 # ---------------------------------------------------------------------------
-# V2, V3, V4, V5, V6: statistics keep their grain beside any sibling
+# Statistics keep their grain beside any sibling
 # ---------------------------------------------------------------------------
 
-_V2: dict[str, Case] = {
+_VALUE_AGGREGATE: dict[str, Case] = {
     "F": Case(lambda: agg("point", color=mean(fm.Color)), marks={"circle": 2}),
     "L-inherits-the-hosts-aggregate": Case(
         lambda: agg("point", color=mean(fm.Color)).layer(layer("tick")),
@@ -579,9 +582,9 @@ _V2: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V2))
-def test_V2_a_value_aggregate_is_computed_per_layer(case):
-    check_rendering(_V2[case])
+@pytest.mark.parametrize("case", sorted(_VALUE_AGGREGATE))
+def test_a_value_aggregate_is_computed_per_layer(case):
+    check_rendering(_VALUE_AGGREGATE[case])
 
 
 _AGG_CLASSES = {
@@ -597,7 +600,7 @@ _AGG_CLASSES = {
 }
 
 
-def _v3_cases() -> dict[str, Case]:
+def _sibling_grain_cases() -> dict[str, Case]:
     cases: dict[str, Case] = {
         "L/bar_mean+point(color=mean(z))": Case(
             lambda: bar_mean().layer(layer("point", color=mean(fm.Color))),
@@ -626,27 +629,28 @@ def _v3_cases() -> dict[str, Case]:
     return cases
 
 
-_V3 = _v3_cases()
+_SIBLING_GRAIN = _sibling_grain_cases()
 
 
-@pytest.mark.parametrize("case", sorted(_V3))
-def test_V3_a_siblings_binding_never_changes_a_layers_grain(case):
-    """V3: host 2 bars + 2 points; the tick keeps 2; the bar mean keeps 2; Fc 4 ticks.
+@pytest.mark.parametrize("case", sorted(_SIBLING_GRAIN))
+def test_a_siblings_binding_never_changes_a_layers_grain(case):
+    """Host 2 bars + 2 points; the tick keeps 2; the bar mean keeps 2; Fc 4 ticks.
 
-    Rejects D1-B: a grain-preserving leak would still recolor the sibling,
-    and D1-C: the sibling would group by the leaked field (7 bars).
+    Rejects a grain-preserving leak that would still recolor the sibling,
+    and a sibling-encoding leak where the sibling would group by the leaked
+    field (7 bars).
     """
-    check_rendering(_V3[case])
+    check_rendering(_SIBLING_GRAIN[case])
 
 
-def test_V3_the_tick_beside_a_colored_mean_draws_two_ticks():
-    """V3 named repro: ``point(g, mean(y), color=mean(z)) + tick(g, mean(y))`` keeps 2 ticks."""
+def test_the_tick_beside_a_colored_mean_draws_two_ticks():
+    """Named repro: ``point(g, mean(y), color=mean(z)) + tick(g, mean(y))`` keeps 2 ticks."""
     for channel, cls in _AGG_CLASSES.items():
         svg = _quiet(lambda: (agg("point", **{channel: mean(cls)}) + agg("tick")).to_svg())
         assert tag_counts(svg).get("line", 0) == 2, channel
 
 
-def _v4_cases() -> dict[str, Case]:
+def _different_frame_sibling_cases() -> dict[str, Case]:
     cases: dict[str, Case] = {}
     for channel in ("color", "size", "opacity", "fill_opacity", "stroke_opacity"):
         cls = _AGG_CLASSES[channel]
@@ -664,21 +668,21 @@ def _v4_cases() -> dict[str, Case]:
     return cases
 
 
-_V4 = _v4_cases()
+_DIFFERENT_FRAME_SIBLING = _different_frame_sibling_cases()
 
 
-@pytest.mark.parametrize("case", sorted(_V4))
-def test_V4_a_different_frame_sibling_never_empties_or_regroups_a_layer(case):
-    """V4: left 2 ticks, right 3 points; no build error; ``bar_mean`` keeps 2 bars.
+@pytest.mark.parametrize("case", sorted(_DIFFERENT_FRAME_SIBLING))
+def test_a_different_frame_sibling_never_empties_or_regroups_a_layer(case):
+    """Left 2 ticks, right 3 points; no build error; ``bar_mean`` keeps 2 bars.
 
-    Rejects D1-C: the left would group by the right's renamed column and
-    draw nothing, and the opacity family's renamed promotion copy would
-    refuse its stamped title.
+    Rejects the sibling-encoding leak: the left would group by the right's
+    renamed column and draw nothing, and the opacity family's renamed
+    promotion copy would refuse its stamped title.
     """
-    check_rendering(_V4[case])
+    check_rendering(_DIFFERENT_FRAME_SIBLING[case])
 
 
-_V5 = _cases(
+_RIGHT_AGGREGATE = _cases(
     "P(x=g)+point(mean(y),color=mean(z))",
     plus_doors(
         lambda: P(x="g"),
@@ -690,16 +694,17 @@ _V5 = _cases(
 )
 
 
-@pytest.mark.parametrize("case", sorted(_V5))
-def test_V5_a_right_aggregate_leaves_the_left_raw_and_uncolored(case):
-    """V5: the left draws 8 raw uncolored points; one color legend from the right, titled ``mean_z``.
+@pytest.mark.parametrize("case", sorted(_RIGHT_AGGREGATE))
+def test_a_right_aggregate_leaves_the_left_raw_and_uncolored(case):
+    """The left draws 8 raw uncolored points; one color legend from the right, titled ``mean_z``.
 
-    Rejects D1-C: the left's raw z would draw through the promoted scale.
+    Rejects the sibling-encoding leak: the left's raw z would draw through
+    the promoted scale.
     """
-    check_rendering(_V5[case])
+    check_rendering(_RIGHT_AGGREGATE[case])
 
 
-_V6: dict[str, Case] = {
+_ALIAS_SHADOW: dict[str, Case] = {
     "L/fill-shadows-nothing": Case(
         lambda: bar_mean().layer(layer("point", fill=mean(fm.Fill))),
         (bar_mean, lambda: agg("point", fill=mean(fm.Fill))),
@@ -726,18 +731,18 @@ _V6: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V6))
-def test_V6_an_alias_shadows_the_parents_channel(case):
-    """V6: a layer's own ``fill``/``stroke`` is its color, so it groups by ``g`` alone (2 points).
+@pytest.mark.parametrize("case", sorted(_ALIAS_SHADOW))
+def test_an_alias_shadows_the_parents_channel(case):
+    """A layer's own ``fill``/``stroke`` is its color, so it groups by ``g`` alone (2 points).
 
     Rejects an alias-blind merge: the layer would also group by the
     parent's color field (7 points, or a vanished layer over two frames).
     """
-    check_rendering(_V6[case])
+    check_rendering(_ALIAS_SHADOW[case])
 
 
 # ---------------------------------------------------------------------------
-# V9, V10, V11, V12
+# A user transform's output, and one scale and legend over every drawing layer
 # ---------------------------------------------------------------------------
 
 
@@ -761,7 +766,7 @@ def _my_column() -> fm.Chart:
     )
 
 
-_V9: dict[str, Case] = {
+_TRANSFORM_OUTPUT_BINDING: dict[str, Case] = {
     "SY(mean_r)": Case(lambda: _mean_r_by_v() + SY("mean_r"), marks={"circle": 8, "polyline": 1}),
     "L(text=my)": Case(
         lambda: _my_column().layer(layer("text", text="my")),
@@ -771,17 +776,17 @@ _V9: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V9))
-def test_V9_a_user_transforms_output_binds_on_every_door(case):
-    check_rendering(_V9[case])
+@pytest.mark.parametrize("case", sorted(_TRANSFORM_OUTPUT_BINDING))
+def test_a_user_transforms_output_binds_on_every_door(case):
+    check_rendering(_TRANSFORM_OUTPUT_BINDING[case])
 
 
-def test_V9_the_attached_text_layer_draws_the_calculated_column():
+def test_the_attached_text_layer_draws_the_calculated_column():
     labels = set(chrome_text(_my_column().layer(layer("text", text="my")).to_svg()))
     assert set(df["k"]) <= labels
 
 
-_V10: dict[str, Case] = {
+_SHARED_SCALE_LEGEND: dict[str, Case] = {
     **{
         k: v
         for k, v in _cases(
@@ -793,13 +798,13 @@ _V10: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V10))
-def test_V10_one_scale_and_one_legend_over_every_drawing_layer(case):
-    """V10: a ``g`` color on both layers over two frames draws one legend a, b, c.
+@pytest.mark.parametrize("case", sorted(_SHARED_SCALE_LEGEND))
+def test_one_scale_and_one_legend_over_every_drawing_layer(case):
+    """A ``g`` color on both layers over two frames draws one legend a, b, c.
 
     Rejects first-layer domains: the legend would list a, b only.
     """
-    case = _V10[case]
+    case = _SHARED_SCALE_LEGEND[case]
     chart = _quiet(case.build)
     assert legend_set(_quiet(chart.to_svg)) == _ABC
 
@@ -809,8 +814,8 @@ def test_V10_one_scale_and_one_legend_over_every_drawing_layer(case):
     [lambda: P(size="z") + P(df2, size="z"), lambda: P(df2, size="z") + P(size="z")],
     ids=["size", "size-rev"],
 )
-def test_V10_a_size_on_both_layers_draws_one_legend_over_the_union(build):
-    """V10: one size legend titled ``z`` whose entries span both frames' z (5..45).
+def test_a_size_on_both_layers_draws_one_legend_over_the_union(build):
+    """One size legend titled ``z`` whose entries span both frames' z (5..45).
 
     Rejects a first-layer domain: the legend would list either frame's
     entries alone.
@@ -823,12 +828,12 @@ def test_V10_a_size_on_both_layers_draws_one_legend_over_the_union(build):
     assert float(entries[0]) <= df["z"].min() and float(entries[-1]) >= 0.8 * df["z"].max()
 
 
-def test_V10_an_opacity_on_both_layers_draws_one_legend():
+def test_an_opacity_on_both_layers_draws_one_legend():
     titles = list(legend_set(_quiet(lambda: P(opacity="z") + P(df2, opacity="z")).to_svg()))
     assert titles == ["z"]
 
 
-def test_V10_a_type_conflict_excludes_the_later_layer_with_a_warning():
+def test_a_type_conflict_excludes_the_later_layer_with_a_warning():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         svg = (P(color="z") + line(color="g")).to_svg()
@@ -838,7 +843,7 @@ def test_V10_a_type_conflict_excludes_the_later_layer_with_a_warning():
 
 
 # ---------------------------------------------------------------------------
-# V1, V10: the opacity family and stroke_width draw one legend on every door
+# The opacity family and stroke_width draw one legend on every door
 # ---------------------------------------------------------------------------
 #
 # A field bound to opacity, fill_opacity, stroke_opacity or stroke_width
@@ -948,8 +953,8 @@ _LEGEND_DOOR_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_LEGEND_DOOR_CASES))
-def test_V10_an_opacity_or_width_binding_draws_one_legend_alike_on_every_door(case):
-    """V1/V10: every door draws the flat chart's one legend, static and interactive.
+def test_an_opacity_or_width_binding_draws_one_legend_alike_on_every_door(case):
+    """Every door draws the flat chart's one legend, static and interactive.
 
     The interactive legend's entries carry the swatch each label maps to,
     so a door that drew another scale (or another title) would differ.
@@ -970,7 +975,7 @@ def test_V10_an_opacity_or_width_binding_draws_one_legend_alike_on_every_door(ca
 
 
 @pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
-def test_V10_an_explicit_domain_and_range_reach_the_wire_and_set_the_legend(channel):
+def test_an_explicit_domain_and_range_reach_the_wire_and_set_the_legend(channel):
     """The legend lists the explicit domain's values, each drawn at its linear map onto the range.
 
     Rejects a scale dropped before the wire (the data extent 10..45 and the
@@ -1053,7 +1058,7 @@ def _union_layers(channel: str) -> tuple[Callable[[], fm.Chart], Callable[[], fm
 
 @pytest.mark.parametrize("order", ["r-first", "w-first"])
 @pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
-def test_V10_two_layers_draw_one_legend_spanning_both_extents(channel, order):
+def test_two_layers_draw_one_legend_spanning_both_extents(channel, order):
     """``line(stroke_width="r") + line(df2, stroke_width="w")``: one legend over r and w together.
 
     ``r`` spans 1..4.5 and ``w`` 1..6. Rejects a first-layer domain: the
@@ -1073,7 +1078,7 @@ def test_V10_two_layers_draw_one_legend_spanning_both_extents(channel, order):
 
 
 @pytest.mark.parametrize("channel", sorted(_LEGEND_CHANNEL_CLASSES))
-def test_V10_a_string_layer_is_excluded_and_one_legend_stays(channel):
+def test_a_string_layer_is_excluded_and_one_legend_stays(channel):
     """``point(opacity="z") + point(opacity="g")`` warns the exclusion and draws layer 0's one legend."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1557,7 +1562,7 @@ def test_reverse_swaps_the_mapped_values(channel, kind):
 @pytest.mark.parametrize("channel", sorted(_NUMERIC_AUX_CLASSES))
 def test_a_constant_column_maps_to_the_range_midpoint(channel, kind):
     """A constant column is a zero-width domain: every kind maps it to the
-    range midpoint (2026-10-16 ruling), never NaN -- ``degenerate_ratio``
+    range midpoint, never NaN -- ``degenerate_ratio``
     resolves the same way under a non-linear transform as under Linear,
     and ``LogScaleData::nice`` leaves a degenerate domain's two equal
     magnitudes unchanged rather than widening them to a full decade.
@@ -1625,7 +1630,7 @@ _TRANSFORM_DOORS = ("+", "L-own", "LCm", "Fc")
 def test_a_transform_scale_draws_one_legend_alike_on_every_door(channel, kind, door):
     """Log/Pow/Sqrt draw the flat chart's one legend on ``+``, ``Chart.layer``,
     ``LayerChart`` and a facet, static and interactive alike -- the same
-    door coverage V10 pins for the linear scale.
+    door coverage the linear scale is pinned on above.
 
     Rejects a door that resolves the auxiliary scale independently per
     layer or per panel: the legend or a mark's swatch would disagree with
@@ -2942,7 +2947,7 @@ def test_pow_and_sqrt_map_a_negative_value_with_the_same_fraction_on_x_and_aux(k
     assert linear_values != pytest.approx(aux_values, abs=1e-3)
 
 
-_V11: dict[str, Case] = {
+_AGGREGATE_LEGEND_TITLE: dict[str, Case] = {
     "same-frame/+": Case(
         lambda: P(x="g") + agg("point", color=mean(fm.Color)), chart_level=frozenset()
     ),
@@ -2965,18 +2970,18 @@ _V11: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V11))
-def test_V11_an_aggregated_legend_is_titled_by_its_output_column(case):
-    """V11: the color legend is titled ``mean_z`` on every door, same frame or not.
+@pytest.mark.parametrize("case", sorted(_AGGREGATE_LEGEND_TITLE))
+def test_an_aggregated_legend_is_titled_by_its_output_column(case):
+    """The color legend is titled ``mean_z`` on every door, same frame or not.
 
     Rejects the source-field title (``z``) a different-frame promotion copy drew.
     """
-    case = _V11[case]
+    case = _AGGREGATE_LEGEND_TITLE[case]
     check_rendering(case)
     assert list(legend_set(_quiet(_quiet(case.build).to_svg))) == ["mean_z"]
 
 
-_V12: dict[str, Case] = {
+_LAYER_ENCODING_STRING: dict[str, Case] = {
     "string": Case(
         lambda: P().layer(fm.Layer(mark="point", encoding={"y": "r", "color": "c"})),
         (P, lambda: P(y="r", color="c")),
@@ -2992,18 +2997,18 @@ _V12: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V12))
-def test_V12_a_string_in_layer_encoding_draws_with_a_legend(case):
-    """V12: ``encoding={"color": "c"}`` draws colored with a legend, as ``Color("c")`` does.
+@pytest.mark.parametrize("case", sorted(_LAYER_ENCODING_STRING))
+def test_a_string_in_layer_encoding_draws_with_a_legend(case):
+    """``encoding={"color": "c"}`` draws colored with a legend, as ``Color("c")`` does.
 
     Rejects a scale built only from the chart-level encoding: the string
     spelling drew no color.
     """
-    check_rendering(_V12[case])
+    check_rendering(_LAYER_ENCODING_STRING[case])
 
 
 # ---------------------------------------------------------------------------
-# G2, G5, V7, X4, V12, R1: one channel vocabulary on every door (spec §4.3, §6.5)
+# One channel vocabulary on every door
 # ---------------------------------------------------------------------------
 #
 # Every door reads a binding the way ``encode()`` does and refuses the same
@@ -3023,8 +3028,8 @@ def _channel_classes() -> dict[str, type]:
 _BIN_HONORED = frozenset({"x", "y", "color", "fill", "stroke"})
 _BIN_REFUSED = sorted(set(_channel_classes()) - _BIN_HONORED)
 
-# Spec §4.3's channels that refuse aggregate=: a grouping, link, facet or
-# error channel draws no aggregated value.
+# The channels that refuse aggregate=: a grouping, link, facet or error
+# channel draws no aggregated value.
 _AGGREGATE_REFUSED = (
     "detail",
     "shape",
@@ -3076,7 +3081,11 @@ _BIN_SPELLINGS: dict[str, Callable[[], Any]] = {
 }
 
 _BIN_REFUSAL_CASES = {
-    f"{'V7' if name in _VALUE_CHANNELS else 'G5'}/{name}/{spelling}/{door}": (name, spelling, door)
+    f"{'value-channel' if name in _VALUE_CHANNELS else 'grouping-channel'}/{name}/{spelling}/{door}": (
+        name,
+        spelling,
+        door,
+    )
     for name in _BIN_REFUSED
     for spelling in _BIN_SPELLINGS
     for door in _vocabulary_doors(name, lambda: None)
@@ -3084,8 +3093,8 @@ _BIN_REFUSAL_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_BIN_REFUSAL_CASES))
-def test_G5_V7_a_bin_on_a_channel_drawing_no_binned_value_is_refused_on_every_door(case):
-    """G5/V7: ``bin=`` on any channel but x, y and the color family refuses at construction.
+def test_a_bin_on_a_channel_drawing_no_binned_value_is_refused_on_every_door(case):
+    """``bin=`` on any channel but x, y and the color family refuses at construction.
 
     Rejects the warn-and-keep path, whose bin still lowered into a step that
     replaced the chart's rows: ``P(size=fm.Size("z", bin=True))`` drew 39
@@ -3101,7 +3110,7 @@ def test_G5_V7_a_bin_on_a_channel_drawing_no_binned_value_is_refused_on_every_do
 
 
 _AGGREGATE_REFUSAL_CASES = {
-    f"G2/{name}/{spelling}/{door}": (name, spelling, door)
+    f"no_value_aggregate/{name}/{spelling}/{door}": (name, spelling, door)
     for name in _AGGREGATE_REFUSED
     for spelling in ("object", "shorthand")
     for door in _vocabulary_doors(name, lambda: None)
@@ -3110,8 +3119,8 @@ _AGGREGATE_REFUSAL_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_AGGREGATE_REFUSAL_CASES))
-def test_G2_an_aggregate_on_a_channel_drawing_no_aggregated_value_is_refused_on_every_door(case):
-    """G2: ``aggregate=`` on a grouping, link, facet or error channel refuses at construction.
+def test_an_aggregate_on_a_channel_drawing_no_aggregated_value_is_refused_on_every_door(case):
+    """``aggregate=`` on a grouping, link, facet or error channel refuses at construction.
 
     The shorthand cells reject reading ``Layer(encoding={"detail": "mean(z)"})``
     as a literal column named ``mean(z)``: a layer string means what
@@ -3164,7 +3173,7 @@ def test_an_unset_bin_or_aggregate_draws_what_the_bare_binding_draws(door):
         assert built.to_svg() == bare.to_svg()
 
 
-_X4: dict[str, Case] = {
+_LAYER_ENCODING_SPELLING: dict[str, Case] = {
     "sum/L": Case(
         lambda: P().layer(fm.Layer(mark="point", encoding={"y": "sum(y)"})),
         (P, lambda: P(y="sum(y)")),
@@ -3183,19 +3192,19 @@ _X4: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_X4))
-def test_X4_a_layer_encoding_shorthand_aggregates_that_layer(case):
-    """X4: ``Layer(encoding={"y": "sum(y)"})`` aggregates the layer, as ``encode(y="sum(y)")`` does.
+@pytest.mark.parametrize("case", sorted(_LAYER_ENCODING_SPELLING))
+def test_a_layer_encoding_shorthand_aggregates_that_layer(case):
+    """``Layer(encoding={"y": "sum(y)"})`` aggregates the layer, as ``encode(y="sum(y)")`` does.
 
     Rejects the literal reading: ``"sum(y)"`` was refused as an unknown
     column of that name.
     """
-    check_rendering(_X4[case])
+    check_rendering(_LAYER_ENCODING_SPELLING[case])
 
 
 @pytest.mark.parametrize("type_", ["Q", "N", "O", "T"])
-def test_X4_a_layer_encoding_type_suffix_sets_the_type(type_):
-    """X4: ``"r:Q"`` binds ``r`` with that type, on the layer and on its wire encoding.
+def test_a_layer_encoding_type_suffix_sets_the_type(type_):
+    """``"r:Q"`` binds ``r`` with that type, on the layer and on its wire encoding.
 
     Rejects the literal reading, which bound a column named ``r:Q``.
     """
@@ -3210,8 +3219,8 @@ def test_X4_a_layer_encoding_type_suffix_sets_the_type(type_):
 
 
 @pytest.mark.parametrize("name", sorted(_channel_classes()))
-def test_V12_a_layer_string_equals_the_channel_object_spelling(name):
-    """V12: a string in ``Layer(encoding=)`` is the channel object ``encode()`` builds from it."""
+def test_a_layer_string_equals_the_channel_object_spelling(name):
+    """A string in ``Layer(encoding=)`` is the channel object ``encode()`` builds from it."""
     cls = _channel_classes()[name]
     assert fm.Layer(encoding={name: "z"}).encoding[name] == cls("z")
     assert fm.Layer(encoding={name: "z:O"}).encoding[name] == cls("z", type="O")
@@ -3230,8 +3239,8 @@ _DRAWN_STRING_CHANNELS = {
 
 
 @pytest.mark.parametrize("name", sorted(_DRAWN_STRING_CHANNELS))
-def test_V12_a_layer_string_draws_what_the_channel_object_draws(name):
-    """V12: the string and the object spelling of one layer binding render the same bytes."""
+def test_a_layer_string_draws_what_the_channel_object_draws(name):
+    """The string and the object spelling of one layer binding render the same bytes."""
     field, mark = _DRAWN_STRING_CHANNELS[name]
     cls = _channel_classes()[name]
     as_string = P().layer(layer(mark, y="r", **{name: field}))
@@ -3239,8 +3248,8 @@ def test_V12_a_layer_string_draws_what_the_channel_object_draws(name):
     assert _quiet(as_string.to_svg) == _quiet(as_object.to_svg)
 
 
-def test_X4_an_unknown_op_in_a_layer_string_is_refused_as_encode_refuses_it():
-    """X4: ``"foo(y)"`` names an unknown aggregate on every door, not an unknown column."""
+def test_an_unknown_op_in_a_layer_string_is_refused_as_encode_refuses_it():
+    """``"foo(y)"`` names an unknown aggregate on every door, not an unknown column."""
     with pytest.raises(ValueError) as from_encode:
         P(y="foo(y)").to_svg()
     with pytest.raises(ValueError) as from_layer:
@@ -3262,8 +3271,8 @@ _ANY_VALUE: dict[str, Callable[[], Any]] = {
 
 @pytest.mark.parametrize("value", sorted(_ANY_VALUE))
 @pytest.mark.parametrize("name", ["bogus", "order", "colour"])
-def test_X4_an_unknown_channel_in_a_layer_encoding_is_refused_as_encode_refuses_it(name, value):
-    """X4: a name ``encode()`` does not take is refused at ``Layer`` construction, whatever its value.
+def test_an_unknown_channel_in_a_layer_encoding_is_refused_as_encode_refuses_it(name, value):
+    """A name ``encode()`` does not take is refused at ``Layer`` construction, whatever its value.
 
     Rejects carrying it to the wire: ``bogus`` was warned and dropped, and
     the wire-only ``order`` reached the render as a channel ``encode()``
@@ -3296,8 +3305,8 @@ def test_a_none_binding_binds_nothing_on_encode_and_layer_encoding(name):
 
 
 @pytest.mark.parametrize("value", [3, 2.5, ["y"]], ids=["int", "float", "list"])
-def test_X4_a_layer_value_that_is_no_binding_is_refused_as_encode_refuses_it(value):
-    """X4: a value that is neither a string nor a channel object is a ``TypeError`` on both doors.
+def test_a_layer_value_that_is_no_binding_is_refused_as_encode_refuses_it(value):
+    """A value that is neither a string nor a channel object is a ``TypeError`` on both doors.
 
     Rejects passing it to the wire, where ``encoding={"y": 3}`` rendered.
     """
@@ -3334,31 +3343,32 @@ def test_a_statistic_rebinding_stamps_only_kwargs_its_channel_honors(name):
 
 
 # ---------------------------------------------------------------------------
-# G1, G3, G4, G6: grouping channels
+# Grouping channels
 # ---------------------------------------------------------------------------
 
-_G1: dict[str, Case] = {
+_GROUPING_BINDING: dict[str, Case] = {
     **_cases("detail", plus_doors(lambda: line(detail="c"), lambda: line(y="r"))),
     **_cases("stroke_dash", plus_doors(lambda: line(stroke_dash="c"), lambda: line(y="r"))),
     **_cases("shape", plus_doors(lambda: P(shape="c"), lambda: P(y="r"))),
 }
 
 
-@pytest.mark.parametrize("case", sorted(_G1))
-def test_G1_a_grouping_binding_never_splits_a_sibling(case):
-    """G1: ``line(detail=c) + line`` = ``line + line(detail=c)`` = 3 polylines.
+@pytest.mark.parametrize("case", sorted(_GROUPING_BINDING))
+def test_a_grouping_binding_never_splits_a_sibling(case):
+    """``line(detail=c) + line`` = ``line + line(detail=c)`` = 3 polylines.
 
-    Rejects D1-C: the left's detail would split the right line into 2.
+    Rejects the sibling-encoding leak: the left's detail would split the
+    right line into 2.
     """
-    check_rendering(_G1[case])
+    check_rendering(_GROUPING_BINDING[case])
 
 
-def test_G1_three_polylines_in_both_orders():
+def test_three_polylines_in_both_orders():
     for chart in (line(detail="c") + line(y="r"), line(y="r") + line(detail="c")):
         assert tag_counts(chart.to_svg())["polyline"] == 3
 
 
-_G3: dict[str, Case] = {
+_INHERITED_GROUPING: dict[str, Case] = {
     # The shape scale's second glyph is a square `<rect>`.
     "F": Case(lambda: agg("point", shape="c"), marks={"circle": 2, "rect": 2}),
     "L-inherits-the-hosts-shape": Case(
@@ -3369,10 +3379,10 @@ _G3: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_G3))
-def test_G3_a_raw_grouping_channel_groups_an_aggregating_layer(case):
-    """G3: flat 4 groups; an attached layer inheriting the host's ``shape`` groups by it too."""
-    check_rendering(_G3[case])
+@pytest.mark.parametrize("case", sorted(_INHERITED_GROUPING))
+def test_a_raw_grouping_channel_groups_an_aggregating_layer(case):
+    """Flat 4 groups; an attached layer inheriting the host's ``shape`` groups by it too."""
+    check_rendering(_INHERITED_GROUPING[case])
 
 
 # Channel -> (field, the raw binder's mark), as the probes draw them.
@@ -3387,7 +3397,7 @@ _GROUPING: dict[str, tuple[str, str]] = {
 }
 
 
-def _g4_cases() -> dict[str, Case]:
+def _aggregating_sibling_grain_cases() -> dict[str, Case]:
     cases: dict[str, Case] = {}
     for channel, (value, mark) in _GROUPING.items():
         cases |= _cases(
@@ -3402,19 +3412,20 @@ def _g4_cases() -> dict[str, Case]:
     return cases
 
 
-_G4 = _g4_cases()
+_AGGREGATING_SIBLING_GRAIN = _aggregating_sibling_grain_cases()
 
 
-@pytest.mark.parametrize("case", sorted(_G4))
-def test_G4_an_aggregating_sibling_keeps_its_grain_beside_a_raw_grouping_binding(case):
-    """G4: the tick keeps 2 marks beside a raw detail/shape/stroke_dash/key/href/text/tooltip.
+@pytest.mark.parametrize("case", sorted(_AGGREGATING_SIBLING_GRAIN))
+def test_an_aggregating_sibling_keeps_its_grain_beside_a_raw_grouping_binding(case):
+    """The tick keeps 2 marks beside a raw detail/shape/stroke_dash/key/href/text/tooltip.
 
-    Rejects D1-C: the tick would group by the sibling's raw field.
+    Rejects the sibling-encoding leak: the tick would group by the sibling's
+    raw field.
     """
-    check_rendering(_G4[case])
+    check_rendering(_AGGREGATING_SIBLING_GRAIN[case])
 
 
-_G6: dict[str, Case] = {
+_ATTACHED_GROUPING: dict[str, Case] = {
     "shape": Case(
         lambda: P().layer(fm.Layer(mark="point", encoding={"y": "r", "shape": "c"})),
         (P, lambda: P(y="r", shape="c")),
@@ -3430,13 +3441,13 @@ _G6: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_G6))
-def test_G6_an_attached_layers_own_grouping_channel_draws_with_a_legend(case):
-    check_rendering(_G6[case])
+@pytest.mark.parametrize("case", sorted(_ATTACHED_GROUPING))
+def test_an_attached_layers_own_grouping_channel_draws_with_a_legend(case):
+    check_rendering(_ATTACHED_GROUPING[case])
 
 
 # ---------------------------------------------------------------------------
-# Parent rules (spec §4.1)
+# Parent rules
 # ---------------------------------------------------------------------------
 
 _TITLED = fm.Color("c", title="Group", scale=fm.OrdinalScale(domain=["q", "p"]))
@@ -3486,16 +3497,17 @@ _PARENT: dict[str, Case] = {
 
 @pytest.mark.parametrize("case", sorted(_PARENT))
 def test_parent_rules(case):
-    """§4.1: a layer inherits its one parent's bindings whole, and nothing from a sibling.
+    """A layer inherits its one parent's bindings whole, and nothing from a sibling.
 
-    Rejects D1-C: ``(a + b).encode(detail="g") + c`` would split ``c``, and
-    a LayerChart member would inherit an earlier member's composition color.
+    Rejects the sibling-encoding leak: ``(a + b).encode(detail="g") + c``
+    would split ``c``, and a LayerChart member would inherit an earlier
+    member's composition color.
     """
     check_rendering(_PARENT[case])
 
 
 # ---------------------------------------------------------------------------
-# Axis fallback (spec §4.6 X1): the one cross-sibling flow
+# Axis fallback: the one cross-sibling flow
 # ---------------------------------------------------------------------------
 
 
@@ -3504,7 +3516,7 @@ def _line_points() -> fm.Chart:
     return fm.Chart(df).mark_line(point=True).encode(x="v", y="r")
 
 
-_X1: dict[str, Case] = {
+_AXIS_FALLBACK: dict[str, Case] = {
     "L": Case(lambda: P().layer(layer("line")), (P, line), chart_level=None),
     "LD": Case(lambda: P().layer(fm.Layer(data=df2, mark="line")), (P, lambda: line(df2))),
     "+s": Case(lambda: P() + line(), (P, line)),
@@ -3535,14 +3547,14 @@ _X1: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_X1))
-def test_X1_a_layer_binding_no_axis_takes_layer_zeros_written_axis(case):
-    check_rendering(_X1[case])
+@pytest.mark.parametrize("case", sorted(_AXIS_FALLBACK))
+def test_a_layer_binding_no_axis_takes_layer_zeros_written_axis(case):
+    check_rendering(_AXIS_FALLBACK[case])
 
 
 @pytest.mark.parametrize("order", ["right", "left"])
-def test_X1_a_layered_operands_layers_draw_that_operands_written_axis(order):
-    """X1: ``mark_line(point=True).encode(y="r")``'s two layers draw ``r`` beside ``P``, either order.
+def test_a_layered_operands_layers_draw_that_operands_written_axis(order):
+    """``mark_line(point=True).encode(y="r")``'s two layers draw ``r`` beside ``P``, either order.
 
     Rejects the composition's axis reaching them: they bind no y of their
     own, and would draw layer 0's ``y``.
@@ -3563,12 +3575,12 @@ def test_X1_a_layered_operands_layers_draw_that_operands_written_axis(order):
     ],
     ids=["+d", "+s-aggregate"],
 )
-def test_X1_layer_zeros_written_axis_titles_the_axes(build, titles):
+def test_layer_zeros_written_axis_titles_the_axes(build, titles):
     assert axis_titles(build().to_svg()) == titles
 
 
-def test_X1_a_drawn_fallback_column_the_layers_rows_lack_is_refused():
-    """X1 +d reversed: the points take layer 0's ``x="w"``, which df lacks, so the chart refuses.
+def test_a_drawn_fallback_column_the_layers_rows_lack_is_refused():
+    """``+d`` reversed: the points take layer 0's ``x="w"``, which df lacks, so the chart refuses.
 
     A point draws x, so it takes the fallback and reads ``w`` by name in its
     own rows. Rejects the padded column: the points drew nothing, silently.
@@ -3594,77 +3606,83 @@ def _binned(data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
 
 
 _NET: dict[str, Case] = {
-    # X2: an encoding aggregate, each layer over its own rows by its own groupby.
-    "X2/F": Case(bar_mean, marks={"rect": 2}),
-    "X2/L-own-sum": Case(
+    # An encoding aggregate, each layer over its own rows by its own groupby.
+    "layer_aggregate/F": Case(bar_mean, marks={"rect": 2}),
+    "layer_aggregate/L-own-sum": Case(
         lambda: bar_mean().layer(layer("point", y=fm.Y("y", aggregate="sum"))),
         (bar_mean, lambda: agg("point", y="sum(y)")),
         chart_level=None,
     ),
-    "X2/L-raw-y": Case(
+    "layer_aggregate/L-raw-y": Case(
         lambda: bar_mean().layer(layer("point", y="y")),
         (bar_mean, lambda: P(x="g")),
         chart_level=None,
     ),
-    "X2/L-finer-color": Case(
+    "layer_aggregate/L-finer-color": Case(
         lambda: bar_mean().layer(layer("point", color="c")),
         (bar_mean, lambda: agg("point", color="c")),
         chart_level=None,
     ),
-    "X2/+s-right-binds-none": Case(
+    "layer_aggregate/+s-right-binds-none": Case(
         lambda: bar_mean() + fm.Chart(df).mark_point(), (bar_mean, lambda: agg("point"))
     ),
-    "X2/+d-right-binds-none": Case(
+    "layer_aggregate/+d-right-binds-none": Case(
         lambda: bar_mean() + fm.Chart(df2).mark_point(), (bar_mean, lambda: agg("point", df2))
     ),
-    "X2/+r": Case(lambda: P(x="g") + bar_mean(), (lambda: P(x="g"), bar_mean)),
-    "X2/+r-diff": Case(lambda: P(df2, x="g") + bar_mean(), (lambda: P(df2, x="g"), bar_mean)),
-    "X2/LCm": Case(
+    "layer_aggregate/+r": Case(lambda: P(x="g") + bar_mean(), (lambda: P(x="g"), bar_mean)),
+    "layer_aggregate/+r-diff": Case(
+        lambda: P(df2, x="g") + bar_mean(), (lambda: P(df2, x="g"), bar_mean)
+    ),
+    "layer_aggregate/LCm": Case(
         lambda: fm.LayerChart(bar_mean(), P(df2, x="g"))._build_merged(),
         (bar_mean, lambda: P(df2, x="g")),
     ),
-    "X2/Fc": Case(lambda: bar_mean().facet("c"), marks={"rect": 4}),
-    # X9: composite statistics per layer; attached layers read the host's rows.
-    "X9/H-layer-rug": Case(
+    "layer_aggregate/Fc": Case(lambda: bar_mean().facet("c"), marks={"rect": 4}),
+    # Composite statistics per layer; attached layers read the host's rows.
+    "composite_layer/H-layer-rug": Case(
         lambda: _hist().layer(layer("tick")),
         (_hist, lambda: mk("tick", x="v")),
         marks={"rect": 4, "line": 8},
         chart_level=None,
     ),
-    "X9/H+rug": Case(lambda: _hist() + mk("tick", x="v"), marks={"rect": 4, "line": 8}),
-    "X9/rug+H": Case(lambda: mk("tick", x="v") + _hist(), marks={"line": 8, "rect": 4}),
-    # X10: a user transform; attached layers read the host chain's output.
+    "composite_layer/H+rug": Case(
+        lambda: _hist() + mk("tick", x="v"), marks={"rect": 4, "line": 8}
+    ),
+    "composite_layer/rug+H": Case(
+        lambda: mk("tick", x="v") + _hist(), marks={"line": 8, "rect": 4}
+    ),
+    # A user transform; attached layers read the host chain's output.
     # `datum.v > 3` keeps 4 of df's rows.
-    "X10/L": Case(
+    "transform_layer/L": Case(
         lambda: P().transform(fm.transform_filter("datum.v > 3")).layer(layer("tick")),
         marks={"circle": 4, "line": 4},
         chart_level=None,
     ),
-    "X10/LD": Case(
+    "transform_layer/LD": Case(
         lambda: (
             P().transform(fm.transform_filter("datum.v > 3")).layer(fm.Layer(data=df2, mark="tick"))
         ),
         marks={"circle": 4, "line": 6},
     ),
-    "X10/+e": Case(
+    "transform_layer/+e": Case(
         lambda: (P() + line(df2)).transform(fm.transform_filter("datum.v > 3")),
         marks={"circle": 4, "polyline": 1},
     ),
-    # S1: a span with no statistic, read per layer.
-    "S1/F": Case(lambda: mk("bar", x="g", y="y", y2="r"), marks={"rect": 8}),
-    "S1/L-inherits-y2": Case(
+    # A span with no statistic, read per layer.
+    "span_no_statistic/F": Case(lambda: mk("bar", x="g", y="y", y2="r"), marks={"rect": 8}),
+    "span_no_statistic/L-inherits-y2": Case(
         lambda: mk("bar", x="v", y="y", y2="r").layer(layer("tick")),
         marks={"rect": 8, "line": 8},
         chart_level=None,
     ),
-    # S3: a binned channel gets its span; S4: a user transform's span.
-    "S3/F": Case(_binned, marks={"rect": 4}),
-    "S3/L-inherits-the-bin": Case(
+    # A binned channel gets its span; a user transform's span.
+    "binned_span/F": Case(_binned, marks={"rect": 4}),
+    "binned_span/L-inherits-the-bin": Case(
         lambda: _binned().layer(layer("point")),
         (_binned, lambda: mk("point", x=fm.X("v", bin=True), y="count()")),
         chart_level=None,
     ),
-    "S4/F": Case(
+    "transform_span/F": Case(
         lambda: (
             fm.Chart(df)
             .transform(
@@ -3679,20 +3697,22 @@ _NET: dict[str, Case] = {
         ),
         marks={"rect": 2},
     ),
-    # F1: facets partition the source; every statistic groups by them.
-    "F1/L": Case(
+    # Facets partition the source; every statistic groups by them.
+    "facet_grain/L": Case(
         lambda: bar_mean().layer(layer("text", text=fm.Text("y", aggregate="mean"))).facet("c"),
         marks={"rect": 4, "text": 4},
         chart_level=None,
     ),
-    "F1/SY": Case(
+    "facet_grain/SY": Case(
         lambda: (bar_mean() + SY("r")).facet("c"),
         marks={"rect": 4, "polyline": 2},
         chart_level=None,
     ),
-    # P1, P3: polar.
-    "P1/F": Case(lambda: mk("arc", theta="z", color="g").coord(fm.CoordPolar()), marks={"path": 8}),
-    "P3/F": Case(
+    # Polar.
+    "polar_color/F": Case(
+        lambda: mk("arc", theta="z", color="g").coord(fm.CoordPolar()), marks={"path": 8}
+    ),
+    "polar_transform_aggregate/F": Case(
         lambda: (
             fm.Chart(df)
             .transform(
@@ -3704,12 +3724,12 @@ _NET: dict[str, Case] = {
         ),
         marks={"path": 2},
     ),
-    # P6: the errorbar composite, per layer.
-    "P6/+point": Case(
+    # The errorbar composite, per layer.
+    "span_composite/+point": Case(
         lambda: mk("errorbar", x="g", y="y") + agg("point"),
         (lambda: mk("errorbar", x="g", y="y"), lambda: agg("point")),
     ),
-    "P6/L-point": Case(
+    "span_composite/L-point": Case(
         lambda: mk("errorbar", x="g", y="y").layer(layer("point")), chart_level=None
     ),
 }
@@ -3721,7 +3741,7 @@ def test_regression_net(case):
 
 
 # ---------------------------------------------------------------------------
-# S2, P2: an aggregate on a span end or a polar channel, per layer
+# An aggregate on a span end or a polar channel, per layer
 # ---------------------------------------------------------------------------
 
 
@@ -3744,63 +3764,67 @@ def _radial_label() -> fm.Chart:
 
 
 _SPAN_POLAR: dict[str, Case] = {
-    "S2/F": Case(_ranged_bar, marks={"rect": 2}),
-    "S2/F-objects": Case(
+    "span_aggregate/F": Case(_ranged_bar, marks={"rect": 2}),
+    "span_aggregate/F-objects": Case(
         lambda: mk("bar", y="g", x=fm.X("v", aggregate="min"), x2=fm.X2("v", aggregate="max")),
         marks={"rect": 2},
     ),
-    "S2/F-rule": Case(lambda: mk("rule", x="g", y="min(y)", y2="max(y)"), marks={"line": 2}),
+    "span_aggregate/F-rule": Case(
+        lambda: mk("rule", x="g", y="min(y)", y2="max(y)"), marks={"line": 2}
+    ),
     # A raw `v` beside `max(v)` is a group key: one bar per distinct (g, v).
-    "S2/F-raw-x": Case(lambda: mk("bar", y="g", x="v", x2="max(v)"), marks={"rect": 8}),
-    "S2/L-inherits": Case(
+    "span_aggregate/F-raw-x": Case(lambda: mk("bar", y="g", x="v", x2="max(v)"), marks={"rect": 8}),
+    "span_aggregate/L-inherits": Case(
         lambda: _ranged_bar().layer(layer("rule")),
         (_ranged_bar, lambda: mk("rule", y="g", x="min(v)", x2="max(v)")),
         chart_level=None,
     ),
-    "S2/L-own-objects": Case(
+    "span_aggregate/L-own-objects": Case(
         lambda: P(y="g").layer(
             layer("bar", x=fm.X("v", aggregate="min"), x2=fm.X2("v", aggregate="max"))
         ),
         (lambda: P(y="g"), _ranged_bar),
         chart_level=None,
     ),
-    **_cases("S2", plus_doors(_ranged_bar, lambda: mk("point", y="g", x="mean(v)"))),
-    "P2/F": Case(lambda: _polar("arc", theta="sum(z)", color="g"), marks={"path": 2}),
-    "P2/F-object": Case(
+    **_cases("span_aggregate", plus_doors(_ranged_bar, lambda: mk("point", y="g", x="mean(v)"))),
+    "polar_aggregate/F": Case(lambda: _polar("arc", theta="sum(z)", color="g"), marks={"path": 2}),
+    "polar_aggregate/F-object": Case(
         lambda: _polar("arc", theta=fm.Theta("z", aggregate="sum"), color="g"), marks={"path": 2}
     ),
-    "P2/F-radius": Case(
+    "polar_aggregate/F-radius": Case(
         lambda: _polar("arc", theta="sum(z)", radius="mean(z)", color="g"), marks={"path": 2}
     ),
-    "P2/F-no-color": Case(lambda: _polar("arc", theta="sum(z)"), marks={"path": 1}),
-    "P2/F-count": Case(lambda: _polar("arc", theta="count()", color="g"), marks={"path": 2}),
-    "P2/F-span-ends": Case(
+    "polar_aggregate/F-no-color": Case(lambda: _polar("arc", theta="sum(z)"), marks={"path": 1}),
+    "polar_aggregate/F-count": Case(
+        lambda: _polar("arc", theta="count()", color="g"), marks={"path": 2}
+    ),
+    "polar_aggregate/F-span-ends": Case(
         lambda: _polar(
             "arc", theta="min(z)", theta2="max(z)", radius="min(r)", radius2="max(r)", color="g"
         ),
         marks={"path": 2},
     ),
-    "P2/L-inherits": Case(
+    "polar_aggregate/L-inherits": Case(
         lambda: _radial_bar().layer(layer("text", text="g")),
         (_radial_bar, _radial_label),
         chart_level=None,
     ),
-    "P2/L-raw-host": Case(
+    "polar_aggregate/L-raw-host": Case(
         lambda: _polar("bar", theta="g", radius="z").layer(
             layer("text", radius="sum(z)", text="g")
         ),
         (lambda: _polar("bar", theta="g", radius="z"), _radial_label),
         chart_level=None,
     ),
-    **_cases("P2", plus_doors(_radial_bar, _radial_label)),
+    **_cases("polar_aggregate", plus_doors(_radial_bar, _radial_label)),
     # Layer(data=): the label takes the host's written theta and radius,
     # aggregating its own rows by them.
-    "P2/LD-same-data": Case(
+    "polar_aggregate/LD-same-data": Case(
         lambda: _radial_bar().layer(fm.Layer(data=df, mark="text", encoding={"text": "g"})),
         (_radial_bar, _radial_label),
         chart_level=None,
     ),
-    "P2/LD-other-data": Case(
+    "polar_aggregate/LD-other-data": Case(
         lambda: _radial_bar().layer(fm.Layer(data=df2, mark="text", encoding={"text": "g"})),
         (_radial_bar, lambda: _polar("text", df2, theta="g", radius="sum(z)", text="g")),
         chart_level=None,
@@ -3809,8 +3833,8 @@ _SPAN_POLAR: dict[str, Case] = {
 
 
 @pytest.mark.parametrize("case", sorted(_SPAN_POLAR))
-def test_S2_P2_a_span_or_polar_aggregate_is_computed_per_layer(case):
-    """S2/P2: ``aggregate=`` on x2/y2 and theta/radius/theta2/radius2 renders on every door.
+def test_a_span_or_polar_aggregate_is_computed_per_layer(case):
+    """``aggregate=`` on x2/y2 and theta/radius/theta2/radius2 renders on every door.
 
     Rejects refusing it as drawing no value, the field-keyed output remap
     that pointed ``x`` and ``x2`` at one column when both aggregate ``v``,
@@ -3832,35 +3856,35 @@ def _via_transform(
 
 
 _TRANSFORM_ORACLES: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
-    "S2/F": (
+    "span_aggregate/F": (
         _ranged_bar,
         lambda: _via_transform(
             "bar", [("v", "min"), ("v", "max")], ["g"], y="g", x="min_v", x2="max_v"
         ),
     ),
-    "S2/F-rule": (
+    "span_aggregate/F-rule": (
         lambda: mk("rule", x="g", y="min(y)", y2="max(y)"),
         lambda: _via_transform(
             "rule", [("y", "min"), ("y", "max")], ["g"], x="g", y="min_y", y2="max_y"
         ),
     ),
-    "S2/F-raw-x": (
+    "span_aggregate/F-raw-x": (
         lambda: mk("bar", y="g", x="v", x2="max(v)"),
         lambda: _via_transform("bar", [("v", "max")], ["g", "v"], y="g", x="v", x2="max_v"),
     ),
-    "P2/F": (
+    "polar_aggregate/F": (
         lambda: _polar("arc", theta="sum(z)", color="g"),
         lambda: _via_transform("arc", [("z", "sum")], ["g"], theta="sum_z", color="g").coord(
             fm.CoordPolar()
         ),
     ),
-    "P2/F-radius": (
+    "polar_aggregate/F-radius": (
         lambda: _polar("arc", theta="sum(z)", radius="mean(z)", color="g"),
         lambda: _via_transform(
             "arc", [("z", "sum"), ("z", "mean")], ["g"], theta="sum_z", radius="mean_z", color="g"
         ).coord(fm.CoordPolar()),
     ),
-    "P2/F-span-ends": (
+    "polar_aggregate/F-span-ends": (
         lambda: _polar(
             "arc", theta="min(z)", theta2="max(z)", radius="min(r)", radius2="max(r)", color="g"
         ),
@@ -3879,8 +3903,8 @@ _TRANSFORM_ORACLES: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
 
 
 @pytest.mark.parametrize("case", sorted(_TRANSFORM_ORACLES))
-def test_S2_P2_an_encoding_aggregate_draws_what_the_same_transform_draws(case):
-    """S2/P2: each span end and polar channel draws its own (field, op) output.
+def test_an_encoding_aggregate_draws_what_the_same_transform_draws(case):
+    """Each span end and polar channel draws its own (field, op) output.
 
     The oracle is the chart spelled with ``transform_aggregate`` computing
     the same outputs, so the bars span min to max and the arcs sweep each
@@ -3896,8 +3920,8 @@ def _aggregate_steps(chart: Any) -> list[dict]:
     return [step for step in steps if step["type"] == "aggregate"]
 
 
-def test_S2_one_aggregate_computes_both_ends_of_the_span():
-    """S2: one Aggregate per layer holds both ops, grouped like x/y, and each end reads its own."""
+def test_one_aggregate_computes_both_ends_of_the_span():
+    """One Aggregate per layer holds both ops, grouped like x/y, and each end reads its own."""
     ops = [
         {"field": "v", "fn": "min", "as": "min_v"},
         {"field": "v", "fn": "max", "as": "max_v"},
@@ -3914,7 +3938,7 @@ def test_S2_one_aggregate_computes_both_ends_of_the_span():
 
 
 def test_a_raw_binding_of_an_aggregated_field_stays_a_group_key_on_a_flat_chart():
-    """P3 on F: a channel naming ``y`` raw beside ``size="mean(y)"`` draws ``y``, as a layer does.
+    """On a flat chart, a channel naming ``y`` raw beside ``size="mean(y)"`` draws ``y``, as a layer does.
 
     Rejects re-pointing every channel whose field an aggregate reads at that
     aggregate's output, which drew the flat chart's y axis from ``mean_y``
@@ -3925,8 +3949,8 @@ def test_a_raw_binding_of_an_aggregated_field_stays_a_group_key_on_a_flat_chart(
     assert "mean_y" not in axis_titles(_quiet(mk("point", x="g", y="y", size="mean(y)").to_svg))
 
 
-def test_P2_a_polar_aggregate_is_lowered_onto_the_channel_the_remap_produces():
-    """P2: the remap runs first, so the aggregate is x's and a layer reading its own output keeps its angle.
+def test_a_polar_aggregate_is_lowered_onto_the_channel_the_remap_produces():
+    """The remap runs first, so the aggregate is x's and a layer reading its own output keeps its angle.
 
     The text layer's own statistic moves it onto a named output, where Rust
     passes no chart positional channel: its inherited ``theta`` reaches it as
@@ -3944,7 +3968,7 @@ def test_P2_a_polar_aggregate_is_lowered_onto_the_channel_the_remap_produces():
 
 
 # ---------------------------------------------------------------------------
-# P4: the labelled pie, every route, static and interactive
+# The labelled pie, every route, static and interactive
 # ---------------------------------------------------------------------------
 
 
@@ -3989,16 +4013,16 @@ def _labelled_pie_doors(theta: str) -> dict[str, Case]:
 
 
 _LABELLED_PIE: dict[str, Case] = {
-    **_cases("P4", _labelled_pie_doors("z")),
-    **_cases("P4/sum", _labelled_pie_doors("sum(z)")),
-    "P4/F-text": Case(_pie_labels, marks={"text": 8}),
-    "P4/F-band": Case(lambda: _pie("g"), marks={"path": 8}),
+    **_cases("pie_label", _labelled_pie_doors("z")),
+    **_cases("pie_label/sum", _labelled_pie_doors("sum(z)")),
+    "pie_label/F-text": Case(_pie_labels, marks={"text": 8}),
+    "pie_label/F-band": Case(lambda: _pie("g"), marks={"path": 8}),
 }
 
 
 @pytest.mark.parametrize("case", sorted(_LABELLED_PIE))
-def test_P4_a_labelled_pie_renders_its_wedges_and_labels_on_every_route(case):
-    """P4: ``arc + text`` over one theta draws each layer as it draws alone.
+def test_a_labelled_pie_renders_its_wedges_and_labels_on_every_route(case):
+    """``arc + text`` over one theta draws each layer as it draws alone.
 
     Rejects refusing a theta-only text under ``CoordPolar`` (``encoding 'y'
     expected EncodingSpec, got None``) and a text aggregating at its
@@ -4069,13 +4093,13 @@ for _variant, _theta, _contents, _values in (
     ("sum", "sum(z)", _SUMS["g"].to_list(), _SUMS["z"].to_numpy()),
 ):
     for _door, _case in _labelled_pie_doors(_theta).items():
-        _LABEL_ORACLES[f"P4/{_variant}/{_door}"] = (
+        _LABEL_ORACLES[f"pie_label/{_variant}/{_door}"] = (
             _case.build,
             lambda outer, c=_contents, v=_values: [
                 (t, a, outer / 2) for t, a in zip(c, _pie_mid_angles(v))
             ],
         )
-_LABEL_ORACLES["P4/z/F-text"] = (
+_LABEL_ORACLES["pie_label/z/F-text"] = (
     _pie_labels,
     lambda outer: [(t, a, outer / 2) for t, a in zip(df["g"], _pie_mid_angles(df["z"]))],
 )
@@ -4085,7 +4109,7 @@ for _variant, _theta, _contents, _values in (
     ("z", "z", df2["g"].to_list(), df2["z"].to_numpy()),
     ("sum", "sum(z)", _SUMS2["g"].to_list(), _SUMS2["z"].to_numpy()),
 ):
-    _LABEL_ORACLES[f"P4/{_variant}/LD-other-data"] = (
+    _LABEL_ORACLES[f"pie_label/{_variant}/LD-other-data"] = (
         lambda t=_theta: _pie(t).layer(
             fm.Layer(data=df2, mark="text", encoding={"theta": _stacked(t), "text": "g"})
         ),
@@ -4097,8 +4121,8 @@ for _variant, _theta, _contents, _values in (
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("case", sorted(_LABEL_ORACLES))
-def test_P4_each_label_sits_at_its_wedges_mid_angle_at_mid_ring(case, kind):
-    """P4: a ``Theta(stack=True)`` label's angle is its wedge's mid-angle from a cumulative sum.
+def test_each_label_sits_at_its_wedges_mid_angle_at_mid_ring(case, kind):
+    """A ``Theta(stack=True)`` label's angle is its wedge's mid-angle from a cumulative sum.
 
     Rejects placing a stacked label by the linear theta projection (off its
     wedge) and a ``sum(z)`` label summing rows its wedge does not.
@@ -4145,8 +4169,8 @@ _LABEL_EXTRAS: dict[str, tuple[Callable[[], Any], Callable[[float], list]]] = {
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("case", sorted(_LABEL_EXTRAS))
-def test_P4_a_label_sits_at_its_radius_binding_style_or_mid_ring(case, kind):
-    """P4: the label radius is its radius binding, else ``radius=``, else mid-ring.
+def test_a_label_sits_at_its_radius_binding_style_or_mid_ring(case, kind):
+    """The label radius is its radius binding, else ``radius=``, else mid-ring.
 
     The untyped string theta (``theta="g"``, no declared type) draws one
     band per category, and a label at each band's mid-angle; it drew no
@@ -4207,8 +4231,8 @@ def _interactive_points_and_labels(chart: Any) -> tuple[list, list]:
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("route", sorted(_SCATTER_LABELS))
-def test_P4_an_unstacked_polar_label_sits_on_its_point(route, kind):
-    """P4: without ``Theta(stack=True)`` a polar text sits on its own theta value.
+def test_an_unstacked_polar_label_sits_on_its_point(route, kind):
+    """Without ``Theta(stack=True)`` a polar text sits on its own theta value.
 
     Each label of a polar scatter draws where its point draws, on every
     route, ``Layer(data=)`` included (it takes the host's written theta and
@@ -4255,8 +4279,8 @@ _UNSTACKED_BESIDE_A_PIE: dict[str, Callable[[], Any]] = {
 
 
 @pytest.mark.parametrize("route", sorted(_UNSTACKED_BESIDE_A_PIE))
-def test_P4_an_unstacked_label_beside_a_pie_on_its_field_warns(route):
-    """P4: a text on the field an arc stacks, itself unstacked, warns its labels sit off the wedges."""
+def test_an_unstacked_label_beside_a_pie_on_its_field_warns(route):
+    """A text on the field an arc stacks, itself unstacked, warns its labels sit off the wedges."""
     assert _polar_label_warnings(_UNSTACKED_BESIDE_A_PIE[route]) == {_UNSTACKED_LABEL_WARNING}
 
 
@@ -4269,12 +4293,12 @@ def test_P4_an_unstacked_label_beside_a_pie_on_its_field_warns(route):
     ],
     ids=["stacked", "other-field", "no-arc"],
 )
-def test_P4_a_stacked_label_or_one_off_the_pies_field_does_not_warn(build):
+def test_a_stacked_label_or_one_off_the_pies_field_does_not_warn(build):
     assert _polar_label_warnings(lambda: build().to_svg()) == set()
 
 
-def test_P4_theta_stack_on_a_polar_text_reaches_the_wire_and_is_not_warned():
-    """P4: ``Theta(stack=True)`` on a polar text is honored, on its own and on an attached layer.
+def test_theta_stack_on_a_polar_text_reaches_the_wire_and_is_not_warned():
+    """``Theta(stack=True)`` on a polar text is honored, on its own and on an attached layer.
 
     Rejects stripping it with the warning that stacking is honored by bar
     and area only; a Cartesian text's ``stack=`` is still stripped and warned.
@@ -4308,13 +4332,13 @@ def test_P4_theta_stack_on_a_polar_text_reaches_the_wire_and_is_not_warned():
     ],
     ids=["mark_text", "Layer"],
 )
-def test_P4_a_negative_label_radius_is_refused_at_construction(build):
-    """P4: a negative ``radius=`` would mirror each label through the center, so it refuses."""
+def test_a_negative_label_radius_is_refused_at_construction(build):
+    """A negative ``radius=`` would mirror each label through the center, so it refuses."""
     with pytest.raises(ValueError, match=r"\(radius=\.\.\.\) must be non-negative; received -10$"):
         build()
 
 
-def test_P4_a_zero_label_radius_places_every_label_at_the_center():
+def test_a_zero_label_radius_places_every_label_at_the_center():
     chart = fm.Chart(df).mark_text(radius=0).encode(theta=_stacked("z"), text="g")
     labels, _ = _static_labels(chart.coord(fm.CoordPolar()))
     assert [radius for _, _, radius in labels] == pytest.approx([0.0] * df.height, abs=1e-3)
@@ -4342,8 +4366,8 @@ _RADIUS_OWNERSHIP: dict[str, Callable[[], Any]] = {
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("route", sorted(_RADIUS_OWNERSHIP))
-def test_P4_a_radius_style_stays_on_its_own_text_layer(route, kind):
-    """P4: one operand's ``mark_text(radius=60)`` never moves a sibling text's labels.
+def test_a_radius_style_stays_on_its_own_text_layer(route, kind):
+    """One operand's ``mark_text(radius=60)`` never moves a sibling text's labels.
 
     The ``k`` labels sit at 60 px, the ``g`` labels at mid-ring.
     """
@@ -4393,8 +4417,8 @@ def _all_warnings(render: Callable[[], Any]) -> list[str]:
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("route", sorted(_SHARED_STACK))
-def test_P4_a_stack_written_once_on_the_shared_theta_labels_the_pie(route, kind):
-    """P4: ``Theta('z', stack=True)`` on the base places the arc's wedges and the text's labels.
+def test_a_stack_written_once_on_the_shared_theta_labels_the_pie(route, kind):
+    """``Theta('z', stack=True)`` on the base places the arc's wedges and the text's labels.
 
     Each label sits at its wedge's mid-angle, and nothing warns. Rejects
     judging the chart-level binding by the host mark, which stripped the
@@ -4409,16 +4433,16 @@ def test_P4_a_stack_written_once_on_the_shared_theta_labels_the_pie(route, kind)
     _assert_labels(labels, [(t, a, outer / 2) for t, a in zip(_g, _mid)])
 
 
-def test_P4_an_arcs_theta_stack_is_honored_without_a_warning():
-    """P4: an arc always sweeps its theta into a pie, so ``Theta(stack=True)`` draws the same pie."""
+def test_an_arcs_theta_stack_is_honored_without_a_warning():
+    """An arc always sweeps its theta into a pie, so ``Theta(stack=True)`` draws the same pie."""
     stacked = _stacked_pie()
     assert _all_warnings(stacked.to_svg) == []
     assert stacked.to_svg() == _quiet(lambda: _pie().to_svg())
     assert json.loads(stacked.to_spec().to_json())["encoding"]["x"]["stack"] == "zero"
 
 
-def test_P4_a_point_host_warns_and_its_attached_text_keeps_the_stack():
-    """P4: a polar point cannot stack its theta, so it warns; the text drawing the same binding stacks it."""
+def test_a_point_host_warns_and_its_attached_text_keeps_the_stack():
+    """A polar point cannot stack its theta, so it warns; the text drawing the same binding stacks it."""
     host = _polar("point", theta=fm.Theta("z", stack=True), radius="r")
     chart = host.layer(layer("text", text="g"))
     messages = _all_warnings(chart.to_svg)
@@ -6155,7 +6179,7 @@ def test_a_color_only_texts_inherit_draws_no_legend_and_warns(color_route, kind)
         assert legend_set(_quiet(chart.to_svg)) == {}
 
 
-def test_X3_naming_another_layers_statistic_is_refused_with_the_statistic_remedy():
+def test_naming_another_layers_statistic_is_refused_with_the_statistic_remedy():
     with pytest.raises(ValueError, match=r"statistic"):
         bar_mean().layer(layer("text", text="mean_y")).to_svg()
     with pytest.raises(ValueError, match=r"statistic the base chart's encoding computes"):
@@ -6166,26 +6190,26 @@ def test_X3_naming_another_layers_statistic_is_refused_with_the_statistic_remedy
         _hist() + SY("count")
 
 
-def test_F2_a_facet_on_a_right_operand_is_warned_and_ignored():
+def test_a_facet_on_a_right_operand_is_warned_and_ignored():
     with pytest.warns(UserWarning, match="secondary layer's theme/facet is ignored"):
         chart = P() + P(df2, y="w").facet("g")
     assert len(_clip_groups(_svg_root(chart.to_svg()))) == 1
 
 
-def test_F4_an_aggregate_on_a_facet_channel_is_refused():
+def test_an_aggregate_on_a_facet_channel_is_refused():
     with pytest.raises(ValueError) as exc:
         fm.Facet("c", aggregate="mean")
     assert str(exc.value).startswith("Facet(aggregate='mean') is not supported")
 
 
-def test_P5_an_error_channel_on_encode_is_warned_and_omitted():
+def test_an_error_channel_on_encode_is_warned_and_omitted():
     with pytest.warns(UserWarning):
         svg = P(y_error="r").to_svg()
     assert tag_counts(svg) == {"circle": 8}
 
 
 # ---------------------------------------------------------------------------
-# A1: a different-frame operand reads only its own rows (spec §4.5, §5 A1)
+# A different-frame operand reads only its own rows
 # ---------------------------------------------------------------------------
 #
 # A ``+`` operand or ``fm.Layer(data=...)`` over another frame reads its own
@@ -6214,7 +6238,7 @@ def _f3(faceted: bool, data: pl.DataFrame = df2) -> fm.Chart:
     return host.layer(fm.Layer(data=data, mark="point"))
 
 
-_F3: dict[str, Case] = {
+_DATA_LAYER_OWN_ROWS: dict[str, Case] = {
     "LD": Case(
         lambda: _f3(faceted=False),
         (bar_mean, lambda: agg("point", df2)),
@@ -6229,20 +6253,20 @@ _F3: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_F3))
-def test_F3_a_data_layer_inheriting_an_aggregate_draws_its_own_rows_means(case):
-    """F3: the data layer averages its own rows by ``g``: 4 bars and 3 points faceted, nothing warned.
+@pytest.mark.parametrize("case", sorted(_DATA_LAYER_OWN_ROWS))
+def test_a_data_layer_inheriting_an_aggregate_draws_its_own_rows_means(case):
+    """The data layer averages its own rows by ``g``: 4 bars and 3 points faceted, nothing warned.
 
     Rejects reading the combined rows: the faceted data layer grouped by
     the renamed ``g`` copy, null on every row of the host's frame, and each
     panel warned that every row had a null in its groupby key.
     """
-    check_rendering(_F3[case])
-    assert _null_group_warnings(_F3[case].build) == []
+    check_rendering(_DATA_LAYER_OWN_ROWS[case])
+    assert _null_group_warnings(_DATA_LAYER_OWN_ROWS[case].build) == []
 
 
-def test_F3_the_faceted_data_layer_draws_its_means_in_its_own_panel():
-    """F3 faceted: panel ``p`` draws the host's 2 bars and the data layer's 3 points; ``q`` the bars."""
+def test_the_faceted_data_layer_draws_its_means_in_its_own_panel():
+    """Faceted: panel ``p`` draws the host's 2 bars and the data layer's 3 points; ``q`` the bars."""
     panels = panel_census(_quiet(lambda: _f3(faceted=True, data=_DF2_IN_P).to_svg()))
     kinds = [dict(Counter(signature[0] for signature in panel.elements())) for panel in panels]
     assert kinds == [{"rect": 2, "circle": 3}, {"rect": 2}]
@@ -6270,13 +6294,12 @@ def _facet_warnings(build: Callable[[], Any]) -> list[str]:
     return [str(w.message) for w in caught if str(w.message).startswith("facet ")]
 
 
-def test_F3_a_data_layer_whose_frame_lacks_the_facet_field_repeats_in_every_panel():
-    """F3 over the spec's df2, which has no ``c``: each panel draws 2 bars and 3 points, nothing warned.
+def test_a_data_layer_whose_frame_lacks_the_facet_field_repeats_in_every_panel():
+    """Over df2, which has no ``c``: each panel draws 2 bars and 3 points, nothing warned.
 
     The data layer's ``mean(y)`` by ``g`` runs on its own 6 rows in every
-    panel, as ggplot2 draws a layer whose data lacks the faceting variable
-    (ruling 2026-10-17). Rejects the silent drop: the 3 points were drawn in
-    no panel.
+    panel, as ggplot2 draws a layer whose data lacks the faceting variable.
+    Rejects the silent drop: the 3 points were drawn in no panel.
     """
     assert _null_group_warnings(lambda: _f3(faceted=True)) == []
     assert _facet_warnings(lambda: _f3(faceted=True)) == []
@@ -6377,7 +6400,7 @@ def test_a_null_facet_value_in_a_frame_with_the_field_is_dropped_with_a_warning(
 
 # Each pair: a data layer, and the ``+`` it lowers to, binding on the right
 # operand what the data layer inherits from its host.
-_M1_PAIRS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
+_DATA_LAYER_PLUS_PAIRS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
     "bar-mean-point": (
         lambda: _f3(faceted=False),
         lambda: bar_mean() + fm.Chart(df2).mark_point(),
@@ -6397,10 +6420,10 @@ _M1_PAIRS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_M1_PAIRS))
-def test_M1_a_data_layer_draws_what_the_plus_it_lowers_to_draws(case):
-    """M1 control: ``Layer(data=df2)`` over a different frame renders the bytes of its ``+``."""
-    layered, plus = _M1_PAIRS[case]
+@pytest.mark.parametrize("case", sorted(_DATA_LAYER_PLUS_PAIRS))
+def test_a_data_layer_draws_what_the_plus_it_lowers_to_draws(case):
+    """``Layer(data=df2)`` over a different frame renders the bytes of its ``+``."""
+    layered, plus = _DATA_LAYER_PLUS_PAIRS[case]
     assert _quiet(lambda: layered().to_svg()) == _quiet(lambda: plus().to_svg())
 
 
@@ -6448,7 +6471,7 @@ def _overlap_cases() -> dict[str, Case]:
     return cases
 
 
-_OVERLAP = _overlap_cases()
+_DIFFERENT_FRAME_OWN_ROWS = _overlap_cases()
 
 
 def _wire_names(chart: Any) -> list[str]:
@@ -6478,16 +6501,16 @@ def _wire_names(chart: Any) -> list[str]:
     return names
 
 
-@pytest.mark.parametrize("case", sorted(_OVERLAP))
-def test_A1_an_operand_sharing_column_names_reads_only_its_own_rows(case):
-    """A1: each operand of ``P(df) + line(df2)`` draws its own rows alone, in both orders.
+@pytest.mark.parametrize("case", sorted(_DIFFERENT_FRAME_OWN_ROWS))
+def test_an_operand_sharing_column_names_reads_only_its_own_rows(case):
+    """Each operand of ``P(df) + line(df2)`` draws its own rows alone, in both orders.
 
     No layer binding, groupby, legend, axis title or tooltip names a
     ``__rhs_`` column. Rejects reading the combined rows under renamed
     fields: the right layer bound ``v__rhs_0001``, and a faceted or
     aggregating right layer grouped by a column null on the left's rows.
     """
-    built = _OVERLAP[case]
+    built = _DIFFERENT_FRAME_OWN_ROWS[case]
     check_rendering(built)
     chart = _quiet(built.build)
     assert not [name for name in _wire_names(chart) if "__rhs_" in name]
@@ -6520,8 +6543,8 @@ _RENAMED_TITLES = _renamed_title_cases()
 
 
 @pytest.mark.parametrize("case", sorted(_RENAMED_TITLES))
-def test_V4_a_right_binding_on_a_shared_column_name_is_titled_by_its_field(case):
-    """V4: ``P(df) + P(df2, size="z")`` draws one legend titled ``z``, with no title on the wire.
+def test_a_right_binding_on_a_shared_column_name_is_titled_by_its_field(case):
+    """``P(df) + P(df2, size="z")`` draws one legend titled ``z``, with no title on the wire.
 
     Rejects the rename title stamp: the right layer bound ``z__rhs_0001``
     with a stamped ``title="z"`` where its channel takes a title, and an
@@ -6536,7 +6559,7 @@ def test_V4_a_right_binding_on_a_shared_column_name_is_titled_by_its_field(case)
 
 
 @pytest.mark.parametrize("order", ["+", "+rev"])
-def test_V4_an_explicit_tooltip_on_a_shared_column_name_shows_its_field(order):
+def test_an_explicit_tooltip_on_a_shared_column_name_shows_its_field(order):
     """An explicit ``Tooltip("z")`` on a right operand over df2 shows ``z``, as alone.
 
     Rejects reading the combined rows: the tooltip named ``z__rhs_0001``.
@@ -6603,8 +6626,8 @@ _OWN_ROWS_CONTROLS: dict[str, Callable[[], Any]] = {
     ),
 }
 
-# The SVG bytes each spec §7 control renders; routing every different-frame
-# operand through its own rows leaves them unchanged.
+# The SVG bytes each control renders; routing every different-frame operand
+# through its own rows leaves them unchanged.
 _OWN_ROWS_CONTROL_DIGESTS = {
     "+/no-shared-name": "373d2a3b67c7526b251ffa8d91652fb0e29b9c27157c167a1a73bc54361e17a3",
     "+/no-shared-name-rev": "d745f517551755552412f8683ea65d44c7afcffd13cdb1389817bbb3f077c3c5",
@@ -6626,7 +6649,7 @@ def test_an_own_rows_control_renders_its_pinned_bytes(case):
 
 
 # ---------------------------------------------------------------------------
-# X11: a SecondaryY on a composition reads the left operand's frame (spec §4.5)
+# A SecondaryY on a composition reads the left operand's frame
 # ---------------------------------------------------------------------------
 
 _SECONDARY_W_REFUSAL = (
@@ -6637,8 +6660,8 @@ _SECONDARY_W_REFUSAL = (
 
 
 @pytest.mark.parametrize("left", [P, bar_mean], ids=["raw", "aggregating"])
-def test_X11_a_secondary_y_naming_a_right_only_column_is_refused_at_construction(left):
-    """X11: ``(P(df) + P(df2, y="w")) + SY("w")`` raises the ``SecondaryY`` column message.
+def test_a_secondary_y_naming_a_right_only_column_is_refused_at_construction(left):
+    """``(P(df) + P(df2, y="w")) + SY("w")`` raises the ``SecondaryY`` column message.
 
     Rejects reading the composition's combined frame, which holds the right
     operand's ``w``: the secondary layer drew nothing, silently.
@@ -6652,8 +6675,8 @@ def test_X11_a_secondary_y_naming_a_right_only_column_is_refused_at_construction
 _W_ABSENT = "layer 2: encoding 'y' references unknown column 'w' (not present in that layer's data)"
 
 
-def test_X11_a_secondary_y_on_a_left_chain_lacking_the_column_is_refused_at_render():
-    """X11, left with a chain: the secondary layer's rows are the left's, which have no ``w``.
+def test_a_secondary_y_on_a_left_chain_lacking_the_column_is_refused_at_render():
+    """A left operand with its own chain: the secondary layer's rows are the left's, which have no ``w``.
 
     Rejects keeping the other frame's padded ``w`` in the left's rows: the
     secondary axis drew nothing, silently.
@@ -6685,7 +6708,7 @@ def _polyline_vertices(svg: str) -> list[int]:
     ]
 
 
-_X11: dict[str, tuple[Case, list[int]]] = {
+_SECONDARY_OPERAND_ROWS: dict[str, tuple[Case, list[int]]] = {
     "left-column": (
         Case(
             lambda: (P() + P(df2)) + SY("r"), marks={"circle": 14, "polyline": 1}, chart_level=None
@@ -6712,10 +6735,10 @@ _X11: dict[str, tuple[Case, list[int]]] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_X11))
-def test_X11_a_secondary_y_on_a_composition_draws_the_left_operands_rows(case):
-    """X11: the secondary line draws one vertex per row of the left operand's frame."""
-    built, vertices = _X11[case]
+@pytest.mark.parametrize("case", sorted(_SECONDARY_OPERAND_ROWS))
+def test_a_secondary_y_on_a_composition_draws_the_left_operands_rows(case):
+    """The secondary line draws one vertex per row of the left operand's frame."""
+    built, vertices = _SECONDARY_OPERAND_ROWS[case]
     check_rendering(built)
     assert _polyline_vertices(_quiet(lambda: built.build().to_svg())) == vertices
 
@@ -6766,7 +6789,7 @@ def test_a_facet_fills_its_field_from_every_copy_a_chain_of_merges_made():
 
 
 # ---------------------------------------------------------------------------
-# V10 on the static overlay: one legend per channel, as the merged chart draws
+# On the static overlay: one legend per channel, as the merged chart draws
 # ---------------------------------------------------------------------------
 
 # Channel -> (bound field, the left operand's mark, the right operand's mark).
@@ -6780,8 +6803,8 @@ _OVERLAY_LEGEND_CHANNELS: dict[str, tuple[str, str, str]] = {
 
 
 @pytest.mark.parametrize("channel", sorted(_OVERLAY_LEGEND_CHANNELS))
-def test_V10_the_static_overlay_draws_one_legend_over_both_members(channel):
-    """V10 LCs: two members binding one channel over df and df2 draw one legend, the merged chart's.
+def test_the_static_overlay_draws_one_legend_over_both_members(channel):
+    """On the static overlay, two members binding one channel over df and df2 draw one legend, the merged chart's.
 
     Rejects a legend per member: the title would be drawn twice and each
     legend would list one member's values.
@@ -6805,10 +6828,9 @@ def test_V10_the_static_overlay_draws_one_legend_over_both_members(channel):
 # A layer takes an inherited positional channel only where its mark draws it
 # ---------------------------------------------------------------------------
 #
-# Ruling 2026-10-17: a layer takes an inherited x, y, x2 or y2 only on a
-# channel its mark draws (Rust's one per-mark table,
-# ``ferrum._core.mark_inherited_positional``), and a drawn channel whose
-# column the layer's rows lack is refused.
+# A layer takes an inherited x, y, x2 or y2 only on a channel its mark draws
+# (Rust's one per-mark table, ``ferrum._core.mark_inherited_positional``),
+# and a drawn channel whose column the layer's rows lack is refused.
 
 
 def test_a_drawn_inherited_channel_its_rows_lack_is_refused_on_a_data_layer():
@@ -6955,20 +6977,20 @@ def test_a_right_operand_with_no_facet_joins_the_left_facet_without_a_warning(bu
 
 
 def test_a_right_operands_own_facet_is_still_warned_and_ignored():
-    """F2: ``P + P(df2).facet("g")`` warns that the right operand's facet is ignored."""
+    """``P + P(df2).facet("g")`` warns that the right operand's facet is ignored."""
     with pytest.warns(UserWarning, match="secondary layer's theme/facet is ignored"):
         (P() + P(df2).facet("g")).to_svg()
 
 
 # ---------------------------------------------------------------------------
-# P5: layer 0 is judged by the column gate like every later layer
+# Layer 0 is judged by the column gate like every later layer
 # ---------------------------------------------------------------------------
 #
 # The first layer that draws a channel establishes its scale, axis and legend
 # from its own rows, and no reader falls back to another layer's batch. So a
 # layer 0 binding to a column only another operand's frame holds is refused in
-# the gate's one message, as a later layer's is (cell A7 below), rather than
-# drawing an axis or legend read from rows it does not draw.
+# the gate's one message, as a later layer's is below, rather than drawing an
+# axis or legend read from rows it does not draw.
 
 
 def _layer_zero_absent(channel: str, field: str) -> str:
@@ -7022,8 +7044,8 @@ _LAYER_ZERO_REFUSALS = _layer_zero_refusals()
         for kind in kinds
     ],
 )
-def test_P5_layer_zeros_binding_to_a_column_only_another_frame_holds_is_refused(case, kind):
-    """P5: layer 0 is refused on the channel it draws from a column its own rows lack.
+def test_layer_zeros_binding_to_a_column_only_another_frame_holds_is_refused(case, kind):
+    """Layer 0 is refused on the channel it draws from a column its own rows lack.
 
     Rejects reading the field outside layer 0's batch: ``P(x="w") + P(df2)``
     drew df2's 6 circles on a ``w`` axis, and ``P(color="w") + P(df2)``
@@ -7037,7 +7059,7 @@ def test_P5_layer_zeros_binding_to_a_column_only_another_frame_holds_is_refused(
 
 
 @pytest.mark.parametrize("case", sorted(_LAYER_ZERO_OPERANDS))
-def test_P5_the_static_overlay_refuses_the_member_with_its_leaf_message(case):
+def test_the_static_overlay_refuses_the_member_with_its_leaf_message(case):
     """LCs renders each member as its own unlayered leaf, which keeps the flat chart's message."""
     a, b, _, field = _LAYER_ZERO_OPERANDS[case]
     with pytest.raises(ValueError) as refused:
@@ -7049,7 +7071,7 @@ def test_P5_the_static_overlay_refuses_the_member_with_its_leaf_message(case):
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("channel", ["x", "color", "size"])
-def test_P5_an_unlayered_charts_missing_column_keeps_its_message(channel, kind):
+def test_an_unlayered_charts_missing_column_keeps_its_message(channel, kind):
     """The control: a flat chart has no layer to name, so its refusal is unchanged."""
     with pytest.raises(ValueError) as refused:
         chart = P(**{channel: "w"})
@@ -7058,7 +7080,7 @@ def test_P5_an_unlayered_charts_missing_column_keeps_its_message(channel, kind):
 
 
 # ---------------------------------------------------------------------------
-# A7: the column gate covers every channel a layer's mark draws
+# The column gate covers every channel a layer's mark draws
 # ---------------------------------------------------------------------------
 #
 # A layer reading rows the user supplied (a ``+`` operand's frame, a
@@ -7082,7 +7104,7 @@ def _over_df2(host: fm.Chart) -> fm.Chart:
     return host.layer(fm.Layer(data=df2, mark="line"))
 
 
-_A7_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
+_COLUMN_GATE_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
     "color-right": (lambda: P(df2) + P(color="w"), _absent("color", "w")),
     "color-other-frame": (lambda: P() + P(df2, color="k"), _absent("color", "k")),
     "host-color-over-a-data-layer": (lambda: _over_df2(P(color="c")), _absent("color", "c")),
@@ -7106,9 +7128,9 @@ _A7_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
 
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
-@pytest.mark.parametrize("case", sorted(_A7_REFUSALS))
-def test_A7_a_drawn_binding_its_layers_rows_lack_is_refused(case, kind):
-    """A7: a later layer's drawn binding to a column its own rows lack names the layer and channel.
+@pytest.mark.parametrize("case", sorted(_COLUMN_GATE_REFUSALS))
+def test_a_drawn_binding_its_layers_rows_lack_is_refused(case, kind):
+    """A later layer's drawn binding to a column its own rows lack names the layer and channel.
 
     The color cells reject reading the other frame's column (``P(df2) +
     P(color="w")`` drew 14 circles under a ``w`` legend); the host cells
@@ -7117,14 +7139,14 @@ def test_A7_a_drawn_binding_its_layers_rows_lack_is_refused(case, kind):
     tooltip, because the selection field never reaches a layer whose rows
     lack it.
     """
-    build, message = _A7_REFUSALS[case]
+    build, message = _COLUMN_GATE_REFUSALS[case]
     with pytest.raises(ValueError) as refused:
         chart = build()
         chart.to_svg() if kind == "static" else chart.interactive().to_html()
     assert str(refused.value) == message
 
 
-_R1_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
+_NON_POSITIONAL_COLUMN_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
     "L": (
         lambda: P().layer(fm.Layer(mark="line", encoding={"color": "nope"})),
         _absent("color", "nope"),
@@ -7143,31 +7165,31 @@ _R1_REFUSALS: dict[str, tuple[Callable[[], Any], str]] = {
 
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
-@pytest.mark.parametrize("door", sorted(_R1_REFUSALS))
-def test_R1_an_unknown_column_on_a_non_positional_channel_is_refused_with_the_plain_message(
+@pytest.mark.parametrize("door", sorted(_NON_POSITIONAL_COLUMN_REFUSALS))
+def test_an_unknown_column_on_a_non_positional_channel_is_refused_with_the_plain_message(
     door, kind
 ):
-    """R1: a layer's color naming a column its rows lack refuses at render, plain message.
+    """A layer's color naming a column its rows lack refuses at render, plain message.
 
     Rejects drawing the layer uncolored under no legend.
     """
-    build, message = _R1_REFUSALS[door]
+    build, message = _NON_POSITIONAL_COLUMN_REFUSALS[door]
     with pytest.raises(ValueError) as refused:
         chart = build()
         chart.to_svg() if kind == "static" else chart.interactive().to_html()
     assert str(refused.value) == message
 
 
-# The SVG each rendering cell drew before the gate covered every channel:
-# the gate refuses none of them.
-_A7_RENDER_DIGESTS = {
+# The SVG each rendering cell draws: the column gate covers every channel
+# and refuses none of these cells.
+_COLUMN_GATE_RENDER_DIGESTS = {
     "selection-only": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
     "value-conditional": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
     "selection-plus": "9d910acf614a7f9c5c5c000fc2d6d525a6a95d475dd1060ac1328bd928beb313",
     "undrawn-host-shape": "bbc7316b39bcbcb990493cf76ec22e5c99c53ec7f41c8decf05df5b6faeec9e8",
 }
 
-_A7_RENDERS: dict[str, Callable[[], Any]] = {
+_COLUMN_GATE_RENDERS: dict[str, Callable[[], Any]] = {
     "selection-only": lambda: _over_df2(P().add_selection(_PICK_C)),
     "value-conditional": lambda: _over_df2(
         P(color=_PICK_C.when(fm.value("#d62728")).otherwise(fm.value("#cccccc"))).add_selection(
@@ -7179,33 +7201,33 @@ _A7_RENDERS: dict[str, Callable[[], Any]] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_A7_RENDERS))
-def test_A7_a_layer_whose_rows_lack_only_an_unread_field_renders(case):
-    """A7: a selection field, or an undrawn binding, its rows lack never refuses a layer.
+@pytest.mark.parametrize("case", sorted(_COLUMN_GATE_RENDERS))
+def test_a_layer_whose_rows_lack_only_an_unread_field_renders(case):
+    """A selection field, or an undrawn binding, its rows lack never refuses a layer.
 
     A field selection's ``c`` joins the host's tooltip but not the df2
     line's, whose rows lack it, and a line never reads the host's shape. Each
-    renders static and interactive, the SVG unchanged, and the line's
-    interactive tooltip lists only its own drawn fields. Rejects carrying
+    renders static and interactive, the SVG at its pinned bytes, and the
+    line's interactive tooltip lists only its own drawn fields. Rejects carrying
     the selection field (or the undrawn shape's column) into the line's
     tooltip, which the gate refuses.
     """
     import hashlib
 
-    svg = _A7_RENDERS[case]().to_svg()
-    assert hashlib.sha256(svg.encode()).hexdigest() == _A7_RENDER_DIGESTS[case]
-    host, data_line = interactive_tooltip_fields(_A7_RENDERS[case]())
+    svg = _COLUMN_GATE_RENDERS[case]().to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _COLUMN_GATE_RENDER_DIGESTS[case]
+    host, data_line = interactive_tooltip_fields(_COLUMN_GATE_RENDERS[case]())
     assert data_line == {"v", "y"}
     assert "c" in host or case == "undrawn-host-shape"
 
 
-def test_A7_a_selection_field_is_never_written_into_a_tooltip_binding():
+def test_a_selection_field_is_never_written_into_a_tooltip_binding():
     """The spec names no selection field in any tooltip; the scene lists ``c`` on the host only.
 
     A field selection's fields are match keys the render's tooltip reader
     appends where the rows hold them, so the column gate never judges them.
     """
-    chart = _A7_RENDERS["selection-plus"]()
+    chart = _COLUMN_GATE_RENDERS["selection-plus"]()
     wire = _wire(chart)
     assert "tooltip_fields" not in wire["encoding"]
     assert all("tooltip_fields" not in layer["encoding"] for layer in wire["layers"])
@@ -7213,7 +7235,7 @@ def test_A7_a_selection_field_is_never_written_into_a_tooltip_binding():
     assert "c" in host and "c" not in data_line
 
 
-def test_A7_a_selection_field_reaches_the_frame_of_a_chain_of_merges_that_carries_it():
+def test_a_selection_field_reaches_the_frame_of_a_chain_of_merges_that_carries_it():
     """In ``(P + P(df2)) + P(df3-like)``, the selection's ``c`` stays off df2's layer only."""
     with_c = df2.with_columns(c=pl.Series(["p", "q"] * 3))
     chart = (P().add_selection(_PICK_C) + P(df2)) + P(with_c)
@@ -7225,7 +7247,7 @@ def test_A7_a_selection_field_reaches_the_frame_of_a_chain_of_merges_that_carrie
     chart.to_svg()
 
 
-def test_A7_a_layer_keeps_the_selection_fields_its_rows_carry():
+def test_a_layer_keeps_the_selection_fields_its_rows_carry():
     """A selection on ``c`` and ``g``: the df2 line, which holds only ``g``, lists ``g`` beside its own."""
     both = fm.selection_point(fields=["c", "g"], name="both")
     chart = _over_df2(P().add_selection(both))
@@ -7241,7 +7263,7 @@ def test_A7_a_layer_keeps_the_selection_fields_its_rows_carry():
     ],
     ids=["L-own-shape", "+-own-shape", "L-own-shape-beside-own-color"],
 )
-def test_A7_a_layers_own_undrawn_binding_stays_out_of_its_auto_tooltip(build, line_fields):
+def test_a_layers_own_undrawn_binding_stays_out_of_its_auto_tooltip(build, line_fields):
     """A line never draws ``shape``, so its own ``shape="c"`` is not listed in its interactive tooltip.
 
     Rejects listing ``c`` (the line lists ``{c}`` alone, or ``c`` beside its
@@ -7261,7 +7283,7 @@ def test_A7_a_layers_own_undrawn_binding_stays_out_of_its_auto_tooltip(build, li
 
 
 def _sel_cat() -> pl.DataFrame:
-    return _W_CAT.with_columns(c=pl.Series(["p", "q", "q", "p"] * 15))
+    return _CAT_DATA.with_columns(c=pl.Series(["p", "q", "q", "p"] * 15))
 
 
 # Per family: the chart, and the mark kinds of the batches whose rows carry ``c``.
@@ -7356,7 +7378,7 @@ def test_a_parent_fallback_auto_tooltip_is_listed_as_inherited():
     assert "inherited_channels" not in host
 
 
-_A7_C7_BUILDS: dict[str, Callable[[], Any]] = {
+_EXCLUDED_COLOR_SCALE_BUILDS: dict[str, Callable[[], Any]] = {
     "+": lambda: bar_mean(color=mean(fm.Color)) + mk("tick", df2, color="g"),
     "L": lambda: bar_mean(color=mean(fm.Color)).layer(
         fm.Layer(data=df2, mark="tick", encoding={"color": "g"})
@@ -7365,8 +7387,8 @@ _A7_C7_BUILDS: dict[str, Callable[[], Any]] = {
 
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
-@pytest.mark.parametrize("door", sorted(_A7_C7_BUILDS))
-def test_A7_a_tick_left_out_of_a_numeric_color_scale_draws_with_one_warning(door, kind):
+@pytest.mark.parametrize("door", sorted(_EXCLUDED_COLOR_SCALE_BUILDS))
+def test_a_tick_left_out_of_a_numeric_color_scale_draws_with_one_warning(door, kind):
     """A string-colored tick beside a mean-colored bar stays out of the scale, as a point does.
 
     Rejects the tick's color reader refusing the column's dtype
@@ -7374,7 +7396,7 @@ def test_A7_a_tick_left_out_of_a_numeric_color_scale_draws_with_one_warning(door
     """
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        chart = _A7_C7_BUILDS[door]()
+        chart = _EXCLUDED_COLOR_SCALE_BUILDS[door]()
         chart.to_svg() if kind == "static" else chart.interactive().scene_json
     excluded = [str(w.message) for w in caught if "stays out of that scale" in str(w.message)]
     assert excluded == [
@@ -7385,18 +7407,18 @@ def test_A7_a_tick_left_out_of_a_numeric_color_scale_draws_with_one_warning(door
 
 
 # ---------------------------------------------------------------------------
-# A7, user ruling W (2026-10-17): a statistic sub-layer drops an inherited
-# channel its statistic does not carry, with a warning
+# A statistic sub-layer drops an inherited channel its statistic does not
+# carry, with a warning
 # ---------------------------------------------------------------------------
 
-_W_RNG = np.random.default_rng(0)
-_W_CAT = pl.DataFrame(
+_CAT_RNG = np.random.default_rng(0)
+_CAT_DATA = pl.DataFrame(
     {
         "cat": ["a", "b", "c"] * 20,
         "grp": ["X"] * 30 + ["Y"] * 30,
-        "val": _W_RNG.normal(0, 1, 60),
-        "x": _W_RNG.normal(0, 1, 60),
-        "y": _W_RNG.normal(0, 1, 60),
+        "val": _CAT_RNG.normal(0, 1, 60),
+        "x": _CAT_RNG.normal(0, 1, 60),
+        "y": _CAT_RNG.normal(0, 1, 60),
     }
 )
 
@@ -7409,9 +7431,9 @@ def _dropped(entry: str, mark: str, channel: str, field: str) -> str:
     )
 
 
-_W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
+_DROPPED_CHANNEL_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
     "catplot-point-tooltip": (
-        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="point", tooltip="grp"),
+        lambda: fm.catplot(_CAT_DATA, x="cat", y="val", kind="point", tooltip="grp"),
         [
             _dropped("catplot", "rule", "tooltip", "grp"),
             _dropped("catplot", "point", "tooltip", "grp"),
@@ -7421,9 +7443,9 @@ _W_CASES: dict[str, tuple[Callable[[], Any], list[str], str]] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_W_CASES))
-def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(case):
-    """Ruling W: every statistic sub-layer, layer 0 included, warns and draws without the channel.
+@pytest.mark.parametrize("case", sorted(_DROPPED_CHANNEL_CASES))
+def test_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(case):
+    """Every statistic sub-layer, layer 0 included, warns and draws without the channel.
 
     Rejects refusing a call whose column is in the user's data (the
     statistic's output, not the user, dropped it), rejects dropping it
@@ -7432,7 +7454,7 @@ def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(ca
     """
     import hashlib
 
-    build, expected, digest = _W_CASES[case]
+    build, expected, digest = _DROPPED_CHANNEL_CASES[case]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         svg = build().to_svg()
@@ -7440,7 +7462,7 @@ def test_A7_W_a_statistic_layer_draws_without_an_inherited_channel_it_dropped(ca
     assert hashlib.sha256(svg.encode()).hexdigest() == digest
 
 
-def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack():
+def test_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack():
     """The control: a ``Layer(data=)`` line reads the user's rows, so the host's color refuses."""
     with pytest.raises(ValueError) as refused:
         _over_df2(P(color="c")).to_svg()
@@ -7448,8 +7470,8 @@ def test_A7_W_a_raw_rows_layer_still_refuses_an_inherited_column_its_rows_lack()
 
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
-def test_X11_a_column_only_another_operands_rows_hold_gets_the_plain_message(kind):
-    """X11 with a left chain: the right operand's own ``w`` is the user's rows, not a statistic.
+def test_a_column_only_another_operands_rows_hold_gets_the_plain_message(kind):
+    """With a left chain: the right operand's own ``w`` is the user's rows, not a statistic.
 
     Rejects the statistic remedy, which told the caller to compute ``w`` in
     a transform when it is a column of the other operand's frame.
@@ -7460,7 +7482,7 @@ def test_X11_a_column_only_another_operands_rows_hold_gets_the_plain_message(kin
     assert str(refused.value) == _W_ABSENT
 
 
-def test_X3_a_statistic_another_layers_mark_computes_keeps_the_statistic_remedy():
+def test_a_statistic_another_layers_mark_computes_keeps_the_statistic_remedy():
     """The control: a histogram's ``count`` is a statistic output, so its remedy stays."""
     with pytest.raises(ValueError) as refused:
         _hist().layer(layer("tick", y="count")).to_svg()
@@ -7485,7 +7507,7 @@ _ONE_AXIS_RULE_AND_BAR: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.
 def test_the_static_overlay_takes_an_axis_its_first_member_does_not_draw_from_the_drawing_member(
     axis, door
 ):
-    """P5 on LCs: the bar, the first member drawing the axis, establishes it.
+    """On the static overlay, the bar, the first member drawing the axis, establishes it.
 
     ``LayerChart(rule(df2, y="w"), bar(x="g"))`` draws x a, b titled ``g``
     and titles ``['w', 'g']``, as ``+`` and LCm do. Rejects taking the axis
@@ -7553,7 +7575,7 @@ _CALLER_SCALED_RULE_AND_POINT: dict[str, tuple[Callable[[], fm.Chart], Callable[
 @pytest.mark.parametrize("door", ["+", "LCm"])
 @pytest.mark.parametrize("case", sorted(_CALLER_SCALED_RULE_AND_POINT))
 def test_the_static_overlay_takes_a_caller_scaled_axis_from_the_member_drawing_it(case, door):
-    """P5 on LCs under a caller's scale: the point, which draws the axis, establishes it.
+    """On the static overlay under a caller's scale: the point, which draws the axis, establishes it.
 
     Rejects keeping the rule's untitled 0..1 axis because the caller's scale
     resolved the group on its own route: ``+`` and LCm draw the point's
@@ -7607,7 +7629,7 @@ _CATEGORICAL_SCALED_RULE_AND_MARK: dict[
 def test_the_static_overlay_takes_a_categorical_axis_from_the_member_whose_scale_draws_it(
     case, door
 ):
-    """P5 on LCs under a band, point or ordinal scale: that member's categories are the axis.
+    """On the static overlay under a band, point or ordinal scale: that member's categories are the axis.
 
     Equal to ``+`` and LCm on every tick, title and mark count, in the order
     the member's own sort gives over its own rows. Rejects keeping the
@@ -7967,7 +7989,7 @@ def test_a_reactive_name_across_operands_is_refused_as_a_merge(order, later_kind
 
 
 # ---------------------------------------------------------------------------
-# P5: each channel is established by the first layer that draws it, from the
+# Each channel is established by the first layer that draws it, from the
 # rows that layer draws
 # ---------------------------------------------------------------------------
 
@@ -7999,15 +8021,14 @@ _ESTABLISHING_CONTROLS: dict[str, Callable[[], Any]] = {
         .properties(render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"))
     ),
     "Fc/raster": lambda: _raster().facet("f"),
-    "F/catplot-box-size": lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="box", size="val"),
+    "F/catplot-box-size": lambda: fm.catplot(_CAT_DATA, x="cat", y="val", kind="box", size="val"),
     "F/contour-utf8-groupby": lambda: fm.Chart(df).mark_contour(groupby="g").encode(x="v", y="y"),
     "LCs/first-member-draws-both-axes": lambda: fm.LayerChart(bar_mean(), mk("rule", df2, y="w")),
 }
 
-# The SVG each renders when every layer, layer 0 included, read a bound field
-# from whichever batch held it. A raster's cells map through a color scale
-# over [0, max] of their non-negative values, which draws the bytes the
-# image drew before it read a scale.
+# The SVG each control renders: its establishing layer draws every bound
+# field from its own rows. A raster's cells map through a color scale over
+# [0, max] of their non-negative values.
 _ESTABLISHING_CONTROL_DIGESTS = {
     "F/raster": "f73507afe152bfdb98c902da73ac6b00aa136a7c4cf55b87f5118bea812a0034",
     "F/auto-raster": "8412beedc32d0d99c327e9a03d6e431a0bede1ba05906be168b21a25d591b6a8",
@@ -8021,7 +8042,7 @@ _ESTABLISHING_CONTROL_DIGESTS = {
 
 
 @pytest.mark.parametrize("case", sorted(_ESTABLISHING_CONTROLS))
-def test_P5_a_chart_whose_establishing_layer_draws_its_own_rows_renders_its_pinned_bytes(case):
+def test_a_chart_whose_establishing_layer_draws_its_own_rows_renders_its_pinned_bytes(case):
     import hashlib
 
     svg = _quiet(lambda: _ESTABLISHING_CONTROLS[case]().to_svg())
@@ -8034,7 +8055,7 @@ def _axis_chrome(svg: str) -> list[str]:
     return [text for text in chrome_text(svg) if text not in titles]
 
 
-def test_P5_a_raster_after_a_few_points_draws_what_the_reverse_order_draws():
+def test_a_raster_after_a_few_points_draws_what_the_reverse_order_draws():
     """The gate judges a raster image on the extent columns it draws, not its bound ``x``/``y``.
 
     ``P(5 rows) + raster`` renders the axes and marks ``raster + P(5 rows)``
@@ -8108,7 +8129,7 @@ def _recorded_svg(build: Callable[[], Any]) -> tuple[str, list[str]]:
 
 
 @pytest.mark.parametrize("case", sorted(_UNDRAWN_CHANNELS))
-def test_P5_a_channel_no_layers_mark_draws_builds_no_scale_and_no_legend(case):
+def test_a_channel_no_layers_mark_draws_builds_no_scale_and_no_legend(case):
     """A channel no layer's mark draws gets no scale and no legend, and warns once.
 
     The chart renders the bytes it renders without the binding. Rejects a
@@ -8124,7 +8145,7 @@ def test_P5_a_channel_no_layers_mark_draws_builds_no_scale_and_no_legend(case):
 
 
 @pytest.mark.parametrize("case", sorted(_UNDRAWN_CHANNELS))
-def test_P5_a_channel_no_layers_mark_draws_has_no_interactive_legend(case):
+def test_a_channel_no_layers_mark_draws_has_no_interactive_legend(case):
     bound, _, _ = _UNDRAWN_CHANNELS[case]
     assert _quiet(lambda: interactive_legend_set(bound())) == {}
 
@@ -8142,7 +8163,7 @@ def _mean_raster(**encoding: Any) -> fm.Chart:
     )
 
 
-def test_P5_a_raster_color_naming_its_value_field_draws_a_colorbar_over_the_drawn_cells():
+def test_a_raster_color_naming_its_value_field_draws_a_colorbar_over_the_drawn_cells():
     """A raster image draws color through its value field: the colorbar spans the cell means.
 
     Rejects the colorless render with an undrawn-channel warning, and a
@@ -8175,7 +8196,7 @@ _RASTER_TOOLTIPS: dict[str, tuple[Callable[[], Any], list[set[str]]]] = {
 
 
 @pytest.mark.parametrize("case", sorted(_RASTER_TOOLTIPS))
-def test_P5_a_raster_image_lists_no_auto_tooltip_for_the_axes_it_draws_through_extents(case):
+def test_a_raster_image_lists_no_auto_tooltip_for_the_axes_it_draws_through_extents(case):
     """The auto tooltip lists only the fields a layer draws as its own columns.
 
     A raster image draws ``x``/``y`` through its cells' extent columns, so
@@ -8191,12 +8212,12 @@ def test_P5_a_raster_image_lists_no_auto_tooltip_for_the_axes_it_draws_through_e
 
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
-def test_P5_a_raster_tooltip_naming_a_bound_axis_is_dropped_with_a_warning(kind):
+def test_a_raster_tooltip_naming_a_bound_axis_is_dropped_with_a_warning(kind):
     """A raster's ``tooltip="x"`` is the chart's binding its image sub-layer inherits.
 
     The image reads the raster statistic's cells, which carry no ``x``, so
-    the inherited tooltip is dropped with ruling W's warning and the image
-    carries no tooltip.
+    the inherited tooltip is dropped with a warning and the image carries
+    no tooltip.
     """
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -8271,7 +8292,7 @@ _RASTER_COLOR_REFUSALS: dict[str, tuple[Callable[[], Any], tuple[str, ...], str]
         for kind in kinds
     ],
 )
-def test_P5_a_categorical_color_over_a_rasters_cells_is_refused(case, kind):
+def test_a_categorical_color_over_a_rasters_cells_is_refused(case, kind):
     """A raster's cells are quantitative: a nominal or ordinal color over them is refused.
 
     Declared on the raster, or established by another layer's categorical
@@ -8313,7 +8334,7 @@ _COUNT_RASTER_DOORS: dict[str, Callable[[], Any]] = {
 
 @pytest.mark.parametrize("kind", ["static", "interactive"])
 @pytest.mark.parametrize("door", sorted(_COUNT_RASTER_DOORS))
-def test_P5_a_count_rasters_colorbar_reads_raw_counts_through_symlog(door, kind):
+def test_a_count_rasters_colorbar_reads_raw_counts_through_symlog(door, kind):
     """The cells keep raw counts and the color scale owns the log compression.
 
     The five labels sit at even steps of the symlog scale over [0, max]:
@@ -8329,7 +8350,7 @@ def test_P5_a_count_rasters_colorbar_reads_raw_counts_through_symlog(door, kind)
     assert [float(label) for label in labels] == pytest.approx(expected, abs=0.06)
 
 
-def test_P5_a_linear_color_scale_on_a_count_raster_labels_counts_linearly():
+def test_a_linear_color_scale_on_a_count_raster_labels_counts_linearly():
     """The caller's ``LinearScale`` replaces the raster's symlog default."""
     labels = _colorbar(
         lambda: _count_raster(color=fm.Color("count", scale=fm.LinearScale())), "static"
@@ -8337,7 +8358,7 @@ def test_P5_a_linear_color_scale_on_a_count_raster_labels_counts_linearly():
     assert [float(label) for label in labels] == pytest.approx([0, 10.5, 21, 31.5, 42], abs=0.06)
 
 
-def test_P5_a_density_rasters_colorbar_reads_raw_density():
+def test_a_density_rasters_colorbar_reads_raw_density():
     """A density raster's labels are densities, the top one the densest cell's."""
     svg = _quiet(
         lambda: (
@@ -8373,7 +8394,7 @@ def _mean_raster_8(**kwargs: Any) -> fm.Chart:
     )
 
 
-# Each log_scale choice: the raster and its colorbar's expected labels.
+# Each log_scale value: the raster and its colorbar's expected labels.
 _LOG_SCALE_CASES: dict[str, tuple[Callable[[], fm.Chart], str, list[float]]] = {
     "count/unset-is-symlog": (
         lambda: _count_raster(color="count"),
@@ -8404,7 +8425,7 @@ _LOG_SCALE_CASES: dict[str, tuple[Callable[[], fm.Chart], str, list[float]]] = {
 
 @pytest.mark.parametrize("door", ["F", "+"])
 @pytest.mark.parametrize("case", sorted(_LOG_SCALE_CASES))
-def test_P5_a_rasters_log_scale_picks_its_color_scale_on_any_aggregate(case, door):
+def test_a_rasters_log_scale_picks_its_color_scale_on_any_aggregate(case, door):
     """``log_scale=None`` is symlog for count and density, linear otherwise; True/False are honored.
 
     Rejects reading an explicit ``False`` as unset, which kept a count
@@ -8417,13 +8438,13 @@ def test_P5_a_rasters_log_scale_picks_its_color_scale_on_any_aggregate(case, doo
     assert [float(label) for label in labels] == pytest.approx(expected, abs=0.06)
 
 
-def test_P5_a_rasters_log_scale_refuses_anything_but_a_truth_value_or_none():
+def test_a_rasters_log_scale_refuses_anything_but_a_truth_value_or_none():
     with pytest.raises(ValueError) as refused:
         fm.Chart(_RASTER_ROWS).mark_raster(log_scale="yes")
     assert str(refused.value) == "mark_raster: log_scale must be True or False; got 'yes'"
 
 
-def test_P5_a_rasters_cmap_colors_its_cells_and_colorbar_when_color_names_the_value_field():
+def test_a_rasters_cmap_colors_its_cells_and_colorbar_when_color_names_the_value_field():
     """``mark_raster(cmap="magma").encode(color="count")`` draws magma, cells and colorbar alike.
 
     The cells draw the image the uncolored magma raster draws, and the
@@ -8472,7 +8493,7 @@ _STEPPED_RASTERS: dict[str, tuple[Any, tuple[str, ...], set | None]] = {
 
 @pytest.mark.parametrize("door", ["F", "+"])
 @pytest.mark.parametrize("case", sorted(_STEPPED_RASTERS))
-def test_P5_a_discretizing_color_scale_steps_a_rasters_cells_by_bucket(case, door):
+def test_a_discretizing_color_scale_steps_a_rasters_cells_by_bucket(case, door):
     """A quantize or threshold color on a count raster draws one color per bucket.
 
     The image's opaque cells take exactly as many colors as the scale has
@@ -8546,7 +8567,7 @@ def _sibling_doors(raster: Callable[[], fm.Chart], field: str) -> dict[str, Call
         for door in sorted(_sibling_doors(*_SIBLING_RASTERS[raster]))
     ],
 )
-def test_P5_a_raster_beside_points_colored_by_its_value_field_draws_its_own_cells(raster, door):
+def test_a_raster_beside_points_colored_by_its_value_field_draws_its_own_cells(raster, door):
     """The points' color is theirs: the raster, binding no color, draws on its own cell scale.
 
     One image on every route, LayerChart's own included, equal to the
@@ -8593,7 +8614,7 @@ _AREA_GROUPING: dict[str, tuple[Callable[[], fm.Chart], str, str]] = {
 
 
 @pytest.mark.parametrize("case", sorted(_AREA_GROUPING))
-def test_P5_an_area_groups_color_by_category_only_when_it_draws_color(case):
+def test_an_area_groups_color_by_category_only_when_it_draws_color(case):
     """An area beside a quantitative color leaves it continuous unless the area draws color.
 
     An area drawing no color makes no demand on the color scale, in either
@@ -8617,7 +8638,7 @@ def test_P5_an_area_groups_color_by_category_only_when_it_draws_color(case):
 
 
 @pytest.mark.parametrize(("order", "layer"), [("area-then-raster", 0), ("raster-then-area", 1)])
-def test_P5_an_area_drawing_a_category_beside_a_rasters_cells_is_refused(order, layer):
+def test_an_area_drawing_a_category_beside_a_rasters_cells_is_refused(order, layer):
     """``area(color="g")`` makes the color scale categorical, which a raster's cells cannot read."""
     build = (
         (lambda: _area(color="g") + _count_raster(color="count"))
@@ -8654,7 +8675,7 @@ def _panel_cell_colors(svg: str) -> list[Counter]:
     return panels
 
 
-def test_P5_a_faceted_raster_drawing_no_color_maps_every_panel_through_one_cell_scale():
+def test_a_faceted_raster_drawing_no_color_maps_every_panel_through_one_cell_scale():
     """Panels whose densest cells differ (300 rows vs 100) share one color scale.
 
     A cell holding one row draws the same color in both panels; the denser
@@ -8676,7 +8697,7 @@ def test_P5_a_faceted_raster_drawing_no_color_maps_every_panel_through_one_cell_
     assert set(sparse) < set(dense)
 
 
-def test_P5_a_rasters_cells_are_no_output_a_layer_can_read():
+def test_a_rasters_cells_are_no_output_a_layer_can_read():
     """A layer naming ``raster__cells`` is refused as any unknown output is."""
     from ferrum._layer import _Layer
 
@@ -8696,7 +8717,7 @@ def test_P5_a_rasters_cells_are_no_output_a_layer_can_read():
     )
 
 
-def test_P5_a_shape_one_layers_point_draws_is_established_by_that_point():
+def test_a_shape_one_layers_point_draws_is_established_by_that_point():
     """The point draws shape, so its rows alone give the shape legend.
 
     Rejects unioning the attached line's ``g`` values (df2's a, b, c) into
@@ -8774,38 +8795,39 @@ def test_a_layer_chart_members_selection_reaches_every_member_interactively(case
 
 
 # ---------------------------------------------------------------------------
-# The wire seam (spec §6.3), read off every matrix case
+# The wire seam, read off every matrix case
 # ---------------------------------------------------------------------------
 
 _MATRIX: dict[str, Case] = {
-    **{f"V1/{k}": v for k, v in _V1.items()},
-    **{f"V1-by-name/{k}": v for k, v in _V1_BY_NAME.items()},
-    **{f"V2/{k}": v for k, v in _V2.items()},
-    **{f"V3/{k}": v for k, v in _V3.items()},
-    **{f"V4/{k}": v for k, v in _V4.items()},
-    **{f"V5/{k}": v for k, v in _V5.items()},
-    **{f"V6/{k}": v for k, v in _V6.items()},
-    **{f"V12/{k}": v for k, v in _V12.items()},
-    **{f"G1/{k}": v for k, v in _G1.items()},
-    **{f"G3/{k}": v for k, v in _G3.items()},
-    **{f"G4/{k}": v for k, v in _G4.items()},
-    **{f"G6/{k}": v for k, v in _G6.items()},
+    **{f"value_binding/{k}": v for k, v in _VALUE_BINDING.items()},
+    **{f"value_binding_by_name/{k}": v for k, v in _VALUE_BINDING_BY_NAME.items()},
+    **{f"value_aggregate/{k}": v for k, v in _VALUE_AGGREGATE.items()},
+    **{f"sibling_grain/{k}": v for k, v in _SIBLING_GRAIN.items()},
+    **{f"different_frame_sibling/{k}": v for k, v in _DIFFERENT_FRAME_SIBLING.items()},
+    **{f"right_aggregate/{k}": v for k, v in _RIGHT_AGGREGATE.items()},
+    **{f"alias_shadow/{k}": v for k, v in _ALIAS_SHADOW.items()},
+    **{f"layer_encoding_string/{k}": v for k, v in _LAYER_ENCODING_STRING.items()},
+    **{f"grouping_binding/{k}": v for k, v in _GROUPING_BINDING.items()},
+    **{f"inherited_grouping/{k}": v for k, v in _INHERITED_GROUPING.items()},
+    **{f"aggregating_sibling_grain/{k}": v for k, v in _AGGREGATING_SIBLING_GRAIN.items()},
+    **{f"attached_grouping/{k}": v for k, v in _ATTACHED_GROUPING.items()},
     **{f"parent/{k}": v for k, v in _PARENT.items()},
-    **{f"X1/{k}": v for k, v in _X1.items()},
+    **{f"axis_fallback/{k}": v for k, v in _AXIS_FALLBACK.items()},
     **{f"net/{k}": v for k, v in _NET.items()},
-    **{f"F3/{k}": v for k, v in _F3.items()},
-    **{f"A1/{k}": v for k, v in _OVERLAP.items()},
-    **{f"V4-titled/{k}": v for k, v in _RENAMED_TITLES.items()},
-    **{f"X11/{k}": v for k, (v, _vertices) in _X11.items()},
+    **{f"data_layer_own_rows/{k}": v for k, v in _DATA_LAYER_OWN_ROWS.items()},
+    **{f"different_frame_own_rows/{k}": v for k, v in _DIFFERENT_FRAME_OWN_ROWS.items()},
+    **{f"different_frame_sibling_titled/{k}": v for k, v in _RENAMED_TITLES.items()},
+    **{f"secondary_operand_rows/{k}": v for k, (v, _vertices) in _SECONDARY_OPERAND_ROWS.items()},
 }
 
 
 @pytest.mark.parametrize("case", sorted(_MATRIX))
 def test_each_layers_completed_wire_encoding_draws_what_it_draws_alone(case):
-    """§6.3: wire layer encoding over the chart-level encoding = the layer's effective encoding.
+    """The wire layer encoding over the chart-level encoding = the layer's effective encoding.
 
-    Rejects D1-C on the wire: the chart-level encoding would carry an
-    operand's own binding (or a promoted copy), completing a sibling with it.
+    Rejects the sibling-encoding leak on the wire: the chart-level encoding
+    would carry an operand's own binding (or a promoted copy), completing a
+    sibling with it.
     """
     check_wire_seam(_MATRIX[case])
 
@@ -8816,7 +8838,7 @@ _LAYER_CHART_CASES = sorted(key[: -len("LCs")] for key in _MATRIX if key.endswit
 
 @pytest.mark.parametrize("prefix", _LAYER_CHART_CASES)
 def test_the_static_overlay_draws_the_legends_every_layer_chart_route_draws(prefix):
-    """Route parity (spec §7): LCs draws LCm's and LCi's legend set, and LCx shows it interactively.
+    """Route parity: LCs draws LCm's and LCi's legend set, and LCx shows it interactively.
 
     Rejects a static overlay that resolves each member's auxiliary scales
     alone: a legend per member, or one listing only the first member's values.
@@ -8939,7 +8961,7 @@ def _roc_frame() -> pl.DataFrame:
 def test_a_metric_label_on_a_composition_labels_each_curve_hue(label):
     """The label groups by the curves' color although the composition carries none itself.
 
-    The left operand's color stays on its own layer (spec §4.6 V1), so the label reads
+    The left operand's color stays on its own layer, so the label reads
     the first layer that draws a color. Rejects reading only the chart
     level: one pooled label would replace the two per-class labels.
     """
@@ -8953,7 +8975,7 @@ def test_a_metric_label_on_a_composition_labels_each_curve_hue(label):
 
 
 # ---------------------------------------------------------------------------
-# Byte-identical controls (spec §7): charts the model does not reach
+# Byte-identical controls: charts the model does not reach
 # ---------------------------------------------------------------------------
 
 _CONTROLS: dict[str, Callable[[], Any]] = {
@@ -8989,7 +9011,7 @@ _CONTROLS: dict[str, Callable[[], Any]] = {
     "F/two-ops": lambda: mk("point", x="g", y="mean(y)", size="sum(z)"),
 }
 
-# The SVG each control renders on the tree before the one-parent model.
+# The SVG each control renders.
 _CONTROL_DIGESTS = {
     "F/point-color": "a4a1d3b7746458ddbe4983e33cee3886e90b208e4f2e5be9c8c12482da5d5dff",
     "F/bar-mean-color": "3d61496ff5e8aba078879d090bafeb1a3ab31cfd72eeb86cb39ec6c617c73aa0",
@@ -9020,7 +9042,7 @@ def test_a_control_renders_its_pinned_bytes(case):
 
 
 # ---------------------------------------------------------------------------
-# An operand draws in a composition what it draws alone (spec §7 isolation)
+# An operand draws in a composition what it draws alone
 # ---------------------------------------------------------------------------
 #
 # The parts are whole operands: a host with attached layers, or a
@@ -9099,7 +9121,7 @@ _OPERAND = _operand_cases()
 
 @pytest.mark.parametrize("case", sorted(_OPERAND))
 def test_an_operand_draws_inside_a_composition_what_it_draws_alone(case):
-    """§7 isolation: a host's labels stay dark, its grey line whole, its line's width its own.
+    """A host's labels stay dark, its grey line whole, its line's width its own.
 
     Rejects carrying an operand's inherited binding onto its layers as their
     own: the labels would take the palette, the grey line would split by
@@ -9159,7 +9181,7 @@ def _tooltip_batches(chart: Any) -> Counter:
 
 @pytest.mark.parametrize("case", sorted(c for c in _OPERAND if not c.endswith("/LCs")))
 def test_an_operand_lists_inside_a_composition_the_tooltips_it_lists_alone(case):
-    """§7 isolation, interactive: each layer's auto tooltip fields are its fields alone.
+    """Interactively, too: each layer's auto tooltip fields are its fields alone.
 
     A layer binding a field lists its own fields; a layer binding none lists
     everything it draws. Rejects reading ownership off the wire by presence:
@@ -9372,7 +9394,7 @@ _PROVENANCE: dict[str, tuple[Callable[[], Any], list[list[str]]]] = {
 
 @pytest.mark.parametrize("case", sorted(_PROVENANCE))
 def test_the_wire_lists_exactly_the_channels_a_layer_inherits(case):
-    """§6.3 wire seam: ``inherited_channels`` names a carried parent binding and no own one."""
+    """On the wire, ``inherited_channels`` names a carried parent binding and no own one."""
     build, expected = _PROVENANCE[case]
     layers = _wire(_quiet(build))["layers"]
     assert [layer_.get("inherited_channels", []) for layer_ in layers] == expected
@@ -9383,77 +9405,79 @@ def test_the_wire_lists_exactly_the_channels_a_layer_inherits(case):
 # ---------------------------------------------------------------------------
 
 _NET_DOORS: dict[str, Case] = {
-    "X2/LCs": Case(
+    "layer_aggregate/LCs": Case(
         lambda: fm.LayerChart(bar_mean(), P(df2, x="g")), (bar_mean, lambda: P(df2, x="g"))
     ),
-    "X2/LCi": Case(
+    "layer_aggregate/LCi": Case(
         lambda: fm.LayerChart(bar_mean(), P(df2, x="g", y="w"), resolve={"y": "independent"}),
         (bar_mean, lambda: P(df2, x="g", y="w")),
     ),
-    "X2/LCx": Case(
+    "layer_aggregate/LCx": Case(
         lambda: fm.LayerChart(bar_mean(), P(df2, x="g")),
         (bar_mean, lambda: P(df2, x="g")),
         static=False,
     ),
-    "X9/LD": Case(
+    "composite_layer/LD": Case(
         lambda: _hist().layer(fm.Layer(data=df2, mark="tick", encoding={"x": "v"})),
         (_hist, lambda: mk("tick", df2, x="v")),
         marks={"rect": 4, "line": 6},
     ),
-    "X9/+d": Case(
+    "composite_layer/+d": Case(
         lambda: _hist() + mk("tick", df2, x="v"),
         (_hist, lambda: mk("tick", df2, x="v")),
         marks={"rect": 4, "line": 6},
     ),
-    "X9/+d-rev": Case(
+    "composite_layer/+d-rev": Case(
         lambda: mk("tick", df2, x="v") + _hist(),
         (lambda: mk("tick", df2, x="v"), _hist),
         marks={"line": 6, "rect": 4},
     ),
-    "X9/SY": Case(lambda: _hist() + SY("r"), marks={"rect": 4, "polyline": 1}, chart_level=None),
-    "X9/LCs": Case(
+    "composite_layer/SY": Case(
+        lambda: _hist() + SY("r"), marks={"rect": 4, "polyline": 1}, chart_level=None
+    ),
+    "composite_layer/LCs": Case(
         lambda: fm.LayerChart(_hist(), mk("tick", df2, x="v")),
         (_hist, lambda: mk("tick", df2, x="v")),
     ),
-    "X9/LCm": Case(
+    "composite_layer/LCm": Case(
         lambda: fm.LayerChart(_hist(), mk("tick", df2, x="v"))._build_merged(),
         (_hist, lambda: mk("tick", df2, x="v")),
     ),
-    "X9/LCi": Case(
+    "composite_layer/LCi": Case(
         lambda: fm.LayerChart(_hist(), mk("tick", df2, x="v", y="w"), resolve={"y": "independent"}),
         marks={"rect": 4, "line": 6},
     ),
-    "X9/LCx": Case(
+    "composite_layer/LCx": Case(
         lambda: fm.LayerChart(_hist(), mk("tick", df2, x="v")),
         (_hist, lambda: mk("tick", df2, x="v")),
         static=False,
     ),
-    "X9/Fc": Case(
+    "composite_layer/Fc": Case(
         lambda: _hist().layer(layer("tick")).facet("c"),
         (lambda: _hist().facet("c"), lambda: mk("tick", x="v").facet("c")),
         faceted=True,
         chart_level=None,
     ),
-    "S1/+d-right-binds-none": Case(
+    "span_no_statistic/+d-right-binds-none": Case(
         lambda: mk("rule", x="v", y="y", y2="z") + fm.Chart(df2).mark_rule(),
         (lambda: mk("rule", x="v", y="y", y2="z"), lambda: mk("rule", df2, x="v", y="y", y2="z")),
         marks={"line": 14},
     ),
-    "F1/F": Case(lambda: P().facet("c"), marks={"circle": 8}),
-    "F1/LD": Case(
+    "facet_grain/F": Case(lambda: P().facet("c"), marks={"circle": 8}),
+    "facet_grain/LD": Case(
         lambda: P().facet("g").layer(fm.Layer(data=df2, mark="tick")),
         marks={"circle": 8, "line": 6},
     ),
-    "F1/+d": Case(
+    "facet_grain/+d": Case(
         lambda: (P() + line(df2)).facet("g"),
         (lambda: P().facet("g"), lambda: line(df2).facet("g")),
         marks={"circle": 8, "polyline": 3},
     ),
-    "F1/+d-rev": Case(
+    "facet_grain/+d-rev": Case(
         lambda: (line(df2) + P()).facet("g"),
         marks={"circle": 8, "polyline": 3},
     ),
-    "P6/SY": Case(
+    "span_composite/SY": Case(
         lambda: mk("errorbar", x="g", y="y") + SY("r"),
         marks={"line": 6, "polyline": 1},
         chart_level=None,
@@ -9466,15 +9490,15 @@ def test_regression_net_doors(case):
     check_rendering(_NET_DOORS[case])
 
 
-def test_X2_a_layer_zero_binding_no_axis_is_refused_beside_an_aggregate():
-    """X2 +rev, right binds none reversed: layer 0 owns the axes, so binding none it is refused."""
+def test_a_layer_zero_binding_no_axis_is_refused_beside_an_aggregate():
+    """``+rev`` with the right binding none: layer 0 owns the axes, so binding none it is refused."""
     with pytest.raises(ValueError, match=r"^layer 0: mark_point needs both positional channels"):
         (fm.Chart(df).mark_point() + bar_mean()).to_svg()
 
 
 @pytest.mark.parametrize("channel", ["size", "opacity", "fill_opacity", "stroke_opacity"])
 def test_a_later_layers_string_column_first_drawer_refuses_as_the_flat_chart_does(channel):
-    """V10: a later layer first drawing a numeric-only channel from a string column refuses alike."""
+    """A later layer first drawing a numeric-only channel from a string column refuses alike."""
     with pytest.raises(ValueError) as flat:
         P(**{channel: "g"}).to_svg()
     with pytest.raises(ValueError) as later:
@@ -9510,7 +9534,7 @@ def test_a_text_layer_draws_no_inherited_color_however_it_was_lowered(build):
 
 
 # ---------------------------------------------------------------------------
-# A right operand's attached layer keeps its host's written axis (spec §4.1)
+# A right operand's attached layer keeps its host's written axis
 # ---------------------------------------------------------------------------
 
 _RUG_HOSTS: dict[str, Callable[[], fm.Chart]] = {
@@ -9588,8 +9612,8 @@ def _drawn_statically(xs: list[float], static: list[float]) -> bool:
 
 @pytest.mark.parametrize("door", sorted(_RUG_DOORS))
 @pytest.mark.parametrize("host", sorted(_RUG_HOSTS))
-def test_X1_a_right_operands_attached_layer_draws_its_hosts_written_axis(host, door):
-    """X1 / §4.1: the tick attached to a right operand draws at its host's ``x``, as alone.
+def test_a_right_operands_attached_layer_draws_its_hosts_written_axis(host, door):
+    """The tick attached to a right operand draws at its host's ``x``, as alone.
 
     A channel the host never wrote takes layer 0's (the axis fallback).
     Rejects filling the right operand's attached layer from the
@@ -9614,7 +9638,7 @@ def test_X1_a_right_operands_attached_layer_draws_its_hosts_written_axis(host, d
 
 
 # ---------------------------------------------------------------------------
-# Figure functions composed with ``+`` draw as before
+# Figure functions composed with ``+`` render byte-identical output
 # ---------------------------------------------------------------------------
 
 _FIG_RNG = np.random.default_rng(0)
@@ -9648,8 +9672,7 @@ _FIGURES: dict[str, Callable[[], Any]] = {
     ),
 }
 
-# The SVG each figure renders on the tree before its scatter and fit (or
-# cells and labels) composed through ``+``.
+# The SVG each figure renders.
 _FIGURE_DIGESTS = {
     "lmplot/plain": "518c81c4c53bf1c9fadb0bc97d7adb390a5c97221c96391088f4c269286a8a75",
     "lmplot/hue": "f3ac385b78b66370f3426db7f3ad73f3d7d957de5c19fafbeadb2e6f3d050a55",
@@ -9667,8 +9690,7 @@ _FIGURE_DIGESTS = {
 }
 
 
-# The interactive scene each hue figure draws on the tree before its fit
-# bound its hue itself: the fit's tooltips list the fields they listed then.
+# The interactive scene each hue figure draws.
 _FIGURE_SCENE_DIGESTS = {
     "lmplot/hue": "de4baef90f117d8f893cd369c14229890eef23897bf8d9277e5017b80bd169cb",
     "lmplot/hue-size": "75235c3490d8f87598cfbc19a2cb3835c4bec5c72940cf473f29b05ac40206ef",
@@ -9701,7 +9723,7 @@ def test_a_figure_composed_with_plus_renders_its_pinned_bytes(case):
 
 
 # ---------------------------------------------------------------------------
-# X5-X8: one statistic plan per layer over a positional bin (spec §4.2, §6.4)
+# One statistic plan per layer over a positional bin
 # ---------------------------------------------------------------------------
 
 
@@ -9718,7 +9740,7 @@ def _two_means(mark: str = "bar", **encoding: Any) -> fm.Chart:
     )
 
 
-_X5: dict[str, Case] = {
+_ROW_BIN: dict[str, Case] = {
     "F": Case(_row_bins, marks={"circle": 8}),
     "F-y": Case(lambda: mk("point", x="v", y=fm.Y("y", bin=True)), marks={"circle": 8}),
     "F-color": Case(lambda: _row_bins(color="c"), marks={"circle": 8}, legends={"c": ("p", "q")}),
@@ -9743,7 +9765,7 @@ _X5: dict[str, Case] = {
     "Fc": Case(lambda: _row_bins().facet("c"), marks={"circle": 8}),
 }
 
-_X8: dict[str, Case] = {
+_BIN_TWO_AGGREGATES: dict[str, Case] = {
     "F": Case(_two_means, marks={"rect": 4}, legends=None),
     "L": Case(
         lambda: _two_means().layer(layer("point")),
@@ -9759,7 +9781,7 @@ def _binned_count(data: pl.DataFrame = df, **encoding: Any) -> fm.Chart:
     return _binned(data, **encoding)
 
 
-_X6: dict[str, Case] = {
+_COUNTING_BIN: dict[str, Case] = {
     "F": Case(_binned_count, marks={"rect": 4}),
     "F-grouped-by-color": Case(
         lambda: _binned_count(color="c"), marks={"rect": 8}, legends={"c": ("p", "q")}
@@ -9781,7 +9803,7 @@ _X6: dict[str, Case] = {
     "Fc": Case(lambda: _binned_count().facet("c"), marks={"rect": 6}),
 }
 
-_X7: dict[str, Case] = {
+_COUNTING_BIN_LABEL: dict[str, Case] = {
     "F-tooltip": Case(lambda: _binned_count(tooltip=mean(fm.Tooltip)), marks={"rect": 4}),
     "L-text": Case(
         lambda: _binned_count().layer(layer("text", text=mean(fm.Text))),
@@ -9794,15 +9816,15 @@ _X7: dict[str, Case] = {
 }
 
 _BIN_CELLS = {
-    **_cases("X5", _X5),
-    **_cases("X6", _X6),
-    **_cases("X7", _X7),
-    **_cases("X8", _X8),
+    **_cases("row_bin", _ROW_BIN),
+    **_cases("counting_bin", _COUNTING_BIN),
+    **_cases("counting_bin_label", _COUNTING_BIN_LABEL),
+    **_cases("bin_two_aggregates", _BIN_TWO_AGGREGATES),
 }
 
 
 @pytest.mark.parametrize("case", sorted(_BIN_CELLS))
-def test_X5_X8_a_binned_layer_computes_its_own_statistic_on_every_door(case):
+def test_a_binned_layer_computes_its_own_statistic_on_every_door(case):
     """Each layer bins at its own grain: per row without an aggregate, per bin with them.
 
     Rejects a count bin grouped by the raw fields (a raw ``y`` collapsed into
@@ -9845,8 +9867,8 @@ def _svg_and_titles(chart: Any) -> tuple[str, list[str]]:
         ),
     ],
 )
-def test_X5_a_positional_bin_without_an_aggregate_places_each_row_at_its_bin(encoded, transformed):
-    """X5: every row is kept and drawn at its bin's start, with ``x2`` at the bin's end.
+def test_a_positional_bin_without_an_aggregate_places_each_row_at_its_bin(encoded, transformed):
+    """Every row is kept and drawn at its bin's start, with ``x2`` at the bin's end.
 
     The encoding route renders the bytes the explicit per-row ``fm.Bin``
     renders, so the edges are the bin transform's own. Rejects an implicit
@@ -9859,13 +9881,13 @@ def test_X5_a_positional_bin_without_an_aggregate_places_each_row_at_its_bin(enc
     assert "bin_start" not in titles and "bin_end" not in titles
 
 
-def test_X5_a_row_binned_layer_keeps_its_raw_rows_unchanged():
-    """X5: the per-row bin moves no row on its unbinned axis: the points sit at the raw ``y``."""
+def test_a_row_binned_layer_keeps_its_raw_rows_unchanged():
+    """The per-row bin moves no row on its unbinned axis: the points sit at the raw ``y``."""
     cy = re.compile(r'<circle [^>]*cy="([-\d.]+)"')
     assert sorted(cy.findall(_quiet(_row_bins().to_svg))) == sorted(cy.findall(_quiet(P().to_svg)))
 
 
-def test_X5_a_pre_bound_span_channel_is_kept():
+def test_a_pre_bound_span_channel_is_kept():
     encoding = _wire(mk("bar", x=fm.X("v", bin=True), x2="r", y="y"))["encoding"]
     assert encoding["x"]["field"] == "bin_start"
     assert encoding["x2"]["field"] == "r"
@@ -9879,8 +9901,8 @@ def _bin_steps(chart: Any) -> list[dict]:
     return [step for step in steps if step["type"] == "bin"]
 
 
-def test_X8_two_aggregates_beside_a_bin_draw_what_the_explicit_bin_draws():
-    """X8: ``bar(x=bin(v), y=mean(y), color=mean(z))`` is one Bin computing both, per bin.
+def test_two_aggregates_beside_a_bin_draw_what_the_explicit_bin_draws():
+    """``bar(x=bin(v), y=mean(y), color=mean(z))`` is one Bin computing both, per bin.
 
     Rejects the refusal of a second aggregating channel: the encoding route
     renders the bytes ``fm.Bin(aggregates=...)`` renders, titled by the
@@ -9915,8 +9937,8 @@ def test_X8_two_aggregates_beside_a_bin_draw_what_the_explicit_bin_draws():
 _HALVES = {"bin_count": 2, "extent": (0.0, 8.0), "nice": False}
 
 
-def test_X8_each_bin_carries_both_of_its_own_means():
-    """X8: each bin's label reads its own mean ``z`` beside its mean ``y`` and ``r``."""
+def test_each_bin_carries_both_of_its_own_means():
+    """Each bin's label reads its own mean ``z`` beside its mean ``y`` and ``r``."""
     chart = mk(
         "text",
         x=fm.X("v", bin=_HALVES),
@@ -9964,8 +9986,8 @@ def test_X8_each_bin_carries_both_of_its_own_means():
         ),
     ],
 )
-def test_X8_a_bin_computes_one_op_per_distinct_field_and_op(build, aggregates):
-    """X8: every distinct (field, op) beside the bin is one ``aggregates`` entry; a repeat is one op."""
+def test_a_bin_computes_one_op_per_distinct_field_and_op(build, aggregates):
+    """Every distinct (field, op) beside the bin is one ``aggregates`` entry; a repeat is one op."""
     steps = _bin_steps(_quiet(build))
     assert [
         (entry["field"], entry["fn"], entry["as"]) for entry in steps[0]["aggregates"]
@@ -9987,21 +10009,21 @@ def test_X8_a_bin_computes_one_op_per_distinct_field_and_op(build, aggregates):
         ),
     ],
 )
-def test_X6_one_aggregate_beside_a_bin_keeps_the_agg_field_wire(build):
-    """X6: one distinct aggregate folds through ``agg_field``/``agg`` and draws ``agg_value``."""
+def test_one_aggregate_beside_a_bin_keeps_the_agg_field_wire(build):
+    """One distinct aggregate folds through ``agg_field``/``agg`` and draws ``agg_value``."""
     (step,) = _bin_steps(_quiet(build))
     assert (step["agg_field"], step["agg"]) == ("y", "mean")
     assert "aggregates" not in step and "per_row" not in step
 
 
-def test_X8_an_aggregate_beside_a_bin_is_titled_by_its_output_name():
-    """V11 on the positional axis: the aggregate's axis reads ``mean_y``, the bin's ``v``."""
+def test_an_aggregate_beside_a_bin_is_titled_by_its_output_name():
+    """On the positional axis, the aggregate's axis reads ``mean_y``, the bin's ``v``."""
     _, titles = _svg_and_titles(mk("bar", x=fm.X("v", bin=True), y="mean(y)"))
     assert sorted(titles) == ["mean_y", "v"]
 
 
-def test_X6_a_grouped_bin_counts_each_group_into_the_pooled_edges():
-    """X6: a color beside a counting bin groups it, over one set of edges (``shared_extent``)."""
+def test_a_grouped_bin_counts_each_group_into_the_pooled_edges():
+    """A color beside a counting bin groups it, over one set of edges (``shared_extent``)."""
     transformed = (
         fm.Chart(df)
         .transform(fm.Bin("v", groupby=["c"], shared_extent=True))
@@ -10033,7 +10055,7 @@ _BIN_CONTROL_DIGESTS = {
 
 
 @pytest.mark.parametrize("case", sorted(_BIN_CONTROLS))
-def test_X6_X7_a_counting_bin_renders_its_pinned_bytes(case):
+def test_a_counting_bin_renders_its_pinned_bytes(case):
     import hashlib
 
     svg = _quiet(lambda: _BIN_CONTROLS[case]().to_svg())
@@ -10041,7 +10063,7 @@ def test_X6_X7_a_counting_bin_renders_its_pinned_bytes(case):
 
 
 # ---------------------------------------------------------------------------
-# X5/X6: a Bin's own statistic parameters, on both spellings and every door
+# A Bin's own statistic parameters, on both spellings and every door
 # ---------------------------------------------------------------------------
 
 #: Each statistic parameter a Bin can carry itself, with the output column a
@@ -10116,8 +10138,8 @@ _UNDRAWN = {
 
 
 @pytest.mark.parametrize("case", sorted(_UNDRAWN))
-def test_X5_a_bin_statistic_no_channel_draws_is_refused_naming_the_parameter(case):
-    """X5: beside raw rows a Bin's own statistic would be dropped, so it is refused on every door.
+def test_a_bin_statistic_no_channel_draws_is_refused_naming_the_parameter(case):
+    """Beside raw rows a Bin's own statistic would be dropped, so it is refused on every door.
 
     The message names the user's spelling, the parameter, the channel drawing
     raw rows and the columns to bind. Rejects letting the per-row placement
@@ -10130,7 +10152,7 @@ def test_X5_a_bin_statistic_no_channel_draws_is_refused_naming_the_parameter(cas
     assert str(exc.value) == _undrawn_statistic(param, spelling)
 
 
-def test_X5_three_raw_axes_join_with_the_oxford_comma():
+def test_three_raw_axes_join_with_the_oxford_comma():
     """Three channels drawing raw rows beside an undrawn Bin statistic join with
     the Oxford comma too, not a bare ``and`` chain."""
     chart = (
@@ -10154,7 +10176,7 @@ def test_X5_three_raw_axes_join_with_the_oxford_comma():
     )
 
 
-def test_X5_a_bin_with_three_statistic_parameters_joins_them_with_the_oxford_comma():
+def test_a_bin_with_three_statistic_parameters_joins_them_with_the_oxford_comma():
     """A Bin declaring groupby, cumulative and aggregates together joins all three with
     the Oxford comma, both in the declared-parameters clause and in its removal
     instruction, the same prose-list rule as every other 3+-item refusal."""
@@ -10222,8 +10244,8 @@ _DECLARED_DRAWN = _drawn_cases()
 
 
 @pytest.mark.parametrize("case", sorted(_DECLARED_DRAWN))
-def test_X6_a_bin_statistic_a_channel_draws_renders_on_every_door(case):
-    """X6: a channel drawing the Bin's declared output makes the Bin aggregate, on every door.
+def test_a_bin_statistic_a_channel_draws_renders_on_every_door(case):
+    """A channel drawing the Bin's declared output makes the Bin aggregate, on every door.
 
     An ``aggregates`` entry's output name is a declared column like
     ``count``, never a group key, and a raw color groups the Bin after its
@@ -10235,7 +10257,7 @@ def test_X6_a_bin_statistic_a_channel_draws_renders_on_every_door(case):
 
 @pytest.mark.parametrize("param", sorted(_BIN_STATISTICS))
 @pytest.mark.parametrize("color", [False, True], ids=["output", "output+color"])
-def test_X6_a_pre_built_bin_draws_what_the_same_dict_draws(param, color):
+def test_a_pre_built_bin_draws_what_the_same_dict_draws(param, color):
     """Both spellings of one Bin are read alike: the same bytes, the same groupby."""
     column = _BIN_STATISTICS[param][1]
     extra = {"color": "y"} if color else {}
@@ -10258,8 +10280,8 @@ _OWN_AND_CHANNEL = {
 
 
 @pytest.mark.parametrize("case", sorted(_OWN_AND_CHANNEL))
-def test_X8_a_bins_own_aggregate_beside_a_channel_aggregate_is_refused(case):
-    """X8: the per-bin statistic is declared once, on the channels or on the Bin.
+def test_a_bins_own_aggregate_beside_a_channel_aggregate_is_refused(case):
+    """The per-bin statistic is declared once, on the channels or on the Bin.
 
     Rejects replacing the Bin's own aggregate with the channel's silently.
     """
@@ -10282,8 +10304,8 @@ def test_X8_a_bins_own_aggregate_beside_a_channel_aggregate_is_refused(case):
         pytest.param({"cumulative": True}, "mean(y)", [], id="own-cumulative-beside-mean"),
     ],
 )
-def test_X6_a_bins_own_parameter_beside_a_channel_count_or_aggregate_is_kept(bin_, y, groupby):
-    """X6: a count() reads the Bin's count beside its own aggregate; own groupby stays beside a mean."""
+def test_a_bins_own_parameter_beside_a_channel_count_or_aggregate_is_kept(bin_, y, groupby):
+    """A count() reads the Bin's count beside its own aggregate; own groupby stays beside a mean."""
     chart = mk("bar", x=fm.X("v", bin=bin_), y=y)
     (step,) = _bin_steps(chart)
     assert step.get("groupby", []) == groupby
@@ -10301,8 +10323,8 @@ _UNREAD_AGG_VALUE = {
 
 
 @pytest.mark.parametrize("case", sorted(_UNREAD_AGG_VALUE))
-def test_X5_agg_value_beside_a_bin_computing_none_is_refused_as_an_undrawn_statistic(case):
-    """X5: a Bin without agg_field/agg computes no ``agg_value``, so ``y="agg_value"`` reads raw rows.
+def test_agg_value_beside_a_bin_computing_none_is_refused_as_an_undrawn_statistic(case):
+    """A Bin without agg_field/agg computes no ``agg_value``, so ``y="agg_value"`` reads raw rows.
 
     The refusal lists only the columns this Bin computes. Rejects reading a
     Bin's columns from its kind's table, which lists ``agg_value`` for every
@@ -10354,7 +10376,7 @@ def _named_refusal(written: str, spelling: str, name: str = "foo") -> str:
 
 
 @pytest.mark.parametrize("case", sorted(_NAMED))
-def test_X5_a_named_encoding_bin_is_refused_on_every_route(case):
+def test_a_named_encoding_bin_is_refused_on_every_route(case):
     """An encoding bin belongs to its layer, so a ``name=`` publishing its rows is refused.
 
     Rejects dropping the name silently, or refusing only when an unrelated
@@ -10378,15 +10400,15 @@ def test_a_named_color_bin_is_refused(spelling):
 
 
 # ---------------------------------------------------------------------------
-# V7, V11: bin= on the color family is a binned color scale (spec §4.4, §6.5, §6.7)
+# bin= on the color family is a binned color scale
 # ---------------------------------------------------------------------------
 #
 # ``Color/Fill/Stroke(field, bin=...)`` keeps the rows and draws the field
 # through a ``bin-ordinal`` scale whose edges Rust cuts with the Bin
 # transform's rule. A statistic grouped by the color groups by its bins, and
 # only a statistic lowered from an encoding or a mark does: it sits after its
-# chain's statistics marker. Rejects the row-replacing ``Bin`` the color
-# family used to lower to: 32 circles from 8 rows, titled ``bin_start``.
+# chain's statistics marker. Rejects the row-replacing ``Bin``: 32 circles
+# from 8 rows, titled ``bin_start``.
 
 _COLOR_CLASSES = {"color": fm.Color, "fill": fm.Fill, "stroke": fm.Stroke}
 _STATISTICS_MARKER = {"type": "identity", "statistics": True}
@@ -10398,7 +10420,7 @@ def _binned_z(cls: type = fm.Color, data: pl.DataFrame = df, **encoding: Any) ->
     return P(data, **{channel: cls("z", bin=True)}, **encoding)
 
 
-def _V7_doors(cls: type) -> dict[str, Case]:
+def _binned_color_doors(cls: type) -> dict[str, Case]:
     def binned(data: pl.DataFrame = df) -> fm.Chart:
         return _binned_z(cls, data)
 
@@ -10422,10 +10444,10 @@ def _V7_doors(cls: type) -> dict[str, Case]:
     }
 
 
-_V7_CASES = {
-    f"V7/{name}/{door}": case
+_BINNED_COLOR_CASES = {
+    f"binned_color/{name}/{door}": case
     for name, cls in _COLOR_CLASSES.items()
-    for door, case in _V7_doors(cls).items()
+    for door, case in _binned_color_doors(cls).items()
 }
 
 
@@ -10434,16 +10456,16 @@ def _wire_layers_and_steps(chart: Any) -> list[dict]:
     return _steps_at_any_depth(chart)
 
 
-@pytest.mark.parametrize("case", sorted(_V7_CASES))
-def test_V7_V11_a_binned_color_keeps_its_rows_and_draws_a_legend_of_bins_titled_by_its_field(
+@pytest.mark.parametrize("case", sorted(_BINNED_COLOR_CASES))
+def test_a_binned_color_keeps_its_rows_and_draws_a_legend_of_bins_titled_by_its_field(
     case,
 ):
-    """V7/V11: one mark per row, a legend of bin ranges titled ``z``, and no ``Bin`` step.
+    """One mark per row, a legend of bin ranges titled ``z``, and no ``Bin`` step.
 
     Each layer draws what it draws alone (the oracle census) on every door,
     and the legend's title is the field on every door, never ``bin_start``.
     """
-    c = _V7_CASES[case]
+    c = _BINNED_COLOR_CASES[case]
     check_rendering(c)
     chart = _quiet(c.build)
     assert not [s for s in _wire_layers_and_steps(chart) if s["type"] == "bin"]
@@ -10454,7 +10476,7 @@ def test_V7_V11_a_binned_color_keeps_its_rows_and_draws_a_legend_of_bins_titled_
 
 
 @pytest.mark.parametrize("cls", sorted(_COLOR_CLASSES.values(), key=lambda c: c.__name__))
-def test_V7_a_secondary_y_inheriting_a_binned_color_keeps_the_hosts_rows_and_legend(cls):
+def test_a_secondary_y_inheriting_a_binned_color_keeps_the_hosts_rows_and_legend(cls):
     """SY: the host's 8 points stay 8 under the binned color its secondary layer inherits."""
     chart = _quiet(lambda: _binned_z(cls) + SY("r"))
     svg = _quiet(chart.to_svg)
@@ -10491,7 +10513,7 @@ def _inherit_door(door: str, color: Any) -> Callable[[], fm.Chart]:
 
 
 @pytest.mark.parametrize("door", ["L", "LD"])
-def test_V7_an_attached_layer_inheriting_a_binned_color_shares_the_hosts_scale(door):
+def test_an_attached_layer_inheriting_a_binned_color_shares_the_hosts_scale(door):
     """Host ``Color("z", bin=True)`` inherited by an attached point layer: one legend of bins.
 
     The legend's edges are ``fm.Bin``'s over both layers' ``z``, each layer
@@ -10515,7 +10537,7 @@ def test_V7_an_attached_layer_inheriting_a_binned_color_shares_the_hosts_scale(d
 
 
 @pytest.mark.parametrize("door", ["L", "LD"])
-def test_V7_an_attached_layer_under_an_unbinned_host_color_draws_its_continuous_legend(door):
+def test_an_attached_layer_under_an_unbinned_host_color_draws_its_continuous_legend(door):
     """Control: the same chart with an unbinned ``z`` draws a continuous colorbar, not bins."""
     binned = legend_set(_quiet(_quiet(_inherit_door(door, fm.Color("z", bin=True))).to_svg))
     plain = legend_set(_quiet(_quiet(_inherit_door(door, fm.Color("z"))).to_svg))
@@ -10536,7 +10558,7 @@ _BIN_RULES: dict[str, tuple[Callable[[], Any], dict]] = {
 
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
 @pytest.mark.parametrize("rule", sorted(_BIN_RULES))
-def test_V7_a_bins_parameters_map_to_the_binned_scales_bin_rule(rule, name):
+def test_a_bins_parameters_map_to_the_binned_scales_bin_rule(rule, name):
     """``bin_count``, ``bin_width``, ``extent`` and ``nice`` reach the scale's ``bin`` rule."""
     value, expected = _BIN_RULES[rule]
     chart = P(**{name: _COLOR_CLASSES[name]("z", bin=value())})
@@ -10548,7 +10570,7 @@ def test_V7_a_bins_parameters_map_to_the_binned_scales_bin_rule(rule, name):
     }
 
 
-def test_V7_the_bin_rule_sets_the_legends_edges():
+def test_the_bin_rule_sets_the_legends_edges():
     """``bin={"extent": (0, 60), "bin_count": 3, "nice": False}`` draws edges 0, 20, 40, 60."""
     rule = {"extent": (0.0, 60.0), "bin_count": 3, "nice": False}
     svg = _quiet(P(color=fm.Color("z", bin=rule)).to_svg)
@@ -10583,7 +10605,7 @@ def _color_bin_refusal(cls: type, param: str, spelling: str) -> str:
 
 
 _COLOR_BIN_REFUSAL_CASES = {
-    f"V7/{name}/{param}/{spelling}/{door}": (name, param, spelling, door)
+    f"binned_color/{name}/{param}/{spelling}/{door}": (name, param, spelling, door)
     for name in _COLOR_CLASSES
     for param in _COLOR_BIN_REFUSED
     for spelling in _SPELLINGS
@@ -10592,7 +10614,7 @@ _COLOR_BIN_REFUSAL_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_COLOR_BIN_REFUSAL_CASES))
-def test_V7_a_binned_colors_bin_declaring_a_statistic_or_grouping_is_refused_on_every_door(case):
+def test_a_binned_colors_bin_declaring_a_statistic_or_grouping_is_refused_on_every_door(case):
     """A Bin carrying a statistic, a groupby, ``per_row`` or ``shared_extent`` refuses, named.
 
     Rejects ignoring the parameter, and the row-replacing Bin that computed it
@@ -10606,7 +10628,7 @@ def test_V7_a_binned_colors_bin_declaring_a_statistic_or_grouping_is_refused_on_
     assert str(refused.value) == _color_bin_refusal(cls, param, spelling)
 
 
-def test_V7_a_binned_colors_bin_declaring_three_parameters_joins_them_with_the_oxford_comma():
+def test_a_binned_colors_bin_declaring_three_parameters_joins_them_with_the_oxford_comma():
     """Three declared parameters on a binned color's Bin join with the Oxford
     comma in both the declared-parameters clause and the removal
     instruction, the same prose-list rule as the positional Bin refusal."""
@@ -10644,7 +10666,7 @@ def test_V7_a_binned_colors_bin_declaring_three_parameters_joins_them_with_the_o
 
 @pytest.mark.parametrize("door", sorted(_vocabulary_doors("color", lambda: None)))
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
-def test_V7_bin_with_scale_is_refused_with_the_spec_string_on_every_door(name, door):
+def test_bin_with_scale_is_refused_with_the_spec_string_on_every_door(name, door):
     cls = _COLOR_CLASSES[name]
     build = _vocabulary_doors(
         name, lambda: cls("z", bin=True, scale=fm.BinOrdinalScale(bins=[0.0, 20.0, 50.0]))
@@ -10659,7 +10681,7 @@ def test_V7_bin_with_scale_is_refused_with_the_spec_string_on_every_door(name, d
 
 
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
-def test_V7_bin_with_aggregate_on_one_color_channel_stays_refused(name):
+def test_bin_with_aggregate_on_one_color_channel_stays_refused(name):
     cls = _COLOR_CLASSES[name]
     with pytest.raises(ValueError) as refused:
         cls("z", bin=True, aggregate="mean")
@@ -10669,7 +10691,7 @@ def test_V7_bin_with_aggregate_on_one_color_channel_stays_refused(name):
 
 
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
-def test_V7_a_bin_that_is_no_bin_or_bins_another_field_is_refused(name):
+def test_a_bin_that_is_no_bin_or_bins_another_field_is_refused(name):
     cls = _COLOR_CLASSES[name]
     with pytest.raises(ValueError) as not_a_bin:
         cls("z", bin=3)
@@ -10707,7 +10729,7 @@ _NON_NUMERIC_DOORS: dict[str, Callable[[str, Any], fm.Chart]] = {
 
 @pytest.mark.parametrize("door", sorted(_NON_NUMERIC_DOORS))
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
-def test_V7_a_binned_color_over_a_non_numeric_column_is_refused_naming_its_class(name, door):
+def test_a_binned_color_over_a_non_numeric_column_is_refused_naming_its_class(name, door):
     """A bin cuts numbers: a string column is refused naming the class written, on every door.
 
     One voice on every door, including rows a transform, a right operand or a
@@ -10775,7 +10797,7 @@ def _render_any(chart: Any) -> str:
 
 
 @pytest.mark.parametrize("case", sorted(_LATER_LAYER_NON_NUMERIC))
-def test_V7_a_later_layers_binned_color_over_a_string_column_is_refused(case):
+def test_a_later_layers_binned_color_over_a_string_column_is_refused(case):
     """A binned color over text is refused on the layer that wrote it, whoever establishes the scale.
 
     Rejects judging the binding only when it establishes the color scale: an
@@ -10869,7 +10891,7 @@ _SCALE_READ_NON_NUMERIC: dict[str, tuple[Callable[[], Any], type, str]] = {
 
 
 @pytest.mark.parametrize("case", sorted(_SCALE_READ_NON_NUMERIC))
-def test_V7_a_binned_color_the_scale_reads_over_text_is_refused_naming_its_class(case):
+def test_a_binned_color_the_scale_reads_over_text_is_refused_naming_its_class(case):
     """A binned binding the color scale reads over text is refused, though no layer draws it.
 
     A layer painting its own literal fill draws no inherited color, but the
@@ -10884,7 +10906,7 @@ def test_V7_a_binned_color_the_scale_reads_over_text_is_refused_naming_its_class
     assert str(refused.value) == _non_numeric_refusal(cls, column)
 
 
-def test_V7_a_later_layers_unbinned_string_color_under_a_binned_layer_is_excluded_once():
+def test_a_later_layers_unbinned_string_color_under_a_binned_layer_is_excluded_once():
     """Control: a later layer whose own color is unbinned is excluded from the binned scale, warned once."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -10946,7 +10968,7 @@ def _binned_override_chart(who: str, door: str, **leaves: Any) -> Any:
 
 
 @pytest.mark.parametrize("case", sorted(_BINNED_OVERRIDE_CASES))
-def test_V7_an_override_leaf_replacing_a_binned_colors_scale_is_refused(case):
+def test_an_override_leaf_replacing_a_binned_colors_scale_is_refused(case):
     """A scale override that replaces what ``bin=`` builds is refused as ``scale=`` is.
 
     Named in the channel door's voice: the class written and the override
@@ -10973,7 +10995,7 @@ def test_V7_an_override_leaf_replacing_a_binned_colors_scale_is_refused(case):
 
 @pytest.mark.parametrize("door", sorted(_BINNED_OVERRIDE_DOORS))
 @pytest.mark.parametrize("who", sorted(_BINNED_OVERRIDE_CLASSES))
-def test_V7_a_binned_colors_scheme_override_is_honored_and_its_own_type_is_a_no_op(who, door):
+def test_a_binned_colors_scheme_override_is_honored_and_its_own_type_is_a_no_op(who, door):
     """``<channel>_scale_scheme`` recolors the bins; ``<channel>_scale_type='bin-ordinal'`` changes nothing."""
     _, _, prefix = _BINNED_OVERRIDE_CLASSES[who]
     bare = _quiet(_binned_override_chart(who, door).to_svg)
@@ -10995,7 +11017,7 @@ def test_an_unbinned_colors_type_override_is_unchanged_by_the_binned_rule():
 
 
 @pytest.mark.parametrize("name", ["fill", "stroke"])
-def test_V7_a_fill_or_stroke_scale_bin_override_reaches_the_color_it_draws_as(name):
+def test_a_fill_or_stroke_scale_bin_override_reaches_the_color_it_draws_as(name):
     """``.override(fill_scale_bin=...)`` bins the color ``Fill`` draws as, as ``color_scale_bin=`` does.
 
     Rejects dropping a ``fill_``/``stroke_`` scale override because the wire
@@ -11071,7 +11093,7 @@ _REFUSED_BIN_TYPES = {"N": "N", "nominal": "N", "T": "T", "temporal": "T"}
 
 @pytest.mark.parametrize("spelling", sorted(_REFUSED_BIN_TYPES))
 @pytest.mark.parametrize("name", sorted(_COLOR_CLASSES))
-def test_V7_a_binned_color_typed_nominal_or_temporal_is_refused(name, spelling):
+def test_a_binned_color_typed_nominal_or_temporal_is_refused(name, spelling):
     """A binned color is ordered by its bins: a nominal or temporal type contradicts it."""
     cls = _COLOR_CLASSES[name]
     with pytest.raises(ValueError) as refused:
@@ -11089,7 +11111,7 @@ def test_V7_a_binned_color_typed_nominal_or_temporal_is_refused(name, spelling):
 @pytest.mark.parametrize(
     "name", sorted(n for n, c in _COLOR_CLASSES.items() if "sort" in c._honored_kwargs)
 )
-def test_V7_a_binned_color_sorted_other_than_ascending_is_refused(name, sort):
+def test_a_binned_color_sorted_other_than_ascending_is_refused(name, sort):
     """A binned color lists its bins in ascending order; no ``sort=`` reaches another order."""
     cls = _COLOR_CLASSES[name]
     with pytest.raises(ValueError) as refused:
@@ -11138,7 +11160,7 @@ _BINNED_HONORED_EXPECTED: dict[str, Callable[[Any, Any], bool]] = {
         if set(kwargs) - {"type_"} <= cls._honored_kwargs
     ],
 )
-def test_V7_each_kwarg_a_binned_color_honors_reaches_its_drawn_chart(name, kwarg):
+def test_each_kwarg_a_binned_color_honors_reaches_its_drawn_chart(name, kwarg):
     """Every honored kwarg on a binned color is honored (or refused above), none silently dropped."""
     cls = _COLOR_CLASSES[name]
     kwargs, read = _BINNED_HONORED[kwarg]
@@ -11147,7 +11169,7 @@ def test_V7_each_kwarg_a_binned_color_honors_reaches_its_drawn_chart(name, kwarg
     assert _BINNED_HONORED_EXPECTED[kwarg](got, bare), (got, bare)
 
 
-def test_V7_a_binned_color_condition_reaches_the_wire():
+def test_a_binned_color_condition_reaches_the_wire():
     """``Color(bin=..., condition=...)``: the conditional reaches the wire beside the binned scale."""
     sel = fm.selection_point(fields=["g"], name="pick")
     chart = P(color=fm.Color("z", bin=True, condition=sel.when("#ff0000").otherwise("#cccccc")))
@@ -11757,8 +11779,8 @@ def test_a_panel_draws_while_any_layer_has_rows(door):
 
 # A step written on a + composition reaches the left operand and every
 # operand over the composition's frame, however the merge routed it, each over
-# its own rows, and never an operand over a different frame (user ruling
-# 2026-10-20). It runs where each reached operand's own steps end, before its
+# its own rows, and never an operand over a different frame. It runs where
+# each reached operand's own steps end, before its
 # statistics, when those rows carry the columns it reads, else on the first
 # rows after the statistics that carry them; a chain whose rows never carry
 # them is left as written, and a step no reached chain can read is refused.
@@ -12467,7 +12489,7 @@ def test_two_composite_marks_publishing_one_output_name_each_draw_their_own(door
 
 
 # A flat chart's own steps run before its encoding statistic, whichever of
-# .encode() and .transform() is written first (user ruling 2026-10-20).
+# .encode() and .transform() is written first.
 
 _V_ABOVE_TWO = df.filter(pl.col("v") > 2)
 
@@ -12504,7 +12526,7 @@ def test_a_flat_charts_step_runs_before_its_encoding_statistic(statistic, order)
 
 # A chart with no rows to draw after its transforms draws its panel frame and
 # axes over an explicit domain, else the unit fallback, and warns; a faceted
-# one draws no facet panel and warns the same way (user ruling 2026-10-19/20).
+# one draws no facet panel and warns the same way.
 
 _NO_ROWS_WARNING = "the chart has no rows to draw after its transforms; its panel is drawn empty"
 _NO_FACET_ROWS_WARNING = (
@@ -12902,9 +12924,8 @@ def test_a_composition_step_dropping_a_column_a_statistic_reads_is_refused():
 
 
 # A figure's statistics run behind its chain's statistics marker, after every
-# step the caller writes on the figure (user ruling 2026-10-20): a
-# `.transform(filter(...))` on a figure filters the rows its statistic reads,
-# as on a hand-built chart.
+# step the caller writes on the figure: a `.transform(filter(...))` on a
+# figure filters the rows its statistic reads, as on a hand-built chart.
 
 #: Figure rows: a group, two numeric series and a wide-matrix row id.
 _FIGURE_ROWS = pl.DataFrame(
@@ -13209,8 +13230,8 @@ def test_each_param_binds_one_filter_per_panel(door):
 
 
 # ---------------------------------------------------------------------------
-# V8 / G7: a composite statistic groups by the grouping channels its layer
-# draws or inherits from its own parent (spec §4.2, §6.4)
+# A composite statistic groups by the grouping channels its layer draws or
+# inherits from its own parent
 # ---------------------------------------------------------------------------
 
 
@@ -13269,7 +13290,7 @@ _GROUPED: dict[str, tuple[str, str, list[str]]] = {
 
 
 @pytest.mark.parametrize("case", sorted(_GROUPED))
-def test_V8_G7_a_composite_statistic_groups_by_each_grouping_channel(case):
+def test_a_composite_statistic_groups_by_each_grouping_channel(case):
     """Color under each spelling, detail, shape and stroke_dash each split the statistic.
 
     Every step the composite builds groups by the field, after the box and
@@ -13320,11 +13341,11 @@ _HAND_BUILT: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]] = 
 
 
 @pytest.mark.parametrize("case", sorted(_HAND_BUILT))
-def test_V8_G7_a_grouped_composite_draws_what_the_hand_built_groupby_transform_draws(case):
+def test_a_grouped_composite_draws_what_the_hand_built_groupby_transform_draws(case):
     """The composite equals the same transform written with ``groupby=``, mark for mark.
 
     Rejects one fit through the pooled rows (one polyline where the
-    hand-built groupby draws two) and the old refusal of ``color`` on a fit.
+    hand-built groupby draws two).
     """
     composite, hand_built = _HAND_BUILT[case]
     assert census(_quiet(composite().to_svg)) == census(_quiet(hand_built().to_svg))
@@ -13332,55 +13353,55 @@ def test_V8_G7_a_grouped_composite_draws_what_the_hand_built_groupby_transform_d
 
 
 # Per door: a grouped composite beside a rug, and the parts it draws alone.
-_V8_DOORS: dict[str, Case] = {
-    "V8/F-smooth": Case(
+_GROUPED_COMPOSITE_DOORS: dict[str, Case] = {
+    "grouped_composite/F-smooth": Case(
         lambda: _smooth(color="c"), marks={"polyline": 2}, legends={"c": ("p", "q")}
     ),
-    "V8/F-smooth-ci": Case(
+    "grouped_composite/F-smooth-ci": Case(
         lambda: _smooth(ci=0.95, color="c"),
         marks={"path": 2, "polyline": 2},
         legends={"c": ("p", "q")},
     ),
-    "V8/F-histogram": Case(
+    "grouped_composite/F-histogram": Case(
         lambda: mk("histogram", x="v", color="g"), marks={"rect": 6}, legends={"g": ("a", "b")}
     ),
-    "V8/F-density": Case(
+    "grouped_composite/F-density": Case(
         lambda: mk("density", x="v", color="g"), marks={"path": 2}, legends={"g": ("a", "b")}
     ),
-    "V8/F-boxplot": Case(
+    "grouped_composite/F-boxplot": Case(
         lambda: mk("boxplot", x="g", y="y", color="c"),
         marks={"line": 16, "rect": 4},
         legends={"c": ("p", "q")},
     ),
-    "V8/L-smooth-tick": Case(
+    "grouped_composite/L-smooth-tick": Case(
         lambda: _smooth(color="c").layer(layer("tick")),
         (lambda: _smooth(color="c"), lambda: mk("tick", x="v", y="y", color="c")),
         legends={"c": ("p", "q")},
         chart_level=None,
     ),
-    "V8/L-smooth-ci-tick": Case(
+    "grouped_composite/L-smooth-ci-tick": Case(
         lambda: _smooth(ci=0.95, color="c").layer(layer("tick")),
         (lambda: _smooth(ci=0.95, color="c"), lambda: mk("tick", x="v", y="y", color="c")),
         legends={"c": ("p", "q")},
         chart_level=None,
     ),
-    "V8/SY-smooth": Case(
+    "grouped_composite/SY-smooth": Case(
         lambda: _smooth(color="c") + SY("r"),
         marks={"polyline": 4},
         chart_level=None,
     ),
-    "V8/Fc-smooth": Case(
+    "grouped_composite/Fc-smooth": Case(
         lambda: _smooth(color="c").facet("g"),
         marks={"polyline": 4},
         legends={"c": ("p", "q")},
         chart_level=None,
     ),
     **_cases(
-        "V8/smooth-rug",
+        "grouped_composite/smooth-rug",
         plus_doors(lambda: _smooth(color="c"), lambda: mk("tick", x="v")),
     ),
     **_cases(
-        "V8/boxplot-shape-point",
+        "grouped_composite/boxplot-shape-point",
         {
             door: case
             for door, case in plus_doors(
@@ -13393,14 +13414,14 @@ _V8_DOORS: dict[str, Case] = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_V8_DOORS))
-def test_V8_a_grouped_composite_keeps_its_groups_on_every_door(case):
+@pytest.mark.parametrize("case", sorted(_GROUPED_COMPOSITE_DOORS))
+def test_a_grouped_composite_keeps_its_groups_on_every_door(case):
     """A composite's grouping holds beside a sibling, attached or composed, static and interactive.
 
     Rejects ``S(color=c).layer(tick)`` fitting one ungrouped curve (it was
     refused), and a sibling's door changing the composite's groups.
     """
-    check_rendering(_V8_DOORS[case])
+    check_rendering(_GROUPED_COMPOSITE_DOORS[case])
 
 
 def _panel_tag_counts(panel: Counter) -> dict[str, int]:
@@ -13408,7 +13429,7 @@ def _panel_tag_counts(panel: Counter) -> dict[str, int]:
     return dict(Counter(signature[0] for signature in panel.elements()))
 
 
-def test_V8_a_faceted_composite_groups_by_its_grouping_then_its_facet_fields():
+def test_a_faceted_composite_groups_by_its_grouping_then_its_facet_fields():
     """The groupby is the grouping fields, then the facet's, within each panel."""
     chart = mk("density", x="v", color="c").facet("g")
     assert _statistic_groupby(chart, "kde") == [["c", "g"]]
@@ -13418,7 +13439,7 @@ def test_V8_a_faceted_composite_groups_by_its_grouping_then_its_facet_fields():
     ]
 
 
-def test_V8_a_smooth_under_a_binned_color_fits_one_curve_per_bin():
+def test_a_smooth_under_a_binned_color_fits_one_curve_per_bin():
     """Each bin of ``Color("v", bin=...)`` gets its own fit, and the legend lists the bins.
 
     Rejects grouping by the raw ``v`` (eight one-row groups, no fit) and
@@ -13432,8 +13453,8 @@ def test_V8_a_smooth_under_a_binned_color_fits_one_curve_per_bin():
 
 
 @pytest.mark.parametrize("output", ["static", "interactive"])
-def test_V8_the_explicit_groupby_wins_over_the_charts_grouping(output):
-    """A caller's own ``groupby=`` is the statistic's grouping, as before.
+def test_the_explicit_groupby_wins_over_the_charts_grouping(output):
+    """A caller's own ``groupby=`` is the statistic's grouping.
 
     Its counts then lack the ``c`` the bars draw, so the chart is refused
     rather than drawn uncolored.
@@ -13448,7 +13469,7 @@ def test_V8_the_explicit_groupby_wins_over_the_charts_grouping(output):
 _SPARSE = df.with_columns(cs=pl.Series(["p", "p", "p", "p", "p", "p", "q", None]))
 
 
-def test_V8_a_group_too_small_for_its_fit_follows_the_transforms_per_group_contract():
+def test_a_group_too_small_for_its_fit_follows_the_transforms_per_group_contract():
     """A one-row group cannot be fit: Smooth degrades that group and warns, as with groupby=."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -13487,7 +13508,7 @@ _NULL_KEY_TWINS: dict[str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart]]
 
 
 @pytest.mark.parametrize("kind", sorted(_NULL_KEY_TWINS))
-def test_V8_a_null_group_key_follows_the_transforms_null_key_policy(kind):
+def test_a_null_group_key_follows_the_transforms_null_key_policy(kind):
     """A null ``cs`` row groups exactly as the transform's own ``groupby=`` groups it."""
     grouped, by_hand = _NULL_KEY_TWINS[kind]
     assert _quiet(lambda: grouped().to_svg()) == _quiet(lambda: by_hand().to_svg())
@@ -13506,7 +13527,7 @@ _RESTORED_HUE: dict[str, tuple[Callable[[], Any], dict[str, tuple[str, ...]]]] =
         {"g": ("a", "b")},
     ),
     "catplot-boxen-hue": (
-        lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="boxen", hue="grp"),
+        lambda: fm.catplot(_CAT_DATA, x="cat", y="val", kind="boxen", hue="grp"),
         {"grp": ("X", "Y")},
     ),
     "mark_qq-color": (
@@ -13525,7 +13546,7 @@ _RESTORED_HUE: dict[str, tuple[Callable[[], Any], dict[str, tuple[str, ...]]]] =
 
 
 @pytest.mark.parametrize("case", sorted(_RESTORED_HUE))
-def test_V8_a_composite_statistic_carries_its_hue_so_every_layer_draws_it(case):
+def test_a_composite_statistic_carries_its_hue_so_every_layer_draws_it(case):
     """The hue groups the statistic, so its rows carry it: a legend, and no layer drops it.
 
     Rejects computing the statistic over the pooled rows, which dropped the
@@ -13537,13 +13558,13 @@ def test_V8_a_composite_statistic_carries_its_hue_so_every_layer_draws_it(case):
     assert legend_set(svg) == legends
 
 
-def test_V8_qq_draws_one_reference_line_per_group():
+def test_qq_draws_one_reference_line_per_group():
     """Each group's quantiles get their own reference line, fit to that group's rows."""
     svg = _quiet(lambda: fm.Chart(df).mark_qq().encode(x="z", color="c").to_svg())
     assert tag_counts(svg) == {"circle": 8, "line": 2}
 
 
-def test_V8_a_contour_grouped_through_color_draws_the_isolines_groupby_draws():
+def test_a_contour_grouped_through_color_draws_the_isolines_groupby_draws():
     """``encode(color=g)`` splits the surfaces as ``groupby="g"`` does."""
     by_color = _quiet(lambda: fm.Chart(df).mark_contour().encode(x="v", y="y", color="g").to_svg())
     by_groupby = _quiet(
@@ -13552,14 +13573,14 @@ def test_V8_a_contour_grouped_through_color_draws_the_isolines_groupby_draws():
     assert census(by_color) == census(by_groupby)
 
 
-def test_V8_a_boxen_hue_draws_bands_per_category_and_hue():
+def test_a_boxen_hue_draws_bands_per_category_and_hue():
     """Each (category, hue) group draws its own median tick and bands."""
     hued = _quiet(lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z", color="c").to_svg())
     plain = _quiet(lambda: fm.Chart(df).mark_boxen().encode(x="g", y="z").to_svg())
     assert tag_counts(hued)["line"] == 2 * tag_counts(plain)["line"]
 
 
-def test_V8_residplot_refits_each_encoded_group_and_drops_the_single_corner_metrics():
+def test_residplot_refits_each_encoded_group_and_drops_the_single_corner_metrics():
     """An encoded hue refits each group's residuals, so the one-fit corner metrics are omitted.
 
     Rejects refusing the hue (the residuals carried no ``c``) and keeping
@@ -13587,8 +13608,8 @@ _RESID_POINT_TOOLTIP_DOORS: dict[str, Callable[[], fm.Chart]] = {
     "post-hoc": lambda: _resid(zero_line=False).encode(color="c"),
 }
 
-#: Each door's static SVG bytes, pinned on the tree before the point layer
-#: bound ``encode=`` itself: the fix changes the interactive tooltip only.
+#: Each door's static SVG bytes: the point layer's own ``encode=`` binding
+#: reaches its interactive tooltip and leaves the static SVG at these bytes.
 _RESID_POINT_TOOLTIP_DOOR_DIGESTS = {
     "zero-line-off": "c281b5e43f488f1c179086c2c1a2f66b36dbee1ee5f7f84ac8c63d08d4c5a250",
     "zero-line-on": "fe6951afdd0e59f9bb3c77da1802e865421d34eb2a83aca4c5b1a014f5779cdb",
@@ -13606,8 +13627,8 @@ def test_a_layered_residplots_points_keep_their_encoded_fields_in_the_tooltip(do
     parent: the per-layer tooltip rule lists a layer's own fields only
     when it has any, and the point layer already has its own (x, y
     residual), so an inherited ``color`` was shadowed and dropped. The
-    static SVG stays byte-identical to the pre-fix render, since only the
-    interactive tooltip changes.
+    static SVG renders at each door's pinned bytes; the binding reaches
+    only the interactive tooltip.
     """
     import hashlib
 
@@ -13620,12 +13641,8 @@ def test_a_layered_residplots_points_keep_their_encoded_fields_in_the_tooltip(do
 
 
 def test_a_flat_residplots_own_encoding_already_carries_its_color():
-    """``residplot(encode={"color": "c"})`` with nothing to layer is unaffected by the layer fix.
-
-    Nothing requests an overlay, so the chart stays flat and ``encode=``
-    lands on the chart's own encoding, which every consumer already reads;
-    the point layer fix applies only once an overlay makes the chart
-    layered.
+    """Nothing requests an overlay, so the chart stays flat and ``encode=``
+    lands on the chart's own encoding, which every consumer already reads.
     """
     build = lambda: fm.residplot(  # noqa: E731
         df, x="v", y="y", zero_line=False, show_metrics=False, encode={"color": "c"}
@@ -13636,9 +13653,6 @@ def test_a_flat_residplots_own_encoding_already_carries_its_color():
     assert "c" in points
 
 
-# An encoding aggregate on a composite's channel keeps the behavior it had:
-# the histogram and the box group by the aggregated field as written (their
-# color reads predate the grouping), the fit refuses as it did.
 _AGGREGATED_COMPOSITE_DIGESTS = {
     "boxplot": "32a65d6338a647f449f41c04188848dad9fa033cf297a4a588f8b327708f276d",
     "histogram": "7fc8b97c5018d3cbf9b16af629f0f8c109eee84c4b8485e430e2b3fc92413413",
@@ -13646,7 +13660,7 @@ _AGGREGATED_COMPOSITE_DIGESTS = {
 
 
 @pytest.mark.parametrize("kind", sorted(_AGGREGATED_COMPOSITE_DIGESTS))
-def test_V8_an_aggregate_on_a_composites_color_renders_as_it_did(kind):
+def test_an_aggregate_on_a_composites_color_renders_as_it_did(kind):
     """``Color("z", aggregate="mean")`` on a histogram or box renders the bytes it rendered."""
     import hashlib
 
@@ -13655,7 +13669,7 @@ def test_V8_an_aggregate_on_a_composites_color_renders_as_it_did(kind):
     assert hashlib.sha256(svg.encode()).hexdigest() == _AGGREGATED_COMPOSITE_DIGESTS[kind]
 
 
-def test_V8_an_aggregate_on_a_fits_color_is_refused_as_it_was():
+def test_an_aggregate_on_a_fits_color_is_refused_as_it_was():
     """An aggregated color joins no grouping, so the fit's rows lack ``z`` and the mean refuses."""
     with pytest.raises(ValueError) as refused:
         _quiet(lambda: _smooth(color=fm.Color("z", aggregate="mean")).to_svg())
@@ -13690,8 +13704,8 @@ _COMPOSITE_CONTROLS: dict[str, Callable[[], Any]] = {
     "density/color": lambda: mk("density", x="v", color="g"),
     "boxplot/color": lambda: mk("boxplot", x="g", y="y", color="c"),
     "violin/color": lambda: mk("violin", x="g", y="y", color="c"),
-    "catplot-box-hue": lambda: fm.catplot(_W_CAT, x="cat", y="val", kind="box", hue="grp"),
-    "displot-kde-hue": lambda: fm.displot(_W_CAT, x="val", hue="grp", kind="kde"),
+    "catplot-box-hue": lambda: fm.catplot(_CAT_DATA, x="cat", y="val", kind="box", hue="grp"),
+    "displot-kde-hue": lambda: fm.displot(_CAT_DATA, x="val", hue="grp", kind="kde"),
     "contour/groupby": lambda: fm.Chart(df).mark_contour(groupby="g").encode(x="v", y="y"),
 }
 
@@ -13754,7 +13768,7 @@ _COMPOSITE_CONTROL_DIGESTS: dict[str, str] = {
 
 
 @pytest.mark.parametrize("case", sorted(_COMPOSITE_CONTROLS))
-def test_V8_a_composite_the_grouping_does_not_reach_renders_as_it_did(case):
+def test_a_composite_the_grouping_does_not_reach_renders_as_it_did(case):
     """Byte-identical controls: no grouping channel, or one the composite already groups by."""
     import hashlib
 
@@ -14660,9 +14674,7 @@ def test_mark_smooth_with_an_all_null_hue_renders_one_pooled_fit(method, output)
     """``mark_smooth(color='h')``, every ``h`` null, draws one pooled fit and warns the all-null text.
 
     The pooled fit's output carries ``h`` all null at its original dtype,
-    so color reads it without refusing: rejects the prior behavior, a raw
-    "unknown column 'h'" refusal, since the pooled output used to lack the
-    column the color reads.
+    so color reads it without refusing.
     """
     chart = fm.Chart(_ALL_NULL_HUE).mark_smooth(method=method).encode(x="x", y="y", color="h")
     with warnings.catch_warnings(record=True) as caught:
@@ -14934,8 +14946,7 @@ _FACET_PARTIAL_ALL_NULL = pl.DataFrame(
     }
 )
 
-#: Per method: the static SVG and the interactive scene sha256, recorded on
-#: the tree before the all-null pooling fix and confirmed byte-identical here.
+#: Per method: the static SVG and the interactive scene sha256.
 _FACET_PARTIAL_ALL_NULL_DIGESTS = {
     "lm": (
         "f4c14ebbdcd7a7046f7f7d4c9532b4560141c5aa246bea2d9232d46f7de7f365",
@@ -14954,9 +14965,7 @@ def test_a_whole_batch_fallback_pooled_in_one_facet_panel_names_it(method, outpu
     """``mark_smooth(color='h').facet('f')`` pooled only in the all-null panel names it.
 
     Rejects the whole-frame text, which would falsely claim every row (not
-    just the panel's) had a null ``h``. Byte-identical to the render
-    before the all-null pooling fix: this shape was never touched by it,
-    since F1's hue is only partly null.
+    just the panel's) had a null ``h``.
     """
     import hashlib
 
@@ -15526,7 +15535,7 @@ _METRICS_WARN_ENTRIES: dict[str, tuple[Callable[..., fm.Chart], str]] = {
 #: mechanism, generic over every entry) are exercised for every entry --
 #: every entry here routes through Smooth, residplot and regplot included;
 #: every entry gets the direct and post-hoc single-operand doors, where
-#: the fix's per-method gating lives. The faceted entry's `+right` door
+#: the warning's per-method gate applies. The faceted entry's `+right` door
 #: also drops its own facet with the generic "primary layer wins"
 #: composition warning, pinned on its own below rather than skipped.
 _METRICS_WARN_DOORS: dict[str, tuple[str, ...]] = {
@@ -15657,7 +15666,7 @@ def test_lmplot_facet_plus_right_drops_its_facet_with_a_primary_layer_wins_warni
 
 
 #: Charts a later grouping never reaches, and the SVG and interactive scene
-#: digests they render on the tree before figures carried a rebuild record.
+#: digests they render.
 _REGROUP_CONTROLS: dict[str, tuple[Callable[[], Any], tuple[str, str]]] = {
     "residplot+P": (
         lambda: _resid() + P(),
@@ -15870,8 +15879,6 @@ _PALETTE_CONTROLS: dict[str, Callable[[], Any]] = {
         .encode(x="group", y="val")
     ),
 }
-#: The SVG and scene digests both render on the tree before the refusal read the
-#: effective color.
 _PALETTE_CONTROL_DIGESTS = (
     "913791d61cd343decbb2d1ed4b6e28c3d6addbe9146d3f1a48a71c12a817bf1a",
     "0d475e208cc304ed3c961d67ca592cce613562cde74b7fd27c0dcfc170e1d17a",
@@ -15969,8 +15976,8 @@ def test_an_error_extent_grouped_without_color_draws_one_bar_or_band_per_group(c
     assert drawn == sum(_quiet(lambda: interactive_census(colored())).values())
 
 
-#: Error bars and bands no grouping reaches, and the SVG and scene digests they
-#: render on the tree before ErrorExtent took the chart's grouping.
+#: Error bars and bands no grouping reaches, and the SVG and scene digests
+#: they render.
 _ERROR_CONTROLS: dict[str, tuple[Callable[[], fm.Chart], tuple[str, str]]] = {
     "errorbar": (
         lambda: mk("errorbar", x="g", y="y"),

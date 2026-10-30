@@ -208,8 +208,8 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> 
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
-    // area does not consume the `stroke_dash` channel (T12 scope: line,
-    // rule, point, bar, rect only); only a statistic's grouping splits further.
+    // area does not consume the `stroke_dash` channel (only line, rule,
+    // point, bar and rect draw it); only a statistic's grouping splits further.
     let grouping = grouping_series_values(ctx);
     let mut groups = build_color_detail_groups(
         color_values,

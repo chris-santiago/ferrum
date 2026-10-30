@@ -69,22 +69,22 @@ are construction-time ``ValueError``s, and ``legend=None``/``False`` is
 accepted silently and puts nothing on the wire. ``scale`` stays honored on the
 opacity family: it IS wired. No legend-owning channel's set changes.
 
-**Seventh deliberate contract change (2026-10-15):** every channel whose mark
-draws the aggregated value honors ``aggregate``: Color, Fill, Stroke, Size,
-Opacity, FillOpacity, StrokeOpacity, StrokeWidth and Angle here (Text,
-Tooltip and TooltipField in ``ferrum.encoding.text``). Any channel's
-``aggregate=`` already lowered into an ``Aggregate`` step (one per flat chart,
-one per layer) that re-points the channel at its output column, so the warn
-guard was telling users the kwarg was ignored on a call that drew the
-aggregated value. Shape and StrokeDash keep warning: an aggregated category
-draws nothing a shape or dash palette means.
+Every channel whose mark draws the aggregated value honors ``aggregate``:
+Color, Fill, Stroke, Size, Opacity, FillOpacity, StrokeOpacity, StrokeWidth
+and Angle here (Text, Tooltip and TooltipField in ``ferrum.encoding.text``).
+Any channel's ``aggregate=`` lowers into an ``Aggregate`` step (one per flat
+chart, one per layer) that re-points the channel at its output column, so
+each channel reads the aggregated value its mark draws. Shape and StrokeDash
+keep warning: an aggregated category draws nothing a shape or dash palette
+means.
 
-**Eighth deliberate contract change (2026-10-16):** a field bound to
-Opacity, FillOpacity, StrokeOpacity or StrokeWidth draws a legend, and a
-field bound to StrokeWidth maps through a linear scale onto pixel widths.
-All four have the ``own`` legend surface, so they honor ``legend`` and
-``title`` (derived), and StrokeWidth honors ``scale`` (``APPEARANCE_FULL``).
-Angle is the one appearance channel left with no legend.
+Supersedes the "honors neither" claim above for Opacity, FillOpacity,
+StrokeOpacity and StrokeWidth: a field bound to any of them now draws a
+legend, and a field bound to StrokeWidth maps through a linear scale onto
+pixel widths. All four have the ``own`` legend surface, so they honor
+``legend`` and ``title`` (derived), and StrokeWidth honors ``scale``
+(``APPEARANCE_FULL``). Angle is the one appearance channel left with no
+legend.
 """
 
 from __future__ import annotations
@@ -108,10 +108,10 @@ from ferrum.encoding.appearance import (
 
 # Canonical expected sets — these are the authoritative contract.
 # When a channel's membership intentionally changes, update this table and
-# add a dated comment explaining why.
+# add a comment stating the rule the new set follows.
 _EXPECTED: dict[type, frozenset[str]] = {
-    # Color, Fill and Stroke honor "bin" since 2026-10-19: bin= draws the
-    # field through a binned color scale over the unchanged rows.
+    # Color, Fill and Stroke honor "bin": bin= draws the field through a
+    # binned color scale over the unchanged rows.
     Color: frozenset(
         {"type", "scale", "title", "legend", "condition", "sort", "scheme", "aggregate", "bin"}
     ),
@@ -129,7 +129,7 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # only the derivation's answer for "shape" flips).
     Shape: frozenset({"type", "scale", "title", "legend", "sort"}),
     # Opacity LOST "title" and "legend" 2026-09-23 (#123, sixth change
-    # above) and regained both 2026-10-16 (eighth change): it draws a legend.
+    # above) and regained both since: it draws a legend.
     Opacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     Fill: frozenset(
         {"type", "scale", "title", "legend", "condition", "scheme", "aggregate", "bin"}
@@ -148,13 +148,13 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # All four LOST "legend" (and FillOpacity/StrokeOpacity "title")
     # 2026-09-23 (#123, sixth change above), the same reason as Opacity's.
     # FillOpacity, StrokeOpacity and StrokeWidth regained "legend"/"title",
-    # and StrokeWidth gained "scale", 2026-10-16 (eighth change above).
+    # and StrokeWidth gained "scale": all three have the "own" legend surface.
     FillOpacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3).
     StrokeOpacity: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
     StrokeWidth: frozenset({"type", "scale", "title", "legend", "condition", "aggregate"}),
-    # Every channel above but Shape and StrokeDash gained "aggregate" 2026-10-15
-    # (seventh change above).
+    # Every channel above but Shape and StrokeDash honors "aggregate": each
+    # one's mark draws the aggregated value.
     # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review
     # addendum) — moved to APPEARANCE_SORT, mirroring Shape.
     StrokeDash: frozenset({"type", "scale", "title", "legend", "condition", "sort"}),

@@ -452,7 +452,7 @@ mod tests {
 
     /// A column that is present but all null is read as written, on both
     /// the bare-reference path and the evaluator; an expression with no
-    /// column reference computes as before.
+    /// column reference computes the same way.
     #[test]
     fn an_all_null_column_and_a_literal_expression_still_compute() {
         let batch = make_batch_with_extra(

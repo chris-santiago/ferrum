@@ -2456,12 +2456,12 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R7 — a highlight layer's color stays on its own layer
+# A highlight layer's color stays on its own layer
 # ---------------------------------------------------------------------------
 
 
-def test_r7_a_highlight_layers_color_stays_on_its_own_layer() -> None:
-    """V1: the highlight operand's color is its own; it never reaches the chart level.
+def test_a_highlight_layers_color_stays_on_its_own_layer() -> None:
+    """The highlight operand's color is its own; it never reaches the chart level.
 
     ``base + highlight`` keeps the highlight layer's color encoding on that
     layer and leaves the gray background lines uncolored, so no chart-level

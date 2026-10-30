@@ -679,9 +679,7 @@ pub struct AxisInput {
     /// non-`Log` axis (and for a `Log` axis whose breaks are all decades,
     /// no multiples in play): `layout_x_axis`'s collision cascade reads it
     /// through `anchored_visibility`, which reduces to plain
-    /// `stride_visibility` when empty, so every existing caller that leaves
-    /// this at its `AxisInput::new` default (`Vec::new()`) culls
-    /// byte-identically to before this field existed.
+    /// `stride_visibility` when empty.
     pub tick_anchors: Vec<bool>,
     /// The index, among `tick_labels`, of this axis's nicest tick — from
     /// `ScaleKind::tick_origin`, index-aligned with `tick_labels` the same
@@ -761,7 +759,7 @@ pub struct TickProjection {
     /// (`theme.grid.minor` off) — `prepare.rs` only populates it when the gate is
     /// on, and "minor enabled" is derived from this vec being non-empty.
     pub minor: Vec<f64>,
-    /// The `Mark::Text` ink demand this axis carries (spec §6.13), threaded
+    /// The `Mark::Text` ink demand this axis carries, threaded
     /// through so `inset_pixel_range(base_range, padding_frac, text_demand)`
     /// builds the SAME inset here that places the marks. Empty for every
     /// axis no `Mark::Text` layer draws, which keeps `padding_frac`/`major`/
@@ -2938,7 +2936,7 @@ fn resolve_presentation_unshrunk(
 
 /// Try, in cascade order, S0 (flat) -> S1 (wrap) -> S2a (font-reduced flat)
 /// -> S2b (font-reduced wrap) -> S3 (rotate) against `labels` within
-/// `slot_w` (spec §4.6, D9). S0-S2 budget against `collision_need(slot_w,
+/// `slot_w`. S0-S2 budget against `collision_need(slot_w,
 /// label_gap)` (the larger of `label_gap`'s pixel gap and
 /// `LABEL_OVERLAP_TOLERANCE`'s own share of the pitch); S3 subtracts
 /// `label_gap.gap()` directly. S0 and S1 are [`resolve_presentation_unshrunk`]'s body, tried
@@ -8284,7 +8282,7 @@ mod tests {
         assert_eq!(greedy.labels, default.labels);
     }
 
-    /// A zero-height slot no longer makes the Greedy arm drop the first
+    /// A zero-height slot does not make the Greedy arm drop the first
     /// label: positions never multiply by a slot height, so the first
     /// label's "clears the last kept one" test is `last_kept.is_none()`,
     /// true regardless of position — three equal (zero-height-slot)
@@ -8334,7 +8332,8 @@ mod tests {
     }
 
     /// A non-decade that clears both of its neighbouring decades is kept
-    /// (guard: this shape was already correct before and after the fix).
+    /// (guard: the both-neighbours test keeps a non-decade that clears
+    /// both decades).
     #[test]
     fn resolve_y_overlap_greedy_keeps_non_decades_that_clear_both_decades() {
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
@@ -8348,7 +8347,7 @@ mod tests {
     }
 
     /// With no anchors, the two-pass rule reduces to the classic single-
-    /// pass greedy over positions (guard: byte-identical to the pre-fix
+    /// pass greedy over positions (guard: byte-identical to the
     /// slot-count greedy on a uniform axis).
     #[test]
     fn resolve_y_overlap_greedy_without_anchors_matches_the_slot_greedy() {

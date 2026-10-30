@@ -20,7 +20,7 @@ same per-row magnitude (point radius = half the line width). A constant
 `size=` kwarg draws the same formula as a constant width, with no per-vertex
 `widths`.
 
-A layer's own binding never reaches a sibling (spec §4.6 V1,
+A layer's own binding never reaches a sibling (see
 `tests/test_layer_channel_promotion.py`), so a line layer that binds only
 its own `stroke_width` (field or constant) beside a `size`-bound layer
 draws at its own `stroke_width`, untapered, on `+` and `fm.layer(...)`, in
@@ -357,7 +357,7 @@ def test_own_stroke_width_draws_beside_a_siblings_size(cell: str) -> None:
 
 
 def test_a_line_binding_neither_channel_draws_untapered_at_the_default_width() -> None:
-    """V1: neither `size` nor `stroke_width` reaches the third layer from its
+    """Neither `size` nor `stroke_width` reaches the third layer from its
     siblings, so it draws untapered at the line's default width, as it does
     alone; the first line keeps its own `stroke_width`."""
     first_line = fm.Chart(_DF).mark_line().encode(x="x", y="y", stroke_width="w")
@@ -466,7 +466,7 @@ def test_own_size_kwarg_draws_beside_a_siblings_size_field(chart_factory, recwar
 def test_own_stroke_width_field_then_own_constant_draw_each_their_own_width(recwarn) -> None:
     """The field line (layer 0) binds `stroke_width='w'` and the constant
     line (layer 1) its own `stroke_width=3`; each draws its own width, in
-    layer order (V1: neither binding reaches the other line). The constant
+    layer order, neither binding reaching the other line. The constant
     field column draws the stroke-width scale's midpoint."""
     field_line = fm.Chart(_OWN_KWARG_DF).mark_line().encode(x="x", y="y", stroke_width="w")
     const_line = fm.Chart(_OWN_KWARG_DF).mark_line(stroke_width=3).encode(x="x", y="y")
@@ -1376,7 +1376,7 @@ def test_line_only_legend_differs_from_point_only() -> None:
 
 @pytest.mark.parametrize("route", ["plus", "layer", "interactive"])
 def test_a_rule_beside_a_sized_line_keeps_the_line_swatches(route: str) -> None:
-    """A rule beside a sized line binds no size (V1: the line's binding is its
+    """A rule beside a sized line binds no size (the line's binding is its
     own), so the line is the legend's only consumer."""
     rule = fm.Chart(_DF).mark_rule().encode(y="y")
     chart = _consumer("line") + rule if route != "layer" else fm.layer(_consumer("line"), rule)

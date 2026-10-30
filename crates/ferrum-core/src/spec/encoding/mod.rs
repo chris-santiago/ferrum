@@ -1213,7 +1213,7 @@ pub struct Encoding {
     /// it (`render::position`: `by`, else `color`, else `group`). It names no
     /// drawn channel, so the column gate and the drawn census never read it,
     /// and no merge inherits it. Wire shape: `"group": {"field": "<column>"}`;
-    /// omitted when unset, so every spec without it serializes as before.
+    /// omitted when unset, so every spec without it serializes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<EncodingSpec>,
 }

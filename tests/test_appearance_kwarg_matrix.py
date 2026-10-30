@@ -468,7 +468,7 @@ def test_legend_dict_or_object_works_for_own_non_aux_channels(
     ids=["dict", "Legend"],
 )
 def test_legend_orient_refused_for_aux_channels(channel_cls: type, legend_value_factory) -> None:
-    """Every aux-legend channel: a legend value with orient != 'none' is refused (#123, Q10)."""
+    """Every aux-legend channel: a legend value with orient != 'none' is refused (#123)."""
     name = channel_cls.__name__
     with pytest.raises(ValueError, match=rf"{name}\(legend=\.\.\.\): orient='bottom'"):
         channel_cls(_field_for(channel_cls._channel_name), legend=legend_value_factory())

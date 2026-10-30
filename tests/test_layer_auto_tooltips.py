@@ -265,7 +265,7 @@ def test_selection_linked_tooltip_unions_per_layer_fields():
 
 def test_selection_union_applies_beside_an_operands_own_tooltip():
     """GH #58: a field-based selection unions its fields into every layer's
-    tooltip when a left operand carries its own tooltip. V1: that tooltip
+    tooltip when a left operand carries its own tooltip. That tooltip
     stays on its own layer (it never becomes the chart level), and the
     selection's field follows each layer's own entries."""
     from ferrum.selection import selection_point
@@ -321,7 +321,7 @@ def test_a_compositions_tooltip_stays_with_its_layers_after_a_later_merge():
 
 
 def test_an_operands_own_tooltip_stays_on_its_layer_across_merges():
-    """V1: ``(a_tt + b) + c`` keeps a's own tooltip on a's layer, and both b
+    """``(a_tt + b) + c`` keeps a's own tooltip on a's layer, and both b
     and c still get their own per-layer auto fields (not a single shared
     chart-level field set)."""
     df = _df()

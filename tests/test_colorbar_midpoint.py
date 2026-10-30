@@ -1,4 +1,4 @@
-"""Diverging colorbar midpoint and scheme-selection acceptance tests (spec §6.4).
+"""Diverging colorbar midpoint and scheme-selection acceptance tests.
 
 A diverging colorbar shows the same color at a value as the cells it colors:
 ``heatmap(center=0)`` places the scheme's mid color at the midpoint's position
@@ -327,9 +327,9 @@ def test_midpoint_at_geometric_center_is_byte_identical_to_no_midpoint():
 )
 def test_inexact_centered_domain_is_byte_identical_to_no_midpoint(lo, hi):
     """A geometric center computed as `(lo + hi) / 2` is rarely float-exact
-    (e.g. `(-0.1 + 0.5) / 2 == 0.19999999999999998`); spec §6.4 still
-    requires 'a midpoint at the geometric center renders byte-identical to no
-    midpoint'. Proven within this build, not against a /tmp baseline: the
+    (e.g. `(-0.1 + 0.5) / 2 == 0.19999999999999998`); a midpoint at the
+    geometric center still renders byte-identical to no midpoint.
+    Proven within this build, not against a /tmp baseline: the
     inexact-centered chart must equal the sibling chart with no midpoint at
     all, over the same domain."""
     centered_svg = _mid_chart(lo, hi, (lo + hi) / 2).to_svg()
@@ -471,9 +471,8 @@ def test_configure_color_domain_only_relabels_the_bar_and_keeps_its_stops():
     """With no range override, a sequential/diverging bar's stops are a pure
     function of the scheme and the stop position -- domain-invariant whether
     or not a midpoint is set -- so `configure_color(domain=)` alone cannot
-    change them; the bug this fixes is the bar's TICK LABELS staying on the
-    pre-config domain. Pinned both ways: stops unchanged from the plain
-    render, labels on the configured domain."""
+    change them. Pinned both ways: stops unchanged from
+    the plain render, labels on the configured domain."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "v": [1.0, 5.0, 9.0]})
     plain = (
         fm.Chart(df)

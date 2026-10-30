@@ -485,7 +485,7 @@ class TestLayeredFillStrokeAlias:
     a legend, identically to the equivalent color= control.
 
     This is a render-level check, not a wire-dict check: the color scale is
-    built from the layers that draw color (spec §4.4), so a correct
+    built from the layers that draw color, so a correct
     ``layer_enc["color"]`` wire entry does not by itself prove the chart
     renders in color: `fill=`/`stroke=` on an overlay layer must draw its
     own color scale, with a legend, not a theme-default fill and no legend,

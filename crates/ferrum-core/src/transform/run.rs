@@ -589,7 +589,7 @@ impl<'s> Run<'s, '_> {
 /// derivation from the layer's effective encoding (every bound channel,
 /// value channels included) rather than a keyword the caller wrote on the
 /// step itself. Only `Aggregate` and `Bin` are ever lowered this way: the
-/// planner never builds any other kind (spec §6.4's one statistic plan).
+/// planner never builds any other kind (the one statistic plan).
 ///
 /// `Aggregate` and `Bin` differ in how much of their `groupby` the planner
 /// can own. An `Aggregate`'s whole `groupby` is always planner-derived,

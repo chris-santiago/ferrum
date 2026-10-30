@@ -26,7 +26,7 @@ pub(crate) struct ShapedInk {
 
 pub struct FontdueMetrics {
     font: fontdue::Font,
-    // spec §6.13: the shaper usvg (and so every browser-equivalent render
+    // the shaper usvg (and so every browser-equivalent render
     // path ferrum ships) shapes with. Parsed once from the same bytes as
     // `font`, borrowed for `'static` since `INTER_REGULAR` is a `'static`
     // byte slice.
@@ -50,8 +50,8 @@ impl FontdueMetrics {
     }
 
     /// Shape `label` at `font_size` with GPOS kerning on, the same shaping
-    /// usvg applies when it renders the glyphs `emit_text` writes (spec
-    /// §6.13). `rustybuzz::shape` returns glyph advances, offsets and ids in
+    /// usvg applies when it renders the glyphs `emit_text` writes.
+    /// `rustybuzz::shape` returns glyph advances, offsets and ids in
     /// font design units (`units_per_em`); every value here is already
     /// scaled to pixels at `font_size`. A glyph with no outline (whitespace)
     /// contributes to `advance` but not to the ink box, so a whitespace-only

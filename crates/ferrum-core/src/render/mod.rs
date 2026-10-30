@@ -378,14 +378,10 @@ pub enum RenderError {
     /// (`EncodingSpec.format`/`.axis.label_format`/`.legend.format`, on any
     /// layer) or `ChartConfig` (`axis`/`axis_x`/`axis_y`/`axis_y2`'s
     /// `label_format`/`label_format_raw`, `legend.format`) could not be
-    /// tokenized by the d3-format grammar `format.rs` implements — NF-B1
-    /// residual (2026-09-02): an unrecognized preset name legitimately
-    /// passes through Python's `resolve_format_or_raw` as a raw spec per
-    /// spec §4.5, but a genuine typo (e.g. `"curency"`) previously reached
-    /// the lenient per-value tokenizer, which silently discarded trailing
-    /// characters it couldn't place — corrupting rendered text with raw
-    /// control characters for some inputs (the tokenizer's `c` type char:
-    /// "format as Unicode code point"). Raised once per render by
+    /// tokenized by the d3-format grammar `format.rs` implements: an
+    /// unrecognized preset name legitimately
+    /// passes through Python's `resolve_format_or_raw` as a raw spec.
+    /// Raised once per render by
     /// [`validate_chart_format_specs`], before any transform/layout work, so
     /// a malformed spec never reaches per-value formatting. `spec` is the
     /// offending string; `reason` is [`format::validate_d3_format_spec`]'s
@@ -393,7 +389,7 @@ pub enum RenderError {
     InvalidFormatSpec { spec: String, reason: String },
     /// A chart-level scale-domain config (`configure_axis(domain_min=,
     /// domain_max=, ...)` and its per-axis spellings) resolved to a domain the
-    /// scale family refuses (D3, spec §4.2). Today the one such shape is a
+    /// scale family refuses. Today the one such shape is a
     /// DEGENERATE pair — `lo == hi` — which every scale constructor already
     /// rejects with [`crate::scale::core::DEGENERATE_DOMAIN_MESSAGE`]; the
     /// config surface quotes that same sentence so a user who reaches the
@@ -676,7 +672,7 @@ pub enum RenderError {
     },
     /// A layer beyond the first bound a channel to a column that is absent
     /// from **that layer's own resolved batch** — the base data, or the named
-    /// `data_source` output the layer reads from (F-L10-01 rider, spec §4):
+    /// `data_source` output the layer reads from (F-L10-01 rider):
     /// a positional channel, any other binding its mark draws, its `detail`,
     /// or a field branch of a conditional it declared.
     ///
@@ -684,14 +680,7 @@ pub enum RenderError {
     /// leaves the channel unbound (`scene_build::resolve_panel_scales` merges
     /// layer 0 onto the chart encoding, and `scale_resolve::positional_binding`
     /// falls back to the first layer that binds an otherwise-unbound `x`/`y`;
-    /// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`), so
-    /// a layer ≥ 1 naming a missing column that layer 0 also binds used to
-    /// reach the mark builders, whose readers skip a column that is not there
-    /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs` for positions,
-    /// the per-row color, tooltip, href, description and key readers for the
-    /// rest): the layer vanished from the render, or drew without the
-    /// channel, with no error and no warning. That is how a broken
-    /// regression-fit layer shipped undetected.
+    /// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`).
     ///
     /// Shape follows the composite `CompositeRenderError::LeafRender { index,
     /// source }` precedent (`composite_render.rs`) — the offending index is
@@ -745,8 +734,8 @@ pub enum RenderError {
     /// area does). A categorical scale has no color for a cell value, so the
     /// image would draw nothing: REFUSE MALFORMED. Decided where a color
     /// scale's kind is decided (`scale_resolve::build_color_scale` and the
-    /// admitted reads beside it), on every route. `entry` voices the image
-    /// layer by ruling F (`mark_raster` for a layer that call built, else
+    /// admitted reads beside it), on every route. `entry` names the image
+    /// layer by its public call (`mark_raster` for a layer that call built, else
     /// `layer {i}: mark_image`), `field` is the cells' field, `reason` why
     /// the scale is categorical.
     /// Boxed, for `clippy::result_large_err` and nothing else, as
@@ -1098,12 +1087,7 @@ pub enum RenderError {
         coord_flipped: bool,
     },
     /// A d3 number format (`".2f"`, `",.0f"`, `"d"`, a `"number"`-typed
-    /// preset such as `"percent"`) meets a temporal value (`#147` close, wave
-    /// 6A T23, user ruling). The surfaces used to give three answers to the
-    /// identical pair: the shared axes formatted the calendar year
-    /// (`2001.00`), an independent facet axis dropped the format, and the
-    /// legend and text formatted the epoch-millisecond count
-    /// (`959817600000.00`). The number-format sibling of
+    /// preset such as `"percent"`) meets a temporal value (`#147`). The number-format sibling of
     /// [`Self::OrdinalFormatOnTemporalScale`], built by the same single
     /// constructor at the same surfaces with the same
     /// `channel`/`surface`/`coord_flipped` discipline. A time-typed numeric
@@ -1115,8 +1099,8 @@ pub enum RenderError {
         format: String,
         coord_flipped: bool,
     },
-    /// A chart combines a projected coordinate system — `Polar` or, since
-    /// 2026-09-12, `Geo` — with a `BreakAxis` structural spec (#230-8, D3:
+    /// A chart combines a projected coordinate system — `Polar` or
+    /// `Geo` — with a `BreakAxis` structural spec (#230-8,
     /// REFUSE MALFORMED). `coord` names which one (`"Polar"`/`"Geo"`);
     /// `axis` is the offending `BreakAxis.axis` token (`"x"`/`"y"`).
     ///
@@ -2101,11 +2085,11 @@ impl ConfigSurface {
 
 /// Warnings emitted during render. Geometric edge cases or wrapped layout warnings.
 ///
-/// Note (2026-05-09): spec §11 (line ~556) used `#[serde(tag = "kind", ...)]` but
-/// that collides with `LayoutWarning`'s own `kind` tag when wrapped via
-/// `RenderWarning::Layout(LayoutWarning)` (serde flattens newtype-around-struct
-/// variants). Outer tag renamed to `type` to disambiguate; `LayoutWarning`'s
-/// `kind` tag is preserved (already pinned by Phase 6 round-trip tests).
+/// The outer tag is `type`, not `kind`: `LayoutWarning` already tags itself
+/// `kind`, and wrapping it via `RenderWarning::Layout(LayoutWarning)` (serde
+/// flattens newtype-around-struct variants) would otherwise emit two `kind`
+/// keys. `LayoutWarning`'s own `kind` tag is preserved (pinned by round-trip
+/// tests).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RenderWarning {
@@ -2271,7 +2255,7 @@ pub enum RenderWarning {
     NoRowsToDraw { faceted: bool },
     /// `Mark::Text` ink still crosses the plot frame on `channel` after
     /// `inset_pixel_range` kept at least `TEXT_INSET_MIN_SPAN_SHARE` of the
-    /// axis's inner length (spec §6.13): the rows' combined clearance needs
+    /// axis's inner length: the rows' combined clearance needs
     /// exceed what the panel can give without collapsing the plot area.
     /// `rows` is the count of rows still overrunning, each counted once
     /// where it is actually drawn: a shared axis's overrunning row counts
@@ -2396,13 +2380,13 @@ pub enum RenderWarning {
         suppressed: bool,
     },
     /// A chart-level config section named a surface the chart does not have:
-    /// `axis_y2` (D2/F-L07-06, spec §4.1) on a chart with no `independent_y`
+    /// `axis_y2` (F-L07-06) on a chart with no `independent_y`
     /// layer has no secondary y-axis input (`AxesInput.secondary_y` is empty)
     /// for the override to fill, so it is dropped with this warning rather
     /// than silently discarded. `section` names the config key the user set.
     ConfigSurfaceNotPresent { section: ConfigSurface },
     /// A per-channel `Legend(values=[...])` on a CATEGORICAL legend named
-    /// entries the legend does not have (D6/F-L04-05, spec §4.4). `values`
+    /// entries the legend does not have (F-L04-05). `values`
     /// filters and orders the entries; a name matching none of them cannot be
     /// drawn as a swatch — there is no category, no color, and no scale slot
     /// behind it — so it is skipped and reported here rather than silently
@@ -2444,8 +2428,7 @@ pub enum RenderWarning {
     /// `configure(axis_x=/axis_y=/axis_y2=...)` section — note the shared
     /// `axis` key reaches x and y only, never the secondary axis, so `axis_y2`
     /// is the sole way to address that one) was set on an axis whose resolved
-    /// scale is ordinal/band
-    /// (D3, spec §4.2). Categorical axes have no numeric bounds to clamp,
+    /// scale is ordinal/band. Categorical axes have no numeric bounds to clamp,
     /// round, or extend to zero, so the fields describe nothing that exists
     /// — a WRONG SURFACE, not a cascade loss, and therefore reported rather
     /// than silently dropped. (The cascade loss — an encoding-level `scale=`
@@ -3363,7 +3346,7 @@ mod tests {
              out of that axis; its marks draw on the layer's own scale, not the labelled axis"
         );
 
-        // D2/F-L07-06 (this task): `axis_y2` names a surface the chart lacks.
+        // F-L07-06: `axis_y2` names a surface the chart lacks.
         let no_surface = RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 };
         let no_surface_text = format!("{no_surface}");
         assert!(no_surface_text.contains("axis_y2"), "{no_surface_text}");
@@ -3388,7 +3371,7 @@ mod tests {
             "{one_category_text}"
         );
 
-        // D6/F-L04-05 (this task): unknown categorical `Legend(values=)` names.
+        // F-L04-05: unknown categorical `Legend(values=)` names.
         let unknown = RenderWarning::LegendValuesUnknown {
             values: vec!["zulu".into(), "yankee".into()],
         };
@@ -3801,7 +3784,7 @@ fn prepare_and_layout(
     let applied =
         config_apply::apply_chart_config_pipeline(&mut prep, theme, chart_config, &mut warnings)?;
 
-    // Parsed once per render (spec §6.13): shared by the independent-panel
+    // Parsed once per render: shared by the independent-panel
     // text-edge measurement just below and by `compute_layout`'s own tick
     // metrics, so this pass never re-parses the bundled font `build_axes`
     // already parsed its own copy of for the chart's shared axes.
@@ -4915,11 +4898,11 @@ mod orchestration_tests {
             .expect("valid-but-unusual specs must not be refused");
     }
 
-    // ── Batch B design review S4 (2026-09-03): `configure_axis(nice=True)`
+    // ── `configure_axis(nice=True)`
     // on a log axis must delegate to `LogScale`'s own `nice()`, not the
     // inline linear `nice_step` rounding every kind used to share. ─────────
 
-    /// RED-proof of the reviewer-reproduced crash: `fm.Chart(df).mark_point()
+    /// RED-proof of the crash: `fm.Chart(df).mark_point()
     /// .encode(x=fm.X("a"), y=fm.Y("v", scale=fm.LogScale()))
     /// .configure_axis(nice=True).to_svg()`. `y`'s data domain `(10, 1000)`
     /// is exactly the shape that trips the pre-fix bug: the OLD
@@ -4986,7 +4969,7 @@ mod orchestration_tests {
         );
     }
 
-    // ── Quality-review S4 (2026-09-03): malformed %-bearing specs on a
+    // ── Malformed %-bearing specs on a
     // TEMPORAL channel must be a typed refusal, never a panic. Root cause:
     // `validate_chart_format_specs` exempted every `%`-bearing spec from
     // validation entirely (on the false premise that `chrono` handles a bad
@@ -4997,7 +4980,7 @@ mod orchestration_tests {
     // with `RenderError::InvalidFormatSpec` — a typed Rust `Result`, which
     // can NEVER become an unhandled Python panic (PyO3's `render_err_to_py`
     // always converts it to a `ValueError` first). These four reproduce the
-    // exact snippets quality review verified crash on the pre-fix build.
+    // exact snippets that panic without this validation.
 
     #[test]
     fn render_svg_refuses_curency_percent_typo_on_temporal_axis() {
@@ -8065,14 +8048,14 @@ mod orchestration_tests {
         );
     }
 
-    // ── axis_y2 effect tests (D2/F-L07-06) ──────────
+    // ── axis_y2 effect tests (F-L07-06) ──────────────
     //
     // The prior test coverage (chart_config.rs's deserialization tests,
     // binding.rs's wire-gate tests, this file's RenderWarning round-trip)
     // proved `axis_y2` PARSES and the warning variant EXISTS — none of them
     // called `prepare_and_layout` (or any render entry) with `axis_y2` set
     // against a chart that actually HAS a secondary y axis, so the fill
-    // branch in `prepare_and_layout` (the code this task added) had zero
+    // branch in `prepare_and_layout` had zero
     // coverage. These three close that gap.
 
     /// A primary line layer plus one `independent_y` layer — the same
@@ -8162,7 +8145,7 @@ mod orchestration_tests {
     /// entry, not the internal `prep` struct), `chart_config.axis_y2.
     /// label_color` now reaches the rendered SVG — the exact repro the
     /// finding used (`AxisConfig(label_color="#654321")` never appearing in
-    /// the output). RED-proven by commenting out this task's axis_y2 block
+    /// the output). RED-proven by commenting out the axis_y2 block
     /// in `prepare_and_layout` (the `if let Some(ref axis_y2_cfg) = chart_
     /// config.axis_y2 { ... }` above) and re-running: this test fails
     /// because `#654321` never reaches the SVG. Restored before committing.

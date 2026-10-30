@@ -265,7 +265,7 @@ def _rank1d_chart_impl(
         # hand the estimator object itself to np.asarray()/
         # polars_or_array_to_record_batch() and leak an internal TypeError
         # instead of the typed ModelSource refusal (is_raw_data hoisted out
-        # of the covariance-only arm it used to live in).
+        # of the covariance-only arm).
         ms = _resolve_source(
             data_or_source,
             X,

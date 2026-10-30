@@ -4,7 +4,7 @@
 
 Quality-review REVISE, cycle 3 (all findings from the cycle-2 ramp fix):
 
-1. **Grouping mechanism** (S3, blocking): the prep estimates depth over
+1. **Grouping mechanism**: the prep estimates depth over
    the groups ``desugar_boxen``'s ``LetterValue`` really computes: its
    category (``color_field if color_field else cat``, see
    ``composite.py``) and its ``groupby``, the chart's grouping fields. This

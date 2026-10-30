@@ -241,9 +241,9 @@ def test_no_warning_when_themes_match_or_the_secondary_carries_none() -> None:
     assert not caught
 
 
-def test_members_sharing_a_theme_render_byte_identically_to_the_default_theme_route() -> None:
-    """Members that already share one theme (default or explicit) lower
-    byte-identically, with no warning -- this fix changes nothing for them."""
+def test_members_sharing_a_theme_render_the_plus_routes_mark_fills_with_no_warning() -> None:
+    """Members that already share one theme render with no warning and the
+    same mark fills as the ``+`` route under that theme."""
     a = _consumer()
     b = _consumer()
     shared = fm.LayerChart(a.theme(_ECONOMIST), b.theme(_ECONOMIST))

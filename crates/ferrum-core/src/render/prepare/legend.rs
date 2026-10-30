@@ -786,7 +786,7 @@ fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) ->
         .is_some_and(|l| LegendStyleSpec::suppressed_by(&[l]))
 }
 
-/// Aux legend title, three-state per spec §6 (#90):
+/// Aux legend title, three-state:
 /// `legend.title` > channel `title` > field name, each rung resolved through
 /// [`resolve_axis_title`] (present+blank → suppress with no further
 /// fallback, present+non-blank → verbatim, absent → fall through). Mirrors

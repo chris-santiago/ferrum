@@ -1,4 +1,4 @@
-"""Pinning test for the reference-rule style on a `+` span rule (spec §6.9).
+"""Pinning test for the reference-rule style on a `+` span rule.
 
 A span rule (`mark_rule` binding exactly one positional channel, no `x2`/
 `y2`) composed with `+` beside a colored host already draws its own default

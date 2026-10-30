@@ -1,4 +1,4 @@
-"""Pins spec §4.4 / §6.5's annotation-contrast guarantee for the five figure
+"""Pins the annotation-contrast guarantee for the five figure
 functions whose cells draw a per-cell ink instead of one fixed theme ink:
 ``heatmap(annot=True)``, ``confusion_matrix_chart``, ``rank2d_chart``,
 ``classification_report_chart`` and ``class_prediction_error_chart``'s
@@ -12,8 +12,8 @@ reads at least 4.5:1 WCAG 2.x contrast against its own rendered cell, on
 every theme and color ramp -- UNLESS a caller painted the label itself (a
 figure's ``mark={<label>: {"fill": ...}}``, a composite mark's catch-all
 ``fill=``, or ``fill="none"``/the ``"color"`` alias), in which case the
-caller's paint wins and the label draws no contrast ink at all (spec §6.5,
-§4.4's "text with explicit fill= ... unchanged"). This module asserts both
+caller's paint wins and the label draws no contrast ink at all ("text with
+explicit fill= ... unchanged"). This module asserts both
 outcomes from the rendered SVG using an independent WCAG implementation
 (``tests/_wcag.py``), not by replaying ferrum's own contrast-resolution
 logic -- a test built that way would just restate the implementation as its
@@ -58,7 +58,7 @@ def _font_hex(theme_obj) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Themes under test -- spec §4.4's named set.
+# Themes under test -- the named theme set.
 # ---------------------------------------------------------------------------
 
 _THEMES = {
@@ -273,7 +273,7 @@ def test_class_prediction_error_count_label_contrast_meets_wcag_aa(theme_name) -
 
 # ---------------------------------------------------------------------------
 # Negative control: prove the oracle discriminates. A single constant ink
-# (the theme's own font color, the pre-fix behavior) must FAIL against at
+# (the theme's own font color, applied uniformly) must FAIL against at
 # least one of these real rendered cells, while the sentinel-driven ink
 # (asserted above) passes the same cell. This is read off the actual
 # rendered cell color, never a re-derivation of ferrum's own ink logic.
@@ -311,7 +311,7 @@ def test_a_single_constant_ink_would_fail_where_the_sentinel_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The contrast binding's "binds color, draws nothing" rule (spec §6.5): a
+# The contrast binding's "binds color, draws nothing" rule: a
 # label's own color binding resolves correctly, warns nothing, and adds no
 # second scale on an overlay (`+`) route and a faceted route, reached here
 # through `mark_confusion` composed with another layer and through
@@ -484,8 +484,8 @@ def test_clustermap_carries_no_contrast_sentinel() -> None:
 # ---------------------------------------------------------------------------
 # Unchanged: a plain user rect+text chart (no bound color on the text layer)
 # still draws the constant theme font ink; explicit fill=/fill="none" still
-# wins exactly as before. None of these routes carry the sentinel or an own
-# color binding, so this batch cannot have touched them.
+# wins. None of these routes carry the sentinel or an own color binding, so
+# the contrast sentinel never reaches them.
 # ---------------------------------------------------------------------------
 
 
@@ -542,7 +542,7 @@ def test_explicit_fill_none_on_a_plain_text_layer_still_clears() -> None:
 # `fill="none"`) and the composite mark's catch-all `fill=`. The label's own
 # `color` binding exists only to pick a contrast ink when nothing else
 # painted the layer; once a caller does, that binding must never draw a hue
-# of its own (spec §6.5, §4.4's "text with explicit fill= ... unchanged").
+# of its own ("text with explicit fill= ... unchanged").
 # ---------------------------------------------------------------------------
 
 _FILL_HEX = "#112233"
@@ -708,7 +708,7 @@ def test_heatmap_size_encode_kwarg_stays_off_the_label_and_warns() -> None:
 
 # ---------------------------------------------------------------------------
 # heatmap(annot=True, color=<field>): the label must read the SAME binding
-# the cells draw (choice 3), not the literal "value" field, so a caller's
+# the cells draw, not the literal "value" field, so a caller's
 # color= override still clears WCAG AA against the hue it actually paints.
 # ---------------------------------------------------------------------------
 
@@ -730,9 +730,9 @@ def test_heatmap_color_override_annotation_contrast_meets_wcag_aa() -> None:
 
 # ---------------------------------------------------------------------------
 # The mask= (melted_data) branch shares the same construction as the default
-# branch (choice 2: one rows chart, reused for both the cells and the
-# label), so it must isolate the cells' own **encode_kwargs from the label
-# exactly as the default branch does.
+# branch: one rows chart, reused for both the cells and the label. So it
+# must isolate the cells' own **encode_kwargs from the label exactly as the
+# default branch does.
 # ---------------------------------------------------------------------------
 
 

@@ -536,12 +536,9 @@ class TestPositionByRefusesNonColumnNames:
 #: so its digest is no longer a statement about anything. Re-baselining it to
 #: the new bytes would turn a record of "this path is untouched" into a
 #: record of "whatever it does today", which is what the entry exists to
-#: prevent. `kde_kind_stack` still holds the original pre-fix bytes; the two
-#: histogram rows are re-measured with the bars grown from the 0 tick, which
-#: moves only their `<rect>` elements. Each of those two digests encodes two
-#: changes: the shared-edges fix leaving the path untouched, and the bars grown
-#: from the 0 tick, which `test_unaffected_histogram_paths_start_on_the_zero_tick`
-#: asserts directly.
+#: prevent. `kde_kind_stack` still holds its original digest, since nothing
+#: moves its bars; the two histogram rows are re-measured with the bars grown
+#: from the 0 tick, which moves only their `<rect>` elements.
 _PRE_FIX_SVG_DIGESTS = {
     "kde_kind_stack": "c5572e1467e762e9009b92f838db248ee80241534022a6a1fc4cbb841605d9ea",
     "layer": "fe9b741ca7d1d33f80ad65505d0a3f6a0975405631596b4e089a4a24ee941247",

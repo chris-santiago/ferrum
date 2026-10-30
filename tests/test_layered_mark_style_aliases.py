@@ -5,7 +5,7 @@ the mark-style bag rather than the wire encoding. On a flat chart that bag is th
 chart's own `mark_style`. A layered chart emits no chart-level `mark_style`
 (`#119`, spec §4.8: a layer's style is its own), but `detail` is an ENCODING, not
 style, and `color` is the model: a layer inherits the bindings of its one parent
-and never a sibling's (spec §4.6 V1, G1). A binding written on a composition
+and never a sibling's. A binding written on a composition
 (`(a + b).encode(...)`) reaches every layer of it that binds none, whenever it
 was declared; a binding written on one `+` operand stays on that operand's
 layers, so a later operand does not inherit it (`(a + b).encode(detail="g") + c`
@@ -94,7 +94,7 @@ SHAPES = {
         2,
     ),
     # The member's composition-level binding stays with its own layers on
-    # every route, the interactive merge included (V1, P8).
+    # every route, the interactive merge included.
     "layerchart_layered_member": (
         lambda k: fm.LayerChart((_line() + _line()).encode(**{k: "g"}), _line()),
         5,
@@ -108,7 +108,7 @@ SHAPES = {
         lambda k: (_line() + _line()).encode(**{k: "g"}) + _line(),
         5,
     ),
-    # G1/V1: the left operand's binding never reaches the right operand.
+    # The left operand's binding never reaches the right operand.
     "declared_before_any_plus": (lambda k: _line(**{k: "g"}) + _line(), 3),
     # A layer's own value wins over the inherited chart-level one.
     "layer_own_differs_from_chart_level": (

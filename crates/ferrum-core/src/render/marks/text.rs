@@ -62,7 +62,7 @@ pub(in crate::render) struct GlyphEdgeExtents {
 /// input `build` folds into a `Mark::Text` glyph besides its position and
 /// paint. Built once by [`text_glyphs`] and read both by `build` (to draw
 /// the glyph) and by the text-inset measurement (to measure the SAME glyph
-/// `build` draws, spec §6.13).
+/// `build` draws).
 pub(in crate::render) struct TextGlyph {
     pub(in crate::render) label: String,
     pub(in crate::render) font_size: f64,
@@ -83,7 +83,7 @@ pub(in crate::render) struct TextGlyph {
 /// `batch`'s rows, read by its caller through `cartesian_anchors` or
 /// `polar_anchors` so this function never has to decide between the
 /// Cartesian (`y` value) and polar (theta value) fallback rule itself; the
-/// text-inset measurement (spec §6.13, Cartesian-only — a polar layer
+/// text-inset measurement (Cartesian-only — a polar layer
 /// contributes no rows) builds its own `y`-value fallback the same way
 /// `cartesian_anchors` does before calling this.
 pub(in crate::render) fn text_glyphs(
@@ -154,7 +154,7 @@ pub(in crate::render) fn text_glyphs(
                 }
             },
         };
-        // S7: truncate label to `limit` characters (including the ellipsis).
+        // truncate label to `limit` characters (including the ellipsis).
         let label = match style.limit {
             Some(limit) if limit > 0 && raw_label.chars().count() > limit => {
                 let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
@@ -185,7 +185,7 @@ pub(in crate::render) fn text_glyphs(
 const HANGING_BASELINE_ASCENT_SHARE: f64 = 0.8;
 
 /// The ink-bounding-box distance from `glyph`'s anchor point to each of its
-/// four sides (spec §6.13): the font line box (ascent/descent) unioned with
+/// four sides: the font line box (ascent/descent) unioned with
 /// the glyph run's own shaped ink — kerning, a negative first-glyph bearing,
 /// an overhanging last glyph, and a glyph taller than the ascent or deeper
 /// than the descent all widen the box past the plain advance; a run with
@@ -603,8 +603,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     };
     let n_rows = row_anchors.len();
 
-    // Each row's drawn label, font size and rotation (spec §6.13's shared
-    // glyph helper): the SAME resolution the text-inset measurement reads,
+    // Each row's drawn label, font size and rotation (the shared glyph
+    // helper): the SAME resolution the text-inset measurement reads,
     // so a later change to how text draws reaches both without a second
     // edit.
     let glyphs = text_glyphs(&spec.encoding, ctx.batch, &ctx.mark_style.text, ctx.theme, &fallback_labels)?;
@@ -653,7 +653,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // `TextStyle.color: None` — the same `#110` rule every filled mark follows.
     //
     // One exception to the whole precedence above: `fill="theme:contrast"`
-    // (spec §6.5) binds its own `color` channel not to draw a hue but to name
+    // binds its own `color` channel not to draw a hue but to name
     // the cell a row's label sits on, so its per-row paint is computed
     // separately below (`contrast_fill`) instead of through this constant.
     let base_text_paint = if ctx.mark_style.paint.fill_source.is_user_set() {
@@ -694,8 +694,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         );
 
         // Resolve per-row fill paint: under `theme:contrast` every row reads
-        // its own color-channel value as a cell to paint against (spec
-        // §6.5), never as the hue itself; otherwise the color channel wins
+        // its own color-channel value as a cell to paint against,
+        // never as the hue itself; otherwise the color channel wins
         // when bound, else the resolved constant (`base_text_paint`, see
         // above) — unless that constant is a clear, which outranks the
         // channel.
@@ -754,7 +754,7 @@ pub(crate) mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
-    // ── spec §6.13: glyph_edge_extents / text_glyphs ──
+    // ── glyph_edge_extents / text_glyphs ──
 
     fn glyph(label: &str, font_size: f64, angle: f64) -> TextGlyph {
         TextGlyph { label: label.to_string(), font_size, angle }
@@ -1551,7 +1551,7 @@ pub(crate) mod tests {
             "channel-resolved colors must still vary per category; got {colors:?}");
     }
 
-    // ── `fill="theme:contrast"` sentinel (spec §6.5) ─────────────────────────
+    // ── `fill="theme:contrast"` sentinel ─────────────────────────
 
     /// `reads_color_for_contrast` is true for exactly one shape: a
     /// `Mark::Text` whose raw `fill` is the literal sentinel string. The
@@ -1653,7 +1653,7 @@ pub(crate) mod tests {
 
     /// A row with no resolvable color (a null value here) is judged against
     /// the theme MARK color (`#2563eb`, the fill an unstyled cell paints for
-    /// that row — spec §6.5), not the font color plainly: on the default
+    /// that row), not the font color plainly: on the default
     /// theme the background wins at 4.84:1 (the font color only reads
     /// 2.84:1 against that same fallback fill), a fixed expected value
     /// independent of `contrast_ink`.

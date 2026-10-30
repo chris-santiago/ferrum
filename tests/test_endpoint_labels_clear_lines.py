@@ -194,7 +194,7 @@ def test_validation_curve_chart_labels_clear_their_lines():
 
 
 # ---------------------------------------------------------------------------
-# Helper-level: both endpoint sides, validation, and the properties the fix
+# Helper-level: both endpoint sides, validation, and the properties that
 # must not move.
 # ---------------------------------------------------------------------------
 
@@ -237,8 +237,6 @@ def test_position_outside_end_or_start_is_refused():
 
 
 def test_label_color_still_matches_its_own_line():
-    """The placement fix must not change which color a label draws in, nor
-    which side of its own anchor it extends from."""
     df = _two_series_df()
     base = Chart(df).encode(x="x", y="y", color="split").mark_line()
     chart = _direct_label_endpoint(base, label_field="split", color_field="split")

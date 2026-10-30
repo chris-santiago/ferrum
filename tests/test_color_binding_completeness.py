@@ -70,7 +70,7 @@ SCANNED_ROOTS = ("src/ferrum/marks", "src/ferrum/plots")
 #: validation. Widening this set would conflate two different contracts.
 CHANNEL = "color"
 
-#: ``_Layer``'s contrast-reading field (spec §6.5): the color binding of the
+#: ``_Layer``'s contrast-reading field: the color binding of the
 #: cells a text layer sits on, read through the same scale a cell layer's
 #: own ``color`` draws. It is a ``color``-channel binding in every sense this
 #: guard cares about -- an untyped field would resolve its scale kind from
@@ -121,7 +121,7 @@ def _color_bindings(tree: ast.AST) -> Iterator[tuple[ast.expr, int]]:
     a dict literal (``{"color": v}``), a subscript assignment
     (``enc["color"] = v``), and a call keyword -- ``.encode(color=v)`` or
     ``_Layer(..., contrast_against=v)``, the contrast-reading field's own
-    color binding (spec §6.5), held to the same rule as any other.
+    color binding, held to the same rule as any other.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):

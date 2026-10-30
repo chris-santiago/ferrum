@@ -23,7 +23,7 @@ use super::{
 /// The `(coord name, BreakAxis.axis)` of the first `BreakAxis`
 /// structural spec, if `spec.coord` is `Polar` or `Geo` and
 /// `chart_config.structural` carries at least one — the combination #230-8
-/// refuses (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). Both
+/// refuses (REFUSE MALFORMED; extended to `Geo`). Both
 /// coordinate systems place geometry during batch build, before the break
 /// fold exists, but they share this root cause structurally rather than by
 /// a measured signature: `Geo`'s vertices are bbox-fit from
@@ -108,7 +108,7 @@ pub fn build_scene(
     // The primary y owner `prepare` resolved, so the per-panel scales read
     // the same layer flags as the prepared layers and slot plan.
     let spec = &*scale_resolve::with_primary_y_owner(spec);
-    // #230-8 (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). A
+    // #230-8 (REFUSE MALFORMED; extended to `Geo`). A
     // projected coordinate system (`Polar` or `Geo`) combined with any
     // `BreakAxis` structural spec is refused, before any geometry — break or
     // otherwise — is built. This is the one funnel every standalone render
@@ -217,7 +217,7 @@ pub fn build_scene(
     let merged_breaks = merge_break_specs(&chart_config.structural, &mut break_ledger);
 
     // One render-wide tally of `Mark::Text` ink still crossing the plot
-    // frame (spec §6.13), noted at every panel-real resolve (shared,
+    // frame, noted at every panel-real resolve (shared,
     // independent-facet and secondary-y-slot alike) and flushed once below,
     // beside `break_ledger`.
     let mut text_overrun_ledger = TextOverrunLedger::default();
@@ -342,7 +342,7 @@ pub fn build_scene(
             .map(|r| (panel.plot_area.x - r.x, panel.plot_area.y - r.y))
             .unwrap_or((0.0, 0.0));
 
-        // This panel's text-edge demand (spec §6.13), one per channel, shared
+        // This panel's text-edge demand, one per channel, shared
         // by ticks and marks: a shared channel reads the chart's own axis
         // (`prep.axes.x/y`, built once in `build_axes`); an independent facet
         // channel reads this panel's OWN axis input
@@ -379,7 +379,7 @@ pub fn build_scene(
             &text_demands,
         )?;
 
-        // Spec §6.13: note this panel's own overrun rows into the
+        // Note this panel's own overrun rows into the
         // render-wide ledger, flushed once after the loop. A shared channel
         // unions its overrun rows across every panel that draws it (the
         // SAME demand each one resolves); an independent channel's demand
@@ -966,7 +966,7 @@ fn panel_layer_batches(
 /// fraction of that unit span, and layout re-applies it to the panel, the way
 /// the panel's marks are inset.
 ///
-/// `text_demand` is this panel's own text-edge demand (spec §6.13): built by
+/// `text_demand` is this panel's own text-edge demand: built by
 /// the caller from this panel's real rows, against the SAME `scale` this
 /// function places ticks with — the one demand this panel's ticks AND marks
 /// share. Domain fractions, not pixel floors, so they are valid over the
@@ -1002,7 +1002,7 @@ fn independent_axis_input(
     Ok(input)
 }
 
-/// An `AxisInput`'s own text-edge demand (spec §6.13), or the empty default
+/// An `AxisInput`'s own text-edge demand, or the empty default
 /// for an axis that drew no `Mark::Text` row needing one. The one place
 /// `resolve_panel_scales`'s callers read a demand back off a built axis
 /// input, for a shared channel (`prep.axes.x/y`) and for an independent
@@ -1029,7 +1029,7 @@ fn axis_text_demand(axis: &crate::layout::AxisInput) -> crate::layout::geometry:
 /// and gets no inputs. Scale warnings are not kept here; the panel render
 /// reports them.
 ///
-/// Spec §6.13's one demand per rendered channel extends to an independent
+/// The one-demand-per-rendered-channel rule extends to an independent
 /// facet channel too: this panel's own text-edge demand is built once here,
 /// from this panel's real rows, against the scale this bootstrap resolve
 /// (below, over the SAME placeholder range the demand's domain fractions are
@@ -1166,7 +1166,7 @@ fn resolve_panel_scales(
     // panel instead of leaving it pinned to the same absolute pixels every
     // panel would otherwise share.
     panel_offset: (f64, f64),
-    // Spec §6.13's one demand per rendered channel, shared by ticks and
+    // The one demand per rendered channel, shared by ticks and
     // marks on every route: a shared x/y reads the chart's own axis
     // (`prep.axes.x/y`); an independent facet channel reads that panel's own
     // axis (`prep.axes.panels[panel_idx].x`/`.y`, via `axis_text_demand`),
@@ -1248,7 +1248,7 @@ fn resolve_panel_scales(
     scales.x.translate_explicit_ordinal_range(panel_offset.0);
     scales.y.translate_explicit_ordinal_range(panel_offset.1);
 
-    // Chart-level scale-domain config (D3, spec §4.2) — the positional twin of
+    // Chart-level scale-domain config — the positional twin of
     // the color-config re-application just below, and for the same reason:
     // `resolve_scales_with_leaf_context` re-resolves each panel's x/y scales
     // from scratch, discarding the domain `prepare_render_inputs` shaped on
@@ -1296,7 +1296,7 @@ fn resolve_panel_scales(
     if prep.y_slot_plan.has_independent() {
         let mut slots: Vec<scale_resolve::ScaleKind> = vec![scales.y.clone()];
         for (slot, &layer_idx) in prep.y_slot_plan.secondary_layers().iter().enumerate() {
-            // The slot's own text-edge demand (spec §6.13), read off the
+            // The slot's own text-edge demand, read off the
             // secondary `AxisInput` `prepare::build_secondary_y_axis_inputs`
             // already built from this layer's real batch — never
             // recomputed here, so this panel-real resolve and that slot's
@@ -1352,7 +1352,7 @@ fn resolve_layer_y_scale(
     // plot-area origin (see `resolve_panel_scales`), applied to this slot's
     // resolved y scale the same way the primary y is re-anchored.
     y_offset: f64,
-    // This slot's text-edge demand (spec §6.13), read by the caller off the
+    // This slot's text-edge demand, read by the caller off the
     // secondary `AxisInput` `prepare::build_secondary_y_axis_inputs` built.
     y_text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
@@ -1386,7 +1386,7 @@ fn resolve_layer_y_scale(
         y_text_demand,
     )?;
     warnings.extend(layer_warnings);
-    // D3 (spec §4.2) at the `axis_y2` position — the secondary-axis twin of
+    // Chart-level scale-domain config at the `axis_y2` position — the secondary-axis twin of
     // `resolve_panel_scales`' own re-application, and for the same reason:
     // this pass resolves the layer's y scale from scratch over the panel-real
     // pixel range, so without it the marks would sit on the un-shaped domain
@@ -3327,7 +3327,7 @@ impl BreakWarningLedger {
 }
 
 /// Per-render tally of `Mark::Text` rows still crossing the plot frame after
-/// the text-edge inset solve (spec §6.13), noted at every site that hands a
+/// the text-edge inset solve, noted at every site that hands a
 /// demand to a panel-real scale resolve (the panel loop's shared and
 /// independent x/y, and each secondary y slot) and flushed once after the
 /// panel loop, beside [`BreakWarningLedger::flush`]: at most one
@@ -3398,8 +3398,8 @@ impl TextOverrunLedger {
     }
 }
 
-/// Per-render tally of rows an explicit positional domain leaves out (spec
-/// §4.2), noted at the per-layer draw site
+/// Per-render tally of rows an explicit positional domain leaves out,
+/// noted at the per-layer draw site
 /// (`draw::domain_left_out_counts`, its channel already un-flipped to the
 /// one the layer's own caller wrote) and flushed once after the panel loop,
 /// beside [`TextOverrunLedger::flush`]: at most one
@@ -5243,7 +5243,7 @@ mod tests {
         // panel draws its own axis, from its own scale, resolved here so
         // layout reserves each axis band for what the panels draw and the
         // per-panel mark resolve inside `build_scene` below reads the SAME
-        // demand back (spec §6.13). A no-op (`Vec::new()`) for every chart
+        // demand back. A no-op (`Vec::new()`) for every chart
         // with no independent-resolve facet, the overwhelming majority of
         // this helper's callers — their output is unaffected.
         prep.axes.panels = match independent_panel_axis_inputs(
@@ -5528,7 +5528,7 @@ mod tests {
             "the text layer's own color channel must not fall back to theme font color; got {colors:?}");
     }
 
-    /// The `heatmap(annot=True)` shape (spec §6.5): a colored-cell (bar)
+    /// The `heatmap(annot=True)` shape: a colored-cell (bar)
     /// layer drawing the chart's `cat` color, and a text layer that binds
     /// its OWN `color="cat"` too — same field, same shared scale — but with
     /// `fill="theme:contrast"`. The own-color exemption
@@ -7506,13 +7506,6 @@ mod tests {
         );
     }
 
-    /// Choice B's `breaks_log` fix at every interactive zoom level
-    /// (`build_tick_levels`'s own `ZOOM_BREAKPOINTS` counts 4/8/16/32), not
-    /// only the direct `breaks_log` unit tests
-    /// (`log_breaks_fall_back_to_the_powers_when_no_multiple_set_fits`,
-    /// `log_breaks_thin_to_every_nth_power_past_the_count`): `[1, 1e9]`
-    /// gives 5/10/10/28 ticks across the four levels, `[1, 1e12]` gives
-    /// 7/7/13/25.
     #[test]
     fn build_tick_levels_label_powers_at_every_zoom_of_a_wide_log_axis() {
         use arrow::array::Float64Array;
@@ -8909,7 +8902,7 @@ mod tests {
             .collect()
     }
 
-    /// The cycle-3 regression, pinned: a rule layer that declares only `x`
+    /// A rule layer that declares only `x`
     /// must render ONE vertical span at that x, whatever the chart-level
     /// encoding inherits into it. Before the fix, the inherited ordinal
     /// `y="feature"` hijacked the shape into the horizontal-span mode and the
@@ -8917,7 +8910,7 @@ mod tests {
     /// band centers, ignoring `x` entirely (in the real chart: 1000 spans and
     /// a 116 KB SVG on a blessed golden).
     ///
-    /// Both halves of the ruling are load-bearing here, and each fails this
+    /// Both changes are load-bearing here, and each fails this
     /// test alone when reverted:
     /// - Relaxing `RuleShape::resolve`'s horizontal-span arm to accept a bound
     ///   `x` (the pre-fix `if let Some(yf)` gate) restores the hijack.
@@ -9017,7 +9010,7 @@ mod tests {
         );
     }
 
-    // ── A span rule beside a classed scatter (spec §6.9) ─────────────────
+    // ── A span rule beside a classed scatter ─────────────────
     //
     // `fm.scatter(color="class") + fm.rule(y=...)`'s Rust-level shape: a `+`
     // operand's own bindings stay on its own layers, so the point layer owns
@@ -9285,18 +9278,19 @@ mod tests {
     // merged-encoding read ──
     //
     // Same mechanism as the rule tests above, extended to `Mark::Tick`
-    // (`scene_build.rs`'s `build_panel_mark_batches`, 2026-09-06). A rug tick
+    // (`scene_build.rs`'s `build_panel_mark_batches`). A rug tick
     // layered under a sibling that supplies `y` — `fm.layer(scatter,
     // mark_tick(band_size=...).encode(x=...))`, the canonical F-L02-05 shape
     // — must honor `band_size` identically whether it is assembled through
     // the static composite-overlay tree (each leaf independent, no
     // cross-layer inheritance) or the interactive merged-flat chart (which
     // DOES run `Encoding::inherit_from` across layers, `LayerChart.
-    // _render_interactive`'s documented exception). Before this fix, only
-    // the static path saw the tick's true one-channel shape; the merged-flat
-    // path saw an inherited `y` and silently kept the fixed length — a
-    // static-vs-interactive divergence measured by both cycle-2 reviewers on
-    // the SAME spec-shape (8.0 vs 202.48). This test builds the merged-flat
+    // _render_interactive`'s documented exception). Without the one-axis
+    // shape rule, only the static path would see the tick's true
+    // one-channel shape; the merged-flat path would see an inherited `y`
+    // and silently keep the fixed length — a
+    // static-vs-interactive divergence on the SAME spec-shape (8.0 vs
+    // 202.48). This test builds the merged-flat
     // shape directly (a `spec.layers` two-layer chart with a chart-level
     // `x`/`y`, mirroring `beeswarm_shaped_zero_line_spec`'s fixture pattern)
     // — the shape the interactive path actually constructs — and proves the
@@ -9383,17 +9377,17 @@ mod tests {
         (spec, batch)
     }
 
-    /// The path-agreement pin (quality-review cycle-2 Required Fix 2): a
-    /// tick layer declaring only its OWN `x`, under a sibling that supplies
-    /// `y`, must honor `band_size` — scaling its length by the panel's
-    /// cross-axis extent — via the SAME merged-flat assembly the interactive
-    /// path uses. Before the cycle-3 fix, `tick::build`'s fallthrough arm
-    /// read the merged encoding's `y` (inherited, so `Some`) and kept the
-    /// fixed `tick_size*2.0` length regardless of `band_size` — silently
-    /// dropping the feature specifically in this assembly shape while the
-    /// static composite tree (no cross-layer inheritance) rendered it
-    /// correctly, which is the static-vs-interactive divergence both
-    /// reviewers measured (8.0 vs 202.48 on the live extension).
+    /// The path-agreement pin: a tick layer declaring only its OWN `x`,
+    /// under a sibling that supplies `y`, must honor `band_size` — scaling
+    /// its length by the panel's cross-axis extent — via the SAME
+    /// merged-flat assembly the interactive path uses. A fallthrough arm
+    /// in `tick::build` that read the merged encoding's `y` (inherited,
+    /// so `Some`) instead would keep the fixed `tick_size*2.0` length
+    /// regardless of `band_size` — silently dropping the feature
+    /// specifically in this assembly shape while the static composite tree
+    /// (no cross-layer inheritance) renders it correctly, which is the
+    /// static-vs-interactive divergence (8.0 vs 202.48 on the live
+    /// extension).
     #[test]
     fn tick_layer_declaring_only_x_honors_band_size_under_inherited_y() {
         let (spec, batch) = layered_rug_tick_spec(0.5);
@@ -9700,7 +9694,7 @@ mod tests {
         }
     }
 
-    // ── R1 port (bug_hunt_render_pipeline.rs): the polar outer-radius helper.
+    // ── Ported from `bug_hunt_render_pipeline.rs`: the polar outer-radius helper.
     //    The break-axis coordinate-remap tests that used to sit here moved to
     //    `render::break_axis`'s own test module along with the code they
     //    cover (`BreakRemap`).
@@ -10407,14 +10401,12 @@ mod tests {
         }
     }
 
-    // ── Wave-1 close remediation (S3-1): provisional-pass vs. panel-real-pass
+    // ── provisional-pass vs. panel-real-pass
     // warning multiplicity ──────────────────────────────────────────────────
 
     /// A continuous color encoding with an unrecognized `scheme=` name: a
     /// chart-level fact (the same scheme resolves the same way for every
-    /// panel), so the prepare provisional pass and the per-panel real pass
-    /// used to EACH report it — a flat (1-panel) chart emitted the warning
-    /// twice, and an N-panel facet emitted it N+1 times. `optional_facet`
+    /// panel). `optional_facet`
     /// controls whether `grp` (2 distinct values) drives a 2-panel facet.
     fn color_scheme_typo_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
         use crate::spec::encoding::Encoding;
@@ -10635,7 +10627,7 @@ mod tests {
     /// Companion RED proof: a 300-category ordinal x axis squeezed into each
     /// of 2 facet panels (real per-panel plot-area widths, not the
     /// provisional placeholder) must still emit `GroupCardinalityDegenerate`
-    /// ONCE PER PANEL — the adjudicated boundary this batch must NOT
+    /// ONCE PER PANEL — the boundary that must NOT
     /// change. `drop_placeholder_only_warnings` already excludes this
     /// variant from the provisional pass entirely (T11), so it was never at
     /// risk from the `UnknownColorScheme`-only dedupe above; this test
@@ -11157,7 +11149,7 @@ mod tests {
 
     /// The `Chart.layer(...)` shape: layer 1 names `value`, the pre-aggregate
     /// SOURCE column, which the unnamed `Aggregate` dropped from the tail
-    /// both layers read. The refusal must name `+` as the fix.
+    /// both layers read. The refusal must name `+` as the remedy.
     #[test]
     fn layer_with_no_data_source_names_plus_remedy_when_chart_has_transforms() {
         pyo3::Python::initialize();
@@ -11200,7 +11192,7 @@ mod tests {
         // would stop being missing at all once the aggregate is removed).
         let (mut spec, batch) = layer_gate_chain_tail_spec("nope");
         spec.transforms.clear();
-        // Without the aggregate, "total" no longer exists anywhere; the
+        // Without the aggregate, there is no "total" column anywhere; the
         // chart-level encoding and layer 0's (judged by the gate first, so it
         // must resolve for the pipeline to reach layer 1) now bind the column
         // the untransformed source batch actually has.
@@ -11927,7 +11919,7 @@ mod tests {
         })
     }
 
-    // ── #230-8 polar + BreakAxis funnel refusal (D3: REFUSE MALFORMED) ──────
+    // ── #230-8 polar + BreakAxis funnel refusal (REFUSE MALFORMED) ──────────
 
     /// A minimal single-mark `(ChartSpec, RecordBatch)` pair whose `coord`
     /// the caller sets afterward. `break_axis_incompatible_coord` fires on
@@ -15288,7 +15280,7 @@ mod tests {
     // specs, so the whole decision moved into
     // `annotation::build_annotations_through_breaks` beside the emitters and
     // the coordinate classifier it needs. Its tests moved with it — including
-    // the three pins this batch rewrote, whose old answers (an extent that
+    // the three pins rewritten in that move, whose old answers (an extent that
     // spans a gap is dropped; N spanning rects roll up as suppressed; an
     // in-gap ENDPOINT suppresses the whole extent) the new contract retires.
     // See `annotation.rs`'s "Break routing" test section.
@@ -15949,7 +15941,7 @@ mod tests {
         assert!(checked > 0, "vacuity control: some listed paint field was checked");
     }
 
-    /// Spec §6.13 route tests through the real `prepare → layout →
+    /// The text-edge-demand route tests through the real `prepare → layout →
     /// build_scene` pipeline: a tick and a mark at the same domain value
     /// land on the same pixel on every route the text-aware inset reaches,
     /// and the ledger reports one `TextInkPastFrame` per channel per
@@ -16235,7 +16227,8 @@ mod tests {
             // plus this glyph's own descent at ITS OWN 30px font size
             // (alphabetic baseline, the default): measured at the host's
             // smaller default font instead, the expected minimum would be
-            // much smaller, so this discriminates the fix.
+            // much smaller, so this discriminates the glyph's own font
+            // size from the host's default.
             let clearance = (plot_area.y + plot_area.h) - mark_y;
             let glyph = crate::render::marks::text::TextGlyph {
                 label: "a label at y1's own bottom edge".to_string(),
@@ -16252,7 +16245,7 @@ mod tests {
             );
         }
 
-        /// Spec §6.13's one-demand-per-rendered-channel rule extends to an
+        /// The one-demand-per-rendered-channel rule extends to an
         /// independent facet x: panel a's own long label floors its OWN
         /// axis, and its tick and its mark agree, through the real
         /// production per-panel demand selection (not a hand-fed demand
@@ -16308,7 +16301,7 @@ mod tests {
             assert_eq!(mark_x, tick_x(&scene, 0, "0"), "panel a's own glyph at x=0 and panel a's own '0' tick must land on the same pixel");
         }
 
-        /// Spec §6.13: `TextInkPastFrame` is pushed at most once per channel
+        /// `TextInkPastFrame` is pushed at most once per channel
         /// per render, with rows summed across the panels that overrun —
         /// never once per panel. A facet with 2 panels sharing x, each
         /// contributing one over-wide label, warns once with both rows

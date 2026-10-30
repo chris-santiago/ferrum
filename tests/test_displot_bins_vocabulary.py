@@ -290,7 +290,7 @@ class TestBinsVocabularyRefuses:
 #: The histogram rows (`default`, `sturges`, `none`, `int7`, `kde_overlay_int7`,
 #: `hue_str_hist`) are re-measured with the bars grown from the 0 tick, which
 #: moves only their `<rect>` elements; the ecdf and kde rows draw no bars and
-#: keep the pre-fix measurement. Each re-measured digest encodes two changes:
+#: are never re-measured. Each re-measured digest encodes two changes:
 #: the bins vocabulary leaving the path untouched, and the bars grown from the
 #: 0 tick, which `test_clean_histogram_paths_start_on_the_zero_tick` asserts
 #: directly.

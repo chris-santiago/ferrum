@@ -1007,7 +1007,7 @@ mod tests {
         });
     }
 
-    // ── WCAG contrast primitives (spec §6.5) ─────────────────────────────
+    // ── WCAG contrast primitives ─────────────────────────────
 
     #[test]
     fn relative_luminance_of_black_and_white_are_the_scale_endpoints() {

@@ -369,12 +369,11 @@ def regrouped(chart: Any) -> Any:
       same binding written before it does;
     - each operand of a composition, by the grouping bindings of every
       composition it is an operand of, the nearest winning, on each channel
-      its own chart binds under no spelling (spec §6.4 over the effective
-      encoding), so ``(fit + points).encode(color="c")`` fits per ``c`` as
+      its own chart binds under no spelling (over the effective encoding),
+      so ``(fit + points).encode(color="c")`` fits per ``c`` as
       its points color.
 
-    The rebuilt statistics take the old ones' place in the chain, and each
-    layer the build drew takes every field the rebuild draws differently
+    Each layer the build drew takes every field the rebuild draws differently
     (:func:`_redrawn_layers`). Returns *chart* itself when nothing changes,
     else a clone: the caller's chart is never mutated.
     """

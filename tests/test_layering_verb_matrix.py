@@ -8,8 +8,8 @@ refusal, and the tapered width, including the refusal that names the
 public entry. Each verb places two members, given as plain descriptions,
 in both orders.
 
-Field and conditional ``size`` follow one reach rule (spec §4.6 V1): a
-binding stays with the chart or layer it was declared on. An operand of
+Field and conditional ``size`` follow one reach rule: a binding stays with
+the chart or layer it was declared on. An operand of
 ``chart + chart`` (and so every ``fm.layer``/``LayerChart`` member) keeps
 it on its own layers, a host of ``Chart.layer()`` shares it with every
 layer it is given, and a ``Layer``'s own encoding keeps it on that layer.
@@ -267,7 +267,7 @@ def _line_elements(svg: str, tags: str = "polyline") -> list[str]:
 def test_a_later_layers_auxiliary_binding_leaves_the_line_as_drawn_alone(
     channel: str, verb: str
 ) -> None:
-    """V1: a later layer's own binding draws that layer only; the line draws as beside a plain point.
+    """A later layer's own binding draws that layer only; the line draws as beside a plain point.
 
     A binding written on the host or chart reaches every layer instead.
     Rejects promotion: the later binding would restyle the line as the
@@ -300,7 +300,7 @@ _TWO_BINDER_VERBS: dict[str, Callable[[_Member, _Member], fm.Chart]] = {
 def test_the_first_layer_binding_a_channel_decides_its_scale(
     verb: str, fields: tuple[str, str]
 ) -> None:
-    """V10: each binder keeps its own field on its layer, and the first one titles the legend."""
+    """Each binder keeps its own field on its layer, and the first one titles the legend."""
     first, second = (_Member("point", {"size": fm.Size(f)}) for f in fields)
     chart = _TWO_BINDER_VERBS[verb](first, second)
     wire = json.loads(chart.to_spec().to_json())
