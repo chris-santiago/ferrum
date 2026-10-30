@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transform::context::TransformContext;
 use crate::transform::core::{spec_name, TransformSpec};
+use crate::transform::run::{with_statistics_hint, StatisticsRemedy};
 
 /// One copy of a composition's step. Wire:
 /// `{"type": "composed", "group": "<id>", "step": {<the step's own wire>}}`.
@@ -165,14 +166,38 @@ pub(crate) struct ComposedRuns<'s> {
 struct GroupRun<'s> {
     copy: &'s ComposedSpec,
     first_rows: RecordBatch,
+    /// The union, in first-appearance order, of every chain a copy of this
+    /// group met's own statistics (each operand's, naming the columns a
+    /// user's `.transform()` step cannot read): empty when none of them
+    /// carry any.
+    statistic_columns: Vec<(String, &'static str)>,
     ran: bool,
 }
 
 impl<'s> ComposedRuns<'s> {
-    /// Record that `copy` met `rows`; the first copy's rows stand.
-    pub(crate) fn met(&mut self, copy: &'s ComposedSpec, rows: &RecordBatch) {
-        if self.groups.iter().all(|run| run.copy.group != copy.group) {
-            self.groups.push(GroupRun { copy, first_rows: rows.clone(), ran: false });
+    /// Record that `copy` met `rows` in a chain whose own statistics are
+    /// `statistic_columns`. The first copy a group meets establishes its
+    /// `first_rows` (and never changes it); every copy, first or later,
+    /// adds its chain's `statistic_columns` to the group's running union,
+    /// skipping a `(column, label)` pair already present so the order
+    /// follows first appearance.
+    pub(crate) fn met(&mut self, copy: &'s ComposedSpec, rows: &RecordBatch, statistic_columns: &[(String, &'static str)]) {
+        match self.groups.iter_mut().find(|run| run.copy.group == copy.group) {
+            Some(run) => {
+                for pair in statistic_columns {
+                    if !run.statistic_columns.contains(pair) {
+                        run.statistic_columns.push(pair.clone());
+                    }
+                }
+            }
+            None => {
+                self.groups.push(GroupRun {
+                    copy,
+                    first_rows: rows.clone(),
+                    statistic_columns: statistic_columns.to_vec(),
+                    ran: false,
+                });
+            }
         }
     }
 
@@ -188,20 +213,29 @@ impl<'s> ComposedRuns<'s> {
     /// column draws (`data_filter: column 'count' not found; available:
     /// [...]`). That run's warnings go to a sink of its own, since its
     /// output is thrown away. A step that would not refuse there is named
-    /// by the first column those rows lack.
+    /// by the first column those rows lack. When the union of every chain a
+    /// copy of this group met carries statistics, the refusal names them
+    /// and their output columns too: the composition's step ran before
+    /// those operands' statistics, so a column only they compute is
+    /// readable only by naming one of those columns directly.
     pub(crate) fn refuse_unrun(&self, ctx: &TransformContext) -> PyResult<()> {
         let Some(run) = self.groups.iter().find(|run| !run.ran) else {
             return Ok(());
         };
         let quiet = TransformContext { warnings: Default::default(), ..ctx.clone() };
-        run.copy.step.apply_with_context(&run.first_rows, &quiet)?;
-        let schema = run.first_rows.schema();
-        let missing = run.copy.step.fields_read().into_iter().find(|field| schema.index_of(field).is_err());
-        let available: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        Err(PyValueError::new_err(format!(
-            "{}: column '{}' not found; available: {available:?}",
-            run.copy.step.label(),
-            missing.unwrap_or_default()
-        )))
+        let err = match run.copy.step.apply_with_context(&run.first_rows, &quiet) {
+            Ok(_) => {
+                let schema = run.first_rows.schema();
+                let missing = run.copy.step.fields_read().into_iter().find(|field| schema.index_of(field).is_err());
+                let available: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                PyValueError::new_err(format!(
+                    "{}: column '{}' not found; available: {available:?}",
+                    run.copy.step.label(),
+                    missing.unwrap_or_default()
+                ))
+            }
+            Err(err) => err,
+        };
+        Err(with_statistics_hint(err, &run.statistic_columns, StatisticsRemedy::NameAnOutput))
     }
 }

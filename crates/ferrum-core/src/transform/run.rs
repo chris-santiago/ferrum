@@ -25,7 +25,7 @@ use std::rc::Rc;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use pyo3::exceptions::PyValueError;
-use pyo3::PyResult;
+use pyo3::{PyErr, PyResult, Python};
 
 use crate::transform::branch::{self, BranchSpec};
 use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, StepBins};
@@ -348,7 +348,7 @@ impl<'s> Run<'s, '_> {
                     current
                 }
                 TransformSpec::Composed(copy) => {
-                    self.composed.met(copy, &current.batch);
+                    self.composed.met(copy, &current.batch, &statistic_columns);
                     self.place(copy, current, published)?
                 }
                 marker if is_statistics_marker(marker) => {
@@ -357,12 +357,20 @@ impl<'s> Run<'s, '_> {
                     current
                 }
                 step => {
+                    let missing = if lowered || statistic_columns.is_empty() {
+                        Vec::new()
+                    } else {
+                        unread_fields(step, &current)
+                    };
                     if !lowered {
-                        refuse_a_statistic_read(step, &current, &statistic_columns)?;
+                        refuse_a_statistic_read(step, &missing, &statistic_columns)?;
                     }
+                    refuse_a_dropped_read(step, &current)?;
                     let own = (lowered && !matches!(step, TransformSpec::Identity(_))).then(|| id.clone());
                     let step_lowering = own.is_some().then(|| lowering.clone()).flatten();
-                    self.step(step, &id, own, step_lowering, current, published)?
+                    let hint_columns: &[(String, &'static str)] = if missing.is_empty() { &[] } else { &statistic_columns };
+                    self.step(step, &id, own, step_lowering, current, published)
+                        .map_err(|err| with_statistics_hint(err, hint_columns, StatisticsRemedy::ComputeFirst))?
                 }
             };
         }
@@ -374,6 +382,13 @@ impl<'s> Run<'s, '_> {
     /// the step's position, `lowered` is that id when it is a lowered step,
     /// and `step_lowering` is the id of the marker that opened its lowering
     /// (always `None` when `lowered` is `None`; see [`Self::chain`]'s doc).
+    /// [`Self::chain`]'s step arm refuses a composition-dropped read and an
+    /// exact statistic read before calling this. Below, `secondary_outputs`,
+    /// `fork` and `settle` can also raise, but only once `spec`'s own
+    /// `apply_with_context` has already succeeded; when `spec` reads a
+    /// column its rows lack, that `apply_with_context` call is the one that
+    /// refuses, so it is the only error the statistics hint ever wraps (the
+    /// hint is appended by [`Self::chain`]'s step arm around this call).
     fn step(
         &mut self,
         spec: &'s TransformSpec,
@@ -383,7 +398,6 @@ impl<'s> Run<'s, '_> {
         mut current: Rows<'s>,
         published: &mut Published<'s>,
     ) -> PyResult<Rows<'s>> {
-        refuse_a_dropped_read(spec, &current)?;
         let fields = match (&lowered, self.demand) {
             (Some(id), Some(demand)) => demand.fields(id),
             _ => &[],
@@ -628,35 +642,113 @@ fn with_swarm<'s>(mut lineage: Lineage<'s>, spec: &TransformSpec) -> Lineage<'s>
 }
 
 /// Each column a lowered step of `chain` (one after its statistics marker)
-/// computes, with the step: what the chain's own steps before the marker
-/// cannot read, since they run first.
-fn statistic_columns(chain: &[TransformSpec]) -> Vec<(String, &TransformSpec)> {
+/// computes, with the computing statistic's label: what the chain's own
+/// steps before the marker cannot read, since they run first.
+fn statistic_columns(chain: &[TransformSpec]) -> Vec<(String, &'static str)> {
     let Some(marker) = chain.iter().position(is_statistics_marker) else { return Vec::new() };
-    chain[marker + 1..].iter().flat_map(|step| step.output_columns().into_iter().map(move |column| (column, step))).collect()
+    chain[marker + 1..]
+        .iter()
+        .flat_map(|step| step.output_columns().into_iter().map(move |column| (column, step.label())))
+        .collect()
 }
 
-/// Refuse `spec`, one of the user's own steps, when it reads a column its
-/// rows lack that a statistic later in its chain computes: the user's steps
-/// run before the chart's statistics, so the step would otherwise refuse in
-/// its own voice with no word of why the column is missing.
-fn refuse_a_statistic_read(spec: &TransformSpec, rows: &Rows<'_>, statistic_columns: &[(String, &TransformSpec)]) -> PyResult<()> {
-    if statistic_columns.is_empty() {
-        return Ok(());
-    }
+/// The fields `spec` reads that `rows` lack: the ones its chain's own steps,
+/// which run before any statistic, cannot supply.
+fn unread_fields(spec: &TransformSpec, rows: &Rows<'_>) -> Vec<String> {
     let schema = rows.batch.schema();
-    let read = spec.fields_read().into_iter().filter(|field| schema.index_of(field).is_err()).find_map(|field| {
-        statistic_columns.iter().find(|(column, _)| *column == field).map(|(_, statistic)| (field, *statistic))
-    });
-    match read {
+    spec.fields_read().into_iter().filter(|field| schema.index_of(field).is_err()).collect()
+}
+
+/// Refuse `spec`, one of the user's own steps, when `missing` (computed by
+/// [`unread_fields`]) names a column that one of `statistic_columns` names
+/// exactly: the user's steps run before the chart's statistics, so the step
+/// would otherwise refuse in its own voice with no word of why the column is
+/// missing. A `missing` field that matches no statistic's output reaches
+/// [`with_statistics_hint`] instead, over the step's own refusal.
+fn refuse_a_statistic_read(spec: &TransformSpec, missing: &[String], statistic_columns: &[(String, &'static str)]) -> PyResult<()> {
+    let exact = missing
+        .iter()
+        .find_map(|field| statistic_columns.iter().find(|(column, _)| column == field).map(|(_, label)| (field, *label)));
+    match exact {
         None => Ok(()),
-        Some((column, statistic)) => Err(PyValueError::new_err(format!(
-            "{}: column '{column}' is computed by the chart's statistics ({}), which run after the chart's \
+        Some((column, label)) => Err(PyValueError::new_err(format!(
+            "{}: column '{column}' is computed by the chart's statistics ({label}), which run after the chart's \
              .transform() steps: .transform() reads the chart's rows before its statistics. Compute '{column}' \
              in .transform() before this step (e.g. with fm.transform_aggregate) and bind the encoding to it",
             spec.label(),
-            statistic.label(),
         ))),
     }
+}
+
+/// The remedy [`with_statistics_hint`] names, by which door's chain the
+/// statistics it appends belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatisticsRemedy {
+    /// The flat chart and a static `LayerChart` member
+    /// ([`Run::chain`]'s step arm): compute the value in `.transform()`
+    /// before this step.
+    ComputeFirst,
+    /// The `+` composition door
+    /// ([`crate::transform::composed::ComposedRuns::refuse_unrun`]): name
+    /// one of the statistics' own output columns directly, since a
+    /// statistic's output is readable there, unlike on the flat door.
+    NameAnOutput,
+}
+
+/// `err`, the step's own refusal of a column its rows lack ([`Run::chain`]'s
+/// step arm refuses a composition-dropped read and an exact statistic read
+/// before calling the step, and `each_steps_label_is_the_prefix_its_own_refusal_carries`
+/// guards that every other step reading a missing column refuses in its own
+/// `apply_with_context`, so this is the only error either door's call site
+/// ever wraps), with the statistics clause appended: which statistics,
+/// naming them and the columns they compute, after `.transform()` already
+/// ran, plus `remedy`'s one sentence. `err` passes through unchanged when
+/// `statistic_columns` is empty — no statistics after the marker, or (at the
+/// flat/`LayerChart` call site) no column actually missing.
+pub(crate) fn with_statistics_hint(err: PyErr, statistic_columns: &[(String, &'static str)], remedy: StatisticsRemedy) -> PyErr {
+    if statistic_columns.is_empty() {
+        return err;
+    }
+    let message = Python::attach(|py| err.value(py).to_string());
+    let (labels, outputs) = distinct_statistics(statistic_columns);
+    let outputs = python_list(&outputs);
+    let remedy = match remedy {
+        StatisticsRemedy::ComputeFirst => "compute the value in .transform() before this step (e.g. with \
+             fm.transform_aggregate) and bind the encoding to it"
+            .to_string(),
+        StatisticsRemedy::NameAnOutput => format!(
+            "a step written on the composition runs after an operand's statistics only where it names one \
+             of their columns: name one of {outputs}"
+        ),
+    };
+    PyValueError::new_err(format!(
+        "{message}. The chart's statistics ({}) compute {outputs} after its .transform() steps, so .transform() \
+         cannot read them: {remedy}",
+        labels.join(", "),
+    ))
+}
+
+/// `items` as a Python list literal (`['a', 'b']`): the spelling the
+/// statistics hint borrows from Python's own `repr`, not Rust's
+/// double-quoted `Debug`.
+fn python_list(items: &[&str]) -> String {
+    format!("[{}]", items.iter().map(|item| format!("'{item}'")).collect::<Vec<_>>().join(", "))
+}
+
+/// The distinct statistic labels and the distinct columns they compute, read
+/// off `statistic_columns` in the order it lists them.
+fn distinct_statistics<'a>(statistic_columns: &'a [(String, &'static str)]) -> (Vec<&'static str>, Vec<&'a str>) {
+    let mut labels: Vec<&'static str> = Vec::new();
+    let mut outputs: Vec<&str> = Vec::new();
+    for (column, label) in statistic_columns {
+        if !labels.contains(label) {
+            labels.push(*label);
+        }
+        if !outputs.contains(&column.as_str()) {
+            outputs.push(column.as_str());
+        }
+    }
+    (labels, outputs)
 }
 
 /// Refuse `spec` when it reads a column its rows lack because a
@@ -916,9 +1008,127 @@ mod tests {
         let err = run(&chain(serde_json::json!([filter("bin_start"), marker, bin]))).unwrap_err().to_string();
         assert!(err.contains("data_filter: column 'bin_start' is computed by the chart's statistics (stat_bin)"), "{err}");
         let err = run(&chain(serde_json::json!([filter("nope"), marker, count_all]))).unwrap_err().to_string();
-        assert!(err.contains("data_filter: column 'nope' not found"), "{err}");
+        assert_eq!(
+            err,
+            "ValueError: data_filter: column 'nope' not found; available: [\"g\", \"v\"]. The chart's statistics \
+             (stat_aggregate) compute ['count_all'] after its .transform() steps, so .transform() cannot read them: \
+             compute the value in .transform() before this step (e.g. with fm.transform_aggregate) and bind the \
+             encoding to it",
+            "a typo matching none of the statistics' own outputs still names them, with the remedy"
+        );
         let outputs = run(&chain(serde_json::json!([filter("v"), marker, count_all]))).unwrap();
         assert_eq!(counts_of(&outputs[FINAL_OUTPUT_KEY], "count_all"), [1.0, 3.0], "a readable step runs before the statistic");
+    }
+
+    /// A column no statistic computes, in a chain with no statistics at all,
+    /// keeps the step's own plain text: there is nothing to hint at. Rejects
+    /// a fix that appends the statistics clause whenever a column is
+    /// missing, regardless of whether the chain has any statistics.
+    #[test]
+    fn a_missing_column_in_a_chain_with_no_statistics_keeps_the_plain_text() {
+        let err = run(&chain(serde_json::json!([
+            {"type": "filter", "predicate": "datum.nope > 1"},
+            {"type": "identity"},
+        ])))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(err, r#"ValueError: data_filter: column 'nope' not found; available: ["g", "v"]"#);
+    }
+
+    /// A composed step naming a column only every met chain's statistics
+    /// compute (their union) is refused over those statistics, with the
+    /// composition's own remedy: name one of their columns directly, since
+    /// a statistic's output is readable there. Rejects the bare not-found
+    /// text, which says nothing of why `bar`'s `count` never appears.
+    #[test]
+    fn a_composed_group_no_copy_ran_names_every_met_chains_statistics() {
+        let count_all = serde_json::json!({"type": "aggregate", "ops": [{"field": "", "fn": "count", "as": "count_all"}], "groupby": ["g"]});
+        let marker = serde_json::json!({"type": "identity", "statistics": true});
+        let err = run(&chain(serde_json::json!([
+            branch("bar", None, serde_json::json!([composed("datum.count > 1"), marker, count_all])),
+            branch("pt", None, serde_json::json!([composed("datum.count > 1")])),
+        ])))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "ValueError: data_filter: column 'count' not found; available: [\"g\", \"v\"]. The chart's statistics \
+             (stat_aggregate) compute ['count_all'] after its .transform() steps, so .transform() cannot read them: \
+             a step written on the composition runs after an operand's statistics only where it names one of their \
+             columns: name one of ['count_all']"
+        );
+    }
+
+    /// The union is order-independent: naming `bar`'s statistics does not
+    /// depend on whether `bar` or `pt` is the first operand the group
+    /// meets. The `available` half still reads the FIRST met chain's
+    /// columns (here `pt`'s), since `first_rows` never changes. Rejects a
+    /// fix that keeps only the first met chain's own statistics, which
+    /// would leave this bare.
+    #[test]
+    fn a_composed_group_no_copy_ran_names_statistics_whichever_operand_meets_it_first() {
+        let count_all = serde_json::json!({"type": "aggregate", "ops": [{"field": "", "fn": "count", "as": "count_all"}], "groupby": ["g"]});
+        let marker = serde_json::json!({"type": "identity", "statistics": true});
+        let err = run(&chain(serde_json::json!([
+            branch("pt", None, serde_json::json!([composed("datum.count > 1")])),
+            branch("bar", None, serde_json::json!([composed("datum.count > 1"), marker, count_all])),
+        ])))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "ValueError: data_filter: column 'count' not found; available: [\"g\", \"v\"]. The chart's statistics \
+             (stat_aggregate) compute ['count_all'] after its .transform() steps, so .transform() cannot read them: \
+             a step written on the composition runs after an operand's statistics only where it names one of their \
+             columns: name one of ['count_all']"
+        );
+    }
+
+    /// `with_statistics_hint` lists every distinct label once, in
+    /// first-appearance order, and every distinct column once, dropping a
+    /// repeat: a broken dedup or join would pass every other test here,
+    /// since each uses one label and one column.
+    #[test]
+    fn with_statistics_hint_names_every_label_once_and_every_column_once() {
+        pyo3::Python::initialize();
+        let statistic_columns: Vec<(String, &'static str)> = vec![
+            ("bin_start".to_string(), "stat_bin"),
+            ("count".to_string(), "stat_bin"),
+            ("count_all".to_string(), "stat_aggregate"),
+            ("count".to_string(), "stat_bin"),
+        ];
+        let err = PyValueError::new_err("data_filter: column 'zzz' not found; available: [\"g\", \"v\"]");
+        let hinted = with_statistics_hint(err, &statistic_columns, StatisticsRemedy::ComputeFirst);
+        let text = pyo3::Python::attach(|py| hinted.value(py).to_string());
+        assert_eq!(
+            text,
+            "data_filter: column 'zzz' not found; available: [\"g\", \"v\"]. The chart's statistics (stat_bin, \
+             stat_aggregate) compute ['bin_start', 'count', 'count_all'] after its .transform() steps, so \
+             .transform() cannot read them: compute the value in .transform() before this step (e.g. with \
+             fm.transform_aggregate) and bind the encoding to it"
+        );
+    }
+
+    /// A column a composed step dropped is refused in the reading step's own
+    /// voice naming the dropping step, with no statistics hint: the chain
+    /// carries a statistic after the marker (`stat_aggregate`'s `s`), but the
+    /// missing `v` has nothing to do with it. Rejects a fix that wraps every
+    /// error `Run::step` can raise, which would append the hint here too and
+    /// blame `.transform()` for a column the composition's own step dropped.
+    #[test]
+    fn a_composed_dropped_read_is_refused_in_its_own_voice_with_no_statistics_hint() {
+        let mean = serde_json::json!({"type": "composed", "group": "m", "step": {"type": "aggregate", "ops": [{"field": "v", "fn": "mean", "as": "m"}], "groupby": ["g"]}});
+        let sum = serde_json::json!({"type": "aggregate", "ops": [{"field": "v", "fn": "sum", "as": "s"}], "groupby": ["g"]});
+        let marker = serde_json::json!({"type": "identity", "statistics": true});
+        let filter = serde_json::json!({"type": "filter", "predicate": "datum.v > 1"});
+        let err = run(&chain(serde_json::json!([mean, filter, marker, sum]))).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "ValueError: data_filter: column 'v' was dropped by the step written on the composition's \
+             .transform() (stat_aggregate), which runs on this operand's rows before its statistics; keep 'v' \
+             in that step's output, or write the step on the operands it should change instead of on the \
+             composition"
+        );
     }
 
     /// Every step refuses rows lacking the columns it names under its own
