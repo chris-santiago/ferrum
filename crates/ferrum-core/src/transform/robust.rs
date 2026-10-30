@@ -1614,4 +1614,54 @@ mod tests {
             other => panic!("expected IntervalUndefined, got {other:?}"),
         }
     }
+
+    /// The same negative-sandwich-variance shape as the ungrouped test
+    /// above, reached once per `groupby` partition: each group's own
+    /// warning names that group rather than leaving `group` unset, so a
+    /// grouped chart's facet or legend can tell which group's band is
+    /// undefined.
+    #[test]
+    fn robust_grouped_negative_sandwich_variance_warns_naming_each_group() {
+        let c = 1_000_000_000.0;
+        let spread = 0.1;
+        let n = 12;
+        let xs: Vec<f64> = (0..n).map(|i| c + (i as f64 - (n as f64 - 1.0) / 2.0) * spread).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| 2.0 * (x - c) + 1.0 + if i % 2 == 0 { 0.3 } else { -0.3 })
+            .collect();
+        let mut all_xs = Vec::new();
+        let mut all_ys = Vec::new();
+        let mut all_g = Vec::new();
+        for group in ["a", "b"] {
+            all_xs.extend(xs.iter().copied());
+            all_ys.extend(ys.iter().copied());
+            all_g.extend(std::iter::repeat(group).take(xs.len()));
+        }
+        let batch = xy_batch_with_group(all_xs, all_ys, all_g);
+        let mut s = spec(50, Some(0.95), 1.345, SmoothOutput::Fitted);
+        s.groupby = vec!["g".into()];
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).expect("fits despite the extreme offset");
+        assert!(col(&out, "y").iter().all(|v| v.is_finite()), "both groups' lines must draw");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 2, "one warning per group, got {warnings:?}");
+        let mut seen_groups: Vec<String> = Vec::new();
+        for w in warnings.iter() {
+            match w {
+                TransformWarning::IntervalUndefined { transform, group, ci, reason, .. } => {
+                    assert_eq!(transform, "Robust");
+                    let label = group.clone().expect("a grouped band warning must name its group");
+                    seen_groups.push(label);
+                    assert_eq!(*ci, 0.95);
+                    assert!(reason.contains("the sandwich variance is negative"), "{reason}");
+                    assert!(reason.contains("of 50 grid points"), "{reason}");
+                }
+                other => panic!("expected IntervalUndefined, got {other:?}"),
+            }
+        }
+        seen_groups.sort();
+        assert_eq!(seen_groups, vec!["g=a".to_string(), "g=b".to_string()]);
+    }
 }

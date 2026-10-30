@@ -2668,6 +2668,38 @@ fn loess_partial_band_warns_with_the_point_count() {
     );
 }
 
+/// The same bootstrap shape as the test above, tuned to leave exactly one
+/// grid point undefined rather than several: the boundary the `> 0` guard
+/// sits on, distinct from a fixture with many undefined points that would
+/// pass even a stricter guard.
+#[test]
+fn loess_partial_band_warns_with_a_single_undefined_point() {
+    let xs = vec![0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0, 4.0, 5.0, 6.0];
+    let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| x + 0.1 * ((i % 3) as f64)).collect();
+    let batch = xy_batch(xs, ys);
+    let ctx = TransformContext::default();
+    let spec = SmoothSpec {
+        method: SmoothMethod::Loess,
+        bandwidth: 3.0 / 11.0,
+        degree: 1,
+        n: 6,
+        seed: 0,
+        ..lm_ci_spec(Some(0.95), vec![])
+    };
+    let out = apply_with_context(&spec, &batch, &ctx).expect("loess still fits a line");
+    assert!(!value_column_is_all_nan(&out, 1));
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(
+        matches!(
+            &warnings[0],
+            TransformWarning::IntervalUndefined { transform, reason, .. }
+                if transform == "Smooth" && reason.contains("at 1 of 6 grid points")
+        ),
+        "expected an IntervalUndefined naming exactly 1 of 6 grid points, got {warnings:?}"
+    );
+}
+
 /// Controls: `ci=None` and a well-determined fit (`n >= p + 2`) never warn.
 #[test]
 fn interval_undefined_controls_do_not_warn() {

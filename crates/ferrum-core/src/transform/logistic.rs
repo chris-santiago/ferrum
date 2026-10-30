@@ -916,4 +916,47 @@ mod tests {
             other => panic!("expected IntervalUndefined, got {other:?}"),
         }
     }
+
+    /// The same Wald-variance-cancellation shape as the ungrouped test
+    /// above, reached once per `groupby` partition: each group's own
+    /// warning names that group rather than leaving `group` unset, so a
+    /// grouped chart's facet or legend can tell which group's band is
+    /// undefined.
+    #[test]
+    fn large_offset_x_grouped_reaches_the_wald_variance_cancellation_branch_naming_each_group() {
+        let c = 37_000_000.0;
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let mut gs: Vec<Option<&str>> = Vec::new();
+        for group in ["a", "b"] {
+            for _ in 0..3 {
+                xs.extend([c - 0.5, c - 0.5, c + 0.5, c + 0.5]);
+                ys.extend([0.0, 1.0, 0.0, 1.0]);
+                gs.extend([Some(group); 4]);
+            }
+        }
+        let batch = grouped_batch(xs, ys, gs);
+        let mut spec = default_spec(100, Some(0.95));
+        spec.groupby = vec!["g".into()];
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert!(col(&out, "y").iter().all(|v| v.is_finite()), "both groups' lines must draw");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 2, "one warning per group, got {warnings:?}");
+        let mut seen_groups: Vec<String> = Vec::new();
+        for w in warnings.iter() {
+            match w {
+                TransformWarning::IntervalUndefined { transform, group, ci, reason, .. } => {
+                    assert_eq!(transform, "Logistic");
+                    let label = group.clone().expect("a grouped band warning must name its group");
+                    seen_groups.push(label);
+                    assert_eq!(*ci, 0.95);
+                    assert!(reason.contains("of 100 grid points"), "{reason}");
+                }
+                other => panic!("expected IntervalUndefined, got {other:?}"),
+            }
+        }
+        seen_groups.sort();
+        assert_eq!(seen_groups, vec!["g=a".to_string(), "g=b".to_string()]);
+    }
 }

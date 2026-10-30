@@ -1161,4 +1161,22 @@ mod tests {
         let cell = from_rgb(0, 0, 0);
         assert_eq!(contrast_ink(cell, font_color, background), background);
     }
+
+    /// A translucent background (alpha `0x80`, neither opaque nor fully
+    /// transparent) is read at the cell's own RGB, never blended against
+    /// it as if it were a solid backing: what lies beneath a translucent
+    /// background is outside the chart and unknowable. A translucent cell
+    /// (also alpha `0x80`) is where this actually changes the winning ink
+    /// — reading the cell at its own white, full-alpha RGB clears AA
+    /// against the dark font color outright, while blending that same
+    /// cell over the background's raw channel (as if the background were
+    /// opaque) composites it down to a mid-gray neither candidate clears,
+    /// falling to the black/white tier and painting black instead.
+    #[test]
+    fn contrast_ink_with_a_translucent_background_reads_the_cell_at_its_own_rgb() {
+        let font_color = from_rgb(0x1f, 0x29, 0x37);
+        let background = from_rgba(0, 0, 0, 0x80);
+        let cell = from_rgba(255, 255, 255, 0x80);
+        assert_eq!(contrast_ink(cell, font_color, background), font_color);
+    }
 }

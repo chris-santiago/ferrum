@@ -3754,6 +3754,28 @@ mod tests {
         assert_eq!(domain, vec!["1", "2", "x"]);
     }
 
+    /// A domain holding a finite number, a `NaN` entry and a non-parsing
+    /// entry together: NaN sits between the finite and non-parsing tiers
+    /// in ascending order, and descending reverses that whole order rather
+    /// than only flipping the finite tier. `numeric_domain_cmp`'s doc names
+    /// this exact three-tier shape; this test is the one place all three
+    /// tiers appear in a single domain.
+    #[test]
+    fn apply_sort_to_domain_orders_nan_between_finite_and_non_parsing_both_directions() {
+        let batch = float64_category_batch(vec![5.0, -2.0]);
+        let ctx = numeric_sort_ctx(&batch);
+        let mut warnings = Vec::new();
+
+        let mut domain = vec!["x".to_string(), "NaN".to_string(), "5".to_string()];
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("ascending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["5", "NaN", "x"], "ascending: finite, then NaN, then non-parsing");
+
+        let mut domain = vec!["x".to_string(), "NaN".to_string(), "5".to_string()];
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("descending")), &ctx, &mut warnings).unwrap();
+        assert_eq!(domain, vec!["x", "NaN", "5"], "descending: non-parsing, then NaN, then finite");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
     /// A `Utf8`/`Categorical` column holding digit strings stays in plain
     /// text order (`"10"` before `"2"`): the numeric-value rule applies
     /// only to a numeric column, never to a string column whose VALUES

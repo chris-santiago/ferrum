@@ -1213,4 +1213,20 @@ mod tests {
         let from_keys = describe_group_keys(&group_cols, &keys);
         assert_eq!(from_row, from_keys);
     }
+
+    /// Every grid point undefined gets the "at every grid point" wording,
+    /// not the "at K of N" wording for a K that happens to equal N.
+    #[test]
+    fn partial_band_reason_at_every_grid_point() {
+        let reason = partial_band_reason("the sandwich variance is negative", 50, 50);
+        assert_eq!(reason, "the sandwich variance is negative at every grid point");
+    }
+
+    /// One grid point short of every point undefined still gets the "at K
+    /// of N grid points" wording, naming both counts.
+    #[test]
+    fn partial_band_reason_at_k_of_n_grid_points() {
+        let reason = partial_band_reason("the sandwich variance is negative", 49, 50);
+        assert_eq!(reason, "the sandwich variance is negative at 49 of 50 grid points");
+    }
 }
