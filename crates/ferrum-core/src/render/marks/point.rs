@@ -337,6 +337,12 @@ pub(crate) fn scaled_dot_areas(
     Some(values.into_iter().map(|v| v.and_then(|v| scale.inner.to_pixel_f64(v))).collect())
 }
 
+/// `x` and `y`, by scale kind (Category for an `Ordinal` axis, Strict
+/// otherwise) — the same dispatch `build`'s own `cx`/`cy` reads take below.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    crate::render::draw::xy_by_scale_kind(ctx)
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;

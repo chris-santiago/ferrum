@@ -193,6 +193,20 @@ def nominal_color_channel(
     return Color(field, **kwargs)
 
 
+def titled_positional_channel(
+    field: str, *, channel: "type[ChannelBase]", title: str | None
+) -> "ChannelBase | str":
+    """Bind *field* to *channel* carrying *title*, or the bare *field* when *title* is ``None``.
+
+    The one spelling of a positional binding that takes a title only when
+    there is one: a layer reading a statistic's output names the axis the
+    chart shows, and with no title to carry it binds the column exactly as
+    an untitled layer always has. ``""`` is a title (a suppression the layer
+    carries to its own axis), so only ``None`` leaves the binding bare.
+    """
+    return field if title is None else channel(field, title=title)
+
+
 def typed_positional_channel(
     field: str,
     *,

@@ -42,6 +42,7 @@ from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
 from ferrum.encoding._resolve import channel_for_value
+from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.marks._desugar_helpers import nominal_color_channel, with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.statistical import desugar_smooth
@@ -590,11 +591,12 @@ def _fit_chart_from_named_transform(
     carries no explicit scale, so the ordinary case is a no-op rather than a
     branch.
 
-    ``x_title``/``y_title`` are the caller's own column names, which the
-    layers need because they are bound to the transform's output columns and
-    the renderer titles each axis from layer 0 (see ``build_fit_layers``).
-    Required, not defaulted, and genuinely ``str``: ``lmplot`` resolves both
-    once through :func:`_required_field_name`, which refuses a ``None``
+    ``x_title``/``y_title`` are the names the caller's axes show (their
+    ``title=``, else their own column names), which the layers need because
+    they are bound to the transform's output columns and the renderer titles
+    each axis from layer 0 (see ``build_fit_layers``). Required, not
+    defaulted, and genuinely ``str``: ``lmplot`` resolves both once, over
+    :func:`_required_field_name`, which refuses a ``None``
     in ``lmplot``'s own voice, so no call site can hand this parameter the
     ``str | None`` that would retitle the value axis ``ci_lower`` again
     (#199). When ``scatter=False`` leaves the fit alone there is no sibling
@@ -630,7 +632,9 @@ class _FitRequest:
     ``regplot``), so a builder's own refusal names it rather than
     ``lmplot`` unconditionally. ``x``/``y`` are the caller's channels
     (``x`` already carries ``logx``'s log scale); ``x_field``/``y_field``
-    are their resolved column names. ``grouping`` is the fields the fit
+    are their resolved column names, and ``x_title``/``y_title`` the names
+    the fit layers title their axes with: the caller's ``title=`` on that
+    channel, else the column name. ``grouping`` is the fields the fit
     groups by (spec §6.4's composite grouping of the hue and every grouping
     channel the caller binds), and ``grouping_bindings`` the bindings of
     those channels, which the fit chart binds itself so each per-group
@@ -645,6 +649,8 @@ class _FitRequest:
     y: Any
     x_field: str
     y_field: str
+    x_title: str
+    y_title: str
     grouping: tuple[str, ...]
     grouping_bindings: dict
     ci: float | None
@@ -742,8 +748,8 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         line_kwargs=lkw,
         chart_x=req.x,
         chart_y=req.y,
-        x_title=req.x_field,
-        y_title=req.y_field,
+        x_title=req.x_title,
+        y_title=req.y_title,
         metrics=req.metrics,
     )
     return _with_grouping_bindings(fit, req)
@@ -779,8 +785,8 @@ def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
         line_kwargs=req.line_kwargs,
         chart_x=req.x,
         chart_y=req.y,
-        x_title=req.x_field,
-        y_title=req.y_field,
+        x_title=req.x_title,
+        y_title=req.y_title,
         # False for logistic/glm: `lmplot` never sets `metrics` for them.
         metrics=req.metrics,
     )
@@ -1087,6 +1093,10 @@ def _lmplot_impl(
             y=y,
             x_field=x_field,
             y_field=y_field,
+            # A suppressed title keeps the column name: the caller's channel,
+            # bound at the chart level, already draws no axis title.
+            x_title=drawn_title(x) or x_field,
+            y_title=drawn_title(y) or y_field,
             grouping=grouping,
             grouping_bindings=grouping_bindings,
             ci=ci_frac,
@@ -1710,10 +1720,16 @@ def residplot(
     # "residual" on its DEFAULT path, losing the caller's columns entirely
     # (#199, the same layer-0 mechanism `build_fit_layers` carries). The value
     # axis names the response it residualizes, since "residual" alone leaves
-    # the reader no way back to the fitted column.
+    # the reader no way back to the fitted column. A title= the caller wrote
+    # on x= or y= names its axis instead, and an empty one (title=None or "")
+    # suppresses it, as on a plain chart's axis. The overlay layers below share
+    # these two names.
+    declared_x, declared_y = declared_title(x), declared_title(y)
+    x_title = x_field if declared_x is None else declared_x
+    residual_title = f"{y_field} residual" if declared_y is None else declared_y
     enc: dict = {
-        "x": X(_resid_x, title=x_field),
-        "y": Y("residual", title=f"{y_field} residual"),
+        "x": X(_resid_x, title=x_title),
+        "y": Y("residual", title=residual_title),
     }
     if color is not None:
         enc["color"] = color
@@ -1755,7 +1771,7 @@ def residplot(
                 _Layer(
                     name="reference",
                     mark="rule",
-                    encoding={"y": "_ref_zero"},
+                    encoding={"y": Y("_ref_zero", title=residual_title)},
                     mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
                 )
             )
@@ -1764,7 +1780,11 @@ def residplot(
                 _Layer(
                     name="metrics",
                     mark="text",
-                    encoding={"x": _resid_x, "y": "_metrics_y", "text": "_metrics_text"},
+                    encoding={
+                        "x": X(_resid_x, title=x_title),
+                        "y": Y("_metrics_y", title=residual_title),
+                        "text": "_metrics_text",
+                    },
                     mark_kwargs={"align": "right", "dx": -4, "dy": 4},
                 )
             )
@@ -1788,7 +1808,10 @@ def residplot(
             # transform's fit-grid output, so a Rust-side rename raises here
             # instead of silently drawing nothing.
             _lowess_cols = registry_output_columns("smooth", ["x", "y"])
-            lowess_enc: dict = {"x": _lowess_cols["x"], "y": _lowess_cols["y"]}
+            lowess_enc: dict = {
+                "x": X(_lowess_cols["x"], title=x_title),
+                "y": Y(_lowess_cols["y"], title=residual_title),
+            }
             # A line mark draws ONE polyline through the rows it is handed:
             # what splits the per-group curves is the color channel, so this
             # layer names it rather than leaning on the chart-level channel

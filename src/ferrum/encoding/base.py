@@ -6,7 +6,7 @@ from dataclasses import dataclass, field as dataclass_field
 from functools import lru_cache
 from typing import Any, ClassVar, Literal
 
-from ferrum._title_sentinel import is_unspecified
+from ferrum._title_sentinel import _UNSET, is_unspecified, serialize_title
 from ferrum._validate import validate_choice
 from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
@@ -362,11 +362,40 @@ def _emit_scale(value: Any, out: dict) -> None:
 
 
 def _emit_title(value: Any, out: dict) -> None:
-    # title=None (explicitly passed) → suppress the axis/legend title by
-    # forwarding an empty string to Rust, which renders a blank title instead of
-    # falling back to the field name.  title omitted (key absent) keeps the
-    # field-name default.  title="Foo" passes through as-is.
-    out["title"] = "" if value is None else value
+    # The three-way title contract (`serialize_title`): title=None (explicitly
+    # passed) suppresses the axis/legend title by forwarding an empty string to
+    # Rust, which renders a blank title instead of falling back to the field
+    # name; title omitted (key absent, so this handler never runs) keeps the
+    # field-name default; title="Foo" passes through as-is.
+    out["title"] = serialize_title(value)
+
+
+def declared_title(binding: Any) -> str | None:
+    """Return the axis/legend title *binding* declares, in its wire form.
+
+    ``None`` when nothing is declared (a bare field name, or a channel with
+    no ``title=``), so the renderer titles by the field; ``""`` when the
+    title is suppressed (``title=None`` or ``title=""``), so it draws none;
+    else the string. The one reader of a channel's ``title=`` for a lowering
+    that rebinds the channel's column on its own layers.
+    """
+    if not isinstance(binding, ChannelBase):
+        return None
+    return serialize_title(binding._kwargs.get("title", _UNSET))
+
+
+def drawn_title(binding: Any) -> str | None:
+    """Return the title *binding* draws on its axis, else ``None``.
+
+    :func:`declared_title` with every suppression read as no title: the
+    renderer draws none for ``title=None``, ``""`` or a whitespace-only
+    string, so a lowering that falls back to the caller's field when no title
+    is drawn treats all three alike.
+    """
+    title = declared_title(binding)
+    if title is None or (isinstance(title, str) and not title.strip()):
+        return None
+    return title
 
 
 def _emit_axis(value: Any, out: dict) -> None:

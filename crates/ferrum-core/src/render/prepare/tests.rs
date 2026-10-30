@@ -10996,6 +10996,66 @@ fn own_bindings_raw_row_layers_and_unknown_columns_still_refuse_beside_a_statist
     assert_eq!(gate_refusal(&nowhere).to_string(), gate_message("tooltip", "nope", None, false));
 }
 
+/// A layered layer with no `data_source` of its own reads its chart's own
+/// unnamed statistic tail exactly as the unlayered door does
+/// (`reads_statistic_output`'s `FINAL_OUTPUT_KEY` fallback) — the shape a
+/// composite mark's promoted layer takes (`spec.layers` has one entry, no
+/// `data_source`, over a chart-level unnamed statistic chain). It drops an
+/// inherited binding its statistic lacks, the same warning a
+/// `data_source: "stats"` layer gets, while its own binding and a column
+/// found nowhere still refuse, unchanged.
+#[test]
+fn a_data_source_none_layer_over_a_statistic_tail_drops_inherited_reads_and_still_refuses_its_own() {
+    let layer_message = |channel: &'static str, name: &str, remedy: Option<crate::render::MissingColumnRemedy>| {
+        RenderError::LayerUnknownColumn {
+            layer: 0, entry: None, channel, name: name.into(), coord_flipped: false, remedy, independent_y: false,
+        }
+        .to_string()
+    };
+    let one_layer_spec = |layer_encoding: serde_json::Value| -> ChartSpec {
+        serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {},
+            "transforms": chain_dropping_z_and_k(),
+            "layers": [{"mark": "point", "encoding": layer_encoding}],
+        }))
+        .expect("the one-layer spec deserializes")
+    };
+
+    // An inherited `color` (chart-level, not written by the one layer
+    // itself): `k` exists in the source and the statistic drops it, so it
+    // drops and warns rather than refusing.
+    let mut drops = one_layer_spec(serde_json::json!({"x": {"field": "total"}, "y": {"field": "total"}}));
+    drops.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    let (scene, warnings) = gate_render(&drops, &column_gate_batch());
+    scene.expect("the data_source: None layer draws without the dropped color");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        ["layer 0: mark_point: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color"]
+    );
+
+    // The layer's OWN binding (not inherited): `z` exists in the source and
+    // is dropped by the statistic, same as `k` above, but because the layer
+    // wrote `tooltip` itself, `inherited` is false and it still refuses.
+    let own = one_layer_spec(serde_json::json!({
+        "x": {"field": "total"}, "y": {"field": "total"}, "tooltip": {"field": "z"}
+    }));
+    assert_eq!(gate_refusal(&own).to_string(), layer_message("tooltip", "z", Some(crate::render::MissingColumnRemedy::Source)));
+
+    // An inherited column found nowhere, not even in the chart's own source
+    // schema: the drop path only applies when the statistic consumed a real
+    // source column, so this still refuses.
+    let mut nowhere = one_layer_spec(serde_json::json!({"x": {"field": "total"}, "y": {"field": "total"}}));
+    nowhere.encoding.tooltip = Some(EncodingSpec { field: "nope".into(), ..Default::default() });
+    assert_eq!(gate_refusal(&nowhere).to_string(), layer_message("tooltip", "nope", None));
+}
+
 /// A layer's `detail` grouping column is checked as its channels are.
 #[test]
 fn a_detail_naming_an_absent_column_refuses() {
@@ -11347,6 +11407,26 @@ fn a_layer_reads_a_statistic_when_its_rows_passed_a_lowered_step() {
     assert!(!reading(Some("outer_rows")));
     assert!(reading(Some("outer_stats")));
     assert!(reading(Some("post")), "a branch over a statistic's output reads that statistic");
+}
+
+/// A layer with no `data_source`
+/// reads its chart's own pipeline tail (`FINAL_OUTPUT_KEY`), the same
+/// resolution `statistic_series_fields`'s own call site already applies
+/// to this exact layer shape. An unlayered `mark_histogram()`'s bar layer
+/// is `data_source: None` because its rows ARE the chart's own unnamed
+/// `Bin` tail, not the user's un-transformed rows.
+#[test]
+fn a_layer_with_no_data_source_reads_its_charts_own_statistic_tail() {
+    pyo3::Python::initialize();
+    let transforms: Vec<crate::transform::core::TransformSpec> = serde_json::from_value(serde_json::json!([
+        {"type": "identity", "statistics": true},
+        {"type": "aggregate", "ops": [{"field": "x", "fn": "mean", "as": "mean_x"}], "groupby": ["g"]},
+    ]))
+    .expect("the transforms deserialize");
+    let (_, lineages) = crate::transform::core::apply_transforms_named(&transforms, &column_gate_batch(), &TransformContext::default())
+        .expect("the pipeline runs");
+    let layer = crate::spec::layer::Layer { data_source: None, ..Default::default() };
+    assert!(reads_statistic_output(&LayerPrepared::from_chart_and_layer(&ChartSpec::default(), &layer), &lineages));
 }
 
 /// A dropped column warns once per layer, naming the first channel that
@@ -17284,4 +17364,2608 @@ fn a_stack_offset_reads_in_any_case() {
     };
     assert_eq!(marks_over(&spec("Zero"), &rows), marks_over(&spec("zero"), &rows));
     assert_ne!(marks_over(&spec("Zero"), &rows), marks_over(&unstacked, &rows));
+}
+
+/// Rows an explicit positional domain leaves out still do
+/// not draw, but warn once per channel and field with the count and
+/// the remedy, the same way on every door. These tests cover the census
+/// (`crate::render::draw::domain_left_out_counts`), the per-render ledger
+/// (`scene_build::DomainLeftOutLedger`) and the generic `(channel, field,
+/// categorical)` text (`RenderWarning::DomainRowsLeftOut`).
+mod domain_rows_left_out_tests {
+    use super::*;
+
+    /// Every mark's drawn rows, counted from `data_indices` directly rather
+    /// than paired with scene nodes (`drawn_rows`'s 1:1 zip under-counts a
+    /// line/area/ribbon series, whose one polyline node carries many
+    /// vertices in `data_indices`).
+    fn drawn_row_count(scene: &ferrum_scene::SceneGraph) -> usize {
+        scene.panels[0]
+            .marks
+            .iter()
+            .filter_map(|b| b.data_indices.as_ref())
+            .map(|v| v.len())
+            .sum()
+    }
+
+    /// The vertex count of every `Polyline` node in the first panel: a
+    /// line's one node carries every surviving vertex internally, with
+    /// `data_indices` naming only the series' first row — so counting rows
+    /// drawn for a line means counting points, not `data_indices` entries.
+    fn drawn_vertex_count(scene: &ferrum_scene::SceneGraph) -> usize {
+        scene.panels[0]
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Polyline { points, .. } => Some(points.len()),
+                ferrum_scene::SceneNode::Polygon { rings, .. } => Some(rings.first().map(Vec::len).unwrap_or(0)),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn domain_left_out_warnings(warnings: &[RenderWarning]) -> Vec<&RenderWarning> {
+        warnings.iter().filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. })).collect()
+    }
+
+    fn ten_row_xy_batch() -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn ten_row_category_batch() -> RecordBatch {
+        let cats = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("c", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(cats.to_vec())),
+                Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A point chart under an explicit continuous `domain=` draws only the
+    /// in-domain rows and warns once, naming the field and the exact count,
+    /// with the remedy. Wrong fix this discriminates against: drawing or
+    /// clamping the left-out rows instead of warning about them would move
+    /// `drawn` away from 7.
+    #[test]
+    fn point_under_explicit_continuous_domain_warns_the_left_out_count() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "x", "scale": {"type": "linear", "domain": [2.0, 8.0]}},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 7, "7 of 10 rows (x in [2,8]) still draw");
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 3, categorical: false, .. }),
+            "{left_out:?}"
+        );
+        assert_eq!(
+            left_out[0].to_string(),
+            "x scale: 3 row(s) of 'x' fall outside the scale's explicit domain, so they are not \
+             drawn; widen the domain, or pass clamp=True to draw them at the axis edge"
+        );
+    }
+
+    /// A `Band` explicit `domain=` missing categories draws only the named
+    /// ones and warns once, naming the field, the count and the
+    /// categorical remedy. `PointScale`/plain `OrdinalScale` share this
+    /// code path (both resolve to the same `ScaleKind::Ordinal`), so one
+    /// case over `Band` covers all three Python-level spellings.
+    #[test]
+    fn band_scale_explicit_domain_missing_categories_warns_the_left_out_count() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "c", "scale": {"type": "band", "domain": ["a", "b", "c"]}},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_category_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 3, "only a, b, c draw");
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 7, categorical: true, .. }),
+            "{left_out:?}"
+        );
+        assert_eq!(
+            left_out[0].to_string(),
+            "x scale: 7 row(s) of 'c' name a category the scale's explicit domain leaves out, so \
+             they are not drawn; add it to the domain, or drop domain= to draw every category"
+        );
+    }
+
+    /// `clamp=True` draws every row, piled at the axis edge, and warns
+    /// nothing: the one deliberately silent escape.
+    #[test]
+    fn clamp_true_draws_every_row_with_no_domain_warning() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "x", "scale": {"type": "linear", "domain": [2.0, 8.0], "clamp": true}},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 10, "every row draws, clamped to the axis edge");
+        assert!(domain_left_out_warnings(&warnings).is_empty(), "{warnings:?}");
+    }
+
+    /// No explicit `domain=` (the data-derived auto path) never leaves a
+    /// row out, so it never warns — the control for every case above.
+    #[test]
+    fn no_explicit_domain_draws_every_row_with_no_warning() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 10);
+        assert!(domain_left_out_warnings(&warnings).is_empty(), "{warnings:?}");
+    }
+
+    /// A plain (unstacked) bar's value outside an explicit `y` domain draws
+    /// the in-domain bars and warns on `y`, naming the value field.
+    #[test]
+    fn bar_value_outside_the_y_domain_warns_the_same_bars() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "x"},
+                "y": {"field": "y", "scale": {"type": "linear", "domain": [2.0, 8.0]}}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 7);
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 3, .. }), "{left_out:?}");
+    }
+
+    /// A stacked bar's base (always 0, never a bound field) can sit below
+    /// an explicit domain that excludes 0 while its cumulative top stays
+    /// inside it: every bar still draws, in full, and nothing warns —
+    /// `Mark::placement_channels`'s `bar: x, y` (never the base) is exactly
+    /// why.
+    #[test]
+    fn a_stacked_bars_base_below_the_domain_draws_every_bar_with_no_warning() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "g"},
+                "y": {"field": "z", "stack": "zero", "scale": {"type": "linear", "domain": [5.0, 100.0]}},
+                "color": {"field": "c"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("z", DataType::Float64, false),
+                Field::new("c", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![5.0, 5.0])),
+                Arc::new(StringArray::from(vec!["u", "v"])),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 2, "both stacked segments draw (tops at 5 and 10)");
+        assert!(domain_left_out_warnings(&warnings).is_empty(), "{warnings:?}");
+    }
+
+    /// A multi-point line drops and warns the vertices an explicit `y`
+    /// domain leaves out, one `DomainRowsLeftOut` naming `y` and the count
+    /// of dropped vertices — not the whole series.
+    #[test]
+    fn a_line_drops_and_warns_the_vertices_an_explicit_domain_leaves_out() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "line",
+            "encoding": {
+                "x": {"field": "x"},
+                "y": {"field": "y", "scale": {"type": "linear", "domain": [2.0, 8.0]}}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_vertex_count(&scene), 7, "7 vertices draw");
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 3, .. }), "{left_out:?}");
+    }
+
+    /// `mark_function(clip=False)` desugars to a line layer whose
+    /// `mark_style.clip` is `false`: the draw-time extrapolating escape
+    /// (`DrawCtx::to_pixel`) draws every vertex past the domain, and the
+    /// census (which reads positions through the same method) agrees —
+    /// no row is left out, so nothing warns.
+    #[test]
+    fn mark_clip_false_draws_a_line_past_the_domain_with_no_warning() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "line",
+            "mark_style": {"clip": false},
+            "encoding": {
+                "x": {"field": "x"},
+                "y": {"field": "y", "scale": {"type": "linear", "domain": [2.0, 8.0]}}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = ten_row_xy_batch();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_vertex_count(&scene), 10, "every vertex draws, extrapolated past the domain");
+        assert!(domain_left_out_warnings(&warnings).is_empty(), "{warnings:?}");
+    }
+
+    /// Seeded data-space `Jitter` moves rows after scale resolution, so an
+    /// explicit domain can leave out points the unjittered data would not
+    /// have — warned with the count of points the jitter itself pushed out,
+    /// on both axes. Asserted structurally (drawn + left-out == total)
+    /// rather than against a hand-computed displacement, since the exact
+    /// count is a deterministic function of the seed this test does not
+    /// need to re-derive.
+    #[test]
+    fn seeded_jitter_under_an_explicit_domain_warns_the_points_not_drawn() {
+        for axis in ["x", "y"] {
+            let jittered = if axis == "x" { "x" } else { "y" };
+            let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+                "mark": "point",
+                "position": {"type": "jitter", "axis": axis, "width": 0.4, "seed": 7},
+                "encoding": {
+                    "x": {"field": "x", "scale": if jittered == "x" { serde_json::json!({"type": "linear", "domain": [0.5, 8.5]}) } else { serde_json::json!(null) }},
+                    "y": {"field": "y", "scale": if jittered == "y" { serde_json::json!({"type": "linear", "domain": [0.5, 8.5]}) } else { serde_json::json!(null) }}
+                }
+            }))
+            .expect("the spec deserializes");
+            let batch = ten_row_xy_batch();
+            let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+            let drawn = drawn_row_count(&scene);
+            let left_out = domain_left_out_warnings(&warnings);
+            let reported: usize = left_out.iter().map(|w| match w { RenderWarning::DomainRowsLeftOut { rows, .. } => *rows, _ => 0 }).sum();
+            assert_eq!(drawn + reported, 10, "{axis}: drawn ({drawn}) + left out ({reported}) must cover every row");
+            assert!(reported > 0, "{axis}: the tight domain must push at least one jittered point out: {warnings:?}");
+        }
+    }
+
+    /// A `Log` channel's off-side rows stay `LogScaleRowsLeftOut`'s alone —
+    /// never re-counted as `DomainRowsLeftOut` too — while a row that IS on
+    /// side but still outside the stated domain's upper bound gets its own,
+    /// separate `DomainRowsLeftOut`. One render, two distinct one-row
+    /// counts, never merged and never doubled.
+    #[test]
+    fn log_off_side_rows_are_not_double_counted_with_the_explicit_domain_warning() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "i"},
+                "y": {"field": "v", "scale": {"type": "log", "base": 10.0, "domain": [1.0, 100.0]}}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("i", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0, 100.0, 1000.0])),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 3, "1, 10, 100 draw; -5 is off-side, 1000 is past the stated domain");
+        let log_left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+        assert_eq!(log_left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(log_left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 1, .. }), "{log_left_out:?}");
+        let domain_left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(domain_left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(domain_left_out[0], RenderWarning::DomainRowsLeftOut { rows: 1, .. }), "{domain_left_out:?}");
+    }
+
+    /// A null, a `NaN` and an infinite positional value are out of scope
+    /// for this count entirely: not drawn, but not counted in
+    /// `DomainRowsLeftOut` either, under an explicit domain that would
+    /// otherwise have excluded a finite value sitting right beside them.
+    #[test]
+    fn null_nan_and_inf_positional_values_are_not_counted() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "x", "scale": {"type": "linear", "domain": [2.0, 8.0]}},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.0), None, Some(f64::NAN), Some(f64::INFINITY), Some(5.0)])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 1, "only x=5.0 (in domain) draws");
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 1, .. }),
+            "only the finite out-of-domain row (x=1.0) is counted, not the null/NaN/inf rows: {left_out:?}"
+        );
+    }
+
+    /// `CoordFlip` swaps which internal render channel a binding occupies,
+    /// but the warning still names the channel the caller WROTE it on
+    /// (`prepare::user_facing_channel`), not the post-flip slot it resolved
+    /// into.
+    #[test]
+    fn coord_flip_names_the_channel_the_caller_wrote() {
+        let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {
+                "x": {"field": "v", "scale": {"type": "linear", "domain": [2.0, 8.0]}},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_row_count(&scene), 7);
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(
+            left_out[0].to_string().starts_with("x scale: 3 row(s) of 'v'"),
+            "the warning must say 'x', the channel the caller wrote, not 'y': {left_out:?}"
+        );
+    }
+
+    /// A faceted chart's shared explicit domain is one chart-wide fact: the
+    /// rows each panel leaves out are summed into ONE `DomainRowsLeftOut`,
+    /// not one per panel.
+    #[test]
+    fn a_facet_sums_domain_left_out_rows_across_panels() {
+        let spec = faceted_spec(
+            "point",
+            serde_json::json!({
+                "x": {"field": "x", "scale": {"type": "linear", "domain": [2.0, 8.0]}},
+                "y": {"field": "x"}
+            }),
+            wrap_by_f(),
+            serde_json::json!({}),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("f", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
+                Arc::new(StringArray::from(vec!["p", "p", "p", "p", "p", "q", "q", "q", "q", "q"])),
+            ],
+        )
+        .unwrap();
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        let drawn: usize = scene
+            .panels
+            .iter()
+            .flat_map(|p| p.marks.iter())
+            .filter_map(|b| b.data_indices.as_ref())
+            .map(|v| v.len())
+            .sum();
+        assert_eq!(drawn, 7, "panel p draws 2,3,4; panel q draws 5,6,7,8");
+        let left_out = domain_left_out_warnings(&warnings);
+        assert_eq!(left_out.len(), 1, "one summed warning, not one per panel: {warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 3, .. }), "{left_out:?}");
+    }
+
+
+    /// Minimal valid 1x1 PNG data URL, for the url-tile `mark_image` case —
+    /// the same bytes `marks::image`'s own test module uses, so a malformed
+    /// URL can never be the reason a row goes undrawn here.
+    fn parity_image_url() -> String {
+        let png_bytes: Vec<u8> = vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144,
+            119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 248, 207, 192, 0, 0, 0, 2, 0, 1, 227, 33, 188, 51,
+            0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        format!("data:image/png;base64,{b64}")
+    }
+
+    /// A 10-row batch of four continuous positional columns (`x`, `y`,
+    /// `x2`, `y2`, values 0..9), a 10-category column (`c`, "a".."j"), a
+    /// constant `mid` column (every row `5.0`, always inside `[2,8]`) used
+    /// to anchor a channel that shares the tested one's axis without
+    /// contributing its own left-out rows, a constant text column (`t`) and
+    /// a constant valid image URL column (`u`) — every fixture below needs
+    /// a subset of these, so no mark gets its own copy.
+    fn parity_fixture_batch() -> RecordBatch {
+        let n = 10usize;
+        let col = || Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>()));
+        let cats = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let url = parity_image_url();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("x2", DataType::Float64, false),
+                Field::new("y2", DataType::Float64, false),
+                Field::new("c", DataType::Utf8, false),
+                Field::new("mid", DataType::Float64, false),
+                Field::new("t", DataType::Utf8, false),
+                Field::new("u", DataType::Utf8, false),
+            ])),
+            vec![
+                col(),
+                col(),
+                col(),
+                col(),
+                Arc::new(StringArray::from(cats.to_vec())),
+                Arc::new(Float64Array::from(vec![5.0; n])),
+                Arc::new(StringArray::from(vec!["t"; n])),
+                Arc::new(StringArray::from(vec![url.as_str(); n])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// `mark`'s minimal drawable encoding over [`parity_fixture_batch`]:
+    /// `restricted` alone under an explicit `domain=[2,8]`, every other
+    /// channel of `channels` plain, plus whatever extra binding the mark
+    /// needs just to draw at all (`text`/`label`'s `text=`, `image`'s
+    /// `url=`, `ribbon`'s plain, undomained `y2`/`x2` — the other band edge
+    /// is never a placement). `tick` binds ONLY `restricted`: with both `x`
+    /// and `y` continuous, `tick`'s own dispatch falls through to its
+    /// quantitative-x rug mode and stops reading `y` at all — a real but
+    /// unrelated dispatch fact (`TickMode::QuantitativeXRug`) this fixture
+    /// sidesteps by giving `tick` exactly one continuous channel at a time,
+    /// the shape its two rug modes each read.
+    fn parity_fixture_spec(mark: &str, channels: &[&str], restricted: &str) -> ChartSpec {
+        // `x`/`x2` share the resolved x scale, `y`/`y2` share y (positional.rs:
+        // "the x2/y2 axis is shared with x/y"), so the explicit domain has to
+        // sit on the AXIS-OWNING channel (`x` or `y`) regardless of which of
+        // the two `restricted` names: `axis` is that channel, and only it
+        // carries `"scale"` below.
+        let axis = if restricted == "x" || restricted == "x2" { "x" } else { "y" };
+        let mut encoding = serde_json::json!({});
+        let bound_channels: Vec<&str> = if mark == "tick" { vec![restricted] } else { channels.to_vec() };
+        for &ch in &bound_channels {
+            let ch_axis = if ch == "x" || ch == "x2" { "x" } else { "y" };
+            // The restricted channel reads its own varying column so there is
+            // something for the domain to exclude; every other channel on
+            // the SAME axis reads the constant `mid` column (always inside
+            // `[2,8]`) so it never contributes its own left-out rows; a
+            // channel on the OTHER axis keeps its own varying column, unrestricted.
+            let field = if ch == restricted {
+                ch
+            } else if ch_axis == axis {
+                "mid"
+            } else {
+                ch
+            };
+            encoding[ch] = if ch == axis {
+                serde_json::json!({"field": field, "scale": {"type": "linear", "domain": [2.0, 8.0]}})
+            } else {
+                serde_json::json!({"field": field})
+            };
+        }
+        match mark {
+            "text" | "label" => encoding["text"] = serde_json::json!({"field": "t"}),
+            "image" => encoding["url"] = serde_json::json!({"field": "u"}),
+            "ribbon" => encoding["y2"] = serde_json::json!({"field": "mid"}),
+            _ => {}
+        }
+        serde_json::from_value(serde_json::json!({"mark": mark, "encoding": encoding}))
+            .unwrap_or_else(|e| panic!("{mark}/{restricted}: the fixture spec deserializes: {e}"))
+    }
+
+    /// Most marks draw one node per row, so [`drawn_row_count`]'s
+    /// `data_indices`-based count is exact; `line` draws one `Polyline`
+    /// node per series, so [`drawn_vertex_count`] is the one that counts
+    /// rows for it.
+    fn parity_drawn_count(mark: &str, scene: &ferrum_scene::SceneGraph) -> usize {
+        if matches!(mark, "line" | "polygon") { drawn_vertex_count(scene) } else { drawn_row_count(scene) }
+    }
+
+    /// A 10-row batch (`v` = 0..9) and a chart-level, unnamed `Bin` step
+    /// behind a statistics marker — the exact shape Python's
+    /// `mark_histogram()` desugar produces for an unlayered chart
+    /// (`desugar_histogram`: `MarkDesugarResult(mark="bar", transforms=
+    /// [marker, Bin(...)], remap=...)`, no `.layers`). `bin_width=2.0`
+    /// yields 5 bins: `bin_start=[0,2,4,6,8]`, `bin_end=[2,4,6,8,10]`,
+    /// `count=[2,2,2,2,2]`.
+    fn histogram_spec_and_rows(entry: Option<&str>, domain: [f64; 2], layered: bool) -> (ChartSpec, RecordBatch) {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        let x_binding = serde_json::json!({"field": "bin_start", "title": "v", "scale": {"type": "linear", "domain": domain}});
+        let x2_binding = serde_json::json!({"field": "bin_end"});
+        let y_binding = serde_json::json!({"field": "count"});
+        let transforms = serde_json::json!([statistics_marker(), {"type": "bin", "field": "v", "bin_width": 2.0, "nice": false}]);
+        let spec = if layered {
+            // Mirrors `displot(kind="hist", kde=True)`'s "promote the
+            // existing mark + encoding into a primary layer" step
+            // (`src/ferrum/plots/distribution.py`): the primary layer is a
+            // real `spec.layers` entry (so `validate_layer_columns`'s
+            // `raw.is_none()` short-circuit does NOT apply to it), with no
+            // `data_source` of its own — it reads the chart's own unnamed
+            // `Bin` tail exactly as the unlayered shape below does.
+            serde_json::json!({
+                "mark": "bar",
+                "transforms": transforms,
+                "encoding": {},
+                "layers": [{"mark": "bar", "entry": entry, "encoding": {"x": x_binding, "x2": x2_binding, "y": y_binding}}],
+            })
+        } else {
+            serde_json::json!({
+                "mark": "bar",
+                "entry": entry,
+                "transforms": transforms,
+                "encoding": {"x": x_binding, "x2": x2_binding, "y": y_binding},
+            })
+        };
+        (serde_json::from_value(spec).expect("the histogram spec deserializes"), batch)
+    }
+
+    /// The `DomainRowsLeftOut` text, as `scene_over` collects it.
+    fn domain_left_out_text(warnings: &[RenderWarning]) -> Vec<String> {
+        warnings.iter().filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. })).map(ToString::to_string).collect()
+    }
+
+    /// An unlayered `mark_histogram()`'s one bar layer has `data_source: None`
+    /// (`LayerPrepared::from_chart_only` always does), yet its rows ARE a
+    /// statistic's output (the chart's own unnamed `Bin` tail,
+    /// `FINAL_OUTPUT_KEY`) — `reads_statistic_output` must resolve that
+    /// same key [`FINAL_OUTPUT_KEY`] a `data_source: None` layer reads,
+    /// the way every other reader of "which lineage are this layer's rows"
+    /// already does, rather than only ever answering `true` for an
+    /// explicit `data_source`. Goes through the real
+    /// `prepare → layout → build_scene` pipeline (`scene_over`), not a
+    /// hand-built `DrawCtx`, so this exercises the actual per-layer
+    /// site, not just the merge-and-voice mechanism in isolation.
+    /// `bin_width=2.0` over `v=0..9` does not divide evenly, so the real
+    /// `Bin` output (checked once, by hand, against this fixture) is 5
+    /// bins of width 1.8: `bin_start=[0,1.8,3.6,5.4,7.2]`,
+    /// `bin_end=[1.8,3.6,5.4,7.2,9.0]`. A bin cut on only one end (bin 0:
+    /// `start=0` fails `domain=[1,9.5]`, `end=1.8` passes).
+    #[test]
+    fn an_unlayered_histogram_speaks_in_its_entry_voice_for_a_bin_cut_on_one_end() {
+        let (spec, batch) = histogram_spec_and_rows(Some("mark_histogram"), [1.0, 9.5], false);
+        let (_, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            ["mark_histogram: x scale: 1 mark(s) of 'v' fall outside the scale's explicit domain, so they are not drawn; \
+              widen the domain, or pass clamp=True to draw them at the axis edge"],
+            "{warnings:?}"
+        );
+    }
+
+    /// The companion case, over the same 5 bins (see the fixture note
+    /// above): `domain=[1,7]` cuts bin 4 (`start=7.2`, `end=9.0`) on BOTH
+    /// ends, bin 0 (`start=0`, `end=1.8`) on `start` alone, and bin 3
+    /// (`start=5.4`, `end=7.2`) on `end` alone — 3 undrawn bars, not the 4
+    /// a wrong fix summing `bin_start`'s and `bin_end`'s counts separately
+    /// would double-count bin 4 into.
+    #[test]
+    fn an_unlayered_histogram_counts_a_bin_cut_on_both_ends_once_not_twice() {
+        let (spec, batch) = histogram_spec_and_rows(Some("mark_histogram"), [1.0, 7.0], false);
+        let (_, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            ["mark_histogram: x scale: 3 mark(s) of 'v' fall outside the scale's explicit domain, so they are not drawn; \
+              widen the domain, or pass clamp=True to draw them at the axis edge"],
+            "{warnings:?}"
+        );
+    }
+
+    /// The main-door fix's other reachable shape: a composite mark whose
+    /// statistic layer is its own tail, not an unlayered chart at all —
+    /// `displot(kind="hist", kde=True)` promotes the histogram's bar mark
+    /// into a REAL `spec.layers` entry (`src/ferrum/plots/distribution.py`'s
+    /// "Convert single-mark chart to layered mode" step) with no
+    /// `data_source` of its own, so `validate_layer_columns`'s
+    /// `raw.is_none()` short-circuit does not apply to it either — this is
+    /// the layer `reads_statistic_output`'s fix must also reach. Same
+    /// fixture and domain as the one-end case above, laid out as one
+    /// explicit layer instead of the flat chart.
+    #[test]
+    fn a_composite_marks_own_tail_layer_speaks_in_its_entry_voice_too() {
+        let (spec, batch) = histogram_spec_and_rows(Some("mark_histogram"), [1.0, 9.5], true);
+        let (_, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            ["mark_histogram: x scale: 1 mark(s) of 'v' fall outside the scale's explicit domain, so they are not drawn; \
+              widen the domain, or pass clamp=True to draw them at the axis edge"],
+            "{warnings:?}"
+        );
+    }
+
+    /// A primitive layer's text stays byte-identical: same fixture, same
+    /// domain, but with no statistics marker ahead of the layer's rows (an
+    /// ordinary point chart over `v`, not a statistic's output), so `entry`
+    /// is `None` and the wording is the primitive row voice (`"row(s)"`,
+    /// no leading `"{entry}: "`). Discriminates against
+    /// a fix that makes every `data_source: None` layer speak as a
+    /// statistic regardless of whether its chart's tail actually is one.
+    #[test]
+    fn a_primitive_layer_over_the_same_rows_keeps_the_row_voice() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from((0..10).map(|i| i as f64).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "point",
+            "encoding": {"x": {"field": "v", "scale": {"type": "linear", "domain": [2.0, 10.0]}}, "y": {"field": "v"}},
+        }))
+        .expect("the point spec deserializes");
+        let (_, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            ["x scale: 2 row(s) of 'v' fall outside the scale's explicit domain, so they are not drawn; \
+              widen the domain, or pass clamp=True to draw them at the axis edge"],
+            "{warnings:?}"
+        );
+    }
+
+    /// The vertex-unit split: a statistic line layer
+    /// with two series groups (`mark_style.detail = "g"`) under an explicit
+    /// `x` domain that leaves the 'q' group (2 rows, `v=[0,1]`) with only 1
+    /// surviving vertex — below `line::placements`' minimum of 2, so it is
+    /// SKIPPED entirely — and the 'p' group (3 rows, `v=[0,1,2]`) with 2 of
+    /// its 3 vertices surviving — at or above the minimum, so it is still
+    /// DRAWN, just CUT. Each group counts as one mark under its own vertex
+    /// minimum (`series_groups`'s own grouping, read by both `build` and
+    /// `placements`), so the two groups speak as two separate warnings: the
+    /// "not drawn" sentence for the skipped group, and the "cross
+    /// the domain" sentence for the cut one. Wrong fix this discriminates
+    /// against: summing the two groups' left-out rows into one "2 mark(s)"
+    /// warning, which both miscounts
+    /// (only 1 mark is actually skipped) and loses the distinction between
+    /// a dropped mark and a merely-trimmed one.
+    #[test]
+    fn a_statistic_lines_skipped_group_and_cut_group_speak_as_two_separate_warnings() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p", "p", "p", "q", "q"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "line",
+            "entry": "mark_density",
+            "mark_style": {"detail": "g"},
+            "transforms": [statistics_marker(), mean_by_g_v(None)],
+            "encoding": {
+                "x": {"field": "v", "scale": {"type": "linear", "domain": [0.5, 10.0]}},
+                "y": {"field": "mean_y"}
+            },
+        }))
+        .expect("the line spec deserializes");
+        let (_, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            [
+                "mark_density: x scale: 1 mark(s) of 'v' fall outside the scale's explicit domain, so they are not \
+                  drawn; widen the domain, or pass clamp=True to draw them at the axis edge",
+                "mark_density: x scale: 1 mark(s) of 'v' cross the scale's explicit domain, so only their part \
+                  inside it is drawn; widen the domain, or pass clamp=True to draw them at the axis edge",
+            ],
+            "{warnings:?}"
+        );
+    }
+
+    /// The rows a statistic vertex layer reads: group `g`, `v` and `y` as
+    /// given. The mean of `y` by `[g, v]` over distinct `(g, v)` pairs is `y`
+    /// itself, so each row is one vertex of its `g` series.
+    fn statistic_vertex_rows(g: &[&str], v: &[f64], y: &[Option<f64>]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(g.to_vec())),
+                Arc::new(Float64Array::from(v.to_vec())),
+                Arc::new(Float64Array::from(y.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// `v` = 0..n in one group `p`, with `y` as given.
+    fn one_series_rows(y: &[Option<f64>]) -> RecordBatch {
+        let v: Vec<f64> = (0..y.len()).map(|i| i as f64).collect();
+        statistic_vertex_rows(&vec!["p"; y.len()], &v, y)
+    }
+
+    /// A continuous binding of `field`, under an explicit `domain` when one
+    /// is given.
+    fn continuous_binding(field: &str, domain: Option<[f64; 2]>) -> serde_json::Value {
+        match domain {
+            Some(domain) => serde_json::json!({"field": field, "scale": {"type": "linear", "domain": domain}}),
+            None => serde_json::json!({"field": field}),
+        }
+    }
+
+    /// One `mark` layer built by `entry` over the mean of `y` by `[g, v]`
+    /// behind a statistics marker, so its rows are a statistic's output:
+    /// `x` on `v`, `y` on `mean_y`, each under its explicit domain when one
+    /// is given, and its series split by `detail` when one is given.
+    fn statistic_vertex_spec(mark: &str, entry: &str, x_domain: Option<[f64; 2]>, y_domain: Option<[f64; 2]>, detail: Option<&str>) -> ChartSpec {
+        let mut spec = serde_json::json!({
+            "mark": mark,
+            "entry": entry,
+            "transforms": [statistics_marker(), mean_by_g_v(None)],
+            "encoding": {"x": continuous_binding("v", x_domain), "y": continuous_binding("mean_y", y_domain)},
+        });
+        if let Some(detail) = detail {
+            spec["mark_style"] = serde_json::json!({"detail": detail});
+        }
+        serde_json::from_value(spec).unwrap_or_else(|e| panic!("the statistic {mark} spec deserializes: {e}"))
+    }
+
+    /// The rows a statistic band reads: one group `p`, `v` = 0..n, and the
+    /// lower and band edges `y` and `y2` as given.
+    fn statistic_band_rows(lower: &[f64], band: &[f64]) -> RecordBatch {
+        let n = lower.len();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("y2", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p"; n])),
+                Arc::new(Float64Array::from((0..n).map(|i| i as f64).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(lower.to_vec())),
+                Arc::new(Float64Array::from(band.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A `mark_errorband` ribbon over the means of `y` (`lo`) and `y2`
+    /// (`hi`) by `[g, v]` behind a statistics marker: `x` on `v`, the lower
+    /// edge `y` on `lo` and the band edge `y2` on `hi`, which shares `y`'s
+    /// scale and so its explicit domain.
+    fn statistic_band_spec(x_domain: Option<[f64; 2]>, y_domain: Option<[f64; 2]>) -> ChartSpec {
+        serde_json::from_value(serde_json::json!({
+            "mark": "ribbon",
+            "entry": "mark_errorband",
+            "transforms": [
+                statistics_marker(),
+                {"type": "aggregate", "ops": [{"field": "y", "fn": "mean", "as": "lo"}, {"field": "y2", "fn": "mean", "as": "hi"}], "groupby": ["g", "v"]},
+            ],
+            "encoding": {"x": continuous_binding("v", x_domain), "y": continuous_binding("lo", y_domain), "y2": {"field": "hi"}},
+        }))
+        .expect("the statistic band spec deserializes")
+    }
+
+    /// Each `DomainRowsLeftOut` among `warnings` as `(channel, field,
+    /// count, cut)`, in order.
+    fn left_out_outcomes(warnings: &[RenderWarning]) -> Vec<(String, Option<String>, usize, bool)> {
+        warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::DomainRowsLeftOut { channel, field, rows, cut, .. } => Some((channel.clone(), field.clone(), *rows, *cut)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(channel, field, count, cut)` for [`left_out_outcomes`].
+    fn outcome(channel: &str, field: &str, count: usize, cut: bool) -> (String, Option<String>, usize, bool) {
+        (channel.to_string(), Some(field.to_string()), count, cut)
+    }
+
+    /// How many marks (scene nodes) the first panel draws.
+    fn drawn_mark_count(scene: &ferrum_scene::SceneGraph) -> usize {
+        scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum()
+    }
+
+    /// A 3-vertex statistic line whose `x` domain removes its first vertex
+    /// and whose `y` domain removes its last: either domain alone leaves 2
+    /// vertices, both together leave 1, so the line draws nothing. Its one
+    /// outcome, not drawn, is reported once on each axis that removed a
+    /// vertex. Wrong fix this discriminates against: deciding the outcome
+    /// per axis from that axis's own left-out rows, which reports the line
+    /// as cut on both axes.
+    #[test]
+    fn a_statistic_line_both_domains_leave_below_two_vertices_is_not_drawn_on_each_axis() {
+        let spec = statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), Some([-1.0, 1.5]), None);
+        let (scene, warnings) = scene_over(&spec, &one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_mark_count(&scene), 0, "the line draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, false), outcome("y", "mean_y", 1, false)], "{warnings:?}");
+    }
+
+    /// The control: the same line under the `x` domain alone keeps 2 of
+    /// its 3 vertices, so it draws cut, reported on `x` alone.
+    #[test]
+    fn a_statistic_line_under_one_domain_is_cut_on_that_axis_alone() {
+        let spec = statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None);
+        let (scene, warnings) = scene_over(&spec, &one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_vertex_count(&scene), 2, "the line draws its 2 inside vertices");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, true)], "{warnings:?}");
+    }
+
+    /// A statistic line whose null `y` vertex the builder cannot place and
+    /// whose first vertex the `x` domain removes keeps 1 vertex, so it is
+    /// not drawn, reported on `x` alone: the null is not the domain's loss,
+    /// so `y` reports nothing. Wrong fix this discriminates against:
+    /// counting survivors without the builder's own vertex predicate,
+    /// which keeps the null vertex and reports the line as cut.
+    #[test]
+    fn a_statistic_lines_null_vertex_counts_against_its_survivors_not_as_a_domain_loss() {
+        let spec = statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None);
+        let (scene, warnings) = scene_over(&spec, &one_series_rows(&[Some(1.0), None, Some(2.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_mark_count(&scene), 0, "1 placeable vertex survives, so the line draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, false)], "{warnings:?}");
+    }
+
+    /// A statistic line with two series: `p` loses its first vertex to the
+    /// `x` domain and draws cut; `q` has only null vertices, so the builder
+    /// drops it with no row outside any domain. Only `p` is reported.
+    /// Wrong fix this discriminates against: reporting every undrawn
+    /// series on an axis that left a row out, which would add `q` as a
+    /// mark not drawn.
+    #[test]
+    fn a_series_dropped_only_for_null_vertices_is_not_reported() {
+        let spec = statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, Some("g"));
+        let batch = statistic_vertex_rows(&["p", "p", "p", "q", "q"], &[0.0, 1.0, 2.0, 3.0, 4.0], &[Some(0.0), Some(1.0), Some(2.0), None, None]);
+        let (scene, warnings) = scene_over(&spec, &batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_mark_count(&scene), 1, "only p draws");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, true)], "{warnings:?}");
+    }
+
+    /// A 4-vertex statistic polygon whose `x` domain removes one vertex
+    /// keeps 3, its own minimum, so it draws cut, reported on `x`.
+    #[test]
+    fn a_statistic_polygon_keeping_three_vertices_is_cut() {
+        let spec = statistic_vertex_spec("polygon", "mark_hex", Some([0.5, 10.0]), None, None);
+        let (scene, warnings) = scene_over(&spec, &one_series_rows(&[Some(0.0), Some(3.0), Some(1.0), Some(2.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_vertex_count(&scene), 3, "the ring draws its 3 inside vertices");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, true)], "{warnings:?}");
+    }
+
+    /// The same polygon with its `y` domain removing another vertex keeps
+    /// 2, below its minimum of 3, so it draws nothing: not drawn, on `x`
+    /// and on `y`. Wrong fix this discriminates against: a per-axis
+    /// outcome, under which each axis alone leaves 3 vertices and reports
+    /// the polygon cut.
+    #[test]
+    fn a_statistic_polygon_both_domains_leave_below_three_vertices_is_not_drawn_on_each_axis() {
+        let spec = statistic_vertex_spec("polygon", "mark_hex", Some([0.5, 10.0]), Some([-1.0, 2.5]), None);
+        let (scene, warnings) = scene_over(&spec, &one_series_rows(&[Some(0.0), Some(1.0), Some(2.0), Some(3.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_mark_count(&scene), 0, "the polygon draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, false), outcome("y", "mean_y", 1, false)], "{warnings:?}");
+    }
+
+    /// A 3-vertex statistic area under its `x` domain alone draws cut;
+    /// under `x` and `y` domains that each remove a different vertex it
+    /// keeps 1 and draws nothing, not drawn on each axis. Wrong fix this
+    /// discriminates against: a per-axis outcome, which reports the second
+    /// area cut on both axes.
+    #[test]
+    fn a_statistic_area_is_cut_under_one_domain_and_not_drawn_under_two() {
+        let rows = one_series_rows(&[Some(1.0), Some(2.0), Some(3.0)]);
+        let theme = crate::layout::ThemeInputs::default();
+        let (scene, warnings) = scene_over(&statistic_vertex_spec("area", "mark_density", Some([0.5, 10.0]), None, None), &rows, &theme);
+        assert_eq!(drawn_mark_count(&scene), 1, "the area draws cut");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, true)], "{warnings:?}");
+        let (scene, warnings) = scene_over(&statistic_vertex_spec("area", "mark_density", Some([0.5, 10.0]), Some([0.0, 2.5]), None), &rows, &theme);
+        assert_eq!(drawn_mark_count(&scene), 0, "the area draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, false), outcome("y", "mean_y", 1, false)], "{warnings:?}");
+    }
+
+    /// A statistic band whose lower edge leaves its first row outside the
+    /// `y` domain and whose band edge leaves its last keeps 1 row, below
+    /// its minimum of 2: not drawn, reported once on `y` (both edges share
+    /// it), named by the lower edge's binding.
+    #[test]
+    fn a_statistic_band_whose_two_edges_each_leave_a_row_out_is_not_drawn_once_on_y() {
+        let spec = statistic_band_spec(None, Some([0.5, 3.0]));
+        let (scene, warnings) = scene_over(&spec, &statistic_band_rows(&[0.0, 1.0, 1.0], &[1.0, 2.0, 5.0]), &crate::layout::ThemeInputs::default());
+        assert_eq!(drawn_mark_count(&scene), 0, "the band draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("y", "lo", 1, false)], "{warnings:?}");
+    }
+
+    /// A statistic band whose shared `x` domain removes its first row draws
+    /// cut, reported on `x`; with the band edge also leaving its last row
+    /// outside the `y` domain it keeps 1 row and is not drawn, reported on
+    /// `x` and on `y`. Wrong fix this discriminates against: a per-axis
+    /// outcome, which reports the second band cut on both axes.
+    #[test]
+    fn a_statistic_band_is_cut_on_its_shared_axis_and_not_drawn_across_two_axes() {
+        let theme = crate::layout::ThemeInputs::default();
+        let (scene, warnings) = scene_over(&statistic_band_spec(Some([0.5, 10.0]), None), &statistic_band_rows(&[1.0, 1.0, 1.0], &[2.0, 2.0, 2.0]), &theme);
+        assert_eq!(drawn_mark_count(&scene), 1, "the band draws cut");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, true)], "{warnings:?}");
+        let (scene, warnings) = scene_over(&statistic_band_spec(Some([0.5, 10.0]), Some([0.5, 3.0])), &statistic_band_rows(&[1.0, 1.0, 1.0], &[2.0, 2.0, 5.0]), &theme);
+        assert_eq!(drawn_mark_count(&scene), 0, "the band draws nothing");
+        assert_eq!(left_out_outcomes(&warnings), [outcome("x", "v", 1, false), outcome("y", "lo", 1, false)], "{warnings:?}");
+    }
+
+    /// A statistic layer whose vertex mark spans the categories `a`..`d`
+    /// on its `cat` axis, under a `band` domain of `a`..`c`: one series
+    /// per `h` category when `color` is set, the mean of `v` by the
+    /// category (and `h`) on the other axis. `mark` is `line` (value on
+    /// `mean_v`) or `ribbon` (lower edge `lo`, band edge `hi`).
+    fn categorical_statistic_spec_and_rows(mark: &str, cat: &str, color: bool) -> (ChartSpec, RecordBatch) {
+        let hs: &[&str] = if color { &["u", "w"] } else { &["u"] };
+        let (mut g, mut h, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for hv in hs {
+            for (i, gv) in ["a", "b", "c", "d"].into_iter().enumerate() {
+                g.push(gv);
+                h.push(*hv);
+                v.push(i as f64 + 1.0);
+            }
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("h", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![Arc::new(StringArray::from(g)), Arc::new(StringArray::from(h)), Arc::new(Float64Array::from(v))],
+        )
+        .unwrap();
+        let groupby: Vec<&str> = if color { vec!["g", "h"] } else { vec!["g"] };
+        let value = if cat == "x" { "y" } else { "x" };
+        let mut encoding = serde_json::json!({});
+        encoding[cat] = serde_json::json!({"field": "g", "scale": {"type": "band", "domain": ["a", "b", "c"]}});
+        let (entry, ops) = if mark == "ribbon" {
+            encoding[value] = serde_json::json!({"field": "lo"});
+            encoding[format!("{value}2")] = serde_json::json!({"field": "hi"});
+            ("mark_errorband", serde_json::json!([{"field": "v", "fn": "min", "as": "lo"}, {"field": "v", "fn": "max", "as": "hi"}]))
+        } else {
+            encoding[value] = serde_json::json!({"field": "mean_v"});
+            ("mark_line", serde_json::json!([{"field": "v", "fn": "mean", "as": "mean_v"}]))
+        };
+        if color {
+            encoding["color"] = serde_json::json!({"field": "h"});
+        }
+        let spec = serde_json::from_value(serde_json::json!({
+            "mark": mark,
+            "entry": entry,
+            "transforms": [statistics_marker(), {"type": "aggregate", "ops": ops, "groupby": groupby}],
+            "encoding": encoding,
+        }))
+        .unwrap_or_else(|e| panic!("the categorical statistic {mark} spec deserializes: {e}"));
+        (spec, batch)
+    }
+
+    /// A statistic line over `a`..`d` under a `band` domain of `a`..`c`
+    /// keeps 3 of its 4 vertices and draws without `d`: it reaches a left-
+    /// out category and is drawn cut, in the categorical sentence with the
+    /// cut consequence. The same holds with a color splitting it into two
+    /// lines (2 marks), with the categorical axis on `y`, and for a
+    /// statistic band whose shared axis is the categorical one. Wrong fixes
+    /// this discriminates against: the continuous cut sentence (whose
+    /// `clamp=True` remedy does nothing on a categorical scale) and the
+    /// categorical not-drawn sentence (false: the line is drawn).
+    #[test]
+    fn a_statistic_vertex_mark_reaching_a_left_out_category_is_reported_drawn_cut() {
+        let theme = crate::layout::ThemeInputs::default();
+        let cases = [
+            ("line", "x", false, "mark_line: x scale: 1 mark(s) of 'g' reach a category the scale's explicit domain leaves out, so only their part inside it is drawn; add it to the domain, or drop domain= to draw every category"),
+            ("line", "x", true, "mark_line: x scale: 2 mark(s) of 'g' reach a category the scale's explicit domain leaves out, so only their part inside it is drawn; add it to the domain, or drop domain= to draw every category"),
+            ("line", "y", false, "mark_line: y scale: 1 mark(s) of 'g' reach a category the scale's explicit domain leaves out, so only their part inside it is drawn; add it to the domain, or drop domain= to draw every category"),
+            ("ribbon", "x", false, "mark_errorband: x scale: 1 mark(s) of 'g' reach a category the scale's explicit domain leaves out, so only their part inside it is drawn; add it to the domain, or drop domain= to draw every category"),
+        ];
+        for (mark, cat, color, expected) in cases {
+            let (spec, batch) = categorical_statistic_spec_and_rows(mark, cat, color);
+            let (scene, warnings) = scene_over(&spec, &batch, &theme);
+            assert_eq!(drawn_mark_count(&scene), if color { 2 } else { 1 }, "{mark} {cat} color={color}: every series draws");
+            assert_eq!(domain_left_out_text(&warnings), [expected], "{mark} {cat} color={color}: {warnings:?}");
+        }
+    }
+
+    /// `spec` with its chart-level `x` binding titled `title`.
+    fn with_x_title(mut spec: ChartSpec, title: &str) -> ChartSpec {
+        spec.encoding.x.as_mut().expect("the fixture binds x").title = Some(title.to_string());
+        spec
+    }
+
+    /// The one `DomainRowsLeftOut` text `spec` over `batch` reports.
+    fn assert_single_left_out_text(spec: &ChartSpec, batch: &RecordBatch, expected: &str) {
+        let (_, warnings) = scene_over(spec, batch, &crate::layout::ThemeInputs::default());
+        assert_eq!(domain_left_out_text(&warnings), [expected], "{warnings:?}");
+    }
+
+    /// A statistic layer whose `x` title is suppressed (the empty title
+    /// `title=None` writes) shows no name, so its sentence for a dropped
+    /// mark drops the `of '<field>'` clause and keeps the rest. Wrong fixes
+    /// this and the three tests below discriminate against: naming the
+    /// empty title (`of ''`), and falling back to the binding's field,
+    /// which on a statistic layer is the statistic's own column
+    /// (`bin_start` here).
+    #[test]
+    fn a_suppressed_title_drops_the_field_clause_from_a_dropped_mark() {
+        let (histogram, rows) = histogram_spec_and_rows(Some("mark_histogram"), [1.0, 9.5], false);
+        assert_single_left_out_text(
+            &with_x_title(histogram, ""),
+            &rows,
+            "mark_histogram: x scale: 1 mark(s) fall outside the scale's explicit domain, so they are not drawn; widen the domain, or pass clamp=True to draw them at the axis edge",
+        );
+    }
+
+    /// A blank title suppresses the name too, so a mark drawn cut drops the
+    /// clause from its sentence.
+    #[test]
+    fn a_suppressed_title_drops_the_field_clause_from_a_mark_drawn_cut() {
+        assert_single_left_out_text(
+            &with_x_title(statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None), "  "),
+            &one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]),
+            "mark_density: x scale: 1 mark(s) cross the scale's explicit domain, so only their part inside it is drawn; widen the domain, or pass clamp=True to draw them at the axis edge",
+        );
+    }
+
+    /// A statistic bar per category under a `band` domain of `a`..`c`, its
+    /// `x` title suppressed: the left-out category's bar drops the clause.
+    #[test]
+    fn a_suppressed_title_drops_the_field_clause_from_a_left_out_category() {
+        let (mut bar, rows) = categorical_statistic_spec_and_rows("line", "x", false);
+        bar.mark = Mark::Bar;
+        bar.entry = Some("mark_bar".to_string());
+        assert_single_left_out_text(
+            &with_x_title(bar, ""),
+            &rows,
+            "mark_bar: x scale: 1 mark(s) name a category the scale's explicit domain leaves out, so they are not drawn; add it to the domain, or drop domain= to draw every category",
+        );
+    }
+
+    /// A statistic line reaching a left-out category, its `x` title
+    /// suppressed: the categorical cut sentence drops the clause.
+    #[test]
+    fn a_suppressed_title_drops_the_field_clause_from_a_category_reached_by_a_cut_mark() {
+        let (line, rows) = categorical_statistic_spec_and_rows("line", "x", false);
+        assert_single_left_out_text(
+            &with_x_title(line, ""),
+            &rows,
+            "mark_line: x scale: 1 mark(s) reach a category the scale's explicit domain leaves out, so only their part inside it is drawn; add it to the domain, or drop domain= to draw every category",
+        );
+    }
+
+    /// The control: a non-empty title on the same statistic line is the
+    /// name its sentence quotes.
+    #[test]
+    fn a_statistic_layer_with_a_title_names_the_title() {
+        let spec = with_x_title(statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None), "Value");
+        let (_, warnings) = scene_over(&spec, &one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]), &crate::layout::ThemeInputs::default());
+        assert_eq!(
+            domain_left_out_text(&warnings),
+            ["mark_density: x scale: 1 mark(s) of 'Value' cross the scale's explicit domain, so only their part inside it is drawn; widen the domain, or pass clamp=True to draw them at the axis edge"],
+            "{warnings:?}"
+        );
+    }
+
+    /// An unlayered chart's `x2`/`y2` is not judged by
+    /// `validate_layer_columns` (it skips entirely when `spec.layers` is
+    /// `None`), so the census is what refuses
+    /// `mark_bar(x='a', x2='zzz', y='b')` rather than drawing it with `x2`
+    /// dropped. With both `x` and `y` numeric, `BarPath::Quantitative`
+    /// places `x2` (`bar::placements`), so the census's own read of `zzz`
+    /// raises `RenderError::UnknownColumn`; a census that swallowed the
+    /// error to zero would render silently. It reaches the user through the
+    /// SAME per-layer seam (`name_layer`/`in_layer_voice`) every other
+    /// builder read in this layer already goes through, so it speaks in
+    /// the entry voice —
+    /// `mark_bar: unknown column ...` — the same voice `mark_rule`'s `x2`
+    /// and `mark_text`'s `text` already use for the identical mistake.
+    #[test]
+    fn unlayered_bar_x2_naming_an_unknown_column_refuses_in_the_entry_voice() {
+        let batch = parity_fixture_batch();
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "x"},
+                "x2": {"field": "zzz"},
+                "y": {"field": "y"}
+            }
+        }))
+        .expect("the spec deserializes");
+        let err = crate::render::render_svg(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect_err("x2 names a column the batch does not have");
+        assert_eq!(err.to_string(), "mark_bar: unknown column 'zzz' referenced by an encoding");
+    }
+
+    /// Mirrors the test above on `mark_rule`'s `x2` and `mark_text`'s
+    /// `text`: both refuse in the entry voice too (an in-layer
+    /// `UnknownColumn` takes the layer's voice whichever read raised it),
+    /// confirming the entry voice is not special-cased to one mark or one
+    /// channel.
+    #[test]
+    fn mark_rule_x2_and_mark_text_text_naming_an_unknown_column_keep_the_entry_voice() {
+        let batch = parity_fixture_batch();
+        let rule_spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "rule",
+            "encoding": {"x": {"field": "x"}, "x2": {"field": "zzz"}, "y": {"field": "y"}},
+        }))
+        .expect("the rule spec deserializes");
+        let text_spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "text",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "text": {"field": "zzz"}},
+        }))
+        .expect("the text spec deserializes");
+        for (spec, voice) in [(rule_spec, "mark_rule"), (text_spec, "mark_text")] {
+            let err = crate::render::render_svg(
+                &spec,
+                &batch,
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )
+            .expect_err("the bound field names a column the batch does not have");
+            assert_eq!(err.to_string(), format!("{voice}: unknown column 'zzz' referenced by an encoding"));
+        }
+    }
+
+    /// Rebinds `spec`'s `channel` from `parity_fixture_spec`'s continuous
+    /// `linear` scale over its numeric field to a `band` scale over
+    /// `domain`, bound to the categorical column `c`.
+    fn retarget_restricted_to_band(mut spec: ChartSpec, channel: &str, domain: &[&str]) -> ChartSpec {
+        let binding = crate::spec::encoding::EncodingSpec {
+            field: "c".into(),
+            scale: Some(crate::spec::encoding::ScaleSpec::Band {
+                domain: Some(domain.iter().map(|s| s.to_string()).collect()),
+                padding: Default::default(),
+                align: 0.5,
+                range: None,
+            }),
+            ..Default::default()
+        };
+        match channel {
+            "x" => spec.encoding.x = Some(binding),
+            "y" => spec.encoding.y = Some(binding),
+            other => panic!("{other}: not wired for this helper"),
+        }
+        spec
+    }
+
+    /// `MoveTo`/`LineTo` commands across every `Path` node in the first
+    /// panel — `area`'s drawn vertex count (its `BottomEdge::Baseline` case
+    /// pushes nothing per row, so the whole path is the top edge alone) and
+    /// twice `ribbon`'s (whose one path walks the lower edge forward and
+    /// the band edge backward, one vertex each per row).
+    fn path_vertex_commands(scene: &ferrum_scene::SceneGraph) -> usize {
+        scene.panels[0]
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match n {
+                // `closed: true` isolates the one fill/band path from any
+                // separate (unclosed) border-stroke path area's `line`/
+                // `borders` style fields can add alongside it.
+                ferrum_scene::SceneNode::Path { commands, closed: true, .. } => {
+                    Some(commands.iter().filter(|c| matches!(c, ferrum_scene::PathCmd::MoveTo { .. } | ferrum_scene::PathCmd::LineTo { .. })).count())
+                }
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// `area`'s and `ribbon`'s drawn row count, read from their one closed
+    /// `Path` node's vertex commands: `area`'s own `build_area_cmds` closes
+    /// the top edge's `n` vertices with 2 more (the baseline corners at the
+    /// first and last x), so its path carries `n + 2` commands for `n`
+    /// drawn rows; `ribbon`'s one path walks the lower edge forward and the
+    /// band edge backward, 2 vertices per drawn row.
+    fn mark_drawn_rows(mark: &str, scene: &ferrum_scene::SceneGraph) -> usize {
+        let vertices = path_vertex_commands(scene);
+        match mark {
+            "ribbon" => vertices / 2,
+            "area" => vertices.saturating_sub(2),
+            _ => vertices,
+        }
+    }
+
+    /// The parity table between the explicit-domain census and what each
+    /// mark draws, over every `Mark` ([`crate::spec::mark::all_marks`]) and,
+    /// for a mark whose build dispatches on a path enum, every variant of
+    /// that enum. Each path enum's rows come from one `parity_paths!` list
+    /// that generates both the exhaustive match from a resolved path to its
+    /// row and the rows the tests iterate, so a new variant does not compile
+    /// until it has a row, and a row whose cases are missing or resolve to
+    /// another path fails `every_path_row_has_a_case_that_lands_on_it` by
+    /// its label.
+    mod parity_cases {
+        use super::*;
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::draw::{resolve_mark_style, DrawCtx};
+        use crate::render::marks::bar::BarPath;
+        use crate::render::marks::curve::CurveAxis;
+        use crate::render::marks::image::ImagePath;
+        use crate::render::marks::rect::{BandAxis, RectShape};
+        use crate::render::marks::ribbon::band_curve_axis;
+        use crate::render::marks::rule::RuleShape;
+        use crate::render::marks::text::{polar_label_placement, LabelAngle};
+        use crate::render::marks::tick::TickMode;
+        use arrow::array::ArrayRef;
+        use std::collections::BTreeSet;
+
+        /// The kind of explicit domain a case's restricted channel carries.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum DomainKind {
+            Continuous,
+            Categorical,
+            None,
+        }
+
+        /// The path a case's fixture must resolve to: its table's generated
+        /// resolver and the row the case belongs to.
+        #[derive(Clone, Copy)]
+        struct Pin {
+            table: &'static str,
+            row: &'static str,
+            resolved_row: fn(&DrawCtx) -> &'static str,
+        }
+
+        /// One fixture: the channel its explicit domain restricts (`field`,
+        /// the name the census reports), the kind of that domain, how many
+        /// drawable units the fixture holds (what draws with nothing left
+        /// out, in [`drawn_count_for`]'s measure), and the census count and
+        /// drawn count the render must report. A case from a path table
+        /// carries its row's [`Pin`].
+        struct ParityCase {
+            label: &'static str,
+            spec: ChartSpec,
+            batch: RecordBatch,
+            field: &'static str,
+            domain: DomainKind,
+            units: usize,
+            expected_census: usize,
+            expected_drawn: usize,
+            pin: Option<Pin>,
+        }
+
+        impl ParityCase {
+            /// A case whose census counts rows in the drawn measure, so its
+            /// drawable units are the rows left out plus the rows drawn.
+            fn new(
+                label: &'static str,
+                spec: ChartSpec,
+                batch: RecordBatch,
+                field: &'static str,
+                domain: DomainKind,
+                expected_census: usize,
+                expected_drawn: usize,
+            ) -> Self {
+                Self { label, spec, batch, field, domain, units: expected_census + expected_drawn, expected_census, expected_drawn, pin: None }
+            }
+
+            /// The drawable units when the census counts in another measure
+            /// than the drawn count (a statistic layer's marks against the
+            /// vertices it draws).
+            fn units(mut self, units: usize) -> Self {
+                self.units = units;
+                self
+            }
+        }
+
+        /// One path enum's rows: the generated resolver from a fixture to
+        /// its row label, and each row with the function building its cases.
+        struct PathTable {
+            name: &'static str,
+            resolved_row: fn(&DrawCtx) -> &'static str,
+            rows: &'static [(&'static str, fn() -> Vec<ParityCase>)],
+        }
+
+        impl PathTable {
+            /// Every row's cases, each pinned to its own row.
+            fn cases(&'static self) -> Vec<ParityCase> {
+                self.rows
+                    .iter()
+                    .flat_map(|&(row, cases)| {
+                        cases().into_iter().map(move |mut case| {
+                            case.pin = Some(Pin { table: self.name, row, resolved_row: self.resolved_row });
+                            case
+                        })
+                    })
+                    .collect()
+            }
+        }
+
+        /// One `PathTable` static from one row list: `"<row>" => <pattern>
+        /// => <cases fn>,`. The list generates `row_of`, a match with exactly
+        /// those patterns and no wildcard, and the table's `rows`, so the
+        /// match and the iterated rows cannot differ; `resolved_row` reads a
+        /// fixture's path through `$resolve` and names its row.
+        macro_rules! parity_paths {
+            ($table:ident: $path:ty = |$ctx:ident| $resolve:expr; { $($row:literal => $pat:pat_param => $cases:ident,)+ }) => {
+                static $table: PathTable = {
+                    fn row_of(path: &$path) -> &'static str {
+                        match path {
+                            $($pat => $row,)+
+                        }
+                    }
+                    fn resolved_row($ctx: &DrawCtx) -> &'static str {
+                        row_of(&$resolve)
+                    }
+                    PathTable {
+                        name: stringify!($table),
+                        resolved_row,
+                        rows: &[$(($row, $cases as fn() -> Vec<ParityCase>),)+],
+                    }
+                };
+            };
+        }
+
+        parity_paths! {
+            BAR_PATHS: BarPath = |ctx| BarPath::of(ctx); {
+                "Polar" => BarPath::Polar => bar_polar_cases,
+                "OrdinalX" => BarPath::OrdinalX => bar_ordinal_x_cases,
+                "OrdinalY" => BarPath::OrdinalY => bar_ordinal_y_cases,
+                "QuantitativeHorizontal" => BarPath::QuantitativeHorizontal => bar_quantitative_horizontal_cases,
+                "Quantitative" => BarPath::Quantitative => bar_quantitative_cases,
+            }
+        }
+
+        parity_paths! {
+            TICK_MODES: TickMode = |ctx| TickMode::of(ctx); {
+                "OrdinalYOnly" => TickMode::OrdinalYOnly => tick_ordinal_y_only_cases,
+                "QuantitativeYOnly" => TickMode::QuantitativeYOnly => tick_quantitative_y_only_cases,
+                "OrdinalXQuantY" => TickMode::OrdinalXQuantY => tick_ordinal_x_quant_y_cases,
+                "OrdinalYQuantX" => TickMode::OrdinalYQuantX => tick_ordinal_y_quant_x_cases,
+                "OrdinalXOnly" => TickMode::OrdinalXOnly => tick_ordinal_x_only_cases,
+                "QuantitativeXRug" => TickMode::QuantitativeXRug => tick_quantitative_x_rug_cases,
+            }
+        }
+
+        parity_paths! {
+            RECT_SHAPES: RectShape = |ctx| RectShape::of(ctx); {
+                "QuantitativeRange" => RectShape::QuantitativeRange => rect_quantitative_range_cases,
+                "BandRange(X)" => RectShape::BandRange(Some(BandAxis::X)) => rect_band_range_x_cases,
+                "BandRange(Y)" => RectShape::BandRange(Some(BandAxis::Y)) => rect_band_range_y_cases,
+                "BandRange(None)" => RectShape::BandRange(None) => rect_band_range_none_cases,
+                "Heatmap" => RectShape::Heatmap => rect_heatmap_cases,
+            }
+        }
+
+        parity_paths! {
+            RULE_SHAPES: RuleShape<'_> = |ctx| RuleShape::resolve(&ctx.spec.encoding, false).expect("a rule case binds a drawable shape"); {
+                "Diagonal" => RuleShape::Diagonal { .. } => rule_diagonal_cases,
+                "VerticalSegment" => RuleShape::VerticalSegment { .. } => rule_vertical_segment_cases,
+                "HorizontalSegment" => RuleShape::HorizontalSegment { .. } => rule_horizontal_segment_cases,
+                "VerticalSpan" => RuleShape::VerticalSpan { .. } => rule_vertical_span_cases,
+                "HorizontalSpan" => RuleShape::HorizontalSpan { .. } => rule_horizontal_span_cases,
+            }
+        }
+
+        parity_paths! {
+            TEXT_PATHS: Option<LabelAngle> = |ctx| polar_label_placement(ctx).map(|p| p.angle); {
+                "Cartesian" => None => text_cartesian_cases,
+                "PolarValue" => Some(LabelAngle::Value) => text_polar_value_cases,
+                "PolarWedge quantity" => Some(LabelAngle::Wedge { categorical: false }) => text_polar_wedge_quantity_cases,
+                "PolarWedge categorical" => Some(LabelAngle::Wedge { categorical: true }) => text_polar_wedge_categorical_cases,
+            }
+        }
+
+        parity_paths! {
+            IMAGE_PATHS: ImagePath<'_> = |ctx| ImagePath::of(ctx); {
+                "Unplaceable" => ImagePath::Unplaceable { .. } => image_unplaceable_cases,
+                "UrlTiles" => ImagePath::UrlTiles { .. } => image_url_tiles_cases,
+                "Raster" => ImagePath::Raster(_) => image_raster_cases,
+                "NoData" => ImagePath::NoData => image_no_data_cases,
+            }
+        }
+
+        parity_paths! {
+            RIBBON_AXES: CurveAxis = |ctx| band_curve_axis(ctx.spec).expect("a ribbon case binds a band channel").1; {
+                "X" => CurveAxis::X => ribbon_shared_x_cases,
+                "Y" => CurveAxis::Y => ribbon_shared_y_cases,
+            }
+        }
+
+        /// Where a mark's cases come from: its path table, or one list for
+        /// a mark that places every channel on one path.
+        enum MarkCases {
+            Paths(&'static PathTable),
+            Plain(fn() -> Vec<ParityCase>),
+        }
+
+        /// Exhaustive: a new `Mark` fails to compile here until it has cases.
+        fn mark_cases(mark: Mark) -> MarkCases {
+            match mark {
+                Mark::Point => MarkCases::Plain(point_cases),
+                Mark::Line => MarkCases::Plain(line_cases),
+                Mark::Bar => MarkCases::Paths(&BAR_PATHS),
+                Mark::Area => MarkCases::Plain(area_cases),
+                Mark::Rule => MarkCases::Paths(&RULE_SHAPES),
+                Mark::Text => MarkCases::Paths(&TEXT_PATHS),
+                Mark::Tick => MarkCases::Paths(&TICK_MODES),
+                Mark::Rect => MarkCases::Paths(&RECT_SHAPES),
+                Mark::Polygon => MarkCases::Plain(polygon_cases),
+                Mark::Image => MarkCases::Paths(&IMAGE_PATHS),
+                Mark::Ribbon => MarkCases::Paths(&RIBBON_AXES),
+                Mark::Segment => MarkCases::Plain(segment_cases),
+                Mark::Arc => MarkCases::Plain(arc_cases),
+                Mark::Label => MarkCases::Plain(label_cases),
+                Mark::Geoshape => MarkCases::Plain(geoshape_cases),
+            }
+        }
+
+        fn parity_cases(mark: Mark) -> Vec<ParityCase> {
+            match mark_cases(mark) {
+                MarkCases::Paths(table) => table.cases(),
+                MarkCases::Plain(cases) => cases(),
+            }
+        }
+
+        /// Whether `mark`'s build reads its positions through
+        /// `DrawCtx::to_pixel`, so `clip=false` draws an out-of-domain
+        /// vertex at its extrapolated pixel instead of dropping it.
+        fn extrapolates_under_clip_false(mark: Mark) -> bool {
+            match mark {
+                Mark::Line | Mark::Area | Mark::Ribbon => true,
+                Mark::Point
+                | Mark::Bar
+                | Mark::Rule
+                | Mark::Text
+                | Mark::Tick
+                | Mark::Rect
+                | Mark::Polygon
+                | Mark::Image
+                | Mark::Segment
+                | Mark::Arc
+                | Mark::Label
+                | Mark::Geoshape => false,
+            }
+        }
+
+        /// The row `resolved_row` names for `case`'s fixture, read from the
+        /// one layer the real pipeline prepares for it: that layer's drawn
+        /// encoding, coord and style over the rows it reads, with the
+        /// pipeline's provisional scales (the kinds the panel's own scales
+        /// resolve to).
+        fn resolved_row_of(case: &ParityCase, resolved_row: fn(&DrawCtx) -> &'static str) -> &'static str {
+            pyo3::Python::initialize();
+            let theme = crate::layout::ThemeInputs::default();
+            let chart_config = crate::render::chart_config::ChartConfig::default();
+            let crate::render::PipelineOutput { prep, .. } = crate::render::prepare_and_layout(
+                &case.spec,
+                &case.batch,
+                &theme,
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &chart_config,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{}: the spec prepares: {e}", case.label));
+            let [layer] = prep.layers.as_slice() else { panic!("{}: a pinned case draws one layer", case.label) };
+            let batch = match &layer.data_source {
+                Some(name) => &prep.transform_outputs[name],
+                None => prep.final_batch(),
+            };
+            let spec = ChartSpec {
+                mark: layer.mark,
+                encoding: layer.drawn_encoding(),
+                coord: layer.coord.clone(),
+                mark_style: layer.mark_style.clone(),
+                ..Default::default()
+            };
+            let mark_style = resolve_mark_style(layer.mark_style.as_ref(), &theme, &layer.mark)
+                .unwrap_or_else(|e| panic!("{}: mark style resolves: {e}", case.label));
+            let panel = PanelLayout {
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                facet_key: None,
+                row: 0,
+                col: 0,
+                strip_title: None,
+                row_strip_title: None,
+                row_facet_key: None,
+            };
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &prep.provisional_scales, batch, mark_style: &mark_style };
+            resolved_row(&ctx)
+        }
+
+        /// Asserts a pinned case's fixture lands on its own row.
+        fn assert_pinned(case: &ParityCase) {
+            if let Some(pin) = case.pin {
+                assert_eq!(resolved_row_of(case, pin.resolved_row), pin.row, "{}: {} row", case.label, pin.table);
+            }
+        }
+
+        /// The rows (or marks) `warnings` report left out for `field`.
+        fn census_of(warnings: &[RenderWarning], field: &str) -> usize {
+            warnings
+                .iter()
+                .filter_map(|w| match w {
+                    RenderWarning::DomainRowsLeftOut { field: f, rows, .. } if f.as_deref() == Some(field) => Some(*rows),
+                    _ => None,
+                })
+                .sum()
+        }
+
+        /// Unifies [`parity_drawn_count`]'s vertex-reading and
+        /// [`mark_drawn_rows`]'s path-command reading into the one answer
+        /// this table's drawn-count column needs for every mark.
+        fn drawn_count_for(mark: &str, scene: &ferrum_scene::SceneGraph) -> usize {
+            match mark {
+                "area" | "ribbon" => mark_drawn_rows(mark, scene),
+                _ => parity_drawn_count(mark, scene),
+            }
+        }
+
+        /// `spec` with `clip=false` on every layer whose mark draws `clip`,
+        /// or on the chart itself when it has no layers (a layered chart
+        /// carries its styles on its layers).
+        fn with_clip_false(spec: &ChartSpec) -> ChartSpec {
+            let set = |style: &mut Option<crate::spec::mark_style::MarkKwargsSpec>| {
+                style.get_or_insert_with(Default::default).clip = Some(false);
+            };
+            let mut spec = spec.clone();
+            match spec.layers.as_mut() {
+                Some(layers) => layers.iter_mut().filter(|l| l.mark.style_field("clip").is_some()).for_each(|l| set(&mut l.mark_style)),
+                None => set(&mut spec.mark_style),
+            }
+            spec
+        }
+
+        #[test]
+        fn every_marks_placement_census_matches_what_it_actually_drew() {
+            for mark in crate::spec::mark::all_marks() {
+                for case in parity_cases(mark) {
+                    assert_pinned(&case);
+                    let (scene, warnings) = scene_over(&case.spec, &case.batch, &crate::layout::ThemeInputs::default());
+                    assert_eq!(census_of(&warnings, case.field), case.expected_census, "{}: census: {warnings:?}", case.label);
+                    assert_eq!(drawn_count_for(mark.as_str(), &scene), case.expected_drawn, "{}: drawn", case.label);
+                }
+            }
+        }
+
+        #[test]
+        fn every_path_row_has_a_case_that_lands_on_it() {
+            for mark in crate::spec::mark::all_marks() {
+                let MarkCases::Paths(table) = mark_cases(mark) else { continue };
+                let mut landed = BTreeSet::new();
+                for &(row, cases) in table.rows {
+                    let cases = cases();
+                    assert!(!cases.is_empty(), "{}: row {row} has no case", table.name);
+                    for case in &cases {
+                        let got = resolved_row_of(case, table.resolved_row);
+                        assert_eq!(got, row, "{}: {} lands on another row", table.name, case.label);
+                        landed.insert(got);
+                    }
+                }
+                let rows: BTreeSet<&str> = table.rows.iter().map(|&(row, _)| row).collect();
+                assert_eq!(landed, rows, "{}: the rows its cases land on", table.name);
+            }
+        }
+
+        /// Every case under a continuous domain, again with `clip=false`:
+        /// the line family (`extrapolates_under_clip_false`) draws every
+        /// unit at its extrapolated pixel and the census agrees, reporting
+        /// nothing; every other mark that draws `clip` keeps its own census
+        /// and drawn count. A mark that does not draw `clip` (text, label)
+        /// refuses it.
+        #[test]
+        fn every_continuous_case_under_clip_false_extrapolates_only_on_the_line_family() {
+            let theme = crate::layout::ThemeInputs::default();
+            for mark in crate::spec::mark::all_marks() {
+                for case in parity_cases(mark).into_iter().filter(|c| c.domain == DomainKind::Continuous) {
+                    let spec = with_clip_false(&case.spec);
+                    if mark.style_field("clip").is_none() {
+                        let refused = crate::render::render_svg(
+                            &spec,
+                            &case.batch,
+                            &theme,
+                            crate::layout::Viewport { width: 600.0, height: 400.0 },
+                            &crate::render::config::RenderConfig::default(),
+                            &crate::render::chart_config::ChartConfig::default(),
+                        );
+                        assert!(
+                            matches!(
+                                &refused,
+                                Err(RenderError::InLayer { source, .. }) if matches!(**source, RenderError::MarkStyleNotDrawn { field: "clip", .. })
+                            ),
+                            "{}: clip=false is refused on a mark that does not draw it: {:?}",
+                            case.label,
+                            refused.as_ref().err()
+                        );
+                        continue;
+                    }
+                    let (scene, warnings) = scene_over(&spec, &case.batch, &theme);
+                    let (census, drawn) = if extrapolates_under_clip_false(mark) {
+                        (0, case.units)
+                    } else {
+                        (case.expected_census, case.expected_drawn)
+                    };
+                    assert_eq!(census_of(&warnings, case.field), census, "{}: clip=false census: {warnings:?}", case.label);
+                    assert_eq!(drawn_count_for(mark.as_str(), &scene), drawn, "{}: clip=false drawn", case.label);
+                }
+            }
+        }
+
+        fn f64s(values: &[f64]) -> ArrayRef {
+            Arc::new(Float64Array::from(values.to_vec()))
+        }
+
+        fn strs(values: &[&str]) -> ArrayRef {
+            Arc::new(StringArray::from(values.to_vec()))
+        }
+
+        /// A batch of the named columns, each field typed and nullable as
+        /// its array is.
+        fn batch(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
+            let fields: Vec<Field> = columns.iter().map(|(name, a)| Field::new(*name, a.data_type().clone(), a.null_count() > 0)).collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns.into_iter().map(|(_, a)| a).collect()).unwrap()
+        }
+
+        fn spec(value: serde_json::Value) -> ChartSpec {
+            serde_json::from_value(value).unwrap_or_else(|e| panic!("the fixture spec deserializes: {e}"))
+        }
+
+        /// `a`..`e` on `g` and 1..5 on `value`.
+        fn five_categories(value: &str) -> RecordBatch {
+            batch(vec![("g", strs(&["a", "b", "c", "d", "e"])), (value, f64s(&[1.0, 2.0, 3.0, 4.0, 5.0]))])
+        }
+
+        fn band_abc(field: &str) -> serde_json::Value {
+            serde_json::json!({"field": field, "scale": {"type": "band", "domain": ["a", "b", "c"]}})
+        }
+
+        fn linear(field: &str, domain: [f64; 2]) -> serde_json::Value {
+            serde_json::json!({"field": field, "scale": {"type": "linear", "domain": domain}})
+        }
+
+        fn plain(field: &str) -> serde_json::Value {
+            serde_json::json!({"field": field})
+        }
+
+        fn point_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("point: x continuous", parity_fixture_spec("point", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("point: y continuous", parity_fixture_spec("point", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                ParityCase::new(
+                    "point: x categorical",
+                    retarget_restricted_to_band(parity_fixture_spec("point", &["x", "y"], "c"), "x", &["a", "b", "c"]),
+                    parity_fixture_batch(),
+                    "c",
+                    DomainKind::Categorical,
+                    7,
+                    3,
+                ),
+                ParityCase::new(
+                    "point: y categorical",
+                    retarget_restricted_to_band(parity_fixture_spec("point", &["x", "y"], "c"), "y", &["a", "b", "c"]),
+                    parity_fixture_batch(),
+                    "c",
+                    DomainKind::Categorical,
+                    7,
+                    3,
+                ),
+            ]
+        }
+
+        fn line_cases() -> Vec<ParityCase> {
+            let (categorical_spec, categorical_rows) = categorical_statistic_spec_and_rows("line", "x", false);
+            vec![
+                ParityCase::new("line: x continuous", parity_fixture_spec("line", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("line: y continuous", parity_fixture_spec("line", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                // The two left-out categories are 2 rows (no statistic voice),
+                // and the polyline draws the other 3 vertices.
+                ParityCase::new(
+                    "line: x categorical",
+                    spec(serde_json::json!({"mark": "line", "encoding": {"x": band_abc("c"), "y": plain("y")}})),
+                    batch(vec![("c", strs(&["a", "b", "c", "d", "e"])), ("y", f64s(&[0.0, 1.0, 2.0, 3.0, 4.0]))]),
+                    "c",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "line: statistic, two domains leave one vertex",
+                    statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), Some([-1.0, 1.5]), None),
+                    one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(3),
+                ParityCase::new(
+                    "line: statistic, one domain cuts",
+                    statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None),
+                    one_series_rows(&[Some(0.0), Some(1.0), Some(2.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                )
+                .units(3),
+                ParityCase::new(
+                    "line: statistic, a null vertex and one left out",
+                    statistic_vertex_spec("line", "mark_density", Some([0.5, 10.0]), None, None),
+                    one_series_rows(&[Some(1.0), None, Some(2.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(2),
+                ParityCase::new("line: statistic, reaches a left-out category", categorical_spec, categorical_rows, "g", DomainKind::Categorical, 1, 3),
+            ]
+        }
+
+        fn bar_polar_cases() -> Vec<ParityCase> {
+            // Wedges from the batch's own categories, radius clamped — never
+            // drops on a domain.
+            vec![ParityCase::new(
+                "bar: Polar",
+                spec(serde_json::json!({"mark": "bar", "coord": {"kind": "polar"}, "encoding": {"x": plain("g"), "y": linear("v", [0.0, 10.0])}})),
+                batch(vec![("g", strs(&["a", "b", "c"])), ("v", f64s(&[1.0, 50.0, 3.0]))]),
+                "v",
+                DomainKind::Continuous,
+                0,
+                3,
+            )]
+        }
+
+        fn bar_ordinal_x_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new(
+                    "bar: OrdinalX x categorical",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": band_abc("g"), "y": plain("y")}})),
+                    five_categories("y"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "bar: OrdinalX y continuous",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": plain("g"), "y": linear("y", [0.0, 10.0])}})),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("y", f64s(&[1.0, 50.0, 3.0]))]),
+                    "y",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                // A bound `y2` outside its own domain falls back to the
+                // baseline (never a placement on this path).
+                ParityCase::new(
+                    "bar: OrdinalX y2 fallback not counted",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": plain("g"), "y": plain("y"), "y2": linear("y2", [0.0, 10.0])}})),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("y", f64s(&[1.0, 1.0, 1.0])), ("y2", f64s(&[5.0, 50.0, 5.0]))]),
+                    "y2",
+                    DomainKind::Continuous,
+                    0,
+                    3,
+                ),
+                // A stacked bar's base (always 0) below a domain that
+                // excludes 0, with its cumulative top inside it: the base is
+                // never a placement, so every bar draws in full.
+                ParityCase::new(
+                    "bar: OrdinalX stacked base below domain not counted",
+                    spec(serde_json::json!({
+                        "mark": "bar",
+                        "encoding": {
+                            "x": plain("g"),
+                            "y": {"field": "z", "stack": "zero", "scale": {"type": "linear", "domain": [5.0, 100.0]}},
+                            "color": plain("c")
+                        }
+                    })),
+                    batch(vec![("g", strs(&["a", "a"])), ("z", f64s(&[5.0, 5.0])), ("c", strs(&["u", "v"]))]),
+                    "z",
+                    DomainKind::Continuous,
+                    0,
+                    2,
+                ),
+            ]
+        }
+
+        fn bar_ordinal_y_cases() -> Vec<ParityCase> {
+            // `x2` shares `x`'s resolved domain, so each continuous case keeps
+            // the OTHER channel's values inside it.
+            let ordinal_y = || spec(serde_json::json!({"mark": "bar", "encoding": {"y": plain("g"), "x": linear("x", [0.0, 10.0]), "x2": plain("x2")}}));
+            vec![
+                ParityCase::new(
+                    "bar: OrdinalY x continuous counted",
+                    ordinal_y(),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("x", f64s(&[1.0, 1.0, 50.0])), ("x2", f64s(&[5.0, 5.0, 5.0]))]),
+                    "x",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                ParityCase::new(
+                    "bar: OrdinalY x2 continuous counted",
+                    ordinal_y(),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("x", f64s(&[1.0, 1.0, 1.0])), ("x2", f64s(&[5.0, 50.0, 5.0]))]),
+                    "x2",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                ParityCase::new(
+                    "bar: OrdinalY y categorical",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"y": band_abc("g"), "x": plain("x")}})),
+                    five_categories("x"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+            ]
+        }
+
+        fn bar_quantitative_horizontal_cases() -> Vec<ParityCase> {
+            // `y2` bound, no `x2`: `x`, `y` and `y2` each counted on its own.
+            let rows = |x: [f64; 3], y: [f64; 3], y2: [f64; 3]| batch(vec![("x", f64s(&x)), ("y", f64s(&y)), ("y2", f64s(&y2))]);
+            vec![
+                ParityCase::new(
+                    "bar: QuantitativeHorizontal x continuous counted",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": linear("x", [0.0, 10.0]), "y": plain("y"), "y2": plain("y2")}})),
+                    rows([1.0, 1.0, 50.0], [1.0, 2.0, 3.0], [5.0, 50.0, 5.0]),
+                    "x",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                ParityCase::new(
+                    "bar: QuantitativeHorizontal y continuous counted",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": plain("x"), "y": linear("y", [0.0, 10.0]), "y2": plain("y2")}})),
+                    rows([1.0, 1.0, 1.0], [1.0, 1.0, 50.0], [5.0, 5.0, 5.0]),
+                    "y",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                ParityCase::new(
+                    "bar: QuantitativeHorizontal y2 continuous counted",
+                    spec(serde_json::json!({"mark": "bar", "encoding": {"x": plain("x"), "y": linear("y", [0.0, 10.0]), "y2": plain("y2")}})),
+                    rows([1.0, 1.0, 1.0], [1.0, 2.0, 3.0], [5.0, 50.0, 5.0]),
+                    "y2",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+            ]
+        }
+
+        fn bar_quantitative_cases() -> Vec<ParityCase> {
+            // The histogram shape (neither axis ordinal, `x2` bound, no
+            // `y2`): `x`, `y` and `x2` each counted on its own. `x2` shares
+            // `x`'s scale, so its domain sits on `x`'s binding.
+            [("bar: Quantitative x continuous counted", "x"), ("bar: Quantitative y continuous counted", "y"), ("bar: Quantitative x2 continuous counted", "x2")]
+                .into_iter()
+                .map(|(label, restricted)| {
+                    let mut encoding = serde_json::json!({"x": plain("x"), "y": plain("y"), "x2": plain("x2")});
+                    let domain_key = if restricted == "x2" { "x" } else { restricted };
+                    encoding[domain_key]["scale"] = serde_json::json!({"type": "linear", "domain": [2.0, 8.0]});
+                    ParityCase::new(label, spec(serde_json::json!({"mark": "bar", "encoding": encoding})), parity_fixture_batch(), restricted, DomainKind::Continuous, 3, 7)
+                })
+                .collect()
+        }
+
+        fn area_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("area: x continuous", parity_fixture_spec("area", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("area: y continuous", parity_fixture_spec("area", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                // The `y2` bottom edge is not a placement: a `y2` outside its
+                // own explicit domain falls back and every row still draws. A
+                // `y2` band carries 2 vertex commands per row, so the drawn
+                // measure (tuned for the baseline shape, `n + 2`) reads 18 for
+                // its 10 rows.
+                ParityCase::new(
+                    "area: y2 fallback not counted",
+                    spec(serde_json::json!({"mark": "area", "encoding": {"x": plain("x"), "y": plain("y"), "y2": linear("y2", [0.0, 20.0])}})),
+                    batch(vec![
+                        ("x", f64s(&(0..10).map(|i| i as f64).collect::<Vec<_>>())),
+                        ("y", f64s(&[1.0; 10])),
+                        ("y2", f64s(&(0..10).map(|i| i as f64 * 10.0).collect::<Vec<_>>())),
+                    ]),
+                    "y2",
+                    DomainKind::Continuous,
+                    0,
+                    18,
+                ),
+                // A stacked area's base sits below a domain that excludes 0
+                // while each band's top stays inside it: the base is not a
+                // placement, so both bands draw in full and nothing is
+                // counted. Two stacked bands of 2 rows carry 4 vertex
+                // commands each, which the drawn measure reads as 6.
+                ParityCase::new(
+                    "area: stacked base below domain not counted",
+                    spec(serde_json::json!({
+                        "mark": "area",
+                        "encoding": {
+                            "x": plain("x"),
+                            "y": {"field": "y", "stack": "zero", "scale": {"type": "linear", "domain": [5.0, 100.0]}},
+                            "color": plain("c")
+                        }
+                    })),
+                    batch(vec![("x", f64s(&[0.0, 1.0, 0.0, 1.0])), ("y", f64s(&[5.0, 5.0, 5.0, 5.0])), ("c", strs(&["u", "u", "v", "v"]))]),
+                    "y",
+                    DomainKind::Continuous,
+                    0,
+                    6,
+                ),
+                ParityCase::new(
+                    "area: statistic, one domain cuts",
+                    statistic_vertex_spec("area", "mark_density", Some([0.5, 10.0]), None, None),
+                    one_series_rows(&[Some(1.0), Some(2.0), Some(3.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                )
+                .units(3),
+                ParityCase::new(
+                    "area: statistic, two domains leave one vertex",
+                    statistic_vertex_spec("area", "mark_density", Some([0.5, 10.0]), Some([0.0, 2.5]), None),
+                    one_series_rows(&[Some(1.0), Some(2.0), Some(3.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(3),
+            ]
+        }
+
+        fn rule_diagonal_cases() -> Vec<ParityCase> {
+            [("rule: Diagonal x continuous", "x"), ("rule: Diagonal y continuous", "y"), ("rule: Diagonal x2 continuous", "x2"), ("rule: Diagonal y2 continuous", "y2")]
+                .into_iter()
+                .map(|(label, restricted)| {
+                    ParityCase::new(label, parity_fixture_spec("rule", &["x", "y", "x2", "y2"], restricted), parity_fixture_batch(), restricted, DomainKind::Continuous, 3, 7)
+                })
+                .collect()
+        }
+
+        fn rule_vertical_segment_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new(
+                "rule: VerticalSegment y2 continuous",
+                spec(serde_json::json!({"mark": "rule", "encoding": {"x": plain("x"), "y": linear("y", [2.0, 8.0]), "y2": plain("y2")}})),
+                parity_fixture_batch(),
+                "y2",
+                DomainKind::Continuous,
+                3,
+                7,
+            )]
+        }
+
+        fn rule_horizontal_segment_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new(
+                "rule: HorizontalSegment x2 continuous",
+                spec(serde_json::json!({"mark": "rule", "encoding": {"y": plain("y"), "x": linear("x", [2.0, 8.0]), "x2": plain("x2")}})),
+                parity_fixture_batch(),
+                "x2",
+                DomainKind::Continuous,
+                3,
+                7,
+            )]
+        }
+
+        fn rule_vertical_span_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new(
+                    "rule: VerticalSpan x continuous",
+                    spec(serde_json::json!({"mark": "rule", "encoding": {"x": linear("x", [2.0, 8.0])}})),
+                    parity_fixture_batch(),
+                    "x",
+                    DomainKind::Continuous,
+                    3,
+                    7,
+                ),
+                ParityCase::new(
+                    "rule: VerticalSpan x categorical",
+                    spec(serde_json::json!({"mark": "rule", "encoding": {"x": band_abc("g")}})),
+                    batch(vec![("g", strs(&["a", "b", "c", "d", "e"]))]),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+            ]
+        }
+
+        fn rule_horizontal_span_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new(
+                "rule: HorizontalSpan y continuous",
+                spec(serde_json::json!({"mark": "rule", "encoding": {"y": linear("y", [2.0, 8.0])}})),
+                parity_fixture_batch(),
+                "y",
+                DomainKind::Continuous,
+                3,
+                7,
+            )]
+        }
+
+        fn text_cartesian_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("text: Cartesian x continuous", parity_fixture_spec("text", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("text: Cartesian y continuous", parity_fixture_spec("text", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                ParityCase::new(
+                    "text: Cartesian x categorical",
+                    retarget_restricted_to_band(parity_fixture_spec("text", &["x", "y"], "c"), "x", &["a", "b", "c"]),
+                    parity_fixture_batch(),
+                    "c",
+                    DomainKind::Categorical,
+                    7,
+                    3,
+                ),
+                ParityCase::new(
+                    "text: Cartesian y categorical",
+                    retarget_restricted_to_band(parity_fixture_spec("text", &["x", "y"], "c"), "y", &["a", "b", "c"]),
+                    parity_fixture_batch(),
+                    "c",
+                    DomainKind::Categorical,
+                    7,
+                    3,
+                ),
+            ]
+        }
+
+        fn text_polar_value_cases() -> Vec<ParityCase> {
+            // Theta bound, not stacked, no radius bound.
+            vec![
+                ParityCase::new(
+                    "text: PolarValue theta continuous",
+                    spec(serde_json::json!({"mark": "text", "coord": {"kind": "polar", "theta": "x"}, "encoding": {"x": linear("v", [0.5, 10.0])}})),
+                    batch(vec![("v", f64s(&[0.0, 1.0, 2.0, 3.0, 4.0]))]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    4,
+                ),
+                ParityCase::new(
+                    "text: PolarValue theta categorical",
+                    spec(serde_json::json!({"mark": "text", "coord": {"kind": "polar", "theta": "x"}, "encoding": {"x": band_abc("g")}})),
+                    batch(vec![("g", strs(&["a", "b", "c", "d", "e"]))]),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+            ]
+        }
+
+        fn text_polar_wedge_quantity_cases() -> Vec<ParityCase> {
+            // A `Theta(stack=True)` quantity's labels sit in its pie sweep at
+            // a radius the radius scale clamps, so a radius outside its
+            // explicit domain still draws every label and counts nothing.
+            vec![ParityCase::new(
+                "text: PolarWedge quantity, radius outside its domain not counted",
+                spec(serde_json::json!({
+                    "mark": "text",
+                    "coord": {"kind": "polar", "theta": "x"},
+                    "encoding": {"x": {"field": "v", "stack": "zero"}, "y": linear("r", [0.0, 10.0])}
+                })),
+                batch(vec![("v", f64s(&[1.0, 2.0, 3.0])), ("r", f64s(&[1.0, 50.0, 3.0]))]),
+                "r",
+                DomainKind::Continuous,
+                0,
+                3,
+            )]
+        }
+
+        fn text_polar_wedge_categorical_cases() -> Vec<ParityCase> {
+            // A stacked categorical theta's labels sit in its equal bands; its
+            // own drop is data validity, never a positional domain, so a
+            // radius domain narrower than the data still draws every label.
+            vec![ParityCase::new(
+                "text: PolarWedge categorical, radius outside its domain not counted",
+                spec(serde_json::json!({
+                    "mark": "text",
+                    "coord": {"kind": "polar", "theta": "x"},
+                    "encoding": {"x": {"field": "g", "stack": "zero"}, "y": linear("v", [0.0, 10.0])}
+                })),
+                batch(vec![("g", strs(&["a", "b", "c"])), ("v", f64s(&[1.0, 50.0, 3.0]))]),
+                "v",
+                DomainKind::Continuous,
+                0,
+                3,
+            )]
+        }
+
+        fn tick_ordinal_y_only_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new(
+                "tick: OrdinalYOnly y categorical",
+                spec(serde_json::json!({"mark": "tick", "encoding": {"y": band_abc("g")}})),
+                batch(vec![("g", strs(&["a", "b", "c", "d", "e"]))]),
+                "g",
+                DomainKind::Categorical,
+                2,
+                3,
+            )]
+        }
+
+        fn tick_quantitative_y_only_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new("tick: QuantitativeYOnly y continuous", parity_fixture_spec("tick", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7)]
+        }
+
+        fn tick_ordinal_x_quant_y_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new(
+                    "tick: OrdinalXQuantY x categorical",
+                    spec(serde_json::json!({"mark": "tick", "encoding": {"x": band_abc("g"), "y": plain("y")}})),
+                    five_categories("y"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "tick: OrdinalXQuantY y continuous counted",
+                    spec(serde_json::json!({"mark": "tick", "encoding": {"x": plain("g"), "y": linear("y", [0.0, 10.0])}})),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("y", f64s(&[1.0, 2.0, 50.0]))]),
+                    "y",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+            ]
+        }
+
+        fn tick_ordinal_y_quant_x_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new(
+                    "tick: OrdinalYQuantX x continuous counted",
+                    spec(serde_json::json!({"mark": "tick", "encoding": {"y": plain("g"), "x": linear("x", [0.0, 10.0])}})),
+                    batch(vec![("g", strs(&["a", "b", "c"])), ("x", f64s(&[1.0, 2.0, 50.0]))]),
+                    "x",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                ),
+                ParityCase::new(
+                    "tick: OrdinalYQuantX y categorical counted",
+                    spec(serde_json::json!({"mark": "tick", "encoding": {"y": band_abc("g"), "x": plain("x")}})),
+                    five_categories("x"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+            ]
+        }
+
+        fn tick_ordinal_x_only_cases() -> Vec<ParityCase> {
+            vec![ParityCase::new(
+                "tick: OrdinalXOnly x categorical",
+                spec(serde_json::json!({"mark": "tick", "encoding": {"x": band_abc("g")}})),
+                batch(vec![("g", strs(&["a", "b", "c", "d", "e"]))]),
+                "g",
+                DomainKind::Categorical,
+                2,
+                3,
+            )]
+        }
+
+        fn tick_quantitative_x_rug_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("tick: QuantitativeXRug x continuous", parity_fixture_spec("tick", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                // The rug reads `x` alone, so a bound `y` outside its own
+                // domain is never read for placement.
+                ParityCase::new(
+                    "tick: QuantitativeXRug y not counted",
+                    spec(serde_json::json!({"mark": "tick", "encoding": {"x": plain("x"), "y": linear("y", [0.0, 10.0])}})),
+                    batch(vec![("x", f64s(&[1.0, 2.0, 3.0])), ("y", f64s(&[1.0, 50.0, 3.0]))]),
+                    "y",
+                    DomainKind::Continuous,
+                    0,
+                    3,
+                ),
+            ]
+        }
+
+        fn rect_quantitative_range_cases() -> Vec<ParityCase> {
+            [
+                ("rect: QuantitativeRange x continuous", "x"),
+                ("rect: QuantitativeRange y continuous", "y"),
+                ("rect: QuantitativeRange x2 continuous", "x2"),
+                ("rect: QuantitativeRange y2 continuous", "y2"),
+            ]
+            .into_iter()
+            .map(|(label, restricted)| {
+                ParityCase::new(label, parity_fixture_spec("rect", &["x", "y", "x2", "y2"], restricted), parity_fixture_batch(), restricted, DomainKind::Continuous, 3, 7)
+            })
+            .collect()
+        }
+
+        fn rect_band_range_x_cases() -> Vec<ParityCase> {
+            let span = |y: [f64; 3], y2: [f64; 3]| batch(vec![("g", strs(&["a", "b", "c"])), ("y", f64s(&y)), ("y2", f64s(&y2))]);
+            let continuous_y = || spec(serde_json::json!({"mark": "rect", "encoding": {"x": plain("g"), "y": linear("y", [0.0, 10.0]), "y2": plain("y2")}}));
+            vec![
+                ParityCase::new(
+                    "rect: BandRange(X) x categorical",
+                    spec(serde_json::json!({"mark": "rect", "encoding": {"x": band_abc("g"), "y": plain("y"), "y2": plain("y")}})),
+                    five_categories("y"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new("rect: BandRange(X) y continuous", continuous_y(), span([1.0, 50.0, 3.0], [2.0, 2.0, 2.0]), "y", DomainKind::Continuous, 1, 2),
+                ParityCase::new("rect: BandRange(X) y2 continuous", continuous_y(), span([1.0, 1.0, 1.0], [2.0, 50.0, 2.0]), "y2", DomainKind::Continuous, 1, 2),
+            ]
+        }
+
+        fn rect_band_range_y_cases() -> Vec<ParityCase> {
+            let span = |x: [f64; 3], x2: [f64; 3]| batch(vec![("g", strs(&["a", "b", "c"])), ("x", f64s(&x)), ("x2", f64s(&x2))]);
+            let continuous_x = || spec(serde_json::json!({"mark": "rect", "encoding": {"y": plain("g"), "x": linear("x", [0.0, 10.0]), "x2": plain("x2")}}));
+            vec![
+                ParityCase::new(
+                    "rect: BandRange(Y) y categorical",
+                    spec(serde_json::json!({"mark": "rect", "encoding": {"y": band_abc("g"), "x": plain("x"), "x2": plain("x")}})),
+                    five_categories("x"),
+                    "g",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new("rect: BandRange(Y) x continuous", continuous_x(), span([1.0, 50.0, 3.0], [2.0, 2.0, 2.0]), "x", DomainKind::Continuous, 1, 2),
+                ParityCase::new("rect: BandRange(Y) x2 continuous", continuous_x(), span([1.0, 1.0, 1.0], [2.0, 50.0, 2.0]), "x2", DomainKind::Continuous, 1, 2),
+            ]
+        }
+
+        fn rect_band_range_none_cases() -> Vec<ParityCase> {
+            // Neither axis ordinal and exactly one of `x2`/`y2` bound: the
+            // rect's own named-empty refusal path, which places and draws
+            // nothing, so a domain on the would-be-ordinal axis is never
+            // counted either.
+            vec![ParityCase::new(
+                "rect: BandRange(None) places nothing",
+                spec(serde_json::json!({"mark": "rect", "encoding": {"x": linear("x", [0.0, 10.0]), "y": plain("y"), "y2": plain("y2")}})),
+                batch(vec![("x", f64s(&[1.0, 2.0, 30.0])), ("y", f64s(&[1.0, 2.0, 3.0])), ("y2", f64s(&[4.0, 5.0, 6.0]))]),
+                "x",
+                DomainKind::Continuous,
+                0,
+                0,
+            )]
+        }
+
+        fn rect_heatmap_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new(
+                    "rect: Heatmap x categorical",
+                    spec(serde_json::json!({"mark": "rect", "encoding": {"x": band_abc("gx"), "y": plain("gy")}})),
+                    batch(vec![("gx", strs(&["a", "b", "c", "d", "e"])), ("gy", strs(&["p", "p", "p", "p", "p"]))]),
+                    "gx",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "rect: Heatmap y categorical",
+                    spec(serde_json::json!({"mark": "rect", "encoding": {"x": plain("gx"), "y": band_abc("gy")}})),
+                    batch(vec![("gx", strs(&["p", "p", "p", "p", "p"])), ("gy", strs(&["a", "b", "c", "d", "e"]))]),
+                    "gy",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+            ]
+        }
+
+        fn polygon_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("polygon: x continuous", parity_fixture_spec("polygon", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("polygon: y continuous", parity_fixture_spec("polygon", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                // A Utf8 `x` read as Category: a domain missing 2 of 5
+                // categories leaves 3, polygon's own minimum, so the ring
+                // still draws.
+                ParityCase::new(
+                    "polygon: x categorical",
+                    spec(serde_json::json!({"mark": "polygon", "encoding": {"x": band_abc("c"), "y": plain("y")}})),
+                    batch(vec![("c", strs(&["a", "b", "c", "d", "e"])), ("y", f64s(&[0.0, 1.0, 2.0, 3.0, 4.0]))]),
+                    "c",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "polygon: statistic, one domain keeps three vertices",
+                    statistic_vertex_spec("polygon", "mark_hex", Some([0.5, 10.0]), None, None),
+                    one_series_rows(&[Some(0.0), Some(3.0), Some(1.0), Some(2.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    3,
+                )
+                .units(4),
+                ParityCase::new(
+                    "polygon: statistic, two domains leave two vertices",
+                    statistic_vertex_spec("polygon", "mark_hex", Some([0.5, 10.0]), Some([-1.0, 2.5]), None),
+                    one_series_rows(&[Some(0.0), Some(1.0), Some(2.0), Some(3.0)]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(4),
+            ]
+        }
+
+        fn ribbon_shared_x_cases() -> Vec<ParityCase> {
+            let (categorical_spec, categorical_rows) = categorical_statistic_spec_and_rows("ribbon", "x", false);
+            vec![
+                ParityCase::new("ribbon: x continuous (shared axis)", parity_fixture_spec("ribbon", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("ribbon: y continuous (lower edge)", parity_fixture_spec("ribbon", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+                ParityCase::new(
+                    "ribbon: y2 continuous (band edge)",
+                    spec(serde_json::json!({"mark": "ribbon", "encoding": {"x": plain("x"), "y": linear("y", [2.0, 8.0]), "y2": plain("y2")}})),
+                    batch(vec![
+                        ("x", f64s(&(0..10).map(|i| i as f64).collect::<Vec<_>>())),
+                        ("y", f64s(&[5.0; 10])),
+                        ("y2", f64s(&(0..10).map(|i| i as f64).collect::<Vec<_>>())),
+                    ]),
+                    "y2",
+                    DomainKind::Continuous,
+                    3,
+                    7,
+                ),
+                ParityCase::new(
+                    "ribbon: x categorical (shared axis)",
+                    spec(serde_json::json!({"mark": "ribbon", "encoding": {"x": band_abc("c"), "y": plain("y"), "y2": plain("y")}})),
+                    batch(vec![("c", strs(&["a", "b", "c", "d", "e"])), ("y", f64s(&[0.0, 1.0, 2.0, 3.0, 4.0]))]),
+                    "c",
+                    DomainKind::Categorical,
+                    2,
+                    3,
+                ),
+                ParityCase::new(
+                    "ribbon: statistic, two edges leave one row",
+                    statistic_band_spec(None, Some([0.5, 3.0])),
+                    statistic_band_rows(&[0.0, 1.0, 1.0], &[1.0, 2.0, 5.0]),
+                    "lo",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(3),
+                ParityCase::new(
+                    "ribbon: statistic, the shared axis cuts",
+                    statistic_band_spec(Some([0.5, 10.0]), None),
+                    statistic_band_rows(&[1.0, 1.0, 1.0], &[2.0, 2.0, 2.0]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    2,
+                )
+                .units(3),
+                ParityCase::new(
+                    "ribbon: statistic, the shared axis and band edge leave one row",
+                    statistic_band_spec(Some([0.5, 10.0]), Some([0.5, 3.0])),
+                    statistic_band_rows(&[1.0, 1.0, 1.0], &[2.0, 2.0, 5.0]),
+                    "v",
+                    DomainKind::Continuous,
+                    1,
+                    0,
+                )
+                .units(3),
+                ParityCase::new("ribbon: statistic, reaches a left-out category", categorical_spec, categorical_rows, "g", DomainKind::Categorical, 1, 3),
+            ]
+        }
+
+        fn ribbon_shared_y_cases() -> Vec<ParityCase> {
+            // An `x`..`x2` band at a shared `y`: the lower edge `x` and the
+            // band edge `x2` share `x`'s scale and domain, each counted on
+            // its own channel while the other stays inside the domain.
+            vec![
+                ParityCase::new(
+                    "ribbon: CurveAxis::Y lower edge x continuous",
+                    spec(serde_json::json!({"mark": "ribbon", "encoding": {"y": plain("y"), "x": linear("x", [2.0, 8.0]), "x2": plain("mid")}})),
+                    parity_fixture_batch(),
+                    "x",
+                    DomainKind::Continuous,
+                    3,
+                    7,
+                ),
+                ParityCase::new(
+                    "ribbon: CurveAxis::Y band edge x2 continuous",
+                    spec(serde_json::json!({"mark": "ribbon", "encoding": {"y": plain("y"), "x": linear("mid", [2.0, 8.0]), "x2": plain("x2")}})),
+                    parity_fixture_batch(),
+                    "x2",
+                    DomainKind::Continuous,
+                    3,
+                    7,
+                ),
+            ]
+        }
+
+        fn segment_cases() -> Vec<ParityCase> {
+            [("segment: x continuous", "x"), ("segment: y continuous", "y"), ("segment: x2 continuous", "x2"), ("segment: y2 continuous", "y2")]
+                .into_iter()
+                .map(|(label, restricted)| {
+                    ParityCase::new(label, parity_fixture_spec("segment", &["x", "y", "x2", "y2"], restricted), parity_fixture_batch(), restricted, DomainKind::Continuous, 3, 7)
+                })
+                .collect()
+        }
+
+        fn label_cases() -> Vec<ParityCase> {
+            [("label: x continuous", "x"), ("label: y continuous", "y")]
+                .into_iter()
+                .map(|(label, restricted)| {
+                    ParityCase::new(label, parity_fixture_spec("label", &["x", "y"], restricted), parity_fixture_batch(), restricted, DomainKind::Continuous, 3, 7)
+                })
+                .collect()
+        }
+
+        fn arc_cases() -> Vec<ParityCase> {
+            // Wedges from the batch's own categories, radius clamped — never
+            // drops on a domain.
+            vec![ParityCase::new(
+                "arc: not counted, all drawn",
+                spec(serde_json::json!({"mark": "arc", "coord": {"kind": "polar"}, "encoding": {"x": plain("g"), "y": linear("v", [0.0, 10.0])}})),
+                batch(vec![("g", strs(&["a", "b", "c"])), ("v", f64s(&[1.0, 50.0, 3.0]))]),
+                "v",
+                DomainKind::Continuous,
+                0,
+                3,
+            )]
+        }
+
+        fn geoshape_cases() -> Vec<ParityCase> {
+            // A geoshape layer carrying an inherited `x` under an explicit
+            // `x` domain never reads a positional scale, so it contributes
+            // nothing to the census — the sibling point layer's own exclusion
+            // is the only count.
+            let geometry: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>, None, None]));
+            vec![ParityCase::new(
+                "geoshape: inherited x not counted",
+                spec(serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": linear("x", [0.0, 10.0]), "y": plain("y")},
+                    "layers": [
+                        {"mark": "point", "encoding": {"x": plain("x"), "y": plain("y")}},
+                        {"mark": "geoshape", "encoding": {}}
+                    ],
+                })),
+                batch(vec![("x", f64s(&[1.0, 50.0, 3.0])), ("y", f64s(&[1.0, 2.0, 3.0])), ("geometry", geometry)]),
+                "x",
+                DomainKind::Continuous,
+                1,
+                2,
+            )]
+        }
+
+        fn image_url_tiles_cases() -> Vec<ParityCase> {
+            vec![
+                ParityCase::new("image: UrlTiles x continuous", parity_fixture_spec("image", &["x", "y"], "x"), parity_fixture_batch(), "x", DomainKind::Continuous, 3, 7),
+                ParityCase::new("image: UrlTiles y continuous", parity_fixture_spec("image", &["x", "y"], "y"), parity_fixture_batch(), "y", DomainKind::Continuous, 3, 7),
+            ]
+        }
+
+        /// The user's 10x10 grid (`x`, `y` in 0..9) a raster bins.
+        fn raster_grid() -> RecordBatch {
+            batch(vec![
+                ("x", f64s(&(0..100).map(|i| (i % 10) as f64).collect::<Vec<_>>())),
+                ("y", f64s(&(0..100).map(|i| (i / 10) as f64).collect::<Vec<_>>())),
+            ])
+        }
+
+        /// `mark_raster().encode(x='x', y='y')` as its lowering builds it: a
+        /// `raster` statistic behind a statistics marker, drawn by one
+        /// image layer reading its output, which binds the user's `x` and
+        /// `y` (columns the raster output does not carry), under `coord`.
+        fn raster_spec(coord: serde_json::Value) -> ChartSpec {
+            spec(serde_json::json!({
+                "mark": "point",
+                "encoding": {"x": plain("x"), "y": plain("y")},
+                "coord": coord,
+                "transforms": [
+                    statistics_marker(),
+                    {"type": "raster", "x": "x", "y": "y", "aggregate": "count", "resolution": "screen", "log_scale": true, "name": "raster"},
+                ],
+                "layers": [{"mark": "image", "encoding": {"x": plain("x"), "y": plain("y")}, "data_source": "raster", "name": "image", "entry": "mark_raster"}],
+            }))
+        }
+
+        /// The coord `xlim`/`ylim` write: a Cartesian coord with `axis`'s
+        /// explicit domain.
+        fn limited(axis: &str, domain: [f64; 2]) -> serde_json::Value {
+            let mut coord = serde_json::json!({"kind": "cartesian", "expand": true, "clip": true});
+            coord[format!("{axis}_domain")] = serde_json::json!(domain);
+            coord
+        }
+
+        fn image_raster_cases() -> Vec<ParityCase> {
+            // The raster is one mark: past the domain on either axis it is not
+            // drawn (1 counted, in its entry's voice), inside it it draws.
+            vec![
+                ParityCase::new("image: Raster past an explicit x domain", raster_spec(limited("x", [20.0, 80.0])), raster_grid(), "x", DomainKind::Continuous, 1, 0),
+                ParityCase::new("image: Raster inside an explicit x domain", raster_spec(limited("x", [-1.0, 11.0])), raster_grid(), "x", DomainKind::Continuous, 0, 1),
+                ParityCase::new("image: Raster past an explicit y domain", raster_spec(limited("y", [20.0, 80.0])), raster_grid(), "y", DomainKind::Continuous, 1, 0),
+                ParityCase::new("image: Raster inside an explicit y domain", raster_spec(limited("y", [-1.0, 11.0])), raster_grid(), "y", DomainKind::Continuous, 0, 1),
+            ]
+        }
+
+        fn image_no_data_cases() -> Vec<ParityCase> {
+            // A bare `mark_image(x=, y=)` with neither a `url` channel nor
+            // Raster-transform columns, at 1 row and at 3 rows.
+            [1usize, 3]
+                .into_iter()
+                .map(|n| {
+                    ParityCase::new(
+                        "image: NoData not counted",
+                        spec(serde_json::json!({"mark": "image", "encoding": {"x": plain("x"), "y": plain("y")}})),
+                        batch(vec![("x", f64s(&vec![1.0; n])), ("y", f64s(&vec![1.0; n]))]),
+                        "x",
+                        DomainKind::None,
+                        0,
+                        0,
+                    )
+                })
+                .collect()
+        }
+
+        fn image_unplaceable_cases() -> Vec<ParityCase> {
+            // A raster under `CoordPolar`/`CoordGeo` places nothing and
+            // counts nothing.
+            [serde_json::json!({"kind": "polar"}), serde_json::json!({"kind": "geo"})]
+                .into_iter()
+                .map(|coord| ParityCase::new("image: Unplaceable not counted", raster_spec(coord), raster_grid(), "x", DomainKind::None, 0, 0))
+                .collect()
+        }
+    }
 }

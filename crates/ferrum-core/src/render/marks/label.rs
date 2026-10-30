@@ -52,6 +52,17 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
     ]
 }
 
+/// `x` and `y`, always Strict: `label` has no ordinal-axis reading at all
+/// (unlike `point`/`text`/`bar`/`tick`), only `col_as_f64` + `to_pixel_f64`.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let mut out = Vec::new();
+    if let Some(f) = ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Strict)); }
+    if let Some(f) = ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Strict)); }
+    out
+}
+
 /// Build positioned text label nodes with greedy collision avoidance.
 ///
 /// Each row emits one text label at (x, y) + a per-label (dx, dy) offset.

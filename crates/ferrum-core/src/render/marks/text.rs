@@ -259,13 +259,16 @@ pub(in crate::render) fn glyph_edge_extents(
 pub(crate) struct PolarLabels<'a> {
     theta_channel: PolarThetaChannel,
     theta_field: &'a str,
-    angle: LabelAngle,
+    pub(crate) angle: LabelAngle,
     pub(crate) radius_field: Option<&'a str>,
     radius_scale: &'a ScaleKind,
 }
 
-/// How a polar label's theta becomes its angle.
-enum LabelAngle {
+/// How a polar label's theta becomes its angle. `pub(crate)` so a test can
+/// pin which one [`polar_label_placement`] resolved, the way `BarPath`/
+/// `TickMode`/`RectShape` are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelAngle {
     /// The label's own theta value on the theta axis, the angle a point with
     /// that value draws at.
     Value,
@@ -553,6 +556,34 @@ pub(crate) fn reads_color_for_contrast(
 ) -> bool {
     mark == crate::spec::mark::Mark::Text
         && style.and_then(|s| s.fill.as_deref()) == Some(crate::render::draw::CONTRAST_SENTINEL)
+}
+
+/// Which positional channel(s) this text layer places a label by:
+/// [`polar_label_placement`]'s own answer under
+/// `CoordPolar` — the theta channel, by scale kind, for
+/// [`LabelAngle::Value`]; nothing for [`LabelAngle::Wedge`], whose drops are
+/// data-validity (a null category, a non-finite/non-positive value, a
+/// degenerate zero-sweep band), never a positional domain — else `x`/`y` by
+/// scale kind, [`cartesian_anchors`]'s own dispatch.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{channel_read, Placement};
+    if let Some(placement) = polar_label_placement(ctx) {
+        return match placement.angle {
+            LabelAngle::Value => {
+                let scale = match placement.theta_channel {
+                    PolarThetaChannel::X => &ctx.scales.x,
+                    PolarThetaChannel::Y => &ctx.scales.y,
+                };
+                let channel = match placement.theta_channel {
+                    PolarThetaChannel::X => crate::spec::layer::PositionalChannel::X,
+                    PolarThetaChannel::Y => crate::spec::layer::PositionalChannel::Y,
+                };
+                vec![Placement::new(channel, placement.theta_field, channel_read(scale))]
+            }
+            LabelAngle::Wedge { .. } => Vec::new(),
+        };
+    }
+    crate::render::draw::xy_by_scale_kind(ctx)
 }
 
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {

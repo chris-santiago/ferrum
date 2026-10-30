@@ -1018,7 +1018,11 @@ def _heatmap_build(
             _Layer(
                 name="label",
                 mark="text",
-                encoding={"x": "column", "y": id_col, "text": Text("value", format=fmt)},
+                encoding={
+                    "x": X("column", title=x_title),
+                    "y": Y(id_col, title=y_title),
+                    "text": Text("value", format=fmt),
+                },
                 contrast_against=enc["color"],
             )
         ]

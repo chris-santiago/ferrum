@@ -71,10 +71,61 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     Ok(build_geometry(ctx, &color_vals))
 }
 
+/// `build_geometry`'s six modes (this module's own doc table), named so a
+/// caller besides the builder — [`placements`] — can ask which one a layer
+/// takes without re-deriving the condition tree a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TickMode {
+    /// No `x`; `y` ordinal → horizontal crossbars centered on each category band.
+    OrdinalYOnly,
+    /// No `x`; `y` quantitative → y-rug, horizontal ticks at the left axis edge.
+    QuantitativeYOnly,
+    /// `x` ordinal, `y` bound → horizontal tick at the data `y` position (boxplot median).
+    OrdinalXQuantY,
+    /// `y` ordinal, `x` bound, `x` not ordinal → vertical tick at the data `x` position (strip plot).
+    OrdinalYQuantX,
+    /// `x` ordinal, no `y` → vertical crossbars centered on each category band.
+    OrdinalXOnly,
+    /// Every other shape with `x` bound: quantitative-x rug, or a bound `y`
+    /// whose own scale did not resolve ordinal (the rug is then the
+    /// fallthrough even though `y` is bound — `build_geometry`'s own doc on
+    /// this arm explains why `y` is still never read for placement here).
+    QuantitativeXRug,
+}
+
+impl TickMode {
+    /// Mirrors `build_geometry`'s if-chain exactly, in the same order, so the
+    /// two can never drift onto different modes for the same layer. Callers
+    /// reach this only after confirming at least one of `x`/`y` is bound
+    /// (`build_geometry`'s own "no x and no y" early return, right before its
+    /// `match` on this); `placements` makes the same check itself.
+    pub(crate) fn of(ctx: &DrawCtx) -> Self {
+        let spec = ctx.spec;
+        if x_field(ctx, spec).is_none() {
+            if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
+                return Self::OrdinalYOnly;
+            }
+            return Self::QuantitativeYOnly;
+        }
+        if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
+            if y_field(ctx, spec).is_some() {
+                return Self::OrdinalXQuantY;
+            }
+            return Self::OrdinalXOnly;
+        }
+        if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_some() {
+            return Self::OrdinalYQuantX;
+        }
+        Self::QuantitativeXRug
+    }
+}
+
 /// The six-mode geometry dispatch, unchanged in shape from before cycle 3 —
 /// split out of `build` purely so the one fallible operation (the per-row
 /// color read) resolves once, up front, without threading a `Result` through
-/// every one of this function's ~10 early-return sites.
+/// every one of this function's ~10 early-return sites. Dispatches on
+/// [`TickMode::of`] rather than re-deriving the condition tree inline, so
+/// this and [`placements`] read one answer.
 fn build_geometry(
     ctx: &DrawCtx,
     color_vals: &Option<Vec<Option<Color>>>,
@@ -150,88 +201,91 @@ fn build_geometry(
     // All modes use the accumulator pattern: push each emitted node with its
     // source row index, finalize, then build metadata for kept indices only
     // (#6 defect class fix — metadata aligned to nodes, not all rows).
-    let xf_opt = x_field(ctx, spec);
+    //
+    // No x and no y: return empty, before either this or `placements` asks
+    // `TickMode::of`, which answers only once at least one is bound.
+    if x_field(ctx, spec).is_none() && y_field(ctx, spec).is_none() {
+        return empty();
+    }
 
-    // No x field: either ordinal-y-only or quantitative-y-rug.
-    if xf_opt.is_none() {
-        if let Some(yf) = y_field(ctx, spec) {
-            // Ordinal y only → horizontal crossbars centered on each category band.
-            if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
-                let ys = match col_as_positional_category_str(ctx.batch, yf) {
-                    Ok(v) => v,
-                    Err(_) => return empty(),
-                };
-                // x is unencoded in this mode, so this crossbar runs along the
-                // CROSS axis and its length is keyed by convention to the
-                // panel-w term. `bandwidth_over(panel.w)` divides that term by
-                // the y scale's own slot count and applies its padding
-                // fraction, so this arm stays on the same domain count and the
-                // same drawn-band fraction as its sibling arms (F-L04-03, spec
-                // §4A) instead of a batch count and no padding. `None` is
-                // unreachable — this branch is gated on an ordinal y.
-                //
-                // GH #66 sub-band clamp NOT applicable here: Dodge offsets
-                // `cy` (the band axis, y), but this tick's length runs along
-                // the CROSS axis (x). Sibling dodge groups land at different
-                // `cy` and never share a row, so this tick length cannot
-                // collide with a neighbouring group regardless of `padding`
-                // — the `n_groups` divisor here is purely a cosmetic
-                // width-pairing convention with the band-axis formulas, not
-                // a collision-prone one.
-                let band_width = match ctx.scales.y.bandwidth_over(panel.w) {
-                    Some(w) => w,
-                    None => {
-                        debug_assert!(false, "this crossbar mode dispatches only for an ordinal y scale, which always reports a bandwidth");
-                        return empty();
-                    }
-                };
-                // band_size is now a FULL-length factor (rect's convention,
-                // GH #85): default 0.6 (formerly a HALF-length factor
-                // defaulting to 0.3) keeps the default rendered length
-                // byte-identical — `tick_full / 2.0` is an exact power-of-2
-                // division, so `tick_half` here is bit-for-bit the old
-                // `tick_half = extent * 0.3` (see the crate's tick.rs test
-                // module for the bit-identity proof).
-                let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
-                let tick_half = tick_full / 2.0;
-                let baseline_x = panel.x;
-                let mut acc = MarkNodes::with_capacity(ys.len());
-                // #230-3: `cy` is this row's own data-mapped y; `x` carries no
-                // data here (crossbar length is a fixed band fraction, drawn
-                // from `bx`), so the x anchor mirrors the drawn geometry's own
-                // (already-symmetric) midpoint — inert for an x-break, since
-                // an x-break never applies to a batch that placed no x data.
-                let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
-                for i in 0..ys.len() {
-                    let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
-                    let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
-                    let cy = cy + y_offsets[i];
-                    let bx = baseline_x + x_offsets[i];
-                    let (x1, x2) = (bx, bx + 2.0 * tick_half);
-                    acc.push(SceneNode::Line {
-                        x1,
-                        y1: cy,
-                        x2,
-                        y2: cy,
-                        style: row_stroke(i),
-                    }, i);
-                    // Same expression the pre-#230-3 bbox model derived from
-                    // this node's own endpoints ((lo+hi)/2.0 over x1/x2), so
-                    // this anchor is bit-identical to it, not merely equal in
-                    // exact arithmetic.
-                    anchors.push(((x1 + x2) / 2.0, cy));
+    match TickMode::of(ctx) {
+        // Ordinal y only → horizontal crossbars centered on each category band.
+        TickMode::OrdinalYOnly => {
+            let Some(yf) = y_field(ctx, spec) else { return empty() };
+            let ys = match col_as_positional_category_str(ctx.batch, yf) {
+                Ok(v) => v,
+                Err(_) => return empty(),
+            };
+            // x is unencoded in this mode, so this crossbar runs along the
+            // CROSS axis and its length is keyed by convention to the
+            // panel-w term. `bandwidth_over(panel.w)` divides that term by
+            // the y scale's own slot count and applies its padding
+            // fraction, so this arm stays on the same domain count and the
+            // same drawn-band fraction as its sibling arms (F-L04-03, spec
+            // §4A) instead of a batch count and no padding. `None` is
+            // unreachable — this branch is gated on an ordinal y.
+            //
+            // GH #66 sub-band clamp NOT applicable here: Dodge offsets
+            // `cy` (the band axis, y), but this tick's length runs along
+            // the CROSS axis (x). Sibling dodge groups land at different
+            // `cy` and never share a row, so this tick length cannot
+            // collide with a neighbouring group regardless of `padding`
+            // — the `n_groups` divisor here is purely a cosmetic
+            // width-pairing convention with the band-axis formulas, not
+            // a collision-prone one.
+            let band_width = match ctx.scales.y.bandwidth_over(panel.w) {
+                Some(w) => w,
+                None => {
+                    debug_assert!(false, "this crossbar mode dispatches only for an ordinal y scale, which always reports a bandwidth");
+                    return empty();
                 }
-                let (nodes, data_indices) = acc.finalize();
-                return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-                    .with_glyph_anchors(anchors);
+            };
+            // band_size is a FULL-length factor (rect's convention), default
+            // 0.6: `tick_full / 2.0` is an exact power-of-2 division, so
+            // `tick_half` here is bit-for-bit `extent * 0.3` (see the
+            // crate's tick.rs test module for the bit-identity proof).
+            let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+            let tick_half = tick_full / 2.0;
+            let baseline_x = panel.x;
+            let mut acc = MarkNodes::with_capacity(ys.len());
+            // #230-3: `cy` is this row's own data-mapped y; `x` carries no
+            // data here (crossbar length is a fixed band fraction, drawn
+            // from `bx`), so the x anchor mirrors the drawn geometry's own
+            // (already-symmetric) midpoint — inert for an x-break, since
+            // an x-break never applies to a batch that placed no x data.
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
+            for i in 0..ys.len() {
+                let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                let cy = cy + y_offsets[i];
+                let bx = baseline_x + x_offsets[i];
+                let (x1, x2) = (bx, bx + 2.0 * tick_half);
+                acc.push(SceneNode::Line {
+                    x1,
+                    y1: cy,
+                    x2,
+                    y2: cy,
+                    style: row_stroke(i),
+                }, i);
+                // Same expression the pre-#230-3 bbox model derived from
+                // this node's own endpoints ((lo+hi)/2.0 over x1/x2), so
+                // this anchor is bit-identical to it, not merely equal in
+                // exact arithmetic.
+                anchors.push(((x1 + x2) / 2.0, cy));
             }
+            let (nodes, data_indices) = acc.finalize();
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
+        }
 
-            // Quantitative y only → y-rug: horizontal ticks at left axis edge.
-            // This branch is reached only when x is entirely unencoded
-            // (`xf_opt.is_none()`, checked above), so it is unconditionally
-            // the true rug shape — safe to scale by `band_size` via
-            // `rug_tick_len` (cross extent = panel width, since these
-            // horizontal ticks run perpendicular to the y data axis).
+        // Quantitative y only → y-rug: horizontal ticks at left axis edge.
+        // This mode is reached only when x is entirely unencoded
+        // (`TickMode::of`'s first check), so it is unconditionally
+        // the true rug shape — safe to scale by `band_size` via
+        // `rug_tick_len` (cross extent = panel width, since these
+        // horizontal ticks run perpendicular to the y data axis).
+        TickMode::QuantitativeYOnly => {
+            let Some(yf) = y_field(ctx, spec) else { return empty() };
             let tick_len = rug_tick_len(ctx, panel.w);
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
@@ -261,22 +315,14 @@ fn build_geometry(
                 anchors.push(((x1 + x2) / 2.0, py));
             }
             let (nodes, data_indices) = acc.finalize();
-            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-                .with_glyph_anchors(anchors);
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
         }
-        // No x and no y: return empty.
-        return empty();
-    }
 
-    // The `None` case returned above, so this is locally provable — but a
-    // panic in the render path aborts the interpreter instead of raising to
-    // Python, and `let-else` states the same invariant with the same
-    // semantics and no panic site.
-    let Some(xf) = xf_opt else { return empty() };
-
-    // Ordinal x + quantitative y → horizontal tick at data y position.
-    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
-        if let Some(yf) = y_field(ctx, spec) {
+        // Ordinal x + quantitative y → horizontal tick at data y position.
+        TickMode::OrdinalXQuantY => {
+            let Some(xf) = x_field(ctx, spec) else { return empty() };
+            let Some(yf) = y_field(ctx, spec) else { return empty() };
             let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             // Length is the resolved x scale's drawn band × `band_size`
@@ -331,14 +377,14 @@ fn build_geometry(
                 anchors.push((cx, py));
             }
             let (nodes, data_indices) = acc.finalize();
-            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-                .with_glyph_anchors(anchors);
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
         }
-    }
 
-    // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
-    if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
-        if let Some(yf) = y_field(ctx, spec) {
+        // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
+        TickMode::OrdinalYQuantX => {
+            let Some(xf) = x_field(ctx, spec) else { return empty() };
+            let Some(yf) = y_field(ctx, spec) else { return empty() };
             let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             // The y twin of the ordinal-x mode's length (F-L04-03, spec §4A;
@@ -382,136 +428,172 @@ fn build_geometry(
                 anchors.push((px, cy));
             }
             let (nodes, data_indices) = acc.finalize();
-            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-                .with_glyph_anchors(anchors);
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
         }
-    }
 
-    // Ordinal x only (no y field) → vertical crossbars at each category, anchored at panel bottom.
-    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_none() {
-        let xs = match col_as_positional_category_str(ctx.batch, xf) {
-            Ok(v) => v,
-            Err(_) => return empty(),
-        };
-        // y is unencoded in this mode, so this crossbar runs along the CROSS
-        // axis and its length is keyed by convention to the panel-h term;
-        // `bandwidth_over(panel.h)` divides that term by the x scale's own
-        // slot count and applies its padding fraction (see the ordinal-y-only
-        // mode above for the full rationale). `None` is unreachable — this
-        // branch is gated on an ordinal x.
-        //
-        // GH #66 sub-band clamp NOT applicable here: Dodge offsets `cx` (the
-        // band axis, x), but this tick's length runs along the CROSS axis
-        // (y). Sibling dodge groups land at different `cx` and never share a
-        // column, so this tick length cannot collide with a neighbouring
-        // group regardless of `padding` — see the analogous "ordinal y only"
-        // mode above.
-        let band_width = match ctx.scales.x.bandwidth_over(panel.h) {
-            Some(w) => w,
-            None => {
-                debug_assert!(false, "this crossbar mode dispatches only for an ordinal x scale, which always reports a bandwidth");
-                return empty();
+        // Ordinal x only (no y field) → vertical crossbars at each category, anchored at panel bottom.
+        TickMode::OrdinalXOnly => {
+            let Some(xf) = x_field(ctx, spec) else { return empty() };
+            let xs = match col_as_positional_category_str(ctx.batch, xf) {
+                Ok(v) => v,
+                Err(_) => return empty(),
+            };
+            // y is unencoded in this mode, so this crossbar runs along the CROSS
+            // axis and its length is keyed by convention to the panel-h term;
+            // `bandwidth_over(panel.h)` divides that term by the x scale's own
+            // slot count and applies its padding fraction (see the ordinal-y-only
+            // mode above for the full rationale). `None` is unreachable — this
+            // branch is gated on an ordinal x.
+            //
+            // GH #66 sub-band clamp NOT applicable here: Dodge offsets `cx` (the
+            // band axis, x), but this tick's length runs along the CROSS axis
+            // (y). Sibling dodge groups land at different `cx` and never share a
+            // column, so this tick length cannot collide with a neighbouring
+            // group regardless of `padding` — see the analogous "ordinal y only"
+            // mode above.
+            let band_width = match ctx.scales.x.bandwidth_over(panel.h) {
+                Some(w) => w,
+                None => {
+                    debug_assert!(false, "this crossbar mode dispatches only for an ordinal x scale, which always reports a bandwidth");
+                    return empty();
+                }
+            };
+            // band_size is a FULL-length factor (rect's convention), default
+            // 0.6 (see the ordinal-y-only mode's analogous comment above).
+            let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+            let tick_half = tick_full / 2.0;
+            let baseline_y = panel.y + panel.h;
+            let mut acc = MarkNodes::with_capacity(xs.len());
+            // #230-3: `cx` (ordinal, never breaks) is exact; the y anchor mirrors
+            // the crossbar's own (already-symmetric) drawn midpoint — no y data
+            // placed this crossbar, so a y-break has nothing real to anchor on.
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
+            for i in 0..xs.len() {
+                let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+                let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+                let cx = cx + x_offsets[i];
+                let by = baseline_y + y_offsets[i];
+                let (y1, y2) = (by, by - 2.0 * tick_half);
+                acc.push(SceneNode::Line {
+                    x1: cx,
+                    y1,
+                    x2: cx,
+                    y2,
+                    style: row_stroke(i),
+                }, i);
+                // Same expression the pre-#230-3 bbox model derived from this
+                // node's own endpoints, for bit-identity (see the first crossbar
+                // mode above).
+                anchors.push((cx, (y1 + y2) / 2.0));
             }
-        };
-        // band_size is now a FULL-length factor (rect's convention, GH #85);
-        // default 0.6 keeps the default rendered length byte-identical (see
-        // the ordinal-y-only mode's analogous comment above).
-        let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
-        let tick_half = tick_full / 2.0;
-        let baseline_y = panel.y + panel.h;
-        let mut acc = MarkNodes::with_capacity(xs.len());
-        // #230-3: `cx` (ordinal, never breaks) is exact; the y anchor mirrors
-        // the crossbar's own (already-symmetric) drawn midpoint — no y data
-        // placed this crossbar, so a y-break has nothing real to anchor on.
-        let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
-        for i in 0..xs.len() {
-            let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
-            let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
-            let cx = cx + x_offsets[i];
-            let by = baseline_y + y_offsets[i];
-            let (y1, y2) = (by, by - 2.0 * tick_half);
-            acc.push(SceneNode::Line {
-                x1: cx,
-                y1,
-                x2: cx,
-                y2,
-                style: row_stroke(i),
-            }, i);
-            // Same expression the pre-#230-3 bbox model derived from this
-            // node's own endpoints, for bit-identity (see the first crossbar
-            // mode above).
-            anchors.push((cx, (y1 + y2) / 2.0));
+            let (nodes, data_indices) = acc.finalize();
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
         }
-        let (nodes, data_indices) = acc.finalize();
-        return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-            .with_glyph_anchors(anchors);
+
+        // Quantitative x → rug-style vertical tick at panel baseline.
+        //
+        // This is ALSO the fallthrough for any tick whose x resolves to a
+        // quantitative scale even when y is separately encoded — e.g. a
+        // composite tick layer (boxplot cap/median, errorbar cap) whose
+        // "categorical" grouping column happens to resolve to a quantitative
+        // scale (numeric category) instead of ordinal. Those composite
+        // layers set `band_size` on themselves unconditionally, so scaling by
+        // `band_size` here would turn their small fixed-length caps into
+        // panel-height bars on charts where the caller passed no `band_size` at
+        // all. Only the TRUE rug shape — no y field encoded whatsoever — may
+        // have `band_size` scale its length; a tick that reaches here WITH an
+        // encoded y keeps its fixed length unconditionally.
+        //
+        // `y_field(ctx, spec)` reads `ctx.spec.encoding.y`, which — for a
+        // layered tick — is the layer's completed encoding
+        // (`Layer::completed_encoding`), which gives a tick declaring only `x`
+        // no inherited `y` (`Mark::inherited_positional`).
+        // So this check is a property of what the layer ACTUALLY DECLARED, not
+        // of the assembly path that built it: a bare rug layered under a sibling
+        // that supplies `y` (`fm.layer(scatter, mark_tick(band_size=...)
+        // .encode(x=...))`) sees `None` here in both the static composite tree
+        // AND the interactive merged-flat chart, because both routes call
+        // `build_panel_mark_batches`, and a composite tick layer that declares
+        // its OWN `y` (boxplot/errorbar) keeps seeing `Some` in both, for the
+        // same reason. A standalone (non-layered) `mark_tick()` chart has no
+        // inheritance step at all, so its `encoding.y` is trivially its own
+        // declaration already.
+        TickMode::QuantitativeXRug => {
+            let Some(xf) = x_field(ctx, spec) else { return empty() };
+            let is_true_rug = y_field(ctx, spec).is_none();
+            let tick_len = if is_true_rug {
+                rug_tick_len(ctx, panel.h)
+            } else {
+                ctx.theme.sizes.tick_size * 2.0
+            };
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let baseline_y = panel.y + panel.h;
+            let mut acc = MarkNodes::with_capacity(xs.len());
+            // #230-3: `px` is this row's own data-mapped x; the y anchor mirrors the
+            // dash's own (already-symmetric) drawn midpoint (`by` is the baseline
+            // chrome, not data — a y-break has nothing real to anchor a rug on).
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
+            for (i, xopt) in xs.iter().enumerate() {
+                let xv = match xopt { Some(v) if ctx.scales.x.admits_for_pixel(*v) => *v, _ => continue };
+                let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+                let px = px + x_offsets[i];
+                let by = baseline_y + y_offsets[i];
+                let (y1, y2) = (by, by - tick_len);
+                acc.push(SceneNode::Line {
+                    x1: px,
+                    y1,
+                    x2: px,
+                    y2,
+                    style: row_stroke(i),
+                }, i);
+                // Same expression the pre-#230-3 bbox model derived from this node's
+                // own endpoints, for bit-identity (see the first crossbar mode above).
+                anchors.push((px, (y1 + y2) / 2.0));
+            }
+
+            let (nodes, data_indices) = acc.finalize();
+
+            MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors)
+        }
     }
+}
 
-    // Quantitative x → rug-style vertical tick at panel baseline.
-    //
-    // This is ALSO the fallthrough for any tick whose x resolves to a
-    // quantitative scale even when y is separately encoded — e.g. a
-    // composite tick layer (boxplot cap/median, errorbar cap) whose
-    // "categorical" grouping column happens to resolve to a quantitative
-    // scale (numeric category) instead of ordinal. That numeric-category
-    // dispatch is a pre-existing sibling defect (tracked separately, not
-    // this task's scope) and this fix must not amplify it: those composite
-    // layers set `band_size` on themselves unconditionally, so scaling by
-    // `band_size` here would turn their small fixed-length caps into
-    // panel-height bars on charts where the caller passed no `band_size` at
-    // all. Only the TRUE rug shape — no y field encoded whatsoever — may
-    // have `band_size` scale its length; a tick that reaches here WITH an
-    // encoded y keeps the exact pre-fix fixed length unconditionally.
-    //
-    // `y_field(ctx, spec)` reads `ctx.spec.encoding.y`, which — for a
-    // layered tick — is the layer's completed encoding
-    // (`Layer::completed_encoding`), which gives a tick declaring only `x`
-    // no inherited `y` (`Mark::inherited_positional`).
-    // So this check is a property of what the layer ACTUALLY DECLARED, not
-    // of the assembly path that built it: a bare rug layered under a sibling
-    // that supplies `y` (`fm.layer(scatter, mark_tick(band_size=...)
-    // .encode(x=...))`) sees `None` here in both the static composite tree
-    // AND the interactive merged-flat chart, because both routes call
-    // `build_panel_mark_batches`, and a composite tick layer that declares
-    // its OWN `y` (boxplot/errorbar) keeps seeing `Some` in both, for the
-    // same reason. A standalone (non-layered) `mark_tick()` chart has no
-    // inheritance step at all, so its `encoding.y` is trivially its own
-    // declaration already.
-    let is_true_rug = y_field(ctx, spec).is_none();
-    let tick_len = if is_true_rug {
-        rug_tick_len(ctx, panel.h)
-    } else {
-        ctx.theme.sizes.tick_size * 2.0
-    };
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-    let baseline_y = panel.y + panel.h;
-    let mut acc = MarkNodes::with_capacity(xs.len());
-    // #230-3: `px` is this row's own data-mapped x; the y anchor mirrors the
-    // dash's own (already-symmetric) drawn midpoint (`by` is the baseline
-    // chrome, not data — a y-break has nothing real to anchor a rug on).
-    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
-    for (i, xopt) in xs.iter().enumerate() {
-        let xv = match xopt { Some(v) if ctx.scales.x.admits_for_pixel(*v) => *v, _ => continue };
-        let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-        let px = px + x_offsets[i];
-        let by = baseline_y + y_offsets[i];
-        let (y1, y2) = (by, by - tick_len);
-        acc.push(SceneNode::Line {
-            x1: px,
-            y1,
-            x2: px,
-            y2,
-            style: row_stroke(i),
-        }, i);
-        // Same expression the pre-#230-3 bbox model derived from this node's
-        // own endpoints, for bit-identity (see the first crossbar mode above).
-        anchors.push((px, (y1 + y2) / 2.0));
+/// Which positional channels this layer's `TickMode` places a row by, and
+/// how: Category (an ordinal scale, read through `to_pixel_str`) or Strict
+/// (continuous, `to_pixel_f64` directly — tick never honors `clip=false`,
+/// matching `build_geometry`'s own direct scale calls). The quantitative-x
+/// rug mode places only `x`, even when `y` is bound — `TickMode`'s own doc
+/// on that variant is why.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<super::super::draw::Placement<'a>> {
+    use crate::spec::layer::PositionalChannel;
+    use super::super::draw::{channel_read, Placement};
+    let spec = ctx.spec;
+    if x_field(ctx, spec).is_none() && y_field(ctx, spec).is_none() {
+        return Vec::new();
     }
-
-    let (nodes, data_indices) = acc.finalize();
-
-    MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
-        .with_glyph_anchors(anchors)
+    match TickMode::of(ctx) {
+        TickMode::OrdinalYOnly | TickMode::QuantitativeYOnly => {
+            match y_field(ctx, spec) {
+                Some(f) => vec![Placement::new(PositionalChannel::Y, f, channel_read(&ctx.scales.y))],
+                None => Vec::new(),
+            }
+        }
+        TickMode::OrdinalXQuantY | TickMode::OrdinalYQuantX => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, channel_read(&ctx.scales.x))); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, channel_read(&ctx.scales.y))); }
+            out
+        }
+        TickMode::OrdinalXOnly | TickMode::QuantitativeXRug => {
+            match x_field(ctx, spec) {
+                Some(f) => vec![Placement::new(PositionalChannel::X, f, channel_read(&ctx.scales.x))],
+                None => Vec::new(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

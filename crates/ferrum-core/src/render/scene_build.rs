@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::{layer_entry, public_layer, user_facing_channel, PreparedInputs};
+use super::prepare::{layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -221,6 +221,14 @@ pub fn build_scene(
     // independent-facet and secondary-y-slot alike) and flushed once below,
     // beside `break_ledger`.
     let mut text_overrun_ledger = TextOverrunLedger::default();
+
+    // One render-wide tally of rows an explicit positional domain leaves
+    // out, summed per `(channel, field, categorical)` across
+    // every layer and panel's own draw-time census
+    // (`draw::domain_left_out_counts`, noted at the per-layer draw site in
+    // `build_panel_mark_batches`) and flushed once below, beside
+    // `text_overrun_ledger`.
+    let mut domain_left_out_ledger = DomainLeftOutLedger::default();
 
     // Each layer's batch across the whole chart, before any facet filter: the
     // base data, or the named `data_source` output it reads. A panel's layer
@@ -515,8 +523,15 @@ pub fn build_scene(
         );
 
         // Per-layer mark batches (MOD-09).
-        let mut mark_batches =
-            build_panel_mark_batches(&panel_resolve_ctx, &layer_batches, &layer_styles, &chart_swarms, &scales, panel, warnings)?;
+        let mut mark_batches = build_panel_mark_batches(
+            &panel_resolve_ctx,
+            &layer_batches,
+            &layer_styles,
+            &chart_swarms,
+            &scales,
+            panel,
+            &mut PanelMarkOutputs { warnings, domain_left_out_ledger: &mut domain_left_out_ledger },
+        )?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -767,6 +782,9 @@ pub fn build_scene(
     // One `TextInkPastFrame` per channel, now that every panel and every
     // secondary y slot has noted its own overrun rows.
     text_overrun_ledger.flush(prep.coord_flipped, warnings);
+    // One `DomainRowsLeftOut` per channel, field, voice and outcome, once
+    // every layer in every panel has noted its own left-out rows.
+    domain_left_out_ledger.flush(warnings);
 
     // `#120`(7) + N2: once at least one panel actually resolved its own
     // scales, the panel-real pass has already re-reported every
@@ -1815,6 +1833,15 @@ fn resolve_layer_styles(
         .collect()
 }
 
+/// The two render-wide outputs `build_panel_mark_batches` writes for every
+/// layer of one panel: the chart's warnings list and this render's
+/// explicit-domain-left-out tally. Both are write-only here and owned by
+/// the caller across the whole panel loop.
+struct PanelMarkOutputs<'a> {
+    warnings: &'a mut Vec<RenderWarning>,
+    domain_left_out_ledger: &'a mut DomainLeftOutLedger,
+}
+
 /// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
 /// mark-batch loop). Pure extraction — same position adjustment, same synthetic
 /// per-layer ChartSpec, same polar node transform, same alignment guard, same
@@ -1831,8 +1858,9 @@ fn build_panel_mark_batches(
     swarms: &[Option<crate::transform::swarm::SwarmPacking<'_>>],
     scales: &scale_resolve::ResolvedScales,
     panel: &crate::layout::PanelLayout,
-    warnings: &mut Vec<RenderWarning>,
+    outputs: &mut PanelMarkOutputs,
 ) -> Result<Vec<MarkBatch>, RenderError> {
+    let PanelMarkOutputs { warnings, domain_left_out_ledger } = outputs;
     let &PanelResolveCtx { spec, prep, theme, .. } = ctx;
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -2086,6 +2114,24 @@ fn build_panel_mark_batches(
         )
         .map_err(name_layer)?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped).map_err(name_layer)?;
+
+        // Tally this layer's own rows an explicit positional domain leaves
+        // out, before the builder below draws the rest. `statistic_voice`
+        // is `Some` only for a layer whose rows a statistic produced, so a
+        // histogram's bar layer speaks as its entry and counts marks, not
+        // rows. Each left-out channel is un-flipped to the one THIS
+        // layer's own caller wrote (`layer_flipped`, not the chart's
+        // `prep.coord_flipped`, so a per-layer `CoordFlip` or a composite's
+        // mixed-flip leaves never misname a contributor) before it is
+        // noted per panel (this function runs once per panel), summed into
+        // the render-wide ledger flushed once after the whole panel loop.
+        let statistic_voice = reads_statistic_output(layer, &prep.transform_lineages)
+            .then(|| draw::StatisticVoice { entry: entry.clone() });
+        for mut left_out in draw::domain_left_out_counts(&ctx, statistic_voice.as_ref()).map_err(name_layer)? {
+            left_out.channel = user_facing_channel(&left_out.channel, layer_flipped).to_string();
+            domain_left_out_ledger.note(left_out);
+        }
+
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
         // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
@@ -3349,6 +3395,61 @@ impl TextOverrunLedger {
                 });
             }
         }
+    }
+}
+
+/// Per-render tally of rows an explicit positional domain leaves out (spec
+/// §4.2), noted at the per-layer draw site
+/// (`draw::domain_left_out_counts`, its channel already un-flipped to the
+/// one the layer's own caller wrote) and flushed once after the panel loop,
+/// beside [`TextOverrunLedger::flush`]: at most one
+/// [`RenderWarning::DomainRowsLeftOut`] per channel, field, voice and
+/// outcome, never one per layer or panel. A composite sums its leaves'
+/// warnings through the same ledger (`note_warning`).
+///
+/// Unlike [`TextOverrunLedger`], there is no shared-vs-own split: a layer's
+/// own rows are its own at every panel it draws in, so every note is a plain
+/// sum (`draw::domain_left_out_counts` already counts only the rows THIS
+/// panel's own batch left out). A layer repeated in every facet panel (no
+/// facet field in its frame) draws the same rows again in every panel and so
+/// is summed again in every panel — deliberately: each panel leaves out its
+/// own copy, as ggplot2 counts a replicated layer.
+#[derive(Default)]
+pub(super) struct DomainLeftOutLedger {
+    entries: Vec<draw::DomainLeftOut>,
+}
+
+impl DomainLeftOutLedger {
+    /// Fold one census tally into the running sum of the entry reporting
+    /// the same channel, field, voice and outcome
+    /// ([`draw::DomainLeftOut::same_report`]), in first-seen order (so
+    /// `flush`'s output order is stable across runs of the same chart).
+    /// `channel` is already the caller's own written channel, so two
+    /// contributors merge exactly when they name the same channel the same
+    /// way, and a mark skipped entirely never merges with one drawn cut.
+    pub(super) fn note(&mut self, left_out: draw::DomainLeftOut) {
+        match self.entries.iter_mut().find(|e| e.same_report(&left_out)) {
+            Some(entry) => entry.rows += left_out.rows,
+            None => self.entries.push(left_out),
+        }
+    }
+
+    /// Fold `warning` in when it is a [`RenderWarning::DomainRowsLeftOut`],
+    /// returning whether it was.
+    pub(super) fn note_warning(&mut self, warning: &RenderWarning) -> bool {
+        match draw::DomainLeftOut::from_warning(warning) {
+            Some(left_out) => {
+                self.note(left_out);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Push one [`RenderWarning::DomainRowsLeftOut`] per entry whose summed
+    /// count is non-empty.
+    pub(super) fn flush(self, warnings: &mut Vec<RenderWarning>) {
+        warnings.extend(self.entries.into_iter().filter(|e| e.rows > 0).map(RenderWarning::from));
     }
 }
 

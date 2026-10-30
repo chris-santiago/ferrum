@@ -153,6 +153,8 @@ def desugar_boxplot(
     x_type: str | None = None,
     y_type: str | None = None,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Box-plot composite mark desugar.
@@ -234,6 +236,11 @@ def desugar_boxplot(
         each one the categorical axis and hue do not already name, so each
         group gets its own box and its rows carry the field the layers
         inherit from the chart.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. Every layer's binding on
+        that channel carries it in place of the field name, so the layers
+        name the axis the chart shows.
 
     Returns
     -------
@@ -269,6 +276,8 @@ def desugar_boxplot(
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
+    cat_title = _y_title if horizontal else _x_title
+    val_title = _x_title if horizontal else _y_title
     # Only split by hue when color_field is a distinct column from the
     # categorical axis. When color encodes the same field as cat (e.g.
     # color="cat:N"), adding it to groupby would create a duplicate entry
@@ -321,7 +330,12 @@ def desugar_boxplot(
         channel=Y if horizontal else X,
         declared_type=y_type if horizontal else x_type,
         sort=cat_sort,
+        title=cat_title,
     )
+    # The value axis's name on every layer: the caller's declared title,
+    # else their field. The outlier layer reads the caller's own column, so
+    # it needs a title only when one was declared.
+    value_title = val_title or val
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of any of these columns raises here instead of
     # silently reading a stale name.
@@ -352,35 +366,35 @@ def desugar_boxplot(
         _Layer(
             name="whisker",
             mark="rule",
-            encoding=enc(_box_cols["lower_whisker"], _box_cols["upper_whisker"], title=val),
+            encoding=enc(_box_cols["lower_whisker"], _box_cols["upper_whisker"], title=value_title),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="box",
         ),
         _Layer(
             name="lower_cap",
             mark="tick",
-            encoding=enc(_box_cols["lower_whisker"]),
+            encoding=enc(_box_cols["lower_whisker"], title=value_title),
             mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
             name="upper_cap",
             mark="tick",
-            encoding=enc(_box_cols["upper_whisker"]),
+            encoding=enc(_box_cols["upper_whisker"], title=value_title),
             mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
             name="box",
             mark="rect",
-            encoding=enc(_box_cols["q1"], _box_cols["q3"], title=val),
+            encoding=enc(_box_cols["q1"], _box_cols["q3"], title=value_title),
             mark_kwargs={"band_size": band},
             data_source="box",
         ),
         _Layer(
             name="median",
             mark="tick",
-            encoding=enc(_box_cols["median"]),
+            encoding=enc(_box_cols["median"], title=value_title),
             # tick's band_size is a full-width factor (same convention as
             # rect's), so this literally spans the box's width.
             mark_kwargs={"band_size": band, "stroke": "theme:label", "stroke_width": 2},
@@ -392,7 +406,7 @@ def desugar_boxplot(
             _Layer(
                 name="outlier",
                 mark="point",
-                encoding=enc(val),
+                encoding=enc(val, title=val_title),
                 mark_kwargs={"filled": False},
                 data_source="outliers",
             )
@@ -427,6 +441,8 @@ def desugar_errorbar(
     x_sort: Any = None,
     x_type: str | None = None,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-bar composite mark desugar.
@@ -496,6 +512,11 @@ def desugar_errorbar(
         categorical axis and hue do not already name, so each group gets
         its own bar and its rows carry the field the layers inherit from
         the chart, as ``mark_boxplot`` groups its boxes.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. Every layer's binding on
+        that channel carries it in place of the field name, so the layers
+        name the axis the chart shows.
 
     Returns
     -------
@@ -528,14 +549,17 @@ def desugar_errorbar(
     # endpoint `tick` layers below size their cap against the category band,
     # which a numeric category column's inferred Quantitative scale gives them
     # no way to do -- they render as 8px stubs instead.
-    x_enc_val = typed_positional_channel(x_field, channel=X, declared_type=x_type, sort=x_sort)
+    x_enc_val = typed_positional_channel(
+        x_field, channel=X, declared_type=x_type, sort=x_sort, title=_x_title
+    )
+    y_title = _y_title or y_field
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
     _err_cols = registry_output_columns("error_extent", ["lower", "upper"])
 
     def _enc(y_col: str, y2_col: str | None = None) -> dict:
-        d: dict = {"x": x_enc_val, "y": y_col}
+        d: dict = {"x": x_enc_val, "y": Y(y_col, title=y_title)}
         if y2_col is not None:
             d["y2"] = y2_col
         if split_hue:
@@ -600,6 +624,8 @@ def desugar_errorband(
     color_sort: Any = None,
     x_type: str | None = None,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
@@ -664,6 +690,11 @@ def desugar_errorband(
         composite-mark expansion. ``ErrorExtent`` groups by each one x and
         the hue do not already name, so each group gets its own band and
         its rows carry the field the layers inherit from the chart.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The ribbon's and the
+        border lines' bindings on that channel carry it in place of the
+        field name, so the band names the axis the chart shows.
 
     Returns
     -------
@@ -699,13 +730,15 @@ def desugar_errorband(
     # this mark takes no categorical default. With nothing declared this is
     # the bare `x_field` string the layers used to bind directly.
     x_enc_val = typed_positional_channel(
-        x_field, channel=X, declared_type=x_type, default_type=None
+        x_field, channel=X, declared_type=x_type, default_type=None, title=_x_title
     )
+    # The band and its border lines share one value-axis name.
+    y_title = _y_title or y_field
 
     def _enc_ribbon() -> dict:
         d: dict = {
             "x": x_enc_val,
-            "y": Y(_err_cols["lower"], title=y_field),
+            "y": Y(_err_cols["lower"], title=y_title),
             "y2": _err_cols["upper"],
         }
         if split_hue:
@@ -713,7 +746,7 @@ def desugar_errorband(
         return d
 
     def _enc_border(y_col: str) -> dict:
-        d: dict = {"x": x_enc_val, "y": y_col}
+        d: dict = {"x": x_enc_val, "y": Y(y_col, title=y_title)}
         if split_hue:
             d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
@@ -1126,6 +1159,8 @@ def desugar_boxen(
     boxen_agg_sort: dict | None = None,
     materialized_depth: int | None = None,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Letter-value (boxen) composite mark.
@@ -1148,6 +1183,10 @@ def desugar_boxen(
     ``None`` -- they declared none -- defaults the categorical channel to
     Nominal so a numeric category column bands exactly as its ``Utf8``
     equivalent does (#171).
+
+    ``_x_title``/``_y_title`` (injected by ``_desugar._prep_axis_titles``)
+    carry the ``title=`` the caller declared on the chart-level channel; each
+    replaces the field name this mark otherwise titles that channel with.
 
     LetterValue secondary-output schemas:
         ``lv_depth_K``:  ``[group, lower, upper, level]``
@@ -1224,6 +1263,8 @@ def desugar_boxen(
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
     group = color_field if color_field else cat
+    group_title = (_y_title if horizontal else _x_title) or group
+    value_title = (_x_title if horizontal else _y_title) or val
     # Resolve the sort for the categorical axis.  When horizontal, y is the
     # categorical channel; otherwise x is categorical.
     cat_sort = y_sort if horizontal else x_sort
@@ -1265,22 +1306,23 @@ def desugar_boxen(
     # depth-band rects needs an ordinal scale to size against.
     group_col = depth_cols["group"]
     group_enc_x = typed_positional_channel(
-        group_col, channel=X, declared_type=x_type, sort=cat_sort, title=group
+        group_col, channel=X, declared_type=x_type, sort=cat_sort, title=group_title
     )
     group_enc_y = typed_positional_channel(
-        group_col, channel=Y, declared_type=y_type, sort=cat_sort, title=group
+        group_col, channel=Y, declared_type=y_type, sort=cat_sort, title=group_title
     )
 
     def enc(value_col: str, value2_col: str | None = None) -> dict:
         """This layer's positional encoding: the categorical channel from
-        ``group_enc_x``/``group_enc_y`` (already titled with ``group``) plus
-        the value channel titled with ``val``, the user's original field."""
+        ``group_enc_x``/``group_enc_y`` (already titled with ``group_title``)
+        plus the value channel titled with ``value_title``, the caller's
+        declared title, else their original field."""
         if horizontal:
-            d: dict = {"x": X(value_col, title=val), "y": group_enc_y}
+            d: dict = {"x": X(value_col, title=value_title), "y": group_enc_y}
             if value2_col:
                 d["x2"] = value2_col
         else:
-            d = {"x": group_enc_x, "y": Y(value_col, title=val)}
+            d = {"x": group_enc_x, "y": Y(value_col, title=value_title)}
             if value2_col:
                 d["y2"] = value2_col
         return d

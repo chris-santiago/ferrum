@@ -15663,14 +15663,14 @@ _REGROUP_CONTROLS: dict[str, tuple[Callable[[], Any], tuple[str, str]]] = {
         lambda: _resid() + P(),
         (
             "fd49e8c120af904fad68873e0c1d3eb12d2bde65dcfdea252367c879f4c941d4",
-            "5b315590754e83b5082714a3cb82b5da37b98a8e4b6149611a77b75f7e1cc894",
+            "4da8ed8948135722a0f089a12e5da3a1f7b678fed02660affd81c07049c3463d",
         ),
     ),
     "lmplot+P": (
         lambda: fm.lmplot(df, x="v", y="y") + P(),
         (
             "7947575162b432e08b6c869276319844f89c056c6f928f5cf3d5addc5a0f1144",
-            "5adbe7a9cbb2dee7c2b4650ab68c46a64552bdb2425f4ffaf654272bcb203e43",
+            "1d829d523228086c1f8e271e0f954f6e8df701743ccf794fb6b848cb168be497",
         ),
     ),
     "smooth-tick-pre-attach": (
@@ -15975,22 +15975,22 @@ _ERROR_CONTROLS: dict[str, tuple[Callable[[], fm.Chart], tuple[str, str]]] = {
     "errorbar": (
         lambda: mk("errorbar", x="g", y="y"),
         (
-            "13ab1cb5ea2f7337c3063235468ad2f92df0d3f1e8107345ee49ff295acc127f",
-            "4ff88913bea2466e0c8d6b5384948974f42bb7a7cbd2af3fc2bbbe682a4793bf",
+            "c99631559dec413767c30efe68868c1fdd39a7c4cc9839b585255637a73a297f",
+            "6b6954e6482c6d0c06e31ecfe897f7643f59947caf575f01167b5369fbb2fd95",
         ),
     ),
     "errorbar/detail-equal-to-x": (
         lambda: mk("errorbar", x="g", y="y", detail="g"),
         (
-            "13ab1cb5ea2f7337c3063235468ad2f92df0d3f1e8107345ee49ff295acc127f",
-            "4ff88913bea2466e0c8d6b5384948974f42bb7a7cbd2af3fc2bbbe682a4793bf",
+            "c99631559dec413767c30efe68868c1fdd39a7c4cc9839b585255637a73a297f",
+            "6b6954e6482c6d0c06e31ecfe897f7643f59947caf575f01167b5369fbb2fd95",
         ),
     ),
     "errorbar/color": (
         lambda: mk("errorbar", x="g", y="y", color="c"),
         (
-            "86ffe24333c552b4da76f5d91050f6c1cfedbc11d2d4ce043193fd13e1ccf39b",
-            "5dc64029914fcaacb79f4e94d7e002c85377ec2d1ee9cdf6ff53d9a5ea1dea0a",
+            "b61ca59f90e91c9b4fa52475b7a14f952922d977307be545f82f4e9c3f61548a",
+            "dffa9265804efc4eedbc9740c2241cc2b50171f9696b85a324f29cb2328e76be",
         ),
     ),
     "errorband": (
@@ -16085,7 +16085,7 @@ _LM_CONTROLS: dict[str, tuple[str, str]] = {
     ),
     "robust": (
         "137e9e41ef5e22b0ba446e2f4cbd1f78ade7c9ca499da90f24536752747a428d",
-        "b02e9b72f37c40068ad09f36fcc04a9128932a8ab4b15af105a44df69847319b",
+        "19d8fbaa69ad453943ff792d4c8b75c75fd96e02bc2556bb9c371e8259630acb",
     ),
 }
 

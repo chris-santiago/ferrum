@@ -40,8 +40,10 @@ def desugar_silhouette(
     from ferrum.encoding import X, Y
 
     user_kw = _validate("silhouette", mark_kwargs)
+    # The bars and the reference rule share one x-axis name, bound once.
+    x_title = "silhouette coefficient"
     rect_enc: dict[str, Any] = {
-        "x": X("_silhouette_x_lo", title="silhouette coefficient"),
+        "x": X("_silhouette_x_lo", title=x_title),
         "x2": "_silhouette_x_hi",
         "y": Y("_silhouette_y_lo", title="sample"),
         "y2": "_silhouette_y_hi",
@@ -59,7 +61,7 @@ def desugar_silhouette(
             _Layer(
                 name="reference",
                 mark="rule",
-                encoding={"x": "_ref_zero"},
+                encoding={"x": X("_ref_zero", title=x_title)},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )

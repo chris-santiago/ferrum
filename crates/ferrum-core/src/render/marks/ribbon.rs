@@ -53,7 +53,7 @@ const RIBBON_STEP_SPELLING: StepSpelling = StepSpelling::Vertices;
 /// the unbound `y2` made `build` return empty, so every flipped `mark_ribbon`,
 /// `mark_errorband`, `mark_smooth(ci=)`, `mark_learning_curve`,
 /// `mark_validation_curve` and QQ CI region silently drew nothing.
-fn band_curve_axis(spec: &crate::spec::chart::ChartSpec) -> Option<(&str, CurveAxis)> {
+pub(crate) fn band_curve_axis(spec: &crate::spec::chart::ChartSpec) -> Option<(&str, CurveAxis)> {
     match (spec.encoding.y2.as_ref(), spec.encoding.x2.as_ref()) {
         (Some(e), _) => Some((e.field.as_str(), CurveAxis::X)),
         (None, Some(e)) => Some((e.field.as_str(), CurveAxis::Y)),
@@ -123,46 +123,15 @@ fn resolve_shared_pixels(
     None
 }
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{
-        to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns, PaintChannels,
-    };
-    use ferrum_scene::{MarkBatchKind, PathCmd};
-
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Ribbon);
-
+/// This mark's own series partition: `color` (or a binned color's keys),
+/// `detail` and a categorical `stroke_dash` field, in that grouping key's
+/// own order (a binned color's bin order) — the SAME partition `build`
+/// draws one closed band from per group. Read by [`vertex_frame`] too, so
+/// the census's vertex-unit count and the real render can never group a
+/// statistic layer's rows differently.
+pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
     let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return empty(),
-    };
-    let (band_field, curve_axis) = match band_curve_axis(spec) {
-        Some(v) => v,
-        None => return empty(),
-    };
-    // The lower bound rides the same axis as the band channel; the remaining
-    // positional channel is the coordinate both edges share.
-    let (lower_field, shared_field, value_scale, shared_scale) = match curve_axis {
-        CurveAxis::X => (yf, xf, &ctx.scales.y, &ctx.scales.x),
-        CurveAxis::Y => (xf, yf, &ctx.scales.x, &ctx.scales.y),
-    };
-
-    let lows = match col_as_f64(ctx.batch, lower_field) {
-        Ok(v) => v,
-        Err(_) => return empty(),
-    };
-    let highs = match col_as_f64(ctx.batch, band_field) {
-        Ok(v) => v,
-        Err(_) => return empty(),
-    };
-    let n = lows.len().min(highs.len());
-    let (shared_pixels, shared_is_ordinal) =
-        match resolve_shared_pixels(ctx, shared_scale, shared_field, n) {
-            Some(v) => v,
-            None => return empty(),
-        };
-    let n = n.min(shared_pixels.len());
-
+    let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
     // col_as_ordinal_category_str (not col_as_str), gated on the resolved
     // color scale being category-keyed (Categorical) or absent — mirrors
@@ -202,10 +171,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // bands instead of one merged polygon under a multi-entry dashed legend.
     // `stroke_dash_column_loader` gates the categorical column on a resolved
     // `StrokeDashScale`; a numeric (or absent) `stroke_dash` field yields
-    // `categorical == None`, which skips subdivision entirely — grouping stays
-    // byte-identical to pre-fix for that case (ribbon still does not consume a
-    // numeric or literal-only `stroke_dash`, only the categorical-scale case
-    // this round authorizes).
+    // `categorical == None`, which skips subdivision entirely.
     let dash_cols = stroke_dash_column_loader(ctx);
 
     let grouping = grouping_series_values(ctx);
@@ -214,16 +180,104 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         detail_values.as_ref(),
         dash_cols.categorical.iter().chain(&grouping),
         ctx.scales.color.is_some(),
-        n,
+        n_rows,
     );
     if let Some(binned) = &binned {
         binned.order(&mut groups);
     }
+    groups
+}
+
+/// [`band_curve_axis`]'s shared channel (Category on an `Ordinal` scale,
+/// else `ClipAware` — [`resolve_shared_pixels`]'s own dispatch) and both
+/// value edges, always `ClipAware` (the lower bound and the band field,
+/// both read through `ctx.to_pixel` in [`vertex_pixels`]).
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{clip_aware_or_category, Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    let Some((band_field, curve_axis)) = band_curve_axis(spec) else { return Vec::new() };
+    let (lower_channel, lower_field, band_channel, shared_channel, shared_field, shared_scale): (_, _, _, _, _, &ScaleKind) =
+        match curve_axis {
+            CurveAxis::X => (PositionalChannel::Y, y_field(ctx, spec), PositionalChannel::Y2, PositionalChannel::X, x_field(ctx, spec), &ctx.scales.x),
+            CurveAxis::Y => (PositionalChannel::X, x_field(ctx, spec), PositionalChannel::X2, PositionalChannel::Y, y_field(ctx, spec), &ctx.scales.y),
+        };
+    let mut out = Vec::new();
+    if let Some(f) = shared_field { out.push(Placement::new(shared_channel, f, clip_aware_or_category(shared_scale))); }
+    if let Some(f) = lower_field { out.push(Placement::new(lower_channel, f, PlacementRead::ClipAware)); }
+    out.push(Placement::new(band_channel, band_field, PlacementRead::ClipAware));
+    out
+}
+
+/// A band's per-row vertices in pixels, before position offsets, plus the
+/// axis its edges advance along and whether its shared coordinate is
+/// ordinal (an ordinal shared coordinate keeps its row order instead of
+/// being sorted by pixel).
+pub(crate) struct BandVertices {
+    /// `(shared, lower, band)` per row, `None` for a row `build` cannot
+    /// place: a shared coordinate that does not map to a finite pixel, or a
+    /// lower or band value that is null, non-finite or unmappable.
+    pub(crate) pixels: Vec<Option<(f64, f64, f64)>>,
+    pub(crate) curve_axis: CurveAxis,
+    pub(crate) shared_is_ordinal: bool,
+}
+
+/// This band's [`BandVertices`], `None` when a positional channel or the
+/// band channel is unbound or unreadable, where `build` draws nothing.
+/// Both value edges read through `DrawCtx::to_pixel`, so
+/// `mark_ribbon(clip=False)` keeps its out-of-domain vertices as
+/// `mark_line` does; clipped ribbons (the default) are byte-identical.
+pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<BandVertices> {
+    let spec = ctx.spec;
+    let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
+    let (band_field, curve_axis) = band_curve_axis(spec)?;
+    // The lower bound rides the same axis as the band channel; the remaining
+    // positional channel is the coordinate both edges share.
+    let (lower_field, shared_field, value_scale, shared_scale) = match curve_axis {
+        CurveAxis::X => (yf, xf, &ctx.scales.y, &ctx.scales.x),
+        CurveAxis::Y => (xf, yf, &ctx.scales.x, &ctx.scales.y),
+    };
+    let lows = col_as_f64(ctx.batch, lower_field).ok()?;
+    let highs = col_as_f64(ctx.batch, band_field).ok()?;
+    let n = lows.len().min(highs.len());
+    let (shared_pixels, shared_is_ordinal) = resolve_shared_pixels(ctx, shared_scale, shared_field, n)?;
+    let edge = |v: Option<f64>| v.filter(|v| v.is_finite()).and_then(|v| ctx.to_pixel(value_scale, v));
+    let pixels = (0..n)
+        .map(|i| {
+            let shared = shared_pixels.get(i).copied().flatten().filter(|p| p.is_finite())?;
+            Some((shared, edge(lows[i])?, edge(highs[i])?))
+        })
+        .collect();
+    Some(BandVertices { pixels, curve_axis, shared_is_ordinal })
+}
+
+/// This mark's [`VertexFrame`](crate::render::draw::VertexFrame): its own
+/// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
+/// of 2 vertices per band.
+pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
+    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    let vertices = vertex_pixels(ctx).map(|band| band.pixels);
+    crate::render::draw::VertexFrame::from_vertices(groups, vertices, ctx.batch.num_rows(), 2)
+}
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{
+        to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns, PaintChannels,
+    };
+    use ferrum_scene::{MarkBatchKind, PathCmd};
+
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Ribbon);
+
+    let Some(BandVertices { pixels: vertices, curve_axis, shared_is_ordinal }) = vertex_pixels(ctx) else { return empty() };
+    let groups = series_groups(ctx);
+    // A categorical `stroke_dash` field extends ribbon's series partition
+    // key (spec §4.3) — read again here (beside `series_groups`' own read,
+    // which folds it into the grouping key) for the per-group dash
+    // resolution below.
+    let dash_cols = stroke_dash_column_loader(ctx);
 
     // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-
-    let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
 
     // F-L02-03: ribbon honors `interpolate=` like line and area do. Until
     // batch E it read the setting not at all and always traced straight
@@ -246,19 +300,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let mut acc = MarkNodes::with_capacity(groups.len());
 
     for (key, rows) in groups {
-        let mut indices: Vec<usize> = rows
-            .into_iter()
-            .filter(|&i| {
-                let sp_ok = shared_pixels.get(i).and_then(|v| *v).map(|p| p.is_finite()).unwrap_or(false);
-                let lo_ok = lows.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
-                let hi_ok = highs.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
-                sp_ok && lo_ok && hi_ok
-            })
-            .collect();
+        let mut indices: Vec<usize> = rows.into_iter().filter(|&i| vertices.get(i).is_some_and(Option::is_some)).collect();
         if !shared_is_ordinal {
             indices.sort_by(|&a, &b| {
-                let sa = shared_pixels[a].unwrap_or(f64::NAN);
-                let sb = shared_pixels[b].unwrap_or(f64::NAN);
+                let (sa, sb) = (vertices[a].map_or(f64::NAN, |v| v.0), vertices[b].map_or(f64::NAN, |v| v.0));
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
@@ -266,15 +311,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             continue;
         }
         // Representative source row for this group's single polygon node: the
-        // first kept vertex's row (in render order). Captured before the ring is
-        // built so the node maps to a stable, well-defined row.
+        // first vertex it draws (in render order), as a line's and an area's
+        // node maps to theirs.
         let representative_row = indices[0];
         let pixels: Vec<(f64, f64, f64)> = indices
             .iter()
             .filter_map(|&i| {
-                let shared = shared_pixels.get(i).and_then(|v| *v)?;
-                let lo = ctx.to_pixel(value_scale, lows[i]?)?;
-                let hi = ctx.to_pixel(value_scale, highs[i]?)?;
+                let (shared, lo, hi) = vertices[i]?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);
                 // Each pixel offset belongs to the axis it displaces, so the
@@ -288,9 +331,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 Some((shared + shared_off, lo + value_off, hi + value_off))
             })
             .collect();
-        if pixels.len() < 2 {
-            continue;
-        }
 
         // Build closed path commands: lower edge with the shared coordinate
         // ascending, upper edge descending, Close. Both edges describe the SAME
@@ -308,23 +348,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         trace.extend_reversed(&mut cmds, &bottom_edge);
         cmds.push(PathCmd::Close);
 
-        // Color resolution — mirrors draw().
-        // The fill paint is `Cleared` (T8 quality-review c2) only when the
-        // color-scale lookup missed (or there was no group) AND the constant
-        // fill was cleared by a literal "none"/"transparent" — a scale-resolved
-        // `solid` color is never a user paint-clear. `stroke` is always the
-        // literal constant (never scale-driven for ribbon), so its own
-        // provenance carries through unconditionally.
-        let fill = if has_color_groups {
-            match key
-                .as_deref()
-                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
-            {
-                Some(solid) => ClearablePaint::Paint(solid),
-                None => ctx.mark_style.paint.fill_paint(),
-            }
-        } else {
-            ctx.mark_style.paint.fill_paint()
+        // Color resolution — mirrors draw(). A group's key is `Some` only
+        // when its color column split the rows, so the key alone decides:
+        // its palette color when the color scale maps it, else the constant
+        // fill. The fill paint is `Cleared` only when that lookup missed (or
+        // there was no key) AND the constant fill was cleared by a literal
+        // "none"/"transparent" — a scale-resolved `solid` color is never a
+        // user paint-clear. `stroke` is always the literal constant (never
+        // scale-driven for ribbon), so its own provenance carries through
+        // unconditionally.
+        let fill = match key.as_deref().and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v))) {
+            Some(solid) => ClearablePaint::Paint(solid),
+            None => ctx.mark_style.paint.fill_paint(),
         }
         .map(|c| crate::render::color::with_opacity(c, ctx.mark_style.paint.opacity));
         let stroke = ctx.mark_style.paint.stroke_paint();
@@ -835,6 +870,73 @@ mod tests {
         assert_eq!(vals, vec!["A", "B"],
             "node j tooltip is its group's representative-row label; \
              old full-row code (len 6) mis-indexes / mis-sizes the metadata.");
+    }
+
+    /// A band whose first row's lower edge sits below its explicit `y`
+    /// domain draws from its second row on, and its one node maps to that
+    /// second row, the first vertex it draws, as a line's and an area's
+    /// node maps to theirs. Wrong fix this discriminates against: taking
+    /// the first row with finite values as the representative, which names
+    /// a row the band does not draw.
+    #[test]
+    fn ribbon_representative_row_is_its_first_drawn_vertex() {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "mark": "ribbon",
+            "encoding": {
+                "x": {"field": "x"},
+                "y": {"field": "y", "scale": {"type": "linear", "domain": [1.0, 10.0]}},
+                "y2": {"field": "y2"},
+                "tooltip": {"field": "tip"}
+            }
+        }))
+        .expect("the ribbon spec deserializes");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+            Arc::new(arrow::array::StringArray::from(vec!["r0", "r1", "r2"])),
+        ]).unwrap();
+        let result = render(&spec, &batch);
+        assert_eq!(result.data_indices.as_deref(), Some(&[1usize][..]), "the band's node maps to its first drawn vertex");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips[0].fields[0].value, "r1");
+    }
+
+    /// A categorical color whose column holds a null category: the null
+    /// rows draw their own band, which takes the mark's constant fill, the
+    /// fill a ribbon with no color at all draws.
+    #[test]
+    fn ribbon_null_color_category_band_takes_the_constant_fill() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(StringArray::from(vec![Some("A"), Some("A"), None, None])),
+        ]).unwrap();
+        let fills = |spec: &ChartSpec| -> Vec<Option<ferrum_scene::Color>> {
+            render(spec, &batch).nodes.iter()
+                .filter_map(|n| if let ferrum_scene::SceneNode::Path { style, closed: true, .. } = n { Some(style.fill) } else { None })
+                .collect()
+        };
+        let mut colored = ribbon_spec(true);
+        colored.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        let colored_fills = fills(&colored);
+        assert_eq!(colored_fills.len(), 2, "one band for 'A', one for the null category");
+        let constant_fill = fills(&ribbon_spec(true))[0];
+        assert_eq!(colored_fills[1], constant_fill, "the null category's band takes the constant fill");
     }
 
     /// Bug #6 href channel: href aligns to the representative row with no tooltip

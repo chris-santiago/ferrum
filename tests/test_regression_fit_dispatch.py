@@ -35,6 +35,8 @@ def _request() -> regression._FitRequest:
         y="y",
         x_field="x",
         y_field="y",
+        x_title="x",
+        y_title="y",
         grouping=(),
         grouping_bindings={},
         ci=0.95,

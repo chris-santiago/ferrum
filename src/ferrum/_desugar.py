@@ -54,7 +54,7 @@ from ferrum._layer import (
 )
 from ferrum._encode_lowering import _composite_groupby, _over, _rebind_channel
 from ferrum._layer_transforms import _with_statistics_marker
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding.base import ChannelBase, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, with_grouping
 from ferrum._entry import EntryRefusal, voiced_as
@@ -601,6 +601,12 @@ class _ResolveContext:
     #: Never an inferred type -- see :func:`_prep_cat_axis_types`.
     x_type: str | None
     y_type: str | None
+    #: The title the caller's chart-level x/y channel draws, or ``None`` when
+    #: it declares none or suppresses it
+    #: (:func:`~ferrum.encoding.base.drawn_title`) -- see
+    #: :func:`_prep_axis_titles`.
+    x_title: str | None = None
+    y_title: str | None = None
     #: The chart's composite grouping (spec §6.4): the fields its color,
     #: detail, shape and stroke_dash bind, then its facet fields
     #: (:func:`~ferrum._encode_lowering._composite_groupby`).
@@ -865,6 +871,25 @@ def _prep_cat_axis_types(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "y_type": ctx.y_type}
 
 
+def _prep_axis_titles(ctx: _ResolveContext) -> None:
+    """Inject _x_title and _y_title -- the axis title the CALLER declared.
+
+    The bare field names the desugar receives carry no ``title=``, and these
+    kinds bind their layers to statistic-output columns titled with the
+    caller's field. A declared title stamps those bindings instead, so a
+    layer's warning and its tooltip name the axis the chart shows, which the
+    chart-level channel titles. Only a drawn title is threaded: an undeclared
+    one leaves the desugar's own field title, so an untitled chart lowers
+    unchanged, and a suppressed one (``None``, empty or blank) does too, since
+    the chart-level channel already draws no axis title and the layers keep
+    naming the caller's field.
+    """
+    if ctx.x_title is not None:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "_x_title": ctx.x_title}
+    if ctx.y_title is not None:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "_y_title": ctx.y_title}
+
+
 def _prep_color_field(ctx: _ResolveContext) -> None:
     """Thread the color (hue) field into the desugar so each (x, hue) group gets
     its own split summary, and every emitted layer carries a consistent color
@@ -1123,28 +1148,54 @@ _PENDING_PREP: dict[str, _KindPrep] = {
             _prep_boxen_agg_sort,
             _prep_cat_axis_sorts,
             _prep_cat_axis_types,
+            _prep_axis_titles,
             _prep_boxen_palette_color_conflict,
             _prep_grouping,
             _prep_boxen_ramp_depth,
         ),
     ),
     "boxplot": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+        pre=(
+            _prep_cat_axis_sorts,
+            _prep_cat_axis_types,
+            _prep_axis_titles,
+            _prep_color_field,
+            _prep_grouping,
+        )
     ),
     "errorbar": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+        pre=(
+            _prep_cat_axis_sorts,
+            _prep_cat_axis_types,
+            _prep_axis_titles,
+            _prep_color_field,
+            _prep_grouping,
+        )
     ),
     "violin": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_grouping)
+        pre=(
+            _prep_cat_axis_sorts,
+            _prep_cat_axis_types,
+            _prep_axis_titles,
+            _prep_color_field,
+            _prep_grouping,
+        )
     ),
-    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types)),
-    "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field, _prep_grouping)),
-    "density": _KindPrep(pre=(_prep_groupby_from_color,)),
+    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_axis_titles)),
+    "errorband": _KindPrep(
+        pre=(_prep_cat_axis_types, _prep_axis_titles, _prep_color_field, _prep_grouping)
+    ),
+    "density": _KindPrep(pre=(_prep_groupby_from_color, _prep_axis_titles)),
     "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
-    "hex": _KindPrep(pre=(_prep_hex_field_from_color,)),
-    "smooth": _KindPrep(pre=(_prep_smooth_force_name, _prep_groupby_from_grouping)),
-    "qq": _KindPrep(pre=(_prep_grouping,)),
-    "contour": _KindPrep(pre=(_prep_grouping,)),
+    "hex": _KindPrep(pre=(_prep_hex_field_from_color, _prep_axis_titles)),
+    "smooth": _KindPrep(
+        pre=(_prep_smooth_force_name, _prep_groupby_from_grouping, _prep_axis_titles)
+    ),
+    "qq": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
+    "raster": _KindPrep(pre=(_prep_axis_titles,)),
+    "calibration": _KindPrep(pre=(_prep_axis_titles,)),
+    "cv_scores": _KindPrep(pre=(_prep_axis_titles,)),
+    "contour": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
     "discrimination_threshold": _KindPrep(pre=(_prep_discrimination_threshold_sentinels,)),
 }
 
@@ -1310,6 +1361,10 @@ def _resolve_pending_as(
     # they declared nothing at all.
     x_type = x_enc.option("type") if isinstance(x_enc, ChannelBase) else None
     y_type = y_enc.option("type") if isinstance(y_enc, ChannelBase) else None
+    # The declared axis title, for the same reason: a composite whose layers
+    # read statistic-output columns stamps it on them (_prep_axis_titles).
+    x_title = drawn_title(x_enc)
+    y_title = drawn_title(y_enc)
     # Partition the user kwargs by the desugar signature: declared params are
     # transform kwargs; everything else is a constant mark-style override.
     # ``style_dict`` is validated/normalised through MarkBase so aliases
@@ -1330,6 +1385,8 @@ def _resolve_pending_as(
         color_sort=color_sort,
         x_type=x_type,
         y_type=y_type,
+        x_title=x_title,
+        y_title=y_title,
         grouping=grouping,
         parent=parent,
     )

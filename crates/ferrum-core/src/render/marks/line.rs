@@ -116,70 +116,15 @@ fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), Re
     }
 }
 
-pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{
-        to_scene_fill_stroke, to_scene_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
-        PaintChannels,
-    };
-    use ferrum_scene::MarkBatchKind;
-
-    let conditionals = size_conditionals(ctx.spec);
-    let size_conditional = !conditionals.is_empty();
-    refuse_width_conflict(ctx, size_conditional)?;
-    conditionals.into_iter().try_for_each(refuse_non_positive_branch)?;
-
-    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Line));
-
+/// This mark's own series partition: `color` (or a binned color's keys),
+/// `detail` and a categorical `stroke_dash` field, in that grouping key's
+/// own order (a binned color's bin order) — the SAME partition `build`
+/// draws one polyline per group from. Read by [`vertex_frame`] too, so the
+/// census's vertex-unit count and the real render can never group a
+/// statistic layer's rows differently.
+pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
     let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return empty(),
-    };
-
-    // Batch-E T13 (mark_function completeness): `clip == Some(false)` (the
-    // `mark_function(clip=False)` escape T9 added at the SVG-group level) must
-    // also stop this positional read from dropping an out-of-domain vertex —
-    // otherwise the point never reaches the node list for T9's clip escape to
-    // apply to. `DrawCtx::to_pixel` owns that decision for the whole line
-    // family (line/area/ribbon all accept `clip=`), so the kwarg means one
-    // thing everywhere; see its doc. Clipped marks are byte-identical.
     let n_rows = ctx.batch.num_rows();
-    let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
-        ScaleKind::Ordinal(_) => {
-            let xs_str = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-            xs_str.iter()
-                .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
-                .collect()
-        }
-        _ => {
-            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-            xs.iter()
-                .map(|opt| opt
-                    .filter(|v| ctx.scales.x.admits_for_pixel(*v))
-                    .and_then(|v| ctx.to_pixel(&ctx.scales.x, v)))
-                .collect()
-        }
-    };
-    let ys_pix: Vec<Option<f64>> = match &ctx.scales.y {
-        ScaleKind::Ordinal(_) => {
-            let ys_str = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
-            ys_str.iter()
-                .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
-                .collect()
-        }
-        _ => {
-            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
-            ys.iter()
-                .map(|opt| opt
-                    .filter(|v| ctx.scales.y.admits_for_pixel(*v))
-                    .and_then(|v| ctx.to_pixel(&ctx.scales.y, v)))
-                .collect()
-        }
-    };
-    if xs_pix.len() != n_rows || ys_pix.len() != n_rows {
-        return empty();
-    }
-
     let cf = color_field(ctx, spec);
     // col_as_ordinal_category_str (not col_as_str), gated on the resolved
     // color scale being category-keyed (Categorical) or absent — mirrors
@@ -212,7 +157,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
-    // T12: a categorical `stroke_dash` field extends the series partition key
+    // A categorical `stroke_dash` field extends the series partition key
     // (color, detail) -> (color, detail, stroke_dash-field), spec §4.3, so
     // distinct style categories draw as distinct polylines rather than all
     // sampling the first row's dash within their color/detail group. A
@@ -231,6 +176,91 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     if let Some(binned) = &binned {
         binned.order(&mut groups);
     }
+    groups
+}
+
+/// `x` and `y`: Category on an `Ordinal` scale, [`PlacementRead::ClipAware`]
+/// otherwise — [`vertex_pixels`]' two readers, each dispatching on scale
+/// kind the same way.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{clip_aware_or_category, Placement};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    let mut out = Vec::new();
+    if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, clip_aware_or_category(&ctx.scales.x))); }
+    if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, clip_aware_or_category(&ctx.scales.y))); }
+    out
+}
+
+/// Each row's vertex in pixels, `None` for a row `build` cannot place: a
+/// null or unplaceable value on either axis, a category an `Ordinal`
+/// scale does not map, or a value its continuous scale does not admit or
+/// map. `None` overall when `x` or `y` is unbound or unreadable, where
+/// `build` draws nothing.
+///
+/// `clip == Some(false)` (the `mark_function(clip=False)` escape at the
+/// SVG-group level) must also stop this read from dropping an
+/// out-of-domain vertex — otherwise the point never reaches the node list
+/// for that escape to apply to. `DrawCtx::to_pixel` decides this for
+/// the whole line family (line/area/ribbon all accept `clip=`), so the
+/// kwarg means one thing everywhere; see its doc. Clipped marks are
+/// byte-identical.
+pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
+    let spec = ctx.spec;
+    let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
+    let axis_pixels = |scale: &ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
+        Some(match scale {
+            ScaleKind::Ordinal(_) => col_as_positional_category_str(ctx.batch, field)
+                .ok()?
+                .iter()
+                .map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s)))
+                .collect(),
+            _ => col_as_f64(ctx.batch, field)
+                .ok()?
+                .iter()
+                .map(|opt| opt.filter(|v| scale.admits_for_pixel(*v)).and_then(|v| ctx.to_pixel(scale, v)))
+                .collect(),
+        })
+    };
+    let xs_pix = axis_pixels(&ctx.scales.x, xf)?;
+    let ys_pix = axis_pixels(&ctx.scales.y, yf)?;
+    let n_rows = ctx.batch.num_rows();
+    if xs_pix.len() != n_rows || ys_pix.len() != n_rows {
+        return None;
+    }
+    Some(xs_pix.into_iter().zip(ys_pix).map(|(x, y)| Some((x?, y?))).collect())
+}
+
+/// This mark's [`VertexFrame`](crate::render::draw::VertexFrame): its own
+/// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
+/// of 2 vertices per polyline.
+pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
+    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), 2)
+}
+
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
+    use crate::render::draw::{
+        to_scene_fill_stroke, to_scene_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
+        PaintChannels,
+    };
+    use ferrum_scene::MarkBatchKind;
+
+    let conditionals = size_conditionals(ctx.spec);
+    let size_conditional = !conditionals.is_empty();
+    refuse_width_conflict(ctx, size_conditional)?;
+    conditionals.into_iter().try_for_each(refuse_non_positive_branch)?;
+
+    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Line));
+
+    let spec = ctx.spec;
+    let Some(vertices) = vertex_pixels(ctx) else { return empty() };
+
+    let groups = series_groups(ctx);
+    // The categorical `stroke_dash` column `series_groups` folds into the
+    // series key, read again here for the per-row dash resolution below; a
+    // numeric field (or none) yields `dash_cols.categorical == None`.
+    let dash_cols = stroke_dash_column_loader(ctx);
 
     let interpolate = ctx.mark_style.line.interpolate.unwrap_or_default();
     // A straight series stays a `Polyline` (`StrokeStyle`-shaped); anything
@@ -283,10 +313,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         let mut points: Vec<(f64, f64)> = Vec::new();
         let mut row_indices: Vec<usize> = Vec::new();
         for i in rows {
-            let (cx, cy) = match (xs_pix[i], ys_pix[i]) {
-                (Some(a), Some(b)) => (a, b),
-                _ => continue,
-            };
+            let Some((cx, cy)) = vertices[i] else { continue };
             points.push((cx, cy));
             row_indices.push(i);
         }

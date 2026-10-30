@@ -604,6 +604,14 @@ pub(crate) fn render_composite_scene(
     // merged separately below, by channel, in the order each channel is
     // first seen.
     let mut text_overrun: Vec<(String, usize)> = Vec::new();
+    // The same multiplicity as `TextInkPastFrame` just above: each leaf's
+    // `DomainRowsLeftOut` already counts only that leaf's own panel loop's
+    // left-out rows, so a composite's equal reports are one render-wide
+    // fact, summed across the leaves that report them by the same ledger a
+    // leaf sums its own layers with — every leaf's `channel` is already the
+    // one its own caller wrote, so no flip bookkeeping is needed here — in
+    // the order each report is first seen.
+    let mut domain_left_out = scene_build::DomainLeftOutLedger::default();
     for (i, leaf_warnings) in leaf_warning_lists.iter().enumerate() {
         for w in leaf_warnings {
             if let RenderWarning::TextInkPastFrame { channel, rows } = w {
@@ -611,6 +619,9 @@ pub(crate) fn render_composite_scene(
                     Some((_, sum)) => *sum += rows,
                     None => text_overrun.push((channel.clone(), *rows)),
                 }
+                continue;
+            }
+            if domain_left_out.note_warning(w) {
                 continue;
             }
             let applied_elsewhere = (0..n).any(|j| {
@@ -625,6 +636,7 @@ pub(crate) fn render_composite_scene(
     for (channel, rows) in text_overrun {
         warnings.push(RenderWarning::TextInkPastFrame { channel, rows });
     }
+    domain_left_out.flush(&mut warnings);
 
     let merge_ctx = MergeCtx {
         plan: &band_plan,
@@ -6340,6 +6352,179 @@ mod tests {
         let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
         assert_eq!(left_out.len(), 1, "{warnings:?}");
         assert!(matches!(left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 1, .. }), "{left_out:?}");
+    }
+
+    /// The generic explicit-domain census shares the same multiplicity
+    /// `TextInkPastFrame` already has: an overlay's two
+    /// leaves, each with its own rows a shared explicit domain leaves out,
+    /// report ONE `DomainRowsLeftOut` summing both leaves' counts.
+    #[test]
+    fn an_overlay_sums_domain_left_out_rows_across_leaves() {
+        let domain_scale = crate::spec::encoding::ScaleSpec::Linear {
+            common: stated_domain_common(vec![2.0, 8.0]),
+            nice: false,
+            zero: false,
+            system_injected: false,
+        };
+        let point = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), scale: Some(domain_scale), ..Default::default() }),
+                y: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Leaf 0: x = 0..9, domain [2,8] leaves out 0, 1, 9 (3 rows).
+        let batch0 = xy_batch(&(0..10).map(|i| i as f64).collect::<Vec<_>>(), &(0..10).map(|i| i as f64).collect::<Vec<_>>());
+        // Leaf 1: x = 3, 10, 11, domain [2,8] leaves out 10, 11 (2 rows).
+        let batch1 = xy_batch(&[3.0, 10.0, 11.0], &[3.0, 10.0, 11.0]);
+        let holds = [
+            LeafHold { spec: point.clone(), batch: batch0, ..hold() },
+            LeafHold { spec: point, batch: batch1, ..hold() },
+        ];
+        let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+            resolve.y = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::DomainRowsLeftOut { rows: 5, .. }), "{left_out:?}");
+    }
+
+    /// An hconcat of a flipped and an unflipped leaf that both bind the same
+    /// field to the same INTERNAL slot (post-flip `y`) must still report two
+    /// separate warnings, one per caller's own channel. `CoordFlip` swaps the
+    /// rendering encoding before the draw context ever sees it, so the
+    /// unflipped leaf's authored `y="y"` and the flipped leaf's authored
+    /// `x="y"` both land on internal `y` — a merge keyed on the internal
+    /// slot would wrongly combine them into one warning under whichever
+    /// leaf's flip the summing code happened to consult. Un-flipping each
+    /// leaf's channel at note time, before the
+    /// composite ever merges by `(channel, field, categorical, entry)`,
+    /// keeps the two leaves' keys apart: `y` for the unflipped leaf, `x` for
+    /// the flipped one — each exactly as its own caller wrote it.
+    #[test]
+    fn hconcat_of_a_flipped_and_unflipped_leaf_reports_two_warnings_each_naming_its_own_channel() {
+        let domain_scale = crate::spec::encoding::ScaleSpec::Linear {
+            common: stated_domain_common(vec![2.0, 8.0]),
+            nice: false,
+            zero: false,
+            system_injected: false,
+        };
+        // Unflipped: authored y="y" (domain-restricted) is also the internal y.
+        let unflipped = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), scale: Some(domain_scale.clone()), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Flipped: authored x="y" (domain-restricted) becomes internal y once
+        // `CoordFlip` swaps the rendering encoding — same internal slot as
+        // the unflipped leaf above, different caller-written channel.
+        let flipped = ChartSpec {
+            mark: Mark::Point,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "y".into(), scale: Some(domain_scale), ..Default::default() }),
+                y: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // y = 0..9, domain [2,8] leaves out 0, 1, 9 (3 rows) on each leaf.
+        let batch = xy_batch(&(0..10).map(|i| i as f64).collect::<Vec<_>>(), &(0..10).map(|i| i as f64).collect::<Vec<_>>());
+        let holds = [
+            LeafHold { spec: unflipped, batch: batch.clone(), ..hold() },
+            LeafHold { spec: flipped, batch, ..hold() },
+        ];
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 2, "{warnings:?}");
+        let channels: std::collections::BTreeSet<&str> = left_out
+            .iter()
+            .map(|w| match w {
+                RenderWarning::DomainRowsLeftOut { channel, .. } => channel.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(channels, ["x", "y"].into_iter().collect(), "{left_out:?}");
+        for w in &left_out {
+            assert!(matches!(w, RenderWarning::DomainRowsLeftOut { rows: 3, field, .. } if field.as_deref() == Some("y")), "{w:?}");
+        }
+    }
+
+    /// `+` of an unflipped host and a member with its own `CoordFlip`,
+    /// under one explicit domain on the member's authored `y`: the warning
+    /// names the member's rows by `y` (the channel the member WROTE), not
+    /// `x` (the internal slot its own `CoordFlip` swapped it into), and the
+    /// host — which binds a different field on the same shared internal
+    /// axis, with no domain of its own — contributes nothing.
+    #[test]
+    fn overlay_of_an_unflipped_host_and_a_coord_flipped_member_names_the_members_own_channel() {
+        let domain_scale = crate::spec::encoding::ScaleSpec::Linear {
+            common: stated_domain_common(vec![2.0, 8.0]),
+            nice: false,
+            zero: false,
+            system_injected: false,
+        };
+        // Host: unflipped, authored x="x" (shares the member's internal x
+        // axis) with values that stay inside [2,8] — contributes no warning
+        // of its own.
+        let host = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let host_batch = xy_batch(&[3.0, 4.0, 5.0], &[1.0, 2.0, 3.0]);
+        // Member: `CoordFlip`, authored y="y" (field `hi`'s own column,
+        // domain-restricted) becomes internal x once the flip swaps the
+        // rendering encoding; authored x="x" becomes internal y.
+        let member = ChartSpec {
+            mark: Mark::Point,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "hi".into(), scale: Some(domain_scale), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // `hi` = 0..10 (11 rows); domain [2,8] leaves out 0, 1, 9, 10 (4 rows).
+        let hi_values: Vec<f64> = (0..11).map(|i| i as f64).collect();
+        let member_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("hi", DataType::Float64, false),
+            ])),
+            vec![Arc::new(Float64Array::from(vec![0.0; 11])), Arc::new(Float64Array::from(hi_values))],
+        )
+        .unwrap();
+        let holds = [
+            LeafHold { spec: host, batch: host_batch, ..hold() },
+            LeafHold { spec: member, batch: member_batch, ..hold() },
+        ];
+        let tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 1, "the host contributes nothing: {warnings:?}");
+        assert!(
+            matches!(left_out[0], RenderWarning::DomainRowsLeftOut { channel, field, rows: 4, .. } if channel == "y" && field.as_deref() == Some("hi")),
+            "names the member's own authored channel ('y') and field ('hi'), not the internal 'x' slot: {left_out:?}"
+        );
     }
 
     /// A stated Log domain overlay group with one all-off-side member beside

@@ -36,8 +36,13 @@ from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import as_finite_real, coerce_positive_int, validate_choice
 from ferrum._warn import warn_once
-from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
+from ferrum.marks._desugar_helpers import (
+    nominal_color_channel,
+    resolve_color_groupby,
+    titled_positional_channel,
+)
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
+from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.plots._helpers import (
     _checked_figure_size,
     _field_name,
@@ -198,6 +203,16 @@ def _overlay_count_scale(bins: Any) -> Any:
     return bins if bins is not None else "sturges"
 
 
+def _displayed_name(binding: Any) -> str | None:
+    """Return the name a positional *binding* shows: its ``title=``, else its field.
+
+    ``None`` when nothing is bound. Read off the primary layer's own binding,
+    so the overlay names whatever that layer's axis already shows.
+    """
+    title = declared_title(binding)
+    return _field_name(binding) if title is None else title
+
+
 def _kde_overlay(
     x_field: str,
     *,
@@ -210,11 +225,21 @@ def _kde_overlay(
     bandwidth: Any,
     bw_adjust: float,
     cumulative: bool,
+    x_title: str | None,
+    y_title: str | None,
 ):
     """Build the named `Kde` transform and `_Layer` for displot's `kde=True` overlay.
 
     Returns `(transform, layer)`: the caller prepends the transform (so it
     reads the original, pre-`Bin` data batch) and appends the layer.
+
+    `x_title`/`y_title` are the names the chart's primary layer shows on its
+    x/y axes, read off its own bindings by the caller. The overlay reads its
+    own grid/density columns, so its bindings carry those names instead: its
+    warnings and tooltips then name the axes it shares with the primary
+    mark. A title is `None` when the primary binds nothing on that axis
+    (`y` under `kind="rug"`); the overlay then owns that axis and names its
+    own column.
 
     `groupby=hue` gives one curve per hue level instead of one curve pooled
     across all rows; `shared_extent` is passed in -- it is the value the real
@@ -244,6 +269,7 @@ def _kde_overlay(
     match and flattened the curve to a constant against the panel edge.
     """
     from ferrum import Kde as _KdeTransform
+    from ferrum.encoding import X, Y
 
     kde_kwargs: dict = dict(
         bandwidth=bandwidth,
@@ -291,7 +317,10 @@ def _kde_overlay(
     # Rust-side rename of either Kde output column raises here instead of
     # silently drawing an empty overlay line.
     _kde_cols = registry_output_columns("kde", ["value", "density"])
-    encoding: dict = {"x": _kde_cols["value"], "y": _kde_cols["density"]}
+    encoding: dict = {
+        "x": titled_positional_channel(_kde_cols["value"], channel=X, title=x_title),
+        "y": titled_positional_channel(_kde_cols["density"], channel=Y, title=y_title),
+    }
     if hue is not None:
         encoding["color"] = nominal_color_channel(hue)
 
@@ -816,14 +845,19 @@ def _displot_build(
             )
         )
         chart = chart.mark_line()
-        # Re-route encoding to bin output columns, preserving the original
-        # variable name as the x-axis title.
+        # Re-route encoding to bin output columns, titled as the caller's own
+        # x channel would title a plain chart's axis: their title= (an empty
+        # one suppresses it), else the original variable name.
         # Derived from the registry (spec §4.6 / M6a) rather than hardcoded:
         # these read the cumulative Bin transform chained two lines above, so
         # a Rust-side rename of either bin output column raises here instead
         # of silently rendering an empty step line.
         _bin_cols = registry_output_columns("bin", ["bin_start", "count"])
-        enc["x"] = _X_ecdf(_bin_cols["bin_start"], title=_ecdf_x_name)
+        _ecdf_x_title = declared_title(x)
+        enc["x"] = _X_ecdf(
+            _bin_cols["bin_start"],
+            title=_ecdf_x_name if _ecdf_x_title is None else _ecdf_x_title,
+        )
         enc["y"] = _bin_cols["count"]
     elif kind == "rug":
         chart = chart.mark_tick()
@@ -864,8 +898,18 @@ def _displot_build(
             )
             chart._layers = [primary_layer]
             chart._mark = None
+        drawn_layers = chart._layers
+        if not drawn_layers:
+            # RuntimeError is the project's internal-invariant type (the
+            # `_compose` rebuild guards): no public input reaches a resolved
+            # displot without its primary mark, so no remedy can be named.
+            raise RuntimeError(
+                "displot: the primary mark resolved to no layer, so its overlays have "
+                "nothing to join"
+            )
 
         if kde and kind != "kde":
+            primary_encoding = drawn_layers[0].encoding
             kde_transform, kde_layer = _kde_overlay(
                 x_field,
                 hue=hue,
@@ -877,6 +921,8 @@ def _displot_build(
                 bandwidth=bandwidth,
                 bw_adjust=bw_adjust,
                 cumulative=cumulative,
+                x_title=_displayed_name(primary_encoding.get("x")),
+                y_title=_displayed_name(primary_encoding.get("y")),
             )
             # The named Kde sits right after the statistics marker, ahead of
             # the unnamed Bin, so it reads the caller's rows, after any
@@ -906,6 +952,8 @@ def _displot_build(
             # Wrapped in `Y` because this runs after `_resolve_pending()`:
             # `chart._encoding` holds channel objects by now, and the bare
             # string spelling the `enc` dict accepts is no longer resolved.
+            # The overlay's own `y` is that bare density column here: the rug
+            # binds no y, so the overlay names its own column.
             if "y" not in chart._encoding:
                 from ferrum.encoding import Y as _Y_overlay
 
@@ -1343,9 +1391,10 @@ def _catplot_summary_layers(
     chart-level adjustment is how the displot overlays previously acquired a
     ``Stack`` they had no business honoring (see ``_kde_overlay``).
 
-    The value axis is titled with the original value column on BOTH layers so
-    the axis reads ``"tip"`` rather than the transform's output column name --
-    whichever layer is first (it differs by kind) owns the axis title.
+    The value axis is titled on BOTH layers with the caller's ``title=`` on
+    their value channel, else the original value column, so the axis reads
+    ``"tip"`` rather than the transform's output column name -- whichever
+    layer is first (it differs by kind) owns the axis title.
 
     No value-axis scale is invented here, and that is what keeps
     ``kind="bar"`` zero-anchored: the layered-bar rule in
@@ -1415,9 +1464,13 @@ def _catplot_summary_layers(
     cols = registry_output_columns("summary", ["mean", "lower", "upper"])
 
     layer_position = position if position is not None else Identity()
+    # The value axis's name on both layers: the caller's title= on their value
+    # channel, else the value column. A suppressed title keeps the column: the
+    # caller's chart-level channel already draws no axis title.
+    value_title = drawn_title(chart_encoding.get("y")) or val_field
 
     def _encoding(y_col: str, y2_col: str | None = None) -> dict:
-        enc: dict = {"x": cat_channel, "y": _Y(y_col, title=val_field)}
+        enc: dict = {"x": cat_channel, "y": _Y(y_col, title=value_title)}
         if y2_col is not None:
             enc["y2"] = y2_col
         if color_channel is not None:

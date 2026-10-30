@@ -174,21 +174,93 @@ impl<'a> StrokeChannels<'a> {
 
 // ── Scene-graph build path (11a) ────────────────────────────────────
 
+/// Which of `build`'s five shapes a bar layer takes — extracted from its
+/// dispatch (unchanged below) so [`placements`] can name the channels a
+/// path reads without re-deriving the same condition tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BarPath {
+    /// `CoordPolar`: wedges from the batch's own categories, radius clamped —
+    /// never drops on a domain.
+    Polar,
+    /// Ordinal x + quantitative y: places `x` (Category) and `y` (Strict); a
+    /// bound `y2`/stack base falls back to the baseline, never a placement.
+    OrdinalX,
+    /// Quantitative x + ordinal y: places `y` (Category), `x` (Strict) and a
+    /// bound `x2` (Strict).
+    OrdinalY,
+    /// `y2` bound, no `x2`: places `x`, `y` and `y2`, all Strict.
+    QuantitativeHorizontal,
+    /// Neither axis ordinal: places `x`, `y` and a bound `x2`, all Strict
+    /// (the histogram path; `x2` is `bin_end`).
+    Quantitative,
+}
+
+impl BarPath {
+    pub(crate) fn of(ctx: &DrawCtx) -> Self {
+        if matches!(ctx.spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+            return Self::Polar;
+        }
+        let has_x2 = ctx.spec.encoding.x2.is_some();
+        let has_y2 = ctx.spec.encoding.y2.is_some();
+        match (&ctx.scales.x, &ctx.scales.y) {
+            (ScaleKind::Ordinal(_), _) => Self::OrdinalX,
+            (_, ScaleKind::Ordinal(_)) => Self::OrdinalY,
+            (_, _) if has_y2 && !has_x2 => Self::QuantitativeHorizontal,
+            (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_) | ScaleKind::Time(_), _) => {
+                Self::Quantitative
+            }
+        }
+    }
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // CoordPolar: bars become arc wedges (wind-rose / coxcomb). The angular
     // position/width comes from the angle channel; the radial span is the
     // stacked [base, top] mapped through the radial scale.
-    if matches!(ctx.spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
-        return build_polar(ctx);
+    match BarPath::of(ctx) {
+        BarPath::Polar => build_polar(ctx),
+        BarPath::OrdinalX => build_ordinal(ctx),
+        BarPath::OrdinalY => build_ordinal_y(ctx),
+        BarPath::QuantitativeHorizontal => build_quantitative_horizontal(ctx),
+        BarPath::Quantitative => build_quantitative(ctx),
     }
-    let has_x2 = ctx.spec.encoding.x2.is_some();
-    let has_y2 = ctx.spec.encoding.y2.is_some();
-    match (&ctx.scales.x, &ctx.scales.y) {
-        (ScaleKind::Ordinal(_), _) => build_ordinal(ctx),
-        (_, ScaleKind::Ordinal(_)) => build_ordinal_y(ctx),
-        (_, _) if has_y2 && !has_x2 => build_quantitative_horizontal(ctx),
-        (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_) | ScaleKind::Time(_), _) => {
-            build_quantitative(ctx)
+}
+
+/// Which positional channels this bar layer's [`BarPath`] places a row by —
+/// read by the explicit-domain census instead of a per-mark table, since
+/// the set depends on the path, not the mark.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    match BarPath::of(ctx) {
+        BarPath::Polar => Vec::new(),
+        BarPath::OrdinalX => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Category)); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Strict)); }
+            out
+        }
+        BarPath::OrdinalY => {
+            let mut out = Vec::new();
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Category)); }
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Strict)); }
+            if let Some(f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::X2, f, PlacementRead::Strict)); }
+            out
+        }
+        BarPath::QuantitativeHorizontal => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Strict)); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Strict)); }
+            if let Some(f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::Y2, f, PlacementRead::Strict)); }
+            out
+        }
+        BarPath::Quantitative => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Strict)); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Strict)); }
+            if let Some(f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::X2, f, PlacementRead::Strict)); }
+            out
         }
     }
 }

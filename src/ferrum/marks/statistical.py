@@ -36,6 +36,8 @@ def desugar_density(
     thresholds: int = 6,
     smooth: bool = True,
     cmap: str | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Kernel-density-estimate area/line mark desugar.
 
@@ -113,6 +115,11 @@ def desugar_density(
     cmap : str or None, default None
         Passed through to ``desugar_contour`` on the bivariate path.  ``None``
         defers to the theme's sequential scheme.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion and passed through to
+        ``desugar_contour`` on the bivariate path. The 1D path does not read
+        them: its remap rebinds the caller's own channel, title included.
 
     Returns
     -------
@@ -160,6 +167,8 @@ def desugar_density(
                 smooth=smooth,
                 cmap=cmap,
                 groupby=groupby,
+                _x_title=_x_title,
+                _y_title=_y_title,
             )
 
     if kernel is not None:
@@ -452,6 +461,8 @@ def desugar_smooth(
     groupby: Any = None,
     name: str | None = None,
     x_range: list[float] | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
@@ -566,6 +577,11 @@ def desugar_smooth(
         ``Smooth`` transform.  When set, the fit line is evaluated over
         this range rather than the observed data range — used by
         ``lmplot(truncate=False)`` to extend the fit beyond the data.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The layered path's layers
+        carry it in place of the field name, so they name the axis the chart
+        shows; the single-line path keeps the caller's own channel instead.
     Per-layer style
     ---------------
     Styling the fit line without repainting the CI band is not a parameter
@@ -685,8 +701,8 @@ def desugar_smooth(
         "smooth",
         data_source="smooth",
         ci=ci,
-        x_title=x_field,
-        y_title=y_field,
+        x_title=_x_title or x_field,
+        y_title=_y_title or y_field,
         metrics=show_metrics,
     )
     return MarkDesugarResult(transforms=transforms, layers=layers)

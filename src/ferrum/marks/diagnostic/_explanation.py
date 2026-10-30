@@ -156,12 +156,14 @@ def desugar_shap_beeswarm(
     from ferrum.marks._desugar_helpers import shap_beeswarm_color_channel
     from ferrum.position import Jitter
 
+    # The points' column, which the reference rule also names its x axis by.
+    shap_field = "shap_value"
     layers: list = [
         _Layer(
             name="point",
             mark="point",
             encoding={
-                "x": _x_channel("shap_value"),
+                "x": _x_channel(shap_field),
                 "y": "feature",
                 "color": shap_beeswarm_color_channel(color_bar=color_bar),
             },
@@ -169,11 +171,13 @@ def desugar_shap_beeswarm(
         ),
     ]
     if zero_line:
+        from ferrum.encoding import X
+
         layers.append(
             _Layer(
                 name="reference",
                 mark="rule",
-                encoding={"x": "_ref_zero"},
+                encoding={"x": X("_ref_zero", title=shap_field)},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )

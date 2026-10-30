@@ -6,6 +6,7 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.encoding import Y
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -54,7 +55,7 @@ def desugar_residuals(
             _Layer(
                 name="reference",
                 mark="rule",
-                encoding={"y": "_ref_zero"},
+                encoding={"y": Y("_ref_zero", title=y_col)},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )

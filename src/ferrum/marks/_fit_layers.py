@@ -134,7 +134,11 @@ def build_fit_layers(
             _Layer(
                 name="metrics",
                 mark="text",
-                encoding={"x": cols["x"], "y": _METRICS_Y, "text": _METRICS_TEXT},
+                encoding={
+                    "x": X(cols["x"], title=x_title),
+                    "y": Y(_METRICS_Y, title=y_title),
+                    "text": _METRICS_TEXT,
+                },
                 mark_kwargs={"align": "right", "dx": -4, "dy": 4},
                 data_source=data_source,
             )

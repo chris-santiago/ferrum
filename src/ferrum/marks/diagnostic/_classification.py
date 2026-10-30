@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Any
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.encoding import Color
-from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, nominal_color_channel
+from ferrum.marks._desugar_helpers import (
+    DISC_FLAG_DEFAULTS,
+    nominal_color_channel,
+    titled_positional_channel,
+)
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -213,6 +217,8 @@ def desugar_calibration(
     *,
     reference_line: bool = True,
     color_field: str | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Calibration (reliability) curve mark.
@@ -232,7 +238,14 @@ def desugar_calibration(
     reads from a named ``ReferenceLine`` transform that emits exactly two
     rows for the line endpoints — so the diagonal renders once per chart
     regardless of how many models are layered on top.
+
+    ``_x_title``/``_y_title`` are the ``title=`` declared on the chart-level
+    x/y channel, injected by the composite-mark expansion. The diagonal reads
+    the ``ReferenceLine`` output, so it carries them on its bindings and
+    names the axes the chart shows.
     """
+    from ferrum.encoding import X, Y
+
     user_kw = _validate("calibration", mark_kwargs)
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
@@ -258,7 +271,10 @@ def desugar_calibration(
             _Layer(
                 name="reference",
                 mark="line",
-                encoding={"x": "mean_predicted", "y": "fraction_positive"},
+                encoding={
+                    "x": titled_positional_channel("mean_predicted", channel=X, title=_x_title),
+                    "y": titled_positional_channel("fraction_positive", channel=Y, title=_y_title),
+                },
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
                 data_source="calibration_ref",
             )

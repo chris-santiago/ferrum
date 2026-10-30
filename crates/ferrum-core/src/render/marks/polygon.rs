@@ -34,55 +34,31 @@ pub(crate) fn color_is_quantitative(ctx: &DrawCtx) -> bool {
         .is_some_and(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
 }
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{
-        resolve_group_fill_color, to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
-        PaintChannels,
-    };
-    use ferrum_scene::{MarkBatchKind, SceneNode};
+/// Strict when `field` reads as `f64`, else Category — `build`'s own
+/// `xpx`/`ypx` reader order below (`col_as_f64` tried first, `col_as_str`
+/// the fallback), not a static "by scale kind" rule: a polygon's x/y
+/// placement depends on the COLUMN's own dtype, since `build` never
+/// consults `ctx.scales.{x,y}`'s kind to choose a reader.
+fn polygon_read(ctx: &DrawCtx, field: &str) -> crate::render::draw::PlacementRead {
+    use crate::render::draw::PlacementRead;
+    if col_as_f64(ctx.batch, field).is_ok() { PlacementRead::Strict } else { PlacementRead::Category }
+}
 
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Polygon);
-
-    let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return empty(),
-    };
-
-    // Pre-resolve per-row x pixel positions (numeric or ordinal).
-    let xpx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, xf) {
-        v.into_iter()
-            .map(|opt| opt.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
-            .collect()
-    } else if let Ok(v) = col_as_str(ctx.batch, xf) {
-        v.into_iter()
-            .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
-            .collect()
-    } else {
-        return empty();
-    };
-    // Pre-resolve per-row y pixel positions (numeric or ordinal — mirrors xpx so
-    // CoordFlip works when the categorical axis is swapped onto y).
-    let ypx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, yf) {
-        v.into_iter()
-            .map(|opt| opt.and_then(|y| ctx.scales.y.to_pixel_f64(y)))
-            .collect()
-    } else if let Ok(v) = col_as_str(ctx.batch, yf) {
-        v.into_iter()
-            .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
-            .collect()
-    } else {
-        return empty();
-    };
-
-    // --- Group rows by detail column (or single group if unset) ---
+/// This mark's own ring partition: one group per `mark_style.group.detail`
+/// value, in that detail column's own sort order (numeric keys sorted
+/// numerically, mirroring the `BTreeMap` `build` groups with); a single
+/// group of every row when `detail` is unset. Empty (no groups at all) when
+/// a bound `detail` names a column this batch does not carry — `build`
+/// draws nothing for that same reason, so there is nothing for a statistic
+/// layer's census to attribute to a domain exclusion either. Read by
+/// [`vertex_frame`] too, so the census's vertex-unit count and the real
+/// render can never group a statistic layer's rows differently.
+pub(crate) fn detail_groups(ctx: &DrawCtx) -> Vec<Vec<usize>> {
+    let n_rows = ctx.batch.num_rows();
     let detail_field = ctx.mark_style.group.detail.as_deref();
     let groups: BTreeMap<i64, Vec<usize>> = match detail_field {
         Some(field) => {
-            let arr = match ctx.batch.column_by_name(field) {
-                Some(a) => a,
-                None => return empty(),
-            };
+            let Some(arr) = ctx.batch.column_by_name(field) else { return Vec::new() };
             let mut g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
             if let Some(u) = arr.as_any().downcast_ref::<UInt32Array>() {
                 for i in 0..u.len() {
@@ -103,16 +79,74 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     }
                 }
             } else {
-                g.insert(0, (0..xpx.len()).collect());
+                g.insert(0, (0..n_rows).collect());
             }
             g
         }
         None => {
             let mut g = BTreeMap::new();
-            g.insert(0, (0..xpx.len()).collect());
+            g.insert(0, (0..n_rows).collect());
             g
         }
     };
+    groups.into_values().collect()
+}
+
+/// `x` and `y` per vertex row, each placed Strict or Category by
+/// [`polygon_read`].
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::Placement;
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    let mut out = Vec::new();
+    if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, polygon_read(ctx, f))); }
+    if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, polygon_read(ctx, f))); }
+    out
+}
+
+/// Each row's vertex in pixels (numeric or ordinal on each axis, so
+/// `CoordFlip` works when the categorical axis is swapped onto y), before
+/// position offsets, `None` for a row `build` cannot place: a null value or
+/// one its scale does not map. `None` overall when `x` or `y` is unbound or
+/// reads as neither numbers nor strings, where `build` draws nothing.
+pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
+    let spec = ctx.spec;
+    let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
+    let axis_pixels = |scale: &crate::render::scale_resolve::ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
+        if let Ok(v) = col_as_f64(ctx.batch, field) {
+            Some(v.into_iter().map(|opt| opt.and_then(|x| scale.to_pixel_f64(x))).collect())
+        } else if let Ok(v) = col_as_str(ctx.batch, field) {
+            Some(v.into_iter().map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s))).collect())
+        } else {
+            None
+        }
+    };
+    let xpx = axis_pixels(&ctx.scales.x, xf)?;
+    let ypx = axis_pixels(&ctx.scales.y, yf)?;
+    Some(xpx.into_iter().zip(ypx).map(|(x, y)| Some((x?, y?))).collect())
+}
+
+/// This mark's [`VertexFrame`](crate::render::draw::VertexFrame): its own
+/// [`detail_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
+/// of 3 vertices per ring.
+pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
+    crate::render::draw::VertexFrame::from_vertices(detail_groups(ctx), vertex_pixels(ctx), ctx.batch.num_rows(), 3)
+}
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{
+        resolve_group_fill_color, to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+        PaintChannels,
+    };
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Polygon);
+
+    let spec = ctx.spec;
+    let Some(vertices) = vertex_pixels(ctx) else { return empty() };
+
+    // --- Group rows by detail column (or single group if unset) ---
+    let groups = detail_groups(ctx);
 
     // --- Resolve color encoding mode ---
     let cf = color_field(ctx, spec);
@@ -185,12 +219,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let mut acc = MarkNodes::with_capacity(groups.len());
 
     // --- Emit one polygon per group ---
-    for group_indices in groups.values() {
+    for group_indices in &groups {
         let ring: Vec<(f64, f64)> = group_indices
             .iter()
             .filter_map(|&i| {
-                let cx = xpx.get(i).copied().flatten()?;
-                let cy = ypx.get(i).copied().flatten()?;
+                let (cx, cy) = vertices.get(i).copied().flatten()?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);
                 Some((cx + xo, cy + yo))

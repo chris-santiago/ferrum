@@ -10,6 +10,23 @@ use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::RenderError;
 
+/// `x`, `y`, `x2`, `y2`, always Strict: every end reads `col_as_f64` +
+/// `to_pixel_f64` directly, never a category, never `ctx.to_pixel`.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    [
+        (PositionalChannel::X, x_field(ctx, spec)),
+        (PositionalChannel::Y, y_field(ctx, spec)),
+        (PositionalChannel::X2, spec.encoding.x2.as_ref().map(|e| e.field.as_str())),
+        (PositionalChannel::Y2, spec.encoding.y2.as_ref().map(|e| e.field.as_str())),
+    ]
+    .into_iter()
+    .filter_map(|(ch, f)| f.map(|f| Placement::new(ch, f, PlacementRead::Strict)))
+    .collect()
+}
+
 /// Build one `Line` scene node per row from `(x, y)` to `(x2, y2)`.
 ///
 /// Fallible for one reason: the per-row color read propagates the typed

@@ -187,6 +187,91 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Tra
     cmds
 }
 
+/// This mark's own series partition: `color` (or a binned color's keys) and
+/// `detail`, in that grouping key's own order (a binned color's bin order)
+/// — the SAME partition `build` draws one area band per group from. Read
+/// by [`vertex_frame`] too, so the census's vertex-unit count and the real
+/// render can never group a statistic layer's rows differently.
+pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
+    let spec = ctx.spec;
+    let n_rows = ctx.batch.num_rows();
+    let cf = color_field(ctx, spec);
+    // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
+    // split into groups just like Utf8 columns do. col_as_str returns Err for
+    // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
+    //
+    // A binned color groups by bin instead: one band per bin, keyed by a value
+    // its bin's color resolves from (the bin's lower edge), in bin order.
+    let binned = BinnedColorSeries::of(ctx);
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
+    let detail_values = ctx.mark_style.group.detail.as_deref()
+        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+
+    // area does not consume the `stroke_dash` channel (T12 scope: line,
+    // rule, point, bar, rect only); only a statistic's grouping splits further.
+    let grouping = grouping_series_values(ctx);
+    let mut groups = build_color_detail_groups(
+        color_values,
+        detail_values.as_ref(),
+        &grouping,
+        ctx.scales.color.is_some(),
+        n_rows,
+    );
+    if let Some(binned) = &binned {
+        binned.order(&mut groups);
+    }
+    groups
+}
+
+/// `x` and `y`, always `ClipAware` (`ctx.to_pixel`, [`vertex_pixels`]' own
+/// read): `y2` and the stack base fall back to the baseline on an
+/// unmappable value rather than dropping the row, so neither is a
+/// placement.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    let mut out = Vec::new();
+    if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::ClipAware)); }
+    if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::ClipAware)); }
+    out
+}
+
+/// Each row's top-edge vertex in pixels, before position offsets and the
+/// bottom edge, `None` for a row `build` cannot place: a null `x` or `y`,
+/// or a value its scale does not admit or map. Every read goes through
+/// `DrawCtx::to_pixel`, so `mark_area(clip=False)` keeps its out-of-domain
+/// vertices, the same escape `mark_line` honors for the same public kwarg;
+/// clipped areas (the default) are byte-identical. The bottom edge (`y2`,
+/// the stack base) falls back to the baseline and never drops a vertex.
+/// `None` overall when `x` or `y` is unbound or unreadable, where `build`
+/// draws nothing.
+pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
+    let spec = ctx.spec;
+    let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
+    let xs = col_as_f64(ctx.batch, xf).ok()?;
+    let ys = col_as_f64(ctx.batch, yf).ok()?;
+    let (sx, sy) = (&ctx.scales.x, &ctx.scales.y);
+    Some(
+        xs.into_iter()
+            .zip(ys)
+            .map(|(xv, yv)| {
+                let (xv, yv) = (xv.filter(|v| sx.admits_for_pixel(*v))?, yv.filter(|v| sy.admits_for_pixel(*v))?);
+                Some((ctx.to_pixel(sx, xv)?, ctx.to_pixel(sy, yv)?))
+            })
+            .collect(),
+    )
+}
+
+/// This mark's [`VertexFrame`](crate::render::draw::VertexFrame): its own
+/// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
+/// of 2 top-edge vertices per band.
+pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
+    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), 2)
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
         resolve_group_fill_color, to_scene_fill_stroke, ClearablePaint, MarkBuildResult,
@@ -197,11 +282,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let empty = || MarkBuildResult::empty(MarkBatchKind::Area);
 
     let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b), _ => return empty(),
-    };
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+    let Some(vertices) = vertex_pixels(ctx) else { return empty() };
 
     // y2 column: when bound, the area fills the band between y and y2.
     let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
@@ -218,33 +299,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let baseline_y = ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y);
     let baseline_x = ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w);
 
-    let cf = color_field(ctx, spec);
-    // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
-    // split into groups just like Utf8 columns do. col_as_str returns Err for
-    // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
-    //
-    // A binned color groups by bin instead: one band per bin, keyed by a value
-    // its bin's color resolves from (the bin's lower edge), in bin order.
-    let binned = BinnedColorSeries::of(ctx);
-    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
-    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
-    let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
-
-    let n_rows = xs.len();
-    // area does not consume the `stroke_dash` channel (T12 scope: line,
-    // rule, point, bar, rect only); only a statistic's grouping splits further.
-    let grouping = grouping_series_values(ctx);
-    let mut groups = build_color_detail_groups(
-        color_values,
-        detail_values.as_ref(),
-        &grouping,
-        ctx.scales.color.is_some(),
-        n_rows,
-    );
-    if let Some(binned) = &binned {
-        binned.order(&mut groups);
-    }
+    let groups = series_groups(ctx);
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -310,17 +365,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let mut bottom: Vec<(f64, f64)> = Vec::new();
         let mut row_indices: Vec<usize> = Vec::new();
         for i in rows {
-            let (xv, yv) = match (xs[i], ys[i]) {
-                (Some(a), Some(b)) if ctx.scales.x.admits_for_pixel(a) && ctx.scales.y.admits_for_pixel(b) => (a, b),
-                _ => continue,
-            };
-            // Every positional read in this loop goes through `DrawCtx::
-            // to_pixel`, so `mark_area(clip=False)` keeps its out-of-domain
-            // vertices instead of dropping them — the same escape `mark_line`
-            // honors, for the same public kwarg. Clipped areas (the default)
-            // are byte-identical; see `DrawCtx::to_pixel`.
-            let cx = match ctx.to_pixel(&ctx.scales.x, xv) { Some(p) => p, None => continue };
-            let cy = match ctx.to_pixel(&ctx.scales.y, yv) { Some(p) => p, None => continue };
+            let Some((cx, cy)) = vertices[i] else { continue };
+            // The bottom edge below reads through `DrawCtx::to_pixel` too, so
+            // `mark_area(clip=False)` keeps its out-of-domain bounds as well.
             let xo = x_offsets.get(i).copied().unwrap_or(0.0);
             let yo = y_offsets.get(i).copied().unwrap_or(0.0);
             let cx = cx + xo;

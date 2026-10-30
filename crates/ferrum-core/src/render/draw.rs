@@ -4,6 +4,7 @@ use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 
 use crate::layout::{PanelLayout, ThemeInputs};
+use crate::spec::layer::PositionalChannel;
 use crate::spec::mark::Mark;
 use crate::spec::mark_style::MarkKwargsSpec;
 
@@ -157,6 +158,452 @@ impl DrawCtx<'_> {
             scale.to_pixel_f64(value)
         }
     }
+}
+
+/// How a [`Placement`] reads its column(s) into pixels: the three shapes a
+/// builder's own positional dispatch already takes, named so a reader (the
+/// census) can ask for the behavior without re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementRead {
+    /// An `Ordinal` scale's own reading: `col_as_ordinal_category_str` then
+    /// [`ScaleKind::to_pixel_str`]. A null category is excluded before the
+    /// placement check runs (`col_as_ordinal_category_str` keeps it `None`,
+    /// unlike the null-band sentinel the positional reader every builder
+    /// draws with maps it to), not counted as left out.
+    Category,
+    /// A continuous scale read directly, never through [`DrawCtx::to_pixel`]:
+    /// `col_as_f64` then [`ScaleKind::to_pixel_f64`]. Every builder but
+    /// `line`/`area`/`ribbon` reads this way, so `clip=false` never changes
+    /// what any of them drop.
+    Strict,
+    /// A continuous scale read through [`DrawCtx::to_pixel`], honoring
+    /// `clip=false`'s extrapolation — only `line`, `area` and `ribbon` read
+    /// this way, exactly where each one's own build calls `ctx.to_pixel`.
+    ClipAware,
+}
+
+/// One positional channel a mark's build places a row by, and how: the
+/// per-builder fact [`dispatch_mark_placements`] collects, read by the
+/// census ([`domain_left_out_counts`]) instead of a per-mark table, so the
+/// drop a builder's own dispatch takes and the count the census takes can
+/// never name different channels for the same layer. `channel` is the
+/// resolved (post-flip) positional channel; `columns` are the
+/// batch columns this placement reads values from — one, except a raster
+/// `mark_image`'s extent pair (`marks::image::drawn_columns`), where EITHER
+/// column failing to place counts the row once for this placement's
+/// channel.
+pub(crate) struct Placement<'a> {
+    pub(crate) channel: PositionalChannel,
+    pub(crate) columns: Vec<&'a str>,
+    pub(crate) read: PlacementRead,
+}
+
+impl<'a> Placement<'a> {
+    /// A placement over a single column — every mark but the raster image.
+    pub(crate) fn new(channel: PositionalChannel, field: &'a str, read: PlacementRead) -> Self {
+        Self { channel, columns: vec![field], read }
+    }
+}
+
+/// A vertex-unit mark's own drawing facts (`line`, `area`, `ribbon`,
+/// `polygon`), read by the census so a statistic layer's mark outcome is
+/// the one its builder reaches: `groups` is the series/ring partition the
+/// builder draws one mark per group from, `placed[i]` whether the builder
+/// places row `i` as a vertex (every placed channel maps and every value it
+/// reads is valid — the predicate its own build iterates), and
+/// `min_vertices` the placed-vertex count below which it skips the whole
+/// group.
+pub(crate) struct VertexFrame {
+    pub(crate) groups: Vec<Vec<usize>>,
+    pub(crate) placed: Vec<bool>,
+    pub(crate) min_vertices: usize,
+}
+
+impl VertexFrame {
+    /// The frame over a builder's per-row vertex vector: a row is placed
+    /// when its vertex is `Some`, and every row is unplaced when the builder
+    /// has no vertex vector at all (`None`, its own empty return).
+    pub(crate) fn from_vertices<T>(
+        groups: Vec<Vec<usize>>,
+        vertices: Option<Vec<Option<T>>>,
+        n_rows: usize,
+        min_vertices: usize,
+    ) -> Self {
+        let placed = match vertices {
+            Some(vertices) => vertices.iter().map(Option::is_some).collect(),
+            None => vec![false; n_rows],
+        };
+        Self { groups, placed, min_vertices }
+    }
+
+    /// Whether the builder draws `group`: at least `min_vertices` of its
+    /// rows are placed.
+    fn draws(&self, group: &[usize]) -> bool {
+        group.iter().filter(|&&i| self.placed.get(i).copied().unwrap_or(false)).count() >= self.min_vertices
+    }
+}
+
+/// The vertex-unit marks' [`VertexFrame`]s, beside
+/// [`dispatch_mark_placements`]: `Some` for the marks whose build draws one
+/// mark per group of vertices, `None` for every mark that places per row.
+/// Exhaustive, so a new mark states which it is.
+pub(crate) fn dispatch_vertex_frame(mark: &Mark, ctx: &DrawCtx) -> Option<VertexFrame> {
+    match mark {
+        Mark::Line => Some(super::marks::line::vertex_frame(ctx)),
+        Mark::Area => Some(super::marks::area::vertex_frame(ctx)),
+        Mark::Ribbon => Some(super::marks::ribbon::vertex_frame(ctx)),
+        Mark::Polygon => Some(super::marks::polygon::vertex_frame(ctx)),
+        Mark::Rule
+        | Mark::Segment
+        | Mark::Point
+        | Mark::Bar
+        | Mark::Text
+        | Mark::Tick
+        | Mark::Rect
+        | Mark::Image
+        | Mark::Label
+        | Mark::Arc
+        | Mark::Geoshape => None,
+    }
+}
+
+/// [`PlacementRead::Category`] for an `Ordinal` scale, else
+/// [`PlacementRead::Strict`] — the "by scale kind" rule `point`/`text`
+/// (Cartesian)/`bar`'s ordinal paths/`tick`/`rule` each apply to their own
+/// channels.
+pub(crate) fn channel_read(scale: &ScaleKind) -> PlacementRead {
+    if matches!(scale, ScaleKind::Ordinal(_)) { PlacementRead::Category } else { PlacementRead::Strict }
+}
+
+/// [`PlacementRead::Category`] for an `Ordinal` scale, else
+/// [`PlacementRead::ClipAware`] — `line`'s and `ribbon`'s shared-axis rule
+/// (`area` has no ordinal axis of its own and calls [`PlacementRead::ClipAware`]
+/// directly).
+pub(crate) fn clip_aware_or_category(scale: &ScaleKind) -> PlacementRead {
+    if matches!(scale, ScaleKind::Ordinal(_)) { PlacementRead::Category } else { PlacementRead::ClipAware }
+}
+
+/// `x`/`y` Strict or Category "by scale kind" — `point`'s whole fact, and
+/// Cartesian `text`'s.
+pub(crate) fn xy_by_scale_kind<'a>(ctx: &'a DrawCtx<'a>) -> Vec<Placement<'a>> {
+    let mut out = Vec::new();
+    if let Some(f) = x_field(ctx, ctx.spec) { out.push(Placement::new(PositionalChannel::X, f, channel_read(&ctx.scales.x))); }
+    if let Some(f) = y_field(ctx, ctx.spec) { out.push(Placement::new(PositionalChannel::Y, f, channel_read(&ctx.scales.y))); }
+    out
+}
+
+/// The exhaustive per-mark dispatch to each builder module's own
+/// `placements()`, beside [`dispatch_mark_build`] and read from the same
+/// per-builder path resolvers that build dispatches on (`BarPath`,
+/// `tick::TickMode`, `RectShape`, `RuleShape`, `text::polar_label_placement`),
+/// so the drop a builder takes and the count the census takes can never
+/// disagree about which path a layer is on. `Arc` and `Geoshape` place
+/// nothing: an arc's radius clamps (`arc::radius_to_pixel`) and its theta/
+/// wedge geometry drops only for data validity, never a positional domain;
+/// a geoshape projects lon/lat through its own geographic projection and
+/// never reads `ctx.scales` at all.
+pub(crate) fn dispatch_mark_placements<'a>(mark: &Mark, ctx: &'a DrawCtx<'a>) -> Vec<Placement<'a>> {
+    match mark {
+        Mark::Rule => super::marks::rule::placements(ctx),
+        Mark::Segment => super::marks::segment::placements(ctx),
+        Mark::Point => super::marks::point::placements(ctx),
+        Mark::Line => super::marks::line::placements(ctx),
+        Mark::Bar => super::marks::bar::placements(ctx),
+        Mark::Area => super::marks::area::placements(ctx),
+        Mark::Text => super::marks::text::placements(ctx),
+        Mark::Tick => super::marks::tick::placements(ctx),
+        Mark::Rect => super::marks::rect::placements(ctx),
+        Mark::Polygon => super::marks::polygon::placements(ctx),
+        Mark::Image => super::marks::image::placements(ctx),
+        Mark::Ribbon => super::marks::ribbon::placements(ctx),
+        Mark::Label => super::marks::label::placements(ctx),
+        Mark::Arc | Mark::Geoshape => Vec::new(),
+    }
+}
+
+/// One positional channel's rows this layer's mark draws but whose explicit
+/// domain leaves out — [`domain_left_out_counts`]'s per-channel (or, for a
+/// statistic layer, per-axis) tally, and the payload of one
+/// [`RenderWarning::DomainRowsLeftOut`](super::RenderWarning::DomainRowsLeftOut).
+/// `channel` is the resolved token as counted, then the channel the layer's
+/// own caller wrote once the per-layer draw site un-flips it. `entry` is the
+/// statistic-layer voice: `Some(entry)` for a layer whose rows a statistic
+/// produced, naming the call that built it and counting `rows` worth of
+/// marks, not of the user's own rows; `None` for a primitive layer over the
+/// user's own rows. `field` is the name the warning quotes: a primitive
+/// layer's bound field, a statistic layer's displayed name, and `None` when
+/// that statistic layer's title is suppressed (empty or blank, as
+/// `title=None` writes it), whose sentence then names no field. `cut` is
+/// `true` only for a vertex-unit statistic layer's marks the builder still
+/// draws with some vertices removed; `false` for a mark the builder skips
+/// entirely and for every primitive layer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DomainLeftOut {
+    pub(crate) channel: String,
+    pub(crate) field: Option<String>,
+    pub(crate) rows: usize,
+    pub(crate) categorical: bool,
+    pub(crate) entry: Option<String>,
+    pub(crate) cut: bool,
+}
+
+impl DomainLeftOut {
+    /// The tally a [`RenderWarning::DomainRowsLeftOut`](super::RenderWarning::DomainRowsLeftOut)
+    /// carries, so a composite can fold a leaf's warning back into its own
+    /// sum; `None` for every other warning.
+    pub(crate) fn from_warning(warning: &super::RenderWarning) -> Option<Self> {
+        match warning {
+            super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut } => Some(Self {
+                channel: channel.clone(),
+                field: field.clone(),
+                rows: *rows,
+                categorical: *categorical,
+                entry: entry.clone(),
+                cut: *cut,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether `other` reports the same channel, field, voice and outcome,
+    /// so the two tallies sum into one warning.
+    pub(crate) fn same_report(&self, other: &Self) -> bool {
+        self.channel == other.channel
+            && self.field == other.field
+            && self.categorical == other.categorical
+            && self.entry == other.entry
+            && self.cut == other.cut
+    }
+}
+
+impl From<DomainLeftOut> for super::RenderWarning {
+    fn from(left_out: DomainLeftOut) -> Self {
+        let DomainLeftOut { channel, field, rows, categorical, entry, cut } = left_out;
+        super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut }
+    }
+}
+
+/// The caller's voice for a statistic layer's `DomainRowsLeftOut`: the
+/// entry that built the layer (`prepare::layer_entry`), read once per layer
+/// by the per-layer draw site and passed to [`domain_left_out_counts`] only
+/// when `prepare::reads_statistic_output` holds for it.
+pub(crate) struct StatisticVoice {
+    pub(crate) entry: String,
+}
+
+/// Which of `ctx.batch`'s rows an explicit domain leaves out for a single
+/// [`Placement`]: a row counts when, on ANY of the placement's columns, the
+/// value is present, [`ScaleKind::admits_for_pixel`] admits it, it is on a
+/// `Log` scale's mapped side (an off-side row is
+/// [`RenderWarning::LogScaleRowsLeftOut`](super::RenderWarning::LogScaleRowsLeftOut)'s
+/// alone, never double-counted here), and the placement's
+/// [`PlacementRead`] cannot place it. Returns the row INDICES, not a count,
+/// so [`domain_left_out_counts`] can union a statistic layer's `x`/`x2` (or
+/// `y`/`y2`) placements into one per-axis set instead of summing two counts
+/// that may double-count a row left out on both.
+///
+/// `Err(RenderError::UnsupportedDtype { .. })` on any column counts the
+/// whole placement as zero rather than raising: the builder's own identical
+/// read fails the identical way and draws nothing for every row, with no
+/// explicit domain at fault (a `Timestamp` column sharing a sibling layer's
+/// established `Ordinal` axis,
+/// `test_a_temporal_layer_field_beside_a_categorical_axis_renders` pins).
+/// Any OTHER error — `UnknownColumn` included — propagates: the census
+/// reads [`Placement::columns`], which (`marks::image::drawn_columns`
+/// aside) are the layer's own bound fields behind the same column gate
+/// every other door already refuses an absent one through
+/// (`prepare::validate_layer_columns`), so an `UnknownColumn` here can only
+/// mean the census and the builder disagree about a column — the drift
+/// class a raster's own `ImagePath` resolver closes for `mark_image`.
+fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
+    let scale = match placement.channel {
+        PositionalChannel::X | PositionalChannel::X2 => &ctx.scales.x,
+        PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
+    };
+    match placement.read {
+        PlacementRead::Category => {
+            let mut columns = Vec::with_capacity(placement.columns.len());
+            for col in &placement.columns {
+                match col_as_ordinal_category_str(ctx.batch, col) {
+                    Ok(v) => columns.push(v),
+                    Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
+                    Err(e) => return Err(e),
+                }
+            }
+            let n = columns.iter().map(Vec::len).max().unwrap_or(0);
+            Ok((0..n)
+                .filter(|&i| {
+                    columns.iter().any(|col| {
+                        col.get(i).and_then(|o| o.as_deref()).is_some_and(|v| scale.to_pixel_str(v).is_none())
+                    })
+                })
+                .collect())
+        }
+        PlacementRead::Strict | PlacementRead::ClipAware => {
+            let clip_aware = placement.read == PlacementRead::ClipAware;
+            let mut columns = Vec::with_capacity(placement.columns.len());
+            for col in &placement.columns {
+                match col_as_f64(ctx.batch, col) {
+                    Ok(v) => columns.push(v),
+                    Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
+                    Err(e) => return Err(e),
+                }
+            }
+            let n = columns.iter().map(Vec::len).max().unwrap_or(0);
+            Ok((0..n)
+                .filter(|&i| {
+                    columns.iter().any(|col| {
+                        col.get(i).copied().flatten().is_some_and(|x| {
+                            scale.admits_for_pixel(x)
+                                && !matches!(scale, ScaleKind::Log(s) if !s.on_side(x))
+                                && (if clip_aware { ctx.to_pixel(scale, x) } else { scale.to_pixel_f64(x) }).is_none()
+                        })
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+/// Count, per positional placement [`dispatch_mark_placements`] names for
+/// this layer's mark, how many of `ctx.batch`'s rows an explicit domain
+/// leaves out — the draw-time half of
+/// [`RenderWarning::DomainRowsLeftOut`](super::RenderWarning::DomainRowsLeftOut).
+///
+/// Every builder below still receives the SAME `ctx.batch` it always did —
+/// this only tallies what each placement's [`PlacementRead`] is about to
+/// decline to place, mirroring the drop the real builder makes rather than
+/// causing a new one, since both read the same per-builder path fact.
+///
+/// `statistic` is `None` for a primitive layer: one [`DomainLeftOut`] per
+/// placement, `field` the placement channel's own encoding binding (the
+/// field the caller wrote — for a raster image this is the user's `x`/`y`,
+/// never the extent column `Placement::columns` actually reads), `cut`
+/// always `false` (the primitive row text has only one sentence). `Some`
+/// for a layer whose rows a statistic produced: `x` and `x2` placements
+/// merge into one `x`-axis set of left-out rows (a mark left out on EITHER
+/// end counts once, not twice — a histogram bin cut on both `bin_start` and
+/// `bin_end` is one undrawn bar), `y` and `y2` merge the same way under
+/// `y`, and the reported `field` is the merged axis's own PRIMARY channel
+/// (`x` over `x2`, `y` over `y2`) title, else its field
+/// (`layout::axis::resolve_axis_title`), or no name when that title is
+/// suppressed — the title is the name `_rebind_channel` stamps with the
+/// user's own pre-statistic field (`v`,
+/// not `bin_start`).
+///
+/// A statistic layer drawn by a vertex-unit mark ([`dispatch_vertex_frame`]
+/// is `Some`) counts marks, one outcome per mark decided once over every
+/// axis from the builder's own [`VertexFrame`]: a group that keeps fewer
+/// placed vertices than the builder's minimum is a mark the builder skips
+/// entirely (`cut: false`), any other group is a mark drawn cut (`cut:
+/// true`). A placed vertex is the builder's own predicate, so a vertex
+/// another axis's domain removes, or a null or non-finite value the
+/// builder cannot place, counts against the group's survivors too. The one
+/// outcome is reported on each axis that left out one of the group's rows;
+/// a group with no left-out row on any axis (one the builder drops only
+/// for its values) is not the domain's loss and is not reported. Each axis
+/// reports up to two [`DomainLeftOut`]s, one per outcome. A statistic layer
+/// with no vertex frame (a histogram's bar, say) keeps the plain per-axis
+/// left-out row count, `cut: false`.
+pub(crate) fn domain_left_out_counts(
+    ctx: &DrawCtx,
+    statistic: Option<&StatisticVoice>,
+) -> Result<Vec<DomainLeftOut>, RenderError> {
+    use std::collections::BTreeSet;
+
+    let bindings = ctx.spec.encoding.bindings();
+    let field_for = |channel: &str| bindings.iter().find(|(c, _)| *c == channel).map(|(_, e)| *e);
+
+    let placements = dispatch_mark_placements(&ctx.spec.mark, ctx);
+    let mut found = Vec::with_capacity(placements.len());
+    for placement in &placements {
+        found.push((placement, placement_left_out_rows(ctx, placement)?));
+    }
+
+    let Some(voice) = statistic else {
+        let mut out = Vec::new();
+        for (placement, rows) in &found {
+            if rows.is_empty() {
+                continue;
+            }
+            let Some(enc) = field_for(placement.channel.as_str()) else { continue };
+            out.push(DomainLeftOut {
+                channel: placement.channel.as_str().to_string(),
+                field: Some(enc.field.clone()),
+                rows: rows.len(),
+                categorical: placement.read == PlacementRead::Category,
+                entry: None,
+                cut: false,
+            });
+        }
+        return Ok(out);
+    };
+
+    // One statistic axis's left-out rows, merged over its primary and
+    // secondary channels, with the name and categorical flag it reports.
+    struct AxisLeftOut {
+        axis: PositionalChannel,
+        field: Option<String>,
+        categorical: bool,
+        rows: BTreeSet<usize>,
+    }
+    let mut axes = Vec::new();
+    for (axis, secondary) in [(PositionalChannel::X, PositionalChannel::X2), (PositionalChannel::Y, PositionalChannel::Y2)] {
+        let members: Vec<_> = found.iter().filter(|(p, _)| p.channel == axis || p.channel == secondary).collect();
+        let Some((first, _)) = members.first() else { continue };
+        let rows: BTreeSet<usize> = members.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let Some(enc) = field_for(axis.as_str()).or_else(|| field_for(secondary.as_str())) else { continue };
+        axes.push(AxisLeftOut {
+            axis,
+            field: crate::layout::axis::resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone())),
+            categorical: first.read == PlacementRead::Category,
+            rows,
+        });
+    }
+    if axes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let report = |axis: &AxisLeftOut, rows: usize, cut: bool| DomainLeftOut {
+        channel: axis.axis.as_str().to_string(),
+        field: axis.field.clone(),
+        rows,
+        categorical: axis.categorical,
+        entry: Some(voice.entry.clone()),
+        cut,
+    };
+
+    let Some(frame) = dispatch_vertex_frame(&ctx.spec.mark, ctx) else {
+        return Ok(axes.iter().map(|axis| report(axis, axis.rows.len(), false)).collect());
+    };
+    // Per axis, `(not drawn, drawn cut)` marks.
+    let mut tallies = vec![(0usize, 0usize); axes.len()];
+    for group in &frame.groups {
+        let hit: Vec<usize> = (0..axes.len()).filter(|&k| group.iter().any(|i| axes[k].rows.contains(i))).collect();
+        if hit.is_empty() {
+            continue;
+        }
+        let drawn = frame.draws(group);
+        for k in hit {
+            if drawn {
+                tallies[k].1 += 1;
+            } else {
+                tallies[k].0 += 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (axis, (not_drawn, cut)) in axes.iter().zip(tallies) {
+        if not_drawn > 0 {
+            out.push(report(axis, not_drawn, false));
+        }
+        if cut > 0 {
+            out.push(report(axis, cut, true));
+        }
+    }
+    Ok(out)
 }
 
 pub struct DrawCtx<'a> {
@@ -625,7 +1072,7 @@ pub(crate) fn style_need_met(need: crate::spec::mark::StyleNeed, ctx: &DrawCtx<'
         StyleNeed::Stroke => stroke_is_drawn(ctx),
         StyleNeed::Arrow => style.segment.arrow == Some(true),
         StyleNeed::QuantitativeColor => super::marks::polygon::color_is_quantitative(ctx),
-        StyleNeed::BandScale => super::marks::rect::RectShape::of(ctx) == super::marks::rect::RectShape::BandRange,
+        StyleNeed::BandScale => matches!(super::marks::rect::RectShape::of(ctx), super::marks::rect::RectShape::BandRange(_)),
         StyleNeed::LeaderPlacement => style.text.dx.is_some() && style.text.dy.is_some(),
         StyleNeed::TextChannel => {
             encoding.text.is_some() && super::marks::rect::RectShape::of(ctx) == super::marks::rect::RectShape::Heatmap

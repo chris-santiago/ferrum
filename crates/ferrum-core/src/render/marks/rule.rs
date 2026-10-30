@@ -299,6 +299,39 @@ fn rule_segments(
     acc
 }
 
+/// The channels this rule layer's [`RuleShape`] draws, each Category on an
+/// `Ordinal` scale and Strict otherwise — mirroring [`positional_pixels`]'s
+/// own per-channel dispatch. Reached only after `validate_mark_encoding`
+/// has already confirmed `RuleShape::resolve` succeeds for this layer, so
+/// an `Err` here (defensively handled rather than assumed unreachable)
+/// places nothing.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{channel_read, Placement};
+    use crate::spec::layer::PositionalChannel;
+    let coord_flipped = matches!(ctx.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let Ok(shape) = RuleShape::resolve(&ctx.spec.encoding, coord_flipped) else { return Vec::new() };
+    match shape {
+        RuleShape::Diagonal { x, y, x2, y2 } => vec![
+            Placement::new(PositionalChannel::X, x, channel_read(&ctx.scales.x)),
+            Placement::new(PositionalChannel::Y, y, channel_read(&ctx.scales.y)),
+            Placement::new(PositionalChannel::X2, x2, channel_read(&ctx.scales.x)),
+            Placement::new(PositionalChannel::Y2, y2, channel_read(&ctx.scales.y)),
+        ],
+        RuleShape::VerticalSegment { x, y, y2 } => vec![
+            Placement::new(PositionalChannel::X, x, channel_read(&ctx.scales.x)),
+            Placement::new(PositionalChannel::Y, y, channel_read(&ctx.scales.y)),
+            Placement::new(PositionalChannel::Y2, y2, channel_read(&ctx.scales.y)),
+        ],
+        RuleShape::HorizontalSegment { y, x, x2 } => vec![
+            Placement::new(PositionalChannel::Y, y, channel_read(&ctx.scales.y)),
+            Placement::new(PositionalChannel::X, x, channel_read(&ctx.scales.x)),
+            Placement::new(PositionalChannel::X2, x2, channel_read(&ctx.scales.x)),
+        ],
+        RuleShape::VerticalSpan { x } => vec![Placement::new(PositionalChannel::X, x, channel_read(&ctx.scales.x))],
+        RuleShape::HorizontalSpan { y } => vec![Placement::new(PositionalChannel::Y, y, channel_read(&ctx.scales.y))],
+    }
+}
+
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::MetadataColumns;
 

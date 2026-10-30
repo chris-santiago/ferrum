@@ -77,11 +77,12 @@ def test_every_private_desugar_parameter_is_injected_by_a_prep_step() -> None:
     functions = _desugar_functions()
     injected = _injected_names(_PREP_STEPS)
     # The population is every desugar the dispatcher can reach, and it holds
-    # a private parameter: ``desugar_hex``'s ``_color``, which
-    # ``_prep_hex_field_from_color`` supplies. The control below shows an
-    # unsupplied one would be caught.
-    assert _private_params(functions[_HEX]) == {"_color"}
-    assert "_color" in injected
+    # private parameters: ``desugar_hex``'s ``_color``, which
+    # ``_prep_hex_field_from_color`` supplies, and the declared axis titles
+    # ``_prep_axis_titles`` supplies. The control below shows an unsupplied
+    # one would be caught.
+    assert _private_params(functions[_HEX]) == {"_color", "_x_title", "_y_title"}
+    assert {"_color", "_x_title", "_y_title"} <= injected
     assert _uninjected(functions, injected) == {}
 
 

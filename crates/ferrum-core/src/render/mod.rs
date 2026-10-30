@@ -2157,6 +2157,79 @@ pub enum RenderWarning {
         side: crate::scale::log::LogSide,
         coord_flipped: bool,
     },
+    /// A row this layer's mark places by a positional channel
+    /// (`render::draw::dispatch_mark_placements`'s per-builder fact), whose
+    /// value the channel's scale cannot place under an explicit domain:
+    /// outside a continuous `domain=`/`xlim`/`ylim`/`configure_*` bound with
+    /// `clamp` unset (`categorical: false`), or naming a category a `Band`/
+    /// `Point`/`Ordinal` explicit `domain=` leaves out (`categorical:
+    /// true`). The mark still draws every other row — this is a count of
+    /// what it skipped, not a refusal. Counted at the one draw-time seam
+    /// that sees every mark's final rows and projection
+    /// (`render::draw::domain_left_out_counts`, called from the per-layer
+    /// draw site in `scene_build`), never at scale resolution — the
+    /// explicit-domain path never computes a data extent, `xlim`/
+    /// `configure_*` domains apply after the provisional resolve, and
+    /// position adjustments (data-space `Jitter`) have already moved the
+    /// rows by the time this count runs, none of which a scale-resolution-
+    /// time count could see.
+    ///
+    /// A `Log` scale's off-side rows are excluded here — `ScaleKind::
+    /// to_pixel_f64` returns `None` for those too, but they are already
+    /// [`LogScaleRowsLeftOut`](Self::LogScaleRowsLeftOut)'s to report, and a
+    /// row reported twice would contradict this warning's own "never double
+    /// counted" rule.
+    ///
+    /// `entry` is `Some` for a layer whose rows a statistic produced
+    /// (`prepare::reads_statistic_output`): the warning then speaks in that
+    /// entry's voice, counts `rows` worth of marks rather than the user's
+    /// own rows (an `x`/`x2` pair — a histogram bin's `bin_start`/`bin_end`
+    /// — merges into one `x`-axis count, so a bin cut on both ends counts
+    /// once, not twice), and names the channel's displayed title in place
+    /// of its raw field. `None` for a primitive layer over the user's own
+    /// rows, which keeps the plain per-channel, per-row text.
+    ///
+    /// `cut` is `true` only for a vertex-unit mark's (`line`/`area`/
+    /// `ribbon`/`polygon`) statistic layer whose marks still draw with some
+    /// vertices removed — a different sentence ("cross the domain", or on
+    /// a categorical axis "reach a category the scale's explicit domain
+    /// leaves out", both with "only their part inside it is drawn") from
+    /// the one a mark the builder skips entirely gets (`cut: false`, the
+    /// same sentence every other case uses). Each mark's outcome is decided
+    /// once, over every axis and every vertex its build cannot place, and
+    /// reported on each axis that left out one of its rows. A layer can
+    /// report one of each per axis when it has marks of both kinds; `false`
+    /// for every primitive layer and every non-vertex-unit statistic layer
+    /// (a histogram's bar, say).
+    ///
+    /// `field` is `None` for a statistic layer whose title is suppressed
+    /// (empty or blank, as `title=None` writes it): it shows no name, so
+    /// its sentence drops the `of '<field>'` clause and keeps the rest.
+    ///
+    /// Summed per `(channel, field, categorical, entry, cut)` across every
+    /// layer and panel by `scene_build`'s `DomainLeftOutLedger`, flushed
+    /// once after the panel loop (one warning per distinct key, not one per
+    /// layer or panel), and summed again across composite leaves by
+    /// `render_composite_scene`, mirroring `TextInkPastFrame`'s multiplicity
+    /// — so `+`, a static `LayerChart` and `.interactive()` report the same
+    /// count for the same data. A layer repeated in every facet panel (its
+    /// frame lacks the facet field) counts once per panel, since each panel
+    /// leaves out its own copy. `channel` is already the one the layer's
+    /// own caller wrote by the time it reaches here — the per-layer draw
+    /// site un-flips it with its OWN `layer_flipped`, not the chart's, so a
+    /// per-layer `CoordFlip` or a composite's mixed-flip leaves never
+    /// misname a contributor (unlike `LogScaleRowsLeftOut`, which stores the
+    /// resolved channel and un-flips once at `Display` time with one
+    /// chart-wide flag — correct there because every `Log` channel shares
+    /// the chart's own flip).
+    DomainRowsLeftOut {
+        channel: String,
+        field: Option<String>,
+        rows: usize,
+        categorical: bool,
+        entry: Option<String>,
+        cut: bool,
+    },
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
     /// A categorical `stroke_dash` channel named more categories than the dash
@@ -2692,6 +2765,39 @@ impl std::fmt::Display for RenderWarning {
                         "{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale \
                          cannot map, so they are not drawn; filter them, or use fm.SqrtScale()"
                     )
+                }
+            }
+            RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut } => {
+                if let Some(entry) = entry {
+                    write!(f, "{entry}: ")?;
+                }
+                let unit = if entry.is_some() { "mark(s)" } else { "row(s)" };
+                let named = field.as_ref().map(|field| format!(" of '{field}'")).unwrap_or_default();
+                match (*categorical, *cut) {
+                    (true, false) => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} name a category the scale's \
+                         explicit domain leaves out, so they are not drawn; add it to the domain, \
+                         or drop domain= to draw every category"
+                    ),
+                    (false, false) => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} fall outside the scale's \
+                         explicit domain, so they are not drawn; widen the domain, or pass \
+                         clamp=True to draw them at the axis edge"
+                    ),
+                    (true, true) => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} reach a category the scale's \
+                         explicit domain leaves out, so only their part inside it is drawn; add it \
+                         to the domain, or drop domain= to draw every category"
+                    ),
+                    (false, true) => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} cross the scale's explicit \
+                         domain, so only their part inside it is drawn; widen the domain, or pass \
+                         clamp=True to draw them at the axis edge"
+                    ),
                 }
             }
             RenderWarning::ColorPaletteOverflowed { categories } => write!(

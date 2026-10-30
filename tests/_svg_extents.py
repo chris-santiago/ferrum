@@ -103,12 +103,44 @@ def y_axis_title(svg: str) -> str | None:
     telling those two cases apart is what the ``displot(kind="rug", kde=True)``
     composition is pinned on (#201).
     """
-    titles = [text for attrs, text in text_elements(svg) if "rotate(-90" in attrs]
+    titles = y_axis_titles(svg)
     if not titles:
         return None
     if len(titles) > 1:
         raise AssertionError(f"expected a single-panel SVG with one y-axis title, got {titles}")
     return titles[0]
+
+
+def y_axis_titles(svg: str) -> list[str]:
+    """Every rendered y-axis title, one per panel axis, in document order."""
+    return [text for attrs, text in text_elements(svg) if "rotate(-90" in attrs]
+
+
+def x_axis_title(svg: str) -> str | None:
+    """The rendered x-axis title of a single-panel SVG, or ``None`` when it has none.
+
+    The unrotated counterpart of :func:`y_axis_title`: the one ``<text>`` set
+    in the axis-title weight (``font-weight="600"``), centred on its anchor
+    and not rotated. Tick labels carry no weight, and the chart title and a
+    legend title anchor at their start.
+    """
+    titles = x_axis_titles(svg)
+    if not titles:
+        return None
+    if len(titles) > 1:
+        raise AssertionError(f"expected a single-panel SVG with one x-axis title, got {titles}")
+    return titles[0]
+
+
+def x_axis_titles(svg: str) -> list[str]:
+    """Every rendered x-axis title, one per panel axis, in document order."""
+    return [
+        text
+        for attrs, text in text_elements(svg)
+        if 'font-weight="600"' in attrs
+        and 'text-anchor="middle"' in attrs
+        and "rotate(" not in attrs
+    ]
 
 
 def text_runs(svg: str) -> list[str]:

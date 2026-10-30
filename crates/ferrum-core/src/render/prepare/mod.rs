@@ -2992,11 +2992,21 @@ fn python_channel(wire: &'static str) -> &'static str {
 }
 
 /// Whether `layer` reads a statistic's output: the rows under its
-/// `data_source` passed a lowered step ([`OutputLineage::is_statistic`]). A
-/// layer with no `data_source`, or one reading the user's rows, reads the
-/// user's rows.
-fn reads_statistic_output(layer: &LayerPrepared, lineages: &OutputLineages) -> bool {
-    layer.data_source.as_deref().and_then(|key| lineages.get(key)).is_some_and(OutputLineage::is_statistic)
+/// effective data key passed a lowered step ([`OutputLineage::is_statistic`]).
+/// A layer with no `data_source` reads its chart's own pipeline tail
+/// ([`FINAL_OUTPUT_KEY`]), the same resolution every other reader of "which
+/// lineage does this layer's rows come from" already applies (e.g. the
+/// `statistic_series_fields` call just above). An unlayered
+/// `mark_histogram()`'s one bar layer, and a figure's own tail layer built
+/// through Python's `Chart._with_statistics`, are `data_source: None`
+/// exactly because their rows ARE the chart's own tail, not because they
+/// read the user's un-transformed rows. A layer naming a key nothing
+/// published still reads the user's rows here (`false`): that mismatch is
+/// refused elsewhere ([`validate_layer_columns`]/[`layer_final_rows`]), not
+/// silently answered by this predicate.
+pub(in crate::render) fn reads_statistic_output(layer: &LayerPrepared, lineages: &OutputLineages) -> bool {
+    let key = layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY);
+    lineages.get(key).is_some_and(OutputLineage::is_statistic)
 }
 
 /// Every batch a chart's pipeline saw: its SOURCE schema, taken before any

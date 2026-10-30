@@ -182,6 +182,8 @@ def desugar_cv_scores(
     kind: str = "box",
     split: str = "both",
     color_field: str | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Per-fold CV score distribution.
@@ -202,6 +204,10 @@ def desugar_cv_scores(
     a chart-level ``position=Dodge(...)`` can offset the points instead —
     position adjustments are not composable (single-position rule, same
     as catplot's dodge-overrides-jitter).
+
+    ``_x_title``/``_y_title`` are the ``title=`` declared on the chart-level
+    x/y channel, injected by the composite-mark expansion; ``kind="box"``
+    hands them to the box layers, which read ``BoxStats`` output.
     """
     del x_field, y_field
     # split is wired via data_transform in Chart.mark_cv_scores (filters the
@@ -214,7 +220,9 @@ def desugar_cv_scores(
     if kind == "box":
         from ferrum.marks.composite import desugar_boxplot
 
-        box_result = desugar_boxplot("split", "score", color_field=color_field)
+        box_result = desugar_boxplot(
+            "split", "score", color_field=color_field, _x_title=_x_title, _y_title=_y_title
+        )
         layers = list(box_result.layers)
         # Override layer-0's y field-name (BoxStats output column) with a
         # titled channel so the chart's y-axis reads "score" rather than

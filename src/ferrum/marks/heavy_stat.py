@@ -29,6 +29,7 @@ from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
+    titled_positional_channel,
     typed_positional_channel,
     with_grouping,
 )
@@ -49,6 +50,8 @@ def desugar_contour(
     cmap: str | None = None,
     groupby: str | Sequence[str] | None = None,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Bivariate-density contour mark desugar.
 
@@ -119,6 +122,11 @@ def desugar_contour(
         composite-mark expansion. They join the groupby after *groupby*'s
         own, so the surfaces split per group as with ``groupby=``; the layer
         draws them through the bindings it inherits from the chart.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The layer's x/y bindings
+        carry it in place of the field name, so the layer names the axis
+        the chart shows.
 
     Returns
     -------
@@ -159,6 +167,8 @@ def desugar_contour(
     ]
     from ferrum.encoding import Color, X, Y
 
+    x_title = _x_title or x_field
+    y_title = _y_title or y_field
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of any of these columns raises here instead of
     # silently reading a stale name.  All six are declared `contour` outputs;
@@ -182,8 +192,8 @@ def desugar_contour(
         # chart's grouping adds is drawn through the binding the layer
         # inherits from the chart.
         segment_encoding: dict = {
-            "x": X(_contour_cols["contour_x"], title=x_field),
-            "y": Y(_contour_cols["contour_y"], title=y_field),
+            "x": X(_contour_cols["contour_x"], title=x_title),
+            "y": Y(_contour_cols["contour_y"], title=y_title),
             "x2": _contour_cols["contour_x2"],
             "y2": _contour_cols["contour_y2"],
         }
@@ -210,8 +220,8 @@ def desugar_contour(
                 name="polygon",
                 mark="polygon",
                 encoding={
-                    "x": X(_contour_cols["contour_x"], title=x_field),
-                    "y": Y(_contour_cols["contour_y"], title=y_field),
+                    "x": X(_contour_cols["contour_x"], title=x_title),
+                    "y": Y(_contour_cols["contour_y"], title=y_title),
                     "color": Color(_contour_cols["level_value"], title="Density"),
                 },
                 mark_kwargs=mk,
@@ -230,8 +240,8 @@ def desugar_contour(
                 name="segment",
                 mark="segment",
                 encoding={
-                    "x": X(_contour_cols["contour_x"], title=x_field),
-                    "y": Y(_contour_cols["contour_y"], title=y_field),
+                    "x": X(_contour_cols["contour_x"], title=x_title),
+                    "y": Y(_contour_cols["contour_y"], title=y_title),
                     "x2": _contour_cols["contour_x2"],
                     "y2": _contour_cols["contour_y2"],
                 },
@@ -301,6 +311,8 @@ def desugar_violin(
     shared_extent: bool = False,
     horizontal: bool = False,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
@@ -395,6 +407,11 @@ def desugar_violin(
         emits ``__pos_y_offset__`` (scaled by panel height) instead of
         ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
         expands along the category band on the ``y`` axis.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. Every layer's binding on
+        that channel carries it in place of the field name, so the layers
+        name the axis the chart shows.
 
     Returns
     -------
@@ -434,11 +451,16 @@ def desugar_violin(
         val_field = x_field  # numeric values on x
         cat_sort = y_sort
         cat_type = y_type
+        cat_title, val_title = _y_title, _x_title
     else:
         cat_field = x_field  # categorical grouping on x (default)
         val_field = y_field  # numeric values on y
         cat_sort = x_sort
         cat_type = x_type
+        cat_title, val_title = _x_title, _y_title
+    # The value axis's name on every layer reading a statistic output: the
+    # caller's declared title, else their field.
+    value_title = val_title or val_field
 
     # The categorical encoding, built once and shared by the body polygon and
     # every inner overlay below: typed Nominal unless the caller declared
@@ -450,6 +472,7 @@ def desugar_violin(
         channel=Y if horizontal else X,
         declared_type=cat_type,
         sort=cat_sort,
+        title=cat_title,
     )
 
     # When a hue (color) field is present, the KDE — and every inner summary —
@@ -471,9 +494,9 @@ def desugar_violin(
     # vertical; __pos_y_offset__ for horizontal — both are implemented; the
     # Violin transform emits __pos_y_offset__ from panel height).
     if horizontal:
-        body_encoding: dict = {"y": cat_enc, "x": X(_violin_cols["violin_y"], title=val_field)}
+        body_encoding: dict = {"y": cat_enc, "x": X(_violin_cols["violin_y"], title=value_title)}
     else:
-        body_encoding = {"x": cat_enc, "y": Y(_violin_cols["violin_y"], title=val_field)}
+        body_encoding = {"x": cat_enc, "y": Y(_violin_cols["violin_y"], title=value_title)}
     # Attach the per-hue body fill only when the hue is a distinct column from
     # the categorical axis (split_hue). When color encodes the same field as
     # cat, the color encoding is redundant with the axis, so it is suppressed to
@@ -553,9 +576,9 @@ def desugar_violin(
             if role != "median":
                 mk["stroke_dash"] = [2, 2]
             if horizontal:
-                quart_encoding: dict = {"y": cat_enc, "x": col}
+                quart_encoding: dict = {"y": cat_enc, "x": X(col, title=value_title)}
             else:
-                quart_encoding = {"x": cat_enc, "y": col}
+                quart_encoding = {"x": cat_enc, "y": Y(col, title=value_title)}
             # The q1/median/q3 rules read the split "quart" BoxStats output
             # (grouped by the same split_hue-gated `groupby` as the body), so
             # attach the per-hue color only when the hue is a distinct column
@@ -594,6 +617,8 @@ def desugar_violin(
         color_field=color_field if split_hue else None,
         color_sort=color_sort if split_hue else None,
         grouping=grouping,
+        _x_title=_x_title,
+        _y_title=_y_title,
     )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
@@ -643,6 +668,8 @@ def desugar_qq(
     dequantize: bool = False,
     line: bool = True,
     grouping: Sequence[str] = (),
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Q-Q (quantile-quantile) plot mark desugar.
 
@@ -689,6 +716,11 @@ def desugar_qq(
         composite-mark expansion. ``QQ`` computes each group's quantiles and
         reference line on its own rows, and both batches carry the fields
         the layers inherit from the chart.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. Both layers carry it in
+        place of ``"Theoretical Quantiles"``/``"Sample Quantiles"``, so they
+        name the axis the chart shows.
 
     Returns
     -------
@@ -723,13 +755,16 @@ def desugar_qq(
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
     _qq_cols = registry_output_columns("qq", ["theoretical", "sample"])
+    # Both layers share one name per axis, bound once.
+    x_title = _x_title or "Theoretical Quantiles"
+    y_title = _y_title or "Sample Quantiles"
     layers = [
         _Layer(
             name="point",
             mark="point",
             encoding={
-                "x": X(_qq_cols["theoretical"], title="Theoretical Quantiles"),
-                "y": Y(_qq_cols["sample"], title="Sample Quantiles"),
+                "x": X(_qq_cols["theoretical"], title=x_title),
+                "y": Y(_qq_cols["sample"], title=y_title),
             },
             data_source=_QQ_TRANSFORM_NAME,
         )
@@ -753,8 +788,8 @@ def desugar_qq(
                 name="reference",
                 mark="rule",
                 encoding={
-                    "x": _qq_line_cols["qq_line_x_start"],
-                    "y": _qq_line_cols["qq_line_y_start"],
+                    "x": X(_qq_line_cols["qq_line_x_start"], title=x_title),
+                    "y": Y(_qq_line_cols["qq_line_y_start"], title=y_title),
                     "x2": _qq_line_cols["qq_line_x_end"],
                     "y2": _qq_line_cols["qq_line_y_end"],
                 },
@@ -786,6 +821,8 @@ def desugar_raster(
     blend: str | None = None,
     min_count: Optional[int] = None,
     log_scale: bool | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Datashader-style raster aggregation mark desugar.
 
@@ -851,6 +888,11 @@ def desugar_raster(
         labels raw values either way. ``None`` is symlog for ``"count"``
         and ``"density"`` and linear otherwise; ``True`` or ``False`` is
         honored on any aggregate.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The image layer's binding
+        on that channel carries it, so the layer names the axis the chart
+        shows; with none declared it binds the bare field.
 
     Returns
     -------
@@ -892,6 +934,8 @@ def desugar_raster(
     mk: dict = {}
     if cmap is not None:
         mk["cmap"] = cmap
+    from ferrum.encoding import X, Y
+
     # An unset blend writes nothing, so a raster that never asked for a
     # blend serializes exactly as it always has.
     if blend is not None:
@@ -900,7 +944,10 @@ def desugar_raster(
         _Layer(
             name="image",
             mark="image",
-            encoding={"x": x_field, "y": y_field},
+            encoding={
+                "x": titled_positional_channel(x_field, channel=X, title=_x_title),
+                "y": titled_positional_channel(y_field, channel=Y, title=_y_title),
+            },
             mark_kwargs=mk if mk else None,
             data_source="raster",
         )
@@ -929,6 +976,8 @@ def desugar_hex(
     stroke: Optional[str] = None,
     stroke_width: float = 0,
     _color: Any = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Hexagonal-bin mark desugar.
 
@@ -985,6 +1034,11 @@ def desugar_hex(
         channel properties style the cell color binding; the default title is
         the aggregated column, or ``"Count"``. Its scheme arrives already
         folded into *cmap* by the resolution step.
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The cells' x/y bindings
+        carry it in place of the field name, so the layer names the axis
+        the chart shows.
 
     Returns
     -------
@@ -1030,8 +1084,8 @@ def desugar_hex(
             name="polygon",
             mark="polygon",
             encoding={
-                "x": X(_hex_cols["hex_x"], title=x_field),
-                "y": Y(_hex_cols["hex_y"], title=y_field),
+                "x": X(_hex_cols["hex_x"], title=_x_title or x_field),
+                "y": Y(_hex_cols["hex_y"], title=_y_title or y_field),
                 "color": Color(_hex_cols["value"], **_hex_color_kwargs(aggregate, field, _color)),
             },
             mark_kwargs=mk,
@@ -1082,6 +1136,8 @@ def desugar_swarm(
     y_sort: Any = None,
     x_type: str | None = None,
     y_type: str | None = None,
+    _x_title: str | None = None,
+    _y_title: str | None = None,
 ) -> MarkDesugarResult:
     """Beeswarm plot mark desugar.
 
@@ -1155,6 +1211,11 @@ def desugar_swarm(
         case the categorical channel defaults to Nominal so a numeric category
         column spreads within a band exactly as its ``Utf8`` equivalent does
         (#171).
+    _x_title, _y_title : str or None, default None
+        The ``title=`` the caller declared on the chart-level x/y channel,
+        injected by the composite-mark expansion. The point layer's binding
+        on that channel carries it, so the layer names the axis the chart
+        shows; with none declared it binds the bare field.
 
     Returns
     -------
@@ -1181,6 +1242,8 @@ def desugar_swarm(
     # categorical (x_sort/x_type apply); when horizontal, y is (y_sort/y_type).
     cat_sort = x_sort if orient == "vertical" else y_sort
     cat_type = x_type if orient == "vertical" else y_type
+    cat_title = _x_title if orient == "vertical" else _y_title
+    val_title = _y_title if orient == "vertical" else _x_title
     swarm_kwargs: dict = dict(
         category=cat,
         value=val,
@@ -1208,12 +1271,17 @@ def desugar_swarm(
         # Dodge uses (Phase 9c). That band centre only exists on an ordinal
         # scale, so the channel is typed Nominal unless the caller declared
         # otherwise (#171).
-        x_enc_val = typed_positional_channel(cat, channel=X, declared_type=cat_type, sort=cat_sort)
+        x_enc_val = typed_positional_channel(
+            cat, channel=X, declared_type=cat_type, sort=cat_sort, title=cat_title
+        )
         layers = [
             _Layer(
                 name="point",
                 mark="point",
-                encoding={"x": x_enc_val, "y": val},
+                encoding={
+                    "x": x_enc_val,
+                    "y": titled_positional_channel(val, channel=Y, title=val_title),
+                },
                 data_source="swarm",
             )
         ]
@@ -1225,12 +1293,17 @@ def desugar_swarm(
         # ordinal y axis render category labels correctly, and the renderer
         # fills `__pos_y_offset__` with the packed pixel offset via
         # `render/position.rs::read_position_offsets`.
-        y_enc_val = typed_positional_channel(cat, channel=Y, declared_type=cat_type, sort=cat_sort)
+        y_enc_val = typed_positional_channel(
+            cat, channel=Y, declared_type=cat_type, sort=cat_sort, title=cat_title
+        )
         layers = [
             _Layer(
                 name="point",
                 mark="point",
-                encoding={"x": val, "y": y_enc_val},
+                encoding={
+                    "x": titled_positional_channel(val, channel=X, title=val_title),
+                    "y": y_enc_val,
+                },
                 data_source="swarm",
             )
         ]

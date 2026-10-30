@@ -98,6 +98,101 @@ pub(crate) fn drawn_columns<'f>(
 
 pub(crate) use crate::transform::raster::{RASTER_VALUE_FIELD, RASTER_VALUE_SCALE};
 
+/// Which path an image layer draws, resolved once and read by both [`build`]
+/// and [`placements`] so neither can disagree about what the other draws —
+/// the same pattern `BarPath::of`/`TickMode::of` apply to their own marks.
+/// `Unplaceable` is a coord this mark cannot draw under at all (its reason
+/// text names the coord; the mark is Cartesian-only); `UrlTiles` is a
+/// `url=`-bound layer, naming its own field; `Raster` is a true
+/// Raster-transform batch — every precondition `build_raster` draws under,
+/// parsed once into [`RasterFrame`] so it never re-reads these columns;
+/// `NoData` is
+/// everything else (a bare `mark_image()` with neither a `url` channel nor
+/// Raster-transform data behind it).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ImagePath<'a> {
+    Unplaceable { reason: &'static str },
+    UrlTiles { field: &'a str },
+    Raster(RasterFrame<'a>),
+    NoData,
+}
+
+/// A Raster-transform output's extent, size and pixel data, parsed once by
+/// [`ImagePath::of`]: `build_raster` reads these fields rather than making
+/// a second pass over the same columns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RasterFrame<'a> {
+    pub(crate) x_min: f64,
+    pub(crate) x_max: f64,
+    pub(crate) y_min: f64,
+    pub(crate) y_max: f64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixel_bytes: &'a [u8],
+}
+
+impl<'a> ImagePath<'a> {
+    /// Resolves this layer's path: a Polar/Geo coord first (neither path can
+    /// draw under one), then `url_tile_field` for the url-tile path, then
+    /// every precondition a one-row Raster-transform batch must meet
+    /// (Float64 extents, UInt32 width/height, Binary pixel data whose length
+    /// is exactly `8 * width * height`) for the raster path — `NoData`
+    /// otherwise.
+    pub(crate) fn of(ctx: &DrawCtx<'a>) -> Self {
+        match &ctx.spec.coord {
+            Some(crate::spec::coord::CoordKind::Polar { .. }) => {
+                return ImagePath::Unplaceable {
+                    reason: "mark_image() does not support CoordPolar; both its url-tile and \
+                             raster paths place images in Cartesian pixel space",
+                };
+            }
+            Some(crate::spec::coord::CoordKind::Geo { .. }) => {
+                return ImagePath::Unplaceable {
+                    reason: "mark_image() does not support CoordGeo; both its url-tile and \
+                             raster paths place images in Cartesian pixel space",
+                };
+            }
+            _ => {}
+        }
+        if let Some(field) = url_tile_field(ctx.spec.encoding.url.as_ref()) {
+            return ImagePath::UrlTiles { field };
+        }
+        let batch = ctx.batch;
+        if batch.num_rows() != 1 {
+            return ImagePath::NoData;
+        }
+        let f64_at = |name: &str| {
+            batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref::<Float64Array>()).map(|a| a.value(0))
+        };
+        let u32_at = |name: &str| {
+            batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref::<UInt32Array>()).map(|a| a.value(0))
+        };
+        let (Some(x_min), Some(x_max), Some(y_min), Some(y_max)) = (
+            f64_at(RASTER_X_EXTENT[0]),
+            f64_at(RASTER_X_EXTENT[1]),
+            f64_at(RASTER_Y_EXTENT[0]),
+            f64_at(RASTER_Y_EXTENT[1]),
+        ) else {
+            return ImagePath::NoData;
+        };
+        let (Some(width), Some(height)) = (u32_at("width"), u32_at("height")) else {
+            return ImagePath::NoData;
+        };
+        let Some(pixel_bytes) = batch
+            .column_by_name("pixel_data")
+            .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
+            .map(|a| a.value(0))
+        else {
+            return ImagePath::NoData;
+        };
+        let n_cells = (width as usize) * (height as usize);
+        if pixel_bytes.len() != n_cells * 8 {
+            return ImagePath::NoData;
+        }
+        ImagePath::Raster(RasterFrame { x_min, x_max, y_min, y_max, width, height, pixel_bytes })
+    }
+}
+
 /// The field a raster batch's cells hold ([`RASTER_VALUE_FIELD`]), or `None`
 /// for a batch that is no Raster output.
 pub(crate) fn raster_value_field(batch: &arrow::record_batch::RecordBatch) -> Option<&str> {
@@ -207,39 +302,66 @@ pub(crate) fn drawn_positional_columns_py(
     Ok(drawn_columns(mark, has_url.then_some(&url), channel, field).into_iter().map(str::to_string).collect())
 }
 
+/// `x` and `y`, always Strict: a url-tile image places each tile's own
+/// field directly; a raster places `drawn_columns`' extent pair
+/// (`RASTER_X_EXTENT`/`RASTER_Y_EXTENT`), so EITHER end failing to place
+/// counts the image's one row once — the same condition `build`'s own
+/// per-end `to_pixel_f64` calls blank the whole image on. Nothing places
+/// for [`ImagePath::Unplaceable`] (a coord this mark cannot draw under) or
+/// [`ImagePath::NoData`] (neither a `url=` channel nor a true Raster-
+/// transform batch) — the same [`ImagePath::of`] `build` matches on, so the
+/// census can never ask for a column `build` was never going to read.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    match ImagePath::of(ctx) {
+        ImagePath::Unplaceable { .. } | ImagePath::NoData => return Vec::new(),
+        ImagePath::UrlTiles { .. } | ImagePath::Raster(_) => {}
+    }
+    let url = ctx.spec.encoding.url.as_ref();
+    let mut out = Vec::new();
+    if let Some(xf) = ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) {
+        out.push(Placement { channel: PositionalChannel::X, columns: drawn_columns(ctx.spec.mark, url, "x", xf), read: PlacementRead::Strict });
+    }
+    if let Some(yf) = ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()) {
+        out.push(Placement { channel: PositionalChannel::Y, columns: drawn_columns(ctx.spec.mark, url, "y", yf), read: PlacementRead::Strict });
+    }
+    out
+}
+
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
 
-    // #118: both paths below are Cartesian-only, so a Polar/Geo coord leaves
-    // this mark with nothing it can place — a genuine defect (the user
-    // asked for images on a coord this mark cannot draw under), not a
-    // documented degrade: nothing about `mark_image()`'s public API says
-    // Polar/Geo is a legitimate, silent no-op.
-    match &ctx.spec.coord {
-        Some(crate::spec::coord::CoordKind::Polar { .. }) => {
-            return Ok(MarkBuildResult::empty_because(
-                MarkBatchKind::Image,
-                "mark_image() does not support CoordPolar; both its url-tile and \
-                 raster paths place images in Cartesian pixel space",
-            ));
-        }
-        Some(crate::spec::coord::CoordKind::Geo { .. }) => {
-            return Ok(MarkBuildResult::empty_because(
-                MarkBatchKind::Image,
-                "mark_image() does not support CoordGeo; both its url-tile and \
-                 raster paths place images in Cartesian pixel space",
-            ));
-        }
-        _ => {}
-    }
-
-    match url_tile_field(ctx.spec.encoding.url.as_ref()) {
+    match ImagePath::of(ctx) {
+        // #118: both paths are Cartesian-only, so a Polar/Geo coord leaves
+        // this mark with nothing it can place — a genuine defect (the user
+        // asked for images on a coord this mark cannot draw under), not a
+        // documented degrade: nothing about `mark_image()`'s public API
+        // says Polar/Geo is a legitimate, silent no-op.
+        ImagePath::Unplaceable { reason } => Ok(MarkBuildResult::empty_because(MarkBatchKind::Image, reason)),
         // ── URL-tile path ──────────────────────────────────────────────────
-        Some(field) => Ok(build_url_tiles(ctx, field)),
+        ImagePath::UrlTiles { field } => Ok(build_url_tiles(ctx, field)),
         // ── Raster path ────────────────────────────────────────────────────
-        None => build_raster(ctx),
+        ImagePath::Raster(frame) => build_raster(ctx, frame),
+        ImagePath::NoData => empty_no_data(),
     }
+}
+
+/// #118: reached only when [`ImagePath::of`] found neither a `url` encoding
+/// (the URL-tile path) nor a true Raster-transform batch (the raster
+/// path) — the only way a user reaches here is calling `mark_image()` bare,
+/// with neither a `url` channel nor the internal Raster transform behind
+/// it: a genuine defect (the user asked for an image and named no source
+/// for one), not a documented degrade.
+fn empty_no_data() -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::MarkBatchKind;
+    Ok(MarkBuildResult::empty_because(
+        MarkBatchKind::Image,
+        "mark_image() requires either a `url` encoding channel or Raster-transform \
+         data (produced by mark_raster()); this batch has neither",
+    ))
 }
 
 /// URL-tile path: one `SceneNode::Image` per row, positioned via x/y scales.
@@ -358,88 +480,17 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
 /// Refuses a raster whose cells hold a finite value that no color scale
 /// reached: scale resolution gives every image a scale (the chart's color
 /// scale or the shared cell scale) whenever a cell is finite, so the image
-/// never silently draws nothing.
-fn build_raster(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
+/// never silently draws nothing. `frame` is [`ImagePath::of`]'s own parse of
+/// this layer's extent, size and pixel data — this function reads none of
+/// those columns itself.
+fn build_raster(ctx: &DrawCtx, frame: RasterFrame) -> Result<crate::render::draw::MarkBuildResult, crate::render::RenderError> {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
 
     let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Image));
-    // #118: reached only when `build()`'s dispatch found no `url` encoding
-    // (the URL-tile path's own presence/dtype guards are unreachable/
-    // already-covered classes — see the doc above `build`) — so every
-    // failure below means the batch is not a `url=`-carrying tile batch AND
-    // not the single-row Raster-transform output `mark_raster()`'s own
-    // desugar always produces. The only way a user reaches here is calling
-    // `mark_image()` bare, with neither a `url` channel nor the internal
-    // Raster transform behind it — a genuine defect (the user asked for an
-    // image and named no source for one), not a documented degrade.
-    let empty_no_data = || {
-        Ok(MarkBuildResult::empty_because(
-            MarkBatchKind::Image,
-            "mark_image() requires either a `url` encoding channel or Raster-transform \
-             data (produced by mark_raster()); this batch has neither",
-        ))
-    };
-
+    let RasterFrame { x_min, x_max, y_min, y_max, width, height, pixel_bytes } = frame;
     let batch = ctx.batch;
-    if batch.num_rows() != 1 {
-        return empty_no_data();
-    }
-
-    let x_min = match batch
-        .column_by_name(RASTER_X_EXTENT[0])
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let x_max = match batch
-        .column_by_name(RASTER_X_EXTENT[1])
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let y_min = match batch
-        .column_by_name(RASTER_Y_EXTENT[0])
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let y_max = match batch
-        .column_by_name(RASTER_Y_EXTENT[1])
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let width = match batch
-        .column_by_name("width")
-        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let height = match batch
-        .column_by_name("height")
-        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-    let pixel_bytes = match batch
-        .column_by_name("pixel_data")
-        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
-    {
-        Some(a) => a.value(0),
-        None => return empty_no_data(),
-    };
-
     let n_cells = (width as usize) * (height as usize);
-    if pixel_bytes.len() != n_cells * 8 {
-        return empty_no_data();
-    }
 
     // The cells map through one color scale, resolved with the chart's
     // scales: the chart's color scale when the image draws color (its binding
@@ -834,6 +885,174 @@ mod tests {
             "the default Cartesian coord must still render"
         );
         assert!(result.empty_reason.is_none(), "a rendered image must carry no empty_reason");
+    }
+
+    /// `ImagePath` regression: a bare `mark_image(x=, y=)` with neither a
+    /// `url` channel nor Raster-transform columns behind it warns the named
+    /// no-data reason and never refuses, at 1 row and at 3 rows: the
+    /// census resolves the same `NoData` path `build` does, so it never
+    /// asks for the `x_min`/`y_min` extent columns this batch does not
+    /// carry, which would refuse an "unknown column" the caller never
+    /// wrote. A row-count rule in place of the path would reach that
+    /// refusal at exactly 1 row.
+    #[test]
+    fn bare_mark_image_warns_named_empty_not_refused_at_1_row_and_at_3_rows() {
+        for n in [1, 3] {
+            let spec = ChartSpec {
+                mark: Mark::Image,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("x", DataType::Float64, false),
+                    Field::new("y", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0; n])),
+                    Arc::new(Float64Array::from(vec![1.0; n])),
+                ],
+            )
+            .unwrap();
+            let out = crate::render::render_svg(
+                &spec,
+                &batch,
+                &ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )
+            .expect(&format!("{n}-row bare mark_image renders, named empty, never refused"));
+            let empties: Vec<&crate::render::RenderWarning> = out
+                .warnings
+                .iter()
+                .filter(|w| matches!(w, crate::render::RenderWarning::MarkBuildEmpty { .. }))
+                .collect();
+            assert_eq!(empties.len(), 1, "{n} rows: {:?}", out.warnings);
+            assert!(
+                matches!(
+                    empties[0],
+                    crate::render::RenderWarning::MarkBuildEmpty { reason, .. }
+                        if reason == "mark_image() requires either a `url` encoding channel or Raster-transform \
+                                       data (produced by mark_raster()); this batch has neither"
+                ),
+                "{n} rows: {:?}",
+                empties[0]
+            );
+        }
+    }
+
+    /// `ImagePath` regression: a raster under `CoordPolar`/`CoordGeo` with
+    /// an explicit `x` domain narrower than its extent (`x_min=0` falls
+    /// outside `[2,8]`) warns ONLY its coord empty reason — no
+    /// `DomainRowsLeftOut` on top: `placements` resolves the same
+    /// `ImagePath` `build` does, which is `Unplaceable` for Polar/Geo
+    /// before any column read, so the exclusion the builder's own
+    /// Polar/Geo empty already explains is never also counted as a
+    /// left-out row.
+    #[test]
+    fn raster_under_polar_or_geo_with_an_explicit_domain_warns_only_its_coord_reason() {
+        use crate::spec::coord::{CoordKind, GeoProjection};
+        use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+        let polar = CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        };
+        let geo = CoordKind::Geo { projection: GeoProjection::Mercator };
+        for (coord, tag) in [(polar, "CoordPolar"), (geo, "CoordGeo")] {
+            let mut spec = image_spec((2.0, 8.0), (2.0, 8.0));
+            spec.coord = Some(coord);
+            let pixel_data: Vec<u8> = [0.0_f64, 1.0, 0.5, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+            let batch = raster_batch(0.0, 10.0, 0.0, 10.0, 2, 2, pixel_data);
+            let out = crate::render::render_svg(
+                &spec,
+                &batch,
+                &ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )
+            .expect(&format!("{tag}: renders, named empty"));
+            let reasons: Vec<&crate::render::RenderWarning> = out
+                .warnings
+                .iter()
+                .filter(|w| matches!(w, crate::render::RenderWarning::MarkBuildEmpty { .. }))
+                .collect();
+            assert_eq!(reasons.len(), 1, "{tag}: {:?}", out.warnings);
+            assert!(
+                matches!(reasons[0], crate::render::RenderWarning::MarkBuildEmpty { reason, .. } if reason.contains(tag)),
+                "{tag}: {:?}",
+                reasons[0]
+            );
+            assert!(
+                !out.warnings.iter().any(|w| matches!(w, crate::render::RenderWarning::DomainRowsLeftOut { .. })),
+                "{tag}: the coord's own empty reason already explains nothing drew; a domain count on top double-reports it: {:?}",
+                out.warnings
+            );
+        }
+    }
+
+    /// `ImagePath` regression: a 1-row batch whose `x_min`/`x_max`/`y_min`/
+    /// `y_max` are Int64 (not Float64) is not a true Raster-transform batch
+    /// — `build_raster` requires Float64 extents — so it counts NOTHING
+    /// toward an explicit domain, even though `col_as_f64` can widen an
+    /// Int64 column: a dtype-blind census would count `x_min=0` as outside
+    /// `[2,8]`.
+    #[test]
+    fn raster_with_int64_extents_counts_nothing_toward_an_explicit_domain() {
+        use arrow::array::Int64Array;
+
+        let spec = image_spec((2.0, 8.0), (2.0, 8.0));
+        let pixel_data: Vec<u8> = [0.0_f64, 1.0, 0.5, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x_min", DataType::Int64, false),
+                Field::new("x_max", DataType::Int64, false),
+                Field::new("y_min", DataType::Int64, false),
+                Field::new("y_max", DataType::Int64, false),
+                Field::new("width", DataType::UInt32, false),
+                Field::new("height", DataType::UInt32, false),
+                Field::new("pixel_data", DataType::Binary, false),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(UInt32Array::from(vec![2])),
+                Arc::new(UInt32Array::from(vec![2])),
+                Arc::new(BinaryArray::from(vec![pixel_data.as_slice()])),
+            ],
+        )
+        .unwrap();
+        let out = crate::render::render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("renders, named empty (Int64 extents are not a Raster-transform batch)");
+        assert!(
+            out.warnings.iter().any(|w| matches!(w, crate::render::RenderWarning::MarkBuildEmpty { .. })),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            !out.warnings.iter().any(|w| matches!(w, crate::render::RenderWarning::DomainRowsLeftOut { .. })),
+            "Int64 extents are not a Raster-transform batch, so nothing is counted toward the domain: {:?}",
+            out.warnings
+        );
     }
 
     #[test]

@@ -30,9 +30,19 @@ use crate::render::RenderError;
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     match RectShape::of(ctx) {
         RectShape::QuantitativeRange => build_quantitative_range(ctx),
-        RectShape::BandRange => build_ordinal_range(ctx),
+        RectShape::BandRange(band) => build_ordinal_range(ctx, band),
         RectShape::Heatmap => build_heatmap(ctx),
     }
+}
+
+/// Which axis a [`RectShape::BandRange`] draws as its band — the one answer
+/// [`RectShape::of`] computes, that both `build` (through `build_ordinal_
+/// range`'s own `band` parameter) and [`placements`] read, so neither
+/// re-derives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BandAxis {
+    X,
+    Y,
 }
 
 /// Which of its three shapes a rect layer draws. The style table's
@@ -44,8 +54,10 @@ pub(crate) enum RectShape {
     /// `x`/`x2` and `y`/`y2` ranges on two quantitative axes.
     QuantitativeRange,
     /// A band axis and a `y`/`y2` range (or `x`/`x2` under `CoordFlip`): a
-    /// box body, `band_size` of its band wide.
-    BandRange,
+    /// box body, `band_size` of its band wide. `None` when neither axis
+    /// actually resolved ordinal — `build_ordinal_range`'s own
+    /// refusal path, which draws nothing.
+    BandRange(Option<BandAxis>),
     /// One cell per band pair, filling the band on both axes.
     Heatmap,
 }
@@ -65,9 +77,58 @@ impl RectShape {
         } else if ctx.spec.encoding.y2.is_some() || ctx.spec.encoding.x2.is_some() {
             // y2.is_some(): normal orientation (ordinal x + quantitative y/y2).
             // x2.is_some() without y2: CoordFlip case (ordinal y + quantitative x/x2).
-            Self::BandRange
+            let x_is_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
+            let y_is_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
+            let band = if x_is_ordinal {
+                Some(BandAxis::X)
+            } else if y_is_ordinal {
+                Some(BandAxis::Y)
+            } else {
+                None
+            };
+            Self::BandRange(band)
         } else {
             Self::Heatmap
+        }
+    }
+}
+
+/// Which positional channels this rect layer's [`RectShape`] places a row
+/// by.
+pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
+    use crate::render::draw::{Placement, PlacementRead};
+    use crate::spec::layer::PositionalChannel;
+    let spec = ctx.spec;
+    match RectShape::of(ctx) {
+        RectShape::QuantitativeRange => [
+            (PositionalChannel::X, x_field(ctx, spec)),
+            (PositionalChannel::Y, y_field(ctx, spec)),
+            (PositionalChannel::X2, spec.encoding.x2.as_ref().map(|e| e.field.as_str())),
+            (PositionalChannel::Y2, spec.encoding.y2.as_ref().map(|e| e.field.as_str())),
+        ]
+        .into_iter()
+        .filter_map(|(ch, f)| f.map(|f| Placement::new(ch, f, PlacementRead::Strict)))
+        .collect(),
+        RectShape::BandRange(Some(BandAxis::X)) => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Category)); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Strict)); }
+            if let Some(f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::Y2, f, PlacementRead::Strict)); }
+            out
+        }
+        RectShape::BandRange(Some(BandAxis::Y)) => {
+            let mut out = Vec::new();
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Category)); }
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Strict)); }
+            if let Some(f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) { out.push(Placement::new(PositionalChannel::X2, f, PlacementRead::Strict)); }
+            out
+        }
+        RectShape::BandRange(None) => Vec::new(),
+        RectShape::Heatmap => {
+            let mut out = Vec::new();
+            if let Some(f) = x_field(ctx, spec) { out.push(Placement::new(PositionalChannel::X, f, PlacementRead::Category)); }
+            if let Some(f) = y_field(ctx, spec) { out.push(Placement::new(PositionalChannel::Y, f, PlacementRead::Category)); }
+            out
         }
     }
 }
@@ -193,17 +254,13 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     Ok(MarkBuildResult::populated(MarkBatchKind::Rect, nodes, data_indices, &meta))
 }
 
-fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
+fn build_ordinal_range(ctx: &DrawCtx, band: Option<BandAxis>) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{MarkBuildResult, PaintChannels, to_scene_fill_stroke};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
-
-    // Detect orientation: normal (x-ordinal + y2) vs. CoordFlip (y-ordinal + x2).
-    let x_is_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
-    let y_is_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
     // The ordinal-range path binds only the categorical half of the shared
     // loader: its rects have no continuous fill path, so a `Numeric` color
@@ -229,7 +286,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
     // values, and scale-resolution failures (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(32);
 
-    if x_is_ordinal {
+    match band {
+    Some(BandAxis::X) => {
         // Normal orientation: x is categorical band, y and y2 are quantitative extents.
         let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return Ok(empty_result()),
@@ -244,11 +302,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
         let n_groups = pos_meta.dodge_n_groups();
         // Width is the resolved scale's drawn band × the box `band_size` factor
         // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
-        // unreachable — this branch is gated on `x_is_ordinal`.
+        // unreachable — this branch is gated on `band == Some(BandAxis::X)`.
         let band_width = match ctx.scales.x.bandwidth() {
             Some(w) => w,
             None => {
-                debug_assert!(false, "build_ordinal_range's x_is_ordinal branch dispatches only for an ordinal x scale, which always reports a bandwidth");
+                debug_assert!(false, "build_ordinal_range's BandAxis::X branch dispatches only for an ordinal x scale, which always reports a bandwidth");
                 return Ok(empty_result());
             }
         };
@@ -328,7 +386,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 corner_radius: ctx.mark_style.paint.corner_radius,
             }, i);
         }
-    } else if y_is_ordinal {
+    }
+    Some(BandAxis::Y) => {
         // CoordFlip orientation: y is categorical band, x and x2 are quantitative extents.
         let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return Ok(empty_result()),
@@ -342,11 +401,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
         // → n_groups == 1 → byte-identical to the non-dodged box height.
         let n_groups = pos_meta.dodge_n_groups();
         // The y twin of the x-ordinal branch's width (F-L04-03, spec §4A; see
-        // `ScaleKind::bandwidth`). `None` is unreachable — `y_is_ordinal`.
+        // `ScaleKind::bandwidth`). `None` is unreachable — `band == Some(BandAxis::Y)`.
         let band_width = match ctx.scales.y.bandwidth() {
             Some(w) => w,
             None => {
-                debug_assert!(false, "build_ordinal_range's y_is_ordinal branch dispatches only for an ordinal y scale, which always reports a bandwidth");
+                debug_assert!(false, "build_ordinal_range's BandAxis::Y branch dispatches only for an ordinal y scale, which always reports a bandwidth");
                 return Ok(empty_result());
             }
         };
@@ -424,7 +483,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 corner_radius: ctx.mark_style.paint.corner_radius,
             }, i);
         }
-    } else {
+    }
+    None => {
         // #118: reached when `build()` dispatched here because a `y2` (or
         // `x2`) endpoint was bound, but NEITHER x nor y actually resolved to
         // an Ordinal scale — this branch's whole geometry is "one band-width
@@ -441,6 +501,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             "mark_rect() needs an ordinal x or y axis to size its band-relative \
              width, but the resolved scale is continuous",
         ));
+    }
     }
 
     let (nodes, data_indices) = acc.finalize();
