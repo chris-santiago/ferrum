@@ -303,15 +303,52 @@ def test_integer_and_float_value_columns_feed_lag_and_rolling(dtype):
 
 
 def test_unsupported_sort_dtype_raises_naming_column_and_dtype():
+    """A `Binary` column is not one of the ordered dtypes `sort=`/`field=`
+    accept (integer, unsigned, float, temporal, text or Boolean): the door
+    refuses naming the column and the dtype, not a silent no-op or NaN."""
+    df = pl.DataFrame(
+        {
+            "idx": [0.0, 1.0],
+            "flag": pl.Series([b"a", b"b"], dtype=pl.Binary),
+        }
+    )
+    t = fm.transform_window({"op": "rank", "as": "r"}, sort=["flag"])
+    chart = fm.Chart(df).mark_point().encode(x="idx:Q", y="r:Q").transform(t)
+    with pytest.raises(ValueError, match=r"data_window.*'flag'.*Binary"):
+        chart.to_svg()
+
+
+def test_a_boolean_sort_column_orders_false_before_true():
+    """A Boolean `sort=` column is an ordered key, `false` before `true`,
+    the same order pandas, Vega and seaborn use -- not a group discriminator
+    and not unsupported."""
+    df = pl.DataFrame(
+        {
+            "idx": [0.0, 1.0, 2.0, 3.0],
+            "flag": pl.Series([True, False, True, False], dtype=pl.Boolean),
+        }
+    )
+    t = fm.transform_window({"op": "rank", "as": "r"}, sort=["flag"])
+    assert _window_values(df, t, "r") == [3.0, 1.0, 3.0, 1.0]
+
+
+def test_a_boolean_field_refuses_a_numeric_rolling_op():
+    """A Boolean column orders fine as a `sort=` key, but an op that reads
+    its `field` as a value (`lag`, `lead`, `first_value`, `last_value`, and
+    the rolling `sum`, `mean`, `count`, `min` and `max`) still refuses it,
+    the same refusal a text field gets, not a silent NaN. `rank`/
+    `dense_rank` with a field use it only to find ties among rows already
+    in `sort` order, not to order by it, so they take a text or Boolean
+    field too."""
     df = pl.DataFrame(
         {
             "idx": [0.0, 1.0],
             "flag": pl.Series([True, False], dtype=pl.Boolean),
         }
     )
-    t = fm.transform_window({"op": "rank", "as": "r"}, sort=["flag"])
-    chart = fm.Chart(df).mark_point().encode(x="idx:Q", y="r:Q").transform(t)
-    with pytest.raises(ValueError, match=r"data_window.*'flag'.*Boolean"):
+    t = fm.transform_window({"op": "sum", "field": "flag", "as": "s"}, frame=(-1, 0))
+    chart = fm.Chart(df).mark_point().encode(x="idx:Q", y="s:Q").transform(t)
+    with pytest.raises(ValueError, match=r"data_window: sum requires a numeric column.*Boolean"):
         chart.to_svg()
 
 

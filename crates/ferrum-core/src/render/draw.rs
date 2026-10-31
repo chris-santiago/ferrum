@@ -808,6 +808,12 @@ pub struct LineStyle {
     /// width never is.
     pub size: Option<f64>,
     pub stroke_width: Option<f64>,
+    /// [`MarkKwargsSpec::sort_vertices`], resolved straight through: a
+    /// declared series joins its vertices ascending by its own value on the
+    /// advancing axis (read by [`super::marks::line::build`]) instead of
+    /// batch order. `false` — every spec written before this field existed —
+    /// is batch order, byte-identical.
+    pub sort_vertices: bool,
 }
 
 /// `mark_area`-only overrides: whether to draw the area's top border line and
@@ -1286,6 +1292,8 @@ pub fn resolve_mark_style(
     if let Some(sz) = o.arrow_size { style.segment.arrow_size = Some(sz); }
     // `#172`(2): the producer's declared value axis (line family)
     if let Some(va) = o.value_axis { style.misc.value_axis = Some(va); }
+    // The producer's declared vertex join order (line family).
+    if let Some(sv) = o.sort_vertices { style.line.sort_vertices = sv; }
     // A constant `size=` on a line is a width: the diameter of a dot of that
     // area. Beside a `stroke_width=` it is refused by the line build, which
     // reads both bindings from `style.line`.

@@ -13,12 +13,14 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 import polars as pl
 
 from ferrum._compose import figure_recorded
+from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby
 from ferrum._entry import EntryRefusal, _voiced, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
-from ferrum._layer import set_style
+from ferrum._layer import merge_style, set_style
 from ferrum.color import to_hex
 from ferrum.encoding import X
+from ferrum.encoding._resolve import channel_for_value
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
 
@@ -192,6 +194,38 @@ def _field_name(value: Any) -> str | None:
     if value is None:
         return None
     return value.field if hasattr(value, "field") else str(value)
+
+
+def _drawn_bindings(bindings: dict, encode: dict | None) -> dict:
+    """Return the bindings a figure's chart draws once ``_finalize_chart``
+    applies ``encode=`` over its keyword *bindings*, read the way
+    ``Chart.encode`` itself reads ``encode=``: a value replaces the
+    channel's binding, and a ``None`` leaves that binding in place rather
+    than unbinding it (:func:`ferrum._layer.merge_style`, the one
+    None-is-unset merge every style door already shares). A figure that
+    computes a statistic, builds a fit layer's channels, or reads a
+    channel's scale before ``encode=`` is applied reads this instead of
+    re-deriving the merge by hand, so what it groups or scales by is what
+    the chart actually draws.
+    """
+    return merge_style(bindings, encode or {})
+
+
+def _encode_grouping(bindings: dict) -> list[str]:
+    """Return the composite grouping fields the caller's own *bindings* bind.
+
+    Each grouping channel's value is read as ``encode()`` reads it
+    (shorthand included), so ``"c:N"`` groups by ``c``; ``None`` binds
+    nothing. Shared by every figure that fits or counts one curve per group
+    the same way a composite mark's statistic does (``lmplot``/``regplot``/
+    ``residplot``, ``displot(kind="ecdf")``).
+    """
+    channels = {
+        name: channel_for_value(name, value, declare=f"encode({name}=...)")
+        for name, value in bindings.items()
+        if name in COMPOSITE_GROUPING_CHANNELS and value is not None
+    }
+    return _composite_groupby(channels, None)
 
 
 def _log_scaled_x(entry: str, value: Any, field: str, *, param: str) -> Any:

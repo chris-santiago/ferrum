@@ -8,6 +8,8 @@ visible effect on the final chart.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import polars as pl
 import pytest
@@ -58,6 +60,12 @@ def _renders_differently(chart_default, chart_override):
     assert svg_default != svg_override, (
         "Expected overridden chart to produce different SVG from the default"
     )
+
+
+def _renders_identically(chart_a, chart_b):
+    """Assert that two charts produce byte-identical SVG output."""
+    svg_a, svg_b = chart_a.to_svg(), chart_b.to_svg()
+    assert svg_a == svg_b, "Expected the two charts to render byte-identically"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +125,16 @@ class TestCatplotPassthrough:
         )
         _renders_differently(default, overridden)
 
+    def test_encode_none_keeps_the_keywords_own_y_scale(self, df):
+        """`encode={"y": None}` leaves the keyword `y=`'s own scale bound,
+        the same read every figure that computes a statistic before the
+        overrides apply shares: `_finalize_chart` applies `encode=` through
+        `Chart.encode`, where a `None` value binds nothing."""
+        y = fm.Y("val", scale=fm.LinearScale(domain=[0, 100]))
+        default = fm.catplot(df, x="cat", y=y, kind="bar")
+        with_none = fm.catplot(df, x="cat", y=y, kind="bar", encode={"y": None})
+        _renders_identically(default, with_none)
+
 
 # ---------------------------------------------------------------------------
 # lmplot
@@ -143,6 +161,29 @@ class TestLmplotPassthrough:
         default = fm.lmplot(df, x="x", y="y")
         overridden = fm.lmplot(df, x="x", y="y", properties={"title": "Linear Model"})
         _renders_differently(default, overridden)
+
+    def test_encode_none_keeps_the_keywords_own_grouping(self, df):
+        """`encode={"color": None}` leaves `hue=`'s own binding in place
+        (`Chart.encode`'s `None`-binds-nothing contract), so the fit still
+        groups and colors by it -- two fits, not one pooled fit under a
+        two-color legend."""
+        default = fm.lmplot(df, x="x", y="y", hue="cat")
+        with_none = fm.lmplot(df, x="x", y="y", hue="cat", encode={"color": None})
+        _renders_identically(default, with_none)
+
+
+# ---------------------------------------------------------------------------
+# regplot
+# ---------------------------------------------------------------------------
+
+
+class TestRegplotPassthrough:
+    def test_encode_none_keeps_the_keywords_own_grouping(self, df):
+        """The same contract `lmplot` shares: `encode={"color": None}`
+        leaves `hue=`'s own binding in place."""
+        default = fm.regplot(df, x="x", y="y", hue="cat")
+        with_none = fm.regplot(df, x="x", y="y", hue="cat", encode={"color": None})
+        _renders_identically(default, with_none)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +234,41 @@ class TestResidplotPassthrough:
             properties={"title": "Residuals"},
         )
         _renders_differently(default, overridden)
+
+    def test_encode_none_keeps_the_keywords_own_shape(self, df):
+        """`encode={"shape": None}` leaves the keyword `shape=`'s own
+        binding in place, the same `None`-binds-nothing contract every
+        figure that regroups before the overrides apply shares."""
+        default = fm.residplot(df, x="x", y="y", shape="cat", show_metrics=False, zero_line=False)
+        with_none = fm.residplot(
+            df,
+            x="x",
+            y="y",
+            shape="cat",
+            encode={"shape": None},
+            show_metrics=False,
+            zero_line=False,
+        )
+        _renders_identically(default, with_none)
+
+    def test_encode_wins_over_a_conflicting_keyword_and_refits_by_it(self, df):
+        """`encode=` is applied after the keyword bindings
+        (`_finalize_chart`'s own order), so a channel both a keyword and
+        `encode=` name differently refits by `encode=`'s value, the one
+        the chart actually draws, not the keyword's."""
+        two_groups = df.with_columns(pl.Series("cat2", (["p", "q"] * 25)[: df.height]))
+        chart = fm.residplot(
+            two_groups,
+            x="x",
+            y="y",
+            shape="cat",
+            encode={"shape": "cat2"},
+            show_metrics=False,
+            zero_line=False,
+        )
+        spec = json.loads(chart.to_spec().to_json())
+        (smooth,) = [t for t in spec["transforms"] if t["type"] == "smooth"]
+        assert smooth["groupby"] == ["cat2"], smooth["groupby"]
 
 
 # ---------------------------------------------------------------------------

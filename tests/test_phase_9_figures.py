@@ -58,12 +58,18 @@ class TestDisplot:
         d = json.loads(chart.to_spec().to_json())
         assert any(t.get("type") == "kde" for t in all_steps(d))
 
-    def test_ecdf_uses_cumulative_bin(self, iris_like):
+    def test_ecdf_uses_a_rolling_count_window(self, iris_like):
+        """`kind="ecdf"` counts each observation itself through a
+        `data_window` rolling count, not a cumulative `Bin`."""
         chart = fe.displot(iris_like, x="sepal_length", kind="ecdf")
         d = json.loads(chart.to_spec().to_json())
-        bin_t = next((t for t in all_steps(d) if t.get("type") == "bin"), None)
-        assert bin_t is not None
-        assert bin_t.get("cumulative") is True
+        assert not any(t.get("type") == "bin" for t in all_steps(d))
+        window_t = next((t for t in all_steps(d) if t.get("type") == "data_window"), None)
+        assert window_t is not None
+        (op,) = window_t["ops"]
+        assert op["op"] == "count"
+        assert op["field"] == "sepal_length"
+        assert window_t["frame"] == [None, 0]
 
     def test_rug_kind(self, iris_like):
         chart = fe.displot(iris_like, x="sepal_length", kind="rug")

@@ -930,6 +930,7 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column
         "_extract_ordinal_domain",  # internal helper, positional field name
         "_set_composite_mark",  # internal composite-mark metadata setter
+        "_unique_col_name",  # _unique_col_name(df.columns, "count") -- reads the SOURCE frame's own columns, never a transform's output batch
         "append",  # list.append("count") building a column-name list
         "col",  # pl.col("value")
         "get",  # dict.get("x") / dict.get("theoretical")

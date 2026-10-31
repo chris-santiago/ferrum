@@ -289,18 +289,24 @@ class TestBinsVocabularyRefuses:
 #:
 #: The histogram rows (`default`, `sturges`, `none`, `int7`, `kde_overlay_int7`,
 #: `hue_str_hist`) are re-measured with the bars grown from the 0 tick, which
-#: moves only their `<rect>` elements; the ecdf and kde rows draw no bars and
-#: are never re-measured. Each re-measured digest encodes two changes:
+#: moves only their `<rect>` elements; the `hue_str_kde` row draws no bars and
+#: is never re-measured. Each re-measured digest encodes two changes:
 #: the bins vocabulary leaving the path untouched, and the bars grown from the
 #: 0 tick, which `test_clean_histogram_paths_start_on_the_zero_tick` asserts
 #: directly.
+#:
+#: This table pins the binning kinds only: `kind="ecdf"` counts each
+#: observation itself rather than binning, so its render is not a claim
+#: this table's "the bins vocabulary leaves the path untouched" makes. The
+#: ecdf render itself is pinned by
+#: `tests/test_log_axis_statistics.py::test_the_ecdf_steps_at_every_observation`,
+#: and its inert `bins=` warning is pinned in
+#: `tests/test_displot_requires_x.py::TestInertBinsWarns`.
 _PRE_FIX_SVG_DIGESTS = {
     "default": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
     "sturges": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
     "none": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
     "int7": "73721a813b2c3dfc4c3da5b9f99961fc4962dfd10e4a9b87f94cd2caf122b675",
-    "ecdf_default": "d96af5dc99c6e334a38525317774b1331f1b3f7bbf28e6e3d841df669b2ce2be",
-    "ecdf_int7": "08095cf826f2bba9be7122a96772d41728d737af726f8da99c47ebd2965a7677",
     "kde_overlay_int7": "b17a16a139e5085bd66d58e4725480dec832eb2dd78db55cc606b377a397747b",
     "hue_str_hist": "3ac4841424604764fc17557a1bf1fbb94977a517fd77fa6b24a5e589dfd6c887",
     "hue_str_kde": "4b5bf25e46b4335ad48c2e3f5668f59cbd0a039835e730217c02acfe93461c63",
@@ -311,8 +317,6 @@ _CLEAN_PATHS = {
     "sturges": dict(x="v", bins="sturges"),
     "none": dict(x="v", bins=None),
     "int7": dict(x="v", bins=7),
-    "ecdf_default": dict(x="v", kind="ecdf"),
-    "ecdf_int7": dict(x="v", kind="ecdf", bins=7),
     "kde_overlay_int7": dict(x="v", kind="hist", kde=True, stat="count", bins=7),
     "hue_str_hist": dict(x="v", hue="g"),
     "hue_str_kde": dict(x="v", hue="g", kind="kde"),
@@ -451,12 +455,19 @@ class TestOverlayTracksTheRealBinning:
 
 
 class TestVocabularyReachesEveryBinningEntry:
-    def test_ecdf_honors_the_rule_too(self, normal_df):
-        """The ecdf branch builds its own raw `Bin`; it reads the same `bins`."""
-        chart = fm.displot(normal_df, x="v", kind="ecdf", bins="fd")
-        wire = _bin_wire(chart)
-        assert wire["bin_rule"] == "freedman_diaconis"
-        assert wire["cumulative"] is True
+    def test_ecdf_still_validates_the_rule_but_it_is_now_inert(self, normal_df):
+        """`kind="ecdf"` counts each observation itself through
+        `transform_window`, never building a `Bin`, so a stated rule is
+        validated by the same vocabulary -- a malformed one still refuses --
+        but warns inert rather than feeding a transform."""
+        with pytest.warns(UserWarning) as record:
+            chart = fm.displot(normal_df, x="v", kind="ecdf", bins="fd")
+        messages = [str(w.message) for w in record]
+        assert any(
+            m.startswith("displot(kind='ecdf', bins='fd')") and "inert" in m for m in messages
+        ), messages
+        spec = json.loads(chart.to_spec().to_json())
+        assert not any(t["type"] == "bin" for t in spec.get("transforms", []))
         with pytest.raises(ValueError) as exc:
             fm.displot(normal_df, x="v", kind="ecdf", bins="auto")
         assert str(exc.value).startswith("displot: unknown bins value 'auto'")

@@ -16,7 +16,6 @@ from typing import Any, NamedTuple
 from ferrum import (
     Aggregate,
     AggregateOp,
-    Bin,
     Chart,
     CoordFlip,
     Dodge,
@@ -24,16 +23,17 @@ from ferrum import (
     Jitter,
     LinearScale,
     Stack,
+    transform_window,
 )
 from ferrum._coerce import to_polars
 from ferrum._core import validate_bin_rule
 from ferrum._desugar import (
-    _apply_remap,
     _explicit_positional_scale,
     _propagate_layer_scale,
     _scale_domain,
 )
-from ferrum._layer import _Layer
+from ferrum._encode_lowering import _rebind_positional
+from ferrum._layer import _Layer, merge_style
 from ferrum._registry import registry_output_columns
 from ferrum._validate import as_finite_real, coerce_positive_int, validate_choice
 from ferrum._warn import warn_once
@@ -41,15 +41,21 @@ from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
     titled_positional_channel,
+    with_grouping,
 )
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
+from ferrum.marks.base import resolve_method_bool
+from ferrum.encoding import Y
 from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.plots._helpers import (
     _checked_figure_size,
+    _drawn_bindings,
+    _encode_grouping,
     _field_name,
     _figure_entry,
     _finalize_chart,
     _log_scaled_x,
+    _unique_col_name,
 )
 
 
@@ -71,10 +77,12 @@ _DISPLOT_VALID_STAT = {"count", "density"}
 # axis -- which is why this is a named set and not "every kind".
 _DISPLOT_KINDS_REQUIRING_X = frozenset({"hist", "ecdf", "kde"})
 
-# The kinds that actually bin, i.e. the only ones `bins=` can act on.  The
-# `kde=True` overlay reads `bins=` too, but only to count-scale itself onto a
-# HISTOGRAM's count axis (`_overlay_count_scale`), so it adds no kind here.
-_DISPLOT_KINDS_THAT_BIN = frozenset({"hist", "ecdf"})
+# The kinds that actually bin, i.e. the only ones `bins=` can act on.
+# `"ecdf"` counts each observation itself (a rolling `transform_window`, not
+# a bin edge), so it is not in this set.  The `kde=True` overlay reads
+# `bins=` too, but only to count-scale itself onto a HISTOGRAM's count axis
+# (`_overlay_count_scale`), so it adds no kind here either.
+_DISPLOT_KINDS_THAT_BIN = frozenset({"hist"})
 
 # displot's own `bins=` default, named so the "did the caller state a rule of
 # their own?" test below and the signature cannot drift apart.
@@ -451,12 +459,11 @@ def _reject_ecdf_field_y(*, kind: str, y: Any) -> None:
 
     ``kind="ecdf"`` draws the cumulative count of the variable ``x=`` names
     on ``y``, so a second variable has nowhere to go. Re-pointing a field-
-    bearing ``y=`` at the Bin's count column, the way the plain re-point
-    below handles ``x=``, would silently mislabel the count axis with the
-    caller's field name -- a worse outcome than refusing outright. A
-    fieldless ``fm.Y(title=..., scale=..., axis=..., format=...)`` is the
-    documented way to style the count axis, and is not refused here:
-    :func:`_field_name` reads ``None`` off it.
+    bearing ``y=`` at the window's count column would silently mislabel the
+    count axis with the caller's field name -- a worse outcome than
+    refusing outright. A fieldless ``fm.Y(title=..., scale=..., axis=...,
+    format=...)`` is the documented way to style the count axis, and is not
+    refused here: :func:`_field_name` reads ``None`` off it.
     """
     if kind != "ecdf" or y is None:
         return
@@ -476,12 +483,13 @@ def _warn_inert_bins(*, kind: str, bins: Any) -> None:
 
     ``bins=`` is validated for every kind (so a malformed rule is refused as
     ``displot(...)`` rather than by whichever transform happens to be built),
-    but only ``kind="hist"``/``"ecdf"`` bin anything: measured,
+    but only ``kind="hist"`` bins anything: measured,
     ``displot(x="v", kind="kde", bins=3)`` and ``bins=97`` render byte-
-    identically, as do ``kind="rug", kde=True`` with either.  Accepted-and-
-    inert is the WARN-DEGRADED half of the standing policy, so it warns
-    rather than refusing -- the chart the caller asked for is still drawn,
-    it just is not binned by their rule.
+    identically, as do ``kind="ecdf"`` (a per-observation count, not a bin
+    edge) and ``kind="rug", kde=True`` with either.  Accepted-and-inert is
+    the WARN-DEGRADED half of the standing policy, so it warns rather than
+    refusing -- the chart the caller asked for is still drawn, it just is
+    not binned by their rule.
 
     Only a rule the caller actually STATED warns.  ``bins=None`` and
     ``bins="sturges"`` both mean "the default rule", which is what a
@@ -496,7 +504,7 @@ def _warn_inert_bins(*, kind: str, bins: Any) -> None:
         f"displot(kind={kind!r}, bins={bins!r}): bins= is inert for kind={kind!r} -- "
         "it evaluates no binned statistic, so the rule you named cannot act on "
         "anything and the render is identical for every value. Drop bins=, or use "
-        "kind='hist'/'ecdf', which bin.",
+        "kind='hist', which bins.",
     )
 
 
@@ -567,8 +575,9 @@ def displot(
     kind : {"hist", "kde", "ecdf", "rug"}, default "hist"
         Which distribution mark to draw.  ``"hist"`` calls
         ``mark_histogram``; ``"kde"`` calls ``mark_density`` (filled by
-        default); ``"ecdf"`` builds a cumulative frequency line via ``Bin``
-        + ``mark_line``; ``"rug"`` calls ``mark_tick``.
+        default); ``"ecdf"`` draws a per-observation rolling count as a step
+        line (``mark_line(interpolate="step-after")``); ``"rug"`` calls
+        ``mark_tick``.
     fill : bool, default True
         Fill the area under the KDE curve (``kind="kde"`` only).
     cumulative : bool, default False
@@ -588,8 +597,8 @@ def displot(
         Validated for every ``kind`` (not just ``"hist"``): an unsupported
         value raises regardless of ``kind``.
     bins : str, int or float, default "sturges"
-        Binning rule for ``kind="hist"`` and ``kind="ecdf"`` -- the only two
-        kinds that bin.  Stating a non-default rule on ``kind="kde"`` or
+        Binning rule for ``kind="hist"`` -- the only kind that bins.
+        Stating a non-default rule on ``kind="kde"``, ``kind="ecdf"`` or
         ``kind="rug"`` emits a ``UserWarning``: the value is accepted and
         validated, but nothing evaluates it there.  ``"sturges"``
         (the default) and ``"fd"``/``"freedman_diaconis"`` select a rule; an
@@ -693,9 +702,16 @@ def displot(
     validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
     validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
     validate_choice("displot", "stat", stat, _DISPLOT_VALID_STAT)
+    # `fill=` and `cumulative=` take only a truth value, on every `kind=`,
+    # not only `kind="kde"` (whose own gate, `mark_density`'s in
+    # `_chart_methods_statistical.py`, reads them for itself). A column
+    # reaches the fill channel only through `encode={"fill": ...}`; `fill=`
+    # here is this switch, not a channel.
+    fill = resolve_method_bool("displot", "fill", fill, True)
+    cumulative = resolve_method_bool("displot", "cumulative", cumulative, False)
     # `bins` is validated here, alongside the three closed vocabularies, so a
     # malformed value is refused as `displot: ...` rather than by whichever
-    # transform this call happens to build (`Bin` for hist/ecdf, `Kde` for the
+    # transform this call happens to build (`Bin` for hist, `Kde` for the
     # overlay). The vocabulary itself is not restated: `validate_bin_rule` IS
     # the parser those transforms construct through.
     if bins is not None:
@@ -821,11 +837,11 @@ def _displot_build(
     enc.update(encode_kwargs)
 
     # `log_scale` is resolved on the x channel here, before the kind
-    # dispatch, so the re-pointing rule each kind runs below (the
-    # dispatcher's own re-point for hist/kde/rug, `ecdf`'s `_apply_remap`
-    # further below) carries the scale onto whatever column ends up bound,
-    # and a layered `kde=`/`rug=` overlay inherits it from that same
-    # chart-level binding instead of reading a linear axis.
+    # dispatch, so the dispatcher's own re-point for hist/kde/rug carries the
+    # scale onto whatever column ends up bound, and a layered `kde=`/`rug=`
+    # overlay inherits it from that same chart-level binding instead of
+    # reading a linear axis. `ecdf`'s own `x=` is never re-pointed, so the
+    # scale rides the caller's own binding directly.
     if log_scale and "x" in enc:
         enc["x"] = _log_scaled_x("displot", enc["x"], _field_name(enc["x"]), param="log_scale")
 
@@ -876,43 +892,60 @@ def _displot_build(
             kde_kwargs["groupby"] = hue_field
         chart = chart.mark_density(**kde_kwargs)
     elif kind == "ecdf":
-        # ECDF: cumulative bin → step line.  `x is not None` here by
-        # `_reject_displot_without_x`.
+        # ECDF: a per-observation rolling count -> step line.  `x is not
+        # None` here by `_reject_displot_without_x`.
 
-        # The original field name, for the Bin field -- through the same
-        # shared extraction point `hue_field` uses above.
+        # The caller's own field name, through the same shared extraction
+        # point `hue_field` uses above.
         _ecdf_x_name = _field_name(x)
-        # `hue_field` (the unwrapped name resolved once above) is the Bin
-        # transform's groupby. Without a groupby, Bin's output schema drops
-        # the hue column entirely, so the color channel set below
-        # unconditionally names a column the transform no longer emits.
-        # `shared_extent=True` is unconditional (not gated on `multiple=`):
-        # an ECDF is a per-group comparison, so a common x-grid is the only
-        # reading under which the curves are comparable.
+        # Every grouping channel the caller binds -- hue (already `enc`'s
+        # `color`), and color=/stroke=/detail=/shape=/stroke_dash= as a
+        # keyword, plus fill= only through `encode=` (displot's own `fill=`
+        # is the KDE area-fill switch, not a channel) -- groups the window's
+        # count the same way a composite mark's statistic groups by them
+        # (the `lmplot`/`regplot`/`residplot` rule). `_drawn_bindings` reads
+        # `encode=` the way `_finalize_chart` will apply it to the chart
+        # (a value replaces the keyword's binding; `None` leaves it bound),
+        # so the window groups by exactly what the chart draws, even though
+        # `encode=` itself is applied after this branch returns.
+        _ecdf_grouping = _encode_grouping(_drawn_bindings(enc, encode))
+        # A source column already named "count" must not be silently
+        # overwritten; the y axis below is titled "count" regardless of
+        # which name this collision avoidance actually lands on. Reads the
+        # column names of the caller's data, normalized through `to_polars`
+        # (a `pyarrow.Table`'s own `.columns` holds its data arrays, not its
+        # names, so reading the caller's own object directly would not do).
+        _ecdf_count_col = _unique_col_name(to_polars(data).columns, "count")
+        # A rolling count over an unbounded-preceding, peer-aware frame:
+        # every row sees the count of every row at or below it (tied rows
+        # share one frame and therefore one count), which is the textbook
+        # ECDF (seaborn `ecdfplot`, ggplot2 `stat_ecdf`) -- one step per
+        # distinct observation, never a bin edge. `transform_window`'s
+        # `groupby=` partitions runs ADJACENT in sort order, not by key, so
+        # the grouping fields lead the sort, ahead of x.
         chart = chart._with_statistics(
-            Bin(
-                field=_ecdf_x_name,
-                bins=bins,
-                cumulative=True,
-                groupby=hue_field,
-                shared_extent=hue_field is not None,
+            transform_window(
+                {"op": "count", "field": _ecdf_x_name, "as": _ecdf_count_col},
+                sort=with_grouping(_ecdf_grouping, [_ecdf_x_name]),
+                groupby=_ecdf_grouping or None,
+                frame=(None, 0),
             )
         )
-        chart = chart.mark_line()
-        # Derived from the registry (spec §4.6 / M6a) rather than hardcoded:
-        # these read the cumulative Bin transform chained two lines above, so
-        # a Rust-side rename of either bin output column raises here instead
-        # of silently rendering an empty step line.
-        _bin_cols = registry_output_columns("bin", ["bin_start", "count"])
-        # Re-point the caller's own x (and fieldless y, if any) at the Bin's
-        # output columns through the same re-pointing rule `kind="hist"` runs
-        # at resolve time, so every option the caller wrote on either channel
-        # -- `title=`, `scale=`, `axis=`, `format=` -- survives.
-        _apply_remap(
-            enc,
-            {"x": _bin_cols["bin_start"], "y": _bin_cols["count"]},
-            orig_encoding=dict(enc),
-        )
+        chart = chart.mark_line(interpolate="step-after")
+        # The line joins each group's own vertices in ascending x at draw
+        # time (a declared line orders its series by the advancing axis's
+        # own data value), not by reordering the caller's rows here: the
+        # batch keeps the caller's own row order, so the legend, color
+        # assignment and facet panels follow first appearance, the same as
+        # every sibling kind's and as every chart without the declaration.
+        chart._mark_kwargs = merge_style(chart._mark_kwargs, {"sort_vertices": True})
+        # The caller's own `x=` is never re-pointed: the window keeps every
+        # original column, so every option `x=` carries -- `title=`,
+        # `scale=` (a log scale included), `axis=`, `format=` -- stays on
+        # the caller's own field with no re-point. Only a fieldless `y=` is
+        # re-pointed at the count column, through the same rule
+        # `residplot`'s own default title uses, titled "count" always.
+        enc["y"] = _rebind_positional(_ecdf_count_col, enc.get("y"), Y, title="count")
     elif kind == "rug":
         chart = chart.mark_tick()
 
@@ -928,9 +961,10 @@ def _displot_build(
     #
     # Instead we resolve the chart, then manually prepend named transforms
     # for the overlays.  Named transforms read from the current chain head
-    # (the original data, since they run before the unnamed Bin) without
-    # advancing it.  The overlay _Layer objects set data_source to the named
-    # transform key so they read the correct output.
+    # (the original data, since they run before the primary mark's own
+    # unnamed statistic -- a `Bin` for hist, a `DataWindow` for ecdf)
+    # without advancing it.  The overlay _Layer objects set data_source to
+    # the named transform key so they read the correct output.
     if (kde and kind != "kde") or (rug and kind != "rug"):
         chart = chart._resolve_pending()
         chart = chart._clone()
@@ -979,18 +1013,19 @@ def _displot_build(
                 y_title=_displayed_name(primary_encoding.get("y")),
             )
             # The named Kde sits right after the statistics marker, ahead of
-            # the unnamed Bin, so it reads the caller's rows, after any
-            # `.transform(...)` step, never the bins.
+            # the primary mark's own unnamed statistic (`Bin` for hist,
+            # `DataWindow` for ecdf), so it reads the caller's rows, after
+            # any `.transform(...)` step, never the bins.
             chart = chart._with_statistics(kde_transform, reading="rows")
             chart._layers.append(kde_layer)
             # The chart's own value axis, for the one kind whose primary mark
             # has none (GH #201). `kind="rug"` binds x only: `hist` remaps
-            # y -> the Bin count column, `ecdf` binds the cumulative count
-            # above, and `kind="kde"` never reaches this block. So the rug is
-            # the only primary mark that leaves the root encoding without a y,
-            # and a density curve drawn over it has no chart-level axis to
-            # name -- pre-fix the render resolved y from the overlay layer
-            # itself and came out untitled.
+            # y -> the Bin count column, `ecdf` binds the window's count
+            # column above, and `kind="kde"` never reaches this block. So
+            # the rug is the only primary mark that leaves the root encoding
+            # without a y, and a density curve drawn over it has no
+            # chart-level axis to name; left to the overlay layer's own `y`
+            # alone, the axis would come out untitled.
             #
             # Taken from the overlay layer's own `y` rather than re-derived
             # from `registry_output_columns("kde", ...)`: the axis and the
@@ -1021,8 +1056,9 @@ def _displot_build(
 
             rug_xform = identity_transform("rug_data")
             # The named Identity sits right after the statistics marker,
-            # ahead of the unnamed Bin, so it captures the caller's rows for
-            # the rug tick marks, after any `.transform(...)` step.
+            # ahead of the primary mark's own unnamed statistic (`Bin` for
+            # hist, `DataWindow` for ecdf), so it captures the caller's rows
+            # for the rug tick marks, after any `.transform(...)` step.
             chart = chart._with_statistics(rug_xform, reading="rows")
             chart._layers.append(
                 _Layer(
@@ -2319,8 +2355,9 @@ def _catplot_build(
         # channel cannot reach an aggregated mark, and the chart-level
         # encoding it would land on still draws its legend.  Both doors are
         # checked -- the bare keyword (`**encode_kwargs`) and the `encode=`
-        # dict -- because both reach `chart.encode` for these kinds.
-        _reject_per_row_appearance_channels(kind, {**encode_kwargs, **(encode or {})})
+        # dict -- because both reach `chart.encode` for these kinds, read
+        # through `_drawn_bindings` the way `chart.encode` will apply them.
+        _reject_per_row_appearance_channels(kind, _drawn_bindings(encode_kwargs, encode))
         summary, summary_layers = _catplot_summary_layers(
             kind=kind,
             cat_channel=cat_channel,
@@ -2337,10 +2374,12 @@ def _catplot_build(
             # encoding -- and on a layered chart the renderer resolves its axis
             # from layer 0's encoding, which overlays the chart level away. A
             # scale arriving through `encode=` would therefore be silently
-            # dropped AND would slip past the refusal below, the exact defect
-            # the `y=`/`x=` door was fixed for. `encode` wins over `enc` because
-            # that is the order `_finalize_chart` applies the two in.
-            chart_encoding={**enc, **(encode or {})},
+            # dropped and would slip past the refusal below. `_drawn_bindings`
+            # applies `encode` over `enc` the same way `_finalize_chart`
+            # applies the two: a value wins, and a `None` leaves `enc`'s own
+            # binding, so a scale on `y=`/`x=` through `encode=` reaches the
+            # chart-level encoding the refusal below reads.
+            chart_encoding=_drawn_bindings(enc, encode),
             ci_level=ci_level,
             n_boot=n_boot,
             seed=seed,

@@ -22,6 +22,7 @@ in.
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from typing import Any, Callable
@@ -32,14 +33,23 @@ import pyarrow as pa
 import pytest
 
 import ferrum as fm
+from tests._hue_probe import legend_labels
 from tests._svg_extents import (
     log_axis_pixels_per_unit,
     log_value_for_pixel,
     value_axis_ladder,
     value_axis_ladders,
     value_for_pixel,
+    y_axis_title,
 )
-from tests._svg_rects import data_bar_rects, mark_groups, mark_layer, polylines, svg_elements
+from tests._svg_rects import (
+    data_bar_rects,
+    mark_groups,
+    mark_layer,
+    polylines,
+    step_after_paths,
+    svg_elements,
+)
 
 #: A frame a chart reads: the polars and pyarrow tables the dtype doors build.
 _Frame = pl.DataFrame | pa.Table
@@ -1390,3 +1400,410 @@ def test_a_faceted_int64_histogram_shares_one_log_space_extent_across_panels():
     msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", col="g", log_scale=True).to_svg())
     assert msgs == [], msgs
     _assert_panels_share_one_bin_width(svg, panel_totals=[float(g.count("a")), float(g.count("b"))])
+
+
+# ---------------------------------------------------------------------------
+# The ECDF is computed per observation, not from bins: one step per distinct
+# observation, its height the count of observations at or below it (seaborn
+# `ecdfplot`, ggplot2 `stat_ecdf`). On a log x axis it reaches this file's
+# `DataWindow` log-space arm the same way a histogram reaches `Bin`'s and a
+# kde `Kde`'s: the off-side observations are left out before counting and
+# warned once, naming the caller's field.
+# ---------------------------------------------------------------------------
+
+
+def _one_step_line(svg: str) -> list[tuple[float, float]]:
+    """The pixel corners of the one step-after line *svg* draws."""
+    (corners,) = [corners for _stroke, corners in step_after_paths(svg)]
+    return corners
+
+
+def _ecdf_heights(corners: list[tuple[float, float]], y_ladder: dict[float, float]) -> list[int]:
+    """A step line's own heights (the window's count), in ascending x
+    order -- a tied x shares one riser, counted once."""
+    return [round(value_for_pixel(y_ladder, py)) for _, py in corners]
+
+
+@pytest.mark.parametrize("door", ["linear", "log_scale", "scale"], ids=["linear", "log", "scale"])
+def test_the_ecdf_steps_at_every_observation(door):
+    """`v = 1..20` steps at `x = 1..20` with heights `1..20` on a linear x
+    axis, under `log_scale=True`, and under the caller's own channel
+    `x=fm.X("v", scale=fm.LogScale())` -- every door onto a log x reaches
+    the same per-observation window, never a bin edge. `bins=` on
+    `kind="ecdf"` is inert (pinned separately in
+    `tests/test_displot_requires_x.py`), so it is left at its default here."""
+    log_scale = door != "linear"
+    build_kwargs = (
+        dict(x=fm.X("v", scale=fm.LogScale())) if door == "scale" else dict(x="v", log_scale=log_scale)
+    )
+    msgs, svg = _warnings_of(lambda: fm.displot(_DF20, kind="ecdf", **build_kwargs).to_svg())
+    assert msgs == [], msgs
+    corners = _one_step_line(svg)
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    to_x = (
+        (lambda px: log_value_for_pixel(x_ladder, px, base=10.0))
+        if log_scale
+        else (lambda px: value_for_pixel(x_ladder, px))
+    )
+    observed = sorted(
+        (round(to_x(px), 3), round(value_for_pixel(y_ladder, py))) for px, py in corners
+    )
+    assert observed == [(float(v), float(v)) for v in _V20], observed
+
+
+def test_the_ecdf_steps_at_every_observation_however_the_source_rows_are_ordered():
+    """The line joins each series' vertices in ascending x at draw time
+    (`mark_line`'s own `sort_vertices` declaration), whatever the source
+    row order, so the same `v = 1..20` steps the same way whether the
+    source rows already climb in order or arrive shuffled."""
+    shuffled = pl.DataFrame({"v": np.random.default_rng(2).permutation(_V20)})
+    msgs, svg = _warnings_of(lambda: fm.displot(shuffled, x="v", kind="ecdf").to_svg())
+    assert msgs == [], msgs
+    corners = _one_step_line(svg)
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    # Not a sorted comparison: the corners must already BE drawn in x order,
+    # which a step line drawn in the source's own (here, shuffled) row
+    # order would not be.
+    xs = [round(value_for_pixel(x_ladder, px), 3) for px, _py in corners]
+    assert xs == sorted(xs), f"step line not drawn in x order: {xs}"
+    observed = [(x, round(value_for_pixel(y_ladder, py))) for x, (_px, py) in zip(xs, corners)]
+    assert observed == [(float(v), float(v)) for v in _V20], observed
+
+
+def test_ties_step_once_per_distinct_x():
+    """Two rows sharing one x share one step: the curve draws one riser at
+    that x, to the count of every row at or below it, not one riser per
+    tied row."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 2.0, 3.0]})
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf").to_svg())
+    assert msgs == [], msgs
+    corners = _one_step_line(svg)
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    observed = sorted(
+        (round(value_for_pixel(x_ladder, px), 3), round(value_for_pixel(y_ladder, py)))
+        for px, py in corners
+    )
+    assert observed == [(1.0, 1.0), (2.0, 3.0), (3.0, 4.0)], observed
+
+
+@pytest.mark.parametrize("door", ["log_scale", "scale"])
+def test_the_ecdf_steps_count_only_the_positive_observations_on_a_log_axis(door):
+    """Under a log x, the window leaves out the off-side observations
+    before counting, the same way a `Bin` or `Kde` does, so each step's
+    height counts only the on-side observations, and the left-out rows
+    join the one off-side warning, naming the caller's field. Both doors
+    onto a log x -- `log_scale=True` and the caller's own channel
+    `x=fm.X("v", scale=fm.LogScale())` -- reach the same window."""
+    build_kwargs = (
+        dict(x=fm.X("v", scale=fm.LogScale())) if door == "scale" else dict(x="v", log_scale=True)
+    )
+    msgs, svg = _warnings_of(lambda: fm.displot(_DF_MIXED, kind="ecdf", **build_kwargs).to_svg())
+    assert len(msgs) == 1, msgs
+    assert "2 row(s) of 'v'" in msgs[0], msgs[0]
+    corners = _one_step_line(svg)
+    y_ladder = value_axis_ladder(svg, axis="y")
+    assert sorted(_ecdf_heights(corners, y_ladder)) == list(range(1, 21))
+
+
+def test_the_ecdf_steps_count_per_group_even_when_the_source_rows_interleave():
+    """Per-group counts: the source rows interleave the two `hue` levels,
+    AND are shuffled within each level, so neither an adjacency-based
+    partition that did not sort by the hue column first (which would reset
+    mid-group) nor a step line drawn in the source's own row order (which
+    would rise and fall out of order) can pass by accident. Each level
+    still reaches its own row count, and each line still steps in x order."""
+    rng = np.random.default_rng(1)
+    a_vals = rng.permutation(np.arange(1, 21, dtype=float))
+    b_vals = rng.permutation(np.arange(1, 11, dtype=float))
+    g: list[str] = []
+    v: list[float] = []
+    for i, a in enumerate(a_vals):
+        g.append("a")
+        v.append(a)
+        if i < len(b_vals):
+            g.append("b")
+            v.append(b_vals[i])
+    df = pl.DataFrame({"g": g, "v": v})
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf", hue="g").to_svg())
+    assert msgs == [], msgs
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    by_step_count = {}
+    for _stroke, corners in step_after_paths(svg):
+        xs = [value_for_pixel(x_ladder, px) for px, _py in corners]
+        assert xs == sorted(xs), f"step line not drawn in x order: {xs}"
+        heights = _ecdf_heights(corners, y_ladder)
+        assert heights == sorted(heights), heights
+        by_step_count[len(heights)] = max(heights)
+    assert by_step_count == {20: 20, 10: 10}, by_step_count
+
+
+def test_the_ecdf_steps_count_per_panel_with_col():
+    """`col=` facets the per-observation count the same way: each panel
+    counts only its own rows, reaching its own row count."""
+    df = pl.DataFrame(
+        {
+            "v": [*range(1, 21), *range(1, 11)],
+            "c": ["x"] * 20 + ["y"] * 10,
+        }
+    )
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf", col="c").to_svg())
+    assert msgs == [], msgs
+    groups = mark_groups(svg)
+    y_ladders = value_axis_ladders(svg, axis="y")
+    assert len(groups) == 2, groups
+    heights = []
+    for group, (_pos, ladder) in zip(groups, y_ladders):
+        corners = _one_step_line(group)
+        heights.append(max(_ecdf_heights(corners, ladder)))
+    assert sorted(heights) == [10, 20], heights
+
+
+def test_a_source_column_named_count_does_not_collide():
+    """A source `"count"` column is not silently overwritten by the
+    synthetic one -- the y axis is still titled "count" and the heights
+    are the window's own count, not the source column's values."""
+    df = pl.DataFrame({"v": _V20, "count": _V20 * 100.0})
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf").to_svg())
+    assert msgs == [], msgs
+    assert y_axis_title(svg) == "count"
+    corners = _one_step_line(svg)
+    y_ladder = value_axis_ladder(svg, axis="y")
+    assert sorted(_ecdf_heights(corners, y_ladder)) == list(range(1, 21))
+
+
+def test_a_fieldless_y_styles_the_count_axis():
+    """A fieldless `y=` styles the count axis; its own `title=` wins over
+    the "count" default, which the bare call still gets."""
+    chart = fm.displot(_DF20, x="v", y=fm.Y(title="N"), kind="ecdf")
+    assert json.loads(chart.to_spec().to_json())["encoding"]["y"]["title"] == "N"
+
+    default_chart = fm.displot(_DF20, x="v", kind="ecdf")
+    assert json.loads(default_chart.to_spec().to_json())["encoding"]["y"]["title"] == "count"
+
+
+def test_the_callers_x_channel_keeps_every_option_with_no_repoint():
+    """`title=` (including an explicit `title=None`), `scale=`, `axis=` and
+    `format=` all survive on the caller's own field, byte for byte: the x
+    channel is never re-pointed at an internal column, so the rendered
+    encoding is exactly the channel the caller wrote."""
+    for title in ("Value", None):
+        x = fm.X(
+            "v", title=title, format=".1f", axis=fm.Axis(grid=False), scale=fm.LogScale()
+        )
+        chart = fm.displot(_DF20, x=x, kind="ecdf")
+        x_enc = json.loads(chart.to_spec().to_json())["encoding"]["x"]
+        assert x_enc == x.to_encoding_spec_dict(), x_enc
+
+
+def test_empty_data_on_ecdf_takes_the_zero_row_path():
+    """Empty data draws the chart's frame and warns once, the same
+    no-rows-to-draw path every other empty chart takes -- not a window
+    computed over zero rows failing some other way."""
+    empty_df = pl.DataFrame({"v": pl.Series([], dtype=pl.Float64)})
+    msgs, svg = _warnings_of(lambda: fm.displot(empty_df, x="v", kind="ecdf").to_svg())
+    assert any("no rows to draw" in m for m in msgs), msgs
+    assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# The line draws its vertices in order at DRAW time (Rust's `sort_vertices`),
+# never by reordering the caller's own rows: the batch stays in the caller's
+# order, so the legend, color assignment and facet panels match every
+# sibling kind's and HEAD's, on the same unsorted data.
+# ---------------------------------------------------------------------------
+
+
+def _column_strip_headers(svg: str, candidates: list[str]) -> list[str]:
+    """Column-strip panel-header text, in first-seen render order: the one
+    strip-label shape every facet renders (`font-size="12"`, no
+    `font-weight`, not rotated), filtered to the candidate label set so a
+    chart or axis title sharing the same style never leaks in."""
+    seen: list[str] = []
+    for attrs, text in re.findall(r"<text([^>]*)>([^<]*)</text>", svg):
+        if 'font-size="12"' not in attrs or "font-weight" in attrs or "rotate(90" in attrs:
+            continue
+        if text in candidates and text not in seen:
+            seen.append(text)
+    return seen
+
+
+def test_the_ecdf_legend_and_facet_order_matches_hist_on_the_same_data():
+    """Per-observation drawing never reorders the caller's own rows: the
+    legend (and, by construction, the color each level gets, since the
+    palette is assigned by legend order) and the facet panel order match
+    `kind="hist"` on the same data, first appearance, not sorted order."""
+    df = pl.DataFrame(
+        {
+            "v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "g": ["z", "a", "z", "m", "a", "m"],
+            "c": ["q", "p", "q", "p", "p", "q"],
+        }
+    )
+    hist_svg = fm.displot(df, x="v", kind="hist", hue="g", col="c").to_svg()
+    ecdf_svg = fm.displot(df, x="v", kind="ecdf", hue="g", col="c").to_svg()
+    hist_legend, ecdf_legend = legend_labels(hist_svg), legend_labels(ecdf_svg)
+    assert ecdf_legend == hist_legend, (ecdf_legend, hist_legend)
+    assert set(ecdf_legend) == {"z", "a", "m"}
+    # Negative control: a legend sorted alphabetically (the symptom a
+    # reordering sort leaves) would read `["a", "m", "z"]`, not this.
+    assert ecdf_legend != sorted(ecdf_legend), ecdf_legend
+
+    hist_headers = _column_strip_headers(hist_svg, ["q", "p"])
+    ecdf_headers = _column_strip_headers(ecdf_svg, ["q", "p"])
+    assert ecdf_headers == hist_headers, (ecdf_headers, hist_headers)
+    assert set(ecdf_headers) == {"q", "p"}
+    assert ecdf_headers != sorted(ecdf_headers), ecdf_headers
+
+
+def test_a_missing_x_or_hue_column_refuses_naming_it():
+    """A column the frame lacks refuses as a typed `ValueError` naming it,
+    the same shape `kind="hist"` already gives -- never a raw polars
+    `ColumnNotFoundError` leaking out of an eager read."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0]})
+    with pytest.raises(ValueError, match="'nope' not found"):
+        fm.displot(df, x="nope", kind="ecdf").to_svg()
+    with pytest.raises(ValueError, match="'nope' not found"):
+        fm.displot(df, x="v", kind="ecdf", hue="nope").to_svg()
+
+
+def test_ecdf_kde_overlay_over_unsorted_rows_is_monotone():
+    """The `kde=True` overlay carries the chart's `sort_vertices`
+    declaration through `chart._mark_kwargs` (the same route a layered
+    chart's style always takes), so the ecdf's own step line still steps
+    monotonically even when the kde overlay is drawn beside it."""
+    rng = np.random.default_rng(4)
+    df = pl.DataFrame({"v": rng.permutation(_V20)})
+    svg = fm.displot(df, x="v", kind="ecdf", kde=True).to_svg()
+    (corners,) = [corners for _stroke, corners in step_after_paths(svg)]
+    xs = [px for px, _py in corners]
+    assert xs == sorted(xs), f"step line not drawn in x order: {xs}"
+
+
+def test_mark_line_refuses_sort_vertices_naming_the_ecdf_door():
+    """`sort_vertices` is an internal-only style field: a caller passing it
+    directly to `mark_line` refuses, naming `displot(kind='ecdf')`, the
+    same shape `detail=`/`clip=`/`value_axis=` already refuse by."""
+    with pytest.raises(ValueError, match=r"set it through displot\(kind='ecdf'\)"):
+        fm.Chart(_DF20).mark_line(sort_vertices=True).encode(x="v", y="v")
+
+
+def test_ecdf_fill_and_cumulative_take_only_a_truth_value():
+    """`fill=` is the KDE area-fill switch, not a channel: a non-bool value
+    on `kind="ecdf"` refuses instead of rendering with the value silently
+    ignored (the column reaches the fill channel only through
+    `encode={"fill": ...}`, pinned separately). `cumulative=` takes the
+    same gate."""
+    with pytest.raises(ValueError, match=r"^displot: fill must be True or False; got 'g'$"):
+        fm.displot(_DF20, x="v", kind="ecdf", fill="g")
+    with pytest.raises(ValueError, match=r"^displot: cumulative must be True or False; got 'no'$"):
+        fm.displot(_DF20, x="v", kind="ecdf", cumulative="no")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"color": "g"},
+        {"stroke": "g"},
+        {"detail": "g"},
+        {"stroke_dash": "g"},
+        {"encode": {"color": "g"}},
+        # `fill=` is `displot`'s own bool kwarg (the KDE area fill), so the
+        # fill ENCODING channel is only reachable through `encode=`.
+        {"encode": {"fill": "g"}},
+    ],
+    ids=["color", "stroke", "detail", "stroke_dash", "encode_color", "encode_fill"],
+)
+def test_every_grouping_channel_groups_the_ecdf_count(kwargs):
+    """Every grouping channel the caller binds -- as a keyword or through
+    `encode=` -- groups the window's count the same way `hue=` does, not
+    only `hue=`: each level reaches its own row count, never a pooled one
+    split only for drawing."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "g": ["a", "b", "a", "b", "a", "b"]})
+    svg = fm.displot(df, x="v", kind="ecdf", **kwargs).to_svg()
+    y_ladder = value_axis_ladder(svg, axis="y")
+    heights = []
+    for _stroke, corners in step_after_paths(svg):
+        heights.append(sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners))
+    assert sorted(heights) == [[1, 2, 3], [1, 2, 3]], heights
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"hue": "g", "encode": {"color": None}},
+        {"color": "g", "encode": {"color": None}},
+        {"stroke": "g", "encode": {"stroke": None}},
+        {"detail": "g", "encode": {"detail": None}},
+    ],
+    ids=["hue", "color", "stroke", "detail"],
+)
+def test_an_encode_none_leaves_the_keywords_own_grouping_channel_bound(kwargs):
+    """`encode={"<channel>": None}` leaves the keyword's own binding of
+    that channel in place (`Chart.encode`'s documented contract: a `None`
+    binds nothing), so the window still groups by it -- per-group heights,
+    byte-identical to the call without the `encode=` entry, never a pooled
+    count under a still-split line."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "g": ["a", "b", "a", "b", "a", "b"]})
+    svg_with_none = fm.displot(df, x="v", kind="ecdf", **kwargs).to_svg()
+    keyword_only = {k: v for k, v in kwargs.items() if k != "encode"}
+    svg_without = fm.displot(df, x="v", kind="ecdf", **keyword_only).to_svg()
+    assert svg_with_none == svg_without
+
+    y_ladder = value_axis_ladder(svg_with_none, axis="y")
+    heights = sorted(
+        sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+        for _stroke, corners in step_after_paths(svg_with_none)
+    )
+    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+
+
+def test_shape_groups_the_ecdf_count_and_warns_it_draws_no_shape():
+    """`shape=` groups the statistic the same way (Rust already splits the
+    line by every field the window groups by), and warns that this mark
+    draws no shape -- `mark_smooth`'s own shape= contract."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "g": ["a", "b", "a", "b", "a", "b"]})
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf", shape="g").to_svg())
+    assert any("groups the statistic by 'g'" in m for m in msgs), msgs
+    y_ladder = value_axis_ladder(svg, axis="y")
+    heights = sorted(
+        sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+        for _stroke, corners in step_after_paths(svg)
+    )
+    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+
+
+def test_a_boolean_hue_groups_the_ecdf_count():
+    """A Boolean hue column groups the window the same way a string hue
+    does."""
+    df = pl.DataFrame(
+        {"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "flag": [True, False, True, False, True, False]}
+    )
+    msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf", hue="flag").to_svg())
+    assert msgs == [], msgs
+    y_ladder = value_axis_ladder(svg, axis="y")
+    heights = sorted(
+        sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+        for _stroke, corners in step_after_paths(svg)
+    )
+    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+
+
+def test_a_null_hue_draws_its_own_rows_as_one_group_with_no_legend_entry():
+    """A null hue value is its own group (`DataWindow` pools null keys by
+    design), drawn in the null color with no legend entry -- the same
+    outcome any `mark_line` over null-color rows gives, not a dropped row."""
+    df = pl.DataFrame(
+        {"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "g": ["a", None, "a", None, "a", None]}
+    )
+    svg = fm.displot(df, x="v", kind="ecdf", hue="g").to_svg()
+    assert legend_labels(svg) == ["a"]
+    y_ladder = value_axis_ladder(svg, axis="y")
+    heights = sorted(
+        sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+        for _stroke, corners in step_after_paths(svg)
+    )
+    assert heights == [[1, 2, 3], [1, 2, 3]], heights

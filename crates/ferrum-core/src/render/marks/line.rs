@@ -24,6 +24,12 @@
 //!   ([`BinnedColorSeries`]). Any other numeric color draws one series.
 //! - Otherwise: one polyline over all rows in batch order.
 //!
+//! Every rule above links a group's rows in BATCH order by default. A line
+//! that declares `mark_style.sort_vertices` joins each group's rows ascending
+//! by its own data value on the axis it advances along instead (stable, so
+//! tied rows keep their row order), except an `Ordinal` advancing axis, which
+//! has no numeric value to order by and keeps batch order regardless.
+//!
 //! Width: a `size` field tapers each series along its length, every vertex
 //! as wide as a point of the same value is across (see [`dot_diameter`]); a
 //! constant `size=` kwarg is the same mapping at one width. `size` and
@@ -39,7 +45,7 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
-use crate::render::marks::curve::{StepSpelling, Trace};
+use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBinding};
@@ -269,11 +275,33 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // A line's points come straight from the positional encodings, so the
     // series' own axis governs — under `CoordFlip` that is y, and a curve
     // fitted against x there doubles back on itself.
+    let curve_axis = ctx.series_curve_axis();
     let trace = Trace {
         method: interpolate,
         step: LINE_STEP_SPELLING,
-        axis: ctx.series_curve_axis(),
+        axis: curve_axis,
     };
+
+    // A declared series join order (`mark_style.sort_vertices`, set by
+    // `displot(kind="ecdf")`'s step line): each group's rows order ascending
+    // by their own DATA value on the advancing axis, not its pixel, so a
+    // reversed scale still steps after in data order; stable, so tied rows
+    // keep their row order. An advancing axis on an `Ordinal` scale has no
+    // numeric value to order by and keeps batch order, the rule `ribbon`
+    // follows for its own series sort. `None`/unset leaves every group in
+    // `series_groups`' own (batch) order, byte-identical.
+    let advancing_field = match curve_axis {
+        CurveAxis::X => x_field(ctx, spec),
+        CurveAxis::Y => y_field(ctx, spec),
+    };
+    let advancing_scale = match curve_axis {
+        CurveAxis::X => &ctx.scales.x,
+        CurveAxis::Y => &ctx.scales.y,
+    };
+    let vertex_sort_values: Option<Vec<Option<f64>>> =
+        (ctx.mark_style.line.sort_vertices && !matches!(advancing_scale, ScaleKind::Ordinal(_)))
+            .then(|| advancing_field.and_then(|f| col_as_f64(ctx.batch, f).ok()))
+            .flatten();
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
     let sw_vals = stroke_width_column(ctx);
@@ -309,7 +337,18 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // Per node, the source row of each width vertex (see `vertex_rows`).
     let mut vertex_rows: Vec<Vec<ferrum_scene::VertexRow>> = Vec::new();
 
-    for (key, rows) in groups {
+    for (key, mut rows) in groups {
+        if let Some(values) = &vertex_sort_values {
+            rows.sort_by(|&a, &b| {
+                let (va, vb) = (values.get(a).copied().flatten(), values.get(b).copied().flatten());
+                match (va, vb) {
+                    (Some(va), Some(vb)) => va.total_cmp(&vb),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+        }
         let mut points: Vec<(f64, f64)> = Vec::new();
         let mut row_indices: Vec<usize> = Vec::new();
         for i in rows {
@@ -2514,5 +2553,201 @@ mod tests {
         let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).unwrap();
         assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0, 1, 2, 3]));
         assert_eq!(all_row_numbers(line_batch(&scene).vertex_rows.clone()), Some(vec![vec![4, 5, 6, 7]]));
+    }
+
+    // ── declared vertex join order (`sort_vertices`) ─────────────────────────
+
+    /// Two color series arrive in unsorted, interleaved row order.
+    /// `sort_vertices: Some(true)` joins each series' own vertices ascending
+    /// by x, so every polyline's x-pixels come out non-decreasing, though the
+    /// batch itself never does.
+    #[test]
+    fn declared_line_over_unsorted_rows_joins_each_color_series_ascending() {
+        use crate::spec::encoding::DataType as SDT;
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // group A rows (x=3,1,2) and group B rows (x=1,5,3) interleaved, each
+        // in unsorted batch order.
+        let xs: Vec<f64> = vec![3.0, 1.0, 1.0, 5.0, 2.0, 3.0];
+        let ys: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let gs: Vec<&str> = vec!["A", "B", "A", "B", "A", "B"];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let polylines: Vec<&Vec<(f64, f64)>> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Polyline { points, .. } = n { Some(points) } else { None }
+        }).collect();
+        assert_eq!(polylines.len(), 2);
+        for points in polylines {
+            let xs: Vec<f64> = points.iter().map(|(x, _)| *x).collect();
+            let mut sorted = xs.clone();
+            sorted.sort_by(f64::total_cmp);
+            assert_eq!(xs, sorted, "each series' x-pixels must come out ascending: {xs:?}");
+        }
+        // The representative row (each node's `data_indices` entry, which
+        // drives tooltip/href metadata and the group-first opacity/stroke
+        // sample) is the FIRST row in the declared order, not the first row
+        // in batch order: A's rows 0,2,4 (x 3,1,2) draw first from row 2;
+        // B's rows 1,3,5 (x 1,5,3) draw first from row 1. Batch order would
+        // give [0, 1].
+        assert_eq!(result.data_indices, Some(vec![2, 1]));
+    }
+
+    /// A size conditional records each kept vertex's source row
+    /// (`vertex_rows`); under a declared sort those rows follow the same
+    /// ascending-x order the points do, not the batch's row order.
+    #[test]
+    fn a_declared_sorts_vertex_rows_follow_the_same_order_as_its_points() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        // Row i's x is 3, 1, 2, 0 — ascending x visits rows 3, 1, 2, 0.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0, 0.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let overrides = MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() };
+        let result = build_line(&with_size_conditional(line_spec(), 100.0, 20.0), &batch, &overrides, &ThemeInputs::default()).unwrap();
+        let rows = all_row_numbers(result.vertex_rows).expect("rows recorded");
+        assert_eq!(rows, vec![vec![3, 1, 2, 0]], "vertex_rows must follow the declared ascending-x order, not batch order [0, 1, 2, 3]");
+    }
+
+    /// `sort_vertices` unset (and explicitly `Some(false)`) both keep the
+    /// batch's own row order, byte-identically to each other and to every
+    /// line rendered before the field existed.
+    #[test]
+    fn undeclared_line_keeps_batch_order_byte_identically() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let points_with = |style: Option<&MarkKwargsSpec>| {
+            let mark_style = resolve_mark_style(style, &theme, &Mark::Line).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let result = super::build(&ctx).unwrap();
+            let SceneNode::Polyline { points, .. } = &result.nodes[0] else { panic!("expected a Polyline") };
+            points.clone()
+        };
+        let unset = points_with(None);
+        let explicit_false = points_with(Some(&MarkKwargsSpec { sort_vertices: Some(false), ..Default::default() }));
+        assert_eq!(explicit_false, unset, "unset and Some(false) must be byte-identical");
+        // Batch order (x = 3, 1, 2) is not ascending; neither spelling sorts it.
+        let xs: Vec<f64> = unset.iter().map(|(x, _)| *x).collect();
+        let mut sorted = xs.clone();
+        sorted.sort_by(f64::total_cmp);
+        assert_ne!(xs, sorted, "batch order must stay in row order, not ascending x");
+    }
+
+    /// The declared join order reads the advancing field's DATA value, not
+    /// its pixel, so a reversed x scale still steps through ascending data
+    /// even though its pixels descend.
+    #[test]
+    fn a_reversed_x_scale_joins_in_ascending_data_order() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 1.0, 9.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0])),
+        ]).unwrap();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![300.0, 0.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None,
+            stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None,
+            y_slots: Default::default(), raster_cells: None,
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let SceneNode::Polyline { points, .. } = &result.nodes[0] else { panic!("expected a Polyline") };
+        // Ascending data order 1, 5, 9 maps through the reversed scale
+        // (domain [0,10] -> range [300,0]) to descending pixels 270, 150, 30.
+        assert_eq!(points, &vec![(270.0, 0.0), (150.0, 0.0), (30.0, 0.0)]);
+    }
+
+    /// An `Ordinal` advancing axis has no numeric data value to order by, so
+    /// a declared line keeps its batch row order exactly as an undeclared
+    /// one does.
+    #[test]
+    fn an_ordinal_advancing_axis_keeps_row_order_even_when_declared() {
+        // A NUMERIC column typed Ordinal: `col_as_f64` reads it fine (unlike
+        // a text column, which the Ordinal guard's absence would mask —
+        // `vertex_sort_values` would already be `None` for want of a numeric
+        // read, not because of the guard), so this is the one fixture that
+        // actually exercises the guard rather than vacuously agreeing with
+        // it.
+        use crate::spec::encoding::DataType as EncDataType;
+        use arrow::array::Int64Array;
+        let mut spec = line_spec();
+        spec.encoding.x = Some(EncodingSpec {
+            field: "year".into(),
+            type_: Some(EncDataType::Ordinal),
+            ..Default::default()
+        });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        // Batch order 2, 0, 3, 1 — unsorted, so a sort would visibly reorder.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![2i64, 0, 3, 1])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        assert!(matches!(scales.x, ScaleKind::Ordinal(_)), "the fixture must resolve an Ordinal x scale, not Linear");
+        let points_with = |style: Option<&MarkKwargsSpec>| {
+            let mark_style = resolve_mark_style(style, &theme, &Mark::Line).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let result = super::build(&ctx).unwrap();
+            let SceneNode::Polyline { points, .. } = &result.nodes[0] else { panic!("expected a Polyline") };
+            points.clone()
+        };
+        let unset = points_with(None);
+        let declared = points_with(Some(&MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() }));
+        assert_eq!(declared, unset, "an Ordinal advancing axis must ignore sort_vertices and keep batch order");
+    }
+
+    /// `sort_vertices` is a `mark_line`-only declaration; any other mark
+    /// carrying it refuses through the existing style-table gate, naming the
+    /// mark and the field.
+    #[test]
+    fn a_non_line_mark_carrying_sort_vertices_refuses() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() };
+        let err = resolve_mark_style(Some(&overrides), &theme, &Mark::Point).unwrap_err();
+        assert_eq!(err, RenderError::MarkStyleNotDrawn { mark: Mark::Point, field: "sort_vertices" });
     }
 }

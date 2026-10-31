@@ -237,6 +237,25 @@ pub struct MarkKwargsSpec {
     /// already uses for `clip=False`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_axis: Option<crate::spec::position::StackValueAxis>,
+    // ── declared vertex join order (line) ────────────────────────────────────
+    /// A producer's declaration that this series joins its own vertices in
+    /// ascending order of its own value on the axis it advances along
+    /// ([`crate::render::draw::DrawCtx::series_curve_axis`]), rather than the
+    /// batch's row order. The sort is stable, so tied rows keep their row
+    /// order, and it reads the advancing field's data value, not its pixel,
+    /// so a reversed scale still steps after in data order. An advancing axis
+    /// on an `Ordinal` scale keeps batch order — it has no numeric value to
+    /// order by, the same rule [`crate::render::marks::ribbon`] follows for
+    /// its own series sort. `None`/unset or `Some(false)` is batch order,
+    /// byte-identical to every line rendered before this field existed:
+    /// `mark_line`'s documented contract (connected-scatter and trajectory
+    /// charts, a partial-dependence sort) draws its series in the batch's own
+    /// order and is unaffected. Set internally by `displot(kind="ecdf")`'s
+    /// step line, whose window keeps the caller's row order for legends and
+    /// facets but must still step through its x values in order; refused on
+    /// every mark but `mark_line`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_vertices: Option<bool>,
 }
 
 /// Every `MarkKwargsSpec` wire key, in declaration order: the field list
@@ -441,6 +460,7 @@ mod tests {
             arrow: _,
             arrow_size: _,
             value_axis: _,
+            sort_vertices: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_numeric_kwarg_names(),
@@ -540,10 +560,11 @@ mod tests {
             arrow: _,
             arrow_size: _,
             value_axis: _,
+            sort_vertices: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_bool_kwarg_names(),
-            vec!["filled", "line", "borders", "leader_line", "clip", "zero", "arrow"]
+            vec!["filled", "line", "borders", "leader_line", "clip", "zero", "arrow", "sort_vertices"]
         );
     }
 
@@ -589,6 +610,7 @@ mod tests {
             arrow: _,
             arrow_size: _,
             value_axis: _,
+            sort_vertices: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_string_kwarg_names(),
@@ -660,12 +682,12 @@ mod tests {
     /// Every traced name is a real field: a wrong-typed value under it is
     /// refused for its type, where an unknown key is refused as unknown. The
     /// reverse holds by construction: the list is serde's own.
-    /// `size`/`value_axis` bracket the declaration order.
+    /// `size`/`sort_vertices` bracket the declaration order.
     #[test]
     fn mark_kwargs_field_names_are_the_structs_fields() {
         let names = super::mark_kwargs_field_names();
         assert_eq!(names.first(), Some(&"size"));
-        assert_eq!(names.last(), Some(&"value_axis"));
+        assert_eq!(names.last(), Some(&"sort_vertices"));
         for name in names {
             let json = serde_json::json!({ *name: [[[]]] });
             let err = serde_json::from_value::<super::MarkKwargsSpec>(json).unwrap_err().to_string();

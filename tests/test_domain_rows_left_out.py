@@ -746,11 +746,15 @@ _SUPPRESSED_TITLE_DOORS: dict[str, tuple[Callable[[Any], Any], str, int, bool]] 
         36,
         False,
     ),
+    # `cut=True`: the ecdf steps at the caller's own observations
+    # (`v = 0..19`), so `v=5` and `v=6` are drawn vertices inside
+    # `xlim(5, 6)` while the rest of the line's vertices sit outside it --
+    # one mark, drawn cut.
     "displot ecdf": (
         lambda x: fm.displot(_SUPPRESSED_TITLE_DF, x=x, kind="ecdf").xlim(5, 6),
         "displot",
         1,
-        False,
+        True,
     ),
 }
 

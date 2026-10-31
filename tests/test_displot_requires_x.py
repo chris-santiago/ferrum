@@ -35,7 +35,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._warn import reset_warnings
-from tests._svg_rects import data_bar_rects, polylines, rug_tick_x1_by_stroke
+from tests._svg_rects import data_bar_rects, polylines, rug_tick_x1_by_stroke, step_after_paths
 
 #: Kinds that draw the variable ``x=`` names and compute the other axis.
 KINDS_REQUIRING_X = ("hist", "kde", "ecdf")
@@ -144,7 +144,7 @@ class TestOverlayRefusesRatherThanVanishing:
 class TestInertBinsWarns:
     """A binning rule named on a kind that does not bin is reported."""
 
-    @pytest.mark.parametrize("kind", ["kde", "rug"])
+    @pytest.mark.parametrize("kind", ["kde", "ecdf", "rug"])
     def test_a_stated_rule_the_kind_cannot_act_on_warns(self, two_group_df, kind):
         with pytest.warns(UserWarning) as record:
             fm.displot(two_group_df, x="v", kind=kind, bins=7)
@@ -152,8 +152,9 @@ class TestInertBinsWarns:
         assert any(
             m.startswith(f"displot(kind={kind!r}, bins=7)") and "inert" in m for m in messages
         ), messages
+        assert any("use kind='hist', which bins" in m for m in messages), messages
 
-    @pytest.mark.parametrize("kind", ["kde", "rug"])
+    @pytest.mark.parametrize("kind", ["kde", "ecdf", "rug"])
     def test_the_warning_is_true_the_render_really_is_unmoved(self, two_group_df, kind):
         """The warning's claim -- "the render is identical for every value" --
         is measured here rather than asserted in prose."""
@@ -177,14 +178,49 @@ class TestInertBinsWarns:
             warnings.simplefilter("error", UserWarning)
             fm.displot(two_group_df, x="v", kind="kde", bins=bins)
 
-    @pytest.mark.parametrize("kind", ["hist", "ecdf"])
-    def test_the_binning_kinds_are_silent_and_actually_bin(self, two_group_df, kind):
-        """No warning where the rule acts -- and it does act."""
+    def test_the_binning_kind_is_silent_and_actually_bins(self, two_group_df):
+        """No warning where the rule acts -- and it does act. `"hist"` is
+        the only kind that bins: `"ecdf"` counts each observation itself
+        and is in the inert set above."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            few = fm.displot(two_group_df, x="v", kind=kind, bins=3).to_svg()
-            many = fm.displot(two_group_df, x="v", kind=kind, bins=23).to_svg()
-        assert few != many, f"kind={kind!r} ignored bins= -- the silence is unearned"
+            few = fm.displot(two_group_df, x="v", kind="hist", bins=3).to_svg()
+            many = fm.displot(two_group_df, x="v", kind="hist", bins=23).to_svg()
+        assert few != many, "kind='hist' ignored bins= -- the silence is unearned"
+
+
+class TestFillAndCumulativeAreTruthValuesOnEveryKind:
+    """`fill=`/`cumulative=` take only a truth value, whatever `kind=` is."""
+
+    @pytest.mark.parametrize("kind", ["hist", "kde", "ecdf", "rug"])
+    @pytest.mark.parametrize("param,bad", [("fill", "g"), ("cumulative", "no")])
+    def test_a_non_truth_value_refuses_naming_displot(self, two_group_df, kind, param, bad):
+        with pytest.raises(ValueError, match=rf"^displot: {param} must be True or False; got"):
+            fm.displot(two_group_df, x="v", kind=kind, **{param: bad})
+
+    #: `fill=` only reaches `mark_density`'s render (`kind="kde"`); `cumulative=`
+    #: reaches both `mark_histogram` (`kind="hist"`) and `mark_density`. A kind
+    #: that does not read a given param renders byte-identically for every
+    #: truth value, same as passing `None` (the default) on any kind.
+    _PARAM_DEFAULT = {"fill": True, "cumulative": False}
+    _PARAM_READING_KINDS = {"fill": {"kde"}, "cumulative": {"hist", "kde"}}
+
+    @pytest.mark.parametrize("kind", ["hist", "kde", "ecdf", "rug"])
+    @pytest.mark.parametrize("param", ["fill", "cumulative"])
+    @pytest.mark.parametrize("value", [None, True, False, np.bool_(True)])
+    def test_a_real_truth_value_renders(self, two_group_df, kind, param, value):
+        """Every truth value renders instead of refusing, compared
+        byte-for-byte against the call without the argument: `None` or the
+        param's own default renders identically on every kind; a non-default
+        value renders identically too on a kind that does not read the param,
+        and differently on one that does."""
+        base = fm.displot(two_group_df, x="v", kind=kind).to_svg()
+        svg = fm.displot(two_group_df, x="v", kind=kind, **{param: value}).to_svg()
+        is_default = value is None or bool(value) == self._PARAM_DEFAULT[param]
+        if is_default or kind not in self._PARAM_READING_KINDS[param]:
+            assert svg == base, f"{kind}({param}={value!r}) should render byte-identically to the default"
+        else:
+            assert svg != base, f"{kind}({param}={value!r}) should change the render"
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +246,8 @@ def _primary_mark_drawn(svg: str, kind: str) -> bool:
     if kind == "kde":
         # `fill=True` by default, so the density is a filled `<path>`.
         return "<path" in svg
-    # ecdf: a step `<polyline>` with real vertices.
-    return any(len(pts) > 2 for _stroke, pts in polylines(svg))
+    # ecdf: a step `<path>` with real vertices.
+    return any(len(corners) > 2 for _stroke, corners in step_after_paths(svg))
 
 
 @pytest.mark.parametrize("kind,axis,kde,rug", _MATRIX, ids=lambda v: str(v))

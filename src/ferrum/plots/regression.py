@@ -37,7 +37,6 @@ from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
 from ferrum._encode_lowering import (
     COMPOSITE_GROUPING_CHANNELS,
-    _composite_groupby,
     _rebind_positional,
 )
 from ferrum._layer import _Layer
@@ -45,7 +44,6 @@ from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
-from ferrum.encoding._resolve import channel_for_value
 from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.marks._desugar_helpers import nominal_color_channel, with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
@@ -54,6 +52,8 @@ from ferrum.plots._helpers import (
     _color_field_for,
     _column_or_literal_color,
     _compose_compare,
+    _drawn_bindings,
+    _encode_grouping,
     _field_name,
     _figure_entry,
     _finalize_chart,
@@ -1026,8 +1026,10 @@ def _lmplot_impl(
     # dict `_finalize_chart` applies later: the composite grouping,
     # computed once here, so each method fits one curve per group as a
     # composite statistic does. The fit binds the same channels, so each
-    # curve draws its group's color.
-    bound = {**enc, **(encode or {})}
+    # curve draws its group's color. `_drawn_bindings` reads `encode=` the
+    # way `_finalize_chart` will apply it (a value wins, a `None` leaves the
+    # keyword's own binding in place), so the fit groups by what is drawn.
+    bound = _drawn_bindings(enc, encode)
     grouping = tuple(_encode_grouping(bound))
     grouping_bindings = {
         channel: value
@@ -1370,21 +1372,6 @@ def lmplot(
     )
 
 
-def _encode_grouping(bindings: dict) -> list[str]:
-    """Return the composite grouping fields the caller's own *bindings* bind.
-
-    Each grouping channel's value is read as ``encode()`` reads it
-    (shorthand included), so ``"c:N"`` groups by ``c``; ``None`` binds
-    nothing.
-    """
-    channels = {
-        name: channel_for_value(name, value, declare=f"encode({name}=...)")
-        for name, value in bindings.items()
-        if name in COMPOSITE_GROUPING_CHANNELS and value is not None
-    }
-    return _composite_groupby(channels, None)
-
-
 def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str]) -> bool:
     """Whether *entry*'s single-fit metrics corner is drawn, given its *grouping* fields.
 
@@ -1628,7 +1615,11 @@ def residplot(
     # (`encode={"color": "c"}`, `shape="c"`) groups the residuals too, as
     # every composite statistic groups by its chart's grouping fields: each
     # group is refit on its own rows, which carry the field its marks draw.
-    encode_grouping = _encode_grouping({**(encode or {}), **encode_kwargs})
+    # `_drawn_bindings` applies `encode=` over the keyword bindings, the
+    # order `_finalize_chart` applies them in, so a keyword and `encode=`
+    # naming the same channel differently refits by `encode=`'s value, the
+    # one the chart draws.
+    encode_grouping = _encode_grouping(_drawn_bindings(encode_kwargs, encode))
     groupby = with_grouping(groupby, encode_grouping)
 
     # `residplot` passes `degree=order` straight to `Smooth` below, so it
@@ -1755,7 +1746,9 @@ def residplot(
                 # point layer is this figure's primary mark, so it draws
                 # what `encode=` binds and its tooltip lists it, instead
                 # of losing it to the per-layer own-fields-shadow rule.
-                encoding={**enc, **(encode or {})},
+                # `_drawn_bindings` keeps a `None` entry from unbinding a
+                # keyword's own channel, the same rule the chart draws by.
+                encoding=_drawn_bindings(enc, encode),
                 mark_kwargs=point_kwargs or None,
             )
         ]

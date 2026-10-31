@@ -10,10 +10,15 @@
 //! unsigned / float dtypes cast to `Float64` via
 //! [`numeric_util::coerce_to_float64`], `Timestamp` casts to its epoch value
 //! (ferrum's Python boundary pre-casts `Date32`/`Date64` to `Timestamp(ms)`, so
-//! this is how a date-sorted window arrives), and `Utf8`/`LargeUtf8` stay
-//! string-compared. Every other dtype raises a message naming the transform,
-//! the column and the dtype. Nothing reaches the window body as a silent
-//! `Ordering::Equal` (an unsorted "sort") or `NaN` (an all-null aggregate).
+//! this is how a date-sorted window arrives), `Utf8`/`LargeUtf8` stay
+//! string-compared, and `Boolean` orders `false` before `true`. Every other
+//! dtype raises a message naming the transform, the column and the dtype.
+//! A `sort` column takes any of these; an op that reads its `field`
+//! numerically (lag/lead, the frame boundary values, a rolling aggregate)
+//! refuses a `Utf8`/`LargeUtf8`/`Boolean` field the same way, since none of
+//! them has a numeric value to aggregate. Nothing reaches the window body as
+//! a silent `Ordering::Equal` (an unsorted "sort") or `NaN` (an all-null
+//! aggregate).
 //!
 //! ## Peers (batch-D M4)
 //!
@@ -27,7 +32,7 @@
 //! every row is its own peer run and ranks and frames behave exactly as they
 //! did before.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::{PyErr, PyResult};
@@ -225,7 +230,8 @@ pub(crate) fn apply_with_context(
 /// The dtypes a window column may carry, named in every refusal message.
 const SUPPORTED_WINDOW_DTYPES: &str = "Utf8/LargeUtf8 (compared as text), \
      Timestamp (compared as epoch), Int8/Int16/Int32/Int64, \
-     UInt8/UInt16/UInt32/UInt64, Float16/Float32/Float64";
+     UInt8/UInt16/UInt32/UInt64, Float16/Float32/Float64, \
+     Boolean (false before true)";
 
 /// How a spec referenced a column. Affects only the "not found" message, which
 /// the two roles have always worded differently.
@@ -253,6 +259,11 @@ impl ColumnRole {
 enum WindowValues {
     Numeric(Float64Array),
     Text(StringArray),
+    /// An ordered key, not a numeric value: `false` before `true`, same as
+    /// pandas, Vega and seaborn order booleans. [`WindowColumn::numeric`]
+    /// refuses it for an op that reads its field numerically, in the same
+    /// words it refuses [`WindowValues::Text`].
+    Boolean(BooleanArray),
 }
 
 /// One `sort` or `field` column, coerced once per [`apply`].
@@ -282,6 +293,7 @@ impl WindowColumn {
             dt if is_numeric_dtype(dt) => {
                 WindowValues::Numeric(coerce_to_float64(col, "data_window", name)?)
             }
+            DataType::Boolean => WindowValues::Boolean(downcast_bool(col, name)?),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "data_window: column '{name}' has unsupported dtype {other:?}; \
@@ -320,6 +332,12 @@ impl WindowColumn {
                 (false, true) => Ordering::Less,
                 (false, false) => arr.value(a).cmp(arr.value(b)),
             },
+            WindowValues::Boolean(arr) => match (arr.is_null(a), arr.is_null(b)) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => arr.value(a).cmp(&arr.value(b)),
+            },
         }
     }
 
@@ -329,7 +347,7 @@ impl WindowColumn {
     fn numeric(&self, op: &str) -> PyResult<&Float64Array> {
         match &self.values {
             WindowValues::Numeric(arr) => Ok(arr),
-            WindowValues::Text(_) => Err(PyValueError::new_err(format!(
+            WindowValues::Text(_) | WindowValues::Boolean(_) => Err(PyValueError::new_err(format!(
                 "data_window: {op} requires a numeric column, but '{}' has dtype {:?}",
                 self.name, self.dtype
             ))),
@@ -358,6 +376,18 @@ fn downcast_string(col: &ArrayRef, name: &str) -> PyResult<StringArray> {
         .ok_or_else(|| {
             PyValueError::new_err(format!(
                 "data_window: expected a Utf8 column for '{name}', got {:?}",
+                col.data_type()
+            ))
+        })
+}
+
+fn downcast_bool(col: &ArrayRef, name: &str) -> PyResult<BooleanArray> {
+    col.as_any()
+        .downcast_ref::<BooleanArray>()
+        .cloned()
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "data_window: expected a Boolean column for '{name}', got {:?}",
                 col.data_type()
             ))
         })
@@ -1379,8 +1409,81 @@ mod tests {
         assert!(msg.contains("not found"), "err: {msg}");
     }
 
+    /// `Boolean` is an ordered sort key ([`WindowValues::Boolean`]), so
+    /// this pins the refusal on `Binary`, which has no ordering and no
+    /// numeric reading.
     #[test]
     fn unsupported_sort_dtype_names_transform_column_and_dtype() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("raw", DataType::Binary, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::BinaryArray::from(vec![
+                b"a".as_ref(),
+                b"b".as_ref(),
+            ]))],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            sort: Some(vec!["raw".into()]),
+            ..window_spec(vec![op("rank", None, "r")])
+        };
+        let msg = apply(&spec, &batch).unwrap_err().to_string();
+        assert!(msg.contains("data_window"), "err: {msg}");
+        assert!(msg.contains("'raw'"), "err must name the column: {msg}");
+        assert!(msg.contains("Binary"), "err must name the dtype: {msg}");
+    }
+
+    /// A `Boolean` sort column orders `false` before `true`, same as pandas,
+    /// Vega and seaborn, and ties within each value: sorted the flags read
+    /// false, false, true, true → competition ranks 1, 1, 3, 3.
+    #[test]
+    fn boolean_sort_column_orders_false_before_true() {
+        let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::BooleanArray::from(vec![true, false, true, false]))],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            sort: Some(vec!["flag".into()]),
+            ..window_spec(vec![op("rank", None, "r")])
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(col_values(&out, 1), vec![3.0, 1.0, 3.0, 1.0]);
+    }
+
+    /// A null in the `Boolean` sort key sorts after every value and ties
+    /// every other null, the same total order `Text`'s own null rule
+    /// follows: sorted, the flags read false, true, null, null (the two
+    /// nulls tied) → competition ranks 1, 2, 3, 3, which read back in the
+    /// original row order (true, null, false, null) give 2, 3, 1, 3.
+    #[test]
+    fn boolean_sort_column_orders_a_null_after_every_value_tied_with_other_nulls() {
+        let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                None,
+            ]))],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            sort: Some(vec!["flag".into()]),
+            ..window_spec(vec![op("rank", None, "r")])
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(col_values(&out, 1), vec![2.0, 3.0, 1.0, 3.0]);
+    }
+
+    /// A rolling aggregate whose `field` is `Boolean` refuses the same way a
+    /// `Text` field does: a `Boolean` is an ordered key, not a numeric value
+    /// to sum.
+    #[test]
+    fn boolean_field_refuses_to_aggregate_instead_of_emitting_nan() {
         pyo3::Python::initialize();
         let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, false)]));
         let batch = RecordBatch::try_new(
@@ -1388,12 +1491,9 @@ mod tests {
             vec![Arc::new(arrow::array::BooleanArray::from(vec![true, false]))],
         )
         .unwrap();
-        let spec = DataWindowSpec {
-            sort: Some(vec!["flag".into()]),
-            ..window_spec(vec![op("rank", None, "r")])
-        };
+        let spec = window_spec(vec![op("sum", Some("flag"), "s")]);
         let msg = apply(&spec, &batch).unwrap_err().to_string();
-        assert!(msg.contains("data_window"), "err: {msg}");
+        assert!(msg.contains("requires a numeric column"), "err: {msg}");
         assert!(msg.contains("'flag'"), "err must name the column: {msg}");
         assert!(msg.contains("Boolean"), "err must name the dtype: {msg}");
     }

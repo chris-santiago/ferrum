@@ -1,32 +1,20 @@
-"""Regression coverage for #200 (batch F wave 4 task 8).
+"""Pins that ``hue=`` reaches the ecdf statistic's grouping.
 
-``fm.displot(df, x=..., kind="ecdf", hue=...)`` raised ``ValueError: unknown
-column 'g' referenced by an encoding`` at render: the ecdf branch built a raw
-``Bin(...)`` transform without threading ``groupby=``, the one figure-layer
-site not on the composite-mark auto-carry road
-(``_desugar._prep_groupby_from_color``), so ``Bin``'s output batch silently
-dropped the hue column the ``color`` channel still named.
-
-Fix: ``src/ferrum/plots/distribution.py``'s ecdf branch threads
-``groupby=_field_name(hue)`` into the ``Bin`` transform (mirroring the
-``kind="kde"`` branch's explicit ``groupby=hue``), and sets
-``shared_extent=True`` whenever a hue is bound -- unconditionally, not gated
-on ``multiple=`` -- since an ECDF is always a per-group comparison and a
-common x-grid is the only reading under which the curves are comparable (the
-same contract a sibling task applies to ``multiple="stack"``/``"fill"``
-histogram binning).
+A bound ``hue=`` reaches the per-observation rolling count
+(``fm.transform_window``) the ecdf branch builds, so each level keeps its
+own count and its own color, drawn as a step-after line (a ``<path>`` of
+``M``/``H``/``V`` commands).
 """
 
 from __future__ import annotations
-
-import hashlib
 
 import numpy as np
 import polars as pl
 import pytest
 
 import ferrum as fm
-from tests._svg_rects import polylines, rug_tick_x1_by_stroke
+from tests._svg_extents import value_axis_ladder, value_for_pixel
+from tests._svg_rects import polylines, rug_tick_x1_by_stroke, step_after_paths
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -37,10 +25,8 @@ from tests._svg_rects import polylines, rug_tick_x1_by_stroke
 def two_group_df():
     """Two equal-size, well-separated normal samples tagged by ``g``.
 
-    Equal group sizes keep each group's auto (Sturges) bin count identical,
-    so under ``shared_extent=True`` both groups land on the exact same
-    bin-edge grid -- the fixture that makes "shared x-grid" a checkable fact
-    rather than an approximation.
+    Equal group sizes make "each level reaches its own row count" a plain
+    equality (150 and 150) rather than two different numbers to track.
     """
     rng = np.random.default_rng(0)
     n = 150
@@ -66,51 +52,38 @@ def two_facet_df():
     )
 
 
-# ---------------------------------------------------------------------------
-# SVG parsing helpers. `_polylines` and `_rug_tick_x1_by_stroke` were written
-# here as local copies with a DUPLICATION-PENDING note; they now come from
-# `tests/_svg_rects.py`, the module that already owned the element regex for
-# the sibling site (`test_displot_kde_overlay.py`). The copies deleted here
-# read attributes positionally, so they also depended on the renderer's
-# attribute order; the owner's parser reads them by name.
-# ---------------------------------------------------------------------------
-
-
 def _assert_finite_svg(svg: str) -> None:
     assert "NaN" not in svg
     assert "Infinity" not in svg
 
 
 # ---------------------------------------------------------------------------
-# #200: distinct-colored per-group step lines, sharing one x-grid.
+# Distinct-colored per-group step lines, each reaching its own count.
 # ---------------------------------------------------------------------------
 
 
 class TestEcdfHueCarriesGroupKey:
-    def test_ecdf_hue_renders_distinct_colored_lines_on_shared_grid(self, two_group_df):
+    def test_ecdf_hue_renders_distinct_colored_lines_reaching_each_groups_own_count(
+        self, two_group_df
+    ):
         chart = fm.displot(two_group_df, x="x", hue="g", kind="ecdf")
         svg = chart.to_svg()
         _assert_finite_svg(svg)
 
-        lines = polylines(svg)
+        lines = step_after_paths(svg)
         assert len(lines) == 2, f"expected one step line per hue level, got {len(lines)}"
         strokes = {stroke for stroke, _ in lines}
         assert len(strokes) == 2, f"step lines are not distinctly colored: {strokes}"
 
-        # Shared x-grid: `shared_extent=True` forces both groups onto the
-        # same bin edges, so (with this fixture's equal group sizes) the two
-        # lines' x coordinates land on the exact same set of screen
-        # positions. Without it (the pre-fix default `shared_extent=False`,
-        # or a regression that drops it again), each group would bin over
-        # its own data range -- and this fixture's two groups (means 0 and
-        # 6) have non-overlapping ranges, so their bin edges would land at
-        # entirely different x positions.
-        xs_by_stroke = {stroke: {round(x, 2) for x, _ in points} for stroke, points in lines}
-        stroke_a, stroke_b = sorted(xs_by_stroke)
-        assert xs_by_stroke[stroke_a] == xs_by_stroke[stroke_b], (
-            "per-group ECDF step lines do not share an x-grid: "
-            f"{sorted(xs_by_stroke[stroke_a])} != {sorted(xs_by_stroke[stroke_b])}"
-        )
+        # Each level's own count, from `groupby=` carrying the hue column
+        # into the window: a dropped `groupby=` would instead count across
+        # both groups pooled, reaching 300 on one or both lines rather than
+        # 150 on each.
+        y_ladder = value_axis_ladder(svg, axis="y")
+        for _stroke, corners in lines:
+            heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+            assert len(corners) == 150, f"expected 150 steps (one per row), got {len(corners)}"
+            assert heights[-1] == 150, f"expected this level's own row count, got {heights[-1]}"
 
     def test_ecdf_hue_channel_object_matches_bare_string(self, two_group_df):
         """`hue=fm.Color("g")` must carry the group exactly like `hue="g"` --
@@ -124,7 +97,7 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_facet_df, x="x", hue="g", col="c", kind="ecdf")
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = polylines(svg)
+        lines = step_after_paths(svg)
         # Two hue levels x two facet panels.
         assert len(lines) == 4, f"expected 4 step lines (2 hue x 2 facets), got {len(lines)}"
         strokes = {stroke for stroke, _ in lines}
@@ -134,10 +107,13 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_group_df, x="x", hue="g", kind="ecdf", kde=True)
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = polylines(svg)
-        # One ECDF step line + one KDE overlay curve per hue level.
-        assert len(lines) == 4, f"expected 4 lines (2 ecdf + 2 kde overlay), got {len(lines)}"
-        strokes = {stroke for stroke, _ in lines}
+        # One ECDF step line (`<path>`) + one KDE overlay curve (`<polyline>`)
+        # per hue level.
+        ecdf_lines = step_after_paths(svg)
+        kde_lines = polylines(svg)
+        assert len(ecdf_lines) == 2, f"expected 2 ecdf step lines, got {len(ecdf_lines)}"
+        assert len(kde_lines) == 2, f"expected 2 kde overlay curves, got {len(kde_lines)}"
+        strokes = {stroke for stroke, _ in ecdf_lines} | {stroke for stroke, _ in kde_lines}
         assert len(strokes) == 2, (
             f"kde overlay does not share the ecdf lines' 2 hue colors: {strokes}"
         )
@@ -146,7 +122,7 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_group_df, x="x", hue="g", kind="ecdf", rug=True)
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = polylines(svg)
+        lines = step_after_paths(svg)
         assert len(lines) == 2, f"expected 2 ecdf step lines, got {len(lines)}"
         line_strokes = {stroke for stroke, _ in lines}
 
@@ -158,28 +134,29 @@ class TestEcdfHueCarriesGroupKey:
 
 
 # ---------------------------------------------------------------------------
-# Clean-input contract: the no-hue path is unchanged by this fix.
+# Clean-input contract: the no-hue path carries no stray grouping.
 # ---------------------------------------------------------------------------
 
 
 class TestEcdfNoHueUnchanged:
-    def test_ecdf_no_hue_wire_has_no_groupby_and_shared_extent_false(self):
+    def test_ecdf_no_hue_wire_has_no_groupby(self):
+        """With no grouping channel bound, the window's `groupby=` is
+        unset, so no grouping channel's binding can leak onto an ungrouped
+        render."""
         df = pl.DataFrame({"x": np.arange(20.0)})
         chart = fm.displot(df, x="x", kind="ecdf")
         spec = chart.to_dict()
-        bin_xform = next(t for t in spec["transforms"] if t["type"] == "bin")
-        assert "groupby" not in bin_xform
-        assert bin_xform["shared_extent"] is False
+        (window,) = [t for t in spec["transforms"] if t["type"] == "data_window"]
+        assert "groupby" not in window
+        assert window["sort"] == ["x"]
 
-    def test_ecdf_no_hue_render_byte_identical(self):
-        """Pinned baseline for the no-hue ecdf render -- must stay
-        byte-identical across this fix: with no hue, `_field_name(None)` is
-        `None`, so `groupby=None, shared_extent=False` are exactly what the
-        pre-fix raw `Bin(...)` call always produced.
-        """
+    def test_ecdf_no_hue_renders_one_step_line_reaching_the_row_count(self):
         df = pl.DataFrame({"x": np.arange(20.0)})
         svg = fm.displot(df, x="x", kind="ecdf").to_svg()
-        digest = hashlib.sha256(svg.encode()).hexdigest()
-        assert digest == ("983b966e9905d7504ca2692fdf2e0c6213dac6314206d8847c7d103757ae7251"), (
-            "no-hue ecdf render moved -- expected byte-identity with the pre-fix baseline"
-        )
+        lines = step_after_paths(svg)
+        assert len(lines) == 1, f"expected one step line, got {len(lines)}"
+        _stroke, corners = lines[0]
+        assert len(corners) == 20
+        y_ladder = value_axis_ladder(svg, axis="y")
+        heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
+        assert heights == list(range(1, 21)), heights

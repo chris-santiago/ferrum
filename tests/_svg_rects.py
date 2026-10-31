@@ -37,6 +37,12 @@ exclude chrome. It lives here for the same reason `svg_elements` does --
 scoping to "the marks, and nothing else" is a fact about ferrum's SVG
 structure, not about either module's subject -- and both import it rather
 than keep their own copy.
+
+`step_after_paths` is `polylines`'s counterpart for a
+`mark_line(interpolate="step-after")` curve, which the renderer draws as a
+`<path>` of `M`/`H`/`V` commands rather than a `<polyline>` of points;
+`tests/test_displot_ecdf_hue.py` and `tests/test_log_axis_statistics.py`
+both read a `displot(kind="ecdf")` step line through it.
 """
 
 from __future__ import annotations
@@ -146,6 +152,47 @@ def polylines(svg: str) -> list[tuple[str | None, list[tuple[float, float]]]]:
         points = [(float(p.split(",")[0]), float(p.split(",")[1])) for p in attrs["points"].split()]
         out.append((attrs.get("stroke"), points))
     return out
+
+
+def _step_after_corners(d: str) -> list[tuple[float, float]]:
+    """The pixel `(x, y)` corners of a `mark_line(interpolate="step-after")`
+    path's own `d`: the initial `M`, then the point each `H`/`V` pair
+    reaches -- the riser where the step rises to its next value. Two rows
+    tied on x draw one riser each, landing on the same pixel, so a repeated
+    corner collapses to one rather than counting as a second step.
+    """
+    tokens = re.findall(r"[MHV]|-?\d+\.?\d*", d)
+    corners: list[tuple[float, float]] = []
+    x = y = 0.0
+    i = 0
+    while i < len(tokens):
+        cmd = tokens[i]
+        if cmd == "M":
+            x, y = float(tokens[i + 1]), float(tokens[i + 2])
+            corners.append((x, y))
+            i += 3
+        elif cmd == "H":
+            x = float(tokens[i + 1])
+            i += 2
+        elif cmd == "V":
+            y = float(tokens[i + 1])
+            if not corners or corners[-1] != (x, y):
+                corners.append((x, y))
+            i += 2
+        else:
+            i += 1
+    return corners
+
+
+def step_after_paths(svg: str) -> list[tuple[str | None, list[tuple[float, float]]]]:
+    """Return `(stroke, corners)` for every `mark_line(interpolate="step-after")`
+    `<path>` in *svg* -- the step-line counterpart of `polylines`, read
+    through `_step_after_corners`.
+    """
+    return [
+        (attrs.get("stroke"), _step_after_corners(attrs["d"]))
+        for attrs in svg_elements(svg, "path", lambda a: "d" in a and "H" in a["d"])
+    ]
 
 
 def rug_tick_x1_by_stroke(svg: str) -> dict[str, set[float]]:
