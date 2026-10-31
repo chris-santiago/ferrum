@@ -18,7 +18,7 @@ use crate::layout::{
     TickProjection,
 };
 use crate::spec::chart::ChartSpec;
-use crate::transform::color_bin_group::{BinDemand, ColorBinPlan};
+use crate::transform::color_bin_group::{BinDemand, ColorBinPlan, LogAxisSpace, RunPlan, SpaceDemand};
 use crate::transform::context::{AllNullOutcome, AllNullPartition, StepInstance, TransformContext, TransformWarning};
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 use crate::transform::run::{OutputLineage, OutputLineages};
@@ -38,7 +38,7 @@ mod legend;
 // directly to prove `Kde::count_scale_extent`'s facet pin matches `Bin`'s
 // (`crate::render::prepare::fix_transform_extents_for_facet`) — no logic fork,
 // same visibility-only pattern as `bin::resolve_bin_extent`'s cycle-1 export.
-pub(crate) use extent::fix_transform_extents_for_facet;
+pub(crate) use extent::{fix_transform_extents_for_facet, fix_transform_extents_for_facet_in_space};
 
 // `pub(crate)` so `lib.rs` can register the `#[pyfunction]` — same shape as
 // `fix_transform_extents_for_facet` above: `mod legend` stays private (its
@@ -1842,20 +1842,94 @@ fn run_pipeline(
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<TransformRun, RenderError> {
     let first = run_transforms_with_facet(spec, normalized, viewport, theme, None)?;
-    let reads = binned_color_reads(spec);
-    if reads.is_empty() {
+
+    let color_reads = binned_color_reads(spec);
+    let color_reads: Vec<(&str, &str)> = color_reads.iter().map(|(key, field)| (key.as_str(), field.as_str())).collect();
+    let color_demand = BinDemand::of(&first.2, &color_reads);
+
+    let space_reads = log_space_reads(spec, &first.0, leaf_scales);
+    let space_demand = SpaceDemand::of(&first.2, &space_reads)?;
+
+    if !color_demand.any() && !space_demand.any() {
         return Ok(first);
     }
-    let reads: Vec<(&str, &str)> = reads.iter().map(|(key, field)| (key.as_str(), field.as_str())).collect();
-    let demand = BinDemand::of(&first.2, &reads);
-    if !demand.any() {
-        return Ok(first);
-    }
-    let Some(edges) = binned_color_edges(spec, &first.0, &first.2, theme, leaf_scales) else {
-        return Ok(first);
+
+    let edges = if color_demand.any() {
+        binned_color_edges(spec, &first.0, &first.2, theme, leaf_scales).map(std::rc::Rc::from)
+    } else {
+        None
     };
-    let plan = ColorBinPlan { demand, edges: Some(std::rc::Rc::from(edges)) };
+    // When color is the only demand and its edges cannot resolve, there is
+    // no second run: the render's own scale pass handles that case in its
+    // place. A step this chart's color demands is otherwise harmless to
+    // carry with no edges (`StepBins::bins` gates on `edges.is_some()`),
+    // so a space demand alongside still reruns.
+    if color_demand.any() && edges.is_none() && !space_demand.any() {
+        return Ok(first);
+    }
+
+    let plan = RunPlan { color: ColorBinPlan { demand: color_demand, edges }, space: space_demand };
     run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))
+}
+
+/// For each layer (the chart itself when unlayered) whose drawn `x` or `y`
+/// resolves to a `LogScale`, the key it draws under and that axis's log
+/// space ([`LogAxisSpace`]) — the demand [`SpaceDemand::of`] reads against
+/// the first pipeline run's lineages, mirroring [`binned_color_reads`].
+///
+/// `enc` for each channel is [`establishing_encoding`]'s positional binding
+/// (layer 0's field and title); the scale itself is the selection
+/// [`crate::render::scale_resolve::domain::resolved_explicit_scale`] makes
+/// — the caller's own scale when it states one, else the scale a sibling
+/// layer establishes — the same selection
+/// [`crate::render::scale_resolve::positional::build_axis_scale`] resolves
+/// its real scale from, so every door that reaches a `LogScale` (a
+/// channel's own `scale=`, an `override()`-merged scale, or a sibling
+/// layer's established scale) reaches this demand too. Empty for a chart
+/// whose `x`/`y` channel resolves to anything else, or whose layers cannot
+/// be built.
+fn log_space_reads(
+    spec: &ChartSpec,
+    outputs: &HashMap<String, RecordBatch>,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
+) -> Vec<(String, &'static str, String, LogAxisSpace)> {
+    use crate::spec::encoding::ScaleSpec;
+    let Some(primary_batch) = outputs.get(FINAL_OUTPUT_KEY) else { return Vec::new() };
+    let Ok(layers) = build_layers(spec) else { return Vec::new() };
+    let Ok(encoding) = establishing_encoding(spec, &layers, primary_batch, outputs, leaf_scales) else {
+        return Vec::new();
+    };
+    let mut reads = Vec::new();
+    for channel in ["x", "y"] {
+        let own = if channel == "x" { encoding.x.as_ref() } else { encoding.y.as_ref() };
+        // A composite leaf that declares no scale of its own on this
+        // channel (or only the injected bar anchor) resolves with its
+        // `Overlay` group's own caller scale, exactly as
+        // `resolve_scales_with_leaf_context` adopts it for the real
+        // scale resolve (`with_group_scale`, the same function) — so a
+        // histogram leaf under a group a sibling's `LogScale` establishes
+        // is demanded here too, not just the leaf that carries it.
+        let group_scale = leaf_scales.and_then(|c| if channel == "x" { c.x_scale.as_ref() } else { c.y_scale.as_ref() });
+        let adopted = crate::render::scale_resolve::with_group_scale(own, group_scale);
+        let Some(enc) = adopted.as_ref().or(own) else { continue };
+        let shared = leaf_scales.and_then(|c| if channel == "x" { c.x.as_ref() } else { c.y.as_ref() });
+        let resolved = crate::render::scale_resolve::resolved_explicit_scale(channel, enc, primary_batch, outputs, spec, shared);
+        let Some(ScaleSpec::Log { base, common, .. }) = resolved else { continue };
+        let side = crate::scale::log::LogSide::of(common.domain.as_deref());
+        let space = LogAxisSpace { base: *base, side };
+        for layer in &layers {
+            // The drawn column is THIS layer's own post-lowering field (a
+            // chart's statistic plan rebinds a layer's x/y encoding to the
+            // computed column it draws — "bin_start", "value", "grid_x" —
+            // never the chart-level establishing encoding's own field,
+            // since an overlay's members can draw different columns).
+            let drawn_column = if channel == "x" { layer.encoding.x.as_ref() } else { layer.encoding.y.as_ref() };
+            let Some(drawn_column) = drawn_column.map(|e| e.field.clone()) else { continue };
+            let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
+            reads.push((key, channel, drawn_column, space));
+        }
+    }
+    reads
 }
 
 /// The binned reads a run's demand comes from: for each layer (the chart
@@ -1924,6 +1998,13 @@ pub(super) struct FacetPartitions {
     pub(super) emptied_by_drop: HashSet<FacetPartitionKey>,
 }
 
+/// One key's facet-merge accumulator: its lineage (minus the rows its
+/// statistics consumed, taken out per panel and merged separately below),
+/// each panel's consumed rows to merge into [`OutputLineage::statistic_input`],
+/// and each `(axis, field)` a demanded step recorded on some panel, one
+/// [`ArrayRef`] per panel to concatenate into [`OutputLineage::log_input`].
+type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(String, String), Vec<ArrayRef>>);
+
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
 ///
 /// When faceting is active, partition the input batch by the facet column(s)
@@ -1954,9 +2035,9 @@ fn run_transforms_with_facet(
     normalized: &RecordBatch,
     viewport: crate::layout::Viewport,
     theme: &crate::layout::ThemeInputs,
-    color_bin_plan: Option<&ColorBinPlan>,
+    run_plan: Option<&RunPlan>,
 ) -> Result<TransformRun, RenderError> {
-    let color_bin_plan = color_bin_plan.map(|plan| std::rc::Rc::new(plan.clone()));
+    let run_plan = run_plan.map(|plan| std::rc::Rc::new(plan.clone()));
     let Some(fspec) = &spec.facet else {
         // No facet: unchanged pipeline (single partition = full batch); one
         // panel occupies the whole estimated viewport.
@@ -1966,7 +2047,7 @@ fn run_transforms_with_facet(
                 theme,
                 (1, 1),
             )),
-            color_bin_plan: color_bin_plan.clone(),
+            run_plan: run_plan.clone(),
             ..TransformContext::default()
         };
         let (mut outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
@@ -2075,7 +2156,7 @@ fn run_transforms_with_facet(
         // whole chart the way an actual whole-frame rank-deficient fit does).
         is_partition: true,
         facet_fields: std::iter::once(&fspec.field).chain(&fspec.row).cloned().collect(),
-        color_bin_plan,
+        run_plan,
         ..TransformContext::default()
     };
     for (field, rows) in dropped_nulls {
@@ -2097,14 +2178,19 @@ fn run_transforms_with_facet(
     // groups share the same value axis. This is the correct default for
     // faceted density / histogram / violin / 2-D density / heatmap charts,
     // including Kde2D/Bin2D.
-    let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, normalized);
+    let space_demand = ctx.run_plan.as_deref().map(|plan| &plan.space).filter(|space| space.any());
+    let effective_transforms = match space_demand {
+        Some(space) => fix_transform_extents_for_facet_in_space(&spec.transforms, normalized, Some(space)),
+        None => fix_transform_extents_for_facet(&spec.transforms, normalized),
+    };
 
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
     // Every partition runs the same transforms, so each key's lineage
     // routes the same `Swarm` and passes the same steps in every panel; the
-    // rows its statistics consumed are merged across the panels as the
-    // outputs are.
-    let mut merged_lineages: HashMap<String, (OutputLineage, Vec<RecordBatch>)> = HashMap::new();
+    // rows its statistics consumed, and a demanded step's recorded caller
+    // columns (keyed by `(axis, field)`), are merged across the panels as
+    // the outputs are.
+    let mut merged_lineages: HashMap<String, MergedLineage> = HashMap::new();
     // The partitions in which each step's every `groupby` key was null, by
     // step in the order they first reported one.
     let mut all_null_steps: Vec<StepAllNull<'_>> = Vec::new();
@@ -2139,8 +2225,12 @@ fn run_transforms_with_facet(
                     _ => rows,
                 }
             });
-            let (_, batches) = merged_lineages.entry(key).or_insert_with(|| (lineage, Vec::new()));
+            let panel_log_input = std::mem::take(&mut lineage.log_input);
+            let (_, batches, log_input) = merged_lineages.entry(key).or_insert_with(|| (lineage, Vec::new(), HashMap::new()));
             batches.extend(consumed);
+            for (field_key, column) in panel_log_input {
+                log_input.entry(field_key).or_default().push(column);
+            }
         }
         // D10: per-panel imputation.
         apply_impute_to_final(&mut panel_outputs, spec);
@@ -2201,12 +2291,24 @@ fn run_transforms_with_facet(
     warnings.extend(all_null_warnings);
     let warnings = crate::transform::context::merge_null_key_reports(warnings);
     let mut lineages = OutputLineages::new();
-    for (key, (lineage, batches)) in merged_lineages {
+    for (key, (lineage, batches, log_input)) in merged_lineages {
         let statistic_input = match batches.is_empty() {
             true => None,
             false => Some(concat_batches_by_name(&key, batches)?),
         };
-        lineages.insert(key, OutputLineage { statistic_input, ..lineage });
+        // A demanded step's recorded caller column is merged across facet
+        // partitions by concatenation, exactly as `statistic_input` is
+        // above: the off-side tally reads the WHOLE FRAME's column, not
+        // one panel's, so a faceted chart's count is the same whether the
+        // axis is shared or independent across panels.
+        let mut merged_log_input = HashMap::with_capacity(log_input.len());
+        for (field_key, columns) in log_input {
+            let refs: Vec<&dyn Array> = columns.iter().map(|c| c.as_ref()).collect();
+            let concatenated = arrow::compute::concat(&refs)
+                .map_err(|e| RenderError::TransformFailed(format!("{key}: {e}")))?;
+            merged_log_input.insert(field_key, concatenated);
+        }
+        lineages.insert(key, OutputLineage { statistic_input, log_input: merged_log_input, ..lineage });
     }
     let partitions = FacetPartitions { order, emptied_by_drop };
     Ok((normalize_transform_outputs(combined)?, warnings, normalize_transform_lineages(lineages)?, partitions))

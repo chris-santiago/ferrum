@@ -60,7 +60,7 @@ pub(in crate::render) use self::domain::{
     add_distinct_source, admitted_aux_reads, admitted_color_reads, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
-    SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows,
+    SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows, resolved_explicit_scale,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -110,11 +110,20 @@ pub(in crate::render) use self::positional::{coord_exempts_channel, text_inset_a
 // SAME fold x/y and every numeric auxiliary channel already use, rather than
 // a second copy of the push/refuse logic.
 pub(in crate::render) use self::positional::resolve_log_extent;
+// The `Log` axis's own name for that warning/refusal, shared with
+// `render::composite`'s resolve pass so a composite leaf names a demanded
+// statistic's drawn column the same way the flat/facet route does.
+pub(in crate::render) use self::positional::{log_axis_name, log_axis_statistic_field};
 // The zero-anchor's "widen this extent to include zero" arithmetic, shared with
 // `render::composite`'s resolve pass so a system-injected bar scale's anchor
 // reaches the cross-leaf union it now participates in (#247A) through the same
 // two guarded assignments the explicit path applies, not a second copy of them.
 pub(in crate::render) use self::positional::extend_extent_to_zero;
+// The off-side tally's other half — a demanded statistic's own recorded
+// caller column, folded in through the SAME content-deduplicated path a
+// primitive layer's column read uses — shared with `render::composite`'s
+// resolve pass so a composite leaf's `Log` channel counts it too.
+pub(in crate::render) use self::domain::fold_log_input_into_tally;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -2757,8 +2766,11 @@ fn validate_drawing_layers_can_plot(
 }
 
 /// `enc` with `scale` in place of whatever scale it declares, the bar anchor
-/// ferrum injects included, when both exist.
-fn with_group_scale(
+/// ferrum injects included, when both exist. `pub(in crate::render)` so
+/// `render::prepare::log_space_reads` adopts a composite leaf's group scale
+/// through this SAME path (not a second copy of it) when deciding whether a
+/// leaf's channel is `Log`.
+pub(in crate::render) fn with_group_scale(
     enc: Option<&crate::spec::encoding::EncodingSpec>,
     scale: Option<&crate::spec::encoding::ScaleSpec>,
 ) -> Option<crate::spec::encoding::EncodingSpec> {

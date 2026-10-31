@@ -2221,3 +2221,200 @@ fn kde_both_extent_slots_fold_the_same_rows() {
         "and so does the count-scale pin, which nices afterwards; got {counts:?}"
     );
 }
+
+// ── Log-space fit (a drawn log axis's demand) ──────────────────────────────
+
+/// The one `field` slot demanded along `x` in `space`.
+fn field_slot(space: crate::transform::color_bin_group::LogAxisSpace) -> SlotSpace {
+    SlotSpace { space, axes: vec!["x"], records_caller_input: true }
+}
+
+fn ctx_demanding_x(
+    space: crate::transform::color_bin_group::LogAxisSpace,
+) -> TransformContext {
+    TransformContext {
+        log_space: Some(std::rc::Rc::new(
+            crate::transform::color_bin_group::StepSpace::for_slots([(SpaceSlot::Field, field_slot(space))]),
+        )),
+        ..TransformContext::default()
+    }
+}
+
+fn positive_space() -> crate::transform::color_bin_group::LogAxisSpace {
+    crate::transform::color_bin_group::LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+}
+
+/// Strictly positive, log-separated data fit in log space grids and
+/// backward-maps every grid point to a strictly positive data value, and
+/// leaves no row off-side. Rejects a fix that maps the input column but
+/// still fits/grids in linear units (the grid would then span the raw
+/// extent, not the log-space one, and the density would be wrong for
+/// log-separated groups).
+#[test]
+fn kde_in_log_space_grids_and_fits_in_log_units() {
+    let batch = batch_with("x", vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]);
+    let spec = minimal_spec(vec![]);
+    let ctx = ctx_demanding_x(positive_space());
+    let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+    let grid = col(&out, "value");
+    assert!(grid.iter().all(|v| v.is_finite() && *v > 0.0), "{grid:?}");
+    let recorded = ctx.log_input.borrow();
+    let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+    assert_eq!(column.len(), 8, "the recorded column is the caller's whole input");
+    // Grid points evenly spaced in log space are NOT evenly spaced in data
+    // space — a linear-space grid would be.
+    let mut diffs: Vec<f64> = grid.windows(2).map(|w| w[1] - w[0]).collect();
+    diffs.sort_by(f64::total_cmp);
+    assert!(
+        diffs.last().unwrap() / diffs.first().unwrap() > 1.5,
+        "a log-space grid widens geometrically toward the high end: {grid:?}"
+    );
+}
+
+/// An off-side row (zero or negative) is left out of the fit, but the
+/// caller's own unfiltered column is still recorded for the off-side tally
+/// to count later: this transform records the column rather than counting
+/// its own off-side rows.
+#[test]
+fn kde_in_log_space_leaves_off_side_rows_out_but_records_the_caller_column() {
+    let batch = batch_with("x", vec![0.0, -3.0, 1.0, 2.0, 4.0, 8.0]);
+    let spec = minimal_spec(vec![]);
+    let ctx = ctx_demanding_x(positive_space());
+    let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+    let recorded = ctx.log_input.borrow();
+    let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+    assert_eq!(column.len(), 6, "the recorded column keeps every caller row, off-side included");
+}
+
+/// Every row off-side (an all-negative column on the positive side): the
+/// body runs on a zero-row slice instead of fitting the already-mapped-to-
+/// null column as a degenerate whole-frame density (which would itself
+/// raise a `DegenerateFit`), under a scratch warning sink — so `ctx`'s own
+/// sink stays empty; the axis resolver's own `LogScaleNoValueOnSide`
+/// refusal reads the recorded caller column instead.
+#[test]
+fn kde_in_log_space_all_off_side_raises_no_degenerate_fit_warning() {
+    let batch = batch_with("x", vec![-1.0, -2.0, -4.0]);
+    let spec = minimal_spec(vec![]);
+    let ctx = ctx_demanding_x(positive_space());
+    let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+    assert!(ctx.warnings.borrow().is_empty(), "the degenerate-slice run must not restate a DegenerateFit");
+}
+
+/// `count_scale`'s synthetic `Bin` mirrors the SAME log space: resolving a
+/// count-scale bin width over log-mapped values gives a width on the order
+/// of the log-space extent, not the raw data-space one (which, for data
+/// spanning decades, would be orders of magnitude larger).
+#[test]
+fn kde_count_scale_bin_width_is_resolved_in_log_space() {
+    let batch = batch_with("x", vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]);
+    let spec = KdeSpec { count_scale: Some(BinMode::Fixed { n: 4 }), ..minimal_spec(vec![]) };
+    let ctx = ctx_demanding_x(positive_space());
+    let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+    let density = col(&out, "density");
+    assert!(density.iter().any(|d| d.is_finite() && *d > 0.0), "{density:?}");
+}
+
+
+/// The facet pins a log-demanded `Kde` on `spec.field` takes in `space`:
+/// its grid extent and its count scale's extent.
+fn log_pins(spec: &KdeSpec, batch: &RecordBatch, space: crate::transform::color_bin_group::LogAxisSpace) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    (global_extent_in_space(spec, batch, &field_slot(space)), count_scale_global_extent_in_space(spec, batch, &field_slot(space)))
+}
+
+fn negative_space() -> crate::transform::color_bin_group::LogAxisSpace {
+    crate::transform::color_bin_group::LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Negative }
+}
+
+/// `x` = 0 and 1..=20 in each numeric type
+/// [`crate::transform::log_space::numeric_dtype_columns`] lists.
+fn x_in_every_dtype() -> Vec<(&'static str, RecordBatch)> {
+    let values: Vec<i64> = (0..=20).collect();
+    crate::transform::log_space::numeric_dtype_columns("x", &values)
+        .into_iter()
+        .map(|(dtype, field, column)| (dtype, RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![column]).unwrap()))
+        .collect()
+}
+
+/// A log-demanded `Kde` (with a count scale) over an integer, `Float32` or
+/// non-nullable column holding an off-side 0 fits exactly as over the same
+/// values in a nullable Float64 column. Rejects writing the mapped Float64
+/// values back under the caller's field, which Arrow refuses for any other
+/// type, or for a non-nullable field once the 0 maps to null.
+#[test]
+fn kde_in_log_space_fits_every_numeric_dtype_like_float64() {
+    pyo3::Python::initialize();
+    let spec = KdeSpec { count_scale: Some(BinMode::Fixed { n: 4 }), ..minimal_spec(vec![]) };
+    let float = batch_with("x", (0..=20).map(f64::from).collect());
+    let expected = apply_with_context(&spec, &float, &ctx_demanding_x(positive_space())).unwrap();
+    for (dtype, batch) in x_in_every_dtype() {
+        let out = apply_with_context(&spec, &batch, &ctx_demanding_x(positive_space())).unwrap_or_else(|e| panic!("{dtype}: {e}"));
+        assert_eq!(out, expected, "{dtype}");
+    }
+}
+
+/// Both facet pins of a log-demanded `Kde` over a non-nullable Int64 column
+/// holding an off-side 0 are the log-space extents the same values pin as a
+/// nullable Float64 column. Rejects a pin that cannot map the column and so
+/// leaves every panel unpinned.
+#[test]
+fn kde_log_facet_pins_read_a_non_nullable_int64_column() {
+    let values: Vec<i64> = (0..=20).collect();
+    let int = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
+        vec![Arc::new(arrow::array::Int64Array::from(values.clone()))],
+    )
+    .unwrap();
+    let float = batch_with("x", values.iter().map(|&v| v as f64).collect());
+    let spec = KdeSpec { count_scale: Some(BinMode::Fixed { n: 4 }), ..minimal_spec(vec![]) };
+    let expected = log_pins(&spec, &float, positive_space());
+    assert!(expected.0.is_some() && expected.1.is_some(), "{expected:?}");
+    assert_eq!(log_pins(&spec, &int, positive_space()), expected);
+}
+
+/// A `Kde` on the negative side of a log axis mirrors the positive fit of
+/// the same magnitudes: each grid point is the negated positive grid point
+/// read from the other end, with the same density. Rejects a map that keeps
+/// negative-side grids in reverse data order.
+#[test]
+fn a_negative_side_log_kde_mirrors_the_positive_one() {
+    let magnitudes = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
+    let spec = minimal_spec(vec![]);
+    let positive = apply_with_context(&spec, &batch_with("x", magnitudes.clone()), &ctx_demanding_x(positive_space())).unwrap();
+    let negative_rows = batch_with("x", magnitudes.iter().map(|v| -v).collect());
+    let negative = apply_with_context(&spec, &negative_rows, &ctx_demanding_x(negative_space())).unwrap();
+    let (pos_grid, neg_grid) = (col(&positive, "value"), col(&negative, "value"));
+    let (pos_density, neg_density) = (col(&positive, "density"), col(&negative, "density"));
+    assert!(neg_grid.windows(2).all(|w| w[0] < w[1]), "the negative grid ascends in data order: {neg_grid:?}");
+    for (i, j) in (0..pos_grid.len()).zip((0..neg_grid.len()).rev()) {
+        assert!((neg_grid[j] + pos_grid[i]).abs() < 1e-9 * pos_grid[i].abs(), "grid {j}: {} vs -{}", neg_grid[j], pos_grid[i]);
+        assert!((neg_density[j] - pos_density[i]).abs() < 1e-12, "density {j}: {} vs {}", neg_density[j], pos_density[i]);
+    }
+}
+
+/// A log-demanded `Kde` whose count scale is pinned to its own facet pin
+/// draws the same counts as the unpinned run over that one partition: the
+/// pin is the log-space extent the step computes for itself.
+#[test]
+fn a_pinned_log_kde_count_scale_matches_the_unpinned_run() {
+    let batch = batch_with("x", vec![1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0]);
+    let spec = KdeSpec { count_scale: Some(BinMode::Fixed { n: 5 }), ..minimal_spec(vec![]) };
+    let unpinned = apply_with_context(&spec, &batch, &ctx_demanding_x(positive_space())).unwrap();
+    let (grid_pin, count_pin) = log_pins(&spec, &batch, positive_space());
+    let pinned_spec = KdeSpec { extent: grid_pin, count_scale_extent: count_pin, ..spec };
+    let pinned = apply_with_context(&pinned_spec, &batch, &ctx_demanding_x(positive_space())).unwrap();
+    let (a, b) = (col(&unpinned, "density"), col(&pinned, "density"));
+    for (i, (a, b)) in a.iter().zip(&b).enumerate() {
+        assert!((a - b).abs() <= 1e-9 * a.abs().max(1.0), "point {i}: {a} vs {b}");
+    }
+}
+
+/// A log-demanded `Kde` over a column the batch lacks refuses in its own
+/// `stat_kde:` voice, naming the column.
+#[test]
+fn a_log_kde_over_a_missing_field_refuses_in_its_own_voice() {
+    pyo3::Python::initialize();
+    let spec = KdeSpec { field: "absent".into(), ..minimal_spec(vec![]) };
+    let err = apply_with_context(&spec, &batch_with("x", vec![1.0, 2.0]), &ctx_demanding_x(positive_space())).unwrap_err().to_string();
+    assert!(err.contains("stat_kde: column 'absent' not found"), "{err}");
+}

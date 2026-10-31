@@ -27,12 +27,23 @@
 //! rows ([`crate::transform::run::OutputLineage::binned_rows`]), and the
 //! second run groups the demanded steps by them. The consumed rows precede
 //! every lowered step, so both runs record the same ones.
+//!
+//! **The positional twin.** A log-resolved positional channel (`x`/`y`)
+//! places the same two-pass demand on the lowered statistics it draws
+//! ([`SpaceDemand`], [`LogAxisSpace`], [`StepSpace`]): the first run's
+//! lineages tell which steps a log-resolved channel reads, and the second
+//! run carries each demanded step the axis's log space
+//! (`TransformContext::log_space`), so `Bin`/`Kde`/`Kde2D`/the ecdf's
+//! `DataWindow` compute in that space instead of data space. [`RunPlan`]
+//! generalizes [`ColorBinPlan`] to carry both demands, so a chart needing
+//! either reruns once, through the same branch.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::transform::core::TransformSpec;
-use crate::transform::run::{OutputLineages, StepId};
+use crate::render::RenderError;
+use crate::transform::core::{SpaceSlot, TransformSpec};
+use crate::transform::run::{OutputLineages, SpaceWalkStep, StepId};
 
 /// Whether `spec` is a chain's statistics marker: an identity step with
 /// `statistics: true` (wire `{"type": "identity", "statistics": true}`).
@@ -89,6 +100,159 @@ impl BinDemand {
 pub(crate) struct ColorBinPlan {
     pub(crate) demand: BinDemand,
     pub(crate) edges: Option<Rc<[f64]>>,
+}
+
+/// The generalized run plan `run_pipeline` reruns a chart for: the existing
+/// binned-color demand ([`ColorBinPlan`]) and the positional-space demand a
+/// log axis places on the lowered statistics it draws ([`SpaceDemand`]). A
+/// chart needing either reruns once, through the same [`run_transforms_with_facet`]
+/// branch; a chart needing neither keeps its first run, byte-identical.
+///
+/// [`run_transforms_with_facet`]: crate::render::prepare::run_transforms_with_facet
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunPlan {
+    pub(crate) color: ColorBinPlan,
+    pub(crate) space: SpaceDemand,
+}
+
+pub(crate) use crate::transform::log_space::LogAxisSpace;
+
+/// One input slot a step is demanded on: the space to compute it in, the
+/// axes whose drawn columns reach it, and whether the step should record
+/// the caller's own input column for the off-side tally
+/// ([`crate::transform::context::TransformContext::note_log_input`]),
+/// once per axis in `axes`. `records_caller_input` is true exactly when the
+/// slot reads the caller's own column (no earlier lowered step computes it,
+/// [`SpaceDemand::of`]'s walk root) AND the step's output column differs
+/// from it (a pass-through, like the ecdf's `DataWindow` sort field, never
+/// needs a second reader to find it: the axis already reads that column
+/// directly).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SlotSpace {
+    pub(crate) space: LogAxisSpace,
+    pub(crate) axes: Vec<&'static str>,
+    pub(crate) records_caller_input: bool,
+}
+
+/// The log space(s) one lowered step is demanded in, keyed by the step's
+/// own input slot ([`SpaceSlot`]), never by the column name the slot reads:
+/// a `Kde2D` whose `x` and `y` read one column is demanded on each slot
+/// independently, and each can resolve an independent axis.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct StepSpace {
+    slots: HashMap<SpaceSlot, SlotSpace>,
+}
+
+impl StepSpace {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// The space demanded on this step's `slot`, `None` if `slot` is not
+    /// demanded.
+    pub(crate) fn of(&self, slot: SpaceSlot) -> Option<&SlotSpace> {
+        self.slots.get(&slot)
+    }
+
+    /// Demand the slot `step` of a space walk reaches in `space`, for the
+    /// read drawn on `axis`. The slot records the caller's column when the
+    /// step computes from it at the walk's root. A slot already demanded
+    /// takes `axis` too when the two reads compute it alike (the same base
+    /// and side for a computed slot, the same side for a pass-through,
+    /// which only leaves out off-side rows), and is refused when they would
+    /// compute it differently: one statistic computes each input in one
+    /// space.
+    fn demand(&mut self, step: &SpaceWalkStep, axis: &'static str, space: LogAxisSpace) -> Result<(), RenderError> {
+        let (slot, input) = (step.slot, step.input);
+        let Some(existing) = self.slots.get_mut(&slot) else {
+            let records_caller_input = step.is_root && step.computes();
+            self.slots.insert(slot, SlotSpace { space, axes: vec![axis], records_caller_input });
+            return Ok(());
+        };
+        let agrees = if step.computes() { existing.space == space } else { existing.space.side == space.side };
+        if !agrees {
+            let first = existing.axes.first().copied().unwrap_or(axis);
+            return Err(RenderError::ScaleResolutionFailed(format!(
+                "the {first} and {axis} scales both draw a column one statistic computes from '{input}', in different log \
+                 spaces; a statistic computes each input in one space, so give both axes the same LogScale or draw that \
+                 column on one axis"
+            )));
+        }
+        if !existing.axes.contains(&axis) {
+            existing.axes.push(axis);
+        }
+        existing.records_caller_input |= step.is_root && step.computes();
+        Ok(())
+    }
+
+    /// A space demanded on exactly the given slots, for a caller that needs
+    /// to hand a `StepSpace` to a transform's `apply_with_context` without
+    /// first building a whole pipeline run (`bin`/`kde`/`kde_2d`/`contour`/
+    /// `data_window`'s own log-space unit tests).
+    #[cfg(test)]
+    pub(crate) fn for_slots(entries: impl IntoIterator<Item = (SpaceSlot, SlotSpace)>) -> Self {
+        Self { slots: entries.into_iter().collect() }
+    }
+}
+
+/// Which lowered steps a log-resolved positional channel demands, and on
+/// which of their own input slots — the positional twin of [`BinDemand`].
+/// A layer's drawn channel names an OUTPUT column (`bin_start`, `value`,
+/// `grid_x`, a `DataWindow` sort field passed through unchanged); the
+/// column itself carries no fact about which step computed it or from
+/// which of ITS OWN slots, so [`TransformSpec::space_columns`] is the one
+/// per-variant map from a step's output columns to the input slot each
+/// holds the units of, and [`of`](Self::of) walks a key's lineage backward
+/// through it ([`crate::transform::run::OutputLineage::space_walk`]): a
+/// `Contour`'s `contour_x` demand reaches the `Kde2D` it reads through its
+/// own `grid_x`. A read whose drawn column no lowered step computes (a
+/// histogram's count axis, a kde's density axis) demands nothing, so a log
+/// count/density/aggregate axis never moves the statistic's own binned or
+/// fitted axis.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SpaceDemand {
+    steps: HashMap<StepId, StepSpace>,
+}
+
+impl SpaceDemand {
+    /// The demand `reads` (one `(key, axis, drawn_column, space)` per
+    /// layer drawing a log-resolved channel's own positional column) place
+    /// on a run whose outputs' lineages are `lineages`. A key no output
+    /// carries demands nothing. Refused when two reads reach one slot of
+    /// one step in spaces that would compute it differently
+    /// ([`StepSpace::demand`]).
+    pub(crate) fn of(lineages: &OutputLineages, reads: &[(String, &'static str, String, LogAxisSpace)]) -> Result<Self, RenderError> {
+        let mut demand = Self::default();
+        for (key, axis, drawn_column, space) in reads {
+            let Some(lineage) = lineages.get(key) else { continue };
+            for step in lineage.space_walk(drawn_column) {
+                demand.steps.entry(lineage.lowered[step.index].id.clone()).or_default().demand(&step, axis, *space)?;
+            }
+        }
+        Ok(demand)
+    }
+
+    /// Whether any step is demanded in any space.
+    pub(crate) fn any(&self) -> bool {
+        !self.steps.is_empty()
+    }
+
+    /// The space(s) step `id` is demanded in, empty when none.
+    pub(crate) fn space(&self, id: &[usize]) -> StepSpace {
+        self.steps.get(id).cloned().unwrap_or_default()
+    }
+
+    /// A demand naming exactly one step, for a caller that needs to hand a
+    /// `SpaceDemand` to a function under test without first building a
+    /// whole pipeline run (`render::prepare::extent`'s own facet-pin
+    /// tests). Test-only: outside `#[cfg(test)]`, every demand is built
+    /// from a real run's lineages via [`Self::of`].
+    #[cfg(test)]
+    pub(crate) fn single(id: StepId, space: StepSpace) -> Self {
+        let mut demand = Self::default();
+        demand.steps.insert(id, space);
+        demand
+    }
 }
 
 /// The binned columns one step groups by bin and the edges they are cut by,
@@ -483,5 +647,220 @@ mod tests {
         assert_eq!(bins.bin_start("v", f64::NAN), None);
         assert_eq!(bins.bin_start("w", 6.0), None);
         assert_eq!(StepBins { fields: vec!["v".into()], edges: None }.bin_start("v", 6.0), None);
+    }
+
+    // ── SpaceDemand (a drawn log axis's demand on lowered statistics) ──────
+
+    fn space() -> LogAxisSpace {
+        LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// The `SpaceDemand` `reads` place on `chain`, run over [`non_finite_rows`]
+    /// — the positional twin of [`demand`]. Each read is `(key, axis,
+    /// drawn_column, space)`.
+    fn space_demand_in(chain: serde_json::Value, reads: &[(&str, &'static str, &str, LogAxisSpace)]) -> Result<SpaceDemand, crate::render::RenderError> {
+        pyo3::Python::initialize();
+        let (_, lineages) = apply_transforms_named(&steps(chain), &non_finite_rows(), &Default::default()).expect("the chain runs");
+        let reads: Vec<(String, &'static str, String, LogAxisSpace)> = reads.iter().map(|(k, a, c, s)| (k.to_string(), *a, c.to_string(), *s)).collect();
+        SpaceDemand::of(&lineages, &reads)
+    }
+
+    /// [`space_demand_in`] with every read in the base-10 positive [`space`].
+    fn space_demand(chain: serde_json::Value, reads: &[(&str, &'static str, &str)]) -> SpaceDemand {
+        let reads: Vec<(&str, &'static str, &str, LogAxisSpace)> = reads.iter().map(|(k, a, c)| (*k, *a, *c, space())).collect();
+        space_demand_in(chain, &reads).expect("one space per slot")
+    }
+
+    fn bin_step(field: &str, name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({"type": "bin", "field": field, "bin_count": 4, "nice": false});
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    fn kde2d_step(x: &str, y: &str, name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({"type": "kde2_d", "x": x, "y": y});
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    fn contour_step(name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({"type": "contour"});
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    fn data_window_step(sort_field: &str, name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({
+            "type": "data_window",
+            "ops": [{"op": "count", "field": sort_field, "as": "c"}],
+            "sort": [sort_field],
+        });
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    /// With no marker every step is the user's, so no space demand reaches
+    /// any — the same rule [`a_chain_without_a_marker_bins_nothing`] pins
+    /// for the color demand.
+    #[test]
+    fn a_chain_without_a_marker_demands_no_space() {
+        let demand = space_demand(serde_json::json!([bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "bin_start")]);
+        assert!(!demand.any());
+    }
+
+    /// An `x` read drawing `bin_start` demands the `Bin` on its `field`
+    /// slot, recording the caller's own column (root, and the output column
+    /// differs from it).
+    #[test]
+    fn an_x_read_drawing_bin_start_demands_the_bin_on_its_field_slot() {
+        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "bin_start")]);
+        let slot = demand.space(&[1]).of(SpaceSlot::Field).cloned().expect("the Bin is demanded on its field slot");
+        assert_eq!(slot, SlotSpace { space: space(), axes: vec!["x"], records_caller_input: true });
+    }
+
+    /// A `y` read drawing `count` demands nothing: `Bin`'s own
+    /// `space_columns` names only `bin_start`/`bin_end`, so a log count
+    /// axis never moves the binned axis. Rejects a field-blind demand that
+    /// marks every lowered step in the lineage regardless of which column
+    /// the channel actually draws.
+    #[test]
+    fn a_y_read_drawing_count_demands_nothing() {
+        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "y", "count")]);
+        assert!(!demand.any());
+    }
+
+    /// A `contour_x` read reaches the shared `Kde2D` through its own
+    /// `grid_x`: the named `Contour` output's lineage records `Kde2D` as a
+    /// shared (not lowered-for-this-reader) step, and the walk still finds
+    /// it because shared steps are searched too. `Contour` itself is
+    /// demanded on its `grid_x` slot but never records a caller input (its
+    /// own input is a statistic's output, not the caller's); `Kde2D` is
+    /// demanded on its `x` slot and does record one.
+    #[test]
+    fn a_contour_x_read_reaches_the_shared_kde2d_through_grid_x() {
+        let chain = serde_json::json!([marker(), kde2d_step("x", "y", None), contour_step(Some("contour"))]);
+        let demand = space_demand(chain, &[("contour", "x", "contour_x")]);
+        let contour_space = demand.space(&[2]).of(SpaceSlot::GridX).cloned().expect("Contour demanded on grid_x");
+        assert!(!contour_space.records_caller_input, "grid_x is Kde2D's output, not the caller's");
+        let kde2d_space = demand.space(&[1]).of(SpaceSlot::X).cloned().expect("Kde2D demanded on x");
+        assert!(kde2d_space.records_caller_input, "x is the caller's own field, and grid_x differs from it");
+        assert!(demand.space(&[1]).of(SpaceSlot::Y).is_none(), "an x read leaves the y slot alone");
+    }
+
+    /// A `DataWindow` read demands only its own sort slot, as a
+    /// pass-through column: its drawn output equals its input, so it never
+    /// records a caller input itself (the axis already reads that column
+    /// directly).
+    #[test]
+    fn a_data_window_read_demands_its_sort_slot_as_a_pass_through() {
+        let demand = space_demand(serde_json::json!([marker(), data_window_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "v")]);
+        let slot = demand.space(&[1]).of(SpaceSlot::Sort(0)).cloned().expect("DataWindow demanded on its sort slot");
+        assert!(!slot.records_caller_input, "v passes through unchanged, so the axis already reads it directly");
+    }
+
+    /// A read through a branch input reaches the statistic it reads,
+    /// exactly as the color demand's [`a_read_through_a_branch_input_bins_the_statistic_it_reads`]
+    /// does — the space demand reuses the same lineage-walking mechanism.
+    #[test]
+    fn space_reaches_through_a_branch_input_like_the_color_demand() {
+        let chain = serde_json::json!([
+            branch("stat", None, serde_json::json!([marker(), bin_step("v", None)])),
+            branch("post", Some("stat"), serde_json::json!([keep_all()])),
+        ]);
+        let demand = space_demand(chain, &[("post", "x", "bin_start")]);
+        assert!(demand.space(&[0, 1]).of(SpaceSlot::Field).is_some());
+    }
+
+    /// A `Kde2D` whose `x` and `y` read one column is demanded per slot: an
+    /// `x` read drawing `grid_x` demands only the `x` slot, and reads on
+    /// both axes demand each slot in its own axis's space, even when the
+    /// two spaces differ. Rejects keying the demand by the column name,
+    /// which gives both slots one entry.
+    #[test]
+    fn a_kde2d_reading_one_column_on_both_axes_is_demanded_per_slot() {
+        let chain = || serde_json::json!([marker(), kde2d_step("v", "v", None)]);
+        let x_only = space_demand(chain(), &[(FINAL_OUTPUT_KEY, "x", "grid_x")]);
+        assert!(x_only.space(&[1]).of(SpaceSlot::X).is_some());
+        assert!(x_only.space(&[1]).of(SpaceSlot::Y).is_none(), "the y slot reads v in data units");
+        let base_two = LogAxisSpace { base: 2.0, ..space() };
+        let both = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "grid_x", space()), (FINAL_OUTPUT_KEY, "y", "grid_y", base_two)])
+            .expect("two slots, one space each");
+        let step = both.space(&[1]);
+        assert_eq!(step.of(SpaceSlot::X).map(|s| (s.space, s.axes.clone())), Some((space(), vec!["x"])));
+        assert_eq!(step.of(SpaceSlot::Y).map(|s| (s.space, s.axes.clone())), Some((base_two, vec!["y"])));
+    }
+
+    /// One computed slot drawn on `x` and `y` in different log spaces is
+    /// refused naming both scales: a statistic computes each input in one
+    /// space. In one space the slot is demanded once, on both axes, so the
+    /// caller's rows count on each. Rejects the later read silently
+    /// overwriting the first.
+    #[test]
+    fn one_computed_slot_on_two_axes_needs_one_space() {
+        let chain = || serde_json::json!([marker(), bin_step("v", None)]);
+        let base_two = LogAxisSpace { base: 2.0, ..space() };
+        let refused = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "bin_start", space()), (FINAL_OUTPUT_KEY, "y", "bin_start", base_two)])
+            .expect_err("two spaces for one slot");
+        assert_eq!(
+            refused.to_string(),
+            crate::render::RenderError::ScaleResolutionFailed(
+                "the x and y scales both draw a column one statistic computes from 'v', in different log spaces; a statistic \
+                 computes each input in one space, so give both axes the same LogScale or draw that column on one axis"
+                    .to_string()
+            )
+            .to_string()
+        );
+        let shared = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "bin_start", space()), (FINAL_OUTPUT_KEY, "y", "bin_end", space())])
+            .expect("one space");
+        let slot = shared.space(&[1]).of(SpaceSlot::Field).cloned().expect("demanded");
+        assert_eq!(slot, SlotSpace { space: space(), axes: vec!["x", "y"], records_caller_input: true });
+    }
+
+    /// A pass-through slot (a `DataWindow` sort field) drawn on two axes
+    /// whose spaces differ only in base agrees: it only leaves out
+    /// off-side rows, which depend on the side alone. Opposite sides are
+    /// refused.
+    #[test]
+    fn a_pass_through_slot_on_two_axes_needs_only_one_side() {
+        let chain = || serde_json::json!([marker(), data_window_step("v", None)]);
+        let base_two = LogAxisSpace { base: 2.0, ..space() };
+        let agreed = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "v", space()), (FINAL_OUTPUT_KEY, "y", "v", base_two)]).expect("one side");
+        assert_eq!(agreed.space(&[1]).of(SpaceSlot::Sort(0)).map(|s| s.axes.clone()), Some(vec!["x", "y"]));
+        let negative = LogAxisSpace { side: crate::scale::log::LogSide::Negative, ..space() };
+        assert!(space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "v", space()), (FINAL_OUTPUT_KEY, "y", "v", negative)]).is_err());
+    }
+
+    /// `LogAxisSpace::forward`/`backward` round-trip an on-side value, and
+    /// `forward` excludes an off-side (zero or wrong-signed) one.
+    #[test]
+    fn log_axis_space_forward_and_backward_round_trip_on_side_values() {
+        let positive = space();
+        assert_eq!(positive.forward(100.0), Some(2.0));
+        assert_eq!(positive.backward(2.0), 100.0);
+        assert_eq!(positive.forward(0.0), None);
+        assert_eq!(positive.forward(-5.0), None);
+        assert!(positive.off_side(0.0));
+        assert!(positive.off_side(-5.0));
+        assert!(!positive.off_side(5.0));
+        assert!(!positive.off_side(f64::NAN));
+
+        // Signed: `forward` is `s * log_b|v|` (`s = -1` on the negative
+        // side), so it stays monotone INCREASING in `v` here too — a
+        // smaller magnitude (closer to zero) maps to a LARGER signed
+        // result than a more negative one, matching data order (see
+        // `log_space::LogAxisSpace::forward`'s doc).
+        let negative = LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Negative };
+        assert_eq!(negative.forward(-100.0), Some(-2.0));
+        assert_eq!(negative.backward(-2.0), -100.0);
+        assert_eq!(negative.forward(0.0), None);
+        assert_eq!(negative.forward(5.0), None);
     }
 }

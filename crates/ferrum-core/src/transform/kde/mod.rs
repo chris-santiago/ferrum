@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use crate::transform::bin::{resolve_bin_extent, shared_bin_edges, BinSpec};
 use crate::transform::bin_mode::{parse_bin_axis, BinMode};
+use crate::transform::color_bin_group::SlotSpace;
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
+use crate::transform::core::SpaceSlot;
+use crate::transform::log_space::{run_in_log_space, with_mapped_slot, ColumnShape, DemandedField};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
@@ -123,6 +126,11 @@ pub(crate) struct KdeSpec {
     pub name: Option<String>,
 }
 
+/// This transform's own voice prefix, passed to every shared
+/// `crate::transform::log_space` call so a `Kde` refusal never borrows
+/// `Bin`'s (`"stat_bin"`'s own `LABEL`, mirrored here).
+const LABEL: &str = "stat_kde";
+
 pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
@@ -147,6 +155,21 @@ pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 /// request is ungrouped or its keys hold no nulls.
 pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     crate::transform::numeric_util::grouped_column_extent(batch, &spec.field, &spec.groupby)
+}
+
+/// [`global_extent`] over `batch`'s `spec.field` mapped into `space`'s log
+/// units first ([`with_mapped_slot`]), mapped back to data units: the facet
+/// pin a log-demanded `Kde`'s own grid extent needs, mirroring
+/// [`crate::transform::bin::global_extent_in_space`]. `None` when
+/// `global_extent` over the mapped column is (an all-off-side field), and
+/// when the field is missing or non-numeric, or the batch already holds the
+/// step-private column name: the pin is skipped, and the step refuses that
+/// input in its own voice when it runs.
+pub(crate) fn global_extent_in_space(spec: &KdeSpec, batch: &RecordBatch, space: &SlotSpace) -> Option<(f64, f64)> {
+    let demand = DemandedField { slot: SpaceSlot::Field, field: &spec.field, space, shape: ColumnShape::Scalar };
+    let (mapped_batch, column) = with_mapped_slot(batch, &demand, LABEL).ok()?;
+    let (lo, hi) = global_extent(&KdeSpec { field: column, ..spec.clone() }, &mapped_batch)?;
+    Some((space.space.backward(lo), space.space.backward(hi)))
 }
 
 /// Compute the global extent [`KdeSpec::count_scale_extent`] should be
@@ -179,6 +202,16 @@ pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64,
 pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let mode = spec.count_scale.as_ref()?;
     crate::transform::bin::global_extent(&count_scale_bin_spec(spec, mode), batch)
+}
+
+/// [`count_scale_global_extent`] in `space`'s units — the count-scale's own
+/// facet pin, under a log-demanded `Kde`, through `Bin`'s own
+/// [`crate::transform::bin::global_extent_in_space`] (the same routine the
+/// real log-demanded histogram's facet-pin arm calls), so the mirrored
+/// `Bin` and the real one pin the identical log-space extent.
+pub(crate) fn count_scale_global_extent_in_space(spec: &KdeSpec, batch: &RecordBatch, space: &SlotSpace) -> Option<(f64, f64)> {
+    let mode = spec.count_scale.as_ref()?;
+    crate::transform::bin::global_extent_in_space(&count_scale_bin_spec(spec, mode), batch, space)
 }
 
 /// The `Bin` a count-scaled `Kde` mirrors: this spec's field and groupby, the
@@ -250,7 +283,10 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 
 /// Context-aware entry point (#162): identical dispatch to [`apply`], plus
 /// `ctx.warnings` as the sink for this transform's own degrade sites (see
-/// [`apply_one_group`]'s `clean.len() < 2` and non-finite-bandwidth branches).
+/// [`apply_one_group`]'s `clean.len() < 2` and non-finite-bandwidth
+/// branches), and, when a drawn log axis demands this `Kde`
+/// (`ctx.log_space`), as the caller-column sink
+/// ([`TransformContext::note_log_input`]).
 pub(crate) fn apply_with_context(
     spec: &KdeSpec,
     batch: &RecordBatch,
@@ -258,6 +294,51 @@ pub(crate) fn apply_with_context(
 ) -> PyResult<RecordBatch> {
     crate::transform::vocabulary::check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
     validate_count_scale_extent(spec)?;
+    match ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Field)) {
+        Some(slot) => apply_in_log_space(spec, batch, ctx, slot),
+        None => apply_in_data_space(spec, batch, ctx),
+    }
+}
+
+/// `apply_with_context` under a drawn log axis's demand: the fit, the
+/// bandwidth and the grid are computed in `slot.space`'s units over the
+/// on-side values, mirroring [`crate::transform::bin::apply_in_log_space`]
+/// exactly: `spec.extent` and `spec.count_scale_extent` are each refused
+/// off-side and mapped
+/// ([`crate::transform::log_space::LogAxisSpace::extent_in_space`]; both are
+/// extent-like fields over `spec.field`'s own units, so a facet-pinned
+/// count scale sees the same log-space edges the real `Bin` it mirrors
+/// would), the shared [`run_in_log_space`] runner maps `spec.field`'s
+/// column into a step-private column, the ordinary body runs unchanged
+/// with only `field` renamed to it (the grid, the fit and the count
+/// scale's synthetic `BinSpec` all compute there, so a `kde=True` overlay
+/// keeps tracking the log-space bars), then the grid (`value`) maps back
+/// to data units. `density` is untouched: per log unit is this axis's own
+/// contract (seaborn's `log_scale=True` reading), not a value this crate
+/// ever maps.
+fn apply_in_log_space(spec: &KdeSpec, batch: &RecordBatch, ctx: &TransformContext, slot: &SlotSpace) -> PyResult<RecordBatch> {
+    let mapped_spec = KdeSpec {
+        extent: slot.space.extent_in_space(LABEL, spec.extent)?,
+        count_scale_extent: slot.space.extent_in_space(LABEL, spec.count_scale_extent)?,
+        ..spec.clone()
+    };
+    let demand = [DemandedField { slot: SpaceSlot::Field, field: &spec.field, space: slot, shape: ColumnShape::Scalar }];
+    run_in_log_space(
+        ctx,
+        LABEL,
+        batch,
+        &demand,
+        |mapped_batch, columns, ctx| {
+            apply_in_data_space(&KdeSpec { field: columns.column(SpaceSlot::Field, &spec.field), ..mapped_spec }, mapped_batch, ctx)
+        },
+        &[("value", SpaceSlot::Field, ColumnShape::Scalar)],
+    )
+}
+
+/// [`apply_with_context`]'s ordinary (data-space) body: every `Kde` whose
+/// axis is not demanded into a log space runs only this, and a demanded one
+/// runs it over its mapped column ([`apply_in_log_space`]).
+fn apply_in_data_space(spec: &KdeSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
         // `count_scale`'s bin edges mirror `Bin::apply_grouped`: under
         // `shared_extent` every group is counted into the one edge set

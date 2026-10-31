@@ -36,6 +36,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::transform::color_bin_group::LogAxisSpace;
+use crate::transform::core::SpaceSlot;
 use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     groupby_key_at, refuse_groupby_output_collision, validate_groupby_columns,
@@ -154,7 +156,37 @@ pub(crate) fn apply_with_context(
     let columns = WindowColumns::resolve(batch, &schema, spec)?;
 
     // Build sort order indices.
-    let sorted_indices = build_sort_order(n_rows, &columns);
+    let mut sorted_indices = build_sort_order(n_rows, &columns);
+
+    // A drawn log axis demands this window on the exact `sort` slot its
+    // own backward walk found ([`SpaceDemand::of`], never "whichever op has
+    // a `field`" — a window can sort by one column and aggregate another):
+    // the demanded field's off-side rows are excluded from every partition
+    // and frame entirely, as if they were never in the batch, so an
+    // on-side row's rolling value counts only on-side observations. Every
+    // row still gets an output row (null, from `compute_window_op`'s own
+    // default), matching the positional null policy that already leaves an
+    // off-side row undrawn. This output column is the caller's own
+    // (`TransformSpec::space_columns`'s pass-through), read directly by the
+    // axis, so this transform never records a caller column itself
+    // ([`SlotSpace::records_caller_input`] is always `false` for a
+    // `DataWindow`'s own demanded entry). A `transform_window` the caller
+    // wrote directly in `.transform()` is never reached by this (the
+    // demand only ever names a lowered step).
+    if let Some(space) = ctx.log_space.as_deref() {
+        let demanded: PyResult<Vec<(LogAxisSpace, &Float64Array)>> = spec
+            .sort
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(i, field)| space.of(SpaceSlot::Sort(i)).map(|slot| (field, slot.space)))
+            .map(|(field, space)| Ok((space, columns.get(field)?.numeric("data_window")?)))
+            .collect();
+        let demanded = demanded?;
+        if !demanded.is_empty() {
+            sorted_indices.retain(|&i| demanded.iter().all(|(space, values)| !space.off_side(f64_at(values, i))));
+        }
+    }
 
     // Build group partitions. The `groupby` request itself is validated by the
     // shared validator every other grouped transform uses (GH #179), so a
@@ -1559,4 +1591,83 @@ mod tests {
         assert!(ctx.warnings.borrow().is_empty(), "a partially-null key column is not a degrade");
     }
 
+    // ── Log-space demand (the ecdf's lowered count, a drawn log axis) ──────
+
+    fn ctx_demanding_x(
+        space: crate::transform::color_bin_group::LogAxisSpace,
+    ) -> TransformContext {
+        // `records_caller_input: false` — a `DataWindow`'s own demanded
+        // entry always is (its drawn column passes its field through
+        // unchanged, read directly by the axis); see `space_columns`'s doc.
+        let slot = crate::transform::color_bin_group::SlotSpace { space, axes: vec!["x"], records_caller_input: false };
+        TransformContext {
+            log_space: Some(std::rc::Rc::new(
+                crate::transform::color_bin_group::StepSpace::for_slots([(SpaceSlot::Sort(0), slot)]),
+            )),
+            ..TransformContext::default()
+        }
+    }
+
+    fn positive_space() -> crate::transform::color_bin_group::LogAxisSpace {
+        crate::transform::color_bin_group::LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// The ecdf's lowered shape: a `count` op over `x`, sorted by `x`,
+    /// frame `(None, 0)` (every row up to and including the current one). Under a
+    /// drawn log axis on `x`, off-side rows are excluded from the window
+    /// entirely -- not merely from their own count, from the FRAME every
+    /// other row's count is computed over -- so an on-side row's count is
+    /// the number of on-side observations at or below it, and the off-side
+    /// rows themselves keep the module's own "no value" output (`NaN`,
+    /// never a wrong number). Rejects a fix that only blanks the off-side
+    /// rows' own cell while leaving them in the sort order, which would
+    /// inflate every on-side row's count by however many off-side rows
+    /// sort before it.
+    #[test]
+    fn data_window_count_in_log_space_excludes_off_side_rows_from_the_frame() {
+        let batch = batch_with_x(vec![0.0, -2.0, 1.0, 2.0, 4.0, 8.0]);
+        let spec = DataWindowSpec {
+            sort: Some(vec!["x".into()]),
+            frame: Some((None, Some(0))),
+            ..window_spec(vec![op("count", Some("x"), "count")])
+        };
+        let ctx = ctx_demanding_x(positive_space());
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let counts = col_values(&out, 1);
+        // Sorted on-side values are 1, 2, 4, 8 -> counts 1, 2, 3, 4. The
+        // off-side rows (0.0, -2.0) carry NaN: never drawn, never counted.
+        let on_side: Vec<f64> = counts.iter().copied().filter(|v| !v.is_nan()).collect();
+        let mut sorted_on_side = on_side.clone();
+        sorted_on_side.sort_by(f64::total_cmp);
+        assert_eq!(sorted_on_side, vec![1.0, 2.0, 3.0, 4.0], "{counts:?}");
+        assert_eq!(counts.iter().filter(|v| v.is_nan()).count(), 2, "{counts:?}");
+        // A `DataWindow`'s drawn column IS the caller's own field, read
+        // directly by the axis — this transform never records a caller
+        // column itself (unlike `Bin`/`Kde`/`Kde2D`'s own walk root).
+        assert!(ctx.log_input.borrow().is_empty(), "{:?}", ctx.log_input.borrow());
+    }
+
+    /// With no `log_space` demand (a `transform_window` the caller wrote
+    /// directly in `.transform()`), every row -- off-side values included
+    /// -- stays in the frame: the data-space control for the test above.
+    #[test]
+    fn data_window_count_without_a_log_demand_keeps_every_row_in_the_frame() {
+        let batch = batch_with_x(vec![0.0, -2.0, 1.0, 2.0, 4.0, 8.0]);
+        let spec = DataWindowSpec {
+            sort: Some(vec!["x".into()]),
+            frame: Some((None, Some(0))),
+            ..window_spec(vec![op("count", Some("x"), "count")])
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let counts = col_values(&out, 1);
+        assert!(counts.iter().all(|v| !v.is_nan()), "{counts:?}");
+        let mut sorted = counts.clone();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(sorted, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "{counts:?}");
+    }
+
+    fn batch_with_x(values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
 }

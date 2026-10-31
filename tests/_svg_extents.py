@@ -33,6 +33,7 @@ importers bind to this copy.
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable
@@ -462,6 +463,58 @@ def value_axis_ladder(svg: str, *, axis: str) -> dict[float, float]:
     ladder = ladders[0][1]
     assert len(ladder) >= MIN_LADDER_TICKS, f"need at least two numeric {axis} ticks; got {ladder}"
     return ladder
+
+
+def _log_axis_fit(ladder: dict[float, float], *, base: float) -> tuple[float, float, float]:
+    """Fit ``ladder`` to ``pixel = pixel_lo + rate * (log(base, value) - log_lo)``, through
+    its two extreme ticks. Returns ``(log_lo, pixel_lo, rate)`` -- the one fit
+    :func:`log_axis_pixels_per_unit` validates against every tick and :func:`log_value_for_pixel`
+    inverts, so neither re-derives it.
+    """
+    lo, hi = min(ladder), max(ladder)
+    log_lo, log_hi = math.log(lo, base), math.log(hi, base)
+    rate = (ladder[hi] - ladder[lo]) / (log_hi - log_lo)
+    return log_lo, ladder[lo], rate
+
+
+def log_axis_pixels_per_unit(
+    svg: str, *, axis: str = "x", base: float = 10.0, tol: float = 0.5
+) -> float | None:
+    """Fit ``axis``'s own rendered tick ladder to ``pixel = a + rate * log(base, value)``,
+    and return the fitted ``rate`` (pixels per ``log(base)`` unit) when every tick --
+    including the interior ones, not only the two extremes -- sits on that line within
+    ``tol``. A log scale places pixels at ``log(value)``, not ``value``, so this is a
+    direct, renderer-level answer to "did this axis resolve a genuine log scale", and its
+    reciprocal (``1 / rate``) converts a pixel distance on the axis into ``log(base)``
+    units. Returns ``None`` when the ladder cannot be a log axis's: a tick at or below
+    zero (impossible on a real log axis), or any tick off the fitted line.
+    """
+    ladder = value_axis_ladder(svg, axis=axis)
+    values = sorted(ladder)
+    assert len(values) >= 3, (
+        f"need at least 3 numeric {axis} ticks to fit a log scale; got {values}"
+    )
+    if any(v <= 0 for v in values):
+        return None
+    log_lo, pixel_lo, rate = _log_axis_fit(ladder, base=base)
+    for v in values[1:-1]:
+        predicted = pixel_lo + (math.log(v, base) - log_lo) * rate
+        if abs(predicted - ladder[v]) > tol:
+            return None
+    return rate
+
+
+def log_value_for_pixel(ladder: dict[float, float], pixel: float, *, base: float = 10.0) -> float:
+    """The data value a log axis with this tick ladder places at ``pixel``.
+
+    :func:`log_axis_pixels_per_unit`'s fit, inverted -- the log-axis counterpart of
+    :func:`value_for_pixel`'s linear fit, fitted through the same two extreme ticks.
+    Unlike :func:`log_axis_pixels_per_unit`, this does not validate every tick against the
+    fit: it answers "where does this pixel sit on the line through the ladder's extremes",
+    for callers that already know the ladder is a genuine log axis's.
+    """
+    log_lo, pixel_lo, rate = _log_axis_fit(ladder, base=base)
+    return base ** (log_lo + (pixel - pixel_lo) / rate)
 
 
 def pixel_for(ladder: dict[float, float], value: float) -> float:

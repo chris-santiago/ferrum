@@ -51,7 +51,15 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::core::TransformSpec;
+use crate::transform::core::SpaceSlot;
+use crate::transform::log_space::{run_in_log_space, ColumnShape, DemandedField};
+
+/// This transform's own voice prefix, passed to every shared
+/// `crate::transform::log_space` call so a `Contour` refusal never borrows
+/// `Kde2D`'s.
+const LABEL: &str = "stat_contour";
 
 fn default_thresholds() -> u32 {
     6
@@ -475,6 +483,45 @@ fn group_key_columns(batch: &RecordBatch) -> Vec<(FieldRef, ArrayRef)> {
     (SURFACE_COLS..schema.fields().len())
         .map(|idx| (Arc::clone(&schema.fields()[idx]), Arc::clone(batch.column(idx))))
         .collect()
+}
+
+/// Context-aware entry point: when a drawn log axis demands this `Contour`
+/// on its `grid_x` slot, its `grid_y` slot, or both (`ctx.log_space`,
+/// reached through the `Kde2D` surface this reads —
+/// [`crate::transform::core::TransformSpec::space_columns`]'s
+/// `contour_x`/`contour_x2` from `grid_x`, `contour_y`/`contour_y2` from
+/// `grid_y`), the demanded grid axis maps into log units in place (through
+/// the shared [`run_in_log_space`] runner), the marching-squares body runs
+/// unchanged on the mapped grid, then the matching output columns map
+/// back: level spacing, cell geometry and interpolation all happen in log
+/// units, mirroring the `Kde2D` surface's own grid. Neither grid slot ever
+/// reads the caller's own column (`SlotSpace::records_caller_input` is
+/// always `false` here — the `Kde2D` it reads already recorded the caller's
+/// `x`/`y` column), so this never writes to the caller-column sink.
+pub(crate) fn apply_with_context(spec: &ContourSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
+    let demand: Vec<DemandedField> = [(SpaceSlot::GridX, "grid_x"), (SpaceSlot::GridY, "grid_y")]
+        .into_iter()
+        .filter_map(|(slot, field)| {
+            let space = ctx.log_space.as_deref()?.of(slot)?;
+            Some(DemandedField { slot, field, space, shape: ColumnShape::List })
+        })
+        .collect();
+    if demand.is_empty() {
+        return apply(spec, batch);
+    }
+    run_in_log_space(
+        ctx,
+        LABEL,
+        batch,
+        &demand,
+        |mapped_batch, _columns, _ctx| apply(spec, mapped_batch),
+        &[
+            ("contour_x", SpaceSlot::GridX, ColumnShape::Scalar),
+            ("contour_x2", SpaceSlot::GridX, ColumnShape::Scalar),
+            ("contour_y", SpaceSlot::GridY, ColumnShape::Scalar),
+            ("contour_y2", SpaceSlot::GridY, ColumnShape::Scalar),
+        ],
+    )
 }
 
 pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -1672,4 +1719,64 @@ mod tests {
         let utf8_out = apply(&spec, &utf8).unwrap();
         assert_eq!(out.num_rows(), utf8_out.num_rows(), "the same isolines as the Utf8 group");
     }
+
+    /// A context demanding the step it is handed to on `slot` along `x`,
+    /// in base-10 log space; the slot reads the caller's column unless it
+    /// is a grid slot.
+    fn ctx_demanding_x_on(slot: SpaceSlot) -> crate::transform::context::TransformContext {
+        use crate::transform::color_bin_group::{LogAxisSpace, SlotSpace, StepSpace};
+        let space = LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive };
+        let records_caller_input = !matches!(slot, SpaceSlot::GridX | SpaceSlot::GridY);
+        crate::transform::context::TransformContext {
+            log_space: Some(std::rc::Rc::new(StepSpace::for_slots([(slot, SlotSpace { space, axes: vec!["x"], records_caller_input })]))),
+            ..Default::default()
+        }
+    }
+
+    /// `Kde2D` then `Contour`, both demanded on `x` in log space, trace the
+    /// contour the same two steps trace in data space over `log10 x`, each
+    /// vertex's `x` mapped back by `10**` and every other column equal; and
+    /// with no demand `Contour` runs its data-space body. Rejects tracing
+    /// the contour over the data-unit grid of a log-space fit, which bends
+    /// every segment between grid points.
+    #[test]
+    fn a_log_demanded_kde_2d_then_contour_equals_the_data_space_run_over_log_x() {
+        pyo3::Python::initialize();
+        use crate::transform::kde_2d::{self, Kde2DSpec};
+        let xs = [1.5, 2.0, 3.0, 4.5, 7.0, 10.0, 15.0, 22.0, 35.0, 50.0];
+        let ys = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+        let rows = |xs: Vec<f64>| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true), Field::new("y", DataType::Float64, true)])),
+                vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys.to_vec()))],
+            )
+            .unwrap()
+        };
+        let kde = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: crate::transform::kde::BandwidthSpec::Scott, n: 12, extent: None, groupby: vec![], name: None };
+        let contour = ContourSpec { thresholds: 4, fill: false, smooth: false, name: None };
+
+        let surface = kde_2d::apply_with_context(&kde, &rows(xs.to_vec()), &ctx_demanding_x_on(SpaceSlot::X)).unwrap();
+        let out = apply_with_context(&contour, &surface, &ctx_demanding_x_on(SpaceSlot::GridX)).unwrap();
+        let oracle_surface = kde_2d::apply(&kde, &rows(xs.iter().map(|v| v.log10()).collect())).unwrap();
+        let oracle = apply(&contour, &oracle_surface).unwrap();
+
+        assert_eq!(out.num_rows(), oracle.num_rows());
+        assert!(out.num_rows() > 0, "the surface draws contour segments");
+        let values = |batch: &RecordBatch, name: &str| -> Vec<f64> {
+            batch.column(batch.schema().index_of(name).unwrap()).as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec()
+        };
+        for name in ["contour_x", "contour_x2"] {
+            for (i, (a, e)) in values(&out, name).iter().zip(values(&oracle, name).iter().map(|v| 10f64.powf(*v))).enumerate() {
+                assert!((a - e).abs() <= 1e-9 * e.abs(), "{name}[{i}]: {a} vs {e}");
+            }
+        }
+        for name in ["contour_y", "contour_y2", "level_value"] {
+            for (i, (a, e)) in values(&out, name).iter().zip(values(&oracle, name)).enumerate() {
+                assert!((a - e).abs() <= 1e-9 * e.abs().max(1.0), "{name}[{i}]: {a} vs {e}");
+            }
+        }
+        let undemanded = apply_with_context(&contour, &oracle_surface, &Default::default()).unwrap();
+        assert_eq!(undemanded, oracle, "no demand runs the data-space body");
+    }
+
 }

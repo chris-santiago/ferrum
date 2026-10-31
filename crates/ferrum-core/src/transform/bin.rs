@@ -10,7 +10,10 @@ use crate::scale::ticks::sturges_floor;
 use crate::transform::aggregate::{extract_aggregate_ops, AggColumn, AggFn, AggregateOp};
 use crate::transform::vocabulary::Vocabulary;
 use crate::transform::bin_mode::{resolve_bin_count, BinMode};
+use crate::transform::color_bin_group::SlotSpace;
 use crate::transform::context::TransformContext;
+use crate::transform::core::SpaceSlot;
+use crate::transform::log_space::{run_in_log_space, with_mapped_slot, ColumnShape, DemandedField};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
@@ -20,6 +23,12 @@ use crate::transform::numeric_util::{
     clean_float64_values, clean_float64_values_indexed, coerce_to_float64, grouped_clean_values,
     grouped_column_extent,
 };
+
+/// This transform's own voice prefix, named once rather than repeated at
+/// every refusal/coerce call site in this module: every shared
+/// `crate::transform::log_space` helper takes a `label` so a
+/// `Kde`/`Kde2D`/`Contour` call never borrows `Bin`'s.
+const LABEL: &str = "stat_bin";
 
 // ── Shared private helpers ────────────────────────────────────────────────────
 
@@ -384,6 +393,30 @@ impl From<BinSpec> for BinWire {
 
 fn default_true() -> bool { true }
 
+/// [`global_extent`] over `batch`'s `spec.field` mapped into `space`'s log
+/// units first ([`with_mapped_slot`]), with the niced-or-raw extent it
+/// returns mapped back to data units: the facet pin a log-demanded `Bin`'s
+/// `global_extent` call needs, so every panel's bins share the same
+/// log-space edges rather than a linear-space pin that can straddle zero
+/// and read as an off-side `extent=` to [`apply_in_log_space`]. A spec
+/// stating its own extent pins it as written, as `global_extent` does.
+/// `None` when `global_extent` over the mapped column is (an all-off-side
+/// field), and when the field is missing or non-numeric, or the batch
+/// already holds the step-private column name: the pin is skipped, and the
+/// step refuses that input in its own voice when it runs.
+/// [`crate::transform::log_space::LogAxisSpace::backward`] is monotone
+/// increasing on either side, so the ascending log-space pair maps back
+/// ascending with no reordering step.
+pub(crate) fn global_extent_in_space(spec: &BinSpec, batch: &RecordBatch, space: &SlotSpace) -> Option<(f64, f64)> {
+    if spec.extent.is_some() {
+        return global_extent(spec, batch);
+    }
+    let demand = DemandedField { slot: SpaceSlot::Field, field: &spec.field, space, shape: ColumnShape::Scalar };
+    let (mapped_batch, column) = with_mapped_slot(batch, &demand, LABEL).ok()?;
+    let (lo, hi) = global_extent(&BinSpec { field: column, ..spec.clone() }, &mapped_batch)?;
+    Some((space.space.backward(lo), space.space.backward(hi)))
+}
+
 /// Compute the global (optionally niced) `(lo, hi)` extent of `spec.field`
 /// over the full `batch`.
 ///
@@ -444,9 +477,11 @@ pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
-/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
-/// sink, for the one degrade `Bin` can report: an all-null `groupby` key column
-/// (GH #197), raised inside the shared partitioner.
+/// Context-aware entry point. `ctx` is used as the GH #162 degrade-warning
+/// sink (an all-null `groupby` key column, GH #197, raised inside the
+/// shared partitioner), and, when a drawn log axis demands this `Bin`
+/// (`ctx.log_space`), as the caller-column sink
+/// ([`TransformContext::note_log_input`]).
 pub(crate) fn apply_with_context(
     spec: &BinSpec,
     batch: &RecordBatch,
@@ -455,6 +490,16 @@ pub(crate) fn apply_with_context(
     // A wire-built spec meets the parameter checks only here; the PyO3 door
     // runs them at construction.
     check_options(spec).map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))?;
+    match ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Field)) {
+        Some(slot) => apply_in_log_space(spec, batch, ctx, slot),
+        None => apply_in_data_space(spec, batch, ctx),
+    }
+}
+
+/// [`apply_with_context`]'s ordinary (data-space) body: every `Bin` whose
+/// axis is not demanded into a log space runs only this, and a demanded one
+/// runs it over its mapped column ([`apply_in_log_space`]).
+fn apply_in_data_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if spec.per_row {
         return apply_per_row(spec, batch);
     }
@@ -467,6 +512,40 @@ pub(crate) fn apply_with_context(
         return apply_grouped(spec, batch, &spec.groupby, &aggs, ctx);
     }
     apply_one_group(spec, batch, None, &aggs)
+}
+
+/// `apply_with_context` under a drawn log axis's demand: the bin edges
+/// (and every extent/count rule that derives them —
+/// [`resolve_bin_extent`], [`group_edges`], [`shared_bin_edges`]) sit in
+/// `slot.space`'s units, so strictly positive data keeps every bar, bins
+/// come out equal-width in log space, and `density` is per log unit.
+///
+/// An explicit `spec.extent` is refused off-side and mapped
+/// ([`crate::transform::log_space::LogAxisSpace::extent_in_space`]); the
+/// shared [`run_in_log_space`] runner maps `spec.field`'s column into a
+/// step-private column, and the ordinary body runs unchanged with only
+/// `field` renamed to it — every downstream reader in this module
+/// (`clean_float64_values_indexed`, `grouped_clean_values`,
+/// `grouped_column_extent`) excludes the null an off-side value maps to
+/// the same way it excludes any null — while every other reader of the
+/// caller's column (an `agg_field` naming the binned field, the `per_row`
+/// pass-through, a `groupby`) reads it in data units. The two edge columns
+/// (`bin_start`/`bin_end`, on every route: per-row, ungrouped, grouped)
+/// map back to data units; `count`/`density`/the per-bin aggregates are
+/// computed from the (log-space) edges and never mapped themselves.
+fn apply_in_log_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformContext, slot: &SlotSpace) -> PyResult<RecordBatch> {
+    let mapped_spec = BinSpec { extent: slot.space.extent_in_space(LABEL, spec.extent)?, ..spec.clone() };
+    let demand = [DemandedField { slot: SpaceSlot::Field, field: &spec.field, space: slot, shape: ColumnShape::Scalar }];
+    run_in_log_space(
+        ctx,
+        LABEL,
+        batch,
+        &demand,
+        |mapped_batch, columns, ctx| {
+            apply_in_data_space(&BinSpec { field: columns.column(SpaceSlot::Field, &spec.field), ..mapped_spec }, mapped_batch, ctx)
+        },
+        &[("bin_start", SpaceSlot::Field, ColumnShape::Scalar), ("bin_end", SpaceSlot::Field, ColumnShape::Scalar)],
+    )
 }
 
 /// The parameter combinations `Bin` refuses whatever the data, checked in
@@ -1323,6 +1402,7 @@ mod tests {
     use super::*;
     use arrow::array::{Array, Float64Array, UInt64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
+    use std::rc::Rc;
     use std::sync::Arc;
 
     fn batch_with(values: Vec<f64>) -> RecordBatch {
@@ -3868,4 +3948,289 @@ mod tests {
             assert_eq!(columns(per_row.unwrap()), ["bin_start", "bin_end"]);
         });
     }
+
+    // ── Log-space binning (a drawn log axis's demand) ──────────────────────
+
+    fn log_space_spec(field: &str, extent: Option<(f64, f64)>) -> BinSpec {
+        BinSpec {
+            written_groupby: Vec::new(),
+            field: field.into(),
+            mode: BinMode::Fixed { n: 4 },
+            extent,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+            per_row: false,
+            aggregates: None,
+        }
+    }
+
+    use crate::transform::color_bin_group::LogAxisSpace;
+
+    fn positive_space() -> LogAxisSpace {
+        LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    fn negative_space() -> LogAxisSpace {
+        LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Negative }
+    }
+
+    /// The one `field` slot demanded along `x` in `space`.
+    fn field_slot(space: LogAxisSpace) -> SlotSpace {
+        SlotSpace { space, axes: vec!["x"], records_caller_input: true }
+    }
+
+    fn ctx_demanding_x(space: LogAxisSpace) -> TransformContext {
+        TransformContext {
+            log_space: Some(Rc::new(crate::transform::color_bin_group::StepSpace::for_slots([(SpaceSlot::Field, field_slot(space))]))),
+            ..TransformContext::default()
+        }
+    }
+
+    /// Strictly positive data bins in equal LOG-space widths: every row is
+    /// kept (the bin edges span the whole log-magnitude range), and the
+    /// edges' `log10` differences are equal — the opposite of equal-width
+    /// DATA-space edges, which would shrink geometrically. Rejects a fix
+    /// that maps values but still derives linear-space edges.
+    #[test]
+    fn bin_in_log_space_keeps_every_row_with_equal_log_width_edges() {
+        let batch = batch_with((1..=20).map(|v| v as f64).collect());
+        let spec = log_space_spec("x", None);
+        let ctx = ctx_demanding_x(positive_space());
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..counts.len()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 20, "every strictly positive row is binned");
+        let starts = col_f64(&out, "bin_start");
+        let ends = col_f64(&out, "bin_end");
+        let log_widths: Vec<f64> =
+            (0..starts.len()).map(|i| ends.value(i).log10() - starts.value(i).log10()).collect();
+        for w in &log_widths[1..] {
+            assert!((w - log_widths[0]).abs() < 1e-9, "log-space widths must be equal: {log_widths:?}");
+        }
+        let recorded = ctx.log_input.borrow();
+        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        assert_eq!(column.len(), 20, "the recorded column is the caller's whole input, not the binned rows");
+    }
+
+    /// Off-side rows (zero or negative, on the positive side) are left out
+    /// of every bin, but the caller's own unfiltered column is still
+    /// recorded for the off-side tally to count later
+    /// (`render::arrow_cast::LeftOutTally`); this transform counts no
+    /// off-side rows itself. Rejects silently dropping them with nothing
+    /// recorded anywhere, and binning them in linear space.
+    #[test]
+    fn bin_in_log_space_leaves_off_side_rows_out_but_records_the_caller_column() {
+        let batch = batch_with(vec![0.0, -2.0, 1.0, 2.0, 4.0, 8.0, 16.0]);
+        let spec = log_space_spec("x", None);
+        let ctx = ctx_demanding_x(positive_space());
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..counts.len()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 5, "only the 5 strictly positive rows are binned");
+        let recorded = ctx.log_input.borrow();
+        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        assert_eq!(column.len(), 7, "the recorded column keeps every caller row, off-side included");
+    }
+
+    /// An explicit `extent=` endpoint off the space's side is refused,
+    /// naming the extent and the scale — not silently binned against an
+    /// extent the axis can never place.
+    #[test]
+    fn bin_in_log_space_refuses_an_explicit_extent_off_the_side() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 4.0, 8.0]);
+        let spec = log_space_spec("x", Some((-5.0, 20.0)));
+        let ctx = ctx_demanding_x(positive_space());
+        let err = apply_with_context(&spec, &batch, &ctx).unwrap_err().to_string();
+        assert!(err.contains("-5"), "{err}");
+        assert!(err.contains("LogScale"), "{err}");
+    }
+
+    /// Negative-side data (the mirrored axis) bins in the signed log space
+    /// `-log10(|v|)`, which increases with `v` on that side as `log10(v)`
+    /// does on the positive one, so every bin keeps `bin_start <= bin_end`
+    /// in data units with no reordering step. Rejects an unsigned
+    /// `log10(|v|)` map, which reorders negative-side edges and leaves
+    /// `bin_start > bin_end`.
+    #[test]
+    fn bin_in_log_space_mirrors_the_negative_side() {
+        let batch = batch_with(vec![-1.0, -2.0, -4.0, -8.0, -16.0]);
+        let spec = log_space_spec("x", None);
+        let ctx = ctx_demanding_x(negative_space());
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..counts.len()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 5, "every strictly negative row is binned");
+        let starts = col_f64(&out, "bin_start");
+        let ends = col_f64(&out, "bin_end");
+        for i in 0..starts.len() {
+            assert!(starts.value(i) <= ends.value(i), "bin {i}: start {} > end {}", starts.value(i), ends.value(i));
+            assert!(starts.value(i) < 0.0 && ends.value(i) < 0.0, "every edge stays on the negative side");
+        }
+    }
+
+    /// Every row off-side (an all-negative column on the positive side):
+    /// the body runs on the zero-row mapped slice rather than the real
+    /// (all-null) one, but the recorded caller column still holds every
+    /// row — the axis resolver's own `LogScaleNoValueOnSide` refusal reads
+    /// it to give `mark_point`'s own remedy, not this transform's own
+    /// (empty) output.
+    #[test]
+    fn bin_in_log_space_all_off_side_still_records_the_caller_column() {
+        let batch = batch_with(vec![-1.0, -2.0, -4.0]);
+        let spec = log_space_spec("x", None);
+        let ctx = ctx_demanding_x(positive_space());
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let recorded = ctx.log_input.borrow();
+        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        assert_eq!(column.len(), 3, "the recorded column keeps every caller row, even when none are on-side");
+    }
+
+
+    /// The facet pin a log-demanded `Bin` on `spec.field` takes in `space`.
+    fn log_pin(spec: &BinSpec, batch: &RecordBatch, space: LogAxisSpace) -> Option<(f64, f64)> {
+        global_extent_in_space(spec, batch, &field_slot(space))
+    }
+
+    /// `x` = 0 and 1..=20 in each numeric type [`crate::transform::log_space::numeric_dtype_columns`]
+    /// lists, the 0 off-side on a positive log axis.
+    fn x_in_every_dtype() -> Vec<(&'static str, RecordBatch)> {
+        let values: Vec<i64> = (0..=20).collect();
+        crate::transform::log_space::numeric_dtype_columns("x", &values)
+            .into_iter()
+            .map(|(dtype, field, column)| (dtype, RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![column]).unwrap()))
+            .collect()
+    }
+
+    /// A log-demanded `Bin` over an integer, `Float32` or non-nullable
+    /// column holding an off-side 0 bins exactly as over the same values in
+    /// a nullable Float64 column, and records the caller's whole column.
+    /// Rejects writing the mapped Float64 values back under the caller's
+    /// field, which Arrow refuses for any other type, or for a
+    /// non-nullable field once an off-side row maps to null.
+    #[test]
+    fn bin_in_log_space_bins_every_numeric_dtype_like_float64() {
+        pyo3::Python::initialize();
+        let spec = log_space_spec("x", None);
+        let float = batch_with((0..=20).map(f64::from).collect());
+        let expected = apply_with_context(&spec, &float, &ctx_demanding_x(positive_space())).unwrap();
+        for (dtype, batch) in x_in_every_dtype() {
+            let ctx = ctx_demanding_x(positive_space());
+            let out = apply_with_context(&spec, &batch, &ctx).unwrap_or_else(|e| panic!("{dtype}: {e}"));
+            assert_eq!(out, expected, "{dtype}");
+            let recorded = ctx.log_input.borrow();
+            let column = recorded.get(&("x".to_string(), "x".to_string())).unwrap_or_else(|| panic!("{dtype}: nothing recorded"));
+            assert_eq!(column.len(), 21, "{dtype}: the caller's whole column, off-side row included");
+        }
+    }
+
+    /// A log-demanded `per_row` `Bin` returns the caller's own column
+    /// unchanged (its Arrow field and values) beside `bin_start`/`bin_end`
+    /// and nothing else; the off-side row carries null edges and every
+    /// other row sits inside its bin's edges. Rejects carrying the
+    /// log-mapped values under the caller's name, which another channel
+    /// reading the same field (a `y` or `color` on `x`'s column) would then
+    /// draw in log units.
+    #[test]
+    fn a_per_row_log_bin_passes_the_callers_column_through_unchanged() {
+        pyo3::Python::initialize();
+        let spec = BinSpec { per_row: true, ..log_space_spec("x", None) };
+        let float = ("nullable Float64", batch_with((0..=20).map(f64::from).collect()));
+        for (dtype, batch) in x_in_every_dtype().into_iter().chain([float]) {
+            let out = apply_with_context(&spec, &batch, &ctx_demanding_x(positive_space())).unwrap_or_else(|e| panic!("{dtype}: {e}"));
+            let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
+            assert_eq!(names, ["x", "bin_start", "bin_end"], "{dtype}");
+            assert_eq!(out.schema().field(0), batch.schema().field(0), "{dtype}: the caller's own field");
+            assert_eq!(out.column(0), batch.column(0), "{dtype}: the caller's own values");
+            let values = coerce_to_float64(batch.column(0), "test", "x").unwrap();
+            let (starts, ends) = (col_f64(&out, "bin_start"), col_f64(&out, "bin_end"));
+            assert!(starts.is_null(0) && ends.is_null(0), "{dtype}: the off-side 0 is in no bin");
+            for row in 1..values.len() {
+                let v = values.value(row);
+                assert!(starts.value(row) <= v * (1.0 + 1e-12) && v <= ends.value(row) * (1.0 + 1e-12), "{dtype}: row {row} = {v} outside [{}, {}]", starts.value(row), ends.value(row));
+            }
+        }
+    }
+
+    /// A log-demanded `Bin` aggregating its own binned field averages each
+    /// bin's rows in data units: every `agg_value` lies inside its bin's
+    /// edges, and the count-weighted sum of the bins' means is the sum of
+    /// the caller's values. Rejects the aggregate reading the log-mapped
+    /// column under the shared name, which averages `log10(v)`.
+    #[test]
+    fn a_log_bin_aggregating_its_own_field_averages_in_data_units() {
+        let values: Vec<f64> = (1..=20).map(|v| f64::from(v) * 5.0).collect();
+        let batch = batch_with(values.clone());
+        let spec = BinSpec { agg_field: Some("x".into()), agg: Some(AggFn::Mean), ..log_space_spec("x", None) };
+        let out = apply_with_context(&spec, &batch, &ctx_demanding_x(positive_space())).unwrap();
+        let (starts, ends, counts, means) = (col_f64(&out, "bin_start"), col_f64(&out, "bin_end"), col_u64(&out, "count"), col_f64(&out, "agg_value"));
+        let mut weighted = 0.0;
+        for bin in 0..out.num_rows() {
+            if counts.value(bin) == 0 {
+                continue;
+            }
+            let mean = means.value(bin);
+            assert!(starts.value(bin) <= mean && mean <= ends.value(bin), "bin {bin}: mean {mean} outside [{}, {}]", starts.value(bin), ends.value(bin));
+            weighted += mean * counts.value(bin) as f64;
+        }
+        let total: f64 = values.iter().sum();
+        assert!((weighted - total).abs() < 1e-9 * total, "{weighted} vs {total}");
+    }
+
+    /// The facet pin of a log-demanded `Bin` over a non-nullable Int64
+    /// column holding an off-side 0 is the log-space extent the same values
+    /// pin as a nullable Float64 column. Rejects a pin that cannot map the
+    /// column and so leaves every panel unpinned.
+    #[test]
+    fn a_log_bin_facet_pin_reads_a_non_nullable_int64_column() {
+        let values: Vec<i64> = (0..=20).collect();
+        let int = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
+            vec![Arc::new(arrow::array::Int64Array::from(values.clone()))],
+        )
+        .unwrap();
+        let float = batch_with(values.iter().map(|&v| v as f64).collect());
+        let spec = BinSpec { nice: true, ..log_space_spec("x", None) };
+        let expected = log_pin(&spec, &float, positive_space());
+        assert!(expected.is_some_and(|(lo, hi)| lo > 0.0 && hi >= 20.0), "{expected:?}");
+        assert_eq!(log_pin(&spec, &int, positive_space()), expected);
+    }
+
+    /// A cumulative `Bin` on the negative side of a log axis accumulates in
+    /// data order: `bin_start` ascends and the running count never falls,
+    /// ending at the row count. Rejects a map that reorders negative-side
+    /// edges, which accumulates from the value nearest zero.
+    #[test]
+    fn a_negative_side_cumulative_log_bin_grows_in_data_order() {
+        let batch = batch_with(vec![-1.0, -2.0, -4.0, -8.0, -16.0, -32.0]);
+        let spec = BinSpec { cumulative: true, ..log_space_spec("x", None) };
+        let out = apply_with_context(&spec, &batch, &ctx_demanding_x(negative_space())).unwrap();
+        let starts = col_f64(&out, "bin_start").values().to_vec();
+        assert!(starts.windows(2).all(|w| w[0] < w[1]), "{starts:?}");
+        let counts = col_u64(&out, "count").values().to_vec();
+        assert!(counts.windows(2).all(|w| w[0] <= w[1]), "{counts:?}");
+        assert_eq!(counts.last(), Some(&6), "{counts:?}");
+        assert!((starts[0] + 32.0).abs() < 1e-9, "the first bin starts at the most negative value: {starts:?}");
+    }
+
+    /// An explicit extent on the negative side of a log axis is accepted
+    /// and the bins span it in data order, from its more negative endpoint
+    /// up to the one nearest zero.
+    #[test]
+    fn a_negative_side_explicit_extent_is_accepted_in_data_order() {
+        let batch = batch_with(vec![-2.0, -5.0, -20.0, -50.0]);
+        let spec = log_space_spec("x", Some((-100.0, -1.0)));
+        let out = apply_with_context(&spec, &batch, &ctx_demanding_x(negative_space())).unwrap();
+        let (starts, ends) = (col_f64(&out, "bin_start"), col_f64(&out, "bin_end"));
+        assert!((starts.value(0) + 100.0).abs() < 1e-9, "{starts:?}");
+        assert!((ends.value(ends.len() - 1) + 1.0).abs() < 1e-9, "{ends:?}");
+        let total: u64 = col_u64(&out, "count").values().iter().sum();
+        assert_eq!(total, 4);
+    }
+
 }

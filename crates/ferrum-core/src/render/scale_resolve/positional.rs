@@ -18,7 +18,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning, ScaleDomainSurface};
 
 use super::domain::{
-    apply_sort_to_domain, establishing_categories, layered_caller_scale, locate_seed_field, numeric_domain_union,
+    apply_sort_to_domain, establishing_categories, locate_seed_field, numeric_domain_union,
     numeric_domain_union_over, positional_category_union,
     LayerUnion, SortContext,
 };
@@ -354,8 +354,6 @@ pub(in crate::render) fn build_axis_scale(
     // the LHS's own layer), so this is the predicate saying what it means rather
     // than a fix for a live shape. Pinned by
     // `injected_scale_with_an_empty_layers_list_keeps_the_bypass`.
-    let layered = spec.is_layered();
-    let yields_to_auto_path = shared.is_some() || layered;
     // The scale this axis resolves with, in precedence order. A layered spec
     // whose chart-level encoding declares no scale of the caller's on this
     // channel resolves with the scale its layers establish (see
@@ -363,14 +361,7 @@ pub(in crate::render) fn build_axis_scale(
     // applies to its leaves; whether every layer can sit on that axis is
     // asked once per spec, before scale resolution
     // (`domain::require_layers_placeable_on_caller_scale`).
-    let explicit_scale = match (enc.scale.as_ref(), layered_caller_scale(spec, channel, primary_batch, transform_outputs).map(|(_, scale)| scale)) {
-        // The caller's own scale on the chart encoding.
-        (Some(own), _) if !own.is_system_injected() => Some(own),
-        // The scale the layers establish.
-        (_, Some(established)) => Some(established),
-        // The bar anchor ferrum injected, unless an auto path takes it over.
-        (injected, None) => injected.filter(|_| !yields_to_auto_path),
-    };
+    let explicit_scale = super::domain::resolved_explicit_scale(channel, enc, primary_batch, transform_outputs, spec, shared);
     if let Some(scale_spec) = explicit_scale {
         let rows = sort_rows(include_final)?;
         let sort_ctx = SortContext {
@@ -433,6 +424,25 @@ pub(in crate::render) fn build_axis_scale(
             if pending && side.is_some() {
                 return Ok((extent, super::LeftOutTally::new()));
             }
+            // A statistic drawn on a log axis read its own (already-
+            // filtered) output column, so the column read above finds
+            // nothing to count — count the lineage's own recorded caller
+            // column (`SlotSpace::records_caller_input`'s entry for this
+            // axis) through the SAME content-deduplicated tally a
+            // primitive layer's own column read uses: a caller column
+            // equal to one already counted (two statistics over the same
+            // rows, or a statistic beside a primitive mark reading the
+            // same column) counts once. Only for a `Log` call
+            // (`side.is_some()`): every other scale kind's
+            // `data_extent(None)` call keeps the tally its own column
+            // read returned.
+            let mut tally = tally;
+            super::domain::fold_log_input_into_tally(transform_lineages, channel, side, &mut tally).map_err(|e| match e {
+                RenderError::UnsupportedDtype { field, dtype, context: None } => {
+                    RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
+                }
+                e => e,
+            })?;
             Ok((extent, tally))
         };
         // `#247`B: the null band is decided against the opposite positional
@@ -456,7 +466,8 @@ pub(in crate::render) fn build_axis_scale(
         // matching on it explicitly means a future caller that did route an
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
-        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, text_demand, warnings)
+        let axis_name = log_axis_name(enc, log_axis_statistic_field(channel, enc, spec, transform_lineages));
+        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, text_demand, axis_name.as_deref(), warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
                     RenderError::InvalidBandPadding { channel, error: e, coord_flipped }
@@ -657,8 +668,10 @@ pub(in crate::render) fn imposed_axis_scale(
     let data_categories = || distinct_positional_categories(&batch, &binding.field, None);
     // An imposed member draws nothing of its own on this channel (see the
     // `shared_domain_axis_scale` call above), so it contributes no text
-    // rows either.
-    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, &Default::default(), warnings))
+    // rows either, and it names no statistic field of its own: the
+    // establishing member's tally names the axis.
+    let axis_name = log_axis_name(binding, None);
+    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, &Default::default(), axis_name.as_deref(), warnings))
 }
 
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
@@ -799,6 +812,12 @@ pub(in crate::render) fn build_from_scale_spec(
     // an explicit `padding`/`domain`/`range`, so every continuous variant
     // arm below can forward it unconditionally.
     text_demand: &crate::layout::geometry::TextEdgeDemand,
+    // The `Log` arm's own axis name, from [`log_axis_name`] — every caller
+    // computes it and passes it in, since only the caller knows whether
+    // this channel's establishing layer draws a demanded statistic's
+    // column (and, if so, which caller field it computes from). Unread by
+    // every other `ScaleSpec` variant.
+    log_axis_name: Option<&str>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::spec::encoding::ScaleSpec;
@@ -823,7 +842,7 @@ pub(in crate::render) fn build_from_scale_spec(
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
-            resolve_log_scale(channel, &enc.field, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, text_demand, warnings)?
+            resolve_log_scale(channel, log_axis_name, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, text_demand, warnings)?
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
@@ -1133,7 +1152,7 @@ pub(super) fn validate_explicit_log_domain(channel: &str, domain: Option<&[f64]>
 #[allow(clippy::too_many_arguments)]
 fn resolve_log_scale(
     channel: &str,
-    field: &str,
+    name: Option<&str>,
     base: &f64,
     common: &crate::spec::encoding::ContinuousScaleCommon,
     nice: bool,
@@ -1149,7 +1168,7 @@ fn resolve_log_scale(
     validate_explicit_log_domain(channel, common.domain.as_deref())?;
     let side = LogSide::of(common.domain.as_deref());
     let (extent, tally) = data_extent(Some(side))?;
-    let (lo, hi) = resolve_log_extent(channel, field, common.domain.is_some(), side, (extent.lo, extent.hi), &tally, *base, coord_flipped, warnings)?;
+    let (lo, hi) = resolve_log_extent(channel, name, common.domain.is_some(), side, (extent.lo, extent.hi), &tally, *base, coord_flipped, warnings)?;
 
     let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
     let unsided_extent = || Ok((lo, hi));
@@ -1191,10 +1210,21 @@ fn resolve_log_scale(
 /// true value; an auxiliary caller (`numeric_aux_scale_kind`'s `Log` arm,
 /// `resolve_group`'s `size` branch) always passes `false` — an aux channel
 /// is never flipped, mirroring the struct's own doc.
+/// `name` is the axis's own name for the warning/refusal below, from
+/// [`log_axis_name`]: the caller's own `title=` when the establishing
+/// layer draws a primitive column, the caller field of a demanded
+/// statistic's computed column when it draws one, `None` under an
+/// explicit suppressed title on a statistic layer (drops the "of '...'"
+/// clause entirely, both here and in [`crate::render::log_no_value_on_side_reason`])
+/// — the same three-way contract `DomainRowsLeftOut`'s own `field` already
+/// carries. The positional caller (`resolve_log_scale`) and the three
+/// composite leaf sites compute it from their own encoding and lineage; an
+/// auxiliary channel always passes `log_axis_name(enc, None)`
+/// (`Some(enc.field)`, the name a primitive column gives).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn resolve_log_extent(
     channel: &str,
-    field: &str,
+    name: Option<&str>,
     has_explicit_domain: bool,
     side: crate::scale::log::LogSide,
     own_extent: (f64, f64),
@@ -1207,7 +1237,7 @@ pub(in crate::render) fn resolve_log_extent(
     if rows > 0 {
         warnings.push(RenderWarning::LogScaleRowsLeftOut {
             channel: channel.to_string(),
-            field: field.to_string(),
+            field: name.map(str::to_string),
             rows,
             side,
             coord_flipped,
@@ -1227,7 +1257,7 @@ pub(in crate::render) fn resolve_log_extent(
         if rows > 0 {
             let reason = crate::render::log_no_value_on_side_reason(
                 channel,
-                field,
+                name,
                 rows,
                 side,
                 tally.zero(),
@@ -1242,6 +1272,52 @@ pub(in crate::render) fn resolve_log_extent(
         return Ok((1.0, base));
     }
     Ok((lo, hi))
+}
+
+/// The caller field the layer establishing `channel` draws through a
+/// statistic: the root input of the walk from its drawn column `enc.field`
+/// ([`crate::transform::run::OutputLineage::space_walk`]) through the
+/// lineage of the key that layer reads (the establishing layer's
+/// `data_source`, else [`FINAL_OUTPUT_KEY`]; [`FINAL_OUTPUT_KEY`] on an
+/// unlayered spec), when the walk passed a step computing a column from
+/// its input. `None` when the establishing layer draws a primitive column,
+/// or a column a step only passes through (an ecdf's sorted field), so a
+/// primitive layer beside a histogram names its axis as a primitive does.
+/// The [`log_axis_name`] argument every positional `Log` site passes.
+pub(in crate::render) fn log_axis_statistic_field<'a>(
+    channel: &str,
+    enc: &'a crate::spec::encoding::EncodingSpec,
+    spec: &ChartSpec,
+    lineages: &'a crate::transform::run::OutputLineages,
+) -> Option<&'a str> {
+    let key = match spec.layers.as_deref().and_then(|layers| super::domain::establishing_axis_layer(spec, layers, channel)) {
+        Some((_, layer)) => layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY),
+        None => FINAL_OUTPUT_KEY,
+    };
+    let walk = lineages.get(key)?.space_walk(&enc.field);
+    if !walk.iter().any(crate::transform::run::SpaceWalkStep::computes) {
+        return None;
+    }
+    walk.last().map(|step| step.input)
+}
+
+/// The axis's own name for a `Log` channel's warning/refusal
+/// ([`resolve_log_extent`]). `statistic_field` is the caller field a
+/// demanded statistic's drawn column computes from
+/// ([`log_axis_statistic_field`]), `None` when the establishing layer draws
+/// a primitive column. `Some(f)`: the three-way
+/// title contract (`title=` text wins, an explicit `title=""` suppresses
+/// to `None`, unset falls back to `f`) — a demanded statistic's drawn
+/// column is an internal name (`bin_start`) the caller never wrote, so it
+/// is never the fallback. `None`: always `Some(enc.field)`, ignoring the
+/// title — a primitive column IS the field the caller wrote, so its own
+/// sentence is the same whatever the title is, matching the domain
+/// warning's treatment of every non-statistic layer.
+pub(in crate::render) fn log_axis_name(enc: &crate::spec::encoding::EncodingSpec, statistic_field: Option<&str>) -> Option<String> {
+    match statistic_field {
+        Some(field) => crate::layout::axis::resolve_axis_title(enc.title.as_deref(), Some(field.to_string())),
+        None => Some(enc.field.clone()),
+    }
 }
 
 /// Widen a resolved domain pair so it includes zero — the zero-anchor's
@@ -1935,7 +2011,7 @@ mod tests {
                 )
             })
         };
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), None, &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2431,7 +2507,10 @@ mod tests {
             }
             Ok((extent, tally))
         };
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), &mut warnings)
+        // This harness has no lineage to ask, so it names the axis exactly
+        // as a primitive (non-statistic) layer does: the raw field.
+        let axis_name = super::log_axis_name(&enc, None);
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), axis_name.as_deref(), &mut warnings)
     }
 
     fn resolve_scale(
@@ -2720,6 +2799,115 @@ mod tests {
         let spec = ScaleSpec::Log { base: 10.0, common: reverse_common(None, None, true), nice: false };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((1000.0, 1.0)));
+    }
+
+    /// `resolve_log_extent`'s off-side warning names the axis exactly as
+    /// `name` says: the pre-computed name a caller passes (its own
+    /// `title=` when one is set, the raw field when none is, `None` under
+    /// an explicit suppressed title). Deriving that name from `field`/
+    /// `title` is [`log_axis_name`]'s own job, tested below.
+    #[test]
+    fn resolve_log_extent_names_the_axis_exactly_as_the_caller_says() {
+        use crate::scale::log::LogSide;
+        let tally = {
+            let mut t = super::super::LeftOutTally::new();
+            let col = arrow::array::Float64Array::from(vec![-1.0, -2.0]);
+            t.count(&col, super::super::sided_min_max_f64(&col, Some(LogSide::Positive)).unwrap());
+            t
+        };
+        let mut warnings = Vec::new();
+        super::resolve_log_extent("x", Some("Price"), false, LogSide::Positive, (1.0, 10.0), &tally, 10.0, false, &mut warnings).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(&warnings[0], RenderWarning::LogScaleRowsLeftOut { field: Some(f), .. } if f == "Price"));
+
+        let mut warnings = Vec::new();
+        super::resolve_log_extent("x", Some("v"), false, LogSide::Positive, (1.0, 10.0), &tally, 10.0, false, &mut warnings).unwrap();
+        assert!(matches!(&warnings[0], RenderWarning::LogScaleRowsLeftOut { field: Some(f), .. } if f == "v"));
+
+        let mut warnings = Vec::new();
+        super::resolve_log_extent("x", None, false, LogSide::Positive, (1.0, 10.0), &tally, 10.0, false, &mut warnings).unwrap();
+        assert!(matches!(&warnings[0], RenderWarning::LogScaleRowsLeftOut { field: None, .. }));
+    }
+
+    /// [`log_axis_name`]'s three-way contract: a demanded statistic's
+    /// internal drawn column (`Some(f)`) resolves the title the same way
+    /// `resolve_axis_title` does (text wins, `""` suppresses to `None`,
+    /// unset falls back to `f`); a primitive column (`None`) always names
+    /// the raw field, ignoring the title entirely.
+    /// A lineage whose lowered steps compute each `(output, slot, input)`.
+    fn lineage_computing(columns: &[&[(&str, crate::transform::core::SpaceSlot, &str)]]) -> crate::transform::run::OutputLineage {
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::empty());
+        crate::transform::run::OutputLineage {
+            swarm: None,
+            statistic_input: None,
+            lowered: columns
+                .iter()
+                .enumerate()
+                .map(|(i, step)| crate::transform::run::LoweredStep {
+                    id: vec![i],
+                    groupby: Vec::new(),
+                    shared: false,
+                    space_columns: step
+                        .iter()
+                        .map(|(output, slot, input)| crate::transform::core::SpaceColumn { output: output.to_string(), slot: *slot, input: input.to_string() })
+                        .collect(),
+                })
+                .collect(),
+            written_groupby: Vec::new(),
+            source: schema,
+            log_input: std::collections::HashMap::new(),
+        }
+    }
+
+    /// A `Log` axis names its left-out rows by the caller field its
+    /// establishing layer draws through a statistic: `None` for a primitive
+    /// point layer establishing the axis beside a histogram layer, `'v'`
+    /// for a histogram layer establishing it, and, for a key holding a
+    /// `Bin` of `v` and a `Kde` of `w`, the field of the statistic whose
+    /// column the establishing layer draws. Rejects naming by whichever
+    /// lineage recorded a statistic on the axis.
+    #[test]
+    fn a_log_axis_statistic_field_is_the_establishing_layers_own() {
+        use crate::transform::core::SpaceSlot;
+        let bin = [("bin_start", SpaceSlot::Field, "v"), ("bin_end", SpaceSlot::Field, "v")];
+        let kde = [("value", SpaceSlot::Field, "w")];
+        let lineages: crate::transform::run::OutputLineages = std::collections::HashMap::from([
+            (crate::transform::core::FINAL_OUTPUT_KEY.to_string(), lineage_computing(&[])),
+            ("hist".to_string(), lineage_computing(&[&bin])),
+            ("stats".to_string(), lineage_computing(&[&bin, &kde])),
+        ]);
+        let layered = |layers: serde_json::Value| -> crate::spec::chart::ChartSpec {
+            serde_json::from_value(serde_json::json!({"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {}, "layers": layers})).unwrap()
+        };
+        let point = serde_json::json!({"mark": "point", "encoding": {"x": {"field": "v"}}});
+        let hist = |key: &str, column: &str| serde_json::json!({"mark": "bar", "data_source": key, "encoding": {"x": {"field": column}}});
+        let enc = |field: &str| crate::spec::encoding::EncodingSpec { field: field.to_string(), ..Default::default() };
+
+        let point_first = layered(serde_json::json!([point.clone(), hist("hist", "bin_start")]));
+        assert_eq!(super::log_axis_statistic_field("x", &enc("v"), &point_first, &lineages), None);
+        let hist_first = layered(serde_json::json!([hist("hist", "bin_start"), point]));
+        assert_eq!(super::log_axis_statistic_field("x", &enc("bin_start"), &hist_first, &lineages), Some("v"));
+        let kde_first = layered(serde_json::json!([hist("stats", "value")]));
+        assert_eq!(super::log_axis_statistic_field("x", &enc("value"), &kde_first, &lineages), Some("w"));
+        let bin_first = layered(serde_json::json!([hist("stats", "bin_start")]));
+        assert_eq!(super::log_axis_statistic_field("x", &enc("bin_start"), &bin_first, &lineages), Some("v"));
+        let unlayered = crate::spec::chart::ChartSpec::default();
+        assert_eq!(super::log_axis_statistic_field("x", &enc("bin_start"), &unlayered, &lineages), None, "the chart's own rows passed no statistic");
+    }
+
+    #[test]
+    fn log_axis_name_follows_the_three_way_title_contract_only_for_a_statistic() {
+        let mut enc = crate::spec::encoding::EncodingSpec { field: "v".to_string(), ..Default::default() };
+        enc.title = Some("Price".to_string());
+        assert_eq!(super::log_axis_name(&enc, Some("v")), Some("Price".to_string()));
+        assert_eq!(super::log_axis_name(&enc, None), Some("v".to_string()), "a primitive column ignores the title");
+
+        enc.title = Some(String::new());
+        assert_eq!(super::log_axis_name(&enc, Some("v")), None, "an explicit suppressed title drops a statistic's name");
+        assert_eq!(super::log_axis_name(&enc, None), Some("v".to_string()), "a primitive column still ignores the title");
+
+        enc.title = None;
+        assert_eq!(super::log_axis_name(&enc, Some("v")), Some("v".to_string()), "no title falls back to the caller field");
     }
 
     #[test]

@@ -584,6 +584,11 @@ impl LogScale {
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.data.domain }
 
+    /// This scale's logarithm base — `render::position`'s continuous
+    /// `Dodge` span split reads it to split a row's span in this scale's
+    /// own units rather than data units.
+    pub(crate) fn base_internal(&self) -> f64 { self.data.base }
+
     /// This scale's domain endpoints rounded outward to the nearest power of
     /// `base` — the exact rounding `LogScale(nice=True)` applies at
     /// construction (`LogScaleData::nice`) — without mutating `self`.

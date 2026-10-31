@@ -48,7 +48,7 @@ use crate::render::scale_resolve::{
     SortContext,
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
-    column_reads_categorical, resolve_color_scale, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, ColorScale, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
+    column_reads_categorical, fold_log_input_into_tally, log_axis_name, log_axis_statistic_field, resolve_color_scale, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, ColorScale, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
 };
 use crate::render::{prepare, ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
@@ -387,22 +387,31 @@ pub(crate) fn congruent_non_hole(children: &[CompositeNode]) -> bool {
     real.all(|c| congruent(first, c))
 }
 
-/// Resolve one *positional* channel (`x`/`y`) for `node`, whose leaves occupy
-/// global indices `leaf_span` (in pre-order). At a `Shared` node the children's
-/// domains are unioned by congruent tree-path pairing (grids pair by column);
-/// at an `Independent` node (or a non-congruent `Shared` node) resolution
-/// recurses into each child so inner sharing still applies. Color/size take the
-/// leaf-span path in [`resolve_nonpositional`] instead.
-fn resolve_channel(
-    node: &CompositeNode,
-    leaf_span: &[usize],
-    channel: Channel,
-    leaves: &[LeafResolveInput<'_>],
-    out: &mut [LeafScaleContext],
-    warnings: &mut Vec<RenderWarning>,
-) -> Result<(), CompositeResolveError> {
+/// One group of leaves a positional channel resolves as one
+/// ([`positional_groups`]): the leaf indices, in tree order, and whether
+/// the group is an `Overlay` node's (one panel drawn by several leaves).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::render) struct PositionalGroup {
+    pub(in crate::render) leaves: Vec<usize>,
+    pub(in crate::render) overlay: bool,
+}
+
+/// THE single source of the positional (`x`/`y`) group walk over a
+/// composite tree whose leaves occupy global indices `leaf_span` (in
+/// pre-order): at a `Shared` node whose non-hole children are congruent,
+/// one group per tree position, pairing leaf *i* of each non-hole child
+/// (grids pair by column); at an `Independent` or non-congruent node, the
+/// children's own groups in child order, so inner sharing still applies.
+/// Groups come in the pre-order the resolve visits them.
+///
+/// Both readers of a positional channel's groups must agree on them
+/// exactly: [`resolve_channel`] resolves each group, and [`log_scale_groups`]
+/// finds, before any leaf is re-prepared, the `Overlay` groups a `Log`
+/// caller scale establishes. Sharing this one walk makes that lockstep
+/// compile-time, as [`effective_share`] does for the non-positional walks.
+fn positional_groups(node: &CompositeNode, leaf_span: &[usize], channel: Channel) -> Vec<PositionalGroup> {
     let CompositeNode::Composite { layout, children, resolve, .. } = node else {
-        return Ok(()); // Leaf: assignment is decided by its parent.
+        return Vec::new(); // Leaf: assignment is decided by its parent.
     };
 
     // Partition this node's leaf span among its children by leaf count.
@@ -415,10 +424,7 @@ fn resolve_channel(
     }
 
     let shared = resolve_mode(resolve, channel) == ResolveMode::Shared;
-
-    let congruent_children = congruent_non_hole(children);
-
-    if shared && congruent_children {
+    if shared && congruent_non_hole(children) {
         // Congruent share: pair leaf i of each NON-HOLE child (tree-path
         // pairing). Every non-hole child has the same leaf count
         // (`congruent_non_hole` guarantees it), so `leaves_per_child` is
@@ -432,42 +438,82 @@ fn resolve_channel(
             .find(|c| !matches!(c, CompositeNode::Hole { .. }))
             .map(leaf_count)
             .unwrap_or(0);
-        for pos in 0..leaves_per_child {
-            let group: Vec<usize> = subspans
-                .iter()
-                .filter(|s| pos < s.len())
-                .map(|s| s[pos])
-                .collect();
-            if *layout == CompositeLayout::Overlay {
-                let axis = overlay_axis(&group, channel, leaves);
-                refuse_unplaceable_overlay_members(&group, channel, &axis, leaves, out)?;
-                warn_members_off_caller_scale(
-                    &axis,
-                    channel.as_str(),
-                    ExcludedLayerPlacement::OwnScale,
-                    warnings,
-                );
-                match establishing_caller_scale(&axis) {
-                    Some((_, scale)) => resolve_caller_scale_group(&group, channel, scale, leaves, out, warnings)?,
-                    None => {
-                        resolve_group(&group, channel, leaves, out, warnings)?;
-                        sort_overlay_categories(&group, channel, leaves, out, warnings)?;
-                    }
-                }
-                impose_overlay_axis(&group, channel, leaves, out, warnings)?;
-                continue;
-            }
-            resolve_group(&group, channel, leaves, out, warnings)?;
-        }
-        Ok(())
+        let overlay = *layout == CompositeLayout::Overlay;
+        (0..leaves_per_child)
+            .map(|pos| PositionalGroup { leaves: subspans.iter().filter(|s| pos < s.len()).map(|s| s[pos]).collect(), overlay })
+            .collect()
     } else {
-        // Independent node, or a non-congruent Shared node (skip sharing for the
-        // group): fall back to per-child resolution so inner Shared nodes work.
-        for (child, span) in children.iter().zip(&subspans) {
-            resolve_channel(child, span, channel, leaves, out, warnings)?;
-        }
-        Ok(())
+        children.iter().zip(&subspans).flat_map(|(child, span)| positional_groups(child, span, channel)).collect()
     }
+}
+
+/// The `Overlay` groups on positional `channel` whose establishing caller
+/// scale is `Log`, each group's member leaf indices, in tree order, paired
+/// with that scale: the [`positional_groups`] [`resolve_channel`] resolves,
+/// filtered, so this read-only pass finds exactly the groups the real
+/// resolve will later resolve. Composite-render's own log-space re-prepare
+/// step (`composite_render::reprepare_log_overlay_members`) is the one
+/// caller: for each group this returns, a member that reads a statistic
+/// output under that axis is re-prepared with the scale fed in, ahead of
+/// the real resolve pass, mirroring `run_pipeline`'s own
+/// run/read-demand/rerun at the composite level.
+pub(in crate::render) fn log_scale_groups(
+    node: &CompositeNode,
+    leaf_span: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+) -> Vec<(Vec<usize>, crate::spec::encoding::ScaleSpec)> {
+    positional_groups(node, leaf_span, channel)
+        .into_iter()
+        .filter(|group| group.overlay)
+        .filter_map(|group| {
+            // Scoped so `axis` (which borrows `group`) drops before
+            // `group.leaves` moves out below.
+            let scale = {
+                let axis = overlay_axis(&group.leaves, channel, leaves);
+                establishing_caller_scale(&axis).and_then(|(_, scale)| match scale {
+                    crate::spec::encoding::ScaleSpec::Log { .. } => Some(scale.clone()),
+                    _ => None,
+                })
+            }?;
+            Some((group.leaves, scale))
+        })
+        .collect()
+}
+
+/// Resolve one *positional* channel (`x`/`y`) for `node`, whose leaves occupy
+/// global indices `leaf_span` (in pre-order), one [`positional_groups`] group
+/// at a time: an `Overlay` group resolves its members against the caller
+/// scale its establishing member carries (or unions them when none does)
+/// and imposes the one axis on every member; any other group unions its
+/// members' domains. Color/size take the leaf-span path in
+/// [`resolve_nonpositional`] instead.
+fn resolve_channel(
+    node: &CompositeNode,
+    leaf_span: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeResolveError> {
+    for PositionalGroup { leaves: group, overlay } in positional_groups(node, leaf_span, channel) {
+        if !overlay {
+            resolve_group(&group, channel, leaves, out, warnings)?;
+            continue;
+        }
+        let axis = overlay_axis(&group, channel, leaves);
+        refuse_unplaceable_overlay_members(&group, channel, &axis, leaves, out)?;
+        warn_members_off_caller_scale(&axis, channel.as_str(), ExcludedLayerPlacement::OwnScale, warnings);
+        match establishing_caller_scale(&axis) {
+            Some((_, scale)) => resolve_caller_scale_group(&group, channel, scale, leaves, out, warnings)?,
+            None => {
+                resolve_group(&group, channel, leaves, out, warnings)?;
+                sort_overlay_categories(&group, channel, leaves, out, warnings)?;
+            }
+        }
+        impose_overlay_axis(&group, channel, leaves, out, warnings)?;
+    }
+    Ok(())
 }
 
 /// Resolve one *non-positional* channel (`color`/`size`) for `node` (GH #74).
@@ -611,7 +657,7 @@ fn resolve_group(
                     hi = hi.max(*h);
                 }
             }
-            let (lo, hi) = resolve_log_extent(channel.as_str(), &field, has_explicit_domain, side, (lo, hi), &tally, base, false, warnings)
+            let (lo, hi) = resolve_log_extent(channel.as_str(), Some(&field), has_explicit_domain, side, (lo, hi), &tally, base, false, warnings)
                 .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped: false })?;
             for (idx, _) in &domains {
                 out[*idx].set(channel, SharedDomain::Numeric { lo, hi });
@@ -1028,6 +1074,18 @@ fn leaf_own_scale<'a>(
     leaf_post_flip_encoding(leaf, channel).and_then(|e| e.scale.as_ref())
 }
 
+/// The name an `Overlay` group's `Log` axis gives its left-out rows, read
+/// off `leaf`, the member that names it (the first admitted member drawing
+/// `channel`, the composite counterpart of layer 0 owning a layered axis):
+/// [`log_axis_name`] over that member's own encoding, and the caller field
+/// its own establishing layer draws through a statistic
+/// ([`log_axis_statistic_field`]), so `+` and `LayerChart` name an axis
+/// the same way.
+fn overlay_log_axis_name(leaf: &LeafResolveInput<'_>, channel: Channel) -> Option<String> {
+    let enc = leaf_post_flip_encoding(leaf, channel)?;
+    log_axis_name(enc, log_axis_statistic_field(channel.as_str(), enc, leaf.spec, leaf.transform_lineages))
+}
+
 /// Resolve an `Overlay` group whose axis is the caller's `scale`, the one
 /// [`establishing_caller_scale`] names as establishing it over the group's
 /// [`overlay_axis`]. The members are the leaves [`LayerUnion::CarryingScale`]
@@ -1063,15 +1121,13 @@ fn resolve_caller_scale_group(
             for &idx in &members {
                 leaf_positional_domain(&leaves[idx], channel, selection, &mut tally, &out[idx])?;
             }
-            let field = members
-                .first()
-                .and_then(|&idx| leaf_post_flip_encoding(&leaves[idx], channel))
-                .map(|e| e.field.clone())
-                .unwrap_or_default();
+            let first_member_enc = members.first().and_then(|&idx| leaf_post_flip_encoding(&leaves[idx], channel));
+            let field = first_member_enc.map(|e| e.field.clone()).unwrap_or_default();
             let stated = common.domain.as_ref().expect("positional_extent confirmed Some above");
             let (lo, hi) = (stated[0], stated[1]);
             let coord_flipped = members.first().is_some_and(|&idx| leaves[idx].coord_flipped());
-            resolve_log_extent(channel.as_str(), &field, true, side, (lo, hi), &tally, *base, coord_flipped, warnings)
+            let axis_name = members.first().and_then(|&idx| overlay_log_axis_name(&leaves[idx], channel));
+            resolve_log_extent(channel.as_str(), axis_name.as_deref(), true, side, (lo, hi), &tally, *base, coord_flipped, warnings)
                 .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
             for &idx in &members {
                 out[idx].set(channel, SharedDomain::Numeric { lo, hi });
@@ -1107,13 +1163,11 @@ fn resolve_caller_scale_group(
                     }
                 }
             }
-            let field = domains
-                .first()
-                .and_then(|&(idx, _)| leaf_post_flip_encoding(&leaves[idx], channel))
-                .map(|e| e.field.clone())
-                .unwrap_or_default();
+            let first_member_enc = domains.first().and_then(|&(idx, _)| leaf_post_flip_encoding(&leaves[idx], channel));
+            let field = first_member_enc.map(|e| e.field.clone()).unwrap_or_default();
             let coord_flipped = domains.first().is_some_and(|&(idx, _)| leaves[idx].coord_flipped());
-            let (lo, hi) = resolve_log_extent(channel.as_str(), &field, common.domain.is_some(), side, (lo, hi), &tally, *base, coord_flipped, warnings)
+            let axis_name = domains.first().and_then(|&(idx, _)| overlay_log_axis_name(&leaves[idx], channel));
+            let (lo, hi) = resolve_log_extent(channel.as_str(), axis_name.as_deref(), common.domain.is_some(), side, (lo, hi), &tally, *base, coord_flipped, warnings)
                 .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
             for (idx, _) in &domains {
                 out[*idx].set(channel, SharedDomain::Numeric { lo, hi });
@@ -1522,13 +1576,26 @@ fn leaf_positional_domain(
                 coord_flipped,
             })?;
             // A `Log` member's off-side rows feed the GROUP's whole-frame
-            // tally: this leaf merges its own tally in
-            // and resolves its own `(lo, hi)` from the plain finite-or-
-            // default fallback, exactly as every other scale type does —
+            // tally: this leaf merges its own tally in, after also folding
+            // in its own lineage's recorded caller column
+            // (`fold_log_input_into_tally` — a demanded statistic this
+            // leaf reads left its own off-side rows out before
+            // `numeric_domain_union_over` ever saw its filtered output,
+            // so that column read alone misses them) — and resolves its
+            // own `(lo, hi)` from the plain finite-or- default fallback,
+            // exactly as every other scale type does —
             // `resolve_caller_scale_group`'s caller (the only path `side`
             // is ever `Some` here) pushes the ONE whole-frame warning after
             // merging every member's tally, not this leaf.
             if side.is_some() {
+                let mut leaf_tally = leaf_tally;
+                fold_log_input_into_tally(leaf.transform_lineages, channel.as_str(), side, &mut leaf_tally)
+                    .map_err(|source| CompositeResolveError::DomainResolve {
+                        channel: channel.as_str(),
+                        field: enc.field.clone(),
+                        source,
+                        coord_flipped,
+                    })?;
                 tally.merge(leaf_tally);
             }
             // a Log side keeps the raw
@@ -3571,6 +3638,50 @@ mod tests {
         owned(spec_with(e), batch)
     }
 
+    /// The positional groups of a shared `HConcat` over two `Overlay`
+    /// children: congruent children pair by position into non-overlay
+    /// groups, which no `Log` overlay re-prepare reads; non-congruent ones
+    /// leave each `Overlay` its own group, and the re-prepare pass finds
+    /// exactly the one whose establishing member carries a `LogScale`,
+    /// which the resolve then gives that scale's domain. Rejects a
+    /// re-prepare walk that finds groups the resolve does not resolve.
+    #[test]
+    fn the_log_overlay_groups_are_the_overlay_groups_the_resolve_resolves() {
+        let log = |values: &[f64]| overlay_log_y_leaf(values);
+        let plain = |values: &[f64]| {
+            let mut e = Encoding::default();
+            e.x = Some(enc("x"));
+            e.y = Some(enc("v"));
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("v", DataType::Float64, false)])),
+                vec![
+                    Arc::new(Float64Array::from((0..values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(values.to_vec())),
+                ],
+            )
+            .unwrap();
+            owned(spec_with(e), batch)
+        };
+        let overlay = |n: usize| composite(CompositeLayout::Overlay, (0..n).map(|_| leaf_node(Some("x"), Some("v"))).collect(), shared_both());
+        let group = |leaves: &[usize], overlay: bool| PositionalGroup { leaves: leaves.to_vec(), overlay };
+
+        let congruent = composite(CompositeLayout::Hconcat, vec![overlay(2), overlay(2)], shared_both());
+        assert_eq!(positional_groups(&congruent, &[0, 1, 2, 3], Channel::Y), [group(&[0, 2], false), group(&[1, 3], false)]);
+        let owned_congruent = [log(&[1.0, 10.0]), plain(&[2.0, 3.0]), log(&[1.0, 100.0]), plain(&[4.0, 5.0])];
+        let inputs: Vec<_> = owned_congruent.iter().map(input).collect();
+        assert!(log_scale_groups(&congruent, &[0, 1, 2, 3], Channel::Y, &inputs).is_empty(), "a grid pairing is no overlay group");
+
+        let nested = composite(CompositeLayout::Hconcat, vec![overlay(2), overlay(3)], shared_both());
+        assert_eq!(positional_groups(&nested, &[0, 1, 2, 3, 4], Channel::Y), [group(&[0, 1], true), group(&[2, 3, 4], true)]);
+        let owned_nested = [log(&[1.0, 10.0]), plain(&[20.0, 100.0]), plain(&[2.0, 3.0]), plain(&[4.0, 5.0]), plain(&[6.0, 7.0])];
+        let inputs: Vec<_> = owned_nested.iter().map(input).collect();
+        let found: Vec<Vec<usize>> = log_scale_groups(&nested, &[0, 1, 2, 3, 4], Channel::Y, &inputs).into_iter().map(|(leaves, _)| leaves).collect();
+        assert_eq!(found, [vec![0, 1]]);
+        let ctx = resolve_composite_scales(&nested, &inputs, &mut Vec::new()).expect("resolves");
+        let log_domain = Some(SharedDomain::Numeric { lo: 1.0, hi: 100.0 });
+        assert_eq!((ctx[0].y.clone(), ctx[1].y.clone()), (log_domain.clone(), log_domain), "the Log overlay group resolves as one");
+    }
+
     /// An all-off-side member must contribute its COUNT to the group, never
     /// a `0..1` placeholder into the group's own extent: `leaf_positional_domain`
     /// does not fold an all-off-side member's empty extent to `(0.0, 1.0)`
@@ -4008,7 +4119,7 @@ mod tests {
         let mut warnings = Vec::new();
         resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut warnings).unwrap();
         let side = crate::scale::log::LogSide::Positive;
-        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "y".to_string(), field: "v".to_string(), rows: 1, side, coord_flipped: false };
+        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "y".to_string(), field: Some("v".to_string()), rows: 1, side, coord_flipped: false };
         assert!(warnings.contains(&expected), "expected {expected:?} among {warnings:?}");
         assert_eq!(
             warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).count(),
@@ -4072,7 +4183,7 @@ mod tests {
         let mut warnings = Vec::new();
         resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut warnings).unwrap();
         let side = crate::scale::log::LogSide::Positive;
-        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "size".to_string(), field: "c1".to_string(), rows: 3, side, coord_flipped: false };
+        let expected = RenderWarning::LogScaleRowsLeftOut { channel: "size".to_string(), field: Some("c1".to_string()), rows: 3, side, coord_flipped: false };
         assert!(warnings.contains(&expected), "expected {expected:?} among {warnings:?}");
         assert_eq!(
             warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).count(),

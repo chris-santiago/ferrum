@@ -8293,7 +8293,7 @@ fn a_mixed_sign_log_column_leaves_the_off_side_out_and_warns() {
         let side = crate::scale::log::LogSide::Positive;
         let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
             channel: channel.to_string(),
-            field: "c".to_string(),
+            field: Some("c".to_string()),
             rows: 1,
             side,
             coord_flipped: false,
@@ -8338,7 +8338,7 @@ fn a_mixed_sign_or_zero_touching_log_column_draws_three_marks_on_every_channel()
             assert_eq!(n, 3, "{channel} {data:?}: {marks:?}");
             let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
                 channel: channel.to_string(),
-                field: "c".to_string(),
+                field: Some("c".to_string()),
                 rows: 1,
                 side: crate::scale::log::LogSide::Positive,
                 coord_flipped: false,
@@ -8467,7 +8467,7 @@ fn a_faceted_log_axis_warns_once_with_the_whole_frame_count() {
                     assert_eq!(log_warnings.len(), 1, "{mode_name} independent={resolve_independent} {log_channel} rows={rows}: {warnings:?}");
                     let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
                         channel: log_channel.to_string(),
-                        field: "v".to_string(),
+                        field: Some("v".to_string()),
                         rows,
                         side: crate::scale::log::LogSide::Positive,
                         coord_flipped: false,
@@ -8537,7 +8537,7 @@ fn a_faceted_log_axis_warns_once_with_the_whole_frame_count() {
                 assert_eq!(log_warnings.len(), 1, "{mode_name} independent={resolve_independent} flip rows={rows}: {warnings:?}");
                 let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
                     channel: "x".to_string(),
-                    field: "v".to_string(),
+                    field: Some("v".to_string()),
                     rows,
                     side: crate::scale::log::LogSide::Positive,
                     coord_flipped: true,
@@ -8570,7 +8570,7 @@ fn a_flat_log_axis_under_coord_flip_warns_with_the_users_channel() {
     assert_eq!(log_warnings.len(), 1, "{warnings:?}");
     let expected = crate::render::RenderWarning::LogScaleRowsLeftOut {
         channel: "x".to_string(),
-        field: "c".to_string(),
+        field: Some("c".to_string()),
         rows: 1,
         side: crate::scale::log::LogSide::Positive,
         coord_flipped: true,
@@ -9161,7 +9161,7 @@ fn an_off_side_infinity_is_not_drawn_and_is_counted() {
         assert_eq!(scene.panels[0].marks[0].nodes.len(), 3, "{channel}");
         let expected = RenderWarning::LogScaleRowsLeftOut {
             channel: channel.to_string(),
-            field: "c".to_string(),
+            field: Some("c".to_string()),
             rows: 1,
             side: crate::scale::log::LogSide::Positive,
             coord_flipped: false,
@@ -9221,7 +9221,7 @@ fn a_negative_domain_log_aux_drops_plus_infinity_and_clamps_minus_infinity() {
     }
     let expected = RenderWarning::LogScaleRowsLeftOut {
         channel: "size".to_string(),
-        field: "c".to_string(),
+        field: Some("c".to_string()),
         rows: 1,
         side: crate::scale::log::LogSide::Negative,
         coord_flipped: false,
@@ -10083,7 +10083,7 @@ fn a_layered_log_size_channel_warns_once_for_the_whole_frame() {
     let side = crate::scale::log::LogSide::Positive;
     let expected = RenderWarning::LogScaleRowsLeftOut {
         channel: "size".to_string(),
-        field: "c1".to_string(),
+        field: Some("c1".to_string()),
         rows: 3,
         side,
         coord_flipped: false,
@@ -15173,7 +15173,10 @@ fn the_consumed_rows_are_the_same_on_both_runs() {
     let demand = crate::transform::color_bin_group::BinDemand::of(&first_lineages, &reads);
     assert_eq!(demand.fields(&[1]), ["v"], "the lowered aggregate is demanded");
     let edges = binned_color_edges(&spec, &first, &first_lineages, &theme, None).expect("edges");
-    let plan = crate::transform::color_bin_group::ColorBinPlan { demand, edges: Some(std::rc::Rc::from(edges.clone())) };
+    let plan = crate::transform::color_bin_group::RunPlan {
+        color: crate::transform::color_bin_group::ColorBinPlan { demand, edges: Some(std::rc::Rc::from(edges.clone())) },
+        space: crate::transform::color_bin_group::SpaceDemand::default(),
+    };
     let (second, _, second_lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, Some(&plan)).unwrap();
     let consumed = |lineages: &crate::transform::run::OutputLineages| lineages[FINAL_OUTPUT_KEY].binned_rows("v").cloned();
     assert!(consumed(&first_lineages).is_some(), "the lowered step records the rows it consumed");
@@ -19956,4 +19959,119 @@ mod domain_rows_left_out_tests {
                 .collect()
         }
     }
+}
+
+/// A layered chart whose point layer carries a `LogScale` on `x` and whose
+/// bar layer draws a histogram's `bin_start` from its named output demands
+/// that histogram's `Bin` on its own field in the point layer's log space:
+/// the demand reads every layer's drawn column against the one resolved
+/// axis scale, not only the layer that declares it.
+#[test]
+fn a_layered_log_axis_demands_a_sibling_histograms_bin() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false), Field::new("w", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 10.0, 30.0, 100.0])),
+            Arc::new(Float64Array::from(vec![5.0, 4.0, 3.0, 2.0, 1.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [statistics_marker(), {"type": "bin", "field": "v", "bin_count": 4, "nice": false, "name": "hist"}],
+        "encoding": {},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "v", "scale": {"type": "log", "base": 10.0}}, "y": {"field": "w"}}},
+            {"mark": "bar", "data_source": "hist", "encoding": {"x": {"field": "bin_start"}, "x2": {"field": "bin_end"}, "y": {"field": "count"}}},
+        ],
+    }))
+    .expect("the layered spec deserializes");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+    let reads = log_space_reads(&spec, &outputs, None);
+    let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
+    let bin = demand.space(&[1]).of(crate::transform::core::SpaceSlot::Field).cloned().expect("the histogram's Bin is demanded on its field slot");
+    assert_eq!((bin.axes, bin.space), (vec!["x"], LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }));
+}
+
+/// A faceted histogram on a log axis records every panel's caller column:
+/// the merged lineage holds the panels' recorded columns concatenated, so
+/// the off-side tally reads the whole frame's rows, off-side ones
+/// included. Rejects keeping only the last panel's column.
+#[test]
+fn a_faceted_log_histogram_records_every_panels_caller_column() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("f", DataType::Utf8, false), Field::new("v", DataType::Float64, true)])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b", "b"])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 10.0, -5.0, 20.0, 200.0])),
+        ],
+    )
+    .unwrap();
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "bar",
+        "facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 2}},
+        "transforms": [statistics_marker(), {"type": "bin", "field": "v", "bin_count": 3, "nice": false}],
+        "encoding": {"x": {"field": "bin_start", "scale": {"type": "log", "base": 10.0}}, "x2": {"field": "bin_end"}, "y": {"field": "count"}},
+    }))
+    .expect("the faceted histogram deserializes");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let (_, _, lineages, _) = run_pipeline(&spec, &rows, viewport, &theme, None).expect("runs");
+    let recorded = lineages[FINAL_OUTPUT_KEY].log_input.get(&("x".to_string(), "v".to_string())).expect("the caller's column is recorded");
+    let mut values: Vec<f64> = crate::render::arrow_cast::col_as_f64(&RecordBatch::try_from_iter([("v", recorded.clone())]).unwrap(), "v").unwrap().into_iter().flatten().collect();
+    values.sort_by(f64::total_cmp);
+    assert_eq!(values, [-5.0, 0.0, 1.0, 10.0, 20.0, 200.0], "both panels' rows, off-side ones included");
+}
+
+/// The off-side warning on a layered log axis names the axis the way its
+/// establishing layer draws it: a primitive point layer names its own
+/// column whatever its title (`'v'` under `title='Price'` and under
+/// `title=''`), and a histogram layer establishing the axis names its
+/// title, or drops the field clause under a suppressed one. Rejects naming
+/// by any layer that happens to draw a statistic on the axis.
+#[test]
+fn a_layered_log_axis_names_its_left_out_rows_by_the_establishing_layer() {
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true), Field::new("w", DataType::Float64, false)])),
+        vec![Arc::new(Float64Array::from(vec![-1.0, 0.0, 1.0, 10.0, 100.0])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0]))],
+    )
+    .unwrap();
+    let point = |title: &str| serde_json::json!({"mark": "point", "encoding": {"x": {"field": "v", "title": title, "scale": {"type": "log", "base": 10.0}}, "y": {"field": "w"}}});
+    let hist = |title: Option<&str>| {
+        let mut x = serde_json::json!({"field": "bin_start", "scale": {"type": "log", "base": 10.0}});
+        if let Some(title) = title {
+            x["title"] = serde_json::json!(title);
+        }
+        serde_json::json!({"mark": "bar", "data_source": "hist", "encoding": {"x": x, "x2": {"field": "bin_end"}, "y": {"field": "count"}}})
+    };
+    let named = |layers: serde_json::Value| -> Vec<Option<String>> {
+        let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "transforms": [statistics_marker(), {"type": "bin", "field": "v", "bin_count": 3, "nice": false, "name": "hist"}],
+            "encoding": {},
+            "layers": layers,
+        }))
+        .expect("the layered spec deserializes");
+        let (_, _, warnings) = marks_and_legend_warned(&spec, &rows).unwrap_or_else(|e| panic!("renders: {e}"));
+        warnings
+            .into_iter()
+            .filter_map(|w| match w {
+                RenderWarning::LogScaleRowsLeftOut { field, rows, .. } => {
+                    assert_eq!(rows, 2, "the two off-side rows, counted once");
+                    Some(field)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let v = Some("v".to_string());
+    assert_eq!(named(serde_json::json!([point("Price"), hist(None)])), [v.clone()]);
+    assert_eq!(named(serde_json::json!([point(""), hist(None)])), [v.clone()]);
+    assert_eq!(named(serde_json::json!([hist(Some("Price")), point("Price")])), [Some("Price".to_string())]);
+    assert_eq!(named(serde_json::json!([hist(Some("")), point("Price")])), [None]);
 }

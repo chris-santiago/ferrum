@@ -9,6 +9,9 @@
 
 use arrow::record_batch::RecordBatch;
 
+use crate::transform::color_bin_group::SpaceDemand;
+use crate::transform::core::SpaceSlot;
+
 /// Pin a shared value-axis extent across facet panels for every extent-carrying
 /// transform — the 1-D trio (`Kde`, `Bin`, `Violin`) and the 2-D pair (`Kde2D`,
 /// `Bin2D`) — that has not been given an explicit extent.
@@ -54,11 +57,44 @@ pub(crate) fn fix_transform_extents_for_facet(
     transforms: &[crate::transform::core::TransformSpec],
     batch: &RecordBatch,
 ) -> Vec<crate::transform::core::TransformSpec> {
+    fix_transform_extents_for_facet_impl(transforms, batch, &[], None)
+}
+
+/// [`fix_transform_extents_for_facet`], additionally pinning a log-demanded
+/// `Bin`/`Kde`/`Kde2D` in that axis's log space ([`SpaceDemand`]) rather
+/// than data space — a linear-space pin can straddle zero and read as an
+/// off-side `extent=` to the demanded step's own `apply_in_log_space`,
+/// refusing a chart whose data is entirely on-side. `space_demand` is
+/// `None` from every call site but `render::prepare`'s own (every
+/// recursive call, every other transform's own facet-pin test), and with
+/// `None` every step pins in data space exactly as
+/// [`fix_transform_extents_for_facet`] pins it.
+pub(crate) fn fix_transform_extents_for_facet_in_space(
+    transforms: &[crate::transform::core::TransformSpec],
+    batch: &RecordBatch,
+    space_demand: Option<&SpaceDemand>,
+) -> Vec<crate::transform::core::TransformSpec> {
+    fix_transform_extents_for_facet_impl(transforms, batch, &[], space_demand)
+}
+
+fn fix_transform_extents_for_facet_impl(
+    transforms: &[crate::transform::core::TransformSpec],
+    batch: &RecordBatch,
+    path: &[usize],
+    space_demand: Option<&SpaceDemand>,
+) -> Vec<crate::transform::core::TransformSpec> {
     use crate::transform::core::TransformSpec;
 
     transforms
         .iter()
-        .map(|t| match t {
+        .enumerate()
+        .map(|(index, t)| {
+        let id: Vec<usize> = path.iter().copied().chain([index]).collect();
+        // Whichever axis (if any) this step's own key is demanded into —
+        // the same lookup `Run::step` makes per step, read here BEFORE any
+        // transform runs so the pin lands in that space from the start.
+        let space = space_demand.map(|demand| demand.space(&id)).unwrap_or_default();
+        match t {
             // ── 1-D single-extent transforms ──────────────────────────────────
             // Each calls its own `global_extent(spec, batch)` which owns the
             // niced-vs-raw decision (XFORM-08: Bin nices; all others are raw).
@@ -79,14 +115,23 @@ pub(crate) fn fix_transform_extents_for_facet(
             TransformSpec::Kde(spec) => {
                 let mut pinned = spec.clone();
                 let mut changed = false;
+                let axis_space = space.of(SpaceSlot::Field);
                 if spec.extent.is_none() {
-                    if let Some(e) = crate::transform::kde::global_extent(spec, batch) {
+                    let extent = match axis_space {
+                        Some(s) => crate::transform::kde::global_extent_in_space(spec, batch, s),
+                        None => crate::transform::kde::global_extent(spec, batch),
+                    };
+                    if let Some(e) = extent {
                         pinned.extent = Some(e);
                         changed = true;
                     }
                 }
                 if spec.count_scale.is_some() && spec.count_scale_extent.is_none() {
-                    if let Some(e) = crate::transform::kde::count_scale_global_extent(spec, batch) {
+                    let extent = match axis_space {
+                        Some(s) => crate::transform::kde::count_scale_global_extent_in_space(spec, batch, s),
+                        None => crate::transform::kde::count_scale_global_extent(spec, batch),
+                    };
+                    if let Some(e) = extent {
                         pinned.count_scale_extent = Some(e);
                         changed = true;
                     }
@@ -94,8 +139,21 @@ pub(crate) fn fix_transform_extents_for_facet(
                 if changed { TransformSpec::Kde(pinned) } else { t.clone() }
             }
             TransformSpec::Bin(spec) if spec.extent.is_none() => {
-                pin_single_extent(crate::transform::bin::global_extent(spec, batch), |e| {
+                let extent = match space.of(SpaceSlot::Field) {
+                    Some(slot) => crate::transform::bin::global_extent_in_space(spec, batch, slot),
+                    None => crate::transform::bin::global_extent(spec, batch),
+                };
+                pin_single_extent(extent, |e| {
                     TransformSpec::Bin(crate::transform::bin::BinSpec {
+                        extent: Some(e),
+                        ..spec.clone()
+                    })
+                })
+                .unwrap_or_else(|| t.clone())
+            }
+            TransformSpec::Kde2D(spec) if spec.extent.is_none() && !space.is_empty() => {
+                pin_single_extent(crate::transform::kde_2d::global_extent_in_space(spec, batch, &space), |e| {
+                    TransformSpec::Kde2D(crate::transform::kde_2d::Kde2DSpec {
                         extent: Some(e),
                         ..spec.clone()
                     })
@@ -214,18 +272,23 @@ pub(crate) fn fix_transform_extents_for_facet(
             // cannot pick them is left unpinned, since the run refuses it.
             TransformSpec::Branch(branch) => {
                 let transforms = match &branch.frame {
-                    None => fix_transform_extents_for_facet(&branch.transforms, batch),
+                    None => fix_transform_extents_for_facet_impl(&branch.transforms, batch, &id, space_demand),
                     Some(frame) => match frame.rows(&branch.name, batch, &[]) {
-                        Ok(rows) => fix_transform_extents_for_facet(&branch.transforms, &rows),
+                        Ok(rows) => fix_transform_extents_for_facet_impl(&branch.transforms, &rows, &id, space_demand),
                         Err(_) => branch.transforms.clone(),
                     },
                 };
                 TransformSpec::Branch(crate::transform::branch::BranchSpec { transforms, ..branch.clone() })
             }
             // A composed copy's step runs per panel as written, so it pins
-            // like the same step written directly.
+            // like the same step written directly — in data space always:
+            // a composition's own step is never lowered (`Run::chain`
+            // sends a composed copy to `place`/`run_copy`, which never
+            // sets `log_space`), so no space demand ever reaches it here
+            // either, and passing `None` states that rather than leaving
+            // it implicit.
             TransformSpec::Composed(composed) => {
-                let step = fix_transform_extents_for_facet(std::slice::from_ref(&*composed.step), batch);
+                let step = fix_transform_extents_for_facet_impl(std::slice::from_ref(&*composed.step), batch, &id, None);
                 match step.into_iter().next() {
                     Some(step) => TransformSpec::Composed(crate::transform::composed::ComposedSpec {
                         group: composed.group.clone(),
@@ -235,6 +298,7 @@ pub(crate) fn fix_transform_extents_for_facet(
                 }
             }
             _ => t.clone(),
+        }
         })
         .collect()
 }
@@ -288,7 +352,7 @@ mod tests {
     use crate::transform::core::TransformSpec;
     use crate::transform::registry::{all_transform_kinds, entry_for_kind};
 
-    use super::fix_transform_extents_for_facet;
+    use super::{fix_transform_extents_for_facet, fix_transform_extents_for_facet_in_space};
 
     /// A one-column batch: Float64 field `v` = [0.3, 0.5, 1.2, 4.8, 9.7].
     /// Shared by every 1-D single-extent pin probe below (`Bin`, `Violin`,
@@ -702,5 +766,183 @@ mod tests {
         let TransformSpec::Bin(pinned) = &op.transforms[0] else { panic!("expected a Bin") };
         assert_eq!(pinned.extent, Some((100.0, 105.0)));
         assert!(op.frame.is_some(), "the frame is kept");
+    }
+
+    // ── The facet pin under a log-demanded step ────────────────────────────
+    //
+    // A demanded step's facet pin must land ON-SIDE: a plain linear pin can
+    // straddle zero (the data minimum niced down past it), which the
+    // demanded step's own `apply_in_log_space` would then refuse as if the
+    // caller had written that off-side `extent=` directly, so a faceted
+    // log-scaled chart over all-positive data would refuse.
+
+    use crate::transform::color_bin_group::{LogAxisSpace, SlotSpace, SpaceDemand, StepSpace};
+    use crate::transform::core::SpaceSlot;
+
+    /// A step demanded on its one `field` slot along `x` in `space`.
+    fn field_slot(space: LogAxisSpace) -> StepSpace {
+        StepSpace::for_slots([(SpaceSlot::Field, SlotSpace { space, axes: vec!["x"], records_caller_input: true })])
+    }
+
+    fn positive_space() -> LogAxisSpace {
+        LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    fn negative_space() -> LogAxisSpace {
+        LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Negative }
+    }
+
+    fn batch_of(field: &str, values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(field, DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    /// A log-demanded `Bin`'s facet pin comes back strictly on-side (both
+    /// endpoints positive), never straddling zero the way the equivalent
+    /// linear pin would for this exact data (the data minimum of `1.0`
+    /// niced down to `0.0` in data units). Rejects a fix that pins in
+    /// linear space and leaves the demanded step to refuse it.
+    #[test]
+    fn log_demanded_bin_facet_pin_stays_on_side() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        let batch = batch_of("v", (1..=40).map(|v| v as f64).collect());
+        let spec = BinSpec {
+            written_groupby: Vec::new(),
+            field: "v".into(),
+            mode: BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+            per_row: false,
+            aggregates: None,
+        };
+        // The linear pin DOES straddle zero for this data (confirms the
+        // test exercises the real defect rather than a fixture that never
+        // could have crossed it).
+        let linear = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
+        let TransformSpec::Bin(linear_pinned) = &linear[0] else { panic!("expected a Bin") };
+        let (linear_lo, _) = linear_pinned.extent.expect("linear pin");
+        assert!(linear_lo <= 0.0, "fixture must straddle zero under a linear pin to be a real repro: {linear_lo}");
+
+        let demand = SpaceDemand::single(vec![0], field_slot(positive_space()));
+        let out = fix_transform_extents_for_facet_in_space(&[TransformSpec::Bin(spec)], &batch, Some(&demand));
+        let TransformSpec::Bin(pinned) = &out[0] else { panic!("expected a Bin") };
+        let (lo, hi) = pinned.extent.expect("log-space pin");
+        assert!(lo > 0.0 && hi > 0.0, "a positive-side pin must stay on-side: ({lo}, {hi})");
+
+        // The pinned extent is not itself refused by the demanded step it
+        // feeds: an on-side extent maps into the step's log space.
+        use crate::transform::context::TransformContext;
+        let demanded_ctx = TransformContext { log_space: Some(std::rc::Rc::new(field_slot(positive_space()))), ..TransformContext::default() };
+        crate::transform::bin::apply_with_context(&pinned.clone(), &batch, &demanded_ctx)
+            .expect("the pinned extent must not be refused by the step it was pinned for");
+    }
+
+    /// A log-demanded `Bin`'s facet pin on all-negative data (the mirrored
+    /// axis) also stays on-side: both endpoints negative.
+    #[test]
+    fn log_demanded_bin_facet_pin_stays_on_the_negative_side() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        let batch = batch_of("v", (1..=40).map(|v| -(v as f64)).collect());
+        let spec = BinSpec {
+            written_groupby: Vec::new(),
+            field: "v".into(),
+            mode: BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+            per_row: false,
+            aggregates: None,
+        };
+        let demand = SpaceDemand::single(vec![0], field_slot(negative_space()));
+        let out = fix_transform_extents_for_facet_in_space(&[TransformSpec::Bin(spec)], &batch, Some(&demand));
+        let TransformSpec::Bin(pinned) = &out[0] else { panic!("expected a Bin") };
+        let (lo, hi) = pinned.extent.expect("log-space pin");
+        assert!(lo < 0.0 && hi < 0.0, "a negative-side pin must stay on-side: ({lo}, {hi})");
+        assert!(lo <= hi, "the pinned extent keeps lo <= hi: ({lo}, {hi})");
+
+        // The step the pin feeds accepts it and bins every row in data
+        // order inside it.
+        let demanded_ctx = crate::transform::context::TransformContext {
+            log_space: Some(std::rc::Rc::new(field_slot(negative_space()))),
+            ..Default::default()
+        };
+        let binned = crate::transform::bin::apply_with_context(pinned, &batch, &demanded_ctx).expect("the step accepts its own pin");
+        let starts = crate::render::arrow_cast::col_as_f64(&binned, "bin_start").unwrap();
+        let ends = crate::render::arrow_cast::col_as_f64(&binned, "bin_end").unwrap();
+        let within = |v: Option<f64>| v.is_some_and(|v| lo * (1.0 + 1e-9) <= v && v <= hi * (1.0 - 1e-9));
+        assert!(starts.iter().chain(&ends).all(|&v| within(v)), "every edge inside ({lo}, {hi}): {starts:?} {ends:?}");
+        assert!(starts.windows(2).all(|w| w[0] < w[1]), "the bins ascend in data order: {starts:?}");
+        let counts = crate::render::arrow_cast::col_as_f64(&binned, "count").unwrap();
+        assert_eq!(counts.iter().flatten().sum::<f64>(), 40.0, "every row is binned");
+    }
+
+    /// A log-demanded `Kde`'s count-scale facet pin (the mirrored `Bin` it
+    /// stands in for) also stays on-side, mirroring the real histogram's
+    /// own pin exactly.
+    #[test]
+    fn log_demanded_kde_count_scale_facet_pin_stays_on_side() {
+        use crate::transform::bin_mode::BinMode;
+        use crate::transform::kde::{BandwidthSpec, KdeSpec};
+        let batch = batch_of("v", (1..=40).map(|v| v as f64).collect());
+        let spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: vec![],
+            count_scale: Some(BinMode::Sturges),
+            count_scale_extent: None,
+            name: None,
+        };
+        let demand = SpaceDemand::single(vec![0], field_slot(positive_space()));
+        let out = fix_transform_extents_for_facet_in_space(&[TransformSpec::Kde(spec)], &batch, Some(&demand));
+        let TransformSpec::Kde(pinned) = &out[0] else { panic!("expected a Kde") };
+        let (lo, hi) = pinned.extent.expect("log-space grid pin");
+        assert!(lo > 0.0 && hi > 0.0, "the grid pin must stay on-side: ({lo}, {hi})");
+        let (clo, chi) = pinned.count_scale_extent.expect("log-space count-scale pin");
+        assert!(clo > 0.0 && chi > 0.0, "the count-scale pin must stay on-side: ({clo}, {chi})");
+    }
+
+    /// With no space demand, `fix_transform_extents_for_facet_in_space` pins
+    /// in data space, equal to `fix_transform_extents_for_facet`.
+    #[test]
+    fn fix_transform_extents_for_facet_in_space_with_no_demand_matches_the_plain_entry_point() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        let spec = BinSpec {
+            written_groupby: Vec::new(),
+            field: "v".into(),
+            mode: BinMode::Fixed { n: 10 },
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+            per_row: false,
+            aggregates: None,
+        };
+        let plain = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &v_batch());
+        let in_space = fix_transform_extents_for_facet_in_space(&[TransformSpec::Bin(spec)], &v_batch(), None);
+        assert_eq!(plain, in_space);
     }
 }

@@ -14,8 +14,11 @@
 //! panel.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::{ArrayRef, RecordBatch};
+use arrow::datatypes::{Field, Schema};
+use arrow::error::ArrowError;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -41,6 +44,26 @@ pub(crate) fn apply_with_context(
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     project(spec, batch, &ctx.facet_fields)
+}
+
+/// `rows` with `column` under `name`: in place of a column of that name, or
+/// appended. The field is nullable, as a calculated column's is.
+pub(crate) fn with_column(rows: &RecordBatch, name: &str, column: ArrayRef) -> Result<RecordBatch, ArrowError> {
+    let schema = rows.schema();
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut columns = rows.columns().to_vec();
+    let field = Field::new(name, column.data_type().clone(), true);
+    match schema.index_of(name) {
+        Ok(index) => {
+            fields[index] = field;
+            columns[index] = column;
+        }
+        Err(_) => {
+            fields.push(field);
+            columns.push(column);
+        }
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
 }
 
 /// `batch` cut to `spec.fields`, in that order, followed by each of `keep`

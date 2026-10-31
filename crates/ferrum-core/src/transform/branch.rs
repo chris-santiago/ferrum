@@ -32,10 +32,8 @@
 //! [`crate::transform::run::apply_transforms_named`].
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use arrow::array::{Array, BooleanArray, RecordBatch};
-use arrow::datatypes::{Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -97,7 +95,7 @@ impl OperandFrame {
             let column = rows.column_by_name(renamed).cloned().ok_or_else(|| {
                 refuse(format!("restores '{original}' from '{renamed}', which the rows lack; their columns are {:?}", columns_of(&rows)))
             })?;
-            rows = with_column(&rows, original, column).map_err(|e| refuse(format!("cannot restore '{original}': {e}")))?;
+            rows = crate::transform::project::with_column(&rows, original, column).map_err(|e| refuse(format!("cannot restore '{original}': {e}")))?;
         }
         if let Some(missing) = self.columns.iter().find(|column| rows.column_by_name(column).is_none()) {
             return Err(refuse(format!("lists column '{missing}', which the operand's rows lack; their columns are {:?}", columns_of(&rows))));
@@ -105,26 +103,6 @@ impl OperandFrame {
         let own = crate::transform::project::ProjectSpec { fields: self.columns.clone(), name: None };
         crate::transform::project::project(&own, &rows, keep)
     }
-}
-
-/// `rows` with `column` under `name`: in place of a column of that name, or
-/// appended. The field is nullable, as a calculated column's is.
-fn with_column(rows: &RecordBatch, name: &str, column: arrow::array::ArrayRef) -> Result<RecordBatch, arrow::error::ArrowError> {
-    let schema = rows.schema();
-    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-    let mut columns = rows.columns().to_vec();
-    let field = Field::new(name, column.data_type().clone(), true);
-    match schema.index_of(name) {
-        Ok(index) => {
-            fields[index] = field;
-            columns[index] = column;
-        }
-        Err(_) => {
-            fields.push(field);
-            columns.push(column);
-        }
-    }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
 }
 
 /// The batch this branch reads, before its frame: `source` with no

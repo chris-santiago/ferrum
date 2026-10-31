@@ -330,7 +330,6 @@ impl TransformSpec {
                     Self::Composed(s) => s.step.apply_with_context(batch, ctx),
                     Self::Bin2D(_)
                     | Self::Swarm(_)
-                    | Self::Contour(_)
                     | Self::Linkage(_)
                     | Self::Hex(_)
                     | Self::Unpivot(_)
@@ -365,6 +364,7 @@ impl TransformSpec {
             ErrorExtent => error_extent,
             Bin => bin,
             Kde2D => kde_2d,
+            Contour => contour,
             Outliers => outliers,
             TopK => top_k,
             Pivot => pivot,
@@ -416,6 +416,32 @@ impl TransformSpec {
             Linkage => linkage,
         }
     }
+}
+
+/// The input role a lowered statistic computes an output column from, in
+/// that input's units ([`TransformSpec::space_columns`]): a `Bin`'s or
+/// `Kde`'s one `field`, a `Kde2D`'s `x` and `y`, a `Contour`'s `grid_x` and
+/// `grid_y`, and a `DataWindow`'s `sort` fields by position. Typed, as
+/// `data_window::ColumnRole` is, so two roles reading one column (a `Kde2D`
+/// whose `x` and `y` name the same field) stay two demands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SpaceSlot {
+    Field,
+    X,
+    Y,
+    GridX,
+    GridY,
+    Sort(usize),
+}
+
+/// One output column a lowered step computes in the units of one of its
+/// input slots: `output` holds the units of the column `input` the step
+/// reads through `slot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceColumn {
+    pub(crate) output: String,
+    pub(crate) slot: SpaceSlot,
+    pub(crate) input: String,
 }
 
 impl TransformSpec {
@@ -470,6 +496,81 @@ impl TransformSpec {
             | Self::DataBin(_)
             | Self::Branch(_)
             | Self::Composed(_) => None,
+        }
+    }
+
+    /// The output columns whose values sit in one input's units, each with
+    /// the input role ([`SpaceSlot`]) that computes it and that input's
+    /// column: a channel drawing the output column needs the input slot's
+    /// space to compute in, as [`SpaceDemand::of`]'s backward walk reads.
+    /// Spelled per variant, with no wildcard, so a new variant decides here
+    /// whether it carries one.
+    ///
+    /// `Bin` passes its field through as both edges of every bin
+    /// (`bin_start`/`bin_end`); `Kde`'s grid (`value`) is the same; `Kde2D`
+    /// grids each axis from its own slot (`grid_x` from `x`, `grid_y` from
+    /// `y`), even when both slots read one column; `Contour` reads a
+    /// `Kde2D`-shaped input, so its own `grid_x`/`grid_y` are its slots,
+    /// and its four output columns name them (`contour_x`/`contour_x2`
+    /// from `grid_x`, `contour_y`/`contour_y2` from `grid_y`);
+    /// `DataWindow`'s sorted columns pass through unchanged, one per `sort`
+    /// field. `Bin2D`, `Hex`, `Raster`, `Violin` and `DensityData` carry
+    /// none (not reached by this crate's log-space demand).
+    ///
+    /// [`SpaceDemand::of`]: crate::transform::color_bin_group::SpaceDemand::of
+    pub(crate) fn space_columns(&self) -> Vec<SpaceColumn> {
+        let column = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string() };
+        match self {
+            Self::Bin(s) => vec![column("bin_start", SpaceSlot::Field, &s.field), column("bin_end", SpaceSlot::Field, &s.field)],
+            Self::Kde(s) => vec![column("value", SpaceSlot::Field, &s.field)],
+            Self::Kde2D(s) => vec![column("grid_x", SpaceSlot::X, &s.x), column("grid_y", SpaceSlot::Y, &s.y)],
+            Self::Contour(_) => vec![
+                column("contour_x", SpaceSlot::GridX, "grid_x"),
+                column("contour_x2", SpaceSlot::GridX, "grid_x"),
+                column("contour_y", SpaceSlot::GridY, "grid_y"),
+                column("contour_y2", SpaceSlot::GridY, "grid_y"),
+            ],
+            Self::DataWindow(s) => s.sort.iter().flatten().enumerate().map(|(i, f)| column(f, SpaceSlot::Sort(i), f)).collect(),
+            Self::Bin2D(_)
+            | Self::Smooth(_)
+            | Self::Aggregate(_)
+            | Self::Summary(_)
+            | Self::Outliers(_)
+            | Self::ErrorExtent(_)
+            | Self::BoxStats(_)
+            | Self::Violin(_)
+            | Self::Qq(_)
+            | Self::Linkage(_)
+            | Self::Raster(_)
+            | Self::Hex(_)
+            | Self::Swarm(_)
+            | Self::Unpivot(_)
+            | Self::Reorder(_)
+            | Self::ReferenceLine(_)
+            | Self::LetterValue(_)
+            | Self::Logistic(_)
+            | Self::Glm(_)
+            | Self::Robust(_)
+            | Self::Identity(_)
+            | Self::Filter(_)
+            | Self::Calculate(_)
+            | Self::Project(_)
+            | Self::Fold(_)
+            | Self::Pivot(_)
+            | Self::JoinAggregate(_)
+            | Self::DensityData(_)
+            | Self::RegressionData(_)
+            | Self::LoessData(_)
+            | Self::Impute(_)
+            | Self::Flatten(_)
+            | Self::Sample(_)
+            | Self::TopK(_)
+            | Self::DataStack(_)
+            | Self::TimeUnit(_)
+            | Self::DataBin(_)
+            | Self::DataAggregate(_)
+            | Self::Branch(_)
+            | Self::Composed(_) => Vec::new(),
         }
     }
 }

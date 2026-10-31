@@ -325,7 +325,7 @@ fn numeric_aux_scale_kind(
             // closure when one is stated).
             let resolved = super::positional::resolve_log_extent(
                 channel,
-                field,
+                Some(field),
                 overrides.domain.is_some(),
                 side,
                 (extent.lo, extent.hi),

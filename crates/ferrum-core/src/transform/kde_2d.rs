@@ -19,7 +19,10 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::color_bin_group::{SlotSpace, StepSpace};
 use crate::transform::context::TransformContext;
+use crate::transform::core::SpaceSlot;
+use crate::transform::log_space::{run_in_log_space, with_mapped_slot, ColumnShape, DemandedField};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
@@ -33,6 +36,11 @@ use crate::transform::kde::{self, BandwidthSpec};
 /// `output_field_names_match_the_emitted_schema` in the tests below, so the
 /// guard cannot fall behind a schema change.
 const OUTPUT_FIELDS: [&str; 6] = ["grid_x", "grid_y", "density", "nx", "ny", "extent"];
+
+/// This transform's own voice prefix, passed to every shared
+/// `crate::transform::log_space` call so a `Kde2D` refusal never borrows
+/// `Bin`'s or `Kde`'s.
+const LABEL: &str = "stat_kde_2d";
 
 fn default_bandwidth() -> BandwidthSpec {
     BandwidthSpec::Scott
@@ -83,6 +91,42 @@ pub(crate) fn global_extent(
     Some((x_lo, x_hi, y_lo, y_hi))
 }
 
+/// [`global_extent`] with `space`'s `x`/`y` slots (whichever is demanded)
+/// mapping that slot's column into log units first ([`with_mapped_slot`],
+/// each slot into its own column, so `x` and `y` reading one field map it
+/// once each) and the extent back after — the facet pin a log-demanded
+/// `Kde2D` needs on either or both axes independently, mirroring
+/// [`crate::transform::bin::global_extent_in_space`]. A spec stating its
+/// own extent pins it as written, as `global_extent` does. `None` when
+/// `global_extent` over the mapped columns is, and when a demanded field is
+/// missing or non-numeric, or the batch already holds the step-private
+/// column name: the pin is skipped, and the step refuses that input in its
+/// own voice when it runs.
+/// [`crate::transform::log_space::LogAxisSpace::backward`] is monotone
+/// increasing on either side, so each mapped-back pair keeps its order
+/// with no reordering step.
+pub(crate) fn global_extent_in_space(spec: &Kde2DSpec, batch: &RecordBatch, space: &StepSpace) -> Option<(f64, f64, f64, f64)> {
+    if spec.extent.is_some() {
+        return global_extent(spec, batch);
+    }
+    let (x_slot, y_slot) = (space.of(SpaceSlot::X), space.of(SpaceSlot::Y));
+    let mut mapped_batch = batch.clone();
+    let mut mapped_spec = spec.clone();
+    if let Some(slot) = x_slot {
+        let demand = DemandedField { slot: SpaceSlot::X, field: &spec.x, space: slot, shape: ColumnShape::Scalar };
+        (mapped_batch, mapped_spec.x) = with_mapped_slot(&mapped_batch, &demand, LABEL).ok()?;
+    }
+    if let Some(slot) = y_slot {
+        let demand = DemandedField { slot: SpaceSlot::Y, field: &spec.y, space: slot, shape: ColumnShape::Scalar };
+        (mapped_batch, mapped_spec.y) = with_mapped_slot(&mapped_batch, &demand, LABEL).ok()?;
+    }
+    let (x_lo, x_hi, y_lo, y_hi) = global_extent(&mapped_spec, &mapped_batch)?;
+    let back = |slot: Option<&SlotSpace>, (lo, hi): (f64, f64)| slot.map_or((lo, hi), |s| (s.space.backward(lo), s.space.backward(hi)));
+    let (x_lo, x_hi) = back(x_slot, (x_lo, x_hi));
+    let (y_lo, y_hi) = back(y_slot, (y_lo, y_hi));
+    Some((x_lo, x_hi, y_lo, y_hi))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Kde2DSpec {
@@ -111,9 +155,12 @@ pub(crate) fn apply(spec: &Kde2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
-/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// Context-aware entry point. `ctx` is used as the GH #162 degrade-warning
 /// sink, for the one degrade this transform can report: an all-null `groupby`
-/// key column (GH #197), raised inside the shared partitioner.
+/// key column (GH #197), raised inside the shared partitioner; and, when a
+/// drawn log axis demands this `Kde2D` on `x`, `y`, or both
+/// (`ctx.log_space`), as the caller-column sink
+/// ([`TransformContext::note_log_input`]).
 pub(crate) fn apply_with_context(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
@@ -122,10 +169,78 @@ pub(crate) fn apply_with_context(
     if spec.n == 0 {
         return Err(PyValueError::new_err("stat_kde_2d: n must be > 0"));
     }
+    let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
+    let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
+    if x_slot.is_none() && y_slot.is_none() {
+        return apply_in_data_space(spec, batch, ctx);
+    }
+    apply_in_log_space(spec, batch, ctx, x_slot, y_slot)
+}
+
+/// [`apply_with_context`]'s ordinary (data-space) body: every `Kde2D`
+/// whose axes are not demanded into a log space runs only this, and a
+/// demanded one runs it over its mapped columns ([`apply_in_log_space`]).
+fn apply_in_data_space(spec: &Kde2DSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
         return apply_grouped(spec, batch, &spec.groupby, ctx);
     }
     apply_one_group(spec, batch, None, None)
+}
+
+/// `apply_with_context` under a drawn log axis's demand on the `x` slot,
+/// the `y` slot, or both independently (`x_slot`/`y_slot`, since a
+/// bivariate fit's two axes can each resolve a different `LogScale`, or
+/// none, even when both read one column): each demanded axis's half of an
+/// explicit `extent` is refused off-side and mapped in that axis's space
+/// ([`crate::transform::log_space::LogAxisSpace::extent_in_space`]), the
+/// shared [`run_in_log_space`] runner maps each demanded slot's column into
+/// its own step-private column, and the ordinary body runs unchanged with
+/// only the demanded slots renamed — the fit and the grid for that axis
+/// compute there. Every output in an axis's units then maps back on that
+/// axis: its grid (`grid_x`/`grid_y`) and its two bounds in `extent`
+/// (positions 0..2 for `x`, 2..4 for `y`). `density` stays per log unit on
+/// every demanded axis, as a 1-D `Kde` does.
+fn apply_in_log_space(
+    spec: &Kde2DSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    x_slot: Option<&SlotSpace>,
+    y_slot: Option<&SlotSpace>,
+) -> PyResult<RecordBatch> {
+    let in_space = |slot: Option<&SlotSpace>, extent: (f64, f64)| match slot {
+        Some(slot) => slot.space.extent_in_space(LABEL, Some(extent)),
+        None => Ok(Some(extent)),
+    };
+    let mapped_extent = match spec.extent {
+        None => None,
+        Some((x_lo, x_hi, y_lo, y_hi)) => {
+            let x = in_space(x_slot, (x_lo, x_hi))?;
+            let y = in_space(y_slot, (y_lo, y_hi))?;
+            x.zip(y).map(|((x_lo, x_hi), (y_lo, y_hi))| (x_lo, x_hi, y_lo, y_hi))
+        }
+    };
+    let mapped_spec = Kde2DSpec { extent: mapped_extent, ..spec.clone() };
+    let demand: Vec<DemandedField> = [(SpaceSlot::X, &spec.x, x_slot), (SpaceSlot::Y, &spec.y, y_slot)]
+        .into_iter()
+        .filter_map(|(slot, field, space)| space.map(|space| DemandedField { slot, field, space, shape: ColumnShape::Scalar }))
+        .collect();
+    run_in_log_space(
+        ctx,
+        LABEL,
+        batch,
+        &demand,
+        |mapped_batch, columns, ctx| {
+            let x = columns.column(SpaceSlot::X, &spec.x);
+            let y = columns.column(SpaceSlot::Y, &spec.y);
+            apply_in_data_space(&Kde2DSpec { x, y, ..mapped_spec }, mapped_batch, ctx)
+        },
+        &[
+            ("grid_x", SpaceSlot::X, ColumnShape::List),
+            ("grid_y", SpaceSlot::Y, ColumnShape::List),
+            ("extent", SpaceSlot::X, ColumnShape::ListPositions(0, 2)),
+            ("extent", SpaceSlot::Y, ColumnShape::ListPositions(2, 4)),
+        ],
+    )
 }
 
 /// Compute a single 2-D KDE surface from a subset of rows (or all rows when
@@ -1212,6 +1327,221 @@ mod tests {
         let err = apply(&spec, &batch)
             .expect_err("grouping by a column named 'density' must refuse");
         assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    // ── Log-space fit (a drawn log axis's demand, independently per axis) ──
+
+    type Space = crate::transform::color_bin_group::LogAxisSpace;
+
+    fn ctx_demanding(space: StepSpace) -> TransformContext {
+        TransformContext { log_space: Some(std::rc::Rc::new(space)), ..TransformContext::default() }
+    }
+
+    /// The `x` slot demanded along `x` in `x`, the `y` slot along `y` in
+    /// `y`, whichever is `Some`.
+    fn axis_slots(x: Option<Space>, y: Option<Space>) -> StepSpace {
+        StepSpace::for_slots(
+            [(SpaceSlot::X, "x", x), (SpaceSlot::Y, "y", y)]
+                .into_iter()
+                .filter_map(|(slot, axis, space)| space.map(|space| (slot, SlotSpace { space, axes: vec![axis], records_caller_input: true }))),
+        )
+    }
+
+    /// Both `x` and `y` demanded independently, each with its own space.
+    fn both_fields(x_space: Space, y_space: Space) -> StepSpace {
+        axis_slots(Some(x_space), Some(y_space))
+    }
+
+    fn positive_space() -> Space {
+        Space { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// Both axes demanded into log space (a bivariate `kind="kde"` with
+    /// `log_scale=True` on both `x` and `y`) grids and fits each axis in
+    /// its own log units, and backward-maps `grid_x`/`grid_y` back to
+    /// strictly positive data values independently — renders without
+    /// error on all-positive, log-separated data, with nothing off-side.
+    #[test]
+    fn kde_2d_in_log_space_grids_both_axes_independently() {
+        pyo3::Python::initialize();
+        let xs = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let ys = vec![0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+        let n = 8;
+        let spec = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n, extent: None, groupby: vec![], name: None };
+        let batch = batch_xy(xs, ys);
+        let ctx = ctx_demanding(both_fields(positive_space(), positive_space()));
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let grid_x = list_f64_at(&out, "grid_x");
+        let grid_y = list_f64_at(&out, "grid_y");
+        assert!(grid_x.iter().all(|v| v.is_finite() && *v > 0.0), "{grid_x:?}");
+        assert!(grid_y.iter().all(|v| v.is_finite() && *v > 0.0), "{grid_y:?}");
+        let recorded = ctx.log_input.borrow();
+        assert_eq!(recorded.len(), 2, "both axes' caller columns are recorded: {recorded:?}");
+    }
+
+    /// Only `x` demanded into log space: `grid_x` is fit in log units
+    /// (strictly positive back in data units) while `grid_y` keeps its
+    /// ordinary linear-space grid, which can legitimately include
+    /// negative values.
+    #[test]
+    fn kde_2d_in_log_space_on_one_axis_only_maps_that_axis() {
+        pyo3::Python::initialize();
+        let xs = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+        let ys = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let n = 8;
+        let spec = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n, extent: None, groupby: vec![], name: None };
+        let batch = batch_xy(xs, ys);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let grid_x = list_f64_at(&out, "grid_x");
+        let grid_y = list_f64_at(&out, "grid_y");
+        assert!(grid_x.iter().all(|v| v.is_finite() && *v > 0.0), "{grid_x:?}");
+        assert!(grid_y.iter().any(|v| *v < 0.0), "y keeps its ordinary linear-space grid: {grid_y:?}");
+    }
+
+    /// Every row off-side on the one demanded axis (an all-negative `x` on
+    /// the positive side): the body runs on the zero-row mapped slice
+    /// rather than the real one, but the recorded caller column still
+    /// holds every `x` row — the axis resolver's own
+    /// `LogScaleNoValueOnSide` refusal reads it, not this transform's own
+    /// (degenerate) surface.
+    #[test]
+    fn kde_2d_in_log_space_all_off_side_on_the_demanded_axis_still_records_the_caller_column() {
+        pyo3::Python::initialize();
+        let xs = vec![-1.0, -2.0, -4.0];
+        let ys = vec![1.0, 2.0, 3.0];
+        let spec = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n: 8, extent: None, groupby: vec![], name: None };
+        let batch = batch_xy(xs, ys);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let recorded = ctx.log_input.borrow();
+        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        assert_eq!(column.len(), 3, "the recorded column keeps every caller row, even when none are on-side");
+    }
+
+    /// A context demanding the `x` slot in `x` and the `y` slot in `y`,
+    /// whichever is `Some`.
+    fn ctx_demanding_axes(x: Option<Space>, y: Option<Space>) -> TransformContext {
+        ctx_demanding(axis_slots(x, y))
+    }
+
+    /// The facet pin a `Kde2D` takes with its `x`/`y` slots demanded in `x`/`y`.
+    fn log_pin(spec: &Kde2DSpec, batch: &RecordBatch, x: Option<Space>, y: Option<Space>) -> Option<(f64, f64, f64, f64)> {
+        global_extent_in_space(spec, batch, &axis_slots(x, y))
+    }
+
+    fn base_two_space() -> Space {
+        Space { base: 2.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// `name`'s one list in `batch`, every entry (null as NaN).
+    fn list_values(batch: &RecordBatch, name: &str) -> Vec<f64> {
+        let list = batch.column(batch.schema().index_of(name).unwrap()).as_any().downcast_ref::<ListArray>().unwrap().value(0);
+        let values = list.as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..values.len()).map(|i| if values.is_null(i) { f64::NAN } else { values.value(i) }).collect()
+    }
+
+    fn assert_close(name: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "{name}");
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - e).abs() <= 1e-9 * e.abs().max(1.0), "{name}[{i}]: {a} vs {e}");
+        }
+    }
+
+    /// The fit a `Kde2D` demanded in `x`/`y` must equal: the data-space fit
+    /// over each demanded axis's column mapped forward by hand into columns
+    /// of their own names, with each demanded axis's grid and extent bounds
+    /// mapped back.
+    fn assert_matches_the_hand_mapped_fit(spec: &Kde2DSpec, batch: &RecordBatch, x: Option<Space>, y: Option<Space>) {
+        let out = apply_with_context(spec, batch, &ctx_demanding_axes(x, y)).unwrap();
+        let column = |field: &str, space: Option<Space>| -> Vec<f64> {
+            let values = crate::transform::numeric_util::coerce_to_float64(batch.column(batch.schema().index_of(field).unwrap()), "test", field).unwrap();
+            values.iter().map(|v| v.map_or(f64::NAN, |v| space.map_or(v, |s| s.forward(v).unwrap_or(f64::NAN)))).collect()
+        };
+        let hand_mapped = batch_xy(column(&spec.x, x), column(&spec.y, y));
+        let oracle = apply(&Kde2DSpec { x: "x".into(), y: "y".into(), ..spec.clone() }, &hand_mapped).unwrap();
+        let back = |values: Vec<f64>, space: Option<Space>| -> Vec<f64> { values.into_iter().map(|v| space.map_or(v, |s| s.backward(v))).collect() };
+        assert_close("grid_x", &list_values(&out, "grid_x"), &back(list_values(&oracle, "grid_x"), x));
+        assert_close("grid_y", &list_values(&out, "grid_y"), &back(list_values(&oracle, "grid_y"), y));
+        assert_close("density", &list_values(&out, "density"), &list_values(&oracle, "density"));
+        let extent = list_values(&oracle, "extent");
+        let expected_extent = [back(extent[0..2].to_vec(), x), back(extent[2..4].to_vec(), y)].concat();
+        assert_close("extent", &list_values(&out, "extent"), &expected_extent);
+    }
+
+    fn one_column(values: &[f64]) -> RecordBatch {
+        RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)])), vec![Arc::new(Float64Array::from(values.to_vec()))]).unwrap()
+    }
+
+    const SPREAD: [f64; 10] = [1.5, 2.0, 3.0, 4.5, 7.0, 10.0, 15.0, 22.0, 35.0, 50.0];
+
+    /// A `Kde2D` reading one column on both axes computes each axis's slot
+    /// from the caller's column mapped once into that slot's own space: a
+    /// log `x` beside a linear `y` fits `(log10 v, v)`, two log axes fit
+    /// `(log10 v, log10 v)`, and a base-10 `x` beside a base-2 `y` fits
+    /// `(log10 v, log2 v)`. Rejects keying the demand by the column name,
+    /// which maps the one column for both slots, or maps it twice.
+    #[test]
+    fn kde_2d_reading_one_column_on_both_axes_maps_each_slot_once_in_its_own_space() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec { x: "v".into(), y: "v".into(), bandwidth: default_bandwidth(), n: 6, extent: None, groupby: vec![], name: None };
+        let batch = one_column(&SPREAD);
+        assert_matches_the_hand_mapped_fit(&spec, &batch, Some(positive_space()), None);
+        assert_matches_the_hand_mapped_fit(&spec, &batch, None, Some(positive_space()));
+        assert_matches_the_hand_mapped_fit(&spec, &batch, Some(positive_space()), Some(positive_space()));
+        assert_matches_the_hand_mapped_fit(&spec, &batch, Some(positive_space()), Some(base_two_space()));
+    }
+
+    /// A log-demanded `Kde2D` maps every output it emits in an axis's units
+    /// back on that axis, the `extent` list included: positions 0..2 hold
+    /// `x`'s bounds and 2..4 `y`'s, so an `x`-only demand maps only the
+    /// first two. Rejects leaving `extent` in log units beside data-unit
+    /// grids.
+    #[test]
+    fn kde_2d_maps_each_axis_extent_bounds_back_on_its_own_axis() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n: 6, extent: None, groupby: vec![], name: None };
+        let batch = batch_xy(SPREAD.to_vec(), SPREAD.iter().rev().map(|v| v * 3.0).collect());
+        assert_matches_the_hand_mapped_fit(&spec, &batch, Some(positive_space()), None);
+        assert_matches_the_hand_mapped_fit(&spec, &batch, None, Some(base_two_space()));
+        assert_matches_the_hand_mapped_fit(&spec, &batch, Some(positive_space()), Some(base_two_space()));
+    }
+
+    /// A `Kde2D` whose demanded `x` is an integer, `Float32` or non-nullable
+    /// column holding an off-side 0 fits exactly as over the same values in
+    /// a nullable Float64 column, and so does its facet pin. Rejects writing
+    /// the mapped Float64 values back under the caller's field.
+    #[test]
+    fn kde_2d_in_log_space_fits_every_numeric_dtype_like_float64() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n: 6, extent: None, groupby: vec![], name: None };
+        let values: Vec<i64> = (0..=20).collect();
+        let ys: Vec<f64> = values.iter().map(|&v| ((v * 7) % 11) as f64).collect();
+        let float = batch_xy(values.iter().map(|&v| v as f64).collect(), ys.clone());
+        let expected = apply_with_context(&spec, &float, &ctx_demanding_axes(Some(positive_space()), None)).unwrap();
+        let expected_pin = log_pin(&spec, &float, Some(positive_space()), None);
+        assert!(expected_pin.is_some());
+        for (dtype, field, column) in crate::transform::log_space::numeric_dtype_columns("x", &values) {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![field, Field::new("y", DataType::Float64, true)])),
+                vec![column, Arc::new(Float64Array::from(ys.clone()))],
+            )
+            .unwrap();
+            let out = apply_with_context(&spec, &batch, &ctx_demanding_axes(Some(positive_space()), None)).unwrap_or_else(|e| panic!("{dtype}: {e}"));
+            assert_eq!(out, expected, "{dtype}");
+            assert_eq!(log_pin(&spec, &batch, Some(positive_space()), None), expected_pin, "{dtype}");
+        }
+    }
+
+    /// A log-demanded `Kde2D` over a column the batch lacks refuses in its
+    /// own `stat_kde_2d:` voice, naming the column.
+    #[test]
+    fn a_log_kde_2d_over_a_missing_field_refuses_in_its_own_voice() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec { x: "absent".into(), y: "y".into(), bandwidth: default_bandwidth(), n: 6, extent: None, groupby: vec![], name: None };
+        let batch = batch_xy(SPREAD.to_vec(), SPREAD.to_vec());
+        let err = apply_with_context(&spec, &batch, &ctx_demanding_axes(Some(positive_space()), None)).unwrap_err().to_string();
+        assert!(err.contains("stat_kde_2d: column 'absent' not found"), "{err}");
     }
 
 }

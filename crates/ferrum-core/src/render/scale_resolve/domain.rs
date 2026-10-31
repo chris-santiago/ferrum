@@ -538,7 +538,7 @@ pub(in crate::render) fn with_primary_y_owner(spec: &ChartSpec) -> std::borrow::
 /// Layer 0 when no layer draws the channel, so a spec binding it nowhere
 /// keeps layer 0's read and its `UnknownColumn` precondition. `None` only for
 /// an empty layer list.
-fn establishing_axis_layer<'a>(
+pub(in crate::render) fn establishing_axis_layer<'a>(
     spec: &'a ChartSpec,
     layers: &'a [Layer],
     channel: &str,
@@ -2520,6 +2520,38 @@ pub(in crate::render) fn layered_caller_scale<'a>(
     establishing_caller_scale(&layered_axis(spec, channel, primary_batch, transform_outputs))
 }
 
+/// The scale `channel`'s axis resolves with, in precedence order, BEFORE any
+/// pixel geometry is read: the caller's own non-system-injected scale, else
+/// the scale a sibling layer establishes ([`layered_caller_scale`]), else a
+/// system-injected scale (the bar zero-anchor) unless an auto path (a
+/// composite leaf's `shared` domain, or a layered spec) would take it over.
+/// This is [`build_axis_scale`]'s own selection, extracted so a caller that
+/// only needs to know WHICH scale a channel resolves with — not its full
+/// resolved domain/range — can ask the identical question `build_axis_scale`
+/// answers, rather than re-deriving it (`render::prepare::log_space_reads`,
+/// the positional-space demand's reader).
+///
+/// [`build_axis_scale`]: super::positional::build_axis_scale
+pub(in crate::render) fn resolved_explicit_scale<'a>(
+    channel: &'a str,
+    enc: &'a crate::spec::encoding::EncodingSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    spec: &'a ChartSpec,
+    shared: Option<&super::SharedDomain>,
+) -> Option<&'a crate::spec::encoding::ScaleSpec> {
+    let layered = spec.is_layered();
+    let yields_to_auto_path = shared.is_some() || layered;
+    match (enc.scale.as_ref(), layered_caller_scale(spec, channel, primary_batch, transform_outputs).map(|(_, scale)| scale)) {
+        // The caller's own scale on the chart encoding.
+        (Some(own), _) if !own.is_system_injected() => Some(own),
+        // The scale the layers establish.
+        (_, Some(established)) => Some(established),
+        // The bar anchor ferrum injected, unless an auto path takes it over.
+        (injected, None) => injected.filter(|_| !yields_to_auto_path),
+    }
+}
+
 /// [`warn_members_off_caller_scale`] over a flat layered spec's layers on
 /// `channel`. One scale serves each axis, so a layer left out of it draws on
 /// the shared axis.
@@ -3080,6 +3112,44 @@ pub(in crate::render) fn numeric_domain_union_over(
         }
     }
     Ok((SidedExtent { lo: mn, hi: mx, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()))
+}
+
+/// Count every lineage's recorded caller column for `channel`
+/// (`crate::transform::run::OutputLineage::log_input`'s `(axis, field)`
+/// entries whose axis matches) into `tally`, through the SAME
+/// content-deduplicated path [`sided_min_max_f64`] feeds a primitive
+/// layer's own column read. `numeric_domain_union_over`'s own column reads
+/// never reach a demanded statistic's filtered input, so its returned
+/// tally alone misses those rows; this is the other half every `Log`
+/// caller of that function folds in afterward (`build_axis_scale`'s
+/// `data_extent`, `composite::leaf_positional_domain`), only when `side`
+/// is `Some` (a `Log` call — every other scale kind's tally stays exactly
+/// what `numeric_domain_union_over` returned). A recorded column
+/// [`sided_min_max_f64`] rejects is refused rather than skipped, the same
+/// `RenderError::UnsupportedDtype` every other caller of that function
+/// raises, so this fold can never under-count a left-out total on the
+/// strength of a dtype gap.
+pub(in crate::render) fn fold_log_input_into_tally(
+    lineages: &crate::transform::run::OutputLineages,
+    channel: &str,
+    side: Option<crate::scale::log::LogSide>,
+    tally: &mut LeftOutTally,
+) -> Result<(), RenderError> {
+    let Some(side) = side else { return Ok(()) };
+    for lineage in lineages.values() {
+        for ((axis, field), column) in &lineage.log_input {
+            if axis.as_str() != channel {
+                continue;
+            }
+            let extent = sided_min_max_f64(column.as_ref(), Some(side)).map_err(|_| RenderError::UnsupportedDtype {
+                field: field.clone(),
+                dtype: format!("{:?}", column.data_type()),
+                context: None,
+            })?;
+            tally.count(column.as_ref(), extent);
+        }
+    }
+    Ok(())
 }
 
 /// Distinct positional (x:N / y:N) categories for an ordinal/band axis, unioning
@@ -5814,6 +5884,70 @@ mod tests {
         assert_eq!(tally.rows(), 2, "the whole frame has 2 off-side rows, not 3 (the panel's 1 double-counted): {tally:?}");
     }
 
+    /// A statistic's recorded caller column on a log axis whose values
+    /// equal a primitive layer's own column on that axis counts its
+    /// off-side rows once: the folded column goes through the same
+    /// content-deduplicated tally the primitive read already fed. Rejects
+    /// adding the statistic's rows on top of the primitive's.
+    #[test]
+    fn a_recorded_statistic_input_equal_to_a_primitive_column_counts_once() {
+        use arrow::array::Float64Array;
+        let column = || -> arrow::array::ArrayRef { Arc::new(Float64Array::from(vec![0.0, -1.0, 1.0, 10.0])) };
+        let panel = RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])), vec![column()]).unwrap();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, mut tally) = numeric_domain_union_over("x", "v", None, &panel, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None)
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 2, "the primitive read alone: {tally:?}");
+        let mut lineages: OutputLineages = HashMap::new();
+        lineages.insert(
+            "hist".to_string(),
+            crate::transform::run::OutputLineage {
+                swarm: None,
+                statistic_input: Some(panel.clone()),
+                lowered: Vec::new(),
+                written_groupby: Vec::new(),
+                source: panel.schema(),
+                log_input: HashMap::from([(("x".to_string(), "v".to_string()), column())]),
+            },
+        );
+        fold_log_input_into_tally(&lineages, "x", side, &mut tally).expect("v is Float64 here");
+        assert_eq!(tally.rows(), 2, "the statistic's copy of the same column counts once: {tally:?}");
+    }
+
+    /// A recorded caller column [`sided_min_max_f64`] cannot fold —
+    /// `coerce_to_float64` accepts `Float16` (the transform step that
+    /// recorded it already ran successfully over that column), but
+    /// `sided_min_max_f64` has no `Float16` arm — surfaces as a typed
+    /// error naming the column, not a silent skip that would under-count
+    /// the left-out total.
+    #[test]
+    fn fold_log_input_into_tally_refuses_a_column_sided_min_max_f64_cannot_fold() {
+        use arrow::array::Float64Array;
+        let f64_column: arrow::array::ArrayRef = Arc::new(Float64Array::from(vec![1.0, 2.0]));
+        let column = arrow::compute::cast(&f64_column, &DataType::Float16).expect("Float64 casts to Float16");
+        let mut lineages: OutputLineages = HashMap::new();
+        lineages.insert(
+            "stat".to_string(),
+            crate::transform::run::OutputLineage {
+                swarm: None,
+                statistic_input: None,
+                lowered: Vec::new(),
+                written_groupby: Vec::new(),
+                source: Arc::new(Schema::new(vec![Field::new("v", DataType::Float16, false)])),
+                log_input: HashMap::from([(("x".to_string(), "v".to_string()), column)]),
+            },
+        );
+        let mut tally = LeftOutTally::new();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let err = fold_log_input_into_tally(&lineages, "x", side, &mut tally)
+            .expect_err("Float16 is not among sided_min_max_f64's supported dtypes");
+        assert!(
+            matches!(&err, RenderError::UnsupportedDtype { field, .. } if field == "v"),
+            "expected UnsupportedDtype naming 'v'; got {err:?}"
+        );
+        assert_eq!(tally.rows(), 0, "a refused column folds nothing into the tally: {tally:?}");
+    }
+
     /// The same two batches, but INDEPENDENT facet resolution
     /// (`include_final: false`): the panel's own extent still comes from
     /// its own batch alone (unchanged, independent-panel domain), but the
@@ -5902,7 +6036,7 @@ mod tests {
             .expect("f is Float64 in the 'box' output");
         assert_eq!(tally.rows(), 2);
         assert!(!tally.any_on_side());
-        let err = crate::render::scale_resolve::positional::resolve_log_extent("y", "f", false, crate::scale::log::LogSide::Positive, (extent.lo, extent.hi), &tally, 10.0, false, &mut Vec::new())
+        let err = crate::render::scale_resolve::positional::resolve_log_extent("y", Some("f"), false, crate::scale::log::LogSide::Positive, (extent.lo, extent.hi), &tally, 10.0, false, &mut Vec::new())
             .expect_err("nothing on side anywhere refuses");
         assert!(matches!(err, RenderError::LogScaleNoValueOnSide { .. }), "{err:?}");
     }
@@ -6062,9 +6196,10 @@ mod tests {
             crate::transform::run::OutputLineage {
                 swarm: None,
                 statistic_input: Some(primary.clone()),
-                lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false }],
+                lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false, space_columns: Vec::new() }],
                 written_groupby: Vec::new(),
                 source: primary.schema(),
+                log_input: HashMap::new(),
             },
         );
         let layer = Layer {
@@ -6219,9 +6354,10 @@ mod tests {
         let lineage = crate::transform::run::OutputLineage {
             swarm: None,
             statistic_input: Some(pre.clone()),
-            lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false }],
+            lowered: vec![crate::transform::run::LoweredStep { id: vec![0], groupby: vec!["g".into()], shared: false, space_columns: Vec::new() }],
             written_groupby: Vec::new(),
             source: pre.schema(),
+            log_input: HashMap::new(),
         };
         let rows = chart_sort_rows(&drawn, Some(&lineage), None, Some("mean_y"));
         assert_eq!(rows.batch.num_rows(), 3, "batch is the chart's pre-statistic rows");

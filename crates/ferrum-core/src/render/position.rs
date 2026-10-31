@@ -931,6 +931,18 @@ fn set_float64_column(
     cols[idx] = Arc::new(values);
 }
 
+/// One group's sub-slot `(start, end)` inside the span `[lo, hi]`, under
+/// `apply_dodge_ordinal`'s own layout convention: `padding` taken off each
+/// end of the span, the `n_groups` sub-slots laid end to end from there.
+/// Shared by the data-space split and the log-space split (each on its own
+/// units — this never knows which).
+fn dodge_slot(lo: f64, hi: f64, padding: f64, n_groups: usize, group_idx: usize) -> (f64, f64) {
+    let span = hi - lo;
+    let slot = (span - span * padding * 2.0) / n_groups as f64;
+    let slot_lo = lo + span * padding + slot * group_idx as f64;
+    (slot_lo, slot_lo + slot)
+}
+
 /// Dense index per row: the position at which that row's category string first
 /// appeared in `cats`.
 ///
@@ -1153,6 +1165,22 @@ fn apply_dodge(
     let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
 
     if let Some((end_idx, end_vals)) = span_end {
+        // A span row on a log axis splits into equal slots in the axis's
+        // space, not in data units — a log-space-equal-width histogram's
+        // bins would otherwise dodge into slots of unequal width on the
+        // axis the reader sees. `band_scale` is the
+        // axis's own resolved scale, already in hand above; every other
+        // continuous scale kind splits in data units, unchanged.
+        let log_space = match band_scale {
+            ScaleKind::Log(log_scale) => {
+                let domain = log_scale.domain_pair();
+                Some(crate::transform::color_bin_group::LogAxisSpace {
+                    base: log_scale.base_internal(),
+                    side: crate::scale::log::LogSide::of(Some(&domain)),
+                })
+            }
+            _ => None,
+        };
         let mut new_start: Vec<Option<f64>> = Vec::with_capacity(band_vals.len());
         let mut new_end: Vec<Option<f64>> = Vec::with_capacity(band_vals.len());
         for (i, g) in by_cats.iter().enumerate() {
@@ -1171,10 +1199,15 @@ fn apply_dodge(
                 new_end.push(Some(hi));
                 continue;
             }
-            let slot = (span - span * padding * 2.0) / n_groups as f64;
-            let slot_lo = lo + span * padding + slot * group_idx as f64;
+            let (slot_lo, slot_hi) = match log_space.as_ref().and_then(|space| Some((space, space.forward(lo)?, space.forward(hi)?))) {
+                Some((space, llo, lhi)) => {
+                    let (lslot_lo, lslot_hi) = dodge_slot(llo, lhi, padding, n_groups, group_idx);
+                    (space.backward(lslot_lo), space.backward(lslot_hi))
+                }
+                None => dodge_slot(lo, hi, padding, n_groups, group_idx),
+            };
             new_start.push(Some(slot_lo));
-            new_end.push(Some(slot_lo + slot));
+            new_end.push(Some(slot_hi));
         }
         set_float64_column(&mut fields, &mut cols, band_col_idx, Float64Array::from(new_start));
         set_float64_column(&mut fields, &mut cols, end_idx, Float64Array::from(new_end));
@@ -2464,6 +2497,7 @@ mod tests {
             lowered: Vec::new(),
             written_groupby: Vec::new(),
             source: batch_xyg().schema(),
+            log_input: HashMap::new(),
         };
         let lineages = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), lineage)]);
         let theme = crate::layout::ThemeInputs::default();

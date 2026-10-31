@@ -19,6 +19,7 @@
 //!   operand's framed rows ([`crate::transform::branch::OperandFrame`]);
 //! - the composition steps the rows met ([`crate::transform::composed`]).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -28,10 +29,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::{PyErr, PyResult, Python};
 
 use crate::transform::branch::{self, BranchSpec};
-use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, StepBins};
+use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, SpaceDemand, StepBins, StepSpace};
 use crate::transform::composed::{ComposedRuns, ComposedSpec, ComposedState};
 use crate::transform::context::{RowsOrigin, StepInstance, TransformContext};
-use crate::transform::core::{spec_name, TransformSpec};
+use crate::transform::core::{spec_name, SpaceColumn, SpaceSlot, TransformSpec};
 use crate::transform::swarm::SwarmSpec;
 
 /// Sentinel key under which the final pipeline output is always published in
@@ -55,6 +56,32 @@ pub(crate) struct LoweredStep {
     /// tail's, which every reader of the chain shares, so they are not the
     /// batch's own statistic.
     pub(crate) shared: bool,
+    /// The output columns this step computes in one input slot's units
+    /// ([`TransformSpec::space_columns`]), read by [`OutputLineage::space_walk`]
+    /// to tell which of a channel's drawn columns this step computed, and
+    /// from which of its own input slots.
+    pub(crate) space_columns: Vec<SpaceColumn>,
+}
+
+/// One step of [`OutputLineage::space_walk`]: the lowered step at `index`
+/// in [`OutputLineage::lowered`] computes `output` from its `slot`, which
+/// reads column `input`. `is_root` when no earlier lowered step outputs
+/// `input`, so `input` is the caller's own column rather than a statistic's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceWalkStep<'a> {
+    pub(crate) index: usize,
+    pub(crate) slot: SpaceSlot,
+    pub(crate) output: &'a str,
+    pub(crate) input: &'a str,
+    pub(crate) is_root: bool,
+}
+
+impl SpaceWalkStep<'_> {
+    /// Whether the step computes `output` from `input` rather than passing
+    /// the input through under its own name (a `DataWindow` sort field).
+    pub(crate) fn computes(&self) -> bool {
+        self.output != self.input
+    }
 }
 
 /// What a run records beside one published batch ([`apply_transforms_named`]).
@@ -78,6 +105,19 @@ pub(crate) struct OutputLineage {
     /// The schema of the rows the lineage started from: the pipeline's
     /// source, or an operand's framed rows.
     pub(crate) source: SchemaRef,
+    /// The caller's own input column a demanded lowered statistic in this
+    /// lineage read, by `(axis, field)` ("x"/"y", the caller's column name)
+    /// — recorded only for a slot `SpaceDemand::of` marks as the walk's
+    /// root with an output column that differs from its input
+    /// (`SlotSpace::records_caller_input`), once per axis that draws it, so
+    /// a pass-through statistic (the ecdf's `DataWindow`) never duplicates
+    /// what the axis already reads directly from its own drawn column. Read
+    /// by the off-side tally
+    /// (`render::scale_resolve::domain::fold_log_input_into_tally`), which
+    /// counts it the same content-deduplicated way a primitive layer's own
+    /// column read is counted. Empty for a lineage no space demand ever
+    /// reached.
+    pub(crate) log_input: HashMap<(String, String), arrow::array::ArrayRef>,
 }
 
 impl OutputLineage {
@@ -104,6 +144,33 @@ impl OutputLineage {
     /// batch's own statistics consumed, when one of them groups by `field`.
     pub(crate) fn binned_rows(&self, field: &str) -> Option<&RecordBatch> {
         self.grouping(field).next().and(self.statistic_input.as_ref())
+    }
+
+    /// The lowered steps whose computed columns `drawn_column` descends
+    /// from, latest first: the latest lowered step (shared steps included,
+    /// since a named output's drawn column can descend from its chain's
+    /// tail, as a `Contour` polygon does from the `Kde2D` surface it reads)
+    /// whose [`LoweredStep::space_columns`] name the column, then, with that
+    /// step's input as the next column to find, the latest earlier step
+    /// that outputs it, until no earlier step does. Empty for a column no
+    /// lowered step computes (a histogram's count, a kde's density).
+    pub(crate) fn space_walk<'a>(&'a self, drawn_column: &'a str) -> Vec<SpaceWalkStep<'a>> {
+        let outputs = |step: &LoweredStep, column: &str| step.space_columns.iter().any(|c| c.output == column);
+        let mut walk = Vec::new();
+        let mut target = drawn_column;
+        let mut search_upto = self.lowered.len();
+        while let Some((index, column)) = self.lowered[..search_upto]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, step)| step.space_columns.iter().find(|c| c.output == target).map(|c| (i, c)))
+        {
+            let is_root = !self.lowered[..index].iter().any(|step| outputs(step, &column.input));
+            walk.push(SpaceWalkStep { index, slot: column.slot, output: &column.output, input: &column.input, is_root });
+            target = &column.input;
+            search_upto = index;
+        }
+        walk
     }
 }
 
@@ -150,11 +217,12 @@ pub(crate) fn apply_transforms_named(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<NamedOutputs> {
-    let plan = ctx.color_bin_plan.as_deref();
+    let plan = ctx.run_plan.as_deref();
     let mut run = Run {
         ctx,
-        demand: plan.map(|plan| &plan.demand),
-        edges: plan.and_then(|plan| plan.edges.clone()),
+        demand: plan.map(|plan| &plan.color.demand),
+        edges: plan.and_then(|plan| plan.color.edges.clone()),
+        space: plan.map(|plan| &plan.space),
         composed: ComposedRuns::default(),
     };
     let source = Rows::over(batch.clone());
@@ -169,7 +237,7 @@ pub(crate) fn apply_transforms_named(
 /// tail over `batch` (or over the named output its `input` names, read from
 /// `ctx`).
 pub(crate) fn apply_branch(spec: &BranchSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
-    let mut run = Run { ctx, demand: None, edges: None, composed: ComposedRuns::default() };
+    let mut run = Run { ctx, demand: None, edges: None, space: None, composed: ComposedRuns::default() };
     let mut published = Published { outputs: ctx.named_outputs.clone(), ..Published::default() };
     run.branch(spec, &[], &Rows::over(batch.clone()), &mut published).map(|tail| tail.batch)
 }
@@ -203,6 +271,8 @@ struct Lineage<'s> {
     /// Which composition steps ran on these rows and which still wait for a
     /// column ([`ComposedState`]).
     composed: ComposedState<'s>,
+    /// See [`OutputLineage::log_input`].
+    log_input: HashMap<(String, String), arrow::array::ArrayRef>,
 }
 
 impl Lineage<'_> {
@@ -216,6 +286,7 @@ impl Lineage<'_> {
             source: batch.schema(),
             origin: RowsOrigin::default(),
             composed: ComposedState::default(),
+            log_input: HashMap::new(),
         }
     }
 
@@ -226,6 +297,7 @@ impl Lineage<'_> {
             lowered: self.lowered,
             written_groupby: self.written_groupby,
             source: self.source,
+            log_input: self.log_input,
         }
     }
 
@@ -308,6 +380,7 @@ struct Run<'s, 'c> {
     ctx: &'c TransformContext,
     demand: Option<&'c BinDemand>,
     edges: Option<Rc<[f64]>>,
+    space: Option<&'c SpaceDemand>,
     composed: ComposedRuns<'s>,
 }
 
@@ -402,6 +475,10 @@ impl<'s> Run<'s, '_> {
             (Some(id), Some(demand)) => demand.fields(id),
             _ => &[],
         };
+        let space = match (&lowered, self.space) {
+            (Some(id), Some(space)) => space.space(id),
+            _ => StepSpace::default(),
+        };
         // Each transform sees the named outputs accumulated so far via the
         // context, which `Reorder(from=...)` reads.
         let mut step_ctx = self.ctx.clone();
@@ -411,8 +488,20 @@ impl<'s> Run<'s, '_> {
         step_ctx.lowering = step_lowering;
         step_ctx.color_bins = (!fields.is_empty())
             .then(|| Rc::new(StepBins { fields: fields.to_vec(), edges: self.edges.clone() }));
+        step_ctx.log_space = (!space.is_empty()).then(|| Rc::new(space));
+        // A fresh sink per step call (never `self.ctx.log_input.clone()`,
+        // which would share one `Rc` across the whole run): the column a
+        // demanded step records here belongs to THIS step's own output,
+        // read back right after the call below.
+        step_ctx.log_input = Rc::new(RefCell::new(HashMap::new()));
         let result = spec.apply_with_context(&current.batch, &step_ctx)?;
-        let own = lowered.map(|id| LoweredStep { id, groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(), shared: false });
+        let step_log_input = step_ctx.log_input.borrow().clone();
+        let own = lowered.map(|id| LoweredStep {
+            id,
+            groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(),
+            shared: false,
+            space_columns: spec.space_columns(),
+        });
         // A user's own step records its WHOLE grouping on every output it
         // makes, since there is no planner involved before the marker at
         // all. A lowered step records only the fields the caller wrote
@@ -423,14 +512,14 @@ impl<'s> Run<'s, '_> {
         // Secondary outputs first, so a named step's explicit `name` wins a
         // key collision. A secondary output descends from no Swarm.
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
-            let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone()) });
+            let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone(), &step_log_input) });
             lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(key.clone()) };
             let rows = self.fork(&mut current, Rows { batch, lineage }, published)?;
             published.insert(key, rows);
         }
         match spec_name(spec) {
             Some(name) => {
-                let mut lineage = after(with_swarm(forked(&current, own), spec));
+                let mut lineage = after(with_swarm(forked(&current, own, &step_log_input), spec));
                 lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(name.to_string()) };
                 let rows = self.fork(&mut current, Rows { batch: result, lineage }, published)?;
                 published.insert(name.to_string(), rows);
@@ -441,6 +530,9 @@ impl<'s> Run<'s, '_> {
                 if let Some(own) = own {
                     lineage.statistic_input.get_or_insert_with(|| current.batch.clone());
                     lineage.lowered.push(own);
+                    for (key, column) in &step_log_input {
+                        lineage.log_input.insert(key.clone(), column.clone());
+                    }
                 }
                 lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: None };
                 self.settle(Rows { batch: result, lineage: with_swarm(lineage, spec) }, published)
@@ -619,8 +711,9 @@ fn caller_groupby(spec: &TransformSpec) -> &[String] {
 /// The lineage of an output a step makes from `current` beside the chain
 /// (a named or secondary output), `own` the step itself when it is lowered:
 /// the tail's lowered steps reach it as shared, and its own statistic, when
-/// it is one, consumed the tail's rows.
-fn forked<'s>(current: &Rows<'s>, own: Option<LoweredStep>) -> Lineage<'s> {
+/// it is one, consumed the tail's rows and (if demanded) recorded
+/// `log_input`'s caller column.
+fn forked<'s>(current: &Rows<'s>, own: Option<LoweredStep>, log_input: &HashMap<(String, String), arrow::array::ArrayRef>) -> Lineage<'s> {
     let mut lineage = current.lineage.clone();
     for step in &mut lineage.lowered {
         step.shared = true;
@@ -628,6 +721,9 @@ fn forked<'s>(current: &Rows<'s>, own: Option<LoweredStep>) -> Lineage<'s> {
     if let Some(own) = own {
         lineage.statistic_input = Some(current.batch.clone());
         lineage.lowered.push(own);
+        for (key, column) in log_input {
+            lineage.log_input.insert(key.clone(), column.clone());
+        }
     }
     lineage
 }

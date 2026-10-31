@@ -88,12 +88,12 @@ use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    effective_share, flatten_leaf_specs, resolve_composite_scales_nonpositional,
+    effective_share, flatten_leaf_specs, log_scale_groups, resolve_composite_scales_nonpositional,
     resolve_composite_scales_positional, CompositeResolveError, LeafResolveInput,
 };
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
-use super::scale_resolve::{ColorScale, ConfiguredAuxiliary, LeafScaleContext, MemberChannels, OverlayAuxiliary, OverlayMembership};
+use super::scale_resolve::{Channel, ColorScale, ConfiguredAuxiliary, LeafScaleContext, MemberChannels, OverlayAuxiliary, OverlayMembership};
 use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::axis::AlignAxis;
@@ -325,6 +325,105 @@ fn same_config_surface(warning: &RenderWarning, a: &ChartConfig, b: &ChartConfig
     }
 }
 
+/// Re-prepare, in place, every `Overlay` member whose group's axis a
+/// sibling's `Log` caller scale establishes AND who itself reads a demanded
+/// statistic (`Bin`/`Kde`/`Kde2D`/`Contour` — [`prepare::reads_statistic_output`]):
+/// `prepared[idx]` is replaced by a fresh [`prepare::prepare_render_inputs`]
+/// run over a [`LeafScaleContext`] seeded with that `Log` scale on the
+/// established channel(s) (`x_scale`/`y_scale`, on top of whatever `pass_one`
+/// already carried — overlay membership, auxiliary deferral), so the
+/// member's own `run_pipeline` demands its statistic in that scale's space
+/// (`render::prepare::log_space_reads` adopts it through `with_group_scale`,
+/// the same path a leaf's own real scale resolve already uses). A member on
+/// a channel no group establishes `Log` on, or that reads no statistic, is
+/// left exactly as pass one prepared it.
+///
+/// Builds its own temporary [`LeafResolveInput`] view over `prepared`
+/// (`views`, below) to call [`log_scale_groups`] — the SAME read of each
+/// group's axis the real positional resolve makes — and drops it before
+/// mutating `prepared`, since a `LeafResolveInput` borrows `prepared`'s own
+/// fields and `prepared[idx] = ...` cannot run while one is alive. The REAL
+/// `resolve_inputs` the rest of the render reads is built fresh from
+/// `prepared` by the caller, after this returns.
+///
+/// A leaf whose own channel carries a `Log` scale it declared itself needs
+/// no re-prepare: its own pass-one `run_pipeline` already demanded its
+/// statistic correctly (this is the gap ONLY for a member reading the
+/// group's scale through a SIBLING's declaration).
+fn reprepare_log_overlay_members(
+    tree: &CompositeNode,
+    leaves: &[CompositeLeafInput<'_>],
+    pass_one: &[Option<LeafScaleContext>],
+    prepared: &mut [prepare::PreparedInputs],
+    leaf_refusal: &dyn Fn(usize, RenderError) -> CompositeRenderError,
+) -> Result<(), CompositeRenderError> {
+    let n = leaves.len();
+    let span: Vec<usize> = (0..n).collect();
+
+    let mut groups: Vec<(Vec<usize>, Channel, crate::spec::encoding::ScaleSpec)> = Vec::new();
+    {
+        let views: Vec<LeafResolveInput<'_>> = leaves
+            .iter()
+            .zip(prepared.iter())
+            .map(|(leaf, prep)| LeafResolveInput {
+                spec: leaf.spec,
+                encoding: prep.rendering_encoding(),
+                final_batch: prep.final_batch(),
+                transform_outputs: &prep.transform_outputs,
+                transform_lineages: &prep.transform_lineages,
+                x_text_rows: prep.x_text_rows.clone(),
+                y_text_rows: prep.y_text_rows.clone(),
+                theme: leaf.theme,
+            })
+            .collect();
+        for channel in [Channel::X, Channel::Y] {
+            for (group, scale) in log_scale_groups(tree, &span, channel, &views) {
+                groups.push((group, channel, scale));
+            }
+        }
+    }
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    let mut x_scale: Vec<Option<crate::spec::encoding::ScaleSpec>> = vec![None; n];
+    let mut y_scale: Vec<Option<crate::spec::encoding::ScaleSpec>> = vec![None; n];
+    for (group, channel, scale) in &groups {
+        for &idx in group {
+            let reads_statistic = prepared[idx]
+                .layers
+                .iter()
+                .any(|layer| prepare::reads_statistic_output(layer, &prepared[idx].transform_lineages));
+            if !reads_statistic {
+                continue;
+            }
+            match channel {
+                Channel::X => x_scale[idx] = Some(scale.clone()),
+                Channel::Y => y_scale[idx] = Some(scale.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    for idx in 0..n {
+        if x_scale[idx].is_none() && y_scale[idx].is_none() {
+            continue;
+        }
+        let mut ctx = pass_one[idx].clone().unwrap_or_default();
+        if let Some(scale) = x_scale[idx].take() {
+            ctx.x_scale = Some(scale);
+        }
+        if let Some(scale) = y_scale[idx].take() {
+            ctx.y_scale = Some(scale);
+        }
+        let leaf = &leaves[idx];
+        let new_prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.viewport, leaf.chart_config, Some(&ctx))
+            .map_err(|source| leaf_refusal(idx, source))?;
+        prepared[idx] = new_prep;
+    }
+    Ok(())
+}
+
 /// Render a validated composite tree into one [`SceneGraph`], plus every
 /// leaf's [`RenderWarning`]s aggregated in leaf pre-order.
 ///
@@ -452,6 +551,20 @@ pub(crate) fn render_composite_scene(
             .map_err(|source| leaf_refusal(i, source))?;
         prepared.push(prep);
     }
+    // An `Overlay` group's `Log` caller scale is not known until THIS pass's
+    // own leaves exist (`log_scale_groups` reads each member's resolved
+    // rendering encoding), so a member that reads a demanded statistic
+    // (`Bin`/`Kde`/`Kde2D`/`Contour`) ran its own pipeline in DATA space
+    // above, even when a sibling member's `LogScale` will go on to
+    // establish the group's axis. Re-prepare exactly those members now,
+    // before `resolve_inputs` is built from `prepared` below, mirroring
+    // `run_pipeline`'s own run/read-demand/rerun at the composite level —
+    // the one-pass cost that still lands on every `LayerChart`/`+`-overlay
+    // leaf whose group turns out not to need it is the tree walk alone;
+    // a group with no `Log` caller scale, or whose members read no
+    // statistic, re-prepares nothing (`reprepare_log_overlay_members`
+    // returns `Ok(())` with `prepared` untouched).
+    reprepare_log_overlay_members(tree, leaves, &pass_one, &mut prepared, &leaf_refusal)?;
     let resolve_inputs: Vec<LeafResolveInput<'_>> = leaves
         .iter()
         .zip(&prepared)
@@ -6351,6 +6464,182 @@ mod tests {
         let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
         assert_eq!(left_out.len(), 1, "{warnings:?}");
         assert!(matches!(left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 1, .. }), "{left_out:?}");
+    }
+
+    /// An unlayered `mark_histogram()`'s lowered `Bin`, over `v = values` (a
+    /// `Sturges`-ruled, niced bin count on strictly positive data, the same
+    /// shape `global_extent_in_space`'s own facet-pin test fixture uses to
+    /// confirm the linear pin straddles zero for this data) — the `x`
+    /// encoding bound to the statistic's own `bin_start`/`bin_end`/`count`
+    /// columns, exactly as Python's statistics lowering leaves it.
+    fn histogram_leaf_x(values: &[f64]) -> (ChartSpec, RecordBatch) {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(values.to_vec()))],
+        )
+        .unwrap();
+        let bin = crate::transform::core::TransformSpec::Bin(crate::transform::bin::BinSpec {
+            written_groupby: Vec::new(),
+            field: "v".into(),
+            mode: crate::transform::bin_mode::BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+            per_row: false,
+            aggregates: None,
+        });
+        let marker = crate::transform::core::TransformSpec::Identity(crate::transform::identity::IdentitySpec {
+            name: None,
+            statistics: true,
+        });
+        let spec = ChartSpec {
+            mark: Mark::Bar,
+            transforms: vec![marker, bin],
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "bin_start".into(), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "bin_end".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "count".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    /// A `mark_point` leaf drawing the SAME raw field `x` demands, under its
+    /// own `LogScale` — the sibling whose scale the `Overlay` group adopts.
+    fn point_leaf_log_x(values: &[f64]) -> (ChartSpec, RecordBatch) {
+        let log_scale = crate::spec::encoding::ScaleSpec::Log {
+            base: 10.0,
+            common: no_domain_common(),
+            nice: false,
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(values.to_vec())),
+                Arc::new(Float64Array::from((0..values.len()).map(|i| i as f64).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), scale: Some(log_scale), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    /// `fm.LayerChart(hist, point(LogScale))`'s own shape, either member
+    /// order: strictly positive data keeps every bar with no warning. The
+    /// histogram leaf's `Bin` demands the `Overlay` group's own `Log`
+    /// scale, the same axis a sibling member establishes, so its niced
+    /// extent bins in log units — a `bin_start` of exactly `0.0` in data
+    /// units never arises there, so no bar is dropped and no row is left
+    /// out, even though a data-space nicing would otherwise round an edge
+    /// down to `0.0` and read it as off-side. Folding and naming the
+    /// histogram's own off-side count correctly is not enough on its own
+    /// to keep the bar: the bin itself has to compute in the group's log
+    /// space.
+    #[test]
+    fn an_overlay_histogram_demands_its_bin_in_the_siblings_log_scale_space() {
+        let values: Vec<f64> = (1..=40).map(|v| v as f64).collect();
+        for hist_first in [true, false] {
+            let (hist_spec, hist_batch) = histogram_leaf_x(&values);
+            let (point_spec, point_batch) = point_leaf_log_x(&values);
+            let (spec0, batch0, spec1, batch1) = if hist_first {
+                (hist_spec, hist_batch, point_spec, point_batch)
+            } else {
+                (point_spec, point_batch, hist_spec, hist_batch)
+            };
+            let holds = [
+                LeafHold { spec: spec0, batch: batch0, ..hold() },
+                LeafHold { spec: spec1, batch: batch1, ..hold() },
+            ];
+            let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                resolve.x = crate::layout::facet::ResolveMode::Shared;
+            }
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+                .unwrap_or_else(|e| panic!("hist_first={hist_first}: expected to render, refused with {e}"));
+            assert!(warnings.is_empty(), "hist_first={hist_first}: strictly positive data must warn nothing: {warnings:?}");
+            let hist_panel = if hist_first { 0 } else { 1 };
+            let bar_count = scene.panels[hist_panel].marks[0].nodes.len();
+            assert!(bar_count > 0, "hist_first={hist_first}: expected bars, got {bar_count}");
+        }
+    }
+
+    /// The companion negative control: 2 off-side caller rows give ONE
+    /// warning naming the whole-frame count, not the histogram's own
+    /// (internal, data-space) bin count — the same content-deduplicated
+    /// tally a flat chart's `Log` channel reads, reached here for an
+    /// `Overlay` group whose axis a sibling's `Log` scale establishes.
+    #[test]
+    fn an_overlay_histogram_and_its_log_sibling_share_one_off_side_count() {
+        let mut values: Vec<f64> = (1..=20).map(|v| v as f64).collect();
+        values.push(0.0);
+        values.push(-2.0);
+        let (hist_spec, hist_batch) = histogram_leaf_x(&values);
+        let (point_spec, point_batch) = point_leaf_log_x(&values);
+        let holds = [
+            LeafHold { spec: hist_spec, batch: hist_batch, ..hold() },
+            LeafHold { spec: point_spec, batch: point_batch, ..hold() },
+        ];
+        let mut tree = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+        let (_, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect("renders");
+        let left_out: Vec<&RenderWarning> = warnings.iter().filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. })).collect();
+        assert_eq!(left_out.len(), 1, "{warnings:?}");
+        assert!(matches!(left_out[0], RenderWarning::LogScaleRowsLeftOut { rows: 2, .. }), "{left_out:?}");
+    }
+
+    /// Two doors that re-prepare no member: a `LayerChart` with no `Log`
+    /// member (no group axis is `Log`, so `reprepare_log_overlay_members`
+    /// finds no group at all), and one of primitives with a `Log` member
+    /// (every member reads its own rows directly, so `reads_statistic_output`
+    /// is false for all of them and nothing is re-prepared).
+    #[test]
+    fn an_overlay_with_no_log_member_or_no_statistic_member_is_not_reprepared() {
+        // No Log member anywhere: two plain points.
+        let holds_plain = [hold(), hold()];
+        let tree_plain = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        let leaves_plain = [leaf_input(&holds_plain[0], 300.0, 200.0), leaf_input(&holds_plain[1], 300.0, 200.0)];
+        let (_, warnings_plain) = render_composite_scene(&tree_plain, &leaves_plain, &ThemeInputs::default()).expect("renders");
+        assert!(warnings_plain.is_empty(), "{warnings_plain:?}");
+
+        // A Log member, but its sibling is a primitive (no statistic output
+        // anywhere in the group) -- `point_leaf_log_x` paired with a second
+        // plain point on the same field.
+        let (log_spec, log_batch) = point_leaf_log_x(&[1.0, 2.0, 4.0, 8.0, 16.0]);
+        let plain = hold();
+        let holds_mixed = [
+            LeafHold { spec: log_spec, batch: log_batch, ..hold() },
+            LeafHold { spec: plain.spec.clone(), batch: plain.batch.clone(), ..hold() },
+        ];
+        let mut tree_mixed = composite(CompositeLayout::Overlay, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree_mixed {
+            resolve.x = crate::layout::facet::ResolveMode::Shared;
+        }
+        let leaves_mixed = [leaf_input(&holds_mixed[0], 300.0, 200.0), leaf_input(&holds_mixed[1], 300.0, 200.0)];
+        let (_, warnings_mixed) = render_composite_scene(&tree_mixed, &leaves_mixed, &ThemeInputs::default())
+            .unwrap_or_else(|e| panic!("expected to render, refused with {e}"));
+        assert!(warnings_mixed.is_empty(), "{warnings_mixed:?}");
     }
 
     /// The generic explicit-domain census shares the same multiplicity

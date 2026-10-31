@@ -19,7 +19,13 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from tests._svg_extents import axis_tick_labels, x_axis_extents, x_axis_title, y_axis_title
+from tests._svg_extents import (
+    axis_tick_labels,
+    log_axis_pixels_per_unit,
+    x_axis_extents,
+    x_axis_title,
+    y_axis_title,
+)
 
 
 def _warnings_of(render: Callable[[], Any]) -> tuple[list[str], Any]:
@@ -307,39 +313,31 @@ def test_ecdf_refuses_a_field_bearing_y(y):
 # primary kinds.
 # ---------------------------------------------------------------------------
 
-#: A positive-skewed sample (seed fixed) whose Sturges bin edges put at
-#: least one bin_start at or below 0 -- the one value a `LogScale` cannot
-#: place, so its own typed warning is proof the resolved scale is
-#: genuinely `log`, not merely accepted-and-ignored.
+#: A positive-skewed sample (seed fixed) spanning several decades, so its
+#: rendered x ticks give `log_axis_pixels_per_unit` enough spread to tell a log
+#: axis from a linear one.
 _rng = np.random.default_rng(0)
 _LOG_DF = pl.DataFrame({"v": (np.exp(_rng.normal(2, 2.5, 300)) + 0.5).tolist()})
-
-_LOG_SCALE_WARNING = "which a LogScale cannot place"
 
 
 def test_log_scale_with_a_channel_x_renders():
     """A channel `x=fm.X("v", title="Value")` with `log_scale=True` renders:
     the channel's own `title=` survives the rebuild, and the resolved scale
-    is genuinely `log` (the typed `LogScale` warning is the proof), not
-    silently accepted-and-linear."""
-    msgs, svg = _warnings_of(
-        lambda: fm.displot(
-            _LOG_DF, x=fm.X("v", title="Value"), kind="hist", log_scale=True
-        ).to_svg()
-    )
+    is genuinely `log` (its own tick ladder is the proof), not silently
+    accepted-and-linear."""
+    svg = fm.displot(_LOG_DF, x=fm.X("v", title="Value"), kind="hist", log_scale=True).to_svg()
     assert x_axis_title(svg) == "Value"
-    assert any(_LOG_SCALE_WARNING in m for m in msgs)
+    assert log_axis_pixels_per_unit(svg) is not None
 
 
 def test_log_scale_on_ecdf_renders():
-    """`kind="ecdf"` with `log_scale=True` renders, with the `LogScale`
-    warning as proof the scale is real; the same call with no `log_scale`
-    never emits it."""
-    msgs, _ = _warnings_of(lambda: fm.displot(_LOG_DF, x="v", kind="ecdf", log_scale=True).to_svg())
-    assert any(_LOG_SCALE_WARNING in m for m in msgs)
+    """`kind="ecdf"` with `log_scale=True` renders with a genuinely `log`
+    x axis; the same call with no `log_scale` resolves a linear one."""
+    svg = fm.displot(_LOG_DF, x="v", kind="ecdf", log_scale=True).to_svg()
+    assert log_axis_pixels_per_unit(svg) is not None
 
-    control_msgs, _ = _warnings_of(lambda: fm.displot(_LOG_DF, x="v", kind="ecdf").to_svg())
-    assert not any(_LOG_SCALE_WARNING in m for m in control_msgs)
+    control_svg = fm.displot(_LOG_DF, x="v", kind="ecdf").to_svg()
+    assert log_axis_pixels_per_unit(control_svg) is None
 
 
 #: (primary kind, overlay flag) -- every kind/overlay combination a figure
@@ -352,17 +350,15 @@ _OVERLAY_LOG_CASES = [("hist", "kde"), ("hist", "rug"), ("ecdf", "kde"), ("ecdf"
 )
 def test_log_scale_reaches_a_layered_overlay(kind, overlay):
     """A layered `kde=`/`rug=` overlay inherits `log_scale=True` from the
-    chart-level x binding its panel shares; the same call with no
-    `log_scale` never emits the `LogScale` warning."""
+    chart-level x binding its panel shares, resolving a genuinely `log` x
+    axis; the same call with no `log_scale` resolves a linear one."""
     kwargs = {overlay: True}
 
-    msgs, _ = _warnings_of(
-        lambda: fm.displot(_LOG_DF, x="v", kind=kind, log_scale=True, **kwargs).to_svg()
-    )
-    assert any(_LOG_SCALE_WARNING in m for m in msgs), (kind, overlay)
+    svg = fm.displot(_LOG_DF, x="v", kind=kind, log_scale=True, **kwargs).to_svg()
+    assert log_axis_pixels_per_unit(svg) is not None, (kind, overlay)
 
-    control_msgs, _ = _warnings_of(lambda: fm.displot(_LOG_DF, x="v", kind=kind, **kwargs).to_svg())
-    assert not any(_LOG_SCALE_WARNING in m for m in control_msgs), (kind, overlay)
+    control_svg = fm.displot(_LOG_DF, x="v", kind=kind, **kwargs).to_svg()
+    assert log_axis_pixels_per_unit(control_svg) is None, (kind, overlay)
 
 
 _LOG_SCALE_REFUSAL = (

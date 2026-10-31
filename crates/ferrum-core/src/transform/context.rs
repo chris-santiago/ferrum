@@ -696,18 +696,42 @@ pub struct TransformContext {
     /// boundary inherits the same "read `ctx.warnings` back after calling"
     /// contract rather than needing to invent one.
     pub warnings: Rc<RefCell<Vec<TransformWarning>>>,
-    /// The binned-color grouping of this pipeline run
-    /// ([`crate::transform::color_bin_group`]): which steps group which
-    /// columns by bin, and the edges. Set only by
+    /// The run plan for this pipeline run ([`crate::transform::color_bin_group::RunPlan`]):
+    /// the binned-color demand and edges, and the positional-space demand a
+    /// log axis places on the lowered statistics it draws. Set only by
     /// `render::prepare::run_transforms_with_facet`; `None` (the default)
     /// runs every step as written.
-    pub(crate) color_bin_plan: Option<Rc<crate::transform::color_bin_group::ColorBinPlan>>,
+    pub(crate) run_plan: Option<Rc<crate::transform::color_bin_group::RunPlan>>,
     /// The binned columns the step this context is handed to groups by bin,
-    /// set per step by the pipeline runner from [`Self::color_bin_plan`] and
-    /// read by the shared partitioner
+    /// set per step by the pipeline runner from [`Self::run_plan`]'s color
+    /// plan and read by the shared partitioner
     /// ([`crate::transform::group_key::GroupKeyReader`]). `None` keys every
     /// groupby column by its raw values.
     pub(crate) color_bins: Option<Rc<crate::transform::color_bin_group::StepBins>>,
+    /// The log space(s) the step this context is handed to is demanded in,
+    /// set per step by the pipeline runner from [`Self::run_plan`]'s space
+    /// demand. `None` (the default) runs the step in data space, as every
+    /// step outside a log-resolved axis's lineage does.
+    pub(crate) log_space: Option<Rc<crate::transform::color_bin_group::StepSpace>>,
+    /// The caller's own input column a demanded step ([`Self::log_space`])
+    /// read before mapping, by `(axis, field)` -- a fresh sink per step call
+    /// ([`Self::note_log_input`]), read back by the pipeline runner right
+    /// after the call and folded into that output's lineage
+    /// (`crate::transform::run::OutputLineage::log_input`). Written only for
+    /// the entry [`crate::transform::color_bin_group::SpaceDemand::of`]
+    /// marks as the caller's own root with an output column that differs
+    /// from its input ([`crate::transform::color_bin_group::SlotSpace::records_caller_input`]) —
+    /// every other demanded step's drawn column is read directly by the
+    /// axis, or is itself a statistic's own output, so it needs no second
+    /// reader to find the caller's column. The off-side tally
+    /// (`render::arrow_cast::LeftOutTally`) counts this column exactly like
+    /// a primitive layer's own column read, so a statistic sharing a
+    /// caller's column with a primitive mark or another statistic counts it
+    /// once. Unlike [`Self::warnings`], never shared across steps: each step
+    /// gets its own empty sink so its own column is attributed to its own
+    /// output, not overwritten by a later step demanded on a different
+    /// field.
+    pub(crate) log_input: Rc<RefCell<HashMap<(String, String), arrow::array::ArrayRef>>>,
     /// The pipeline step this context is handed to, set per step by the
     /// pipeline runner; [`StepInstance::Unplaced`] outside a run.
     pub(crate) step: StepInstance,
@@ -747,6 +771,13 @@ impl TransformContext {
     /// for why `Rc<RefCell<_>>` is load-bearing here).
     pub(crate) fn warn(&self, warning: TransformWarning) {
         self.warnings.borrow_mut().push(warning);
+    }
+
+    /// Record `column`, the caller's own input for `field` on `axis`
+    /// ("x"/"y"), before a demanded step maps it — see [`Self::log_input`]'s
+    /// doc.
+    pub(crate) fn note_log_input(&self, axis: &str, field: &str, column: arrow::array::ArrayRef) {
+        self.log_input.borrow_mut().insert((axis.to_string(), field.to_string()), column);
     }
 
     /// Raise `refusal`, the refusal a `groupby` null-key drop that left

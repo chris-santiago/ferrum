@@ -2007,9 +2007,15 @@ pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
 /// alternative-scale remedy a column touching zero needs — the one piece of
 /// this text that differs between the two channel classes; every other word
 /// is shared.
+/// `field` is `None` only for a demanded statistic's drawn column (an
+/// internal name like `bin_start`) whose caller explicitly suppressed the
+/// channel's title (`title=""`) — see
+/// `render::scale_resolve::positional::log_axis_name`'s doc. It drops the
+/// "of '...'" clause entirely rather than naming the internal column; the
+/// row count and reason stay legible without it.
 pub(crate) fn log_no_value_on_side_reason(
     channel: &str,
-    field: &str,
+    field: Option<&str>,
     rows: usize,
     side: crate::scale::log::LogSide,
     has_zero: bool,
@@ -2029,19 +2035,20 @@ pub(crate) fn log_no_value_on_side_reason(
     } else {
         "fm.SqrtScale() or fm.LinearScale()"
     };
+    let of_field = field.map(|f| format!(" of '{f}'")).unwrap_or_default();
     match (has_zero, opposite_extent) {
         (false, Some((min, max))) => format!(
-            "every value of '{field}' ({rows} rows) is {sign_word}, and a LogScale with no domain maps only \
+            "every value{of_field} ({rows} rows) is {sign_word}, and a LogScale with no domain maps only \
              {maps_word} values; pass an explicit {sign_word} domain, e.g. fm.LogScale(domain=[{min}, {max}]), \
              to draw a mirrored log scale"
         ),
         (_, Some((min, max))) => format!(
-            "{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain maps only {maps_word} \
+            "{rows} row(s){of_field} are {excluded}, and a LogScale with no domain maps only {maps_word} \
              values; use {alt_scale}, or pass an explicit {sign_word} domain, e.g. fm.LogScale(domain=[{min}, {max}])",
             excluded = side.excluded_words(),
         ),
         (_, None) => format!(
-            "{rows} row(s) of '{field}' are {excluded}, and a LogScale with no domain maps only {maps_word} \
+            "{rows} row(s){of_field} are {excluded}, and a LogScale with no domain maps only {maps_word} \
              values; use {alt_scale}",
             excluded = side.excluded_words(),
         ),
@@ -2136,7 +2143,12 @@ pub enum RenderWarning {
     /// for an auxiliary channel, which `CoordFlip` never swaps.
     LogScaleRowsLeftOut {
         channel: String,
-        field: String,
+        /// The name the axis shows: the caller's own `title=` when one is
+        /// set, the raw field when none is, `None` under an explicit
+        /// suppressed title (drops the "of '...'" clause entirely) — the
+        /// same three-way contract `DomainRowsLeftOut`'s own `field` already
+        /// carries.
+        field: Option<String>,
         rows: usize,
         side: crate::scale::log::LogSide,
         coord_flipped: bool,
@@ -2735,17 +2747,18 @@ impl std::fmt::Display for RenderWarning {
             RenderWarning::LogScaleRowsLeftOut { channel, field, rows, side, coord_flipped } => {
                 let excluded = side.excluded_words();
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let named = field.as_ref().map(|field| format!(" of '{field}'")).unwrap_or_default();
                 if excluded_channel_is_positional(channel) {
                     write!(
                         f,
-                        "{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale \
+                        "{channel} scale: {rows} row(s){named} are {excluded}, which a LogScale \
                          cannot place, so they are not drawn; filter them, or use fm.SymlogScale() for \
                          data that reaches zero"
                     )
                 } else {
                     write!(
                         f,
-                        "{channel} scale: {rows} row(s) of '{field}' are {excluded}, which a LogScale \
+                        "{channel} scale: {rows} row(s){named} are {excluded}, which a LogScale \
                          cannot map, so they are not drawn; filter them, or use fm.SqrtScale()"
                     )
                 }
@@ -3147,7 +3160,7 @@ mod tests {
             }),
             RenderWarning::LogScaleRowsLeftOut {
                 channel: "size".into(),
-                field: "v".into(),
+                field: Some("v".into()),
                 rows: 3,
                 side: crate::scale::log::LogSide::Positive,
                 coord_flipped: false,
