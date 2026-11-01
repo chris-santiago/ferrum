@@ -338,7 +338,7 @@ pub(crate) fn run_in_log_space(
         if d.shape == ColumnShape::Scalar {
             let caller = caller_column(batch, d.field, label)?;
             if d.space.records_caller_input {
-                for axis in &d.space.axes {
+                for &axis in &d.space.axes {
                     ctx.note_log_input(axis, d.field, Arc::clone(caller));
                 }
             }
@@ -395,6 +395,7 @@ pub(crate) fn numeric_dtype_columns(name: &str, values: &[i64]) -> Vec<(&'static
 mod tests {
     use super::*;
     use crate::scale::log::LogSide;
+    use crate::spec::layer::PositionalAxis;
 
     fn positive() -> LogAxisSpace {
         LogAxisSpace { base: 10.0, side: LogSide::Positive }
@@ -448,7 +449,7 @@ mod tests {
     }
 
     fn x_slot() -> SlotSpace {
-        SlotSpace { space: positive(), axes: vec!["x"], records_caller_input: true }
+        SlotSpace { space: positive(), axes: vec![PositionalAxis::X], records_caller_input: true }
     }
 
     /// Mapping a demanded scalar slot over a column of any numeric type, or
@@ -501,7 +502,7 @@ mod tests {
     fn two_slots_reading_one_column_map_it_once_each() {
         pyo3::Python::initialize();
         let batch = RecordBatch::try_from_iter([("v", Arc::new(Float64Array::from(vec![10.0, 100.0])) as ArrayRef)]).unwrap();
-        let (x, y) = (x_slot(), SlotSpace { space: LogAxisSpace { base: 2.0, ..positive() }, axes: vec!["y"], records_caller_input: true });
+        let (x, y) = (x_slot(), SlotSpace { space: LogAxisSpace { base: 2.0, ..positive() }, axes: vec![PositionalAxis::Y], records_caller_input: true });
         let (batch, x_name) = with_mapped_slot(&batch, &DemandedField { slot: SpaceSlot::X, field: "v", space: &x, shape: ColumnShape::Scalar }, "t").unwrap();
         let (batch, y_name) = with_mapped_slot(&batch, &DemandedField { slot: SpaceSlot::Y, field: "v", space: &y, shape: ColumnShape::Scalar }, "t").unwrap();
         let read = |name: &str| batch.column_by_name(name).unwrap().as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec();

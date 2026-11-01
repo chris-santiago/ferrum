@@ -2226,7 +2226,7 @@ fn kde_both_extent_slots_fold_the_same_rows() {
 
 /// The one `field` slot demanded along `x` in `space`.
 fn field_slot(space: crate::transform::color_bin_group::LogAxisSpace) -> SlotSpace {
-    SlotSpace { space, axes: vec!["x"], records_caller_input: true }
+    SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true }
 }
 
 fn ctx_demanding_x(
@@ -2259,7 +2259,7 @@ fn kde_in_log_space_grids_and_fits_in_log_units() {
     let grid = col(&out, "value");
     assert!(grid.iter().all(|v| v.is_finite() && *v > 0.0), "{grid:?}");
     let recorded = ctx.log_input.borrow();
-    let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+    let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
     assert_eq!(column.len(), 8, "the recorded column is the caller's whole input");
     // Grid points evenly spaced in log space are NOT evenly spaced in data
     // space — a linear-space grid would be.
@@ -2282,7 +2282,7 @@ fn kde_in_log_space_leaves_off_side_rows_out_but_records_the_caller_column() {
     let ctx = ctx_demanding_x(positive_space());
     let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
     let recorded = ctx.log_input.borrow();
-    let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+    let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
     assert_eq!(column.len(), 6, "the recorded column keeps every caller row, off-side included");
 }
 

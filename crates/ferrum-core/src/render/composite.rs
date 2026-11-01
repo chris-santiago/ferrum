@@ -1589,7 +1589,14 @@ fn leaf_positional_domain(
             // merging every member's tally, not this leaf.
             if side.is_some() {
                 let mut leaf_tally = leaf_tally;
-                fold_log_input_into_tally(leaf.transform_lineages, channel.as_str(), side, &mut leaf_tally)
+                // A composite overlay never carries an independent-y
+                // member (refused before any leaf resolves), so every leaf
+                // folds its off-side rows into the group's slot `0` tally.
+                let axis = match channel {
+                    Channel::X => crate::spec::layer::PositionalAxis::X,
+                    _ => crate::spec::layer::PositionalAxis::Y,
+                };
+                fold_log_input_into_tally(leaf.transform_lineages, axis, side, &mut leaf_tally)
                     .map_err(|source| CompositeResolveError::DomainResolve {
                         channel: channel.as_str(),
                         field: enc.field.clone(),
@@ -4025,7 +4032,7 @@ mod tests {
                 let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
                 let y_domain = |o: &LeafOwned, c: &LeafScaleContext| {
                     let (scales, _) = resolve_scales_with_leaf_context(
-                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(c),
+                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), None, Some(c),
                     )
                     .unwrap();
                     scales.y.data_domain()
@@ -4380,7 +4387,7 @@ mod tests {
                     .zip(&ctx)
                     .map(|(o, c)| {
                         let (scales, _) =
-                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(c))?;
+                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), None, Some(c))?;
                         let adopted = match channel {
                             Channel::X => c.x_scale.is_some(),
                             _ => c.y_scale.is_some(),
@@ -4661,7 +4668,7 @@ mod tests {
             .expect("fm.layer resolves");
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, &NO_LINEAGES, pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx[0]))
                 .expect("fm.layer panel resolves");
         assert_eq!(band_categories(&scales.x), ["a", "b"], "fm.layer panel x");
         assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
@@ -4903,7 +4910,7 @@ mod tests {
         let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, &NO_LINEAGES, pr, pr, &ThemeInputs::default(), &TextEdgeDemands::default(), Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, &NO_LINEAGES, pr, pr, &ThemeInputs::default(), &TextEdgeDemands::default(), None, Some(&ctx[0]))
                 .unwrap();
         assert_eq!(scales.y.data_domain(), Some((1.0, 80.0)));
     }

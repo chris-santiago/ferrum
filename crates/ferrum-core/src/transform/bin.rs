@@ -3981,7 +3981,7 @@ mod tests {
 
     /// The one `field` slot demanded along `x` in `space`.
     fn field_slot(space: LogAxisSpace) -> SlotSpace {
-        SlotSpace { space, axes: vec!["x"], records_caller_input: true }
+        SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true }
     }
 
     fn ctx_demanding_x(space: LogAxisSpace) -> TransformContext {
@@ -4013,7 +4013,7 @@ mod tests {
             assert!((w - log_widths[0]).abs() < 1e-9, "log-space widths must be equal: {log_widths:?}");
         }
         let recorded = ctx.log_input.borrow();
-        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
         assert_eq!(column.len(), 20, "the recorded column is the caller's whole input, not the binned rows");
     }
 
@@ -4033,7 +4033,7 @@ mod tests {
         let total: u64 = (0..counts.len()).map(|i| counts.value(i)).sum();
         assert_eq!(total, 5, "only the 5 strictly positive rows are binned");
         let recorded = ctx.log_input.borrow();
-        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
         assert_eq!(column.len(), 7, "the recorded column keeps every caller row, off-side included");
     }
 
@@ -4087,7 +4087,7 @@ mod tests {
         let ctx = ctx_demanding_x(positive_space());
         let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
         let recorded = ctx.log_input.borrow();
-        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
         assert_eq!(column.len(), 3, "the recorded column keeps every caller row, even when none are on-side");
     }
 
@@ -4124,7 +4124,7 @@ mod tests {
             let out = apply_with_context(&spec, &batch, &ctx).unwrap_or_else(|e| panic!("{dtype}: {e}"));
             assert_eq!(out, expected, "{dtype}");
             let recorded = ctx.log_input.borrow();
-            let column = recorded.get(&("x".to_string(), "x".to_string())).unwrap_or_else(|| panic!("{dtype}: nothing recorded"));
+            let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).unwrap_or_else(|| panic!("{dtype}: nothing recorded"));
             assert_eq!(column.len(), 21, "{dtype}: the caller's whole column, off-side row included");
         }
     }

@@ -1728,7 +1728,7 @@ mod tests {
         let space = LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive };
         let records_caller_input = !matches!(slot, SpaceSlot::GridX | SpaceSlot::GridY);
         crate::transform::context::TransformContext {
-            log_space: Some(std::rc::Rc::new(StepSpace::for_slots([(slot, SlotSpace { space, axes: vec!["x"], records_caller_input })]))),
+            log_space: Some(std::rc::Rc::new(StepSpace::for_slots([(slot, SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input })]))),
             ..Default::default()
         }
     }

@@ -781,7 +781,7 @@ mod tests {
 
     /// A step demanded on its one `field` slot along `x` in `space`.
     fn field_slot(space: LogAxisSpace) -> StepSpace {
-        StepSpace::for_slots([(SpaceSlot::Field, SlotSpace { space, axes: vec!["x"], records_caller_input: true })])
+        StepSpace::for_slots([(SpaceSlot::Field, SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true })])
     }
 
     fn positive_space() -> LogAxisSpace {
@@ -928,10 +928,10 @@ mod tests {
     fn kde2d_slots(x: Option<LogAxisSpace>, y: Option<LogAxisSpace>) -> StepSpace {
         let mut entries = Vec::new();
         if let Some(space) = x {
-            entries.push((SpaceSlot::X, SlotSpace { space, axes: vec!["x"], records_caller_input: true }));
+            entries.push((SpaceSlot::X, SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true }));
         }
         if let Some(space) = y {
-            entries.push((SpaceSlot::Y, SlotSpace { space, axes: vec!["y"], records_caller_input: true }));
+            entries.push((SpaceSlot::Y, SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::Y], records_caller_input: true }));
         }
         StepSpace::for_slots(entries)
     }

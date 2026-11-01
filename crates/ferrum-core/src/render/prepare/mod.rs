@@ -1645,6 +1645,7 @@ pub fn prepare_render_inputs(
             (0.0, 1.0),
             theme,
             &crate::render::scale_resolve::TextEdgeDemands::default(),
+            None,
             leaf_scales,
         )?;
 
@@ -1700,6 +1701,7 @@ pub fn prepare_render_inputs(
         &y_slot_plan,
         &transformed,
         &transform_outputs,
+        &transform_lineages,
         chart_config,
         leaf_scales,
         &mut scale_warnings,
@@ -1892,17 +1894,27 @@ fn run_pipeline(
 /// layer's established scale) reaches this demand too. Empty for a chart
 /// whose `x`/`y` channel resolves to anything else, or whose layers cannot
 /// be built.
+///
+/// An independent-y layer owns its own y slot: the shared selection
+/// above only ever covers slot `0`'s layers, so each independent-y layer
+/// below selects its OWN scale over the exact per-layer spec
+/// [`crate::render::scale_resolve::resolve_layer_y_slot_scale`] resolves
+/// its real scale from ([`crate::render::scale_resolve::layer_y_slot_spec`]),
+/// by the same [`resolved_explicit_scale`] rule — so a secondary histogram
+/// bins (or not) in its own slot's space, never the primary's.
 fn log_space_reads(
     spec: &ChartSpec,
     outputs: &HashMap<String, RecordBatch>,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
-) -> Vec<(String, &'static str, String, LogAxisSpace)> {
+) -> Vec<(String, crate::spec::layer::PositionalAxis, String, LogAxisSpace)> {
     use crate::spec::encoding::ScaleSpec;
+    use crate::spec::layer::PositionalAxis;
     let Some(primary_batch) = outputs.get(FINAL_OUTPUT_KEY) else { return Vec::new() };
     let Ok(layers) = build_layers(spec) else { return Vec::new() };
     let Ok(encoding) = establishing_encoding(spec, &layers, primary_batch, outputs, leaf_scales) else {
         return Vec::new();
     };
+    let y_slot_plan = crate::render::scale_resolve::YSlotPlan::from_layer_flags(layers.iter().map(|l| l.independent_y));
     let mut reads = Vec::new();
     for channel in ["x", "y"] {
         let own = if channel == "x" { encoding.x.as_ref() } else { encoding.y.as_ref() };
@@ -1921,7 +1933,14 @@ fn log_space_reads(
         let Some(ScaleSpec::Log { base, common, .. }) = resolved else { continue };
         let side = crate::scale::log::LogSide::of(common.domain.as_deref());
         let space = LogAxisSpace { base: *base, side };
-        for layer in &layers {
+        let axis = if channel == "x" { PositionalAxis::X } else { PositionalAxis::Y };
+        for (idx, layer) in layers.iter().enumerate() {
+            // An independent-y layer owns its own y slot, selected below
+            // over its own per-layer spec; slot 0's selection never reaches
+            // it.
+            if channel == "y" && y_slot_plan.slot_for_layer(idx) != 0 {
+                continue;
+            }
             // The drawn column is THIS layer's own post-lowering field (a
             // chart's statistic plan rebinds a layer's x/y encoding to the
             // computed column it draws — "bin_start", "value", "grid_x" —
@@ -1930,8 +1949,24 @@ fn log_space_reads(
             let drawn_column = if channel == "x" { layer.encoding.x.as_ref() } else { layer.encoding.y.as_ref() };
             let Some(drawn_column) = drawn_column.map(|e| e.field.clone()) else { continue };
             let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
-            reads.push((key, channel, drawn_column, space));
+            reads.push((key, axis, drawn_column, space));
         }
+    }
+    // Each independent-y layer's own slot: its scale is resolved over the
+    // same per-layer spec `resolve_layer_y_slot_scale` resolves its real
+    // scale from, never the chart's establishing encoding above.
+    for (slot_index, &layer_idx) in y_slot_plan.secondary_layers().iter().enumerate() {
+        let y_slot = slot_index + 1;
+        let layer = &layers[layer_idx];
+        let layer_spec = crate::render::scale_resolve::layer_y_slot_spec(spec, layer);
+        let Some(enc) = layer_spec.encoding.y.as_ref() else { continue };
+        let resolved = crate::render::scale_resolve::resolved_explicit_scale("y", enc, primary_batch, outputs, &layer_spec, None);
+        let Some(ScaleSpec::Log { base, common, .. }) = resolved else { continue };
+        let side = crate::scale::log::LogSide::of(common.domain.as_deref());
+        let space = LogAxisSpace { base: *base, side };
+        let Some(drawn_column) = layer.encoding.y.as_ref().map(|e| e.field.clone()) else { continue };
+        let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
+        reads.push((key, PositionalAxis::secondary_y(y_slot), drawn_column, space));
     }
     reads
 }
@@ -2007,7 +2042,7 @@ pub(super) struct FacetPartitions {
 /// each panel's consumed rows to merge into [`OutputLineage::statistic_input`],
 /// and each `(axis, field)` a demanded step recorded on some panel, one
 /// [`ArrayRef`] per panel to concatenate into [`OutputLineage::log_input`].
-type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(String, String), Vec<ArrayRef>>);
+type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(crate::spec::layer::PositionalAxis, String), Vec<ArrayRef>>);
 
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
 ///
@@ -3279,6 +3314,7 @@ fn build_axes(
     y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &OutputLineages,
     chart_config: &crate::render::chart_config::ChartConfig,
     // Composite seam: `Some` only for a composite leaf whose
     // positional channel shares a domain across the tree. When that leaf's
@@ -3325,6 +3361,7 @@ fn build_axes(
         y_slot_plan,
         transformed,
         transform_outputs,
+        transform_lineages,
         theme,
         chart_config,
         &metrics,
@@ -3447,6 +3484,7 @@ fn build_secondary_y_axis_inputs(
     y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    transform_lineages: &OutputLineages,
     theme: &crate::layout::ThemeInputs,
     chart_config: &crate::render::chart_config::ChartConfig,
     metrics: &crate::render::font::FontdueMetrics,
@@ -3455,7 +3493,8 @@ fn build_secondary_y_axis_inputs(
     let mut inputs = Vec::new();
     let mut scales = Vec::new();
     let mut tick_counts = Vec::new();
-    for &layer_idx in y_slot_plan.secondary_layers() {
+    for (slot_index, &layer_idx) in y_slot_plan.secondary_layers().iter().enumerate() {
+        let y_slot = slot_index + 1;
         let layer = &layers[layer_idx];
         let layer_batch: &RecordBatch = match &layer.data_source {
             Some(name) => transform_outputs
@@ -3479,6 +3518,7 @@ fn build_secondary_y_axis_inputs(
             transform_outputs,
             theme,
             leaf_scales: None,
+            transform_lineages,
         };
         // This call resolves over a metadata-only placeholder `(0.0, 1.0)`
         // pixel range — it exists only to get this layer's y DOMAIN for
@@ -3499,6 +3539,7 @@ fn build_secondary_y_axis_inputs(
                 (0.0, 1.0),
                 (0.0, 1.0),
                 &Default::default(),
+                y_slot,
             )?;
         warnings.extend(drop_placeholder_only_warnings(layer_scale_warnings));
         // Chart-level scale-domain config at the `axis_y2` position: reshape THIS layer's own y

@@ -4308,7 +4308,7 @@ fn d4b_shared_numeric_seeds_auto_path_with_padding() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
 
     // Domain is REPLACED by the shared extent, not the leaf's own [1, 6].
     let (lo, hi) = shared.x.data_domain().unwrap();
@@ -4357,7 +4357,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
     // The union category vector seeds the axis — every leaf renders the full domain.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4392,7 +4392,7 @@ fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
     // Seeded order survives verbatim despite the "-y" sort on the encoding.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4410,7 +4410,7 @@ fn d4b_none_context_is_byte_identical_noop() {
     let (plain, _) =
         resolve_scales_with_outputs(&spec, &batch, &empty, pr, pr, &theme).unwrap();
     let (threaded_none, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, None).unwrap();
 
     assert_eq!(plain.x.data_domain(), threaded_none.x.data_domain());
     assert_eq!(plain.y.data_domain(), threaded_none.y.data_domain());
@@ -4457,7 +4457,7 @@ fn d4b_user_scale_wins_over_shared() {
         ..Default::default()
     };
     let (scales, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
 
     // User scale wins: the explicit [0, 500] domain is used, NOT the shared [-100, 100].
     let (lo, hi) = scales.x.data_domain().unwrap();
@@ -4502,7 +4502,7 @@ fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
     match shared.color.expect("shared color scale") {
         ColorScale::Categorical { domain, .. } => assert_eq!(
             domain,
@@ -4537,7 +4537,7 @@ fn d10preb_shared_size_extent_seeds_scale_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, &crate::transform::run::OutputLineages::new(), pr, pr, &theme, &TextEdgeDemands::default(), None, Some(&ctx)).unwrap();
     let shared_size = shared.size.expect("shared size scale");
     let (lo, hi) = shared_size.inner.data_domain().unwrap();
     assert!(
@@ -5739,6 +5739,7 @@ fn a_texts_inherited_color_does_not_widen_a_binned_colors_edges() {
             (0.0, 80.0),
             &ThemeInputs::default(),
             &TextEdgeDemands::default(),
+            None,
             None,
         )
         .expect("resolves")
@@ -7643,6 +7644,7 @@ fn resolve_against(
         &ThemeInputs::default(),
         &TextEdgeDemands::default(),
         None,
+        None,
     )
     .map(|_| ())
 }
@@ -8186,6 +8188,7 @@ fn resolve_aux_layered(spec: &ChartSpec, chart_encoding: &crate::spec::encoding:
         &ThemeInputs::default(),
         &TextEdgeDemands::default(),
         None,
+        None,
     )
     .expect("the layered spec resolves")
     .0
@@ -8271,6 +8274,7 @@ fn an_inheriting_layer_reads_the_chart_field_from_its_own_batch() {
         &ThemeInputs::default(),
         &TextEdgeDemands::default(),
         None,
+        None,
     )
     .unwrap()
     .0;
@@ -8302,6 +8306,7 @@ fn resolve_aux_layered_warned(
         (0.0, 80.0),
         &ThemeInputs::default(),
         &TextEdgeDemands::default(),
+        None,
         None,
     )
     .expect("the layered spec resolves")
@@ -8705,4 +8710,114 @@ fn tick_origin_none_for_time_log_ordinal_and_too_few_ticks() {
     let linear = ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 400.0], false, false));
     assert_eq!(linear.tick_origin(&[]), None, "no ticks, nothing to anchor");
     assert_eq!(linear.tick_origin(&[5.0]), None, "a single tick has no spacing to judge niceness against");
+}
+
+/// An independent-y layer's own `y` slot resolve must not let its `x`
+/// channel's naming walk through the layer's real lineage at all: `x`
+/// always resolves `LogAxisReads::chart` over the sub-resolve's own EMPTY
+/// lineages (byte-stable with every chart that has no independent-y
+/// layer), while `y` resolves through this slot's own `LogAxisReads::slot`
+/// view of the REAL lineage. A single `Kde2D`-shaped lowered step computes
+/// BOTH the drawn `x` column (`grid_x`, from its `X` slot) and the drawn
+/// `y` column (`grid_y`, from its `Y` slot): a lineage view narrowed only
+/// to the steps the Y walk passes through still contains this ONE step, so
+/// an X walk against that same narrowed view finds it too and misnames the
+/// X warning by the caller's `x` field instead of the drawn column.
+/// Rejects any mechanism that lets the x channel's own naming reach this
+/// layer's real lineage at all: it must name `"grid_x"`, exactly as a
+/// chart with no independent-y layer at all would for a primitive `x`
+/// column no step computes.
+#[test]
+fn an_independent_y_slots_x_naming_never_walks_through_its_own_lineage() {
+    use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+    use crate::spec::layer::{Layer, PositionalAxis};
+    use crate::spec::mark::Mark;
+    use crate::transform::core::{SpaceColumn, SpaceSlot};
+    use crate::transform::run::{LoweredStep, OutputLineage, OutputLineages};
+
+    let log_scale: ScaleSpec = serde_json::from_value(serde_json::json!({"type": "log", "base": 10.0})).unwrap();
+    let layer = Layer {
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "grid_x".into(), scale: Some(log_scale.clone()), ..Default::default() }),
+            y: Some(EncodingSpec { field: "grid_y".into(), scale: Some(log_scale), ..Default::default() }),
+            ..Default::default()
+        },
+        independent_y: true,
+        data_source: Some("kde2d".into()),
+        ..Default::default()
+    };
+    let spec = ChartSpec { mark: Mark::Point, layers: Some(vec![layer.clone()]), ..Default::default() };
+    let layer_prepared = crate::render::prepare::LayerPrepared::from_chart_and_layer(&spec, &layer);
+
+    // `grid_x` carries one off-side (non-positive) row directly in the
+    // batch, found by the ordinary column read with no fold needed at
+    // all. `grid_y` is all on-side in the batch itself; its two off-side
+    // rows are recorded only in `log_input`, as a demanded statistic's
+    // caller column would be.
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("grid_x", ArrowDataType::Float64, false),
+            Field::new("grid_y", ArrowDataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![-1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+        ],
+    )
+    .unwrap();
+
+    let caller_y: arrow::array::ArrayRef = Arc::new(Float64Array::from(vec![-10.0, -20.0, 30.0]));
+    let mut lineages = OutputLineages::new();
+    lineages.insert(
+        "kde2d".to_string(),
+        OutputLineage {
+            swarm: None,
+            statistic_input: None,
+            written_groupby: Vec::new(),
+            source: batch.schema(),
+            lowered: vec![LoweredStep {
+                id: vec![1],
+                groupby: Vec::new(),
+                shared: false,
+                space_columns: vec![
+                    SpaceColumn { slot: SpaceSlot::X, output: "grid_x".into(), input: "caller_x".into() },
+                    SpaceColumn { slot: SpaceSlot::Y, output: "grid_y".into(), input: "caller_y".into() },
+                ],
+            }],
+            log_input: HashMap::from([((PositionalAxis::secondary_y(1), "caller_y".to_string()), caller_y)]),
+        },
+    );
+
+    let outputs = HashMap::new();
+    let theme = ThemeInputs::default();
+    let ctx = LayerScaleCtx { spec: &spec, transform_outputs: &outputs, theme: &theme, leaf_scales: None, transform_lineages: &lineages };
+    let (_, warnings) = resolve_layer_y_slot_scale(
+        &ctx,
+        &layer_prepared,
+        &batch,
+        (0.0, 100.0),
+        (0.0, 100.0),
+        &crate::layout::geometry::TextEdgeDemand::default(),
+        1,
+    )
+    .expect("both channels have on-side values to resolve a domain from");
+
+    let x_warning = warnings
+        .iter()
+        .find(|w| matches!(w, crate::render::RenderWarning::LogScaleRowsLeftOut { channel, .. } if channel == "x"))
+        .expect("x's off-side row, read straight from the batch, still warns");
+    assert!(
+        matches!(x_warning, crate::render::RenderWarning::LogScaleRowsLeftOut { field: Some(f), rows: 1, .. } if f == "grid_x"),
+        "x must name its own drawn column, never the caller field a DIFFERENT channel's walk through the same lineage would find: {x_warning:?}"
+    );
+
+    let y_warning = warnings
+        .iter()
+        .find(|w| matches!(w, crate::render::RenderWarning::LogScaleRowsLeftOut { channel, .. } if channel == "y"))
+        .expect("y's off-side rows, recorded in log_input, still warn through this slot's own fold");
+    assert!(
+        matches!(y_warning, crate::render::RenderWarning::LogScaleRowsLeftOut { field: Some(f), rows: 2, .. } if f == "caller_y"),
+        "y must still name the caller field its own slot's walk finds, and count only its own slot's recorded rows: {y_warning:?}"
+    );
 }

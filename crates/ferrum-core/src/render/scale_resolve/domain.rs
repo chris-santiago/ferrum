@@ -3114,31 +3114,37 @@ pub(in crate::render) fn numeric_domain_union_over(
     Ok((SidedExtent { lo: mn, hi: mx, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()))
 }
 
-/// Count every lineage's recorded caller column for `channel`
+/// Count every lineage's recorded caller column for `axis`
 /// (`crate::transform::run::OutputLineage::log_input`'s `(axis, field)`
-/// entries whose axis matches) into `tally`, through the SAME
+/// entries whose axis matches exactly — channel AND y-slot, so a
+/// secondary layer's own off-side rows never reach the primary's tally or
+/// another secondary slot's) into `tally`, through the SAME
 /// content-deduplicated path [`sided_min_max_f64`] feeds a primitive
 /// layer's own column read. `numeric_domain_union_over`'s own column reads
 /// never reach a demanded statistic's filtered input, so its returned
 /// tally alone misses those rows; this is the other half every `Log`
-/// caller of that function folds in afterward (`build_axis_scale`'s
-/// `data_extent`, `composite::leaf_positional_domain`), only when `side`
-/// is `Some` (a `Log` call — every other scale kind's tally stays exactly
-/// what `numeric_domain_union_over` returned). A recorded column
+/// caller of that function folds in afterward, only when `side` is `Some`
+/// (a `Log` call — every other scale kind's tally stays exactly what
+/// `numeric_domain_union_over` returned). Called through
+/// [`super::positional::LogAxisReads::fold_into`] — the chart's own axis at
+/// slot `0`, or an independent-y layer's own slot, whichever `axis` that
+/// view was built for — and directly by `composite::leaf_positional_domain`,
+/// always at slot `0` (a composite overlay never carries an independent-y
+/// member). A recorded column
 /// [`sided_min_max_f64`] rejects is refused rather than skipped, the same
 /// `RenderError::UnsupportedDtype` every other caller of that function
 /// raises, so this fold can never under-count a left-out total on the
 /// strength of a dtype gap.
 pub(in crate::render) fn fold_log_input_into_tally(
     lineages: &crate::transform::run::OutputLineages,
-    channel: &str,
+    axis: crate::spec::layer::PositionalAxis,
     side: Option<crate::scale::log::LogSide>,
     tally: &mut LeftOutTally,
 ) -> Result<(), RenderError> {
     let Some(side) = side else { return Ok(()) };
     for lineage in lineages.values() {
-        for ((axis, field), column) in &lineage.log_input {
-            if axis.as_str() != channel {
+        for ((entry_axis, field), column) in &lineage.log_input {
+            if *entry_axis != axis {
                 continue;
             }
             let extent = sided_min_max_f64(column.as_ref(), Some(side)).map_err(|_| RenderError::UnsupportedDtype {
@@ -5497,6 +5503,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut warnings,
         )
         .expect("a band scale over a Utf8 column resolves");
@@ -5907,10 +5914,10 @@ mod tests {
                 lowered: Vec::new(),
                 written_groupby: Vec::new(),
                 source: panel.schema(),
-                log_input: HashMap::from([(("x".to_string(), "v".to_string()), column())]),
+                log_input: HashMap::from([((crate::spec::layer::PositionalAxis::X, "v".to_string()), column())]),
             },
         );
-        fold_log_input_into_tally(&lineages, "x", side, &mut tally).expect("v is Float64 here");
+        fold_log_input_into_tally(&lineages, crate::spec::layer::PositionalAxis::X, side, &mut tally).expect("v is Float64 here");
         assert_eq!(tally.rows(), 2, "the statistic's copy of the same column counts once: {tally:?}");
     }
 
@@ -5934,12 +5941,12 @@ mod tests {
                 lowered: Vec::new(),
                 written_groupby: Vec::new(),
                 source: Arc::new(Schema::new(vec![Field::new("v", DataType::Float16, false)])),
-                log_input: HashMap::from([(("x".to_string(), "v".to_string()), column)]),
+                log_input: HashMap::from([((crate::spec::layer::PositionalAxis::X, "v".to_string()), column)]),
             },
         );
         let mut tally = LeftOutTally::new();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let err = fold_log_input_into_tally(&lineages, "x", side, &mut tally)
+        let err = fold_log_input_into_tally(&lineages, crate::spec::layer::PositionalAxis::X, side, &mut tally)
             .expect_err("Float16 is not among sided_min_max_f64's supported dtypes");
         assert!(
             matches!(&err, RenderError::UnsupportedDtype { field, .. } if field == "v"),

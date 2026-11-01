@@ -1340,8 +1340,9 @@ pub(crate) mod tests {
     /// The `x` slot demanded along `x` in `x`, the `y` slot along `y` in
     /// `y`, whichever is `Some`.
     fn axis_slots(x: Option<Space>, y: Option<Space>) -> StepSpace {
+        use crate::spec::layer::PositionalAxis;
         StepSpace::for_slots(
-            [(SpaceSlot::X, "x", x), (SpaceSlot::Y, "y", y)]
+            [(SpaceSlot::X, PositionalAxis::X, x), (SpaceSlot::Y, PositionalAxis::Y, y)]
                 .into_iter()
                 .filter_map(|(slot, axis, space)| space.map(|space| (slot, SlotSpace { space, axes: vec![axis], records_caller_input: true }))),
         )
@@ -1415,7 +1416,7 @@ pub(crate) mod tests {
         let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
         let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
         let recorded = ctx.log_input.borrow();
-        let column = recorded.get(&("x".to_string(), "x".to_string())).expect("the walk's root records the caller's column");
+        let column = recorded.get(&(crate::spec::layer::PositionalAxis::X, "x".to_string())).expect("the walk's root records the caller's column");
         assert_eq!(column.len(), 3, "the recorded column keeps every caller row, even when none are on-side");
     }
 

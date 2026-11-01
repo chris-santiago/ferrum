@@ -274,6 +274,12 @@ pub(in crate::render) fn build_axis_scale(
     // explicit-scale `data_extent` closure below and the auto path's
     // `resolve_numeric_extent`, so every continuous axis route agrees.
     color: Option<&crate::render::scale_resolve::ColorScale>,
+    // This channel's own `LogAxisReads` view, when the caller already has
+    // one: `Some` only for the y call an independent-y layer's own
+    // `resolve_layer_y_slot_scale` makes (that slot's own axis and key,
+    // over the real lineages); `None` resolves `LogAxisReads::chart` from
+    // `transform_lineages`/`channel`/`spec` instead — the chart's own axis.
+    slot_reads: Option<LogAxisReads<'_>>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     // The bound field is typed, and a caller's categorical scale takes its
@@ -372,6 +378,9 @@ pub(in crate::render) fn build_axis_scale(
             y_field: rows.y_field,
             coord_flipped,
         };
+        // The chart's own axis, unless the caller already supplied an
+        // independent-y layer's own slot view.
+        let log_reads = slot_reads.unwrap_or_else(|| LogAxisReads::chart(transform_lineages, channel, spec));
         // What a scale stating no `domain` spans, read as the auto path reads
         // it. A continuous scale spans the data of every layer carrying this
         // same scale or declaring none, with their paired `x2`/`y2` endpoints
@@ -437,7 +446,7 @@ pub(in crate::render) fn build_axis_scale(
             // `data_extent(None)` call keeps the tally its own column
             // read returned.
             let mut tally = tally;
-            super::domain::fold_log_input_into_tally(transform_lineages, channel, side, &mut tally).map_err(|e| match e {
+            log_reads.fold_into(side, &mut tally).map_err(|e| match e {
                 RenderError::UnsupportedDtype { field, dtype, context: None } => {
                     RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
                 }
@@ -466,7 +475,7 @@ pub(in crate::render) fn build_axis_scale(
         // matching on it explicitly means a future caller that did route an
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
-        let axis_name = log_axis_name(enc, log_axis_statistic_field(channel, enc, spec, transform_lineages));
+        let axis_name = log_axis_name(enc, log_reads.statistic_field(enc));
         return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, text_demand, axis_name.as_deref(), warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
@@ -1274,31 +1283,93 @@ pub(in crate::render) fn resolve_log_extent(
     Ok((lo, hi))
 }
 
-/// The caller field the layer establishing `channel` draws through a
-/// statistic: the root input of the walk from its drawn column `enc.field`
-/// ([`crate::transform::run::OutputLineage::space_walk`]) through the
-/// lineage of the key that layer reads (the establishing layer's
-/// `data_source`, else [`FINAL_OUTPUT_KEY`]; [`FINAL_OUTPUT_KEY`] on an
-/// unlayered spec), when the walk passed a step computing a column from
-/// its input. `None` when the establishing layer draws a primitive column,
-/// or a column a step only passes through (an ecdf's sorted field), so a
-/// primitive layer beside a histogram names its axis as a primitive does.
-/// The [`log_axis_name`] argument every positional `Log` site passes.
+/// The positional lineage reads a `Log` axis's own fold and naming make,
+/// held as one borrowed view rather than re-derived at each use: which
+/// output key's lineage to walk for the statistic-field name (`key`), and
+/// which exact axis the off-side fold counts (`axis`). `build_axis_scale`'s
+/// two log reads — [`fold_log_input_into_tally`](super::domain::fold_log_input_into_tally)
+/// and `log_axis_statistic_field`'s walk — go through this one type, so the
+/// chart's own x/y resolve and an independent-y layer's own secondary slot
+/// share one mechanism instead of the slot being disguised as the chart's:
+/// a secondary slot builds its own view with [`Self::slot`] (its own axis,
+/// its own key, over the REAL lineages — the fold already matches exact
+/// `(channel, y_slot)`, so slot `k`'s entries never reach slot `0`'s tally
+/// or vice versa) and hands it to `build_axis_scale` as a caller-supplied
+/// param (the same idiom `TextEdgeDemands` and the color scale already use
+/// there); every other read in that per-layer sub-resolve keeps the fully
+/// empty lineages it always used, since neither sort, color, shape,
+/// stroke_dash nor raster-cell reads go through this type at all.
+#[derive(Clone, Copy)]
+pub(in crate::render) struct LogAxisReads<'a> {
+    lineages: &'a crate::transform::run::OutputLineages,
+    axis: crate::spec::layer::PositionalAxis,
+    key: &'a str,
+}
+
+impl<'a> LogAxisReads<'a> {
+    /// The chart's own `channel` axis at slot `0`: the key is the
+    /// establishing layer's `data_source`, else [`FINAL_OUTPUT_KEY`]
+    /// ([`FINAL_OUTPUT_KEY`] on an unlayered spec) — the key selection
+    /// `log_axis_statistic_field` used to make inline.
+    pub(in crate::render) fn chart(lineages: &'a crate::transform::run::OutputLineages, channel: &str, spec: &'a ChartSpec) -> Self {
+        let axis = if channel == "x" { crate::spec::layer::PositionalAxis::X } else { crate::spec::layer::PositionalAxis::Y };
+        let key = match spec.layers.as_deref().and_then(|layers| super::domain::establishing_axis_layer(spec, layers, channel)) {
+            Some((_, layer)) => layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY),
+            None => FINAL_OUTPUT_KEY,
+        };
+        Self { lineages, axis, key }
+    }
+
+    /// One independent-y layer's own slot: the caller states its own exact
+    /// `axis` ([`crate::spec::layer::PositionalAxis::secondary_y`]) and
+    /// `key` (its own `data_source`, else [`FINAL_OUTPUT_KEY`]) directly,
+    /// rather than deriving them from a spec this slot does not establish.
+    pub(in crate::render) fn slot(lineages: &'a crate::transform::run::OutputLineages, axis: crate::spec::layer::PositionalAxis, key: &'a str) -> Self {
+        Self { lineages, axis, key }
+    }
+
+    /// Fold this axis's recorded off-side log-input entries into `tally`:
+    /// [`fold_log_input_into_tally`](super::domain::fold_log_input_into_tally)
+    /// over every lineage this view was built from, matching only `self.axis`
+    /// exactly (channel and y-slot), so one slot's entries never reach
+    /// another's tally.
+    pub(in crate::render) fn fold_into(
+        &self,
+        side: Option<crate::scale::log::LogSide>,
+        tally: &mut super::LeftOutTally,
+    ) -> Result<(), RenderError> {
+        super::domain::fold_log_input_into_tally(self.lineages, self.axis, side, tally)
+    }
+
+    /// The caller field `enc`'s drawn column computes through, at this
+    /// view's own key: the root input of the walk from `enc.field`
+    /// ([`crate::transform::run::OutputLineage::space_walk`]), when the
+    /// walk passed a step computing a column from its input. `None` when
+    /// this key's lineage draws a primitive column, or a column a step
+    /// only passes through (an ecdf's sorted field), so a primitive layer
+    /// beside a histogram names its axis as a primitive does.
+    pub(in crate::render) fn statistic_field(&self, enc: &'a crate::spec::encoding::EncodingSpec) -> Option<&'a str> {
+        let walk = self.lineages.get(self.key)?.space_walk(&enc.field);
+        if !walk.iter().any(crate::transform::run::SpaceWalkStep::computes) {
+            return None;
+        }
+        walk.last().map(|step| step.input)
+    }
+}
+
+/// The axis's own name for a `Log` channel's warning/refusal
+/// ([`resolve_log_extent`]), via [`LogAxisReads::chart`]'s selection — the
+/// chart's own x/y axis, never a secondary slot (a secondary slot calls
+/// [`LogAxisReads::statistic_field`] directly through its own [`LogAxisReads::slot`]
+/// view inside `build_axis_scale`). [`log_axis_name`]'s own doc covers the
+/// title contract this feeds.
 pub(in crate::render) fn log_axis_statistic_field<'a>(
     channel: &str,
     enc: &'a crate::spec::encoding::EncodingSpec,
-    spec: &ChartSpec,
+    spec: &'a ChartSpec,
     lineages: &'a crate::transform::run::OutputLineages,
 ) -> Option<&'a str> {
-    let key = match spec.layers.as_deref().and_then(|layers| super::domain::establishing_axis_layer(spec, layers, channel)) {
-        Some((_, layer)) => layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY),
-        None => FINAL_OUTPUT_KEY,
-    };
-    let walk = lineages.get(key)?.space_walk(&enc.field);
-    if !walk.iter().any(crate::transform::run::SpaceWalkStep::computes) {
-        return None;
-    }
-    walk.last().map(|step| step.input)
+    LogAxisReads::chart(lineages, channel, spec).statistic_field(enc)
 }
 
 /// The axis's own name for a `Log` channel's warning/refusal
@@ -2347,6 +2418,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -2632,6 +2704,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             &mut warnings,
         )
@@ -3189,6 +3262,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut warnings,
         )
         .unwrap()
@@ -3280,6 +3354,7 @@ mod tests {
             false,
             shared,
             false,
+            None,
             None,
             &mut warnings,
         )
@@ -3436,6 +3511,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut warnings,
         )
     }
@@ -3508,6 +3584,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -3539,6 +3616,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             &mut warnings,
         )
@@ -3783,6 +3861,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             &mut warnings,
         )

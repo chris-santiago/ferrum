@@ -8,7 +8,7 @@ use crate::transform::core::TransformSpec;
 /// [`Layer::inherited_positional`] ranges over. Deserializes from exactly
 /// those four lowercase wire strings; any other value is a deserialize
 /// error, not a silently-ignored one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PositionalChannel {
     X,
@@ -60,6 +60,74 @@ impl PositionalChannel {
             PositionalChannel::X2 => &mut encoding.x2,
             PositionalChannel::Y2 => &mut encoding.y2,
         }
+    }
+}
+
+/// The axis one positional read, log-space demand or off-side warning
+/// concerns: a channel (`x`/`y`) and, for `y`, which independent-y slot it
+/// names — `0` for the primary/shared axis, `1..=n` for the n-th
+/// independent-y layer in layer order, the same numbering
+/// [`crate::render::scale_resolve::YSlotPlan`] and
+/// [`crate::render::scale_resolve::YScaleSlots`] use. `x` is always slot
+/// `0`: an independent `x` slot is refused before any of this is reached.
+///
+/// Replaces the bare `&'static str` axis name that used to flow through
+/// [`crate::render::prepare::log_space_reads`]'s reads, the demand it
+/// places on a lowered statistic, the caller column that demand records
+/// for the off-side tally, and the fold that counts it back in — none of
+/// which could tell a secondary y layer's own slot apart from the primary
+/// or from another secondary layer, so a secondary axis's off-side rows
+/// were folded into whichever read asked and named by whichever field
+/// happened to ask first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PositionalAxis {
+    pub(crate) channel: PositionalChannel,
+    pub(crate) y_slot: usize,
+}
+
+impl PositionalAxis {
+    /// The primary/shared `x` axis: always slot `0`.
+    pub(crate) const X: Self = Self { channel: PositionalChannel::X, y_slot: 0 };
+    /// The primary/shared `y` axis: slot `0`.
+    pub(crate) const Y: Self = Self { channel: PositionalChannel::Y, y_slot: 0 };
+
+    /// A secondary `y` axis's own slot (`1..=n`).
+    pub(crate) fn secondary_y(y_slot: usize) -> Self {
+        Self { channel: PositionalChannel::Y, y_slot }
+    }
+
+    /// The text a warning or refusal names this axis by on its own: `"x"`,
+    /// the primary `"y"`, or `"secondary y"` for any slot above `0`. A
+    /// refusal naming TWO axes together (one statistic's input drawn on
+    /// both) cannot always use this alone — see [`Self::pairwise_voice`].
+    pub(crate) fn voice(self) -> &'static str {
+        match (self.channel, self.y_slot) {
+            (PositionalChannel::Y, slot) if slot > 0 => "secondary y",
+            (channel, _) => channel.as_str(),
+        }
+    }
+
+    /// How two axes name themselves TOGETHER in a refusal: each one's own
+    /// [`Self::voice`], unless both are secondary `y` slots and the slots
+    /// differ, in which case each names its own slot number ("secondary y
+    /// slot 1"/"secondary y slot 2") — otherwise "the secondary y and
+    /// secondary y scales" could not tell which secondary is which. Two
+    /// reads on the SAME slot always agree (one layer owns each slot), so
+    /// this only ever distinguishes a secondary slot from a DIFFERENT
+    /// secondary slot, never from itself; a single secondary paired with
+    /// the primary `y` (or with `x`) keeps the bare `"secondary y"`.
+    pub(crate) fn pairwise_voice(self, other: Self) -> (String, String) {
+        let both_secondary_y = |axis: Self| axis.channel == PositionalChannel::Y && axis.y_slot > 0;
+        if both_secondary_y(self) && both_secondary_y(other) && self.y_slot != other.y_slot {
+            return (format!("secondary y slot {}", self.y_slot), format!("secondary y slot {}", other.y_slot));
+        }
+        (self.voice().to_string(), other.voice().to_string())
+    }
+}
+
+impl std::fmt::Display for PositionalAxis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.voice())
     }
 }
 

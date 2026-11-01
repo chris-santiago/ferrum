@@ -140,7 +140,12 @@ def _path_vertices(svg: str) -> list[tuple[float, float]]:
 
 def _invert_log(pixel: float, ladder: dict[float, float], *, base: float = 10.0) -> float:
     """A drawn pixel's data value on a log ladder: the shared
-    `log_axis_pixels_per_unit` fit, inverted."""
+    `log_axis_pixels_per_unit` fit, inverted -- mirrored when the ladder's
+    own domain sits entirely on the negative side of a mirrored `LogScale`
+    (`log_value_for_pixel`'s fit needs positive values, so the sign-flipped
+    ladder is fitted instead and the result negated back)."""
+    if min(ladder) < 0:
+        return -log_value_for_pixel({-value: px for value, px in ladder.items()}, pixel, base=base)
     return log_value_for_pixel(ladder, pixel, base=base)
 
 
@@ -1999,3 +2004,507 @@ def test_a_null_hue_draws_its_own_rows_as_one_group_with_no_legend_entry():
         for _stroke, corners in step_after_paths(svg)
     )
     assert heights == [[1, 2, 3], [1, 2, 3]], heights
+
+
+# ---------------------------------------------------------------------------
+# A statistic drawn on a LayerChart(resolve={"y": "independent"}) secondary
+# y slot computes in that slot's own declared scale -- linear, or log of any
+# base on either side -- never the primary layer's, exactly matching the
+# identical layer drawn alone on its own scale. An off-side row on that slot
+# warns naming the slot's own field and counting only its own rows, never a
+# sibling slot's field.
+# ---------------------------------------------------------------------------
+
+#: A spread of positive values wide enough that binning it in log space
+#: (roughly equal counts per bin) and in linear space (most rows piled into
+#: the lowest bin) land on visibly different edges -- the discriminator
+#: between a slot reading its own declared scale and one pulled from a
+#: sibling's.
+_IND_Y_V = [float(2**k) for k in range(10)]
+_IND_Y_V_POS = pl.DataFrame({"v": _IND_Y_V})
+#: The mirror image, for the secondary slot whose `LogScale` states an
+#: explicit negative domain.
+_IND_Y_V_NEG = pl.DataFrame({"v": [-value for value in _IND_Y_V]})
+#: The same spread plus two rows no positive-side, no-domain `LogScale` can
+#: place, for the off-side warning's naming and count.
+_IND_Y_V_OFF_SIDE = pl.DataFrame({"v": _IND_Y_V + [0.0, -3.0]})
+#: Boundary row counts on the secondary slot: a single row, every row tied
+#: to the same value, and the spread with one row null -- the null excluded
+#: the way the solo chart excludes it, never counted off-side.
+_IND_Y_V_ONE_ROW = pl.DataFrame({"v": [5.0]})
+_IND_Y_V_ALL_TIED = pl.DataFrame({"v": [5.0, 5.0, 5.0, 5.0]})
+_IND_Y_V_WITH_NULL = pl.DataFrame({"v": _IND_Y_V + [None]})
+#: The primary layer's own data, on a field ('w') no histogram or density
+#: case below ever reads, drawn by a mark that renders neither a rect nor a
+#: path -- so every bar `data_bar_rects` finds and every vertex
+#: `_path_vertices` finds inside these charts is the secondary slot's own.
+_IND_Y_PRIMARY = pl.DataFrame({"t": [1.0, 2.0, 3.0], "w": [10.0, 100.0, 1000.0]})
+#: A density's own output (its x in this horizontal orientation) is tiny
+#: when `v`'s field is drawn linearly (many units of spread share one unit
+#: of probability), and a different, much larger order of magnitude when
+#: `v`'s field is drawn on a `LogScale` (density per log unit, over a far
+#: narrower span). A primary of ordinary magnitude (`_IND_Y_PRIMARY`'s `t`,
+#: 1..3) would dominate either shared x scale, squeezing the secondary's
+#: own variation into a sliver neither render's pixel precision can read
+#: back the same way. Each density case below pairs with a primary whose
+#: `t` sits at the matching order of magnitude instead -- read once, off
+#: `_IND_Y_V_POS`'s own solo density curve on that field scale -- so
+#: sharing the x scale leaves both renders enough precision to agree.
+_IND_Y_DENSITY_PRIMARY_LINEAR_FIELD = pl.DataFrame(
+    {"t": [0.0006, 0.0016, 0.0026], "w": [10.0, 100.0, 1000.0]}
+)
+_IND_Y_DENSITY_PRIMARY_LOG_FIELD = pl.DataFrame(
+    {"t": [0.21, 0.265, 0.32], "w": [10.0, 100.0, 1000.0]}
+)
+
+
+def _ind_y_primary(scale: Any = None, df: pl.DataFrame = _IND_Y_PRIMARY) -> fm.Chart:
+    """The primary layer: a point mark on field `'w'`, drawn from
+    `_IND_Y_PRIMARY` by default or from a density case's own
+    magnitude-matched `df` (`_IND_Y_DENSITY_PRIMARY_LINEAR_FIELD` /
+    `_IND_Y_DENSITY_PRIMARY_LOG_FIELD`)."""
+    y = fm.Y("w") if scale is None else fm.Y("w", scale=scale)
+    return fm.Chart(df).mark_point().encode(x="t", y=y)
+
+
+def _ind_y_hist(df: pl.DataFrame, scale: Any = None) -> fm.Chart:
+    """A histogram whose binned field is bound to y (`orient="horizontal"`
+    swaps the bin-edge and count axes), the one way the binned field can
+    sit in a `LayerChart(resolve={"y": "independent"})` secondary slot."""
+    y = fm.Y("v") if scale is None else fm.Y("v", scale=scale)
+    return fm.Chart(df).mark_histogram(orient="horizontal").encode(y=y)
+
+
+def _ind_y_density(df: pl.DataFrame, scale: Any = None) -> fm.Chart:
+    y = fm.Y("v") if scale is None else fm.Y("v", scale=scale)
+    return fm.Chart(df).mark_density(orient="horizontal").encode(y=y)
+
+
+def _hconcat_sibling_leaf() -> fm.Chart:
+    """A plain second panel for the `hconcat`-leaf door: its own axes read
+    its own field, unrelated to the first panel's, so `_first_panel`'s
+    boundary filter is what keeps its own y ladder and marks out of a
+    reader scoped to the first panel."""
+    return fm.Chart(_IND_Y_V_POS).mark_point().encode(x="v", y="v")
+
+
+def _first_panel(svg: str) -> tuple[tuple[float, float, float, float], str, float]:
+    """The SVG's first (leftmost) panel: its own frame, its own marks-only
+    content, and the x pixel where a sibling panel (an `hconcat` leaf,
+    say) begins, or infinity when there is only one panel. A non-
+    independent `LayerChart`'s overlay members each draw into their own
+    clip group but share one frame, so groups are merged by their exact
+    frame before picking the leftmost -- the one panel every
+    secondary-slot reader below scopes to, never a sibling panel's own
+    axis or marks at this SVG's top level."""
+    by_frame: dict[tuple[float, float, float, float], str] = {}
+    for frame, content in mark_groups_by_frame(svg):
+        by_frame[frame] = by_frame.get(frame, "") + content
+    frames = sorted(by_frame)
+    frame = frames[0]
+    boundary = frames[1][0] if len(frames) > 1 else float("inf")
+    return frame, by_frame[frame], boundary
+
+
+def _secondary_y_ladder(svg: str) -> dict[float, float]:
+    """The first panel's rightmost y tick ladder: an independent-y
+    `LayerChart`'s secondary slot, drawn beside the primary's own
+    left-side axis -- or the only ladder, when the same layer is drawn
+    solo. Kept only when its own position falls within the first panel's
+    own frame (one pixel of margin either side, absorbing
+    `value_axis_ladders`' `round()`), so a sibling panel's own y ladder --
+    past the frame's right edge, not merely past the next panel's left
+    edge -- is excluded by the panel it actually belongs to rather than
+    mistaken for this panel's own."""
+    (x0, _y0, x1, _y1), _content, _boundary = _first_panel(svg)
+    ladders = [
+        (pos, ladder) for pos, ladder in value_axis_ladders(svg, axis="y") if x0 - 1 <= pos <= x1 + 1
+    ]
+    return ladders[-1][1]
+
+
+def _secondary_x_ladder(
+    svg: str, frame: tuple[float, float, float, float], *, single_panel: bool
+) -> dict[float, float]:
+    """The first panel's own x tick ladder: `value_axis_ladder`'s single-
+    ladder read when the SVG draws only one panel (byte-identical to
+    before this helper existed), or `panel_x_ladder`'s frame-scoped read
+    when a sibling panel (an `hconcat` leaf) shares the same tick row and
+    would otherwise merge into one unreadable combined ladder."""
+    if single_panel:
+        return value_axis_ladder(svg, axis="x")
+    return panel_x_ladder(svg, frame)
+
+
+def _assert_bar_spans_match(
+    layered: list[tuple[float, float, float]], solo: list[tuple[float, float, float]]
+) -> None:
+    """Every span's own `(bin_lo, bin_hi, count)` matches pair for pair:
+    `pytest.approx` does not recurse into tuples nested inside a list, so
+    each span is compared on its own rather than wrapping the whole list
+    in one `pytest.approx(...)` call. Shared by every caller that compares
+    two `_secondary_bar_spans_in_data_units` results."""
+    assert len(layered) == len(solo), (layered, solo)
+    for layered_span, solo_span in zip(layered, solo):
+        assert layered_span == pytest.approx(solo_span, rel=1e-3), (layered_span, solo_span)
+
+
+def _secondary_bar_spans_in_data_units(
+    svg: str, *, y_log_base: float | None
+) -> list[tuple[float, float, float]]:
+    """Every rendered bar's own `(bin_lo, bin_hi, count)` in data units,
+    scoped to the SVG's first panel (`_first_panel`): bin edges read off
+    the secondary slot's own y ladder (log of `y_log_base`, or linear when
+    `None`), and the count off the panel's own x ladder, read at the
+    bar's far pixel edge (`x + width`) rather than its width times a
+    units-per-pixel rate -- the near edge sits on whatever padded value
+    the count scale's own domain starts from (never genuinely zero once
+    every bin carries the same count, as a strictly positive-spread
+    secondary's bins can), so only the far edge's own data value is the
+    count. `_secondary_y_ladder` picks out the one ladder that is the
+    secondary's whether the chart draws two y ladders (an independent-y
+    `LayerChart`) or one (the same layer drawn solo), so this one body
+    reads every render: alone, beside its primary, or beside both a
+    primary and an `hconcat` sibling."""
+    frame, content, boundary = _first_panel(svg)
+    y_ladder = _secondary_y_ladder(svg)
+    x_ladder = _secondary_x_ladder(svg, frame, single_panel=boundary == float("inf"))
+    spans: list[tuple[float, float, float]] = []
+    for b in data_bar_rects(content):
+        top, bottom = float(b["y"]), float(b["y"]) + float(b["height"])
+        if y_log_base is None:
+            edges = sorted((value_for_pixel(y_ladder, top), value_for_pixel(y_ladder, bottom)))
+        else:
+            edges = sorted(
+                (
+                    _invert_log(top, y_ladder, base=y_log_base),
+                    _invert_log(bottom, y_ladder, base=y_log_base),
+                )
+            )
+        count = value_for_pixel(x_ladder, float(b["x"]) + float(b["width"]))
+        spans.append((edges[0], edges[1], count))
+    return sorted(spans)
+
+
+def _secondary_density_vertices_in_data_units(
+    svg: str, *, y_log: bool
+) -> tuple[list[float], list[float]]:
+    """Every density `<path>` vertex, scoped to the SVG's first panel
+    (`_first_panel`) and read back to data units through that panel's own
+    x ladder (always linear here, the density value) and the secondary
+    slot's own y ladder -- `_vertices_in_data_units`'s shared conversion,
+    with the secondary slot's own ladder picked out instead of the
+    leftmost one `_contour_vertices_in_data_units` reads for a colorbar."""
+    frame, content, boundary = _first_panel(svg)
+    coords = _path_vertices(content)
+    x_ladder = _secondary_x_ladder(svg, frame, single_panel=boundary == float("inf"))
+    y_ladder = _secondary_y_ladder(svg)
+    return _vertices_in_data_units(coords, x_ladder, y_ladder, x_log=False, y_log=y_log)
+
+
+#: case name -> (primary builder, secondary builder, the secondary's own
+#: LogScale base, or None for linear, "hist" or "density").
+_INDEPENDENT_Y_SLOT_SPACE_CASES: dict[
+    str, tuple[Callable[[], fm.Chart], Callable[[], fm.Chart], float | None, str]
+] = {
+    "histogram, log primary, linear secondary": (
+        lambda: _ind_y_primary(fm.LogScale()),
+        lambda: _ind_y_hist(_IND_Y_V_POS),
+        None,
+        "hist",
+    ),
+    "histogram, linear primary, log secondary": (
+        lambda: _ind_y_primary(),
+        lambda: _ind_y_hist(_IND_Y_V_POS, fm.LogScale()),
+        10.0,
+        "hist",
+    ),
+    "histogram, log10 primary, log2 secondary": (
+        lambda: _ind_y_primary(fm.LogScale()),
+        lambda: _ind_y_hist(_IND_Y_V_POS, fm.LogScale(base=2)),
+        2.0,
+        "hist",
+    ),
+    "histogram, positive log primary, negative-domain log secondary": (
+        lambda: _ind_y_primary(fm.LogScale()),
+        lambda: _ind_y_hist(_IND_Y_V_NEG, fm.LogScale(domain=[-1200.0, -0.25])),
+        10.0,
+        "hist",
+    ),
+    "density, log primary, linear secondary": (
+        lambda: _ind_y_primary(fm.LogScale(), _IND_Y_DENSITY_PRIMARY_LINEAR_FIELD),
+        lambda: _ind_y_density(_IND_Y_V_POS),
+        None,
+        "density",
+    ),
+    "density, linear primary, log secondary": (
+        lambda: _ind_y_primary(df=_IND_Y_DENSITY_PRIMARY_LOG_FIELD),
+        lambda: _ind_y_density(_IND_Y_V_POS, fm.LogScale()),
+        10.0,
+        "density",
+    ),
+    "histogram, same base and side, no off-side rows": (
+        lambda: _ind_y_primary(fm.LogScale()),
+        lambda: _ind_y_hist(_IND_Y_V_POS, fm.LogScale()),
+        10.0,
+        "hist",
+    ),
+    "histogram, one row in the secondary": (
+        lambda: _ind_y_primary(),
+        lambda: _ind_y_hist(_IND_Y_V_ONE_ROW, fm.LogScale()),
+        10.0,
+        "hist",
+    ),
+    "histogram, every row tied in the secondary": (
+        lambda: _ind_y_primary(),
+        lambda: _ind_y_hist(_IND_Y_V_ALL_TIED, fm.LogScale()),
+        10.0,
+        "hist",
+    ),
+    "histogram, a null row in the secondary": (
+        lambda: _ind_y_primary(),
+        lambda: _ind_y_hist(_IND_Y_V_WITH_NULL, fm.LogScale()),
+        10.0,
+        "hist",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", ["flat", "hconcat leaf"])
+@pytest.mark.parametrize("case", sorted(_INDEPENDENT_Y_SLOT_SPACE_CASES))
+def test_an_independent_y_statistic_computes_in_its_own_slots_space(case, door):
+    """A histogram or density on a `LayerChart(resolve={"y": "independent"})`
+    secondary slot computes in that slot's own declared scale -- linear, or
+    log of any base on either side -- matching the identical layer drawn
+    alone on its own scale, and never the primary layer's space, whether
+    the `LayerChart` renders flat or nested as an `hconcat` leaf beside a
+    sibling panel. Every one of these cases is placeable, so neither
+    render warns."""
+    primary, secondary, y_log_base, kind = _INDEPENDENT_Y_SLOT_SPACE_CASES[case]
+
+    def build_layered() -> str:
+        chart = fm.LayerChart(primary(), secondary(), resolve={"y": "independent"})
+        if door == "flat":
+            return chart.to_svg()
+        return fm.hconcat(chart, _hconcat_sibling_leaf()).to_svg()
+
+    layered_msgs, layered_svg = _warnings_of(build_layered)
+    solo_msgs, solo_svg = _warnings_of(lambda: secondary().to_svg())
+    assert layered_msgs == [], (case, door, layered_msgs)
+    assert solo_msgs == [], (case, door, solo_msgs)
+
+    if kind == "hist":
+        layered = _secondary_bar_spans_in_data_units(layered_svg, y_log_base=y_log_base)
+        solo = _secondary_bar_spans_in_data_units(solo_svg, y_log_base=y_log_base)
+        assert layered, (case, door, "the secondary slot draws no bars")
+        _assert_bar_spans_match(layered, solo)
+    else:
+        layered_x, layered_y = _secondary_density_vertices_in_data_units(
+            layered_svg, y_log=y_log_base is not None
+        )
+        solo_x, solo_y = _secondary_density_vertices_in_data_units(
+            solo_svg, y_log=y_log_base is not None
+        )
+        assert layered_y, (case, door, "the secondary slot draws no curve")
+        assert len(layered_y) == len(solo_y), (case, door, len(layered_y), len(solo_y))
+        assert layered_y == pytest.approx(solo_y, rel=1e-3), (case, door)
+        # The density's own output (x) shares a pixel width with the
+        # primary even once both read a comparable-magnitude field, so its
+        # own rounding to the SVG's fixed decimal precision leaves a small
+        # residual neither render's `t` choice can fully erase -- a
+        # looser tolerance than the field's own (y, above) is this axis's
+        # reality, not a discrimination gap: the defect this fix closes
+        # was two or more orders of magnitude off, not a percent.
+        assert layered_x == pytest.approx(solo_x, rel=3e-2), (case, door)
+
+
+# ---------------------------------------------------------------------------
+# Routes this fix does not touch stay exactly as they were: a secondary
+# layer with no lowered statistic, a zero-row or non-numeric secondary, a
+# shared (non-independent) y LayerChart or `+`, a SecondaryY over a
+# primitive mark, a facet's own per-panel independent y, and any chart with
+# no independent y layer at all.
+# ---------------------------------------------------------------------------
+
+
+def test_an_independent_y_secondary_with_no_lowered_statistic_draws_each_rows_own_value():
+    """A secondary layer that binds its own field directly, with no `Bin`
+    or `Kde` lowered underneath it, has no statistic read for this slot
+    demand to mis-bin in the first place: every row draws at its own value
+    on the secondary's own `LogScale`, read back within `rel=1e-3` of the
+    caller's own column, whether layered beside an independent-y primary
+    or drawn alone."""
+    primary = fm.Chart(_IND_Y_PRIMARY).mark_line().encode(x="t", y="w")
+    df = pl.DataFrame({"t2": [1.0] * len(_IND_Y_V), "v": _IND_Y_V})
+    secondary = fm.Chart(df).mark_point().encode(x="t2", y=fm.Y("v", scale=fm.LogScale(base=2)))
+    layered_msgs, layered_svg = _warnings_of(
+        lambda: fm.LayerChart(primary, secondary, resolve={"y": "independent"}).to_svg()
+    )
+    solo_msgs, _ = _warnings_of(lambda: secondary.to_svg())
+    assert layered_msgs == [] and solo_msgs == []
+    y_ladder = _secondary_y_ladder(layered_svg)
+    circles = svg_elements(mark_layer(layered_svg), "circle", lambda a: "cy" in a)
+    drawn = sorted(_invert_log(float(c["cy"]), y_ladder, base=2.0) for c in circles)
+    assert drawn == pytest.approx(sorted(df["v"].to_list()), rel=1e-3)
+
+
+def test_an_independent_y_zero_row_secondary_draws_nothing_on_either_route():
+    """A zero-row secondary layer needs no demand pushed at all -- the
+    existing empty-data path, unchanged by this fix: it draws no bars
+    whether layered beside an independent-y primary or drawn alone."""
+    primary = _ind_y_primary(fm.LogScale())
+    secondary = _ind_y_hist(pl.DataFrame({"v": pl.Series([], dtype=pl.Float64)}), fm.LogScale())
+    layered_msgs, layered_svg = _warnings_of(
+        lambda: fm.LayerChart(primary, secondary, resolve={"y": "independent"}).to_svg()
+    )
+    _, solo_svg = _warnings_of(lambda: secondary.to_svg())
+    assert data_bar_rects(mark_layer(layered_svg)) == []
+    assert data_bar_rects(mark_layer(solo_svg)) == []
+    assert layered_msgs == [], layered_msgs
+
+
+def test_an_independent_y_non_numeric_secondary_keeps_its_existing_refusal():
+    """A non-numeric secondary field refuses with the same text whether
+    the layer sits on an independent-y slot or is drawn alone: the demand
+    this fix narrows never reaches a column `Bin` already refuses on its
+    own terms."""
+    primary = _ind_y_primary()
+    secondary = _ind_y_hist(pl.DataFrame({"v": ["a", "b", "c"]}), fm.LogScale())
+
+    def refuse(build: Callable[[], Any]) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            build()
+        return str(excinfo.value)
+
+    layered_message = refuse(
+        lambda: fm.LayerChart(primary, secondary, resolve={"y": "independent"}).to_svg()
+    )
+    solo_message = refuse(lambda: secondary.to_svg())
+    assert layered_message == solo_message
+
+
+def test_a_secondary_y_primitive_layer_is_unaffected_by_the_slot_fix():
+    """`SecondaryY` over a primitive mark carries no lowered statistic for
+    the space demand to mis-bin: every row still draws at its own value on
+    the secondary's own `LogScale`, independent of its sibling layer."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 100.0, 1000.0], "v": [1.0, 2.0, 4.0]})
+    chart = fm.Chart(df).mark_line().encode(
+        x="x", y=fm.Y("y", scale=fm.LogScale())
+    ) + fm.SecondaryY("v", mark="point", scale=fm.LogScale(base=2))
+    msgs, svg = _warnings_of(lambda: chart.to_svg())
+    assert msgs == []
+    y_ladder = _secondary_y_ladder(svg)
+    circles = svg_elements(mark_layer(svg), "circle", lambda a: "cy" in a)
+    drawn = sorted(_invert_log(float(c["cy"]), y_ladder, base=2.0) for c in circles)
+    assert drawn == pytest.approx(sorted(df["v"].to_list()), rel=1e-3)
+
+
+def test_a_shared_y_layer_chart_or_plus_composition_is_unaffected_by_the_slot_fix():
+    """A `LayerChart` or `+` with no independent-y layer shares one y
+    scale across every layer -- slot 0 is the only slot this demand ever
+    had to read here, so a histogram beside a log-scaled sibling bins
+    exactly as it does drawn alone on that one shared scale, unchanged by
+    this fix."""
+    primary = _ind_y_primary(fm.LogScale())
+    secondary = _ind_y_hist(_IND_Y_V_POS, fm.LogScale())
+    solo_msgs, solo_svg = _warnings_of(lambda: secondary.to_svg())
+    assert solo_msgs == []
+    solo = _secondary_bar_spans_in_data_units(solo_svg, y_log_base=10.0)
+    for name, build in (
+        ("LayerChart", lambda: fm.LayerChart(primary, secondary)),
+        ("+", lambda: primary + secondary),
+    ):
+        msgs, svg = _warnings_of(lambda build=build: build().to_svg())
+        assert msgs == [], name
+        layered = _secondary_bar_spans_in_data_units(svg, y_log_base=10.0)
+        _assert_bar_spans_match(layered, solo)
+
+
+def test_a_faceted_independent_y_scale_is_unaffected_by_the_slot_fix():
+    """`facet(...).share_scale(y="independent")` gives each panel its own
+    y (count) scale -- an orthogonal per-panel mechanism this fix does not
+    touch, which only narrows a `LayerChart`'s per-LAYER y slots. Every row
+    still lands in its own panel's histogram, counted off that panel's own
+    y ladder, on a `LogScale` x axis exactly as the unfaceted door already
+    proves."""
+    group_a = _V20
+    group_b = _V20 * 5.0
+    df = pl.DataFrame(
+        {"v": np.concatenate([group_a, group_b]), "g": ["a"] * len(group_a) + ["b"] * len(group_b)}
+    )
+    msgs, svg = _warnings_of(
+        lambda: (
+            fm.Chart(df)
+            .mark_histogram()
+            .encode(x=fm.X("v", scale=fm.LogScale()))
+            .facet(col="g")
+            .share_scale(y="independent")
+            .to_svg()
+        )
+    )
+    assert msgs == []
+    groups = mark_groups(svg)
+    ladders = value_axis_ladders(svg, axis="y")
+    assert len(groups) == 2 and len(ladders) == 2
+    for group, (_pos, ladder) in zip(groups, ladders):
+        units = _axis_units_per_pixel(ladder)
+        total = sum(float(b["height"]) * units for b in data_bar_rects(group))
+        assert total == pytest.approx(20.0, abs=0.1)
+
+
+def test_a_chart_with_no_independent_y_slot_is_unaffected_by_the_slot_fix():
+    """A chart with no independent-y layer has only slot 0 to read from --
+    the case this demand has always reached correctly, unchanged by this
+    fix."""
+    msgs, svg = _warnings_of(lambda: _door_mark_histogram_channel_log_scale().to_svg())
+    assert msgs == []
+    assert _total_bar_count(svg, count_kind="y_height") == pytest.approx(20.0, abs=0.1)
+
+
+#: case name -> the primary layer's own builder. Its field ('w') is
+#: strictly positive and carries no off-side row of its own, so every case
+#: below has exactly one slot with an off-side row: the secondary's.
+_INDEPENDENT_Y_OFF_SIDE_PRIMARIES: dict[str, Callable[[], fm.Chart]] = {
+    "linear primary, log secondary": lambda: _ind_y_primary(),
+    "log primary, log secondary, same base and side": lambda: _ind_y_primary(fm.LogScale()),
+}
+
+#: secondary kind -> the secondary layer's own builder, over the same
+#: off-side data (`_IND_Y_V_OFF_SIDE`) and the same `LogScale`, so the
+#: off-side warning's naming and count is pinned for both the statistic
+#: families this fix reaches.
+_INDEPENDENT_Y_OFF_SIDE_SECONDARIES: dict[str, Callable[[], fm.Chart]] = {
+    "histogram": lambda: _ind_y_hist(_IND_Y_V_OFF_SIDE, fm.LogScale()),
+    "density": lambda: _ind_y_density(_IND_Y_V_OFF_SIDE, fm.LogScale()),
+}
+
+
+@pytest.mark.parametrize("door", ["flat", "hconcat leaf", "interactive"])
+@pytest.mark.parametrize("case", sorted(_INDEPENDENT_Y_OFF_SIDE_PRIMARIES))
+@pytest.mark.parametrize("secondary_kind", sorted(_INDEPENDENT_Y_OFF_SIDE_SECONDARIES))
+def test_an_independent_y_slots_off_side_rows_warn_by_its_own_field(case, door, secondary_kind):
+    """A `LayerChart(resolve={"y": "independent"})` secondary slot's own
+    off-side rows warn naming the slot's own field `'v'` and counting only
+    its own two rows -- never the primary layer's field `'w'`, whether the
+    secondary is a histogram or a density, whether the primary's own scale
+    shares the secondary's log channel information or not, and whether the
+    chart renders flat, nested in a composite leaf, or through its
+    interactive scene."""
+    primary = _INDEPENDENT_Y_OFF_SIDE_PRIMARIES[case]
+    build_secondary = _INDEPENDENT_Y_OFF_SIDE_SECONDARIES[secondary_kind]
+
+    def build() -> fm.LayerChart:
+        return fm.LayerChart(primary(), build_secondary(), resolve={"y": "independent"})
+
+    def render() -> None:
+        if door == "flat":
+            build().to_svg()
+        elif door == "hconcat leaf":
+            fm.hconcat(build(), _hconcat_sibling_leaf()).to_svg()
+        else:
+            json.loads(build().interactive().scene_json)
+
+    msgs, _ = _warnings_of(render)
+    assert len(msgs) == 1, (case, door, secondary_kind, msgs)
+    assert "2 row(s) of 'v'" in msgs[0], (case, door, secondary_kind, msgs[0])
+    assert "'w'" not in msgs[0], (case, door, secondary_kind, msgs[0])

@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::render::RenderError;
+use crate::spec::layer::PositionalAxis;
 use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::run::{OutputLineages, SpaceWalkStep, StepId};
 
@@ -130,7 +131,7 @@ pub(crate) use crate::transform::log_space::LogAxisSpace;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SlotSpace {
     pub(crate) space: LogAxisSpace,
-    pub(crate) axes: Vec<&'static str>,
+    pub(crate) axes: Vec<PositionalAxis>,
     pub(crate) records_caller_input: bool,
 }
 
@@ -162,7 +163,7 @@ impl StepSpace {
     /// which only leaves out off-side rows), and is refused when they would
     /// compute it differently: one statistic computes each input in one
     /// space.
-    fn demand(&mut self, step: &SpaceWalkStep, axis: &'static str, space: LogAxisSpace) -> Result<(), RenderError> {
+    fn demand(&mut self, step: &SpaceWalkStep, axis: PositionalAxis, space: LogAxisSpace) -> Result<(), RenderError> {
         let (slot, input) = (step.slot, step.input);
         let Some(existing) = self.slots.get_mut(&slot) else {
             let records_caller_input = step.is_root && step.computes();
@@ -172,6 +173,7 @@ impl StepSpace {
         let agrees = if step.computes() { existing.space == space } else { existing.space.side == space.side };
         if !agrees {
             let first = existing.axes.first().copied().unwrap_or(axis);
+            let (first, axis) = first.pairwise_voice(axis);
             return Err(RenderError::ScaleResolutionFailed(format!(
                 "the {first} and {axis} scales both draw a column one statistic computes from '{input}', in different log \
                  spaces; a statistic computes each input in one space, so give both axes the same LogScale or draw that \
@@ -221,12 +223,12 @@ impl SpaceDemand {
     /// carries demands nothing. Refused when two reads reach one slot of
     /// one step in spaces that would compute it differently
     /// ([`StepSpace::demand`]).
-    pub(crate) fn of(lineages: &OutputLineages, reads: &[(String, &'static str, String, LogAxisSpace)]) -> Result<Self, RenderError> {
+    pub(crate) fn of(lineages: &OutputLineages, reads: &[(String, PositionalAxis, String, LogAxisSpace)]) -> Result<Self, RenderError> {
         let mut demand = Self::default();
         for (key, axis, drawn_column, space) in reads {
             let Some(lineage) = lineages.get(key) else { continue };
             for step in lineage.space_walk(drawn_column) {
-                demand.steps.entry(lineage.lowered[step.index].id.clone()).or_default().demand(&step, axis, *space)?;
+                demand.steps.entry(lineage.lowered[step.index].id.clone()).or_default().demand(&step, *axis, *space)?;
             }
         }
         Ok(demand)
@@ -658,16 +660,17 @@ mod tests {
     /// The `SpaceDemand` `reads` place on `chain`, run over [`non_finite_rows`]
     /// — the positional twin of [`demand`]. Each read is `(key, axis,
     /// drawn_column, space)`.
-    fn space_demand_in(chain: serde_json::Value, reads: &[(&str, &'static str, &str, LogAxisSpace)]) -> Result<SpaceDemand, crate::render::RenderError> {
+    fn space_demand_in(chain: serde_json::Value, reads: &[(&str, PositionalAxis, &str, LogAxisSpace)]) -> Result<SpaceDemand, crate::render::RenderError> {
         pyo3::Python::initialize();
         let (_, lineages) = apply_transforms_named(&steps(chain), &non_finite_rows(), &Default::default()).expect("the chain runs");
-        let reads: Vec<(String, &'static str, String, LogAxisSpace)> = reads.iter().map(|(k, a, c, s)| (k.to_string(), *a, c.to_string(), *s)).collect();
+        let reads: Vec<(String, PositionalAxis, String, LogAxisSpace)> =
+            reads.iter().map(|(k, a, c, s)| (k.to_string(), *a, c.to_string(), *s)).collect();
         SpaceDemand::of(&lineages, &reads)
     }
 
     /// [`space_demand_in`] with every read in the base-10 positive [`space`].
-    fn space_demand(chain: serde_json::Value, reads: &[(&str, &'static str, &str)]) -> SpaceDemand {
-        let reads: Vec<(&str, &'static str, &str, LogAxisSpace)> = reads.iter().map(|(k, a, c)| (*k, *a, *c, space())).collect();
+    fn space_demand(chain: serde_json::Value, reads: &[(&str, PositionalAxis, &str)]) -> SpaceDemand {
+        let reads: Vec<(&str, PositionalAxis, &str, LogAxisSpace)> = reads.iter().map(|(k, a, c)| (*k, *a, *c, space())).collect();
         space_demand_in(chain, &reads).expect("one space per slot")
     }
 
@@ -712,7 +715,7 @@ mod tests {
     /// for the color demand.
     #[test]
     fn a_chain_without_a_marker_demands_no_space() {
-        let demand = space_demand(serde_json::json!([bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "bin_start")]);
+        let demand = space_demand(serde_json::json!([bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "bin_start")]);
         assert!(!demand.any());
     }
 
@@ -721,9 +724,9 @@ mod tests {
     /// differs from it).
     #[test]
     fn an_x_read_drawing_bin_start_demands_the_bin_on_its_field_slot() {
-        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "bin_start")]);
+        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "bin_start")]);
         let slot = demand.space(&[1]).of(SpaceSlot::Field).cloned().expect("the Bin is demanded on its field slot");
-        assert_eq!(slot, SlotSpace { space: space(), axes: vec!["x"], records_caller_input: true });
+        assert_eq!(slot, SlotSpace { space: space(), axes: vec![PositionalAxis::X], records_caller_input: true });
     }
 
     /// A `y` read drawing `count` demands nothing: `Bin`'s own
@@ -733,7 +736,7 @@ mod tests {
     /// the channel actually draws.
     #[test]
     fn a_y_read_drawing_count_demands_nothing() {
-        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, "y", "count")]);
+        let demand = space_demand(serde_json::json!([marker(), bin_step("v", None)]), &[(FINAL_OUTPUT_KEY, PositionalAxis::Y, "count")]);
         assert!(!demand.any());
     }
 
@@ -747,7 +750,7 @@ mod tests {
     #[test]
     fn a_contour_x_read_reaches_the_shared_kde2d_through_grid_x() {
         let chain = serde_json::json!([marker(), kde2d_step("x", "y", None), contour_step(Some("contour"))]);
-        let demand = space_demand(chain, &[("contour", "x", "contour_x")]);
+        let demand = space_demand(chain, &[("contour", PositionalAxis::X, "contour_x")]);
         let contour_space = demand.space(&[2]).of(SpaceSlot::GridX).cloned().expect("Contour demanded on grid_x");
         assert!(!contour_space.records_caller_input, "grid_x is Kde2D's output, not the caller's");
         let kde2d_space = demand.space(&[1]).of(SpaceSlot::X).cloned().expect("Kde2D demanded on x");
@@ -761,7 +764,7 @@ mod tests {
     /// directly).
     #[test]
     fn a_data_window_read_demands_its_sort_slot_as_a_pass_through() {
-        let demand = space_demand(serde_json::json!([marker(), data_window_step("v", None)]), &[(FINAL_OUTPUT_KEY, "x", "v")]);
+        let demand = space_demand(serde_json::json!([marker(), data_window_step("v", None)]), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "v")]);
         let slot = demand.space(&[1]).of(SpaceSlot::Sort(0)).cloned().expect("DataWindow demanded on its sort slot");
         assert!(!slot.records_caller_input, "v passes through unchanged, so the axis already reads it directly");
     }
@@ -775,7 +778,7 @@ mod tests {
             branch("stat", None, serde_json::json!([marker(), bin_step("v", None)])),
             branch("post", Some("stat"), serde_json::json!([keep_all()])),
         ]);
-        let demand = space_demand(chain, &[("post", "x", "bin_start")]);
+        let demand = space_demand(chain, &[("post", PositionalAxis::X, "bin_start")]);
         assert!(demand.space(&[0, 1]).of(SpaceSlot::Field).is_some());
     }
 
@@ -787,15 +790,15 @@ mod tests {
     #[test]
     fn a_kde2d_reading_one_column_on_both_axes_is_demanded_per_slot() {
         let chain = || serde_json::json!([marker(), kde2d_step("v", "v", None)]);
-        let x_only = space_demand(chain(), &[(FINAL_OUTPUT_KEY, "x", "grid_x")]);
+        let x_only = space_demand(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "grid_x")]);
         assert!(x_only.space(&[1]).of(SpaceSlot::X).is_some());
         assert!(x_only.space(&[1]).of(SpaceSlot::Y).is_none(), "the y slot reads v in data units");
         let base_two = LogAxisSpace { base: 2.0, ..space() };
-        let both = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "grid_x", space()), (FINAL_OUTPUT_KEY, "y", "grid_y", base_two)])
+        let both = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "grid_x", space()), (FINAL_OUTPUT_KEY, PositionalAxis::Y, "grid_y", base_two)])
             .expect("two slots, one space each");
         let step = both.space(&[1]);
-        assert_eq!(step.of(SpaceSlot::X).map(|s| (s.space, s.axes.clone())), Some((space(), vec!["x"])));
-        assert_eq!(step.of(SpaceSlot::Y).map(|s| (s.space, s.axes.clone())), Some((base_two, vec!["y"])));
+        assert_eq!(step.of(SpaceSlot::X).map(|s| (s.space, s.axes.clone())), Some((space(), vec![PositionalAxis::X])));
+        assert_eq!(step.of(SpaceSlot::Y).map(|s| (s.space, s.axes.clone())), Some((base_two, vec![PositionalAxis::Y])));
     }
 
     /// One computed slot drawn on `x` and `y` in different log spaces is
@@ -807,7 +810,7 @@ mod tests {
     fn one_computed_slot_on_two_axes_needs_one_space() {
         let chain = || serde_json::json!([marker(), bin_step("v", None)]);
         let base_two = LogAxisSpace { base: 2.0, ..space() };
-        let refused = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "bin_start", space()), (FINAL_OUTPUT_KEY, "y", "bin_start", base_two)])
+        let refused = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "bin_start", space()), (FINAL_OUTPUT_KEY, PositionalAxis::Y, "bin_start", base_two)])
             .expect_err("two spaces for one slot");
         assert_eq!(
             refused.to_string(),
@@ -818,10 +821,65 @@ mod tests {
             )
             .to_string()
         );
-        let shared = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "bin_start", space()), (FINAL_OUTPUT_KEY, "y", "bin_end", space())])
+        let shared = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "bin_start", space()), (FINAL_OUTPUT_KEY, PositionalAxis::Y, "bin_end", space())])
             .expect("one space");
         let slot = shared.space(&[1]).of(SpaceSlot::Field).cloned().expect("demanded");
-        assert_eq!(slot, SlotSpace { space: space(), axes: vec!["x", "y"], records_caller_input: true });
+        assert_eq!(slot, SlotSpace { space: space(), axes: vec![PositionalAxis::X, PositionalAxis::Y], records_caller_input: true });
+    }
+
+    /// The same two-spaces refusal, with one read on the primary `y` slot
+    /// and the other on an independent-y secondary slot: the message names
+    /// the secondary "secondary y", distinct from the bare "y" the primary
+    /// keeps — not "the y and y scales" twice over.
+    #[test]
+    fn one_computed_slot_on_the_primary_and_a_secondary_y_needs_one_space() {
+        let chain = || serde_json::json!([marker(), bin_step("v", None)]);
+        let base_two = LogAxisSpace { base: 2.0, ..space() };
+        let refused = space_demand_in(
+            chain(),
+            &[
+                (FINAL_OUTPUT_KEY, PositionalAxis::Y, "bin_start", space()),
+                (FINAL_OUTPUT_KEY, PositionalAxis::secondary_y(1), "bin_start", base_two),
+            ],
+        )
+        .expect_err("two spaces for one slot");
+        assert_eq!(
+            refused.to_string(),
+            crate::render::RenderError::ScaleResolutionFailed(
+                "the y and secondary y scales both draw a column one statistic computes from 'v', in different log spaces; a \
+                 statistic computes each input in one space, so give both axes the same LogScale or draw that column on one axis"
+                    .to_string()
+            )
+            .to_string()
+        );
+    }
+
+    /// Two DIFFERENT independent-y secondary slots drawing one statistic's
+    /// field in different log spaces are distinguished by slot number: "the
+    /// secondary y and secondary y scales" could not tell which secondary
+    /// slot is which, so each names its own.
+    #[test]
+    fn one_computed_slot_on_two_distinct_secondary_ys_names_each_slot() {
+        let chain = || serde_json::json!([marker(), bin_step("v", None)]);
+        let base_two = LogAxisSpace { base: 2.0, ..space() };
+        let refused = space_demand_in(
+            chain(),
+            &[
+                (FINAL_OUTPUT_KEY, PositionalAxis::secondary_y(1), "bin_start", space()),
+                (FINAL_OUTPUT_KEY, PositionalAxis::secondary_y(2), "bin_start", base_two),
+            ],
+        )
+        .expect_err("two spaces for one slot");
+        assert_eq!(
+            refused.to_string(),
+            crate::render::RenderError::ScaleResolutionFailed(
+                "the secondary y slot 1 and secondary y slot 2 scales both draw a column one statistic computes from 'v', in \
+                 different log spaces; a statistic computes each input in one space, so give both axes the same LogScale or draw \
+                 that column on one axis"
+                    .to_string()
+            )
+            .to_string()
+        );
     }
 
     /// A pass-through slot (a `DataWindow` sort field) drawn on two axes
@@ -832,10 +890,10 @@ mod tests {
     fn a_pass_through_slot_on_two_axes_needs_only_one_side() {
         let chain = || serde_json::json!([marker(), data_window_step("v", None)]);
         let base_two = LogAxisSpace { base: 2.0, ..space() };
-        let agreed = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "v", space()), (FINAL_OUTPUT_KEY, "y", "v", base_two)]).expect("one side");
-        assert_eq!(agreed.space(&[1]).of(SpaceSlot::Sort(0)).map(|s| s.axes.clone()), Some(vec!["x", "y"]));
+        let agreed = space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "v", space()), (FINAL_OUTPUT_KEY, PositionalAxis::Y, "v", base_two)]).expect("one side");
+        assert_eq!(agreed.space(&[1]).of(SpaceSlot::Sort(0)).map(|s| s.axes.clone()), Some(vec![PositionalAxis::X, PositionalAxis::Y]));
         let negative = LogAxisSpace { side: crate::scale::log::LogSide::Negative, ..space() };
-        assert!(space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, "x", "v", space()), (FINAL_OUTPUT_KEY, "y", "v", negative)]).is_err());
+        assert!(space_demand_in(chain(), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "v", space()), (FINAL_OUTPUT_KEY, PositionalAxis::Y, "v", negative)]).is_err());
     }
 
     /// `LogAxisSpace::forward`/`backward` round-trip an on-side value, and

@@ -28,6 +28,7 @@ use arrow::datatypes::SchemaRef;
 use pyo3::exceptions::PyValueError;
 use pyo3::{PyErr, PyResult, Python};
 
+use crate::spec::layer::PositionalAxis;
 use crate::transform::branch::{self, BranchSpec};
 use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, SpaceDemand, StepBins, StepSpace};
 use crate::transform::composed::{ComposedRuns, ComposedSpec, ComposedState};
@@ -125,7 +126,7 @@ pub(crate) struct OutputLineage {
     /// counts it the same content-deduplicated way a primitive layer's own
     /// column read is counted. Empty for a lineage no space demand ever
     /// reached.
-    pub(crate) log_input: HashMap<(String, String), arrow::array::ArrayRef>,
+    pub(crate) log_input: HashMap<(PositionalAxis, String), arrow::array::ArrayRef>,
 }
 
 impl OutputLineage {
@@ -280,7 +281,7 @@ struct Lineage<'s> {
     /// column ([`ComposedState`]).
     composed: ComposedState<'s>,
     /// See [`OutputLineage::log_input`].
-    log_input: HashMap<(String, String), arrow::array::ArrayRef>,
+    log_input: HashMap<(PositionalAxis, String), arrow::array::ArrayRef>,
 }
 
 impl Lineage<'_> {
@@ -739,7 +740,7 @@ fn caller_groupby(spec: &TransformSpec) -> &[String] {
 /// the tail's lowered steps reach it as shared, and its own statistic, when
 /// it is one, consumed the tail's rows and (if demanded) recorded
 /// `log_input`'s caller column.
-fn forked<'s>(current: &Rows<'s>, own: Option<LoweredStep>, log_input: &HashMap<(String, String), arrow::array::ArrayRef>) -> Lineage<'s> {
+fn forked<'s>(current: &Rows<'s>, own: Option<LoweredStep>, log_input: &HashMap<(PositionalAxis, String), arrow::array::ArrayRef>) -> Lineage<'s> {
     let mut lineage = current.lineage.clone();
     for step in &mut lineage.lowered {
         step.shared = true;

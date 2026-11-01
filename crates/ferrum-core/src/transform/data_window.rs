@@ -1699,7 +1699,7 @@ mod tests {
         // `records_caller_input: false` — a `DataWindow`'s own demanded
         // entry always is (its drawn column passes its field through
         // unchanged, read directly by the axis); see `space_columns`'s doc.
-        let slot = crate::transform::color_bin_group::SlotSpace { space, axes: vec!["x"], records_caller_input: false };
+        let slot = crate::transform::color_bin_group::SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: false };
         TransformContext {
             log_space: Some(std::rc::Rc::new(
                 crate::transform::color_bin_group::StepSpace::for_slots([(SpaceSlot::Sort(0), slot)]),

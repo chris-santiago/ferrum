@@ -1236,6 +1236,7 @@ fn resolve_panel_scales(
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         theme,
         text_demands,
+        None,
         leaf_scales,
     )?;
     warnings.extend(scale_warnings);
@@ -1316,6 +1317,7 @@ fn resolve_panel_scales(
                 panel,
                 panel_offset.1,
                 &y_text_demand,
+                slot + 1,
                 warnings,
             )?;
             slots.push(y_scale);
@@ -1343,6 +1345,7 @@ fn resolve_panel_scales(
 /// layer's own field), which nothing else surfaces: the primary pass only
 /// warns about layer-0's channels, and this slot's y-field is independent of
 /// layer 0's. A genuine y-field error still propagates as `Err`.
+#[allow(clippy::too_many_arguments)]
 fn resolve_layer_y_scale(
     ctx: &PanelResolveCtx,
     layer: &super::prepare::LayerPrepared,
@@ -1355,6 +1358,10 @@ fn resolve_layer_y_scale(
     // This slot's text-edge demand, read by the caller off the
     // secondary `AxisInput` `prepare::build_secondary_y_axis_inputs` built.
     y_text_demand: &crate::layout::geometry::TextEdgeDemand,
+    // This layer's own secondary slot (1..=n, `YSlotPlan`'s numbering) — the
+    // off-side rows a lowered statistic on this layer draws count against
+    // this slot alone, named by this layer's own field.
+    y_slot: usize,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
     let &PanelResolveCtx {
@@ -1376,6 +1383,7 @@ fn resolve_layer_y_scale(
         transform_outputs: &prep.transform_outputs,
         theme,
         leaf_scales,
+        transform_lineages: &prep.transform_lineages,
     };
     let (mut y, layer_warnings) = scale_resolve::resolve_layer_y_slot_scale(
         &layer_ctx,
@@ -1384,6 +1392,7 @@ fn resolve_layer_y_scale(
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         y_text_demand,
+        y_slot,
     )?;
     warnings.extend(layer_warnings);
     // Chart-level scale-domain config at the `axis_y2` position — the secondary-axis twin of

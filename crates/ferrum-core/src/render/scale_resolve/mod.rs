@@ -71,7 +71,7 @@ pub(in crate::render) use self::seam::{
 };
 
 // Internal re-exports used by the orchestrator in this module.
-use self::positional::{apply_coord_domain_overrides, build_axis_scale, PositionalFields};
+use self::positional::{apply_coord_domain_overrides, build_axis_scale, LogAxisReads, PositionalFields};
 
 /// The `Mark::Text` ink demand each positional channel's axis
 /// carries into [`resolve_scales_with_leaf_context`], already built by the
@@ -2262,6 +2262,7 @@ pub fn resolve_scales_with_outputs(
         theme,
         &TextEdgeDemands::default(),
         None,
+        None,
     )
 }
 
@@ -2334,6 +2335,35 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
     pub(in crate::render) transform_outputs: &'a HashMap<String, RecordBatch>,
     pub(in crate::render) theme: &'a ThemeInputs,
     pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
+    /// The real run's lineages. `resolve_layer_y_slot_scale` reads them only
+    /// through this slot's own [`LogAxisReads::slot`] view, which it hands
+    /// to `build_axis_scale` as that one y call's `slot_reads` — the y
+    /// fold and the y statistic-field naming are the only two reads that
+    /// ever see anything real here. Every other read this per-layer
+    /// resolution makes (sort, color, shape, stroke_dash, raster-cell)
+    /// stays on the fully empty lineages the sub-resolve's own
+    /// `transform_lineages` argument carries.
+    pub(in crate::render) transform_lineages: &'a crate::transform::run::OutputLineages,
+}
+
+/// The per-layer `ChartSpec` [`resolve_layer_y_slot_scale`] and
+/// [`crate::render::prepare::log_space_reads`] both resolve a layer's own y
+/// space against: the layer's own mark/encoding/position, `layers: None` so
+/// [`numeric_domain_union`] never re-unions sibling layers' y fields (this
+/// slot spans exactly its own data), with `domainParam` references
+/// substituted into concrete domains via [`resolve_param_domains`] — the one
+/// rule both the pre-pass demand and the real per-layer resolver select a
+/// slot's scale by.
+pub(in crate::render) fn layer_y_slot_spec(spec: &ChartSpec, layer: &crate::render::prepare::LayerPrepared) -> ChartSpec {
+    let mut layer_spec = ChartSpec {
+        mark: layer.mark,
+        encoding: layer.encoding.clone(),
+        position: layer.position.clone(),
+        layers: None,
+        ..spec.clone()
+    };
+    resolve_param_domains(&mut layer_spec);
+    layer_spec
 }
 
 /// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52 / #72).
@@ -2352,12 +2382,28 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
 /// slot spans exactly its own data), and `domainParam` references are substituted
 /// into concrete domains via [`resolve_param_domains`] BEFORE resolution — the
 /// piece the prepare path previously lacked (#72), which made static right-axis
-/// ticks diverge from mark placement once layer params reached the wire.
+/// ticks diverge from mark placement once layer params reached the wire
+/// ([`layer_y_slot_spec`]).
 ///
 /// Every column the layer draws was checked against its own rows once, in
 /// `prepare`, before any scale read one
 /// ([`crate::render::prepare::validate_layer_columns`]), so a missing column
 /// on any channel is refused there on its real channel, with its remedy.
+///
+/// `y_slot` is this layer's own secondary slot (`1..=n`, [`YSlotPlan`]'s
+/// numbering). A lowered statistic this layer draws (a histogram, a
+/// density) needs its own off-side rows counted against its OWN field, not
+/// folded into the primary's tally or named by an unrelated column — so
+/// this resolution passes [`LogAxisReads::slot`] (this slot's own axis and
+/// key, over the REAL lineages — the fold already matches the exact
+/// `(channel, y_slot)`, so no copy and no rekey is needed) as
+/// `build_axis_scale`'s own `slot_reads` param for the one y
+/// `build_axis_scale` call `resolve_scales_with_leaf_context` makes here.
+/// The sub-resolve's OWN `transform_lineages` argument stays fully empty:
+/// sort, color, shape, stroke_dash and raster-cell reads inside it see
+/// nothing at all, because the real lineages reach `build_axis_scale` only
+/// through the slot view this function builds, never through the
+/// sub-resolve's own lineages parameter.
 ///
 /// Returns the resolved `y` [`ScaleKind`] plus any warnings the resolution
 /// produced (the caller propagates them). No-op param substitution keeps
@@ -2374,19 +2420,19 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     // `resolve_layer_y_scale`'s panel-real call, read off the secondary
     // `AxisInput` that placeholder pass already built.
     y_text_demand: &crate::layout::geometry::TextEdgeDemand,
+    y_slot: usize,
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
-    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
+    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales, transform_lineages } = ctx;
 
-    // The layer's own position (its own, else the chart's), so a layer
-    // stacking on its own y axis widens it to the stack it draws.
-    let mut layer_spec = ChartSpec {
-        mark: layer.mark,
-        encoding: layer.encoding.clone(),
-        position: layer.position.clone(),
-        layers: None,
-        ..spec.clone()
-    };
-    resolve_param_domains(&mut layer_spec);
+    let layer_spec = layer_y_slot_spec(spec, layer);
+
+    // This slot's own view onto the REAL lineages: its own exact axis
+    // (never slot `0`, never rekeyed) and its own key (its `data_source`,
+    // else `FINAL_OUTPUT_KEY`) — handed to `build_axis_scale` as the one y
+    // call's `slot_reads`, below.
+    let key = layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY);
+    let axis = crate::spec::layer::PositionalAxis::secondary_y(y_slot);
+    let reads = LogAxisReads::slot(transform_lineages, axis, key);
 
     let (layer_scales, warnings) = resolve_scales_with_leaf_context(
         &layer_spec,
@@ -2395,13 +2441,12 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
         &layer_spec.encoding,
         layer_batch,
         transform_outputs,
-        // Only this layer's y scale is kept; the auxiliary scales resolved
-        // beside it are discarded, so no binned color's origins are read.
         &crate::transform::run::OutputLineages::new(),
         x_pixel_range,
         y_pixel_range,
         theme,
         &TextEdgeDemands { x: Default::default(), y: y_text_demand.clone() },
+        Some(reads),
         leaf_scales,
     )?;
     Ok((layer_scales.y, warnings))
@@ -2803,6 +2848,14 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
     text_demands: &TextEdgeDemands,
+    // One independent-y layer's own slot view, threaded the same way
+    // `text_demands` is: `Some` only from `resolve_layer_y_slot_scale`
+    // (that slot's own axis and key, over the real lineages), forwarded to
+    // the y `build_axis_scale` call alone (never the x call) so the chart's
+    // own axes resolve byte-identically regardless of this param. `None`
+    // for every other caller — the chart's own x/y axes, which resolve
+    // `LogAxisReads::chart` from `transform_lineages` on their own.
+    y_slot_reads: Option<LogAxisReads<'_>>,
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
@@ -2928,7 +2981,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 // Stack-aware x-axis: see `position::axis_batch`.
                 let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, &mut warnings)?;
                 warnings.extend(aux_warnings);
                 let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
@@ -2943,7 +2996,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
                 let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, &mut warnings)?;
                 warnings.extend(aux_warnings);
                 let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
@@ -3030,12 +3083,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, &mut warnings)?,
     };
     let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the

@@ -19993,7 +19993,222 @@ fn a_layered_log_axis_demands_a_sibling_histograms_bin() {
     let reads = log_space_reads(&spec, &outputs, None);
     let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
     let bin = demand.space(&[1]).of(crate::transform::core::SpaceSlot::Field).cloned().expect("the histogram's Bin is demanded on its field slot");
-    assert_eq!((bin.axes, bin.space), (vec!["x"], LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }));
+    assert_eq!(
+        (bin.axes, bin.space),
+        (vec![crate::spec::layer::PositionalAxis::X], LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive })
+    );
+}
+
+/// Rows for [`independent_y_histogram_chart`]: `v` to be binned (all
+/// strictly positive, so a `LogScale` on either layer's own field places
+/// every row), `w` the primary layer's own field.
+fn independent_y_histogram_rows() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false), Field::new("w", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 10.0, 30.0, 100.0])),
+            Arc::new(Float64Array::from(vec![5.0, 4.0, 3.0, 2.0, 1.0])),
+        ],
+    )
+    .unwrap()
+}
+
+/// A base-10 positive `LogScale` wire value.
+fn log10_scale() -> serde_json::Value {
+    serde_json::json!({"type": "log", "base": 10.0})
+}
+
+/// A point layer (`x=v`, `y=w`, `primary_scale` on `y`) beside an
+/// independent-y HORIZONTAL histogram (`y=bin_start`/`y2=bin_end`,
+/// `x=count`, `secondary_scale` on its own `y`) over one named `Bin` on
+/// `v` — the secondary-y twin of
+/// [`a_layered_log_axis_demands_a_sibling_histograms_bin`]'s fixture, with
+/// the histogram's binned field on `y` (not `x`) so its own independent
+/// slot, never the primary's, carries whichever `LogScale` is given.
+fn independent_y_histogram_chart(primary_scale: Option<serde_json::Value>, secondary_scale: Option<serde_json::Value>) -> ChartSpec {
+    let mut primary_y = serde_json::json!({"field": "w"});
+    if let Some(scale) = primary_scale {
+        primary_y["scale"] = scale;
+    }
+    let mut secondary_y = serde_json::json!({"field": "bin_start"});
+    if let Some(scale) = secondary_scale {
+        secondary_y["scale"] = scale;
+    }
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [statistics_marker(), {"type": "bin", "field": "v", "bin_count": 4, "nice": false, "name": "hist"}],
+        "encoding": {},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "v"}, "y": primary_y}},
+            {"mark": "bar", "independent_y": true, "data_source": "hist", "encoding": {"y": secondary_y, "y2": {"field": "bin_end"}, "x": {"field": "count"}}},
+        ],
+    }))
+    .expect("the independent-y histogram spec deserializes")
+}
+
+/// An independent-y layer's own lowered statistic is demanded in its OWN
+/// slot's space, never the primary's, in either direction: a `LogScale` on
+/// the secondary's own `y` demands the histogram's `Bin` in log space,
+/// naming the secondary slot; a `LogScale` on the PRIMARY's `y` demands
+/// nothing on that same `Bin` at all, even though both read a `("y",
+/// "bin_start")`-shaped column today's un-slotted demand would conflate.
+/// Rejects collapsing every layer's `y` read onto the one scale the
+/// establishing (primary) encoding resolves.
+#[test]
+fn an_independent_y_layer_demands_its_own_slots_space() {
+    let rows = independent_y_histogram_rows();
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+
+    // Direction 1: the secondary owns the LogScale, the primary none.
+    let spec = independent_y_histogram_chart(None, Some(log10_scale()));
+    let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+    let reads = log_space_reads(&spec, &outputs, None);
+    let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
+    let bin = demand
+        .space(&[1])
+        .of(crate::transform::core::SpaceSlot::Field)
+        .cloned()
+        .expect("the secondary's own LogScale demands its Bin");
+    assert_eq!(
+        (bin.axes, bin.space),
+        (vec![crate::spec::layer::PositionalAxis::secondary_y(1)], LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }),
+        "the demand names the secondary's own slot, not the primary's"
+    );
+
+    // Direction 2: the PRIMARY owns the LogScale, the secondary none — the
+    // secondary's Bin is demanded in no space at all.
+    let spec = independent_y_histogram_chart(Some(log10_scale()), None);
+    let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+    let reads = log_space_reads(&spec, &outputs, None);
+    let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
+    assert!(
+        demand.space(&[1]).of(crate::transform::core::SpaceSlot::Field).is_none(),
+        "the primary's LogScale must not reach the secondary's own Bin"
+    );
+}
+
+/// `fold_log_input_into_tally` matches the exact axis it is asked about —
+/// channel AND y-slot — so a slot-1 (secondary) log-input entry recorded
+/// beside a slot-0 (primary) one in the SAME lineage never reaches the
+/// primary's tally. Rejects filtering by channel alone (`"y"`), which would
+/// conflate the two and fold a secondary axis's off-side rows into the
+/// primary's count.
+#[test]
+fn fold_log_input_into_tally_keeps_a_slot_1_entry_out_of_the_slot_0_tally() {
+    use crate::spec::layer::PositionalAxis;
+    let slot0: arrow::array::ArrayRef = Arc::new(Float64Array::from(vec![1.0, -2.0]));
+    let slot1: arrow::array::ArrayRef = Arc::new(Float64Array::from(vec![3.0, -4.0, -5.0]));
+    let mut lineages: crate::transform::run::OutputLineages = HashMap::new();
+    lineages.insert(
+        "a".to_string(),
+        crate::transform::run::OutputLineage {
+            swarm: None,
+            statistic_input: None,
+            lowered: Vec::new(),
+            written_groupby: Vec::new(),
+            source: Arc::new(Schema::empty()),
+            log_input: HashMap::from([((PositionalAxis::Y, "v".to_string()), slot0), ((PositionalAxis::secondary_y(1), "w".to_string()), slot1)]),
+        },
+    );
+    let mut tally = crate::render::scale_resolve::LeftOutTally::new();
+    crate::render::scale_resolve::fold_log_input_into_tally(&lineages, PositionalAxis::Y, Some(crate::scale::log::LogSide::Positive), &mut tally)
+        .expect("Float64 folds");
+    assert_eq!(tally.rows(), 1, "only the slot-0 column's off-side row counts; the slot-1 column never reaches slot 0's tally");
+}
+
+/// Rows for [`two_statistic_independent_y_chart`]: `v0` (the primary's own
+/// binned field) and `v1` (the secondary's), both strictly positive so
+/// either's `LogScale` places every row.
+fn two_statistic_independent_y_rows() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v0", DataType::Float64, false), Field::new("v1", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 10.0, 30.0, 100.0])),
+            Arc::new(Float64Array::from(vec![2.0, 4.0, 20.0, 40.0, 200.0])),
+        ],
+    )
+    .unwrap()
+}
+
+/// A primary horizontal histogram (`y = bin_start` from a named `Bin` on
+/// `v0`) beside an independent-y horizontal histogram (`y = bin_start` from
+/// a SEPARATE named `Bin` on `v1`) — unlike [`independent_y_histogram_chart`],
+/// where the primary's own field is a primitive read, BOTH layers here draw
+/// a lowered statistic, so the primary's own log demand (not just the
+/// secondary's) can be exercised and compared against its own resolved
+/// scale. The two `Bin`s are independent named steps (neither chains from
+/// the other), so each publishes its own lineage with its own step id —
+/// layer 0's `hist0` at `[1]`, layer 1's `hist1` at `[2]`.
+fn two_statistic_independent_y_chart(primary_scale: Option<serde_json::Value>, secondary_scale: Option<serde_json::Value>) -> ChartSpec {
+    let mut primary_y = serde_json::json!({"field": "bin_start"});
+    if let Some(scale) = primary_scale {
+        primary_y["scale"] = scale;
+    }
+    let mut secondary_y = serde_json::json!({"field": "bin_start"});
+    if let Some(scale) = secondary_scale {
+        secondary_y["scale"] = scale;
+    }
+    serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "transforms": [
+            statistics_marker(),
+            {"type": "bin", "field": "v0", "bin_count": 4, "nice": false, "name": "hist0"},
+            {"type": "bin", "field": "v1", "bin_count": 4, "nice": false, "name": "hist1"},
+        ],
+        "encoding": {},
+        "layers": [
+            {"mark": "bar", "data_source": "hist0", "encoding": {"y": primary_y, "y2": {"field": "bin_end"}, "x": {"field": "count"}}},
+            {"mark": "bar", "independent_y": true, "data_source": "hist1", "encoding": {"y": secondary_y, "y2": {"field": "bin_end"}, "x": {"field": "count"}}},
+        ],
+    }))
+    .expect("the two-statistic independent-y spec deserializes")
+}
+
+/// Every layer of every independent-y fixture demands the space of the
+/// `ScaleKind` its OWN slot actually resolves to
+/// (`PreparedInputs::provisional_scales.y` for slot `0`,
+/// `PreparedInputs::secondary_y_scales[slot - 1]` for a secondary slot) —
+/// a miss here would show as a lowered statistic binning in a different
+/// space than the axis it draws on actually resolved. Both layers draw a
+/// lowered `Bin` ([`two_statistic_independent_y_chart`]), so layer 0's own
+/// demand discriminates too, not just layer 1's — rejects a check that
+/// passes by construction regardless of what layer 0 resolves to.
+#[test]
+fn every_independent_y_layers_log_demand_matches_its_own_resolved_scale_kind() {
+    let rows = two_statistic_independent_y_rows();
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let config = crate::render::chart_config::ChartConfig::default();
+    let step_ids: [Vec<usize>; 2] = [vec![1], vec![2]];
+
+    for (primary_scale, secondary_scale) in [
+        (None, Some(log10_scale())),
+        (Some(log10_scale()), None),
+        (Some(log10_scale()), Some(log10_scale())),
+        (None, None),
+    ] {
+        let spec = two_statistic_independent_y_chart(primary_scale, secondary_scale);
+        let prep = prepare_render_inputs(&spec, &rows, &theme, viewport, &config, None).expect("prepares");
+        let (first_outputs, _, _, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
+        let reads = log_space_reads(&spec, &first_outputs, None);
+        let demand = SpaceDemand::of(&prep.transform_lineages, &reads).expect("one space per slot");
+
+        for (layer_idx, _layer) in prep.layers.iter().enumerate() {
+            let slot = prep.y_slot_plan.slot_for_layer(layer_idx);
+            let resolved_is_log = match slot {
+                0 => matches!(prep.provisional_scales.y, crate::render::scale_resolve::ScaleKind::Log(_)),
+                n => matches!(prep.secondary_y_scales[n - 1], crate::render::scale_resolve::ScaleKind::Log(_)),
+            };
+            let demanded_is_log = demand.space(&step_ids[layer_idx]).of(crate::transform::core::SpaceSlot::Field).is_some();
+            assert_eq!(
+                demanded_is_log, resolved_is_log,
+                "layer {layer_idx}, slot {slot}: demand must match whether its own resolved scale is Log"
+            );
+        }
+    }
 }
 
 /// A faceted histogram on a log axis records every panel's caller column:
@@ -20021,7 +20236,7 @@ fn a_faceted_log_histogram_records_every_panels_caller_column() {
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
     let (_, _, lineages, _) = run_pipeline(&spec, &rows, viewport, &theme, None).expect("runs");
-    let recorded = lineages[FINAL_OUTPUT_KEY].log_input.get(&("x".to_string(), "v".to_string())).expect("the caller's column is recorded");
+    let recorded = lineages[FINAL_OUTPUT_KEY].log_input.get(&(crate::spec::layer::PositionalAxis::X, "v".to_string())).expect("the caller's column is recorded");
     let mut values: Vec<f64> = crate::render::arrow_cast::col_as_f64(&RecordBatch::try_from_iter([("v", recorded.clone())]).unwrap(), "v").unwrap().into_iter().flatten().collect();
     values.sort_by(f64::total_cmp);
     assert_eq!(values, [-5.0, 0.0, 1.0, 10.0, 20.0, 200.0], "both panels' rows, off-side ones included");

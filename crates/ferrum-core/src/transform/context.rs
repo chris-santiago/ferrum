@@ -731,7 +731,7 @@ pub struct TransformContext {
     /// gets its own empty sink so its own column is attributed to its own
     /// output, not overwritten by a later step demanded on a different
     /// field.
-    pub(crate) log_input: Rc<RefCell<HashMap<(String, String), arrow::array::ArrayRef>>>,
+    pub(crate) log_input: Rc<RefCell<HashMap<(crate::spec::layer::PositionalAxis, String), arrow::array::ArrayRef>>>,
     /// The pipeline step this context is handed to, set per step by the
     /// pipeline runner; [`StepInstance::Unplaced`] outside a run.
     pub(crate) step: StepInstance,
@@ -773,11 +773,10 @@ impl TransformContext {
         self.warnings.borrow_mut().push(warning);
     }
 
-    /// Record `column`, the caller's own input for `field` on `axis`
-    /// ("x"/"y"), before a demanded step maps it — see [`Self::log_input`]'s
-    /// doc.
-    pub(crate) fn note_log_input(&self, axis: &str, field: &str, column: arrow::array::ArrayRef) {
-        self.log_input.borrow_mut().insert((axis.to_string(), field.to_string()), column);
+    /// Record `column`, the caller's own input for `field` on `axis`, before
+    /// a demanded step maps it — see [`Self::log_input`]'s doc.
+    pub(crate) fn note_log_input(&self, axis: crate::spec::layer::PositionalAxis, field: &str, column: arrow::array::ArrayRef) {
+        self.log_input.borrow_mut().insert((axis, field.to_string()), column);
     }
 
     /// Raise `refusal`, the refusal a `groupby` null-key drop that left
