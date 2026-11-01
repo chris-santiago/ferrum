@@ -920,6 +920,214 @@ mod tests {
         assert!(clo > 0.0 && chi > 0.0, "the count-scale pin must stay on-side: ({clo}, {chi})");
     }
 
+    /// A `Kde2D` step demanded on its `x` slot, `y` slot, or both, each
+    /// independently in its own `space` — the 2-D twin of `field_slot`,
+    /// since a `Kde2D`'s two positional slots can each resolve a different
+    /// `LogScale` (or none) even though `field_slot`'s single `Field` slot
+    /// never needs to.
+    fn kde2d_slots(x: Option<LogAxisSpace>, y: Option<LogAxisSpace>) -> StepSpace {
+        let mut entries = Vec::new();
+        if let Some(space) = x {
+            entries.push((SpaceSlot::X, SlotSpace { space, axes: vec!["x"], records_caller_input: true }));
+        }
+        if let Some(space) = y {
+            entries.push((SpaceSlot::Y, SlotSpace { space, axes: vec!["y"], records_caller_input: true }));
+        }
+        StepSpace::for_slots(entries)
+    }
+
+    /// A positive-side `LogAxisSpace` of the given `base`, reusing
+    /// [`positive_space`]'s side rather than restating it.
+    fn positive_space_base(base: f64) -> LogAxisSpace {
+        LogAxisSpace { base, ..positive_space() }
+    }
+
+    /// A two-column batch with distinct, strictly positive x/y ranges this
+    /// module's `Kde2D` facet-pin tests assert against: x spans 2..32, y
+    /// spans 3..243, both compatible with base-10 and base-2 log mapping.
+    fn kde2d_positive_xy_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![2.0, 4.0, 8.0, 16.0, 32.0])),
+                Arc::new(Float64Array::from(vec![3.0, 9.0, 27.0, 81.0, 243.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A log-demanded `Kde2D`'s facet pin is the DATA-UNIT extent of its
+    /// demanded axes. `global_extent_in_space` maps each demanded axis's
+    /// column into that slot's log space to fold the raw min/max there
+    /// (the forward map), then must map that pair BACK onto the axis before
+    /// pinning it (the backward map). This test's own data-unit assertion
+    /// below exercises both halves of that round trip at once — a forward-map
+    /// bug would land the pin somewhere other than `(min_x, max_x, min_y,
+    /// max_y)` too, the same as a backward-map bug would. Dropping only the
+    /// backward half would pin `(log_base(min), log_base(max))` instead —
+    /// for this fixture still on-side, so not refused, just a silently far
+    /// narrower grid than the real data occupies. Covers x-only, y-only and
+    /// both axes demanded, at base 10 and base 2; an undemanded axis is
+    /// never mapped at all, so it comes back exactly as `global_extent`
+    /// (no space) computes it — the same assertion covers both, since this
+    /// fixture's data-unit extent does not depend on which axis was
+    /// demanded. The pinned spec's own `apply_with_context` run also
+    /// reproduces the unpinned run's grid, extent and density, since the
+    /// pin is exactly what that run would have computed for its own
+    /// extent.
+    #[test]
+    fn log_demanded_kde_2d_facet_pin_is_the_data_unit_extent() {
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::kde_2d::tests::{assert_close, list_values};
+        use crate::transform::kde_2d::Kde2DSpec;
+
+        let batch = kde2d_positive_xy_batch();
+        let (min_x, max_x, min_y, max_y) = (2.0, 32.0, 3.0, 243.0);
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 8,
+            extent: None,
+            groupby: vec![],
+            name: None,
+        };
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+
+        for base in [10.0, 2.0] {
+            for (x_demanded, y_demanded) in [(true, false), (false, true), (true, true)] {
+                let x_space = x_demanded.then(|| positive_space_base(base));
+                let y_space = y_demanded.then(|| positive_space_base(base));
+                let space = kde2d_slots(x_space, y_space);
+                let demand = SpaceDemand::single(vec![0], space.clone());
+                let out = fix_transform_extents_for_facet_in_space(
+                    &[TransformSpec::Kde2D(spec.clone())],
+                    &batch,
+                    Some(&demand),
+                );
+                let TransformSpec::Kde2D(pinned) = &out[0] else { panic!("expected a Kde2D") };
+                let (px_lo, px_hi, py_lo, py_hi) = pinned.extent.expect("the pin is set");
+
+                assert!(
+                    close(px_lo, min_x) && close(px_hi, max_x),
+                    "base {base}, x demanded {x_demanded}: x pin ({px_lo}, {px_hi}) != data-unit ({min_x}, {max_x})"
+                );
+                assert!(
+                    close(py_lo, min_y) && close(py_hi, max_y),
+                    "base {base}, y demanded {y_demanded}: y pin ({py_lo}, {py_hi}) != data-unit ({min_y}, {max_y})"
+                );
+
+                use crate::transform::context::TransformContext;
+                let demanded_ctx = TransformContext { log_space: Some(std::rc::Rc::new(space)), ..Default::default() };
+                let unpinned = crate::transform::kde_2d::apply_with_context(&spec, &batch, &demanded_ctx)
+                    .expect("the unpinned run");
+                let with_pin = crate::transform::kde_2d::apply_with_context(pinned, &batch, &demanded_ctx)
+                    .expect("the pinned extent must not be refused by the step it was pinned for");
+                for name in ["grid_x", "grid_y", "density", "extent"] {
+                    assert_close(name, &list_values(&with_pin, name), &list_values(&unpinned, name));
+                }
+            }
+        }
+    }
+
+    /// A log-demanded `Kde2D`'s facet pin over a demanded column that is
+    /// degenerate (every value tied) is left unpinned: `global_extent` has
+    /// no principled range for a column with none, so the spec comes back
+    /// exactly as it went in. A demanded column holding a null, by
+    /// contrast, IS pinned — the null is simply excluded from the min/max
+    /// fold, the same way `global_extent` already excludes it — and the
+    /// pin equals the unpinned run's OWN emitted `extent` output (the
+    /// oracle the real `apply_with_context` path computes, not a
+    /// hand-picked value), within relative `1e-9`. That pinned spec's own
+    /// `apply_with_context` run then reproduces the unpinned run's grid,
+    /// extent and density too. An off-side demanded value is refused by
+    /// the demanded step itself, not by this pin, and is out of this
+    /// test's domain.
+    #[test]
+    fn log_demanded_kde_2d_facet_pin_on_boundary_data_matches_the_unpinned_run() {
+        use crate::transform::context::TransformContext;
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::kde_2d::tests::{assert_close, list_values};
+        use crate::transform::kde_2d::Kde2DSpec;
+
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 8,
+            extent: None,
+            groupby: vec![],
+            name: None,
+        };
+        let space = kde2d_slots(Some(positive_space_base(10.0)), None);
+        let pin = |batch: &RecordBatch| {
+            let out = fix_transform_extents_for_facet_in_space(
+                &[TransformSpec::Kde2D(spec.clone())],
+                batch,
+                Some(&SpaceDemand::single(vec![0], space.clone())),
+            );
+            let TransformSpec::Kde2D(pinned) = out.into_iter().next().unwrap() else { panic!("expected a Kde2D") };
+            pinned
+        };
+
+        let tied = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let tied_pinned = pin(&tied);
+        assert!(
+            tied_pinned.extent.is_none(),
+            "an all-tied demanded column has no range to pin, so the spec stays unpinned: {:?}",
+            tied_pinned.extent
+        );
+
+        let with_null = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(2.0), None, Some(8.0), Some(16.0)])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let null_pinned = pin(&with_null);
+        let (px_lo, px_hi, py_lo, py_hi) = null_pinned
+            .extent
+            .expect("a null is excluded from the fold, not made degenerate, so this demanded column still pins");
+
+        let demanded_ctx = TransformContext { log_space: Some(std::rc::Rc::new(space)), ..Default::default() };
+        let unpinned = crate::transform::kde_2d::apply_with_context(&spec, &with_null, &demanded_ctx)
+            .expect("the unpinned run");
+        let oracle_extent = list_values(&unpinned, "extent");
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+        assert!(
+            close(px_lo, oracle_extent[0])
+                && close(px_hi, oracle_extent[1])
+                && close(py_lo, oracle_extent[2])
+                && close(py_hi, oracle_extent[3]),
+            "the pin ({px_lo}, {px_hi}, {py_lo}, {py_hi}) must equal the unpinned run's own extent output {oracle_extent:?}"
+        );
+
+        let with_pin = crate::transform::kde_2d::apply_with_context(&null_pinned, &with_null, &demanded_ctx)
+            .expect("the pinned extent must not be refused by the step it was pinned for");
+        for name in ["grid_x", "grid_y", "density", "extent"] {
+            assert_close(name, &list_values(&with_pin, name), &list_values(&unpinned, name));
+        }
+    }
+
     /// With no space demand, `fix_transform_extents_for_facet_in_space` pins
     /// in data space, equal to `fix_transform_extents_for_facet`.
     #[test]

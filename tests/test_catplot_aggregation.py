@@ -592,6 +592,21 @@ class TestPerRowAppearanceChannels:
         with pytest.raises(ValueError, match="is not supported"):
             fm.catplot(cat_df, x="cat", y="val", kind=kind, encode={"size": "val"})
 
+    @pytest.mark.parametrize("channel", ["size", "opacity"])
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_an_encode_none_entry_binds_nothing_to_refuse(self, cat_df, kind, channel):
+        """`encode={<channel>: None}` leaves the chart's encoding exactly
+        where it already was -- unbound -- so there is nothing for the
+        per-row-appearance refusal to catch, and the render is
+        byte-identical to the call with no `encode=` at all. The call
+        carries no keyword for the channel: adding one alongside the
+        `None` entry is refused under both spellings and would not tell
+        apart a merge that drops an unset channel from one that keeps it.
+        """
+        baseline = fm.catplot(cat_df, x="cat", y="val", kind=kind).to_svg()
+        svg = fm.catplot(cat_df, x="cat", y="val", kind=kind, encode={channel: None}).to_svg()
+        assert svg == baseline
+
     @pytest.mark.parametrize("kind", ["point", "bar"])
     def test_the_message_names_every_refused_channel(self, cat_df, kind):
         with pytest.raises(ValueError) as excinfo:

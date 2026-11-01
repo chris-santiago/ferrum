@@ -672,7 +672,7 @@ impl PyKde2D {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use arrow::array::{Float64Array, ListArray, RecordBatch, StringArray, UInt32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1434,14 +1434,18 @@ mod tests {
         Space { base: 2.0, side: crate::scale::log::LogSide::Positive }
     }
 
-    /// `name`'s one list in `batch`, every entry (null as NaN).
-    fn list_values(batch: &RecordBatch, name: &str) -> Vec<f64> {
+    /// `name`'s one list in `batch`, every entry (null as NaN). `pub(crate)`
+    /// so a `Kde2D` facet-pin test outside this module (`render::prepare::extent`)
+    /// reads a `Kde2D` output batch's list columns the same way, rather than
+    /// keeping a second copy.
+    pub(crate) fn list_values(batch: &RecordBatch, name: &str) -> Vec<f64> {
         let list = batch.column(batch.schema().index_of(name).unwrap()).as_any().downcast_ref::<ListArray>().unwrap().value(0);
         let values = list.as_any().downcast_ref::<Float64Array>().unwrap();
         (0..values.len()).map(|i| if values.is_null(i) { f64::NAN } else { values.value(i) }).collect()
     }
 
-    fn assert_close(name: &str, actual: &[f64], expected: &[f64]) {
+    /// `pub(crate)` for the same reason as [`list_values`].
+    pub(crate) fn assert_close(name: &str, actual: &[f64], expected: &[f64]) {
         assert_eq!(actual.len(), expected.len(), "{name}");
         for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
             assert!((a - e).abs() <= 1e-9 * e.abs().max(1.0), "{name}[{i}]: {a} vs {e}");

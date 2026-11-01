@@ -37,6 +37,7 @@ from tests._hue_probe import legend_labels
 from tests._svg_extents import (
     log_axis_pixels_per_unit,
     log_value_for_pixel,
+    panel_x_ladder,
     value_axis_ladder,
     value_axis_ladders,
     value_for_pixel,
@@ -45,6 +46,7 @@ from tests._svg_extents import (
 from tests._svg_rects import (
     data_bar_rects,
     mark_groups,
+    mark_groups_by_frame,
     mark_layer,
     polylines,
     step_after_paths,
@@ -142,6 +144,27 @@ def _invert_log(pixel: float, ladder: dict[float, float], *, base: float = 10.0)
     return log_value_for_pixel(ladder, pixel, base=base)
 
 
+def _vertices_in_data_units(
+    coords: list[tuple[float, float]],
+    x_ladder: dict[float, float],
+    y_ladder: dict[float, float],
+    *,
+    x_log: bool,
+    y_log: bool,
+) -> tuple[list[float], list[float]]:
+    """Pixel vertices read back to data units through each axis's own tick
+    ladder: the log fit when that axis is a `LogScale` of any base, the
+    linear fit otherwise. Shared by a single-panel chart's own ladder and a
+    facet panel's own ladder, which differ only in how each is found."""
+    x_values = [
+        _invert_log(px, x_ladder) if x_log else value_for_pixel(x_ladder, px) for px, _py in coords
+    ]
+    y_values = [
+        _invert_log(py, y_ladder) if y_log else value_for_pixel(y_ladder, py) for _px, py in coords
+    ]
+    return x_values, y_values
+
+
 def _contour_vertices_in_data_units(
     svg: str, *, x_log: bool, y_log: bool
 ) -> tuple[list[float], list[float]]:
@@ -152,13 +175,7 @@ def _contour_vertices_in_data_units(
     coords = _path_vertices(mark_layer(svg))
     x_ladder = _leftmost_ladder(svg, axis="x")
     y_ladder = _leftmost_ladder(svg, axis="y")
-    x_values = [
-        _invert_log(px, x_ladder) if x_log else value_for_pixel(x_ladder, px) for px, _py in coords
-    ]
-    y_values = [
-        _invert_log(py, y_ladder) if y_log else value_for_pixel(y_ladder, py) for _px, py in coords
-    ]
-    return x_values, y_values
+    return _vertices_in_data_units(coords, x_ladder, y_ladder, x_log=x_log, y_log=y_log)
 
 
 def _from_log10(value: float) -> float:
@@ -171,6 +188,26 @@ def _from_log2(value: float) -> float:
 
 def _unchanged(value: float) -> float:
     return value
+
+
+def _assert_vertices_match_oracle(
+    log_x: list[float],
+    log_y: list[float],
+    oracle_x: list[float],
+    oracle_y: list[float],
+    *,
+    x_from_oracle: Callable[[float], float],
+    y_from_oracle: Callable[[float], float],
+) -> None:
+    """The log-axis chart's vertices, read back to data units, equal pair
+    for pair the oracle's: the same statistic fitted on linear axes over a
+    column the test transformed itself, its vertices mapped back by
+    `x_from_oracle` / `y_from_oracle`. Shared by the single-panel and
+    per-facet-panel comparisons."""
+    assert log_x, "the chart draws no path"
+    assert len(log_x) == len(oracle_x), (len(log_x), len(oracle_x))
+    assert log_x == pytest.approx([x_from_oracle(x) for x in oracle_x], rel=1e-3)
+    assert log_y == pytest.approx([y_from_oracle(y) for y in oracle_y], rel=1e-3)
 
 
 def _assert_same_vertices_in_data_units(
@@ -188,10 +225,9 @@ def _assert_same_vertices_in_data_units(
     vertices mapped back by `x_from_oracle` / `y_from_oracle`."""
     log_x, log_y = _contour_vertices_in_data_units(log_svg, x_log=x_log, y_log=y_log)
     oracle_x, oracle_y = _contour_vertices_in_data_units(oracle_svg, x_log=False, y_log=False)
-    assert log_x, "the chart draws no path"
-    assert len(log_x) == len(oracle_x), (len(log_x), len(oracle_x))
-    assert log_x == pytest.approx([x_from_oracle(x) for x in oracle_x], rel=1e-3)
-    assert log_y == pytest.approx([y_from_oracle(y) for y in oracle_y], rel=1e-3)
+    _assert_vertices_match_oracle(
+        log_x, log_y, oracle_x, oracle_y, x_from_oracle=x_from_oracle, y_from_oracle=y_from_oracle
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +952,162 @@ def test_log_axis_univariate_mark_density_keeps_every_off_side_row_counted():
     )
     assert len(msgs) == 1, msgs
     assert "2 row(s) of 'v'" in msgs[0], msgs
+
+
+# ---------------------------------------------------------------------------
+# A faceted bivariate kde on a log axis pins its grid extent in data units
+# the same way across every panel.
+# ---------------------------------------------------------------------------
+
+
+def _faceted_bivariate_log_df() -> pl.DataFrame:
+    """Two strictly positive groups, each with its own (v, w) lognormal
+    spread, so a column-faceted bivariate kde draws two panels whose
+    contour meshes differ in both shape and vertex count. Some rows sit
+    below one on either axis."""
+    rng = np.random.default_rng(2)
+    groups = []
+    for suffix, loc_v, loc_w, n in (("a", 1.0, 0.5, 90), ("b", 1.6, 0.9, 140)):
+        groups.append(
+            pl.DataFrame(
+                {
+                    "v": np.exp(rng.normal(loc_v, 1.0, n)),
+                    "w": np.exp(rng.normal(loc_w, 0.7, n)),
+                    "g": [suffix] * n,
+                }
+            )
+        )
+    return pl.concat(groups)
+
+
+def _faceted_bivariate_log_df_on_side() -> pl.DataFrame:
+    """The same two-group, two-panel shape as `_faceted_bivariate_log_df`,
+    but every `v` and `w` is at least one on both panels: a log-space pin
+    this axis demands stays positive and on the scale's own side, so a
+    broken back-map silently narrows the grid instead of being refused."""
+    rng = np.random.default_rng(3)
+    groups = []
+    for suffix, n in (("a", 90), ("b", 140)):
+        groups.append(
+            pl.DataFrame(
+                {
+                    "v": rng.uniform(2.0, 50.0, n),
+                    "w": rng.uniform(3.0, 80.0, n),
+                    "g": [suffix] * n,
+                }
+            )
+        )
+    return pl.concat(groups)
+
+
+def _panel_vertices_in_data_units(
+    svg: str,
+    frame: tuple[float, float, float, float],
+    content: str,
+    *,
+    x_log: bool,
+    y_log: bool,
+    y_ladder: dict[float, float],
+) -> tuple[list[float], list[float]]:
+    """One facet panel's own path vertices, read back to data units
+    through that panel's own x tick ladder (`panel_x_ladder`, since every
+    column panel draws its own x-axis labels) and the chart's one shared y
+    ladder (every column panel in one facet row shares the same y axis)."""
+    coords = _path_vertices(content)
+    x_ladder = panel_x_ladder(svg, frame)
+    return _vertices_in_data_units(coords, x_ladder, y_ladder, x_log=x_log, y_log=y_log)
+
+
+def _assert_same_faceted_vertices_in_data_units(
+    log_svg: str,
+    oracle_svg: str,
+    *,
+    x_log: bool,
+    y_log: bool,
+    x_from_oracle: Callable[[float], float],
+    y_from_oracle: Callable[[float], float],
+) -> None:
+    """Per facet panel, the log-axis chart's path vertices, read back to
+    data units, equal pair for pair the oracle's: the same bivariate kde
+    fitted on linear axes over a column the test transformed itself, its
+    vertices mapped back by `x_from_oracle`/`y_from_oracle`."""
+    log_panels = mark_groups_by_frame(log_svg)
+    oracle_panels = mark_groups_by_frame(oracle_svg)
+    assert log_panels, "the chart draws no facet panel"
+    assert len(log_panels) == len(oracle_panels), (len(log_panels), len(oracle_panels))
+    log_y_ladder = _leftmost_ladder(log_svg, axis="y")
+    oracle_y_ladder = _leftmost_ladder(oracle_svg, axis="y")
+    for (log_frame, log_content), (oracle_frame, oracle_content) in zip(log_panels, oracle_panels):
+        log_x, log_y = _panel_vertices_in_data_units(
+            log_svg, log_frame, log_content, x_log=x_log, y_log=y_log, y_ladder=log_y_ladder
+        )
+        oracle_x, oracle_y = _panel_vertices_in_data_units(
+            oracle_svg,
+            oracle_frame,
+            oracle_content,
+            x_log=False,
+            y_log=False,
+            y_ladder=oracle_y_ladder,
+        )
+        _assert_vertices_match_oracle(
+            log_x, log_y, oracle_x, oracle_y, x_from_oracle=x_from_oracle, y_from_oracle=y_from_oracle
+        )
+
+
+@pytest.mark.parametrize(
+    "build_df", [_faceted_bivariate_log_df, _faceted_bivariate_log_df_on_side]
+)
+def test_a_faceted_bivariate_kde_on_a_log_axis_matches_its_log_transformed_oracle(build_df):
+    """A column-faceted bivariate kde on a log x axis pins its grid extent
+    in data units across every panel: each panel's contour vertices, read
+    back through that panel's own tick ladder, land where fitting directly
+    on `log10(v)` with linear axes (then mapping the result back by
+    `10**`) does -- panel for panel, not just in aggregate. Both a fixture
+    with rows below one and one where every row is at least one are
+    covered, since a broken back-map behaves differently on either side."""
+    df = build_df()
+    v = df["v"].to_numpy()
+    log_svg = fm.displot(df, x="v", y="w", kind="kde", col="g", log_scale=True).to_svg()
+    oracle_df = df.with_columns(pl.Series("logv", np.log10(v))).drop("v")
+    oracle_svg = fm.displot(oracle_df, x="logv", y="w", kind="kde", col="g").to_svg()
+    _assert_same_faceted_vertices_in_data_units(
+        log_svg,
+        oracle_svg,
+        x_log=True,
+        y_log=False,
+        x_from_oracle=_from_log10,
+        y_from_oracle=_unchanged,
+    )
+
+
+@pytest.mark.parametrize(
+    "build_df", [_faceted_bivariate_log_df, _faceted_bivariate_log_df_on_side]
+)
+def test_a_faceted_bivariate_kde_on_a_log_y_axis_matches_its_log_transformed_oracle(build_df):
+    """The y-axis twin: a column-faceted bivariate kde with a `LogScale` on
+    y alone pins its grid extent in data units on that axis too, panel for
+    panel, on both the below-one and the every-row-at-least-one fixture."""
+    df = build_df()
+    w = df["w"].to_numpy()
+    log_svg = (
+        fm.Chart(df)
+        .mark_density()
+        .encode(x="v", y=fm.Y("w", scale=fm.LogScale()))
+        .facet(col="g")
+        .to_svg()
+    )
+    oracle_df = df.with_columns(pl.Series("logw", np.log10(w))).drop("w")
+    oracle_svg = (
+        fm.Chart(oracle_df).mark_density().encode(x="v", y="logw").facet(col="g").to_svg()
+    )
+    _assert_same_faceted_vertices_in_data_units(
+        log_svg,
+        oracle_svg,
+        x_log=False,
+        y_log=True,
+        x_from_oracle=_unchanged,
+        y_from_oracle=_from_log10,
+    )
 
 
 def test_log_axis_reaches_an_hconcat_leaf():
