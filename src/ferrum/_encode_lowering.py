@@ -13,7 +13,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin, _pending_bin
+from ferrum.encoding.base import (
+    ChannelBase,
+    _PendingAggregate,
+    _PendingBin,
+    _pending_bin,
+    _unset_statistic,
+)
 
 if TYPE_CHECKING:
     from ferrum._core import Aggregate, Bin
@@ -560,6 +566,11 @@ def _rebind_channel(ch: ChannelBase, column: str, title: str | None = None) -> C
     always wins; a non-``str`` field (none, or an unresolved Repeat
     placeholder) recovers nothing, and neither does a channel that does not
     honor ``title=`` (a tooltip, a text label), which keeps no title.
+
+    Precondition: *ch*'s ``bin=``/``aggregate=`` was either consumed by the
+    statistic the caller's door builds, or refused by that door
+    (:func:`_refuse_bin_or_aggregate`) before this runs. Dropping either
+    kwarg here is correct only because one of those two already happened.
     """
     if title is None:
         title = ch.field
@@ -603,6 +614,356 @@ def _rebind_positional(
         field = orig if isinstance(orig, str) else None
         title = field if (field and column != field) else None
     return cls(column, type="Q", title=title) if title else cls(column, type="Q")
+
+
+def _quoted_statistic_value(value: Any) -> str:
+    """The repr a refusal quotes *value* (a ``bin=``/``aggregate=`` kwarg) with.
+
+    A plain literal (``bool``, ``str``, ``int``, ``float``, ``dict``,
+    ``list``, ``tuple``) quotes as its own ``repr``, matching what the
+    caller typed (``bin={'bin_count': 3}``). A pre-built object (a
+    ``fm.Bin(...)``) quotes by its class name alone, the same spelling
+    :func:`_bin_declaration` already gives a pre-built ``Bin``
+    (``"bin=Bin(...)"``), never its raw field-by-field repr.
+    """
+    if isinstance(value, (bool, str, int, float, dict, list, tuple)):
+        return repr(value)
+    return f"{type(value).__name__}(...)"
+
+
+def _written_channel(channel: str, ch: ChannelBase, kwarg: str) -> str:
+    """*channel*'s binding as the user wrote it, naming the *kwarg* a refusal is about.
+
+    A field-bearing channel quotes its field (``x=X('a', bin=True)``); a
+    fieldless one (a histogram/density/ecdf value axis styled with no
+    field of its own) quotes none, since the caller wrote none
+    (``y=Y(aggregate='count')``, never ``Y(None, aggregate='count')``).
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    quoted = _quoted_statistic_value(ch._kwargs[kwarg])
+    field = _channel_field(ch)
+    if field:
+        return f"{channel}={type(ch).__name__}({field!r}, {kwarg}={quoted})"
+    return f"{channel}={type(ch).__name__}({kwarg}={quoted})"
+
+
+def _refuse_bin_or_aggregate(
+    entry: str, channel: str, ch: ChannelBase, kwarg: str, *, reason: str, remedy: str
+) -> None:
+    """Refuse *channel*'s *kwarg* (``"bin"``/``"aggregate"``) a statistic's door cannot honor.
+
+    Raised as :class:`~ferrum._entry.EntryRefusal`, spoken as *entry* and
+    re-voiceable by a figure door that calls further in
+    (:func:`ferrum._entry.voiced_as`). *reason* names the statistic alone,
+    never a call: a re-voiced refusal keeps the same reason text under
+    every voice, so a reason naming a call would misquote whichever call
+    the caller actually made. *remedy* is a call that renders, the one a
+    door choosing it has itself confirmed works -- the same shape
+    :func:`ferrum.plots.distribution._refuse_interval_args_on_non_aggregating_kind`
+    and the channel-level ``_NO_BIN_MESSAGE`` (:mod:`ferrum.encoding.base`) use.
+    """
+    from ferrum._entry import EntryRefusal
+
+    written = _written_channel(channel, ch, kwarg)
+    raise EntryRefusal(
+        lambda voice: (
+            f"{voice}({written}) is not supported: {reason}, so {kwarg}= would be ignored. {remedy}"
+        ),
+        entry,
+    )
+
+
+def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> str:
+    """The remedy for a ``bin=`` a statistic does not fold in.
+
+    A field-bearing channel is binned ahead of time, PER ROW
+    (``per_row=True``): a default ``Bin`` aggregates its rows and drops
+    every column but its own, which breaks a statistic reading the
+    field's sibling columns, so the remedy keeps every row and names the
+    column the statistic binds instead. A fieldless channel names no
+    field to bin, so the only remedy is to drop it. *call_kwargs*, when
+    given, names an extra keyword the remedy's own call needs to render
+    (``residplot``'s ``dropna=False``, since its default drops the rows
+    the remedy's ``.transform()`` step would otherwise read).
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    field = _channel_field(ch)
+    if not field:
+        return "Drop bin=."
+    from ferrum._registry import registry_output_columns
+
+    bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
+    with_clause = f" with {call_kwargs}" if call_kwargs else ""
+    return (
+        f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
+        f"and bind its {bin_start!r} column{with_clause}, or drop bin=."
+    )
+
+
+def _generic_aggregate_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> str:
+    """The remedy for an ``aggregate=`` a statistic does not fold in.
+
+    See :func:`_generic_bin_remedy` for *call_kwargs*.
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    if not _channel_field(ch):
+        return "Drop aggregate=."
+    with_clause = f" with {call_kwargs}" if call_kwargs else ""
+    return (
+        "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
+        f"output column{with_clause}, or drop aggregate=."
+    )
+
+
+def _histogram_value_axis_remedy(
+    kwarg: str, value_ch: ChannelBase, value_axis: str, bin_ch: Any, bin_axis: str
+) -> str:
+    """The remedy for a ``bin=``/``aggregate=`` on the histogram's value axis.
+
+    The value axis never binds a caller's column -- it draws the Bin's
+    own count or density -- so the generic per-row-``Bin``/
+    ``transform_aggregate`` remedy would bind that column there and
+    silently draw the counts under its name instead. A field-bearing
+    channel's remedy computes what the caller asked for over both
+    fields (a per-bin aggregate with a bar mark, a two-field count with
+    ``mark_hex``) or drops the binding and styles the axis instead. With no
+    field bound on the binned axis there is nothing to bin either, so the
+    remedy binds one there as well as dropping the value-axis field. A
+    fieldless channel's remedy is only to drop the kwarg.
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    field = _channel_field(value_ch)
+    if not field:
+        return "Drop bin=." if kwarg == "bin" else "Drop aggregate=."
+    va, ba = value_axis.upper(), bin_axis.upper()
+    drop_clause = f"drop {value_axis}= (style the axis with fm.{va}(title=...) and no field)"
+    bin_field = _channel_field(bin_ch)
+    if not bin_field:
+        return f"Bind the field to bin on {bin_axis}= and {drop_clause}."
+    if kwarg == "aggregate":
+        op = value_ch._kwargs["aggregate"]
+        return (
+            f"Draw the aggregate per bin with a bar mark, fm.Chart(data).mark_bar().encode("
+            f"{bin_axis}=fm.{ba}({bin_field!r}, bin=True), {value_axis}=fm.{va}({field!r}, "
+            f"aggregate={op!r})), or {drop_clause}."
+        )
+    return (
+        f"Count rows over both fields with fm.Chart(data).mark_hex().encode("
+        f"{bin_axis}={bin_field!r}, {value_axis}={field!r}), or {drop_clause}."
+    )
+
+
+def _refuse_statistic_input(
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    *,
+    reason: str,
+    bin_remedy: str | None = None,
+    aggregate_remedy: str | None = None,
+) -> None:
+    """Refuse *channel*'s ``bin=``, then its ``aggregate=``, when *ch* carries either.
+
+    *reason* applies to both alike: the statistic *entry* builds reads
+    *channel*'s raw rows, not a bin or aggregate of them. *bin_remedy*/
+    *aggregate_remedy* default to the generic, field-aware remedy
+    (:func:`_generic_bin_remedy`/:func:`_generic_aggregate_remedy`); a door
+    whose own vocabulary gives a better remedy passes its own text.
+    """
+    if not _unset_statistic("bin", ch._kwargs.get("bin")):
+        _refuse_bin_or_aggregate(
+            entry,
+            channel,
+            ch,
+            "bin",
+            reason=reason,
+            remedy=bin_remedy if bin_remedy is not None else _generic_bin_remedy(ch),
+        )
+    if not _unset_statistic("aggregate", ch._kwargs.get("aggregate")):
+        _refuse_bin_or_aggregate(
+            entry,
+            channel,
+            ch,
+            "aggregate",
+            reason=reason,
+            remedy=aggregate_remedy
+            if aggregate_remedy is not None
+            else _generic_aggregate_remedy(ch),
+        )
+
+
+def _refuse_bin_aggregate_on_channels(
+    entry: str,
+    encoding: dict,
+    channels: tuple[str, ...],
+    *,
+    reason: str,
+    bin_remedy: str | None = None,
+    aggregate_remedy: str | None = None,
+) -> None:
+    """Refuse a ``bin=``/``aggregate=`` on any of *channels* a statistic cannot honor.
+
+    *encoding* may bind a channel bare (a plain field name or ``None``),
+    which carries neither kwarg and is skipped. Checked in *channels*
+    order, so the first one the caller wrote decides the message.
+    """
+    for channel in channels:
+        ch = encoding.get(channel)
+        if isinstance(ch, ChannelBase):
+            _refuse_statistic_input(
+                entry,
+                channel,
+                ch,
+                reason=reason,
+                bin_remedy=bin_remedy,
+                aggregate_remedy=aggregate_remedy,
+            )
+
+
+def _refuse_histogram_bin_aggregate(
+    entry: str,
+    encoding: dict,
+    *,
+    horizontal: bool,
+    density: bool,
+    share_spelling: str | None,
+    share_remedy: str | None,
+    bin_rule_remedy: str,
+    density_spelling: str,
+    density_remedy: str,
+) -> None:
+    """Refuse a bin=/aggregate= the histogram's own ``Bin`` cannot honor.
+
+    The binned axis bins through the mark's own ``bins=``/``bin_count=``/
+    ``bin_width=``/``extent=``/``nice=``, so a channel ``bin=`` that states
+    a rule of its own is a second, conflicting instruction -- refused,
+    with *bin_rule_remedy* naming the door's own binning parameters
+    instead. ``bin=True`` is a harmless redundancy (asking for exactly
+    what the mark already does) and stays honored; an ``aggregate=`` on
+    that axis folds into nothing and is always refused. The value axis
+    reads no caller column at all -- it draws the Bin's own count or
+    density -- so a field-bearing ``bin=``/``aggregate=`` there is
+    refused with :func:`_histogram_value_axis_remedy`. A fieldless
+    ``aggregate="count"`` matches what the value axis draws and stays
+    honored, except under ``density`` (*density_spelling* names how the
+    door spells it, *density_remedy* draws the count instead) and under
+    a normalized stack (*share_spelling*/*share_remedy*, ``None`` when
+    the drawn position does not normalize); every other aggregate on
+    that axis is refused with :func:`_histogram_value_axis_remedy`.
+    """
+    bin_axis, value_axis = ("y", "x") if horizontal else ("x", "y")
+
+    bin_ch = encoding.get(bin_axis)
+    if isinstance(bin_ch, ChannelBase):
+        bin_value = bin_ch._kwargs.get("bin")
+        if not _unset_statistic("bin", bin_value) and bin_value is not True:
+            _refuse_bin_or_aggregate(
+                entry,
+                bin_axis,
+                bin_ch,
+                "bin",
+                reason=f"the histogram bins {bin_axis} by its own rule",
+                remedy=bin_rule_remedy,
+            )
+        if not _unset_statistic("aggregate", bin_ch._kwargs.get("aggregate")):
+            _refuse_bin_or_aggregate(
+                entry,
+                bin_axis,
+                bin_ch,
+                "aggregate",
+                reason=f"the histogram bins {bin_axis} rather than aggregating it",
+                remedy=_generic_aggregate_remedy(bin_ch),
+            )
+
+    value_ch = encoding.get(value_axis)
+    if isinstance(value_ch, ChannelBase):
+        from ferrum.encoding._aliases import _channel_field
+
+        if not _unset_statistic("bin", value_ch._kwargs.get("bin")):
+            _refuse_bin_or_aggregate(
+                entry,
+                value_axis,
+                value_ch,
+                "bin",
+                reason=f"the histogram computes {value_axis} itself",
+                remedy=_histogram_value_axis_remedy("bin", value_ch, value_axis, bin_ch, bin_axis),
+            )
+        agg_value = value_ch._kwargs.get("aggregate")
+        if not _unset_statistic("aggregate", agg_value):
+            fieldless_count = not _channel_field(value_ch) and agg_value == "count"
+            if fieldless_count and density:
+                _refuse_bin_or_aggregate(
+                    entry,
+                    value_axis,
+                    value_ch,
+                    "aggregate",
+                    reason=(
+                        f"with {density_spelling} the histogram draws density on "
+                        f"{value_axis}, not a count"
+                    ),
+                    remedy=density_remedy,
+                )
+            elif fieldless_count and share_spelling is not None:
+                _refuse_bin_or_aggregate(
+                    entry,
+                    value_axis,
+                    value_ch,
+                    "aggregate",
+                    reason=(
+                        f"with {share_spelling} the histogram draws each bin's share of "
+                        f"its stack on {value_axis}, not a count"
+                    ),
+                    remedy=share_remedy,
+                )
+            elif not fieldless_count:
+                _refuse_bin_or_aggregate(
+                    entry,
+                    value_axis,
+                    value_ch,
+                    "aggregate",
+                    reason=f"the histogram computes {value_axis} itself",
+                    remedy=_histogram_value_axis_remedy(
+                        "aggregate", value_ch, value_axis, bin_ch, bin_axis
+                    ),
+                )
+
+
+#: The x-channel ``bin=`` remedy on a route whose fit bins before it
+#: dispatches on method (``mark_smooth``, and ``lmplot``/``regplot`` on a
+#: ``Smooth``-routed method): names the fit's own ``x_bins=`` knob. One
+#: constant so the two doors that use it cannot drift apart.
+SMOOTH_X_BIN_REMEDY = (
+    "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
+)
+
+
+def _refuse_bin_aggregate_fit(
+    entry: str, encoding: dict, *, x_bin_remedy: str | None = None
+) -> None:
+    """Refuse an x bin=/aggregate= a fit reads raw, and a y one it folds in nowhere.
+
+    x is the predictor; a caller supplies *x_bin_remedy* naming the fit's
+    own pre-aggregation knob on a route that has one (``x_bins=``), and
+    leaves it unset (the generic, field-aware remedy) on a route that does
+    not. x's aggregate= always takes the generic remedy: no route
+    aggregates the predictor itself (``x_estimator=`` aggregates the
+    RESPONSE within each x bin, never x), so naming it would send the
+    caller to a knob that does something else. y is the response the fit
+    reads raw, with no knob of its own, so both its kwargs take the
+    generic remedy.
+    """
+    x_ch = encoding.get("x")
+    if isinstance(x_ch, ChannelBase):
+        _refuse_statistic_input(
+            entry, "x", x_ch, reason="the fit reads the raw predictor", bin_remedy=x_bin_remedy
+        )
+    y_ch = encoding.get("y")
+    if isinstance(y_ch, ChannelBase):
+        _refuse_statistic_input(entry, "y", y_ch, reason="the fit reads the raw response")
 
 
 def _count_axes(encoding: dict, agg_axes: list[str]) -> list[str]:

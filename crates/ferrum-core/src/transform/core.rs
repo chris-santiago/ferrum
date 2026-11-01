@@ -499,6 +499,68 @@ impl TransformSpec {
         }
     }
 
+    /// The fields this step computes each output row across, read by the
+    /// run to regroup a series past a lowered statistic: every row sharing
+    /// their values is one partition, and an empty slice is one partition
+    /// over every row. A kind whose `groupby` is optional computes across
+    /// every row when it has none, so its unset `groupby` is the empty
+    /// partition. `None` for a per-row `Bin`, which computes each row alone,
+    /// and for every kind in [`Self::groupby`]'s `None` arm: those either
+    /// compute each row alone or keep no caller column a series could split
+    /// by (`Bin2D`, `Hex`, `Contour`, `Raster` and `Linkage` aggregate
+    /// across rows into their own output columns). Spelled per variant, with
+    /// no wildcard, so a new variant decides here what it partitions by.
+    pub(crate) fn partition(&self) -> Option<&[String]> {
+        match self {
+            Self::Bin(s) if s.per_row => None,
+            Self::Bin(_)
+            | Self::Kde(_)
+            | Self::Smooth(_)
+            | Self::Aggregate(_)
+            | Self::Summary(_)
+            | Self::Outliers(_)
+            | Self::ErrorExtent(_)
+            | Self::BoxStats(_)
+            | Self::Violin(_)
+            | Self::Kde2D(_)
+            | Self::Qq(_)
+            | Self::LetterValue(_)
+            | Self::Robust(_)
+            | Self::Logistic(_)
+            | Self::Glm(_)
+            | Self::DataStack(_) => self.groupby(),
+            Self::Pivot(_)
+            | Self::JoinAggregate(_)
+            | Self::DataWindow(_)
+            | Self::DensityData(_)
+            | Self::RegressionData(_)
+            | Self::LoessData(_)
+            | Self::Impute(_)
+            | Self::TopK(_)
+            | Self::DataAggregate(_) => Some(self.groupby().unwrap_or(&[])),
+            Self::Bin2D(_)
+            | Self::Contour(_)
+            | Self::Linkage(_)
+            | Self::Raster(_)
+            | Self::Hex(_)
+            | Self::Swarm(_)
+            | Self::Unpivot(_)
+            | Self::Reorder(_)
+            | Self::ReferenceLine(_)
+            | Self::Identity(_)
+            | Self::Filter(_)
+            | Self::Calculate(_)
+            | Self::Project(_)
+            | Self::Fold(_)
+            | Self::Flatten(_)
+            | Self::Sample(_)
+            | Self::TimeUnit(_)
+            | Self::DataBin(_)
+            | Self::Branch(_)
+            | Self::Composed(_) => None,
+        }
+    }
+
     /// The output columns whose values sit in one input's units, each with
     /// the input role ([`SpaceSlot`]) that computes it and that input's
     /// column: a channel drawing the output column needs the input slot's

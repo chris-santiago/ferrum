@@ -20,6 +20,7 @@ use crate::render::draw::{
     col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::curve::{short_series_empty_reason, SeriesNoun};
 use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 
@@ -217,6 +218,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // `data_indices` in node order so `build_metadata_for_indices` aligns each
     // polygon's tooltip/href/description to that representative row (bug #6).
     let mut acc = MarkNodes::with_capacity(groups.len());
+    // Polygons the `< 3` gate below dropped with one or two drawable vertices.
+    let mut short_rings = 0;
 
     // --- Emit one polygon per group ---
     for group_indices in &groups {
@@ -230,6 +233,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             })
             .collect();
         if ring.len() < 3 {
+            short_rings += usize::from(!ring.is_empty());
             continue;
         }
 
@@ -300,8 +304,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
+    let empty_reason = short_series_empty_reason(
+        "a polygon joins three or more vertices",
+        SeriesNoun::Polygon,
+        short_rings,
+        nodes.len(),
+    );
 
     MarkBuildResult::populated(MarkBatchKind::Polygon, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 #[cfg(test)]
@@ -814,5 +825,71 @@ mod tests {
              Utf8 twin does; got {int64:?}. Three identical fills here is the \
              col_as_str drop."
         );
+    }
+
+    /// `build` over nullable `x`/`y` columns, one polygon per `group_id`.
+    fn build_rings(xs: Vec<Option<f64>>, ys: Vec<Option<f64>>, groups: Vec<u32>) -> crate::render::draw::MarkBuildResult {
+        let spec = polygon_spec(Some("group_id"), None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("group_id", DataType::UInt32, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(UInt32Array::from(groups)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        super::build(&ctx)
+    }
+
+    /// A polygon mark whose every polygon has one or two drawable vertices
+    /// draws nothing, and names why, counting its polygons.
+    #[test]
+    fn a_polygon_whose_every_ring_is_short_names_its_emptiness() {
+        let one_vertex = build_rings(vec![Some(1.0)], vec![Some(2.0)], vec![0]);
+        assert!(one_vertex.nodes.is_empty());
+        assert_eq!(
+            one_vertex.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("a polygon joins three or more vertices, and its one polygon has one or two"),
+        );
+
+        let three_short = build_rings(
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            vec![0, 1, 1, 2, 2],
+        );
+        assert!(three_short.nodes.is_empty());
+        assert_eq!(
+            three_short.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("a polygon joins three or more vertices, and each of its 3 polygons has one or two"),
+        );
+    }
+
+    /// A polygon mark that draws any polygon, or had no drawable vertex at
+    /// all, carries no reason: a short polygon beside a drawn one, a zero-row
+    /// batch and an all-null batch.
+    #[test]
+    fn a_polygon_that_draws_or_had_no_vertex_carries_no_empty_reason() {
+        let partial = build_rings(
+            vec![Some(0.0), Some(1.0), Some(0.5), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(0.0), Some(1.0), Some(0.0), Some(1.0)],
+            vec![0, 0, 0, 1, 1],
+        );
+        assert_eq!(partial.nodes.len(), 1);
+        assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+
+        let zero_rows = build_rings(vec![], vec![], vec![]);
+        assert!(zero_rows.nodes.is_empty());
+        assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+
+        let all_null = build_rings(vec![None, None, None], vec![None, None, None], vec![0, 0, 0]);
+        assert!(all_null.nodes.is_empty());
+        assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
     }
 }

@@ -37,14 +37,19 @@ from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
 from ferrum._encode_lowering import (
     COMPOSITE_GROUPING_CHANNELS,
+    SMOOTH_X_BIN_REMEDY,
+    _generic_aggregate_remedy,
+    _generic_bin_remedy,
     _rebind_positional,
+    _refuse_bin_aggregate_fit,
+    _refuse_statistic_input,
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
-from ferrum.encoding.base import declared_title, drawn_title
+from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
 from ferrum.marks._desugar_helpers import nominal_color_channel, with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.statistical import desugar_smooth
@@ -53,6 +58,7 @@ from ferrum.plots._helpers import (
     _column_or_literal_color,
     _compose_compare,
     _drawn_bindings,
+    _drawn_positional_channels,
     _encode_grouping,
     _field_name,
     _figure_entry,
@@ -899,6 +905,19 @@ def _lmplot_impl(
             "sqrt, gam) or leave x_bins=None (the default)."
         )
 
+    # Every method fits x as the raw predictor and y as the raw response;
+    # neither folds in a bin= or aggregate= the caller bound on either
+    # channel (through a keyword, `encode=`, or a shorthand string), so a
+    # caller who wrote one would otherwise see the scatter layer honor it
+    # and the fit silently ignore it. x_bins= is a working remedy only on
+    # the methods that build Smooth (it bins before any method dispatch);
+    # the dedicated methods have no such knob (refused above), so their x
+    # bin= falls back to the generic, field-aware remedy.
+    x_bin_remedy = SMOOTH_X_BIN_REMEDY if method in _SMOOTH_ROUTED_METHODS else None
+    _refuse_bin_aggregate_fit(
+        entry, _drawn_positional_channels({"x": x, "y": y}, encode), x_bin_remedy=x_bin_remedy
+    )
+
     data = to_polars(data)
 
     # The fit's column names, resolved ONCE and non-optionally. Every consumer
@@ -1329,6 +1348,19 @@ def lmplot(
     ValueError
         If ``order`` is a negative int, for any ``mark_smooth``-routed
         ``method``.
+    ValueError
+        If ``x`` or ``y`` -- through a keyword, ``encode=`` or a shorthand
+        string -- carries a ``bin=``/``aggregate=``: the fit reads them as
+        the raw predictor/response, never a bin or aggregate of them. An
+        ``x bin=`` names ``x_bins=`` as its remedy on a ``mark_smooth``-
+        routed ``method`` (the fit bins before it dispatches on method);
+        on ``"logistic"``/``"glm"``/``"robust"``, which have no such knob,
+        and for an ``x aggregate=`` on every method (``x_estimator=``
+        aggregates the response within each ``x_bins`` bin, never the
+        predictor, so it is never the remedy), the remedy is to compute it
+        ahead of the fit with ``.transform(...)`` and bind its output
+        column. ``y``'s ``bin=``/``aggregate=`` take that same remedy on
+        every method.
 
     Examples
     --------
@@ -1523,6 +1555,14 @@ def residplot(
     ValueError
         If ``label`` is set and ``data`` already has a ``_label`` column,
         which this function needs for the label's own group key.
+    ValueError
+        If ``x`` or ``y`` -- through a keyword, ``encode=`` or a shorthand
+        string -- carries a ``bin=``/``aggregate=``: residuals are
+        computed from the raw predictor/response columns, never a bin or
+        aggregate of them. Compute it ahead of time with
+        ``.transform(...)`` and bind its output column (the remedy call
+        needs ``dropna=False``, since the default drops rows before any
+        ``.transform()`` step runs), or drop the kwarg.
 
     Examples
     --------
@@ -1551,6 +1591,24 @@ def residplot(
     # (`title=x`, below), which is #199's defect wearing a different value.
     x_field = _required_field_name(x, entry="residplot", param="x")
     y_field = _required_field_name(y, entry="residplot", param="y")
+    # The residual transform reads x/y as the raw predictor/response; a
+    # bin= or aggregate= on either (through a keyword, `encode=`, or a
+    # shorthand string) would be dropped silently once the channel is
+    # rebound to the residual output. dropna=True drops nulls over the
+    # input frame before any transform runs, so the generic remedy's own
+    # .transform() step needs dropna=False to see the column it binds.
+    drawn = _drawn_positional_channels({"x": x, "y": y}, encode)
+    for channel in ("x", "y"):
+        ch = drawn.get(channel)
+        if isinstance(ch, ChannelBase):
+            _refuse_statistic_input(
+                "residplot",
+                channel,
+                ch,
+                reason="the residual fit reads the raw predictor and response",
+                bin_remedy=_generic_bin_remedy(ch, call_kwargs="dropna=False"),
+                aggregate_remedy=_generic_aggregate_remedy(ch, call_kwargs="dropna=False"),
+            )
     if dropna:
         data = data.drop_nulls(subset=[x_field, y_field])
 
@@ -1967,6 +2025,11 @@ def regplot(
         If an explicit ``order`` is not valid for ``method``, or is a
         negative int -- forwarded from ``lmplot``, see its ``order``
         parameter.
+    ValueError
+        If ``x`` or ``y`` -- through a keyword, ``encode=`` or a shorthand
+        string -- carries a ``bin=``/``aggregate=`` the fit reads raw --
+        forwarded from ``lmplot``, whose ``Raises`` entry names each
+        method's remedy.
 
     Examples
     --------

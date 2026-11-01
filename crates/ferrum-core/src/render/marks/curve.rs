@@ -48,6 +48,7 @@
 use ferrum_scene::PathCmd;
 use pyo3::prelude::*;
 
+use crate::render::draw::EmptyReason;
 use crate::transform::vocabulary::Vocabulary;
 
 /// The `interpolate=` vocabulary (spec §6.1), on the shared [`Vocabulary`]
@@ -537,6 +538,68 @@ fn push_cardinal(cmds: &mut Emit, points: &[(f64, f64)], axis: CurveAxis) {
             (u1, v1),
         ));
     }
+}
+
+/// What a mark calls one connected run of its vertices in a
+/// [`short_series_empty_reason`]: a line's or area's series, a ribbon's
+/// band, a polygon's ring. Each also knows how many drawable vertices a run
+/// its gate drops can have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeriesNoun {
+    Series,
+    Band,
+    Polygon,
+}
+
+impl SeriesNoun {
+    fn singular(self) -> &'static str {
+        match self {
+            Self::Series => "series",
+            Self::Band => "band",
+            Self::Polygon => "polygon",
+        }
+    }
+
+    fn plural(self) -> &'static str {
+        match self {
+            Self::Series => "series",
+            Self::Band => "bands",
+            Self::Polygon => "polygons",
+        }
+    }
+
+    /// The drawable vertex counts a run below its mark's minimum can have:
+    /// one, below a series' or band's two; one or two, below a ring's three.
+    fn short_counts(self) -> &'static str {
+        match self {
+            Self::Series | Self::Band => "one",
+            Self::Polygon => "one or two",
+        }
+    }
+}
+
+/// The [`MarkBuildResult::empty_reason`] a mark carries when its
+/// connectivity gate (`< 2` points on a line, area or ribbon, `< 3` vertices
+/// on a polygon) dropped every run: `short` counts the runs (`noun`) that had
+/// at least one drawable vertex but fewer than the minimum, `emitted` the
+/// nodes the mark drew, and `rule` is the mark's own statement of what it
+/// needs (`"mark_line() joins two or more points per series"`). `Some` only
+/// when nothing drew and at least one run was short; a run with no drawable
+/// vertex (null or unplaceable rows) is a per-row skip, not counted. A mark
+/// that draws any run stays silent about the ones it dropped. Shared by
+/// `line`, `area`, `ribbon` and `polygon`, so their gates name the same
+/// blank one way.
+///
+/// [`MarkBuildResult::empty_reason`]: crate::render::draw::MarkBuildResult::empty_reason
+pub(crate) fn short_series_empty_reason(rule: &str, noun: SeriesNoun, short: usize, emitted: usize) -> Option<EmptyReason> {
+    (emitted == 0 && short > 0).then(|| {
+        let tail = if short == 1 {
+            format!("its one {} has {}", noun.singular(), noun.short_counts())
+        } else {
+            format!("each of its {short} {} has {}", noun.plural(), noun.short_counts())
+        };
+        EmptyReason(format!("{rule}, and {tail}"))
+    })
 }
 
 /// What a traced path reveals about the axis it was ACTUALLY fitted against —

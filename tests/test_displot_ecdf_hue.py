@@ -160,3 +160,36 @@ class TestEcdfNoHueUnchanged:
         y_ladder = value_axis_ladder(svg, axis="y")
         heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         assert heights == list(range(1, 21)), heights
+
+
+# ---------------------------------------------------------------------------
+# A grouping a step wrote before the ECDF
+# ---------------------------------------------------------------------------
+
+
+def _rank_within(groupby: list[str]) -> dict:
+    return fm.transform_window({"op": "rank", "as": "r"}, sort=["x"], groupby=groupby)
+
+
+def test_a_window_grouped_before_the_ecdf_does_not_split_its_line(two_group_df):
+    """The ECDF counts across every row, so a ``g`` the caller's window grouped
+    by does not split its line: one step line, byte-equal to the plain ECDF.
+    """
+    plain = fm.displot(two_group_df, x="x", kind="ecdf").to_svg()
+    windowed = fm.displot(two_group_df, x="x", kind="ecdf").transform(_rank_within(["g"])).to_svg()
+    assert len(step_after_paths(windowed)) == 1
+    assert windowed == plain
+
+
+def test_a_window_grouped_by_the_hue_before_the_ecdf_matches_the_hue_alone(two_group_df):
+    """With ``hue="g"`` the ECDF partitions by ``g`` itself, so the same window
+    changes nothing: one step line per level, byte-equal to the hue alone.
+    """
+    hue = fm.displot(two_group_df, x="x", kind="ecdf", hue="g").to_svg()
+    windowed = (
+        fm.displot(two_group_df, x="x", kind="ecdf", hue="g")
+        .transform(_rank_within(["g"]))
+        .to_svg()
+    )
+    assert len(step_after_paths(windowed)) == 2
+    assert windowed == hue

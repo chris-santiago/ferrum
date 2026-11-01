@@ -21,13 +21,13 @@ from ferrum._layer import merge_style, set_style
 from ferrum.color import to_hex
 from ferrum.encoding import X
 from ferrum.encoding._resolve import channel_for_value
+from ferrum.encoding.base import ChannelBase
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
     from ferrum.composition import ConcatChart
-    from ferrum.encoding.base import ChannelBase
 
 
 def _inject_cook_outliers(
@@ -209,6 +209,30 @@ def _drawn_bindings(bindings: dict, encode: dict | None) -> dict:
     the chart actually draws.
     """
     return merge_style(bindings, encode or {})
+
+
+def _drawn_positional_channels(bindings: dict, encode: dict | None) -> dict[str, ChannelBase]:
+    """Return the x/y channel objects the figure's chart draws once ``encode=`` applies.
+
+    Reads :func:`_drawn_bindings` -- the merge every figure applies at
+    ``_finalize_chart`` -- then, for ``"x"`` and ``"y"``, keeps a
+    :class:`ChannelBase` as is and resolves a plain string the way
+    ``encode()`` reads it (:func:`channel_for_value`, the same shorthand
+    reading :func:`_encode_grouping` uses for its own channels), so
+    ``"mean(b)"`` is the ``Y("b", aggregate="mean")`` the chart draws. A
+    missing binding, ``None``, a ``Repeat`` placeholder or any other value
+    is omitted: each is left to the door's own refusals and to
+    ``Chart.encode``.
+    """
+    drawn = _drawn_bindings(bindings, encode)
+    channels: dict[str, ChannelBase] = {}
+    for name in ("x", "y"):
+        value = drawn.get(name)
+        if isinstance(value, ChannelBase):
+            channels[name] = value
+        elif isinstance(value, str):
+            channels[name] = channel_for_value(name, value, declare=f"encode({name}=...)")
+    return channels
 
 
 def _encode_grouping(bindings: dict) -> list[str]:

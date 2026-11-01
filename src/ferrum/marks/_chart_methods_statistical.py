@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
+from ferrum._encode_lowering import _refuse_bin_aggregate_on_channels
 from ferrum._layer import _PendingMark, merge_style
 from ferrum._validate import coerce_bool, validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
@@ -138,6 +139,42 @@ def _refuse_fitted_mark_after_pending_composite(entry: str, pending: _PendingMar
     )
 
 
+def _mark_function_alone_remedy(kwarg: str) -> str:
+    """The remedy for *kwarg* (``"bin"``/``"aggregate"``) mark_function reads over no data layer.
+
+    A data layer before ``mark_function`` in the chain (``chart.mark_point()
+    .encode(x=fm.X('a', bin=True), ...).mark_function(fn)``) is the one
+    layer that honors the option, since ``mark_function`` draws fn's own
+    grid and keeps every prior layer beside it; there is no field for
+    ``.transform(...)`` to bin or aggregate ahead of a layer that does not
+    exist yet.
+    """
+    return (
+        "Draw the data with a mark before mark_function "
+        f"(chart.mark_point().encode(...).mark_function(fn)), which honors {kwarg}=, "
+        f"or drop {kwarg}=."
+    )
+
+
+def _refuse_function_alone_statistics(encoding: dict) -> None:
+    """Refuse an x/y bin=/aggregate= mark_function draws over no data layer.
+
+    Its own layer is the synthetic ``(x, y)`` grid ``fn`` is evaluated over,
+    so no layer reads the caller's field; a bin= or aggregate= bound on x/y
+    before this call -- with no prior layer for ``mark_function`` to keep --
+    would otherwise be dropped silently once the channel is rebound to that
+    grid.
+    """
+    _refuse_bin_aggregate_on_channels(
+        "mark_function",
+        encoding,
+        ("x", "y"),
+        reason="fn is drawn over its own grid and no data layer reads the field",
+        bin_remedy=_mark_function_alone_remedy("bin"),
+        aggregate_remedy=_mark_function_alone_remedy("aggregate"),
+    )
+
+
 class StatisticalMarksMixin:
     """Mixin providing statistical mark methods for Chart."""
 
@@ -198,6 +235,15 @@ class StatisticalMarksMixin:
         -------
         Chart
             New ``Chart`` configured for density rendering.
+
+        Raises
+        ------
+        ValueError
+            If the x or y channel carries a ``bin=`` or ``aggregate=``: the
+            density is estimated over the raw rows, never a bin or
+            aggregate of them. Compute it ahead of time with
+            ``.transform(...)`` and bind its output column, or drop the
+            kwarg.
 
         Examples
         --------
@@ -282,6 +328,39 @@ class StatisticalMarksMixin:
         -------
         Chart
             New ``Chart`` configured for histogram rendering.
+
+        Raises
+        ------
+        ValueError
+            If the binned axis carries a ``bin=`` that states a rule of its
+            own (``bin=True`` is a harmless redundancy and is honored; move
+            a real rule to ``bins=``/``bin_count=``/``bin_width=``), or any
+            ``aggregate=`` (the histogram bins that axis rather than
+            aggregating it; aggregate ahead of it with
+            ``.transform(fm.transform_aggregate(...))`` and bind the output
+            column).
+        ValueError
+            If the value axis carries a ``bin=``, or an ``aggregate=`` other
+            than a fieldless ``"count"``. The value axis draws the bin's own
+            count and never binds a column, so a fieldless one's remedy is
+            to drop the kwarg. A field-bearing one (``aggregate="count"``
+            included) is refused with a remedy that draws what it asked for
+            over both fields: the per-bin aggregate with ``mark_bar()`` (a
+            ``bin=True`` channel on the histogram's field beside the
+            aggregated one), a two-field count with ``mark_hex()`` for a
+            ``bin=``, or dropping the binding and styling the axis with a
+            fieldless ``fm.Y(title=...)`` (``fm.X`` when horizontal). With
+            no field bound on the binned axis, the remedy binds one there
+            too. A fieldless ``aggregate="count"`` is honored, except under
+            ``density=True`` (the value axis draws density there, not a
+            count) or a normalized stack -- ``multiple="fill"``,
+            ``position=fm.Stack(offset="normalize")`` or a channel
+            ``stack="normalize"`` -- which draws each bin's share of its
+            stack there, not a count.
+        ValueError
+            If ``multiple=`` or ``orientation=`` is not one of its values,
+            ``right=True`` is passed, ``position_by=`` is not a column name,
+            or no field is bound on the binned axis.
 
         Examples
         --------
@@ -426,6 +505,14 @@ class StatisticalMarksMixin:
         ValueError
             When this chart has a pending composite mark (``mark_histogram()``,
             another ``mark_smooth()``, ...); use ``+`` instead.
+        ValueError
+            If the x channel carries a ``bin=`` (the fit bins before it
+            dispatches on method, so ``x_bins=`` is the remedy) or an
+            ``aggregate=`` (compute it ahead of time with ``.transform(...)``
+            and bind its output column -- never ``x_estimator=``, which
+            aggregates the response within each ``x_bins`` bin, not the
+            predictor), or if the y channel carries either (the fit reads
+            its response raw; the same ``.transform(...)`` remedy applies).
 
         Examples
         --------
@@ -1546,6 +1633,12 @@ class StatisticalMarksMixin:
             kwarg is not one the line honors, when ``size`` is not a finite
             number above zero, or when this chart has a pending composite
             mark (use ``+`` instead).
+        ValueError
+            If x or y carries a ``bin=``/``aggregate=`` and no data layer
+            is drawn before this call: ``fn`` is drawn over its own grid,
+            so no layer reads the field. Draw the data with a mark first
+            (``chart.mark_point().encode(...).mark_function(fn)``), which
+            honors it.
 
         Examples
         --------
@@ -1570,6 +1663,18 @@ class StatisticalMarksMixin:
         clip = resolve_method_bool("mark_function", "clip", clip, True)
         style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
         refuse_style_no_layer_draws("mark_function", style, ["line"])
+
+        # Whether this call keeps an existing layer (an existing layered
+        # chart, or a primitive mark over real data) beside the function
+        # line, or draws alone over fn's own synthetic grid. Only the
+        # alone case reads no caller field from x/y, so only it is
+        # checked for a bin=/aggregate= that would otherwise be dropped
+        # silently once the channel is rebound to that grid.
+        has_prior_layer = (self._layers is not None and self._layers) or (
+            self._mark is not None and self._data is not None
+        )
+        if not has_prior_layer:
+            _refuse_function_alone_statistics(self._encoding)
 
         # Infer parent x data for domain resolution.
         # For multi-layer charts, try the first layer's data; for single-chart,
@@ -1625,9 +1730,7 @@ class StatisticalMarksMixin:
         # this mixin just applies whatever the desugar decided, the same way
         # every other composite mark's style dict is applied to its layers.
         line_mark_kwargs = {**style, **(result.mark_kwargs or {})}
-        if (self._layers is not None and self._layers) or (
-            self._mark is not None and self._data is not None
-        ):
+        if has_prior_layer:
             # Something is already drawn -- an existing layered chart, or a
             # primitive mark over real data (the refusal above guarantees it
             # cannot be a composite's placeholder here). A primitive mark

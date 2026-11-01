@@ -45,7 +45,7 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
-use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
+use crate::render::marks::curve::{short_series_empty_reason, CurveAxis, SeriesNoun, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBinding};
@@ -336,6 +336,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let mut acc = MarkNodes::with_capacity(groups.len());
     // Per node, the source row of each width vertex (see `vertex_rows`).
     let mut vertex_rows: Vec<Vec<ferrum_scene::VertexRow>> = Vec::new();
+    // Series the `< 2` gate below dropped with exactly one drawable point.
+    let mut single_point_series = 0;
 
     for (key, mut rows) in groups {
         if let Some(values) = &vertex_sort_values {
@@ -356,7 +358,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             points.push((cx, cy));
             row_indices.push(i);
         }
-        if points.len() < 2 { continue; }
+        if points.len() < 2 {
+            single_point_series += usize::from(points.len() == 1);
+            continue;
+        }
 
         // Sample stroke-channel values from the first valid row of the group;
         // this same row represents the group's node for metadata (bug #6).
@@ -470,8 +475,15 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     }
 
     let (nodes, data_indices) = acc.finalize();
+    let empty_reason = short_series_empty_reason(
+        "mark_line() joins two or more points per series",
+        SeriesNoun::Series,
+        single_point_series,
+        nodes.len(),
+    );
 
-    let result = MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta);
+    let result = MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason);
     Ok(if size_conditional { result.with_vertex_rows(vertex_rows) } else { result })
 }
 
@@ -2749,5 +2761,70 @@ mod tests {
         let overrides = MarkKwargsSpec { sort_vertices: Some(true), ..Default::default() };
         let err = resolve_mark_style(Some(&overrides), &theme, &Mark::Point).unwrap_err();
         assert_eq!(err, RenderError::MarkStyleNotDrawn { mark: Mark::Point, field: "sort_vertices" });
+    }
+
+    /// `build` over nullable `x`/`y` columns, with a categorical `c` color
+    /// column splitting the series when `colors` is given.
+    fn build_series(
+        xs: Vec<Option<f64>>,
+        ys: Vec<Option<f64>>,
+        colors: Option<Vec<&str>>,
+    ) -> crate::render::draw::MarkBuildResult {
+        let mut spec = line_spec();
+        let mut fields = vec![Field::new("x", DataType::Float64, true), Field::new("y", DataType::Float64, true)];
+        let mut columns: Vec<arrow::array::ArrayRef> = vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys))];
+        if let Some(colors) = colors {
+            spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+            fields.push(Field::new("c", DataType::Utf8, false));
+            columns.push(Arc::new(StringArray::from(colors)));
+        }
+        let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        super::build(&ctx).unwrap()
+    }
+
+    /// A line whose every series has a single drawable point draws nothing,
+    /// and names why, counting its series.
+    #[test]
+    fn a_line_whose_every_series_has_one_point_names_its_emptiness() {
+        let one_row = build_series(vec![Some(1.0)], vec![Some(2.0)], None);
+        assert!(one_row.nodes.is_empty());
+        assert_eq!(
+            one_row.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("mark_line() joins two or more points per series, and its one series has one"),
+        );
+
+        let five_groups = build_series(
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            Some(vec!["a", "b", "c", "d", "e"]),
+        );
+        assert!(five_groups.nodes.is_empty());
+        assert_eq!(
+            five_groups.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("mark_line() joins two or more points per series, and each of its 5 series has one"),
+        );
+    }
+
+    /// A line that draws any series, or had no drawable point at all, carries
+    /// no reason: a one-point series beside a drawn one, a zero-row batch and
+    /// an all-null batch.
+    #[test]
+    fn a_line_that_draws_or_had_no_point_carries_no_empty_reason() {
+        let partial = build_series(vec![Some(0.0), Some(1.0), Some(2.0)], vec![Some(0.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]));
+        assert_eq!(partial.nodes.len(), 1);
+        assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+
+        let zero_rows = build_series(vec![], vec![], None);
+        assert!(zero_rows.nodes.is_empty());
+        assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+
+        let all_null = build_series(vec![None, None], vec![None, None], None);
+        assert!(all_null.nodes.is_empty());
+        assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
     }
 }

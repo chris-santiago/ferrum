@@ -100,7 +100,15 @@ pub(crate) struct OutputLineage {
     pub(crate) lowered: Vec<LoweredStep>,
     /// The `groupby` fields of the user's own steps the lineage passed (the
     /// steps a chart's statistics marker does not lower, and a
-    /// composition's steps), in order, each once.
+    /// composition's steps), and the fields a lowered step's caller wrote on
+    /// it ([`caller_groupby`]), in order, each once. A line, area or ribbon
+    /// splits by the grouping of the statistic that produced its rows: a
+    /// field an earlier step grouped by stays here past a lowered statistic
+    /// only when that statistic partitioned by it too
+    /// ([`TransformSpec::partition`]), so an ungrouped ECDF window over a
+    /// caller's grouped rows draws one line, not one per earlier group. A
+    /// user's own steps, and a lowered step that computes each row alone,
+    /// keep every field written before them.
     pub(crate) written_groupby: Vec<String>,
     /// The schema of the rows the lineage started from: the pipeline's
     /// source, or an operand's framed rows.
@@ -314,6 +322,16 @@ impl Lineage<'_> {
         }
         self
     }
+
+    /// This lineage after a lowered statistic that computed each output row
+    /// across `partition` ([`TransformSpec::partition`]): a field an earlier
+    /// step grouped by stays in [`OutputLineage::written_groupby`] only when
+    /// the statistic partitioned by it too, in its order: a field it
+    /// computed across does not separate the rows it produced.
+    fn regrouped(mut self, partition: &[String]) -> Self {
+        self.written_groupby.retain(|field| partition.contains(field));
+        self
+    }
 }
 
 /// A batch and its lineage.
@@ -508,7 +526,15 @@ impl<'s> Run<'s, '_> {
         // directly on it ([`caller_groupby`]'s doc), which is everything
         // for most kinds but a narrower subset for `Aggregate`/`Bin`.
         let written_fields: &[String] = if own.is_some() { caller_groupby(spec) } else { spec.groupby().unwrap_or(&[]) };
-        let after = |lineage: Lineage<'s>| lineage.written(written_fields);
+        // A lowered statistic that computes across rows first drops every
+        // earlier written field it did not partition by (`Lineage::regrouped`);
+        // a user's own step, and a lowered step that computes each row alone,
+        // keep every field written before them.
+        let partition = if own.is_some() { spec.partition() } else { None };
+        let after = |lineage: Lineage<'s>| match partition {
+            Some(partition) => lineage.regrouped(partition).written(written_fields),
+            None => lineage.written(written_fields),
+        };
         // Secondary outputs first, so a named step's explicit `name` wins a
         // key collision. A secondary output descends from no Swarm.
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
@@ -1359,5 +1385,60 @@ mod tests {
         }]));
         let (_, lineages) = apply_transforms_named(&smooth, &rows(), &TransformContext::default()).unwrap();
         assert_eq!(lineages["s"].written_groupby, vec!["g".to_string()]);
+    }
+
+    /// A field an earlier step grouped by stays in `written_groupby` past a
+    /// lowered statistic only when that statistic partitions by it too: an
+    /// ungrouped lowered window counts across every row and drops it, the
+    /// same window grouped by it keeps it, and a lowered `Smooth` keeps only
+    /// its own grouping. A lowered per-row `Bin` computes each row alone and
+    /// keeps every field, and a chain of the user's own steps keeps every
+    /// field each of them grouped by, in order.
+    #[test]
+    fn a_lowered_statistic_keeps_only_the_written_grouping_it_partitions_by() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("t", DataType::Utf8, false),
+            Field::new("c", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "b", "a"])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y", "x", "y"])),
+                Arc::new(StringArray::from(vec!["p", "p", "p", "q", "q", "q"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            ],
+        )
+        .unwrap();
+        let written = |steps: serde_json::Value| -> Vec<String> {
+            let (_, lineages) = apply_transforms_named(&chain(steps), &batch, &TransformContext::default()).unwrap();
+            lineages[FINAL_OUTPUT_KEY].written_groupby.clone()
+        };
+        let marker = || serde_json::json!({"type": "identity", "statistics": true});
+        let mean_by_g = || serde_json::json!({"type": "aggregate", "ops": [{"field": "v", "fn": "mean", "as": "mean_v"}], "groupby": ["g"]});
+        let rank_by = |field: &str| serde_json::json!({"type": "data_window", "ops": [{"op": "rank", "as": format!("r_{field}")}], "sort": ["v"], "groupby": [field]});
+        let ecdf = |groupby: Option<Vec<&str>>| {
+            let mut step = serde_json::json!({"type": "data_window", "ops": [{"op": "count", "field": "mean_v", "as": "count"}], "sort": ["mean_v"], "frame": [null, 0]});
+            if let Some(groupby) = groupby {
+                step["groupby"] = serde_json::json!(groupby);
+            }
+            step
+        };
+
+        assert_eq!(written(serde_json::json!([mean_by_g(), marker(), ecdf(None)])), Vec::<String>::new());
+        assert_eq!(written(serde_json::json!([mean_by_g(), marker(), ecdf(Some(vec!["g"]))])), vec!["g".to_string()]);
+        assert_eq!(
+            written(serde_json::json!([rank_by("g"), marker(), {"type": "bin", "field": "v", "per_row": true}])),
+            vec!["g".to_string()],
+        );
+        assert_eq!(written(serde_json::json!([rank_by("g"), rank_by("t")])), vec!["g".to_string(), "t".to_string()]);
+        let smooth_by_c = serde_json::json!({
+            "type": "smooth", "x": "v", "y": "v", "method": "loess", "bandwidth": 0.75, "degree": 2, "n": 10,
+            "seed": 0, "output": "fitted", "inject_zero_ref": false, "inject_metrics": false, "groupby": ["c"],
+        });
+        assert_eq!(written(serde_json::json!([rank_by("g"), marker(), smooth_by_c])), vec!["c".to_string()]);
     }
 }

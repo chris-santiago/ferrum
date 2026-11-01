@@ -929,6 +929,7 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
         "_channel_class_for",  # internal channel-name -> class lookup, not a column read
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column
         "_extract_ordinal_domain",  # internal helper, positional field name
+        "_refuse_statistic_input",  # _refuse_statistic_input(entry, "x"/"y", ch, reason=...) -- the channel SLOT, never a transform's output column read
         "_set_composite_mark",  # internal composite-mark metadata setter
         "_unique_col_name",  # _unique_col_name(df.columns, "count") -- reads the SOURCE frame's own columns, never a transform's output batch
         "append",  # list.append("count") building a column-name list

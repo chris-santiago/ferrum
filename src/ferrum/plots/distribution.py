@@ -32,7 +32,12 @@ from ferrum._desugar import (
     _propagate_layer_scale,
     _scale_domain,
 )
-from ferrum._encode_lowering import _rebind_positional
+from ferrum._encode_lowering import (
+    _rebind_positional,
+    _refuse_bin_aggregate_on_channels,
+    _refuse_histogram_bin_aggregate,
+    _refuse_statistic_input,
+)
 from ferrum._layer import _Layer, merge_style
 from ferrum._registry import registry_output_columns
 from ferrum._validate import as_finite_real, coerce_positive_int, validate_choice
@@ -46,10 +51,11 @@ from ferrum.marks._desugar_helpers import (
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
 from ferrum.marks.base import resolve_method_bool
 from ferrum.encoding import Y
-from ferrum.encoding.base import declared_title, drawn_title
+from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
 from ferrum.plots._helpers import (
     _checked_figure_size,
     _drawn_bindings,
+    _drawn_positional_channels,
     _encode_grouping,
     _field_name,
     _figure_entry,
@@ -478,6 +484,57 @@ def _reject_ecdf_field_y(*, kind: str, y: Any) -> None:
     )
 
 
+def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple: str) -> None:
+    """Refuse a bin=/aggregate= the statistic displot's ``kind=`` builds cannot honor.
+
+    *drawn* is the x/y channel objects the chart actually draws once
+    ``encode=`` applies (:func:`~ferrum.plots._helpers._drawn_positional_channels`),
+    so a keyword, an ``encode=`` entry and a shorthand string are all
+    checked alike. As the matching mark's own disposition
+    (:func:`~ferrum._encode_lowering._refuse_histogram_bin_aggregate` for
+    ``"hist"``, :func:`~ferrum._encode_lowering._refuse_bin_aggregate_on_channels`
+    for ``"kde"`` and ``"ecdf"``), with displot's own remedies. ``kind='rug'``
+    draws every row through the plain lowering, which consumes a channel's
+    ``bin=``/``aggregate=`` as any primitive mark does, so it is not
+    checked here.
+    """
+    if kind == "hist":
+        share_spelling, share_remedy = (
+            ("multiple='fill'", "Drop aggregate=, or draw the count with multiple='stack'.")
+            if multiple == "fill"
+            else (None, None)
+        )
+        _refuse_histogram_bin_aggregate(
+            "displot",
+            drawn,
+            horizontal=False,
+            density=(stat == "density"),
+            share_spelling=share_spelling,
+            share_remedy=share_remedy,
+            bin_rule_remedy="State the rule with displot's bins=, or drop bin=.",
+            density_spelling="stat='density'",
+            density_remedy="Drop aggregate=, or draw the count with stat='count'.",
+        )
+    elif kind == "kde":
+        _refuse_bin_aggregate_on_channels(
+            "displot",
+            drawn,
+            ("x", "y"),
+            reason="the kernel density estimate reads raw rows",
+        )
+    elif kind == "ecdf":
+        x_ch = drawn.get("x")
+        if isinstance(x_ch, ChannelBase):
+            _refuse_statistic_input(
+                "displot", "x", x_ch, reason="the ECDF counts the raw values of x"
+            )
+        y_ch = drawn.get("y")
+        if isinstance(y_ch, ChannelBase):
+            _refuse_statistic_input(
+                "displot", "y", y_ch, reason="the ECDF draws its cumulative count on y"
+            )
+
+
 def _warn_inert_bins(*, kind: str, bins: Any) -> None:
     """Warn when the caller named a binning rule the ``kind=`` cannot act on.
 
@@ -680,6 +737,23 @@ def displot(
     ValueError
         If ``log_scale=True`` is used with a channel ``x=`` that already
         carries its own ``scale=``.
+    ValueError
+        If ``x=`` or ``y=`` -- through a keyword, ``encode=`` or a
+        shorthand string -- carries a ``bin=``/``aggregate=`` the ``kind=``
+        statistic cannot honor: a ``bin=`` rule on ``kind="hist"`` (move it
+        to ``bins=``), any ``bin=``/``aggregate=`` on ``kind="kde"``, or
+        either on ``kind="ecdf"``'s x and y alike. ``kind="hist"``'s value
+        axis never binds a column of its own, so any ``bin=`` there, and
+        any ``aggregate=`` other than a fieldless ``"count"``, is refused
+        the same way. A fieldless one's remedy is to drop the kwarg. A
+        field-bearing one's remedy draws the per-bin aggregate of that
+        second field with ``mark_bar()`` (a ``bin=True`` x channel beside
+        the aggregated y), counts both fields with ``mark_hex()`` for a
+        ``bin=``, or drops ``y=`` and styles the axis with a fieldless
+        ``fm.Y(title=...)``.
+        ``kind="hist"``'s own ``bin=True`` and a fieldless
+        ``aggregate="count"`` (outside ``stat="density"`` and a normalized
+        stack -- ``multiple="fill"``) are honored, not refused.
 
     Warns
     -----
@@ -723,7 +797,17 @@ def displot(
     # built -- including the overlay case, which used to render a chart
     # missing the mark it was asked for.
     _reject_displot_without_x(kind=kind, x=x, y=y, kde=kde, rug=rug)
-    _reject_ecdf_field_y(kind=kind, y=y)
+    # The chart this call draws once `encode=` applies, not just the x=/y=
+    # keywords: a bin=/aggregate= reaching through `encode=`, or as a
+    # shorthand string, is checked the same way as one written as a keyword.
+    drawn = _drawn_bindings({"x": x, "y": y}, encode)
+    _reject_ecdf_field_y(kind=kind, y=drawn.get("y"))
+    _refuse_displot_bin_aggregate(
+        kind=kind,
+        drawn=_drawn_positional_channels({"x": x, "y": y}, encode),
+        stat=stat,
+        multiple=multiple,
+    )
     height, aspect = _checked_figure_size("displot", height=height, aspect=aspect)
 
     return _displot_build(

@@ -30,7 +30,7 @@
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
-use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
+use crate::render::marks::curve::{short_series_empty_reason, CurveAxis, SeriesNoun, StepSpelling, Trace};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
 /// `mark_ribbon` spells its step risers as explicit `LineTo` vertices, like
@@ -298,6 +298,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // (bug #6). Before the fix, `data_indices` carried one entry per *contributing
     // row* while metadata was full-row, so node and metadata lengths diverged.
     let mut acc = MarkNodes::with_capacity(groups.len());
+    // Bands the `< 2` gate below dropped with exactly one drawable point.
+    let mut single_point_bands = 0;
 
     for (key, rows) in groups {
         let mut indices: Vec<usize> = rows.into_iter().filter(|&i| vertices.get(i).is_some_and(Option::is_some)).collect();
@@ -308,6 +310,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             });
         }
         if indices.len() < 2 {
+            single_point_bands += usize::from(indices.len() == 1);
             continue;
         }
         // Representative source row for this group's single polygon node: the
@@ -399,8 +402,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
+    let empty_reason = short_series_empty_reason(
+        "mark_ribbon() spans two or more points per band",
+        SeriesNoun::Band,
+        single_point_bands,
+        nodes.len(),
+    );
 
     MarkBuildResult::populated(MarkBatchKind::Ribbon, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 #[cfg(test)]
@@ -1238,5 +1248,77 @@ mod tests {
         let err = resolve_mark_style(Some(&overrides), &ThemeInputs::default(), &Mark::Ribbon)
             .expect_err("an unknown interpolate value must refuse");
         assert_eq!(err, crate::render::RenderError::UnknownInterpolate { value: "smooth".into() });
+    }
+
+    /// `render` over nullable `x`/`y`/`y2` columns, with a categorical `c`
+    /// color column splitting the bands when `colors` is given.
+    fn render_bands(
+        xs: Vec<Option<f64>>,
+        ys: Vec<Option<f64>>,
+        y2s: Vec<Option<f64>>,
+        colors: Option<Vec<&str>>,
+    ) -> crate::render::draw::MarkBuildResult {
+        let mut spec = ribbon_spec(true);
+        let mut fields = vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("y2", DataType::Float64, true),
+        ];
+        let mut columns: Vec<arrow::array::ArrayRef> =
+            vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys)), Arc::new(Float64Array::from(y2s))];
+        if let Some(colors) = colors {
+            spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+            fields.push(Field::new("c", DataType::Utf8, false));
+            columns.push(Arc::new(arrow::array::StringArray::from(colors)));
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        render(&spec, &batch)
+    }
+
+    /// A ribbon whose every band has a single drawable point draws nothing,
+    /// and names why, counting its bands.
+    #[test]
+    fn a_ribbon_whose_every_band_has_one_point_names_its_emptiness() {
+        let one_row = render_bands(vec![Some(1.0)], vec![Some(1.0)], vec![Some(2.0)], None);
+        assert!(one_row.nodes.is_empty());
+        assert_eq!(
+            one_row.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("mark_ribbon() spans two or more points per band, and its one band has one"),
+        );
+
+        let five_groups = render_bands(
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            (0..5).map(|i| Some(f64::from(i))).collect(),
+            (0..5).map(|i| Some(f64::from(i) + 1.0)).collect(),
+            Some(vec!["a", "b", "c", "d", "e"]),
+        );
+        assert!(five_groups.nodes.is_empty());
+        assert_eq!(
+            five_groups.empty_reason.map(|reason| reason.0).as_deref(),
+            Some("mark_ribbon() spans two or more points per band, and each of its 5 bands has one"),
+        );
+    }
+
+    /// A ribbon that draws any band, or had no drawable point at all,
+    /// carries no reason: a one-point band beside a drawn one, a zero-row
+    /// batch and an all-null batch.
+    #[test]
+    fn a_ribbon_that_draws_or_had_no_point_carries_no_empty_reason() {
+        let partial = render_bands(
+            vec![Some(0.0), Some(1.0), Some(2.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0)],
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            Some(vec!["a", "a", "b"]),
+        );
+        assert_eq!(partial.nodes.len(), 1);
+        assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+
+        let zero_rows = render_bands(vec![], vec![], vec![], None);
+        assert!(zero_rows.nodes.is_empty());
+        assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+
+        let all_null = render_bands(vec![None, None], vec![None, None], vec![None, None], None);
+        assert!(all_null.nodes.is_empty());
+        assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
     }
 }

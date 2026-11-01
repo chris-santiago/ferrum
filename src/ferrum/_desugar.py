@@ -52,7 +52,15 @@ from ferrum._layer import (
     set_style,
     titled_encoding,
 )
-from ferrum._encode_lowering import _composite_groupby, _over, _rebind_positional
+from ferrum._encode_lowering import (
+    SMOOTH_X_BIN_REMEDY,
+    _composite_groupby,
+    _over,
+    _rebind_positional,
+    _refuse_bin_aggregate_fit,
+    _refuse_bin_aggregate_on_channels,
+    _refuse_histogram_bin_aggregate,
+)
 from ferrum._layer_transforms import _with_statistics_marker
 from ferrum.encoding.base import ChannelBase, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
@@ -1123,6 +1131,94 @@ def _prep_smooth_force_name(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "name": "smooth"}
 
 
+def _histogram_share(ctx: _ResolveContext, value_axis: str) -> tuple[str, str] | None:
+    """The spelling and remedy of the normalized-stack mode mark_histogram's value
+    axis draws, or ``None`` when its fieldless count draws a plain count.
+
+    Reads the mode the drawn position actually resolves to, not one
+    keyword alone: ``multiple=``'s own position
+    (:func:`~ferrum.marks._multiple.multiple_semantics`, the one owner of
+    what ``multiple=`` means) wins when it builds one; otherwise the
+    chart's own ``position=`` wins; otherwise the value channel's own
+    ``stack=`` shorthand is what the bar would stack by. ``multiple=
+    "fill"`` is checked first and on its own, since it always resolves to
+    a normalizing ``Stack`` and keeps its own spelling regardless. An
+    unknown ``multiple=`` draws no mode at all: ``None`` here, so the
+    desugar's own vocabulary check refuses it in ``mark_histogram``'s voice.
+    """
+    from ferrum.marks._multiple import MULTIPLE_MODES, multiple_semantics
+    from ferrum.position import Stack
+
+    multiple = ctx.transform_kwargs.get("multiple", "layer")
+    if multiple not in MULTIPLE_MODES:
+        return None
+    if multiple == "fill":
+        return "multiple='fill'", "Drop aggregate=, or draw the count with multiple='stack'."
+    own = multiple_semantics(multiple).position
+    position = own if own is not None else ctx.chart._position
+    if own is None and isinstance(position, Stack) and position.offset == "normalize":
+        return (
+            "position=fm.Stack(offset='normalize')",
+            "Drop aggregate=, or draw the count with position=fm.Stack().",
+        )
+    value_ch = ctx.chart._encoding.get(value_axis)
+    if (
+        position is None
+        and isinstance(value_ch, ChannelBase)
+        and value_ch.option("stack") == "normalize"
+    ):
+        return "stack='normalize'", "Drop aggregate=, or draw the count with stack=True."
+    return None
+
+
+def _prep_refuse_histogram_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= mark_histogram's own Bin cannot honor.
+
+    See :func:`ferrum._encode_lowering._refuse_histogram_bin_aggregate`.
+    """
+    horizontal = ctx.transform_kwargs.get("orientation", "vertical") == "horizontal"
+    value_axis = "x" if horizontal else "y"
+    density = bool(ctx.transform_kwargs.get("density", False))
+    share_spelling, share_remedy = _histogram_share(ctx, value_axis) or (None, None)
+    _refuse_histogram_bin_aggregate(
+        "mark_histogram",
+        ctx.chart._encoding,
+        horizontal=horizontal,
+        density=density,
+        share_spelling=share_spelling,
+        share_remedy=share_remedy,
+        bin_rule_remedy=(
+            "State the rule with mark_histogram's bins=, bin_count= or bin_width=, or drop bin=."
+        ),
+        density_spelling="density=True",
+        density_remedy="Drop aggregate=, or draw the count with density=False.",
+    )
+
+
+def _prep_refuse_density_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= mark_density estimates over, not folds in."""
+    _refuse_bin_aggregate_on_channels(
+        "mark_density",
+        ctx.chart._encoding,
+        ("x", "y"),
+        reason="the kernel density estimate reads raw rows",
+    )
+
+
+def _prep_refuse_smooth_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= mark_smooth's fit cannot fold in.
+
+    Every ``mark_smooth`` method builds its ``Smooth`` transform first and
+    dispatches on method after, so x's own ``x_bins=`` binning knob works
+    on every form.
+    """
+    _refuse_bin_aggregate_fit(
+        "mark_smooth",
+        ctx.chart._encoding,
+        x_bin_remedy=SMOOTH_X_BIN_REMEDY,
+    )
+
+
 # Each kind's ordered list of pre-desugar prep steps.  Order within each list
 # matches the original control flow exactly.  (A post-desugar Float64-cast
 # step used to live here for boxen/boxplot/violin/swarm — see the module
@@ -1176,11 +1272,18 @@ _PENDING_PREP: dict[str, _KindPrep] = {
     "errorband": _KindPrep(
         pre=(_prep_cat_axis_types, _prep_axis_titles, _prep_color_field, _prep_grouping)
     ),
-    "density": _KindPrep(pre=(_prep_groupby_from_color, _prep_axis_titles)),
-    "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
+    "density": _KindPrep(
+        pre=(_prep_groupby_from_color, _prep_axis_titles, _prep_refuse_density_statistics)
+    ),
+    "histogram": _KindPrep(pre=(_prep_groupby_from_color, _prep_refuse_histogram_statistics)),
     "hex": _KindPrep(pre=(_prep_hex_field_from_color, _prep_axis_titles)),
     "smooth": _KindPrep(
-        pre=(_prep_smooth_force_name, _prep_groupby_from_grouping, _prep_axis_titles)
+        pre=(
+            _prep_smooth_force_name,
+            _prep_groupby_from_grouping,
+            _prep_axis_titles,
+            _prep_refuse_smooth_statistics,
+        )
     ),
     "qq": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
     "raster": _KindPrep(pre=(_prep_axis_titles,)),

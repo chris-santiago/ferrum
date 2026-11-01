@@ -212,10 +212,14 @@ impl SeriesGrouping {
 ///   the chart's statistic planner ([`OutputLineage::written_groupby`] --
 ///   a user's own pre-marker step, or a lowered composite statistic's own
 ///   `groupby=` keyword like `mark_smooth(groupby=[...])`,
-///   `transform::run::groupby_is_chart_planned`'s doc), minus the layer's
-///   own color and positional fields, along which the series runs. A field
-///   bound on `shape`/`stroke_dash` reaches `by_channel` too;
-///   `fields()`'s dedup keeps it from doubling.
+///   `transform::run::caller_groupby`'s doc), minus the layer's own color
+///   and positional fields, along which the series runs. The series splits
+///   by the grouping of the statistic that produced its rows: a field an
+///   earlier step grouped by stays a series key past a lowered statistic
+///   only when that statistic grouped by it too, so the run has already
+///   dropped any field the statistic computed across. A field bound on
+///   `shape`/`stroke_dash` reaches `by_channel` too; `fields()`'s dedup
+///   keeps it from doubling.
 ///
 /// The layer's own color, binned or not, and its grouping-only `group` key
 /// split through the color path and stay out of both.
