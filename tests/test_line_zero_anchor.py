@@ -4,10 +4,11 @@
 ``displot(kind='ecdf')`` -- held off every public door by
 ``ferrum.marks.base._INTERNAL_STYLE_DOORS``, exactly as ``sort_vertices`` is.
 No public call accepts it, so every declared chart here is built the way the
-ecdf desugar itself sets an internal style field (``plots/distribution.py``'s
-``chart._mark_kwargs = merge_style(chart._mark_kwargs, {"sort_vertices":
-True})``): by patching ``_mark_kwargs``/``mark_kwargs`` directly with
-:func:`ferrum._layer.merge_style`.
+ecdf desugar itself sets an internal style field
+(``marks/statistical.py``'s ``desugar_ecdf``, whose returned
+``MarkDesugarResult.mark_kwargs`` declares ``{"sort_vertices": True,
+"rise_from_zero": True, ...}``): by patching ``_mark_kwargs``/``mark_kwargs``
+directly with :func:`ferrum._layer.merge_style`.
 
 The one producer of the anchor, ``ferrum._spec_build._mark_zero_anchor``,
 anchors a bar or a declared line on every door that reads an authored

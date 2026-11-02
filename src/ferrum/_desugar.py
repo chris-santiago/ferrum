@@ -435,7 +435,9 @@ def _merge_desugar_mark_kwargs(
     return catch_all_over(desugar_kwargs, style_dict, caller_style_keys)
 
 
-def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
+def _apply_remap(
+    encoding: dict, remap: dict, orig_encoding: dict | None = None, titles: dict | None = None
+) -> None:
     """Apply a desugar remap to an encoding dict, keeping the caller's options.
 
     Modifies *encoding* in place.  When *orig_encoding* is provided and the
@@ -447,7 +449,9 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
     dropped, and the channel's type is always forced to quantitative since
     it now points at the transform's numeric output.  When the caller never
     bound the channel, a fresh quantitative channel is built, stamped with
-    the original field name as its title when the remap changed the field.
+    *titles*' entry for that channel (falling back to the original field
+    name as its title when the remap changed the field, when *titles* names
+    none).
 
     Parameters
     ----------
@@ -459,15 +463,24 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
         The chart's encoding dict *before* the remap, used to recover the
         caller's channel for rebinding, or (for an unbound channel) the
         original field name for the title stamp.  ``None`` disables both.
+    titles : dict or None, optional
+        The desugar's own default title per remapped channel
+        (``result.remap_titles``), passed to :func:`_rebind_positional` as
+        its ``title=`` default: the caller's own title (a suppressing
+        ``title=None`` included) always wins over it.  ``None`` or a channel
+        absent from it falls back to :func:`_rebind_positional`'s own
+        default (the original field name, when that differs from the new
+        column).
     """
     from ferrum.encoding import X, X2, Y, Y2
 
+    titles = titles or {}
     if "x" in remap:
         x_orig = orig_encoding.get("x") if orig_encoding is not None else None
-        encoding["x"] = _rebind_positional(remap["x"], x_orig, X)
+        encoding["x"] = _rebind_positional(remap["x"], x_orig, X, title=titles.get("x"))
     if "y" in remap:
         y_orig = orig_encoding.get("y") if orig_encoding is not None else None
-        encoding["y"] = _rebind_positional(remap["y"], y_orig, Y)
+        encoding["y"] = _rebind_positional(remap["y"], y_orig, Y, title=titles.get("y"))
     if "x2" in remap:
         encoding["x2"] = X2(remap["x2"], type="Q")
     if "y2" in remap:
@@ -1219,6 +1232,69 @@ def _prep_refuse_smooth_statistics(ctx: _ResolveContext) -> None:
     )
 
 
+def _prep_ecdf_groupby(ctx: _ResolveContext) -> None:
+    """ecdf: thread the effective grouping channels into the window's groupby.
+
+    Reads the chart's own grouping bindings, then -- on a ``+``/``LayerChart``
+    operand, at any depth -- each composition binding on a grouping channel
+    the chart itself leaves unbound (:func:`_over`, the same effective-
+    encoding merge :func:`_prep_boxen_palette_color_conflict` reads), over
+    the same restricted channel set every composite statistic groups by
+    (:func:`~ferrum._encode_lowering._composite_groupby`,
+    :data:`~ferrum._encode_lowering.COMPOSITE_GROUPING_CHANNELS`) -- hue is
+    already one of them, bound as ``color``. No facet field is folded in,
+    facet-free like :func:`ferrum.plots._helpers._encode_grouping`: a facet
+    panel's own row subset already partitions the window at render time, so
+    adding the facet field here would double-partition it.
+    """
+    if "groupby" in ctx.transform_kwargs:
+        return
+    groupby = _composite_groupby(_over(ctx.chart._encoding, ctx.parent), None)
+    if groupby:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "groupby": groupby}
+
+
+def _prep_ecdf_count_column(ctx: _ResolveContext) -> None:
+    """ecdf: inject ``_count_col``, a column name absent from the chart's own data.
+
+    ``desugar_ecdf``'s window needs a fresh output column for its rolling
+    count. A source column already named "count" must not be silently
+    overwritten, so this reads the chart's own data (``to_polars``, uniform
+    across every supported input type) rather than guessing a name --
+    the private-parameter injection precedent
+    :func:`_prep_hex_field_from_color` sets for ``_color``. The axis this
+    column draws on is titled "count" regardless of which name this
+    avoidance actually lands on (``desugar_ecdf``'s own ``remap_titles``).
+    """
+    from ferrum._coerce import to_polars
+    from ferrum.plots._helpers import _unique_col_name
+
+    ctx.transform_kwargs = {
+        **ctx.transform_kwargs,
+        "_count_col": _unique_col_name(to_polars(ctx.chart._data).columns, "count"),
+    }
+
+
+def _prep_refuse_ecdf_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate=, or a field-bearing y=, after any later ``.encode()``.
+
+    Backstop for the post-hoc ``.encode()`` door: ``displot``'s own
+    call-time pre-check (``_refuse_ecdf_bin_aggregate``, ``_reject_ecdf_field_y``)
+    runs before anything is built; this prep re-runs the identical checks
+    over the chart's fully resolved encoding, so a ``.encode()`` written
+    after the call is refused the same way. The ``"ecdf"`` composite kind
+    has no public ``mark_ecdf`` door -- ``displot`` is its only caller --
+    so this prep is coupled to displot's own checks by construction,
+    imported locally (both modules are already fully loaded by the time a
+    pending mark resolves).
+    """
+    from ferrum.plots.distribution import _refuse_ecdf_bin_aggregate, _reject_ecdf_field_y
+
+    encoding = ctx.chart._encoding
+    _reject_ecdf_field_y(kind="ecdf", y=encoding.get("y"))
+    _refuse_ecdf_bin_aggregate(encoding)
+
+
 # Each kind's ordered list of pre-desugar prep steps.  Order within each list
 # matches the original control flow exactly.  (A post-desugar Float64-cast
 # step used to live here for boxen/boxplot/violin/swarm — see the module
@@ -1286,6 +1362,9 @@ _PENDING_PREP: dict[str, _KindPrep] = {
         )
     ),
     "qq": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
+    "ecdf": _KindPrep(
+        pre=(_prep_ecdf_groupby, _prep_ecdf_count_column, _prep_refuse_ecdf_statistics)
+    ),
     "raster": _KindPrep(pre=(_prep_axis_titles,)),
     "calibration": _KindPrep(pre=(_prep_axis_titles,)),
     "cv_scores": _KindPrep(pre=(_prep_axis_titles,)),
@@ -1602,7 +1681,7 @@ def _resolve_pending_as(
         # layer that cannot resolve them.
         smooth_enc = {k: v for k, v in chart._encoding.items() if k not in ("x2", "y2")}
         if remap:
-            _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding)
+            _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
         smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
         smooth_enc = titled_encoding(smooth_enc, chart._pending_stat_mark.legend_titles)
         # Style applies to the composite's emitted smooth layer only; the prior
@@ -1644,7 +1723,7 @@ def _resolve_pending_as(
     if result.position is not None:
         new._position = result.position
     if remap:
-        _apply_remap(new._encoding, remap, orig_encoding=chart._encoding)
+        _apply_remap(new._encoding, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
     new._encoding = _propagate_positional_scale(chart._encoding, new._encoding)
     new._encoding = titled_encoding(new._encoding, chart._pending_stat_mark.legend_titles)
     return new

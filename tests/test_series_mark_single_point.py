@@ -69,15 +69,20 @@ def test_a_series_mark_over_one_row_warns_that_it_drew_nothing(
     assert expected in messages
 
 
-def test_a_one_row_ecdf_warns_that_its_line_drew_nothing():
-    _svg, messages = _render_capturing(lambda: fm.displot(_ONE_ROW, x="v", kind="ecdf").to_svg())
-    assert _LINE_ONE in messages
+def test_a_one_row_ecdf_draws_a_riser_and_stays_silent():
+    """A plain `mark_line` over one row draws nothing and warns (`_LINE_ONE`
+    above); the ECDF's own line declares the zero riser, so its one row
+    still draws -- a vertical rise from 0 to 1 -- with no warning."""
+    svg, messages = _render_capturing(lambda: fm.displot(_ONE_ROW, x="v", kind="ecdf").to_svg())
+    assert messages == [], messages
+    (corners,) = [corners for _stroke, corners in step_after_paths(svg)]
+    assert len(corners) == 2, corners
 
 
-def test_the_ecdf_aggregate_remedy_without_a_groupby_warns_like_its_one_row_sibling():
+def test_the_ecdf_aggregate_remedy_without_a_groupby_draws_like_its_one_row_sibling():
     """An aggregate with no groupby leaves one row, so the ECDF over it has one
     point: the remedy and the same door over the one-row frame polars computes
-    both warn, and render the same chart.
+    both draw the same riser silently, and render the same chart.
     """
     remedied = fm.displot(_GROUPED_ROWS, x="mean_v", kind="ecdf").transform(
         fm.transform_aggregate({"field": "v", "fn": "mean", "as": "mean_v"})
@@ -85,17 +90,19 @@ def test_the_ecdf_aggregate_remedy_without_a_groupby_warns_like_its_one_row_sibl
     sibling = fm.displot(_GROUPED_ROWS.select(mean_v=pl.col("v").mean()), x="mean_v", kind="ecdf")
     remedied_svg, remedied_messages = _render_capturing(remedied.to_svg)
     sibling_svg, sibling_messages = _render_capturing(sibling.to_svg)
-    assert _LINE_ONE in remedied_messages
-    assert _LINE_ONE in sibling_messages
+    assert remedied_messages == [], remedied_messages
+    assert sibling_messages == [], sibling_messages
     assert remedied_svg == sibling_svg
 
 
-def test_an_ecdf_with_one_single_row_hue_level_draws_the_other_and_stays_silent():
+def test_an_ecdf_with_one_single_row_hue_level_draws_both_and_stays_silent():
+    """The single-row `"a"` level now draws its own riser (not nothing),
+    beside the four-row `"b"` level's full step line -- two lines, silent."""
     rows = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0], "h": ["a", "b", "b", "b", "b"]})
     svg, messages = _render_capturing(
         lambda: fm.displot(rows, x="v", kind="ecdf", hue="h").to_svg()
     )
-    assert len(step_after_paths(svg)) == 1
+    assert len(step_after_paths(svg)) == 2
     assert not any("drew nothing" in message for message in messages), messages
 
 

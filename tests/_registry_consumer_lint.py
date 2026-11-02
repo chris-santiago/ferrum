@@ -879,6 +879,18 @@ DISPOSITIONED: dict[tuple[str, str, str], str] = {
     ("src/ferrum/plots/matrix.py", "_clustermap_build", "value"): _UNPIVOT_VALUE,
     # --- residuals batch, wrong-schema mispin reverted (round 5) -----------
     ("src/ferrum/plots/regression.py", "residplot", "x"): _RESIDPLOT_X,
+    ("src/ferrum/marks/statistical.py", "desugar_ecdf", "count"): (
+        "desugar_ecdf's rolling-count `DataWindow` op declares its own output "
+        "name through `as:`, Python's to choose; `data_window` declares no "
+        "outputs at all (`transform_registry('data_window')['outputs'] == []`), "
+        "so there is no schema to look the name up against. `_count_col`'s "
+        "default is this site's one textual collision with `Bin`'s declared "
+        "`count`; the actual column name a render reads is resolved per call "
+        "(`_PENDING_PREP['ecdf']`'s count-column prep, collision-avoided "
+        "against the chart's own data), never this default alone. Deriving it "
+        "from the registry would assert a relationship (this op reads Bin's "
+        "schema) that does not exist."
+    ),
 }
 
 

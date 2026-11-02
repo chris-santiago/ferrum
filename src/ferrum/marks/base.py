@@ -229,6 +229,31 @@ _INTERNAL_STYLE_DOORS: dict[str, str] = {
     "rise_from_zero": "displot(kind='ecdf')",
 }
 
+
+class _FigureCall(NamedTuple):
+    """How a refusal names a composite kind no ``Chart.mark_<kind>()`` builds.
+
+    Every other kind a ``_set_composite_mark`` caller sets is its own
+    method's suffix (``"histogram"`` -> ``mark_histogram()``), so a
+    refusal that formats ``mark_{kind}`` names a real, callable method. A
+    figure-only kind (``"ecdf"``, built only by ``displot(kind="ecdf")``,
+    with no ``mark_ecdf()``) is looked up here instead.
+    """
+
+    #: How a refusal names the call in prose (e.g. ``"displot(kind='ecdf')"``).
+    name: str
+    #: The ``+`` operand its remedy types (e.g. ``"fm.displot(..., kind='ecdf')"``).
+    operand: str
+
+
+#: The composite kinds no ``Chart.mark_<kind>()`` method builds, each with
+#: the public call that does. Read by :func:`_refuse_fitted_mark_after_pending_composite`
+#: and by ``Chart._refuse_secondary_field``, in place of their usual
+#: ``mark_{kind}`` formatting.
+_FIGURE_ONLY_KINDS: dict[str, _FigureCall] = {
+    "ecdf": _FigureCall("displot(kind='ecdf')", "fm.displot(..., kind='ecdf')"),
+}
+
 #: The kwargs a ``mark_<name>()`` method consumes itself rather than
 #: forwarding as style: ``orient="horizontal"`` flips the chart's coordinates
 #: (:meth:`MarkBase.orient_coord_flip`). Python-owned, because it describes

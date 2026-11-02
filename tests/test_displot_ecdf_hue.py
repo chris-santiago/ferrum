@@ -78,11 +78,13 @@ class TestEcdfHueCarriesGroupKey:
         # Each level's own count, from `groupby=` carrying the hue column
         # into the window: a dropped `groupby=` would instead count across
         # both groups pooled, reaching 300 on one or both lines rather than
-        # 150 on each.
+        # 150 on each. Each line also rises from 0 at its first
+        # observation, so its corners are that riser plus 150 steps (151).
         y_ladder = value_axis_ladder(svg, axis="y")
         for _stroke, corners in lines:
             heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
-            assert len(corners) == 150, f"expected 150 steps (one per row), got {len(corners)}"
+            assert len(corners) == 151, f"expected the zero riser plus 150 steps, got {len(corners)}"
+            assert heights[0] == 0, f"expected the line to rise from 0, got {heights[0]}"
             assert heights[-1] == 150, f"expected this level's own row count, got {heights[-1]}"
 
     def test_ecdf_hue_channel_object_matches_bare_string(self, two_group_df):
@@ -156,10 +158,12 @@ class TestEcdfNoHueUnchanged:
         lines = step_after_paths(svg)
         assert len(lines) == 1, f"expected one step line, got {len(lines)}"
         _stroke, corners = lines[0]
-        assert len(corners) == 20
+        # The line rises from 0 at its first observation, so its corners
+        # are that riser plus the 20 steps (21).
+        assert len(corners) == 21
         y_ladder = value_axis_ladder(svg, axis="y")
         heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
-        assert heights == list(range(1, 21)), heights
+        assert heights == [0, *range(1, 21)], heights
 
 
 # ---------------------------------------------------------------------------

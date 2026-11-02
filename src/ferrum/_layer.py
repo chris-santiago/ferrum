@@ -499,6 +499,16 @@ class MarkDesugarResult:
     remap : dict
         Encoding-channel remap (e.g. ``{"x": "value", "y": "density"}``).
         Single-mark mode only.
+    remap_titles : dict
+        The title a remapped ``x``/``y`` draws when the caller's own binding
+        at that slot declares none, keyed like ``remap`` (e.g.
+        ``{"y": "count"}``). Applied by :func:`ferrum._desugar._apply_remap`
+        through :func:`ferrum._encode_lowering._rebind_positional`'s own
+        ``title=`` default, so the caller's own ``title=`` -- a suppressing
+        ``title=None`` included -- always wins; empty means the desugar sets
+        no default, and the remapped channel titles itself by the output
+        column. Every key must be ``x`` or ``y`` and re-pointed by ``remap``;
+        any other key is refused at construction. Single-mark mode only.
     position : Any
         Optional position adjustment (e.g. ``Stack``, ``Dodge``).
         Single-mark mode only.
@@ -585,6 +595,7 @@ class MarkDesugarResult:
     mark: Optional[str] = None
     transforms: list = field(default_factory=list)
     remap: dict = field(default_factory=dict)
+    remap_titles: dict = field(default_factory=dict)
     position: Any = None
     layers: Optional[list] = None
     data: Any = None  # synthetic data (e.g. desugar_function)
@@ -611,6 +622,11 @@ class MarkDesugarResult:
         layered result records it per layer instead.  So does ``layer_name``:
         it names the single mark's own catalogued layer, and a layered result
         already carries a name per ``_Layer``.
+
+        ``remap_titles``' own keys are checked against what
+        :func:`ferrum._desugar._apply_remap` actually reads (``x``/``y``,
+        each only when ``remap`` re-points it), since a title keyed anywhere
+        else would draw nowhere and drop silently.
         """
         if (self.layers is not None) == (self.mark is not None):
             raise ValueError(
@@ -640,6 +656,21 @@ class MarkDesugarResult:
                 "the catalogued sub-layer the single mark is, so a layered "
                 "result (layers set) must name each layer on _Layer.name "
                 f"instead, got layer_name={self.layer_name!r}."
+            )
+        if self.layers is not None and self.remap_titles:
+            raise ValueError(
+                "MarkDesugarResult.remap_titles is single-mark-only; it "
+                "annotates the top-level remap, so a layered result (layers "
+                "set) has no remap of its own to title, got "
+                f"remap_titles={self.remap_titles!r}."
+            )
+        unusable = sorted(set(self.remap_titles) - ({"x", "y"} & set(self.remap)))
+        if unusable:
+            raise ValueError(
+                "MarkDesugarResult.remap_titles titles only an x or y that "
+                "remap re-points: _apply_remap reads no other key, so a "
+                f"title keyed elsewhere would draw nowhere, got unusable "
+                f"key(s) {unusable!r} with remap keys {sorted(self.remap)!r}."
             )
 
 

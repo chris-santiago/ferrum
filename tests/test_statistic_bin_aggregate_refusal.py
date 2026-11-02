@@ -662,6 +662,64 @@ def _ecdf_cases() -> list[_Case]:
             ),
         )
     )
+
+    # Post-hoc rows: the same four refusals, reaching through a `.encode()`
+    # written after the call, when the pending mark resolves -- the
+    # resolve-time backstop (`_prep_refuse_ecdf_statistics`) that covers
+    # the door the call-time pre-check cannot reach.
+    cases.append(
+        (
+            "ecdf_x_bin_posthoc",
+            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf").encode(x=X("v", bin=True)).to_svg(),
+            _message(
+                "displot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the ECDF counts the raw values of x",
+                _generic_bin_remedy("v"),
+            ),
+        )
+    )
+    cases.append(
+        (
+            "ecdf_x_aggregate_posthoc",
+            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf")
+            .encode(x=X("v", aggregate="mean"))
+            .to_svg(),
+            _message(
+                "displot",
+                _written("x", "X", "v", "aggregate", "mean"),
+                "aggregate",
+                "the ECDF counts the raw values of x",
+                _generic_aggregate_remedy("v"),
+            ),
+        )
+    )
+    cases.append(
+        (
+            "ecdf_y_field_posthoc",
+            lambda: fm.displot(_XY_ROWS, x="v", kind="ecdf").encode(y="w").to_svg(),
+            "displot(kind='ecdf', y='w') is not supported -- kind='ecdf' draws the "
+            "cumulative count of the variable x= names on y, so a second variable "
+            "has nowhere to go. Drop y=, or style the count axis with "
+            "fm.Y(title=..., scale=...) and no field.",
+        )
+    )
+    cases.append(
+        (
+            "ecdf_y_aggregate_posthoc",
+            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf")
+            .encode(y=Y(aggregate="mean"))
+            .to_svg(),
+            _message(
+                "displot",
+                _written("y", "Y", None, "aggregate", "mean"),
+                "aggregate",
+                "the ECDF draws its cumulative count on y",
+                "Drop aggregate=.",
+            ),
+        )
+    )
     return cases
 
 

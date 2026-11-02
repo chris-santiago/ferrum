@@ -15,7 +15,7 @@ from ferrum._encode_lowering import _refuse_bin_aggregate_on_channels
 from ferrum._layer import _PendingMark, merge_style
 from ferrum._validate import coerce_bool, validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
-from ferrum.marks.base import ORIENT_CHOICES
+from ferrum.marks.base import _FIGURE_ONLY_KINDS, ORIENT_CHOICES
 from ferrum.marks.composite import _MISSING
 from ferrum.marks.statistical import (
     _resolve_density,
@@ -127,9 +127,23 @@ def _refuse_fitted_mark_after_pending_composite(entry: str, pending: _PendingMar
     that leaves its own pending mark unresolved names no such method. When a
     figure or visualizer built the pending mark, its name still appears, as
     the source of the mark being replaced, not as the remedy to type.
+
+    A figure-only kind (:data:`~ferrum.marks.base._FIGURE_ONLY_KINDS`, built
+    only by a figure call and no ``mark_<kind>()`` method) is the one
+    exception: the pending method would name a call that does not exist, so
+    the refusal and its ``+`` remedy name the figure call itself instead,
+    with no separate "(built by ...)" clause -- the name already is that
+    call.
     """
     if pending is None:
         return
+    figure_call = _FIGURE_ONLY_KINDS.get(pending.kind)
+    if figure_call is not None:
+        raise ValueError(
+            f"{entry}() cannot follow {figure_call.name} on one chart: a chart holds "
+            f"one composite mark, and {entry}() keeps every layer already drawn. Layer "
+            f"them with +: {figure_call.operand} + chart.{entry}(...)"
+        )
     pending_method = f"mark_{pending.kind}"
     source = f" (built by {pending.entry}())" if pending.entry else ""
     raise ValueError(
@@ -1748,7 +1762,12 @@ class StatisticalMarksMixin:
             if remap:
                 from ferrum._desugar import _apply_remap
 
-                _apply_remap(fn_chart._encoding, remap, orig_encoding=self._encoding)
+                _apply_remap(
+                    fn_chart._encoding,
+                    remap,
+                    orig_encoding=self._encoding,
+                    titles=result.remap_titles,
+                )
             fn_chart._position = position
             return self + fn_chart
 
@@ -1762,6 +1781,8 @@ class StatisticalMarksMixin:
         if remap:
             from ferrum._desugar import _apply_remap
 
-            _apply_remap(new._encoding, remap, orig_encoding=self._encoding)
+            _apply_remap(
+                new._encoding, remap, orig_encoding=self._encoding, titles=result.remap_titles
+            )
         new._position = position
         return new

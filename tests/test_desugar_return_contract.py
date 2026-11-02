@@ -197,3 +197,42 @@ def test_layered_result_rejects_caller_style_keys():
     """
     with pytest.raises(ValueError, match="caller_style_keys is single-mark-only"):
         MarkDesugarResult(layers=[], caller_style_keys=frozenset({"stroke"}))
+
+
+def test_layered_result_rejects_remap_titles():
+    """The sibling guard for the field that annotates ``remap``.
+
+    ``remap_titles`` names the default title a remapped ``x``/``y`` draws
+    when the caller declares none (e.g. ``desugar_ecdf``'s ``{"y": "count"}``),
+    so it is meaningless without a single-mark ``remap`` and a layered
+    result has no top-level remap of its own to title.
+    """
+    with pytest.raises(ValueError, match="remap_titles is single-mark-only"):
+        MarkDesugarResult(layers=[], remap_titles={"y": "c"})
+
+
+@pytest.mark.parametrize(
+    "remap,remap_titles",
+    [
+        pytest.param(
+            {"x": "bin_start", "x2": "bin_end", "y": "count"}, {"x2": "t"}, id="x2_draws_no_title"
+        ),
+        pytest.param({"x": "value"}, {"y": "count"}, id="y_is_not_remapped"),
+        pytest.param({"y": "c"}, {"color": "t"}, id="not_a_positional_channel"),
+    ],
+)
+def test_remap_titles_rejects_a_key_remap_does_not_title(remap, remap_titles):
+    """``remap_titles`` titles only an ``x``/``y`` that ``remap`` itself
+    re-points. ``_apply_remap`` reads no other key, so a title keyed
+    elsewhere -- a non-positional channel, a positional channel ``remap``
+    does not re-point, or ``x2``/``y2`` (which honor no ``title=`` at all)
+    -- would draw nowhere and drop silently; refused here instead."""
+    with pytest.raises(ValueError, match="remap_titles titles only an x or y that remap re-points"):
+        MarkDesugarResult(mark="line", remap=remap, remap_titles=remap_titles)
+
+
+def test_remap_titles_on_a_remapped_y_is_accepted():
+    """Control: a title keyed to a channel ``remap`` actually re-points
+    constructs normally."""
+    result = MarkDesugarResult(mark="line", remap={"y": "count_1"}, remap_titles={"y": "count"})
+    assert result.remap_titles == {"y": "count"}

@@ -27,11 +27,18 @@ rendering-pipeline regression would show up too.
 
 from __future__ import annotations
 
+import ast
+import importlib
+import inspect
+import pkgutil
+from collections.abc import Container
+
 import numpy as np
 import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum.marks.base import _FIGURE_ONLY_KINDS
 
 #: Every `mark_<primitive>` method on `Chart`, mapped to the mark name it
 #: resolves to (`mark_circle`/`mark_square` are `mark_point(shape=...)`
@@ -406,3 +413,153 @@ def test_mark_smooth_refuses_after_displots_pending_histogram(hist_df):
     assert "built by displot()" in message
     assert "chart.mark_histogram() + chart.mark_smooth(...)" in message
     assert "chart.displot()" not in message
+
+
+# ---------------------------------------------------------------------------
+# displot(kind="ecdf") has no public mark_ecdf() method: the refusal and its
+# "+" remedy name the figure call itself, with no "(built by ...)" clause.
+# ---------------------------------------------------------------------------
+
+
+def test_mark_function_refuses_after_displots_pending_ecdf(hist_df):
+    chart = fm.displot(hist_df, x="x", kind="ecdf")
+    with pytest.raises(ValueError) as excinfo:
+        chart.mark_function(np.sin, domain=[0, 5])
+    assert str(excinfo.value) == (
+        "mark_function() cannot follow displot(kind='ecdf') on one chart: a chart "
+        "holds one composite mark, and mark_function() keeps every layer already "
+        "drawn. Layer them with +: fm.displot(..., kind='ecdf') + "
+        "chart.mark_function(...)"
+    )
+
+
+def test_mark_smooth_refuses_after_displots_pending_ecdf(hist_df):
+    chart = fm.displot(hist_df, x="x", kind="ecdf")
+    with pytest.raises(ValueError) as excinfo:
+        chart.mark_smooth()
+    assert str(excinfo.value) == (
+        "mark_smooth() cannot follow displot(kind='ecdf') on one chart: a chart "
+        "holds one composite mark, and mark_smooth() keeps every layer already "
+        "drawn. Layer them with +: fm.displot(..., kind='ecdf') + "
+        "chart.mark_smooth(...)"
+    )
+
+
+def test_the_ecdf_refusals_plus_remedy_renders(hist_df):
+    """The ``+`` spelling the ecdf's refusal names runs as written."""
+    chart = fm.displot(hist_df, x="x", kind="ecdf") + fm.Chart(hist_df).encode(
+        x="x", y="x"
+    ).mark_smooth()
+    assert chart.to_svg()
+
+
+def _set_composite_mark_kinds() -> set[str]:
+    """Every string-literal first argument of a ``_set_composite_mark(`` call
+    under ``ferrum`` (an AST scan), so a new composite kind joins the
+    population below without editing this file.
+    """
+    kinds: set[str] = set()
+    for info in pkgutil.walk_packages(fm.__path__, prefix="ferrum."):
+        module = importlib.import_module(info.name)
+        try:
+            source = inspect.getsource(module)
+        except (OSError, TypeError):
+            continue
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_set_composite_mark"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                kinds.add(node.args[0].value)
+    return kinds
+
+
+def _uncatalogued_kinds(kinds: set[str], catalogued: Container[str]) -> list[str]:
+    """*kinds* that name no real ``Chart.mark_<kind>()`` method and are not
+    in *catalogued* (``ferrum.marks.base._FIGURE_ONLY_KINDS``) -- the one
+    check both the population test below and its control run, so the
+    control exercises the predicate it guards rather than a copy of it.
+    """
+    return sorted(
+        kind for kind in kinds if kind not in catalogued and not hasattr(fm.Chart, f"mark_{kind}")
+    )
+
+
+def test_every_set_composite_mark_kind_names_a_method_or_is_catalogued():
+    """Every ``_set_composite_mark("<kind>", ...)`` call's kind is either a
+    real ``Chart.mark_<kind>()`` method or a
+    ``ferrum.marks.base._FIGURE_ONLY_KINDS`` entry -- never neither, which
+    would silently misname a refusal's remedy (a method that does not
+    exist).
+    """
+    kinds = _set_composite_mark_kinds()
+    assert kinds, "no _set_composite_mark( calls found -- the AST scan is broken"
+    # Every catalogued kind is one a call really sets, so the table holds no
+    # dead entry and the scan is shown to reach displot's own
+    # _set_composite_mark("ecdf", ...).
+    assert set(_FIGURE_ONLY_KINDS) <= kinds
+    assert _uncatalogued_kinds(kinds, _FIGURE_ONLY_KINDS) == []
+    # A _FIGURE_ONLY_KINDS entry must stay true: no mark_<kind> method exists
+    # for it (otherwise it should be removed from the table).
+    assert not any(hasattr(fm.Chart, f"mark_{kind}") for kind in _FIGURE_ONLY_KINDS)
+
+
+def test_an_uncatalogued_kind_with_no_method_is_caught():
+    """Control: feeding the real scan's kinds, the real catalog and the
+    real predicate one synthetic kind shows the predicate catches it."""
+    kinds = _set_composite_mark_kinds() | {"not_a_real_method"}
+    assert _uncatalogued_kinds(kinds, _FIGURE_ONLY_KINDS) == ["not_a_real_method"]
+
+
+# ---------------------------------------------------------------------------
+# displot(kind="ecdf") keeps the ordinary mark-replacement contract: a mark
+# method called on the returned chart replaces the ECDF, the same as "hist"
+# and "kde".
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def displot_kind_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "x": [1.0, 1.4, 1.8, 2.1, 2.3, 2.6, 2.9, 3.2, 3.6, 4.0] * 2,
+            "y": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0] * 2,
+        }
+    )
+
+
+@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])
+def test_a_chained_point_mark_replaces_the_displot_statistic(displot_kind_df, kind):
+    """``displot(kind=k).mark_point().encode(y=...)`` draws the same chart
+    as binding both channels directly -- the composite's statistic is
+    replaced, as every other mark replacement is."""
+    chained = fm.displot(displot_kind_df, x="x", kind=kind).mark_point().encode(y="y").to_svg()
+    plain = fm.Chart(displot_kind_df).mark_point().encode(x="x", y="y").to_svg()
+    assert chained == plain
+
+
+@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])
+def test_a_chained_point_mark_with_no_y_refuses_like_the_plain_chart(displot_kind_df, kind):
+    """With no ``y=`` bound, the replaced mark refuses exactly as the plain
+    chart does: the composite's own ``y`` (a count, a density, a
+    cumulative count) does not survive the replacement."""
+    with pytest.raises(ValueError) as chained:
+        fm.displot(displot_kind_df, x="x", kind=kind).mark_point().to_svg()
+    with pytest.raises(ValueError) as plain:
+        fm.Chart(displot_kind_df).mark_point().encode(x="x").to_svg()
+    assert str(chained.value) == str(plain.value)
+
+
+@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])
+def test_a_chained_tick_mark_draws_the_plain_rug_across_every_kind(displot_kind_df, kind):
+    """``displot(kind=k).mark_tick()`` draws the same rug on every kind --
+    the replaced mark reads the chart's own x binding, not the statistic's
+    rows."""
+    assert fm.displot(displot_kind_df, x="x", kind="hist").mark_tick().to_svg() == fm.displot(
+        displot_kind_df, x="x", kind=kind
+    ).mark_tick().to_svg()

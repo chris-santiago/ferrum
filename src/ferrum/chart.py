@@ -63,7 +63,7 @@ from ferrum._spec_build import SpecBuildMixin, _encoding_field_and_type
 from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin, _validate_sort_object
-from ferrum.marks.base import MarkBase
+from ferrum.marks.base import _FIGURE_ONLY_KINDS, MarkBase
 from ferrum.position import stack_honored, warn_stack_ignored
 
 # Re-exported from this module so existing ``from ferrum.chart import ...``
@@ -394,9 +394,11 @@ def _refuse_secondary_field(base: "Chart", field: str) -> None:
             f"Available columns: {columns}"
         )
     if base._composite_kind is not None and field in _bound_fields(base):
+        figure_call = _FIGURE_ONLY_KINDS.get(base._composite_kind)
+        builder = figure_call.name if figure_call is not None else f"mark_{base._composite_kind}"
         raise ValueError(
             f"SecondaryY: field {field!r} is a statistic the base chart's "
-            f"mark_{base._composite_kind} computes for its own layers, not a column of "
+            f"{builder} computes for its own layers, not a column of "
             "the base chart's data (SecondaryY draws the base chart's rows after its "
             ".transform(...) steps). Compute it with .transform(...) (e.g. fm.Bin, "
             "fm.transform_aggregate), or draw it from its own chart with "

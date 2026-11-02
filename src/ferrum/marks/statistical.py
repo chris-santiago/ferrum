@@ -11,6 +11,8 @@ from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import with_grouping
+from ferrum.transforms import transform_window
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks._multiple import MULTIPLE_MODES as _MULTIPLE_MODES
 from ferrum.marks._multiple import multiple_semantics
@@ -444,6 +446,87 @@ def desugar_histogram(
     )
 
 
+def desugar_ecdf(
+    x_field: str,
+    y_field: str | None,
+    *,
+    groupby: list[str] | None = None,
+    _count_col: str = "count",
+) -> MarkDesugarResult:
+    """ECDF mark desugar: a per-observation rolling count, drawn as a step line.
+
+    Converts ``displot(kind="ecdf")`` into the rolling-count ``DataWindow``
+    seaborn's ``ecdfplot`` and ggplot2's ``stat_ecdf`` draw -- one step per
+    distinct observation of ``x_field``, never a bin edge -- over an
+    unbounded-preceding, peer-aware frame, so tied observations share one
+    frame and therefore one count. The ``groupby`` fields lead the sort,
+    ahead of ``x_field``: ``transform_window``'s ``groupby=`` partitions
+    runs adjacent in sort order, not by key, so rows must already be
+    contiguous by group before being ordered by x.
+
+    Data contract
+    -------------
+    Input: DataFrame with numeric or orderable column ``x_field``.
+
+    ``DataWindow`` (unnamed) produces: every input column, plus
+    ``_count_col`` (an ``Int64`` running count).
+
+    Encoding remap
+    --------------
+    ``y -> _count_col``, titled ``"count"`` when the caller's own y binding
+    declares no title of its own. ``x`` is never remapped: the chart keeps
+    its own x binding, with every option it carries (``title=``, ``scale=``,
+    ``axis=``, ``format=``).
+
+    Parameters
+    ----------
+    x_field : str
+        The column the chart's x= binding draws, resolved through
+        whichever door bound it (keyword, ``encode=``, a post-hoc
+        ``.encode()``, or shorthand) -- the ECDF counts exactly this
+        column's raw values.
+    y_field : str or None
+        Unused: a field-bearing y= is refused before this runs (the ECDF
+        draws its own cumulative count on y). Accepted only so this
+        desugar matches the ``(x_field, y_field, **kwargs)`` protocol
+        every pending mark resolves through.
+    groupby : list of str or None, default None
+        Every grouping channel the chart draws (hue, plus any other
+        grouping channel), partitioning the rolling count so each group
+        draws its own curve. Injected by ``_PENDING_PREP["ecdf"]``.
+    _count_col : str, default "count"
+        The column name ``_PENDING_PREP["ecdf"]`` resolved against the
+        chart's own data, collision-free with it. Private: not a
+        parameter of any public ``mark_*`` method.
+
+    Returns
+    -------
+    MarkDesugarResult
+        Single-mark mode: ``mark="line"``, the rolling-count transform,
+        ``remap={"y": _count_col}``, ``remap_titles={"y": "count"}``, and
+        ``mark_kwargs`` declaring the step-after interpolation, the
+        data-value vertex sort, and the zero riser every ECDF series draws
+        at its first observation.
+    """
+    window = transform_window(
+        {"op": "count", "field": x_field, "as": _count_col},
+        sort=with_grouping(groupby or [], [x_field]),
+        groupby=groupby or None,
+        frame=(None, 0),
+    )
+    return MarkDesugarResult(
+        mark="line",
+        transforms=[window],
+        remap={"y": _count_col},
+        remap_titles={"y": "count"},
+        mark_kwargs={
+            "interpolate": "step-after",
+            "sort_vertices": True,
+            "rise_from_zero": True,
+        },
+    )
+
+
 def desugar_smooth(
     x_field: str,
     y_field: str,
@@ -773,6 +856,22 @@ def _resolve_histogram(x_field, y_field, **kwargs):
     return desugar_histogram(field, **kwargs)
 
 
+def _resolve_ecdf(x_field, y_field, **kwargs):
+    """Resolve a deferred ``displot(kind="ecdf")`` call once the encoding is known.
+
+    A fieldless x is refused here, in displot's voice, because this is the
+    one point every door reaches (the x= keyword, encode= and a post-hoc
+    .encode()), once the encoding is known.
+    """
+    if x_field is None:
+        raise ValueError(
+            "displot(kind='ecdf') needs x bound to a column -- the ECDF counts the raw "
+            "values of the variable x names, and this x binding names none. Bind x to a "
+            "column: x='<column>', or fm.X('<column>', ...) to keep the channel's options."
+        )
+    return desugar_ecdf(x_field, y_field, **kwargs)
+
+
 def _resolve_smooth(x_field, y_field, **kwargs):
     """Resolve a deferred ``mark_smooth()`` call once the encoding is known."""
     if x_field is None or y_field is None:
@@ -786,6 +885,7 @@ def _resolve_smooth(x_field, y_field, **kwargs):
 # ``**kwargs`` and would otherwise hide the real transform parameter names.
 _resolve_density.__wrapped__ = desugar_density
 _resolve_histogram.__wrapped__ = desugar_histogram
+_resolve_ecdf.__wrapped__ = desugar_ecdf
 _resolve_smooth.__wrapped__ = desugar_smooth
 
 

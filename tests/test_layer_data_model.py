@@ -172,6 +172,24 @@ def test_a_secondary_y_naming_a_histogram_statistic_is_refused_with_the_transfor
     assert str(exc.value) == _STATISTIC_SY
 
 
+_STATISTIC_SY_ECDF = (
+    "SecondaryY: field 'count' is a statistic the base chart's displot(kind='ecdf') computes "
+    "for its own layers, not a column of the base chart's data (SecondaryY draws the base "
+    "chart's rows after its .transform(...) steps). Compute it with .transform(...) "
+    "(e.g. fm.Bin, fm.transform_aggregate), or draw it from its own chart with "
+    "LayerChart(base, other, resolve={'y': 'independent'}). "
+    "Available columns: ['v', 'y', 'r', 'g']"
+)
+
+
+def test_a_secondary_y_naming_an_ecdf_statistic_is_refused_naming_displot():
+    """``displot(kind="ecdf")`` has no ``mark_ecdf()`` method, so the
+    composite-statistic branch names the figure call instead."""
+    with pytest.raises(ValueError) as exc:
+        fm.displot(df, x="v", kind="ecdf") + SY("count")
+    assert str(exc.value) == _STATISTIC_SY_ECDF
+
+
 def test_a_secondary_y_typo_on_a_histogram_keeps_the_plain_message():
     with pytest.raises(ValueError) as exc:
         H() + SY("nope")

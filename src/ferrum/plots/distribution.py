@@ -23,7 +23,6 @@ from ferrum import (
     Jitter,
     LinearScale,
     Stack,
-    transform_window,
 )
 from ferrum._coerce import to_polars
 from ferrum._core import validate_bin_rule
@@ -33,12 +32,11 @@ from ferrum._desugar import (
     _scale_domain,
 )
 from ferrum._encode_lowering import (
-    _rebind_positional,
     _refuse_bin_aggregate_on_channels,
     _refuse_histogram_bin_aggregate,
     _refuse_statistic_input,
 )
-from ferrum._layer import _Layer, merge_style
+from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import as_finite_real, coerce_positive_int, validate_choice
 from ferrum._warn import warn_once
@@ -46,22 +44,20 @@ from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
     titled_positional_channel,
-    with_grouping,
 )
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
 from ferrum.marks.base import resolve_method_bool
+from ferrum.marks.statistical import _resolve_ecdf
 from ferrum.encoding import Y
 from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
 from ferrum.plots._helpers import (
     _checked_figure_size,
     _drawn_bindings,
     _drawn_positional_channels,
-    _encode_grouping,
     _field_name,
     _figure_entry,
     _finalize_chart,
     _log_scaled_x,
-    _unique_col_name,
 )
 
 
@@ -484,19 +480,37 @@ def _reject_ecdf_field_y(*, kind: str, y: Any) -> None:
     )
 
 
+def _refuse_ecdf_bin_aggregate(drawn: dict) -> None:
+    """Refuse an x/y bin=/aggregate= the ECDF's rolling count cannot honor.
+
+    Shared by :func:`_refuse_displot_bin_aggregate`'s call-time ``"ecdf"``
+    arm and :func:`ferrum._desugar._prep_refuse_ecdf_statistics`'s
+    resolve-time backstop for the post-hoc ``.encode()`` door, so the two
+    checks cannot drift apart.
+    """
+    x_ch = drawn.get("x")
+    if isinstance(x_ch, ChannelBase):
+        _refuse_statistic_input("displot", "x", x_ch, reason="the ECDF counts the raw values of x")
+    y_ch = drawn.get("y")
+    if isinstance(y_ch, ChannelBase):
+        _refuse_statistic_input(
+            "displot", "y", y_ch, reason="the ECDF draws its cumulative count on y"
+        )
+
+
 def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple: str) -> None:
     """Refuse a bin=/aggregate= the statistic displot's ``kind=`` builds cannot honor.
 
     *drawn* is the x/y channel objects the chart actually draws once
     ``encode=`` applies (:func:`~ferrum.plots._helpers._drawn_positional_channels`),
     so a keyword, an ``encode=`` entry and a shorthand string are all
-    checked alike. As the matching mark's own disposition
+    checked alike. As the matching mark's own refusal reads it
     (:func:`~ferrum._encode_lowering._refuse_histogram_bin_aggregate` for
     ``"hist"``, :func:`~ferrum._encode_lowering._refuse_bin_aggregate_on_channels`
-    for ``"kde"`` and ``"ecdf"``), with displot's own remedies. ``kind='rug'``
-    draws every row through the plain lowering, which consumes a channel's
-    ``bin=``/``aggregate=`` as any primitive mark does, so it is not
-    checked here.
+    for ``"kde"``, :func:`_refuse_ecdf_bin_aggregate` for ``"ecdf"``), with
+    displot's own remedies. ``kind='rug'`` draws every row through the
+    plain lowering, which consumes a channel's ``bin=``/``aggregate=`` as
+    any primitive mark does, so it is not checked here.
     """
     if kind == "hist":
         share_spelling, share_remedy = (
@@ -523,16 +537,7 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
             reason="the kernel density estimate reads raw rows",
         )
     elif kind == "ecdf":
-        x_ch = drawn.get("x")
-        if isinstance(x_ch, ChannelBase):
-            _refuse_statistic_input(
-                "displot", "x", x_ch, reason="the ECDF counts the raw values of x"
-            )
-        y_ch = drawn.get("y")
-        if isinstance(y_ch, ChannelBase):
-            _refuse_statistic_input(
-                "displot", "y", y_ch, reason="the ECDF draws its cumulative count on y"
-            )
+        _refuse_ecdf_bin_aggregate(drawn)
 
 
 def _warn_inert_bins(*, kind: str, bins: Any) -> None:
@@ -977,63 +982,34 @@ def _displot_build(
         chart = chart.mark_density(**kde_kwargs)
     elif kind == "ecdf":
         # ECDF: a per-observation rolling count -> step line.  `x is not
-        # None` here by `_reject_displot_without_x`.
-
-        # The caller's own field name, through the same shared extraction
-        # point `hue_field` uses above.
-        _ecdf_x_name = _field_name(x)
-        # Every grouping channel the caller binds -- hue (already `enc`'s
-        # `color`), and color=/stroke=/detail=/shape=/stroke_dash= as a
-        # keyword, plus fill= only through `encode=` (displot's own `fill=`
-        # is the KDE area-fill switch, not a channel) -- groups the window's
-        # count the same way a composite mark's statistic groups by them
-        # (the `lmplot`/`regplot`/`residplot` rule). `_drawn_bindings` reads
-        # `encode=` the way `_finalize_chart` will apply it to the chart
-        # (a value replaces the keyword's binding; `None` leaves it bound),
-        # so the window groups by exactly what the chart draws, even though
-        # `encode=` itself is applied after this branch returns.
-        _ecdf_grouping = _encode_grouping(_drawn_bindings(enc, encode))
-        # A source column already named "count" must not be silently
-        # overwritten; the y axis below is titled "count" regardless of
-        # which name this collision avoidance actually lands on. Reads the
-        # column names of the caller's data, normalized through `to_polars`
-        # (a `pyarrow.Table`'s own `.columns` holds its data arrays, not its
-        # names, so reading the caller's own object directly would not do).
-        _ecdf_count_col = _unique_col_name(to_polars(data).columns, "count")
-        # A rolling count over an unbounded-preceding, peer-aware frame:
-        # every row sees the count of every row at or below it (tied rows
-        # share one frame and therefore one count), which is the textbook
-        # ECDF (seaborn `ecdfplot`, ggplot2 `stat_ecdf`) -- one step per
-        # distinct observation, never a bin edge. `transform_window`'s
-        # `groupby=` partitions runs ADJACENT in sort order, not by key, so
-        # the grouping fields lead the sort, ahead of x.
-        chart = chart._with_statistics(
-            transform_window(
-                {"op": "count", "field": _ecdf_x_name, "as": _ecdf_count_col},
-                sort=with_grouping(_ecdf_grouping, [_ecdf_x_name]),
-                groupby=_ecdf_grouping or None,
-                frame=(None, 0),
-            )
-        )
-        chart = chart.mark_line(interpolate="step-after")
-        # The line joins each group's own vertices in ascending x at draw
-        # time (a declared line orders its series by the advancing axis's
-        # own data value), not by reordering the caller's rows here: the
-        # batch keeps the caller's own row order, so the legend, color
-        # assignment and facet panels follow first appearance, the same as
-        # every sibling kind's and as every chart without the declaration.
-        chart._mark_kwargs = merge_style(chart._mark_kwargs, {"sort_vertices": True})
-        # The caller's own `x=` is never re-pointed: the window keeps every
-        # original column, so every option `x=` carries -- `title=`,
-        # `scale=` (a log scale included), `axis=`, `format=` -- stays on
-        # the caller's own field with no re-point. Only a fieldless `y=` is
-        # re-pointed at the count column, through the same rule
-        # `residplot`'s own default title uses, titled "count" always.
-        enc["y"] = _rebind_positional(_ecdf_count_col, enc.get("y"), Y, title="count")
+        # None` here by `_reject_displot_without_x`. The pending mark
+        # resolves once `.encode()` applies below -- and again after any
+        # later `.encode()` -- reading the chart's own x binding at that
+        # point (`_resolve_ecdf`, `_PENDING_PREP["ecdf"]`): the one column
+        # every door (this keyword, `encode=`, a post-hoc `.encode()`, or
+        # shorthand) ends up drawing, so the window counts exactly what
+        # the axis shows.
+        chart = chart._set_composite_mark("ecdf", _resolve_ecdf, {}, placeholder="line")
+        # Neither `x=` nor a fieldless `y=` is re-pointed here: both stay on
+        # the caller's own binding, with every option it carries. The
+        # window's own count column reaches `y` through `desugar_ecdf`'s
+        # `remap` once the pending mark resolves, titled "count" by its
+        # `remap_titles` unless the caller's own fieldless `y=` already
+        # declares a title (`ferrum._desugar._apply_remap`).
     elif kind == "rug":
         chart = chart.mark_tick()
 
     chart = chart.encode(**enc)
+    # The chart's own encoded x, read right here -- before any pending mark
+    # resolves (a resolved hist/ecdf remaps x/y onto its own statistic's
+    # output columns) and before the figure-level `encode=` override lands
+    # (`_finalize_chart`, applied once this builder returns) -- so a
+    # shorthand `x="v:Q"` is parsed the way `Chart.encode()` parses it, on
+    # every kind's overlay below. Same shared extraction point as
+    # `hue_field` above. Not `None` here: an overlay on an x-less call is
+    # refused in displot's voice (`_reject_displot_without_x`) rather than
+    # promoting the primary mark to layered mode and appending nothing.
+    x_field = _field_name(chart._encoding.get("x"))
 
     # Optional kde/rug overlay layers (only when not already that kind).
     #
@@ -1052,11 +1028,6 @@ def _displot_build(
     if (kde and kind != "kde") or (rug and kind != "rug"):
         chart = chart._resolve_pending()
         chart = chart._clone()
-        # Same shared extraction point as `hue_field` and the ecdf branch.
-        # Not `None` here: an overlay on an x-less call is refused in
-        # displot's voice (`_reject_displot_without_x`) rather than promoting
-        # the primary mark to layered mode and appending nothing.
-        x_field = _field_name(x)
 
         # Convert single-mark chart to layered mode: promote the existing
         # mark + encoding into a primary layer so overlay layers can be

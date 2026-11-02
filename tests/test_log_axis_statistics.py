@@ -1632,7 +1632,8 @@ def test_the_ecdf_steps_at_every_observation(door):
     `x=fm.X("v", scale=fm.LogScale())` -- every door onto a log x reaches
     the same per-observation window, never a bin edge. `bins=` on
     `kind="ecdf"` is inert (pinned separately in
-    `tests/test_displot_requires_x.py`), so it is left at its default here."""
+    `tests/test_displot_requires_x.py`), so it is left at its default here.
+    The line also rises from 0 at its first observation (`x=1`)."""
     log_scale = door != "linear"
     build_kwargs = (
         dict(x=fm.X("v", scale=fm.LogScale())) if door == "scale" else dict(x="v", log_scale=log_scale)
@@ -1650,14 +1651,15 @@ def test_the_ecdf_steps_at_every_observation(door):
     observed = sorted(
         (round(to_x(px), 3), round(value_for_pixel(y_ladder, py))) for px, py in corners
     )
-    assert observed == [(float(v), float(v)) for v in _V20], observed
+    assert observed == [(1.0, 0.0), *[(float(v), float(v)) for v in _V20]], observed
 
 
 def test_the_ecdf_steps_at_every_observation_however_the_source_rows_are_ordered():
     """The line joins each series' vertices in ascending x at draw time
     (`mark_line`'s own `sort_vertices` declaration), whatever the source
     row order, so the same `v = 1..20` steps the same way whether the
-    source rows already climb in order or arrive shuffled."""
+    source rows already climb in order or arrive shuffled. The line also
+    rises from 0 at its first observation (`x=1`), regardless of row order."""
     shuffled = pl.DataFrame({"v": np.random.default_rng(2).permutation(_V20)})
     msgs, svg = _warnings_of(lambda: fm.displot(shuffled, x="v", kind="ecdf").to_svg())
     assert msgs == [], msgs
@@ -1670,13 +1672,14 @@ def test_the_ecdf_steps_at_every_observation_however_the_source_rows_are_ordered
     xs = [round(value_for_pixel(x_ladder, px), 3) for px, _py in corners]
     assert xs == sorted(xs), f"step line not drawn in x order: {xs}"
     observed = [(x, round(value_for_pixel(y_ladder, py))) for x, (_px, py) in zip(xs, corners)]
-    assert observed == [(float(v), float(v)) for v in _V20], observed
+    assert observed == [(1.0, 0.0), *[(float(v), float(v)) for v in _V20]], observed
 
 
 def test_ties_step_once_per_distinct_x():
     """Two rows sharing one x share one step: the curve draws one riser at
     that x, to the count of every row at or below it, not one riser per
-    tied row."""
+    tied row. The line also rises from 0 at its first observation (`x=1`),
+    its own riser, distinct from the tied-x one at `x=2`."""
     df = pl.DataFrame({"v": [1.0, 2.0, 2.0, 3.0]})
     msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf").to_svg())
     assert msgs == [], msgs
@@ -1687,7 +1690,7 @@ def test_ties_step_once_per_distinct_x():
         (round(value_for_pixel(x_ladder, px), 3), round(value_for_pixel(y_ladder, py)))
         for px, py in corners
     )
-    assert observed == [(1.0, 1.0), (2.0, 3.0), (3.0, 4.0)], observed
+    assert observed == [(1.0, 0.0), (1.0, 1.0), (2.0, 3.0), (3.0, 4.0)], observed
 
 
 @pytest.mark.parametrize("door", ["log_scale", "scale"])
@@ -1697,7 +1700,9 @@ def test_the_ecdf_steps_count_only_the_positive_observations_on_a_log_axis(door)
     height counts only the on-side observations, and the left-out rows
     join the one off-side warning, naming the caller's field. Both doors
     onto a log x -- `log_scale=True` and the caller's own channel
-    `x=fm.X("v", scale=fm.LogScale())` -- reach the same window."""
+    `x=fm.X("v", scale=fm.LogScale())` -- reach the same window. The line
+    rises from 0 at its first positive observation, not at the off-side
+    rows the log axis leaves out."""
     build_kwargs = (
         dict(x=fm.X("v", scale=fm.LogScale())) if door == "scale" else dict(x="v", log_scale=True)
     )
@@ -1706,7 +1711,7 @@ def test_the_ecdf_steps_count_only_the_positive_observations_on_a_log_axis(door)
     assert "2 row(s) of 'v'" in msgs[0], msgs[0]
     corners = _one_step_line(svg)
     y_ladder = value_axis_ladder(svg, axis="y")
-    assert sorted(_ecdf_heights(corners, y_ladder)) == list(range(1, 21))
+    assert sorted(_ecdf_heights(corners, y_ladder)) == [0, *range(1, 21)]
 
 
 def test_the_ecdf_steps_count_per_group_even_when_the_source_rows_interleave():
@@ -1715,7 +1720,8 @@ def test_the_ecdf_steps_count_per_group_even_when_the_source_rows_interleave():
     partition that did not sort by the hue column first (which would reset
     mid-group) nor a step line drawn in the source's own row order (which
     would rise and fall out of order) can pass by accident. Each level
-    still reaches its own row count, and each line still steps in x order."""
+    still reaches its own row count, and each line still steps in x order.
+    Each line's own riser (its first step) counts toward its step count."""
     rng = np.random.default_rng(1)
     a_vals = rng.permutation(np.arange(1, 21, dtype=float))
     b_vals = rng.permutation(np.arange(1, 11, dtype=float))
@@ -1739,7 +1745,9 @@ def test_the_ecdf_steps_count_per_group_even_when_the_source_rows_interleave():
         heights = _ecdf_heights(corners, y_ladder)
         assert heights == sorted(heights), heights
         by_step_count[len(heights)] = max(heights)
-    assert by_step_count == {20: 20, 10: 10}, by_step_count
+    # 21 corners (the riser plus 20 steps) reach height 20; 11 (the riser
+    # plus 10 steps) reach height 10.
+    assert by_step_count == {21: 20, 11: 10}, by_step_count
 
 
 def test_the_ecdf_steps_count_per_panel_with_col():
@@ -1766,14 +1774,144 @@ def test_the_ecdf_steps_count_per_panel_with_col():
 def test_a_source_column_named_count_does_not_collide():
     """A source `"count"` column is not silently overwritten by the
     synthetic one -- the y axis is still titled "count" and the heights
-    are the window's own count, not the source column's values."""
+    are the window's own count, not the source column's values. The line
+    also rises from 0 at its first observation."""
     df = pl.DataFrame({"v": _V20, "count": _V20 * 100.0})
     msgs, svg = _warnings_of(lambda: fm.displot(df, x="v", kind="ecdf").to_svg())
     assert msgs == [], msgs
     assert y_axis_title(svg) == "count"
     corners = _one_step_line(svg)
     y_ladder = value_axis_ladder(svg, axis="y")
-    assert sorted(_ecdf_heights(corners, y_ladder)) == list(range(1, 21))
+    assert sorted(_ecdf_heights(corners, y_ladder)) == [0, *range(1, 21)]
+
+
+def _riser(corners, x_ladder, y_ladder, *, log_x: bool = False):
+    """One series' leading two corners, in data units: `(x1, 0)` then
+    `(x1, count1)`. Shared by every rises-from-zero case below, so each
+    reads the same two-corner shape instead of its own copy."""
+    to_x = (
+        (lambda px: log_value_for_pixel(x_ladder, px, base=10.0))
+        if log_x
+        else (lambda px: value_for_pixel(x_ladder, px))
+    )
+    (x0, y0), (x1, y1) = corners[0], corners[1]
+    return (
+        (round(to_x(x0), 3), round(value_for_pixel(y_ladder, y0))),
+        (round(to_x(x1), 3), round(value_for_pixel(y_ladder, y1))),
+    )
+
+
+@pytest.mark.parametrize(
+    "build,risers,log_x",
+    [
+        pytest.param(
+            lambda: fm.displot(pl.DataFrame({"v": [1.0, 2.0, 3.0]}), x="v", kind="ecdf"),
+            {1.0: 1},
+            False,
+            id="plain",
+        ),
+        pytest.param(
+            lambda: fm.displot(
+                pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 9.0], "g": ["a", "a", "a", "a", "b"]}),
+                x="v",
+                hue="g",
+                kind="ecdf",
+            ),
+            {1.0: 1, 9.0: 1},
+            False,
+            id="hue_with_a_one_observation_group",
+        ),
+        pytest.param(
+            lambda: fm.displot(pl.DataFrame({"v": [2.0, 2.0, 2.0]}), x="v", kind="ecdf"),
+            {2.0: 3},
+            False,
+            id="all_tied",
+        ),
+        pytest.param(
+            lambda: fm.displot(
+                pl.DataFrame({"v": [1.0, 2.0, 5.0]}), x="v", kind="ecdf", log_scale=True
+            ),
+            {1.0: 1},
+            True,
+            id="log_scale_x_rises_at_the_first_positive_observation",
+        ),
+    ],
+)
+def test_every_ecdf_series_rises_from_zero(build, risers, log_x):
+    """Every series a chart draws rises from 0 at its first observation --
+    checked for each line the chart draws, not only one of them: plain, a
+    `hue` group with one observation beside a four-row group, an all-tied
+    group, and `log_scale=True`."""
+    svg = build().to_svg()
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    lines = step_after_paths(svg)
+    assert len(lines) == len(risers), lines
+    seen = set()
+    for _stroke, corners in lines:
+        first, second = _riser(corners, x_ladder, y_ladder, log_x=log_x)
+        x0, height0 = first
+        assert height0 == 0, (x0, corners)
+        assert x0 in risers, (x0, risers)
+        assert second == (x0, risers[x0]), (second, risers)
+        seen.add(x0)
+    assert seen == set(risers)
+
+
+def test_every_col_panel_rises_from_zero():
+    """Every `col=` panel draws its own riser, read in that panel's own
+    frame (a panel's x/y pixels do not share the whole chart's ladder) --
+    the one-observation panel and the two-observation panel alike, not
+    only the one-observation panel."""
+    df = pl.DataFrame({"v": [1.0, 5.0, 6.0], "c": ["x", "y", "y"]})
+    svg = fm.displot(df, x="v", kind="ecdf", col="c").to_svg()
+    groups = mark_groups_by_frame(svg)
+    y_ladders = value_axis_ladders(svg, axis="y")
+    assert len(groups) == 2, groups
+    risers = {}
+    for (frame, content), (_pos, y_ladder) in zip(groups, y_ladders):
+        (line,) = step_after_paths(content)
+        _stroke, corners = line
+        panel_x = panel_x_ladder(svg, frame)
+        first, second = _riser(corners, panel_x, y_ladder)
+        risers[first[0]] = (first, second)
+    assert risers == {1.0: ((1.0, 0), (1.0, 1)), 5.0: ((5.0, 0), (5.0, 1))}
+
+
+def test_a_log_count_axis_rises_from_the_axis_low_edge():
+    """A caller `y=fm.Y(scale=fm.LogScale())` count axis has no 0 tick (a
+    log scale cannot place one), so the riser starts at the plot area's own
+    low edge -- the same pixel a plain chart's x-axis line sits on --
+    instead of a data-value 0."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 5.0]})
+    svg = fm.displot(df, x="v", kind="ecdf", encode={"y": fm.Y(scale=fm.LogScale())}).to_svg()
+    (frame,) = [frame for frame, _content in mark_groups_by_frame(svg)]
+    (corners,) = [corners for _stroke, corners in step_after_paths(svg)]
+    (x0, y0), (x1, y1) = corners[0], corners[1]
+    assert x0 == x1, corners
+    assert y0 == frame[3], (y0, frame)
+    assert y1 != frame[3], (y1, frame)
+
+
+def test_a_linear_count_axis_domain_is_honored():
+    """A caller `y=fm.Y(scale=fm.LinearScale(domain=[0, 5]))` keeps that
+    explicit domain -- the riser mechanism anchors at 0 but never widens a
+    domain the caller already stated."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 5.0]})
+    svg = fm.displot(
+        df, x="v", kind="ecdf", encode={"y": fm.Y(scale=fm.LinearScale(domain=[0, 5]))}
+    ).to_svg()
+    y_ladder = value_axis_ladder(svg, axis="y")
+    assert min(y_ladder) == 0.0, y_ladder
+    assert max(y_ladder) == 5.0, y_ladder
+
+
+def test_the_ecdf_count_axis_starts_at_zero():
+    """The count axis's lowest tick is 0, as every cumulative distribution
+    plot's does."""
+    svg = fm.displot(_DF20, x="v", kind="ecdf").to_svg()
+    y_ladder = value_axis_ladder(svg, axis="y")
+    assert min(y_ladder) == 0.0, y_ladder
 
 
 def test_a_fieldless_y_styles_the_count_axis():
@@ -1929,7 +2067,8 @@ def test_every_grouping_channel_groups_the_ecdf_count(kwargs):
     heights = []
     for _stroke, corners in step_after_paths(svg):
         heights.append(sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners))
-    assert sorted(heights) == [[1, 2, 3], [1, 2, 3]], heights
+    # Each line also rises from 0 at its first observation.
+    assert sorted(heights) == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
 @pytest.mark.parametrize(
@@ -1959,7 +2098,8 @@ def test_an_encode_none_leaves_the_keywords_own_grouping_channel_bound(kwargs):
         sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         for _stroke, corners in step_after_paths(svg_with_none)
     )
-    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+    # Each line also rises from 0 at its first observation.
+    assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
 def test_shape_groups_the_ecdf_count_and_warns_it_draws_no_shape():
@@ -1974,7 +2114,8 @@ def test_shape_groups_the_ecdf_count_and_warns_it_draws_no_shape():
         sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         for _stroke, corners in step_after_paths(svg)
     )
-    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+    # Each line also rises from 0 at its first observation.
+    assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
 def test_a_boolean_hue_groups_the_ecdf_count():
@@ -1990,7 +2131,8 @@ def test_a_boolean_hue_groups_the_ecdf_count():
         sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         for _stroke, corners in step_after_paths(svg)
     )
-    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+    # Each line also rises from 0 at its first observation.
+    assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
 def test_a_null_hue_draws_its_own_rows_as_one_group_with_no_legend_entry():
@@ -2007,7 +2149,8 @@ def test_a_null_hue_draws_its_own_rows_as_one_group_with_no_legend_entry():
         sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         for _stroke, corners in step_after_paths(svg)
     )
-    assert heights == [[1, 2, 3], [1, 2, 3]], heights
+    # Each line also rises from 0 at its first observation.
+    assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
 # ---------------------------------------------------------------------------
