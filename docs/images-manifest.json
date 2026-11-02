@@ -530,7 +530,7 @@
       "docs/site/gallery/gallery.md"
     ],
     "generator": "design-docs/demos/demo_diagnostics.py:displot_ecdf",
-    "inspected": "2026-10-31",
+    "inspected": "2026-11-02",
     "verdict": "ok"
   },
   {
