@@ -97,6 +97,14 @@ _SMOOTH_ROUTED_METHODS = frozenset(transform_registry("smooth")["methods"]) - {"
 _DEDICATED_FIT_METHODS = frozenset({"logistic", "glm", "robust"})
 _VALID_METHODS = _SMOOTH_ROUTED_METHODS | _DEDICATED_FIT_METHODS
 
+# `truncate=False`'s margin, as a fraction of the predictor's own data span
+# (seaborn's typical auto-scale margin). The only signal this function
+# passes: Smooth/Robust derive the range themselves, from the fit's own
+# whole-batch extent, and pad it in whatever space the fit uses -- data
+# units on a linear x, log units on a demanded log x -- so the pad never
+# pushes a log x's evaluation grid into territory the axis cannot place.
+_TRUNCATE_FALSE_X_RANGE_PAD = 0.05
+
 
 def _smooth_degree_kwargs(method: str, order: int | None, func_name: str = "lmplot") -> dict:
     """``degree=`` kwargs to merge into a ``mark_smooth(method=...)`` call.
@@ -625,7 +633,12 @@ class _FitRequest:
     those channels, which the fit chart binds itself so each per-group
     curve draws its group's color. ``has_scatter`` says whether a scatter
     layer will be composed beside the fit, which decides the smooth path's
-    layer shape.
+    layer shape. ``x_range_pad``, when set (``truncate=False``), asks the
+    transform to extend the fit past its own on-side data extent by this
+    fraction, in whatever space the fit uses (data units on a linear x,
+    log units on a demanded log x): the transform derives the range
+    itself, from its own whole-batch extent, so this function passes only
+    the pad fraction, never a range it computed.
     """
 
     entry: str
@@ -643,7 +656,7 @@ class _FitRequest:
     x_bins: Any
     x_estimator: Any
     order: int | None
-    x_range: list[float] | None
+    x_range_pad: float | None
     metrics: bool
     has_scatter: bool
 
@@ -677,7 +690,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         show_metrics=req.metrics,
         **_grouped(req),
         **_smooth_degree_kwargs(method, req.order, req.entry),
-        **({"x_range": req.x_range} if req.x_range is not None else {}),
+        **({"x_range_pad": req.x_range_pad} if req.x_range_pad is not None else {}),
     )
     if not req.has_scatter:
         # No sibling layer: the fit IS the chart, so `mark_smooth`'s own
@@ -799,7 +812,7 @@ def _build_glm_fit(method: str, req: _FitRequest) -> Chart:
 
 
 def _build_robust_fit(method: str, req: _FitRequest) -> Chart:
-    # The one dedicated transform that takes `inject_metrics=` and `x_range=`.
+    # The one dedicated transform that takes `inject_metrics=` and `x_range_pad=`.
     transform = Robust(
         x=req.x_field,
         y=req.y_field,
@@ -807,7 +820,7 @@ def _build_robust_fit(method: str, req: _FitRequest) -> Chart:
         ci=req.ci,
         name="robust",
         inject_metrics=req.metrics,
-        **({"x_range": req.x_range} if req.x_range is not None else {}),
+        **({"x_range_pad": req.x_range_pad} if req.x_range_pad is not None else {}),
         **_grouped(req),
     )
     return _dedicated_fit_chart("robust", transform, req)
@@ -922,7 +935,7 @@ def _lmplot_impl(
 
     # The fit's column names, resolved ONCE and non-optionally. Every consumer
     # below -- the fit layers' axis titles, `desugar_smooth`'s field
-    # arguments, the x_range/jitter column lookups -- needs a real column
+    # arguments, the jitter column lookup -- needs a real column
     # name, and each used to re-derive it through `_field_name`, whose
     # `str | None` return no call site checked (#199's type hole).
     x_field = _required_field_name(x, entry=entry, param="x")
@@ -940,26 +953,30 @@ def _lmplot_impl(
     # ``_metrics_y`` columns on the fit-grid output — no Python-side
     # duplication. ``inject_metrics`` is generic (verified against
     # ``smooth.rs``: every ``SmoothMethod`` arm accepts it, computed
-    # against the raw input regardless of fit shape), so this applies
-    # uniformly to every smooth-routed method and to ``"robust"``.
+    # against the un-binned input rows, in whatever space the fit uses),
+    # so this applies uniformly to every smooth-routed method and to
+    # ``"robust"``.
     # ``"logistic"``/``"glm"`` expose no ``inject_metrics`` param at all
     # (``transform_registry`` lists none), so those two stay excluded
     # regardless of ``show_metrics=``. Computed below, once the grouping is
     # known: a per-group fit has no single corner to report.
 
-    # truncate: True = clip to data range (current Smooth/Robust default).
-    # False = extend fit line to the full x-axis domain boundary via
-    # SmoothSpec/RobustSpec.x_range (spec §4 WI-7 — wired end-to-end for
-    # every mark_smooth-routed method and for "robust"). "logistic"/"glm"
-    # accept no x_range at all (transform_registry confirms neither lists
+    # truncate: True = clip to data range (default: x_range_pad stays
+    # unset, so the transform uses its own per-group data extent). False =
+    # extend the fit past its own on-side data extent by a 5% margin, in
+    # the transform's own fit space (data units on a linear x, log units
+    # on a demanded log x). `x_range_pad` alone is the request: Smooth and
+    # Robust derive the range themselves, from the fit's own whole-batch
+    # extent (the same facet pin Bin/Kde/Kde2D already use), and pad it in
+    # whatever space they fit in -- this function passes no range, since
+    # it cannot see which side of zero a demanded log axis places (that is
+    # resolved in Rust, where the axis is). "logistic"/"glm" accept no
+    # `x_range_pad` at all (`transform_registry` confirms neither lists
     # it), so extending their fit line past the data range isn't possible
-    # without a Rust-side transform change — truncate=False refuses for
-    # those two rather than silently clipping anyway -- no silent parameter
-    # drop.
-    # The x_range is resolved from the chart's x column min/max at Python
-    # desugar time; the Rust transform uses it as the evaluation domain.
-    # When truncate=True (default) x_range stays None → clips to observed data.
-    x_range = None
+    # without a Rust-side transform change -- truncate=False refuses for
+    # those two rather than silently clipping anyway -- no silent
+    # parameter drop.
+    x_range_pad = None
     if not truncate:
         if method in ("logistic", "glm"):
             raise ValueError(
@@ -970,23 +987,7 @@ def _lmplot_impl(
                 "mark_smooth-routed method (lm, loess, quadratic, cubic, "
                 "log, sqrt, gam), or leave truncate=True (the default)."
             )
-        # Compute the axis-domain extent here so lmplot does not need a
-        # provisional scale pass. The Rust Smooth/Robust transform will
-        # evaluate the fit line over [x_min, x_max] of the full dataset
-        # regardless of which rows each facet panel sees.
-        # seaborn behaviour: extend to the axis limits, which are the data
-        # range padded by 5% on each side (matching the typical auto-scale margin).
-        try:
-            _df = data.collect() if hasattr(data, "collect") else data
-            x_col_name = x_field
-            if hasattr(_df, "to_arrow"):
-                _x_series = _df[x_col_name]
-                _x_min = float(_x_series.min())
-                _x_max = float(_x_series.max())
-                _margin = (_x_max - _x_min) * 0.05
-                x_range = [_x_min - _margin, _x_max + _margin]
-        except (AttributeError, KeyError):
-            x_range = None
+        x_range_pad = _TRUNCATE_FALSE_X_RANGE_PAD
 
     # `x_jitter` offsets the scatter's x column by writing a Float64 noise
     # array back into it (`apply_jitter`, `render/position.rs`), which fails
@@ -1104,7 +1105,7 @@ def _lmplot_impl(
             x_bins=x_bins,
             x_estimator=x_estimator,
             order=order,
-            x_range=x_range,
+            x_range_pad=x_range_pad,
             metrics=metrics_applied,
             has_scatter=scatter_layer is not None,
         ),
@@ -1265,11 +1266,13 @@ def lmplot(
     truncate : bool, default True
         When ``True`` (default), the fit line spans only the observed data
         range (min to max of ``x``). When ``False``, extends the fit line
-        across the axis-domain extent (the data range padded 5% on each
-        side) via the transform's ``x_range`` support --
-        supported for every ``mark_smooth``-routed method and for
+        past that range by a 5% margin the transform computes and applies
+        itself, in its own fit space -- data units on a linear x, log
+        units on a demanded log x (``logx=`` or a channel
+        ``scale=fm.LogScale()``) -- via the transform's ``x_range_pad``
+        support, supported for every ``mark_smooth``-routed method and for
         ``method="robust"``. Not supported for ``method="logistic"`` or
-        ``"glm"`` (neither transform accepts ``x_range``); passing
+        ``"glm"`` (neither transform accepts ``x_range_pad``); passing
         ``truncate=False`` with either raises ``ValueError``.
     x_bins : int or None, optional
         Aggregate the data into this many equal-width x bins before fitting,
@@ -1292,22 +1295,30 @@ def lmplot(
         When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
         scatter layer.
     logx : bool, default False
-        Apply a ``log`` scale to the x-axis on both scatter and fit layers.
+        Apply a ``log`` scale to the x-axis on both scatter and fit
+        layers. Every method then fits in log x, not data x: an
+        ``"lm"``-family fit draws a straight line on the log axis, its CI
+        band maps back asymmetric, and ``method="sqrt"`` -- which would
+        compose a second predictor transform on top of the axis's own log
+        -- raises instead of silently fitting in data space.
     show_metrics : bool or None, default None
         Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
-        ``MAE`` computed from the fit. ``inject_metrics`` is a generic
-        ``Smooth``/``Robust`` transform kwarg (computed against the raw
-        input regardless of fit shape), so this applies to every
+        ``MAE`` computed from the fit, in whatever space the fit itself
+        uses -- log x under ``logx=`` or a channel ``scale=fm.LogScale()``.
+        ``inject_metrics`` is a generic ``Smooth``/``Robust`` transform
+        kwarg (computed against the un-binned input rows, in whatever
+        space the fit uses), so this applies to every
         ``mark_smooth``-routed method and to ``method="robust"``. Not
-        supported for ``method="logistic"``/``"glm"`` (neither transform
-        exposes ``inject_metrics``) -- skipped for those two regardless of
-        this flag, and never warned about. Left unset (``None``), the
-        corner is drawn for one ungrouped fit and dropped silently under
-        any grouping (``hue`` or a grouping channel, as a keyword or
-        through ``encode=``), since one corner describes one fit, not one
-        per group. Passed explicitly as ``True``, a grouping that leaves
-        no single fit to describe warns instead of silently drawing
-        nothing. ``False`` never draws it and never warns.
+        supported for ``method="logistic"``/``"glm"``
+        (neither transform exposes ``inject_metrics``) -- skipped for
+        those two regardless of this flag, and never warned about. Left
+        unset (``None``), the corner is drawn for one ungrouped fit and
+        dropped silently under any grouping (``hue`` or a grouping
+        channel, as a keyword or through ``encode=``), since one corner
+        describes one fit, not one per group. Passed explicitly as
+        ``True``, a grouping that leaves no single fit to describe warns
+        instead of silently drawing nothing. ``False`` never draws it and
+        never warns.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -1335,8 +1346,12 @@ def lmplot(
     ValueError
         If ``method`` is not one of the supported values.
     ValueError
+        If ``method="sqrt"`` on a demanded log x (``logx=True``, or a
+        channel ``scale=fm.LogScale()``) -- a sqrt predictor transform and
+        the axis's own log cannot both apply to one x.
+    ValueError
         If ``truncate=False`` with ``method="logistic"`` or ``"glm"``
-        (neither transform accepts ``x_range``).
+        (neither transform accepts ``x_range_pad``).
     ValueError
         If ``x_bins`` or ``x_estimator`` is set with
         ``method="logistic"``, ``"glm"``, or ``"robust"`` (none of the
@@ -1472,12 +1487,18 @@ def residplot(
         encoding object (``fm.X("col", scale=..., axis=..., format=...,
         title=...)``) is also accepted, and every option it carries reaches
         the point layer's own x binding, the same re-pointing rule
-        ``displot``'s histogram and ECDF kinds use.
+        ``displot``'s histogram and ECDF kinds use. A demanded log x
+        (``scale=fm.LogScale()``) fits the underlying regression in log x,
+        not data x.
     y : str
         Column name used to compute residuals (response; required). An
         encoding object is accepted the same way as ``x=``, and its options
         reach the residual axis; its default title is ``"<y> residual"``
-        rather than the field itself.
+        rather than the field itself. A log scale on the RESIDUAL axis
+        (through any door -- a channel ``scale=``, ``encode=`` or
+        ``.override(y_scale_type="log")``) is refused rather than warning
+        every row off the side: residuals are signed differences around
+        0, which a ``LogScale`` cannot place.
     lowess : bool, default False
         Overlay a lowess smoother on the residuals using
         ``Smooth(method="loess")``.
@@ -1555,6 +1576,12 @@ def residplot(
     ValueError
         If ``label`` is set and ``data`` already has a ``_label`` column,
         which this function needs for the label's own group key.
+    ValueError
+        If the residual axis resolves a ``LogScale``, through any door
+        (``y=``'s own ``scale=``, ``encode=``, or
+        ``.override(y_scale_type="log")``): residuals are signed
+        differences around 0, which a ``LogScale`` cannot place. Use
+        ``fm.SymlogScale()``, or drop the log scale.
     ValueError
         If ``x`` or ``y`` -- through a keyword, ``encode=`` or a shorthand
         string -- carries a ``bin=``/``aggregate=``: residuals are
@@ -1979,7 +2006,9 @@ def regplot(
         scatter layer.
     logx : bool, default False
         Apply a ``log`` scale to the x-axis on both scatter and fit layers,
-        forwarded to ``lmplot`` -- see ``lmplot``'s ``logx`` parameter.
+        forwarded to ``lmplot`` -- see ``lmplot``'s ``logx`` parameter:
+        every method then fits in log x, and ``method="sqrt"`` raises
+        instead of composing a second predictor transform on top of it.
     show_metrics : bool or None, default None
         Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
         ``MAE`` computed from the fit, forwarded to ``lmplot`` -- see
@@ -2015,8 +2044,11 @@ def regplot(
     ValueError
         If ``method`` is not one of the supported values.
     ValueError
+        If ``method="sqrt"`` on a demanded log x -- forwarded from
+        ``lmplot``, see its ``method`` parameter.
+    ValueError
         If ``truncate=False`` with ``method="logistic"`` or ``"glm"``
-        (neither transform accepts ``x_range``).
+        (neither transform accepts ``x_range_pad``).
     ValueError
         If ``x_bins`` or ``x_estimator`` is set with
         ``method="logistic"``, ``"glm"``, or ``"robust"`` -- forwarded from

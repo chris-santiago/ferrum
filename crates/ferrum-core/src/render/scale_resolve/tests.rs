@@ -8781,8 +8781,8 @@ fn an_independent_y_slots_x_naming_never_walks_through_its_own_lineage() {
                 groupby: Vec::new(),
                 shared: false,
                 space_columns: vec![
-                    SpaceColumn { slot: SpaceSlot::X, output: "grid_x".into(), input: "caller_x".into() },
-                    SpaceColumn { slot: SpaceSlot::Y, output: "grid_y".into(), input: "caller_y".into() },
+                    SpaceColumn { slot: SpaceSlot::X, output: "grid_x".into(), input: "caller_x".into(), pass_through: false },
+                    SpaceColumn { slot: SpaceSlot::Y, output: "grid_y".into(), input: "caller_y".into(), pass_through: false },
                 ],
             }],
             log_input: HashMap::from([((PositionalAxis::secondary_y(1), "caller_y".to_string()), caller_y)]),
@@ -8820,4 +8820,66 @@ fn an_independent_y_slots_x_naming_never_walks_through_its_own_lineage() {
         matches!(y_warning, crate::render::RenderWarning::LogScaleRowsLeftOut { field: Some(f), rows: 2, .. } if f == "caller_y"),
         "y must still name the caller field its own slot's walk finds, and count only its own slot's recorded rows: {y_warning:?}"
     );
+}
+
+/// A GENERATED tick places through [`ScaleKind::tick_position_internal`]:
+/// `Log` closes the gap between
+/// `breaks_log`'s domain-end admission tolerance
+/// (`LogScaleData::TICK_DOMAIN_TOLERANCE`) and `scale`'s own strict bounds
+/// check via `place_tick`; every other continuous kind's own
+/// `scale_internal`, byte-identical to the caller-value path. Property
+/// test across every continuous kind, over a domain whose upper end sits
+/// one ULP to `TICK_DOMAIN_TOLERANCE` (`1e-9`) short of a nice boundary
+/// (`1000.0`) — the shape of domain end a strict `scale()` with no
+/// `place_tick` would refuse as NaN (`LogAxisSpace::forward`'s
+/// `1000.0.log(10.0) == 2.9999999999999996` round trip lands a float hair
+/// outside the domain even though `breaks_log` admits the candidate tick
+/// as "within the domain"), collapsing `tick_fractions`'s whole vec under
+/// its `RejectAll` policy.
+/// `tick_fractions` and `tick_labels` must stay the SAME length for every
+/// kind at every epsilon: a regression reintroducing the strict-`scale()`
+/// collapse would empty `tick_fractions` while `tick_labels` stays full,
+/// for `Log` at least, and this asserts the other four kinds' own
+/// (unchanged) dispatch arm is still exercised identically.
+#[test]
+fn a_generated_ticks_place_matches_its_label_count_across_every_continuous_kind_near_a_nice_boundary() {
+    let epsilons = [f64::EPSILON * 1e3, 1e-12, 1e-10, 1e-9];
+    let count_hint = 10;
+    for &eps in &epsilons {
+        let hi = 1000.0 - eps;
+        let kinds: Vec<(&str, ScaleKind)> = vec![
+            ("Linear", ScaleKind::Linear(LinearScale::new_internal(vec![0.0, hi], vec![0.0, 400.0], false, false))),
+            ("Log", ScaleKind::Log(LogScale::new_internal(vec![1.0, hi], vec![0.0, 400.0], 10.0, false, false))),
+            ("Time", ScaleKind::Time(TimeScale::new_internal(vec![0.0, hi], vec![0.0, 400.0], false, false))),
+            ("Symlog", ScaleKind::Symlog(SymlogScale::new_internal(vec![0.0, hi], vec![0.0, 400.0], 1.0, false, false))),
+            ("Pow", ScaleKind::Pow(PowScale::new_internal(vec![0.0, hi], vec![0.0, 400.0], 2.0, false))),
+        ];
+        for (name, scale) in kinds {
+            let labels = scale.tick_labels(count_hint);
+            let fractions = scale.tick_fractions(count_hint);
+            assert_eq!(
+                fractions.len(),
+                labels.len(),
+                "{name} (hi = 1000.0 - {eps:e} = {hi}): tick_fractions ({} entries) must stay \
+                 index-aligned with tick_labels ({} entries)",
+                fractions.len(),
+                labels.len()
+            );
+            // `Log`'s own end tick (the decade `1000`, admitted within
+            // `TICK_DOMAIN_TOLERANCE` of this domain's own `hi`) places
+            // EXACTLY at the range end — `place_tick` returns `r1` itself,
+            // not `mapped(v)`'s own extrapolated value a float hair past
+            // it.
+            if name == "Log" {
+                let values = scale.tick_values_raw(count_hint).expect("Log has numeric ticks");
+                let last = fractions.len() - 1;
+                assert_eq!(
+                    fractions[last],
+                    1.0,
+                    "{name} (hi = 1000.0 - {eps:e}): the end tick ({}) must place exactly at the range end",
+                    values[last]
+                );
+            }
+        }
+    }
 }

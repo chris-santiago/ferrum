@@ -60,7 +60,7 @@ pub(in crate::render) use self::domain::{
     add_distinct_source, admitted_aux_reads, admitted_color_reads, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
-    SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows, resolved_explicit_scale,
+    SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows, resolved_explicit_scale, whole_frame_batch,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -375,7 +375,7 @@ impl ScaleKind {
         // Minors carry no label, so a single out-of-domain minor can be dropped
         // individually without misaligning anything (`DropOne`). Majors must stay
         // index-aligned with `tick_labels`, so they use `RejectAll`.
-        self.project_values_to_fractions(&positions, NonFinite::DropOne)
+        self.project_values_to_fractions(&positions, NonFinite::DropOne, true)
     }
 
     /// Return the data-space domain `(lo, hi)` for continuous scales.
@@ -617,7 +617,7 @@ impl ScaleKind {
         // produce — one fraction per value, in the same order — so the carrier
         // stays index-aligned with `tick_labels`.
         let values = dispatch_continuous!(self, ticks_internal, count_hint);
-        self.project_values_to_fractions(&values, NonFinite::RejectAll)
+        self.project_values_to_fractions(&values, NonFinite::RejectAll, true)
     }
 
     /// Raw numeric tick *values* for a continuous scale, in the same order and
@@ -683,7 +683,24 @@ impl ScaleKind {
         if matches!(self, Self::Ordinal(_)) {
             return Vec::new();
         }
-        self.project_values_to_fractions(values, NonFinite::RejectAll)
+        self.project_values_to_fractions(values, NonFinite::RejectAll, false)
+    }
+
+    /// The pixel a GENERATED tick value (one `ticks_internal`/
+    /// `minor_ticks_internal` produced, never a caller-written one) maps
+    /// to: [`LogScale::place_tick_internal`] for `Log`, closing the gap
+    /// between `breaks_log`'s domain-end admission tolerance and `scale`'s
+    /// own strict bounds check; every other kind's own `scale_internal`,
+    /// byte-identical to the caller-value path.
+    fn tick_position_internal(&self, v: f64) -> f64 {
+        match self {
+            ScaleKind::Log(s) => s.place_tick_internal(v),
+            ScaleKind::Linear(s) => s.scale_internal(v),
+            ScaleKind::Time(s) => s.scale_internal(v),
+            ScaleKind::Symlog(s) => s.scale_internal(v),
+            ScaleKind::Pow(s) => s.scale_internal(v),
+            ScaleKind::Ordinal(_) => unreachable!(),
+        }
     }
 
     /// Project data values to domain fractions `(scale(v) - r0) / (r1 - r0)`,
@@ -694,6 +711,17 @@ impl ScaleKind {
     ///
     /// A zero-span (degenerate domain: all-equal / single distinct / all-null
     /// column) always yields an **empty** vec regardless of policy.
+    ///
+    /// `generated` selects which placement every value in `values` goes
+    /// through: `true` for a GENERATED tick (`tick_fractions`'s majors,
+    /// `minor_tick_fractions`'s minors), which uses
+    /// [`tick_position_internal`](Self::tick_position_internal) so a `Log`
+    /// tick `breaks_log` admits a float hair outside the exact domain
+    /// still places; `false` for a CALLER-WRITTEN value
+    /// (`value_fractions`), which keeps the strict `scale_internal` every
+    /// mark reads through — a caller-written tick value or a data row
+    /// just past an explicit domain stays left out and warned, not swept
+    /// in by the generated-tick tolerance.
     ///
     /// Non-finite projections (a value the scale maps to `NaN`/`±inf`, e.g.
     /// out-of-domain on an unclamped scale) are handled per [`NonFinite`]:
@@ -706,7 +734,7 @@ impl ScaleKind {
     /// * [`NonFinite::DropOne`] — unlabeled minor ticks. Each non-finite
     ///   projection is dropped individually; dropping one minor cannot misalign
     ///   anything.
-    fn project_values_to_fractions(&self, values: &[f64], non_finite: NonFinite) -> Vec<f64> {
+    fn project_values_to_fractions(&self, values: &[f64], non_finite: NonFinite, generated: bool) -> Vec<f64> {
         let (r0, r1) = self.pixel_range();
         let span = r1 - r0;
         if span == 0.0 {
@@ -727,7 +755,7 @@ impl ScaleKind {
         let fractions = values
             .iter()
             .map(|&v| {
-                let px = dispatch_continuous!(self, scale_internal, v);
+                let px = if generated { self.tick_position_internal(v) } else { dispatch_continuous!(self, scale_internal, v) };
                 (px - r0) / span
             });
         match non_finite {
@@ -2979,9 +3007,9 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
                 let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
                 // Stack-aware x-axis: see `position::axis_batch`.
-                let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
+                let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, aux_color)?;
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, x_batch.adjusted.as_ref(), &mut warnings)?;
                 warnings.extend(aux_warnings);
                 let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
@@ -2994,9 +3022,9 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let mut aux_warnings = Vec::new();
                 let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
                 let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
-                let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
+                let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, aux_color)?;
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, y_batch.adjusted.as_ref(), &mut warnings)?;
                 warnings.extend(aux_warnings);
                 let aux = aux_result?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
@@ -3080,15 +3108,15 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let mut aux_warnings = Vec::new();
     let aux_result = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, transform_lineages, theme, leaf_scales, &mut aux_warnings);
     let aux_color = aux_result.as_ref().ok().and_then(AuxiliaryScales::color);
-    let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, x_shared, aux_color)?;
+    let x_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::X, &x_enc.field, primary_batch, transform_outputs, aux_color)?;
     let mut x = match imposed(Channel::X, x_pixel_range, &mut warnings) {
         Some(x) => x?,
-        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, &mut warnings)?,
+        None => build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, &x_batch.outputs, transform_lineages, x_pixel_range, &axis_spec, &text_demands.x, x_shared, x_shared_domain, pending, aux_color, None, x_batch.adjusted.as_ref(), &mut warnings)?,
     };
-    let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, y_shared, aux_color)?;
+    let y_batch = crate::render::position::axis_batch(spec, &spec.encoding, crate::spec::position::StackValueAxis::Y, &y_enc.field, primary_batch, transform_outputs, aux_color)?;
     let mut y = match imposed(Channel::Y, y_pixel_range, &mut warnings) {
         Some(y) => y?,
-        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, &mut warnings)?,
+        None => build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, &y_batch.outputs, transform_lineages, y_pixel_range, &axis_spec, &text_demands.y, y_shared, y_shared_domain, pending, aux_color, y_slot_reads, y_batch.adjusted.as_ref(), &mut warnings)?,
     };
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the

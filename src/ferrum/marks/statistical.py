@@ -461,6 +461,7 @@ def desugar_smooth(
     groupby: Any = None,
     name: str | None = None,
     x_range: list[float] | None = None,
+    x_range_pad: float | None = None,
     _x_title: str | None = None,
     _y_title: str | None = None,
 ) -> MarkDesugarResult:
@@ -575,8 +576,15 @@ def desugar_smooth(
     x_range : [float, float] or None, default None
         Explicit evaluation domain ``[x_min, x_max]`` forwarded to the
         ``Smooth`` transform.  When set, the fit line is evaluated over
-        this range rather than the observed data range — used by
-        ``lmplot(truncate=False)`` to extend the fit beyond the data.
+        this range rather than the observed data range.
+    x_range_pad : float or None, default None
+        Forwarded independently of ``x_range``: the fractional margin
+        ``Smooth`` extends the evaluation range by, in the transform's own
+        fit space (data units on a linear x, log units on a demanded log
+        x). With ``x_range`` also set, it pads that range; alone, ``Smooth``
+        derives the range itself from its own whole-column x extent and
+        pads that — the form ``lmplot(truncate=False)`` uses, since this
+        function cannot see which side of zero a demanded log axis places.
     _x_title, _y_title : str or None, default None
         The ``title=`` the caller declared on the chart-level x/y channel,
         injected by the composite-mark expansion. The layered path's layers
@@ -647,6 +655,8 @@ def desugar_smooth(
             smooth_kwargs["name"] = name
         if x_range is not None:
             smooth_kwargs["x_range"] = x_range
+        if x_range_pad is not None:
+            smooth_kwargs["x_range_pad"] = x_range_pad
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": _smooth_cols["x"], "y": _smooth_cols["y"]}
         # This shape keeps the chart's own encoding; `_apply_remap` rebinds
@@ -683,6 +693,8 @@ def desugar_smooth(
         smooth_kwargs["groupby"] = groupby
     if x_range is not None:
         smooth_kwargs["x_range"] = x_range
+    if x_range_pad is not None:
+        smooth_kwargs["x_range_pad"] = x_range_pad
     if show_metrics:
         # Schwabish SB-followup (2026-05-12): emit R²/RMSE/MAE columns
         # on the fit-grid output so a same-source mark_text layer reads

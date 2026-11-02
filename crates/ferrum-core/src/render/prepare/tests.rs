@@ -1869,7 +1869,7 @@ fn smooth_cubic_spec(
         inject_metrics: false,
         groupby,
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     })];
     spec
 }
@@ -2089,7 +2089,7 @@ fn smooth_lm_ci_facet_spec() -> ChartSpec {
         inject_metrics: false,
         groupby: vec![],
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     })];
     spec
 }
@@ -2192,7 +2192,7 @@ fn smooth_gam_facet_spec() -> ChartSpec {
         inject_metrics: false,
         groupby: vec![],
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     })];
     spec
 }
@@ -2381,7 +2381,7 @@ fn smooth_lm_groupby_spec(
         inject_metrics: true,
         groupby,
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     })];
     spec
 }
@@ -19990,7 +19990,7 @@ fn a_layered_log_axis_demands_a_sibling_histograms_bin() {
     let theme = crate::layout::ThemeInputs::default();
     let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
     let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
-    let reads = log_space_reads(&spec, &outputs, None);
+    let reads: Vec<_> = log_space_reads(&spec, &outputs, None).into_iter().map(LogSpaceRead::into_tuple).collect();
     let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
     let bin = demand.space(&[1]).of(crate::transform::core::SpaceSlot::Field).cloned().expect("the histogram's Bin is demanded on its field slot");
     assert_eq!(
@@ -20064,7 +20064,7 @@ fn an_independent_y_layer_demands_its_own_slots_space() {
     // Direction 1: the secondary owns the LogScale, the primary none.
     let spec = independent_y_histogram_chart(None, Some(log10_scale()));
     let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
-    let reads = log_space_reads(&spec, &outputs, None);
+    let reads: Vec<_> = log_space_reads(&spec, &outputs, None).into_iter().map(LogSpaceRead::into_tuple).collect();
     let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
     let bin = demand
         .space(&[1])
@@ -20081,7 +20081,7 @@ fn an_independent_y_layer_demands_its_own_slots_space() {
     // secondary's Bin is demanded in no space at all.
     let spec = independent_y_histogram_chart(Some(log10_scale()), None);
     let (outputs, _, lineages, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
-    let reads = log_space_reads(&spec, &outputs, None);
+    let reads: Vec<_> = log_space_reads(&spec, &outputs, None).into_iter().map(LogSpaceRead::into_tuple).collect();
     let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
     assert!(
         demand.space(&[1]).of(crate::transform::core::SpaceSlot::Field).is_none(),
@@ -20193,7 +20193,7 @@ fn every_independent_y_layers_log_demand_matches_its_own_resolved_scale_kind() {
         let spec = two_statistic_independent_y_chart(primary_scale, secondary_scale);
         let prep = prepare_render_inputs(&spec, &rows, &theme, viewport, &config, None).expect("prepares");
         let (first_outputs, _, _, _) = run_transforms_with_facet(&spec, &rows, viewport, &theme, None).expect("runs");
-        let reads = log_space_reads(&spec, &first_outputs, None);
+        let reads: Vec<_> = log_space_reads(&spec, &first_outputs, None).into_iter().map(LogSpaceRead::into_tuple).collect();
         let demand = SpaceDemand::of(&prep.transform_lineages, &reads).expect("one space per slot");
 
         for (layer_idx, _layer) in prep.layers.iter().enumerate() {
@@ -20289,4 +20289,256 @@ fn a_layered_log_axis_names_its_left_out_rows_by_the_establishing_layer() {
     assert_eq!(named(serde_json::json!([point(""), hist(None)])), [v.clone()]);
     assert_eq!(named(serde_json::json!([hist(Some("Price")), point("Price")])), [Some("Price".to_string())]);
     assert_eq!(named(serde_json::json!([hist(Some("")), point("Price")])), [None]);
+}
+
+/// A log scale for `channel`'s field, base 10, no explicit domain —
+/// `refuse_sqrt_on_log_x`/`refuse_residplot_log_y`'s tests' one scale
+/// builder, mirroring `ScaleSpec::Log`'s field shape wherever else in this
+/// file a test builds one by hand.
+fn log10_encoding(field: &str) -> EncodingSpec {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    EncodingSpec {
+        field: field.into(),
+        type_: None,
+        scale: Some(ScaleSpec::Log {
+            base: 10.0,
+            common: ContinuousScaleCommon {
+                domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
+            },
+            nice: false,
+        }),
+        ..Default::default()
+    }
+}
+
+/// `mark_smooth(method="sqrt")` drawn against a demanded log x is refused
+/// in the layer entry's own voice, before the fit ever runs in that space:
+/// `method='sqrt'` composes with no other predictor transform, so a
+/// `LogScale` on the x it draws is refused at prepare time
+/// (`refuse_sqrt_on_log_x`), not inside `transform::smooth` itself. The
+/// spec carries its own `entry` (`"mark_smooth"`, as the real door writes
+/// it) and the assertion is `assert_eq!` against the FULL voiced message:
+/// a regression that let the
+/// transform's own backstop fire instead of this gate would produce
+/// `"transform failed: stat_smooth: ..."`, which this exact match catches
+/// where a `.contains(...)` substring check would not.
+#[test]
+fn smooth_sqrt_method_on_a_demanded_log_x_is_refused_in_the_layer_entrys_voice() {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::identity::IdentitySpec;
+    use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+    let mut spec = base_spec();
+    spec.entry = Some("mark_smooth".to_string());
+    spec.encoding.x = Some(log10_encoding("x"));
+    spec.transforms = vec![
+        TransformSpec::Identity(IdentitySpec { name: None, statistics: true }),
+        TransformSpec::Smooth(SmoothSpec {
+            x: "x".into(),
+            y: "y".into(),
+            method: SmoothMethod::SqrtX,
+            ci: None,
+            bandwidth: 0.75,
+            degree: 1,
+            k: crate::transform::gam::DEFAULT_BASIS_DIM,
+            n: 5,
+            seed: 0,
+            x_bins: None,
+            x_estimator: None,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            groupby: vec![],
+            name: None,
+            x_range: None,
+            x_range_pad: None,
+        }),
+    ];
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("y", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0, 8.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("mark_smooth: {}", crate::transform::smooth::SQRT_ON_LOG_X_REASON),
+    );
+}
+
+/// `residplot(...)`'s residual axis draws signed residuals around 0, which
+/// no `LogScale` can place: refused in `residplot`'s own voice
+/// (`refuse_residplot_log_y`) the moment its y resolves to one, with no
+/// fit transform needed at all to trigger the gate — `spec.entry` alone
+/// marks the chart as residplot's.
+#[test]
+fn residplot_under_a_log_y_is_refused_in_its_own_voice() {
+    let mut spec = base_spec();
+    spec.entry = Some("residplot".into());
+    spec.encoding.y = Some(log10_encoding("y"));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("y", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert_eq!(
+        msg,
+        "residplot(y=<log scale>) is not supported: the residual axis draws signed residuals \
+         around 0, which a LogScale cannot place. Use fm.SymlogScale(), or drop scale="
+    );
+}
+
+/// `residplot_residuals_spec`'s batch: `y = 2x + 1` with alternating
+/// noise, so the fit's own residuals are real, non-degenerate (non-zero)
+/// values rather than an exact fit's all-zero line.
+fn residplot_fit_batch() -> RecordBatch {
+    let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+    let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| 2.0 * x + 1.0 + if i % 2 == 0 { 0.3 } else { -0.3 }).collect();
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("y", DataType::Float64, false)])),
+        vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys))],
+    )
+    .unwrap()
+}
+
+/// A `residplot` chart with a REAL `Smooth(output="residuals")` layer
+/// (`entry` alone, with no transform at all, is `residplot_under_a_log_y_is_refused_in_its_own_voice`'s
+/// own simpler case above) drawing `x` from the fit's own grid and `y`
+/// from `y_encoding` — its residual column, under the caller's choice of
+/// a demanded log y or a plain linear one.
+fn residplot_residuals_spec(y_encoding: EncodingSpec) -> ChartSpec {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::identity::IdentitySpec;
+    use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+    let mut spec = base_spec();
+    spec.entry = Some("residplot".into());
+    spec.encoding.x = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
+    spec.encoding.y = Some(y_encoding);
+    spec.transforms = vec![
+        TransformSpec::Identity(IdentitySpec { name: None, statistics: true }),
+        TransformSpec::Smooth(SmoothSpec {
+            x: "x".into(),
+            y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0,
+            degree: 1,
+            k: crate::transform::gam::DEFAULT_BASIS_DIM,
+            n: 5,
+            seed: 0,
+            x_bins: None,
+            x_estimator: None,
+            output: SmoothOutput::Residuals,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            groupby: vec![],
+            name: None,
+            x_range: None,
+            x_range_pad: None,
+        }),
+    ];
+    spec
+}
+
+/// A REAL `Smooth(output="residuals")` layer under `residplot` and a
+/// demanded log y: the first pipeline run fits the line and computes real
+/// residuals in DATA space (this exercises the gate against actual fit
+/// output, not an empty pipeline with no transform at all), and
+/// `refuse_residplot_log_y` still refuses before any second (log-space)
+/// run would try to place a signed residual on a `LogScale` — in the
+/// exact full voiced text, matching `residplot_under_a_log_y_is_refused_in_its_own_voice`'s
+/// own assertion.
+#[test]
+fn residplot_with_a_real_residuals_fit_under_a_log_y_is_refused_in_its_own_voice() {
+    let spec = residplot_residuals_spec(log10_encoding("residual"));
+    let batch = residplot_fit_batch();
+    let err = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "residplot(y=<log scale>) is not supported: the residual axis draws signed residuals \
+         around 0, which a LogScale cannot place. Use fm.SymlogScale(), or drop scale="
+    );
+}
+
+/// The identical spec on a LINEAR y renders, and its `residual` column
+/// holds real, non-degenerate values — proving the fit actually ran,
+/// which the refusal test above cannot show on its own (a gate that fired
+/// for the wrong reason, or before the fit ran at all, would refuse just
+/// as readily over a transform that never executes).
+#[test]
+fn residplot_with_a_real_residuals_fit_on_a_linear_y_renders_the_fits_own_residual_column() {
+    let spec = residplot_residuals_spec(EncodingSpec { field: "residual".into(), type_: None, ..Default::default() });
+    let batch = residplot_fit_batch();
+    let prepared = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("a linear-y residplot with a real fit renders");
+    let residuals = crate::render::arrow_cast::col_as_f64(prepared.final_batch(), "residual").unwrap();
+    assert_eq!(residuals.len(), 6, "{residuals:?}");
+    assert!(residuals.iter().all(|v| v.is_some_and(f64::is_finite)), "every residual must be a real finite value: {residuals:?}");
+    assert!(
+        residuals.iter().flatten().any(|&v| v.abs() > 1e-6),
+        "the residuals must hold real nonzero values, proving the fit actually ran rather than leaving a zero/NaN placeholder: {residuals:?}"
+    );
+}
+
+/// A log scale on x alone (no `entry` set to `residplot`) is unaffected:
+/// the residplot gate never fires for an ordinary chart.
+#[test]
+fn a_log_y_on_a_non_residplot_chart_is_not_refused() {
+    let mut spec = base_spec();
+    spec.encoding.y = Some(log10_encoding("y"));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false), Field::new("y", DataType::Float64, false)])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    let _ = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("an ordinary log-y chart renders");
 }

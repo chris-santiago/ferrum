@@ -31,13 +31,16 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::color_bin_group::SlotSpace;
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
+use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
     stack_grouped_batches,
     NullKeyPolicy,
     KeyValue,
 };
+use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::logistic::inv_normal_cdf;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
 use crate::transform::residuals;
@@ -81,6 +84,13 @@ pub(crate) struct RobustSpec {
     /// instead of ``[xs.min(), xs.max()]``. Enables ``lmplot(truncate=False)``.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub x_range: Option<[f64; 2]>,
+    /// See `SmoothSpec.x_range_pad` — same contract: a proportional margin
+    /// applied to the evaluation range `apply_one_group` resolves
+    /// (`x_range` when set, else the whole batch's own `x` extent),
+    /// in whichever units the fit runs in. `x_range_pad` alone is not a
+    /// no-op: it is the request to extend past the data's own range.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_range_pad: Option<f64>,
 }
 
 // ---------- Main apply ----------
@@ -97,15 +107,72 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
 /// Context-aware entry point (#162): identical dispatch to [`apply`], plus
 /// `ctx.warnings` as the sink for this transform's own degrade sites (see
 /// `apply_one_group`'s `xs.len() < 2` and zero-variance-x branches below).
+///
+/// When a drawn log axis demands this fit on its `X` slot, its `Y` slot, or
+/// both independently, the fit runs in that space instead
+/// ([`apply_in_log_space`]) — the same mechanism `Smooth` joins
+/// (`smooth::apply_in_log_space`), since Robust's linear fit is the same
+/// shape on either side of the mapping.
 pub(crate) fn apply_with_context(
     spec: &RobustSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
+    let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
+    if x_slot.is_none() && y_slot.is_none() {
+        return apply_in_data_space(spec, batch, ctx);
+    }
+    apply_in_log_space(spec, batch, ctx, x_slot, y_slot)
+}
+
+/// [`apply_with_context`]'s ordinary (data-space) body, with `x`/`y` (and
+/// `x_range`, when the caller wrote one) already in this fit's own space
+/// — data units when not demanded, the mapped batch's log units under
+/// [`apply_in_log_space`]. `apply_one_group` resolves the actual
+/// evaluation range via
+/// [`crate::transform::numeric_util::evaluation_range`], padding once in
+/// whichever space this body already runs in.
+fn apply_in_data_space(spec: &RobustSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
         return apply_grouped(spec, batch, &spec.groupby, ctx);
     }
     apply_one_group(spec, batch, None, ctx, None)
+}
+
+/// `apply_with_context` under a drawn log axis's demand, mirroring
+/// `smooth::apply_in_log_space`: a caller-written `x_range` is mapped into
+/// the demanded `x` axis's units (unpadded) before the ordinary body runs
+/// over the mapped columns. Robust has one method (Huber IRLS, always
+/// linear in its own inputs), so there is no predictor-transform swap and
+/// no sqrt-style refusal to make.
+fn apply_in_log_space(
+    spec: &RobustSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    x_slot: Option<&SlotSpace>,
+    y_slot: Option<&SlotSpace>,
+) -> PyResult<RecordBatch> {
+    // See `smooth::apply_in_log_space`'s identical call for the full
+    // contract: `extent_in_space` never returns `Ok(None)` for a `Some`
+    // input, so there is no fallback to write.
+    let x_range = x_slot.map_or(Ok(spec.x_range), |slot| {
+        slot.space
+            .extent_in_space("Robust", "x_range", spec.x_range.map(|[a, b]| (a, b)))
+            .map(|r| r.map(|(a, b)| [a, b]))
+    })?;
+    let mapped_spec = RobustSpec { x_range, ..spec.clone() };
+    run_fit_in_log_space(
+        ctx,
+        "Robust",
+        batch,
+        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output),
+        (&spec.x, x_slot),
+        (&spec.y, y_slot),
+        |mapped_batch, x, y, ctx| {
+            apply_in_data_space(&RobustSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, mapped_batch, ctx)
+        },
+    )
 }
 
 /// Fit one group's (or the whole frame's) rows. `only_indices` restricts the
@@ -142,8 +209,8 @@ fn apply_one_group(
 
     let (data_x_min, data_x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
-    // WI-7: use x_range when set (truncate=False); else fall back to data extent.
-    let (x_min, x_max) = match spec.x_range {
+    // See smooth::apply_one_group's identical call for the full contract.
+    let (x_min, x_max) = match crate::transform::numeric_util::evaluation_range(spec.x_range, spec.x_range_pad, batch, &spec.x) {
         Some([lo, hi]) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
         _ => (data_x_min, data_x_max),
     };
@@ -571,8 +638,6 @@ fn build_residuals_batch(
 
 use pyo3::prelude::*;
 
-use crate::transform::core::TransformSpec;
-
 /// Robust regression fit (Huber M-estimator via IRLS).
 ///
 /// Fits a linear model using an iteratively reweighted least squares
@@ -641,6 +706,7 @@ impl PyRobust {
         groupby = None,
         name = None,
         x_range = None,
+        x_range_pad = None,
     ))]
     fn new(
         x: &str,
@@ -656,9 +722,24 @@ impl PyRobust {
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
         x_range: Option<[f64; 2]>,
+        x_range_pad: Option<f64>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Robust: x and y must be non-empty"));
+        }
+        if let Some([a, b]) = x_range {
+            if !a.is_finite() || !b.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "Robust: x_range must be (lo, hi) with both finite; received [{a}, {b}]"
+                )));
+            }
+        }
+        if let Some(pad) = x_range_pad {
+            if !pad.is_finite() || pad < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "Robust: x_range_pad must be a finite fraction >= 0; received {pad}"
+                )));
+            }
         }
         if n_grid == 0 {
             return Err(PyValueError::new_err("Robust: n_grid must be > 0"));
@@ -711,15 +792,16 @@ impl PyRobust {
             groupby,
             name,
             x_range,
+            x_range_pad,
         })))
     }
 
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Robust(s) => format!(
-                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?})",
+                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?}, x_range_pad={:?})",
                 s.x, s.y, s.n_grid, s.ci, s.huber_c, s.max_iter, s.tol, s.output,
-                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range, s.x_range_pad,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -730,6 +812,7 @@ impl PyRobust {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::color_bin_group::StepSpace;
     use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -775,7 +858,7 @@ mod tests {
             inject_zero_ref: false,
             inject_metrics: false,
             groupby: vec![],
-            x_range: None,
+            x_range: None, x_range_pad: None,
             name: None,
         }
     }
@@ -791,7 +874,7 @@ mod tests {
             inject_metrics: false,
             groupby: vec![],
             name: None,
-            x_range: None,
+            x_range: None, x_range_pad: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: RobustSpec = serde_json::from_str(&json).unwrap();
@@ -807,7 +890,7 @@ mod tests {
             inject_metrics: false,
             groupby: vec![],
             name: Some("r1".into()),
-            x_range: None,
+            x_range: None, x_range_pad: None,
         };
         let json2 = serde_json::to_string(&s2).unwrap();
         let parsed2: RobustSpec = serde_json::from_str(&json2).unwrap();
@@ -968,7 +1051,7 @@ mod tests {
             inject_zero_ref: false,
             inject_metrics: true,
             groupby: vec![],
-            x_range: None,
+            x_range: None, x_range_pad: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();
@@ -1024,7 +1107,7 @@ mod tests {
             inject_zero_ref: false,
             inject_metrics: false,
             groupby: vec![],
-            x_range: None,
+            x_range: None, x_range_pad: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();
@@ -1663,5 +1746,228 @@ mod tests {
         }
         seen_groups.sort();
         assert_eq!(seen_groups, vec!["g=a".to_string(), "g=b".to_string()]);
+    }
+
+    // ── A drawn log axis demands this fit in its own space ───────────────
+
+    type LogSpace = crate::transform::color_bin_group::LogAxisSpace;
+
+    fn ctx_demanding(space: StepSpace) -> TransformContext {
+        TransformContext { log_space: Some(std::rc::Rc::new(space)), ..TransformContext::default() }
+    }
+
+    /// The `x` slot demanded along `x` in `x_space`, the `y` slot along `y`
+    /// in `y_space`, whichever is `Some` — mirrors `smooth::tests`' and
+    /// `kde_2d::tests`' identical helper.
+    fn axis_slots(x_space: Option<LogSpace>, y_space: Option<LogSpace>) -> StepSpace {
+        use crate::spec::layer::PositionalAxis;
+        StepSpace::for_slots(
+            [(SpaceSlot::X, PositionalAxis::X, x_space), (SpaceSlot::Y, PositionalAxis::Y, y_space)]
+                .into_iter()
+                .filter_map(|(slot, axis, space)| space.map(|space| (slot, SlotSpace { space, axes: vec![axis], records_caller_input: true }))),
+        )
+    }
+
+    fn positive_space() -> LogSpace {
+        LogSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// Robust's Huber fit, drawn on a demanded log x, fits a straight line
+    /// in log(x): data generated as `y = a + b*log10(x)` has no outliers to
+    /// down-weight, so Huber IRLS converges to (close to) the exact OLS
+    /// line in log units, and the mapped-back grid stays strictly positive.
+    #[test]
+    fn robust_on_a_demanded_log_x_fits_a_straight_line_in_log_units() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let ys: Vec<f64> = xs.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+        let batch = xy_batch(xs, ys);
+        let s = spec(6, None, 1.345, SmoothOutput::Fitted);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        let grid = col(&out, "x");
+        let fitted = col(&out, "y");
+        assert!(grid.iter().all(|v| v.is_finite() && *v > 0.0), "{grid:?}");
+        for (&x, &y) in grid.iter().zip(fitted.iter()) {
+            let expected = 3.0 + 2.0 * x.log10();
+            assert!((y - expected).abs() < 1e-6, "x={x} y={y} expected={expected}");
+        }
+        let recorded = ctx.log_input.borrow();
+        let column = recorded
+            .get(&(crate::spec::layer::PositionalAxis::X, "x".to_string()))
+            .expect("the walk's root records the caller's column");
+        assert_eq!(column.len(), 6, "the recorded column is the caller's whole input");
+    }
+
+    /// A demanded x with off-side (`<= 0`) rows and a genuine null mixed
+    /// in among on-side ones: the mapped-off-side rows never reach the
+    /// fit body, so the output grid draws no off-side x, but
+    /// `ctx.log_input` still records the caller's WHOLE, UNTOUCHED column
+    /// — mirrors `smooth::tests`'s identical case.
+    #[test]
+    fn robust_on_a_demanded_x_with_off_side_and_null_rows_records_the_caller_column_untouched_and_draws_no_off_side_x() {
+        pyo3::Python::initialize();
+        let xs: Vec<Option<f64>> = vec![Some(-2.0), None, Some(1.0), Some(2.0), Some(4.0), Some(8.0), Some(16.0)];
+        let ys: Vec<Option<f64>> = vec![
+            Some(0.0),
+            Some(0.0),
+            Some(3.0),
+            Some(3.0 + 2.0 * 2f64.log10()),
+            Some(3.0 + 2.0 * 4f64.log10()),
+            Some(3.0 + 2.0 * 8f64.log10()),
+            Some(3.0 + 2.0 * 16f64.log10()),
+        ];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs.clone())),
+            Arc::new(Float64Array::from(ys)),
+        ])
+        .unwrap();
+        let s = spec(5, None, 1.345, SmoothOutput::Fitted);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).expect("the on-side rows alone still fit a line");
+        let grid = col(&out, "x");
+        assert!(grid.iter().all(|v| v.is_finite() && *v > 0.0), "the grid must draw no off-side x: {grid:?}");
+        let recorded = ctx.log_input.borrow();
+        let column = recorded
+            .get(&(crate::spec::layer::PositionalAxis::X, "x".to_string()))
+            .expect("the demanded X slot records the caller's column");
+        assert_eq!(
+            column.len(),
+            xs.len(),
+            "the recorded column is the caller's WHOLE input length, off-side and null rows included, not filtered down to the rows the fit itself uses"
+        );
+        let recorded_f64 = column.as_any().downcast_ref::<Float64Array>().expect("caller x is Float64");
+        assert!(recorded_f64.is_null(1), "the caller's own null stays null in the recorded copy, not silently filled in");
+        assert_eq!(recorded_f64.value(0), -2.0, "the off-side row's own value is recorded verbatim, not nulled out by the log mapping that only touches the fit's own input");
+    }
+
+    /// `PyRobust::new` refuses a non-finite `x_range` endpoint, at either
+    /// end, for each of NaN/+inf/-inf — a regression test for the
+    /// constructor's own `x_range.is_finite()` guard: were that check
+    /// deleted, every one of these six cases would construct successfully
+    /// instead of refusing (`result.err()` would be `None`), and the test
+    /// would panic at `.err().unwrap_or_else(..)` ("must be refused, not
+    /// accepted"), never reaching the `assert_eq!` on the refusal text.
+    /// Mirrors `smooth::tests`'s identical `PySmooth` case.
+    #[test]
+    fn pyrobust_new_refuses_a_non_finite_x_range_at_either_end() {
+        pyo3::Python::initialize();
+        for (a, b) in [
+            (f64::NAN, 8.0),
+            (8.0, f64::NAN),
+            (f64::INFINITY, 8.0),
+            (8.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 8.0),
+            (8.0, f64::NEG_INFINITY),
+        ] {
+            let result = PyRobust::new(
+                "x", "y", 100, None, 1.345, 25, 1e-8, "fitted",
+                false, false, None, None, Some([a, b]), None,
+            );
+            let err = result.err().unwrap_or_else(|| panic!("x_range=[{a}, {b}] must be refused, not accepted"));
+            assert_eq!(
+                err.to_string(),
+                format!("ValueError: Robust: x_range must be (lo, hi) with both finite; received [{a}, {b}]"),
+                "x_range=[{a}, {b}]"
+            );
+        }
+    }
+
+    /// `x_range_pad` is taken AFTER `x_range` is mapped into the demanded
+    /// axis's own log10 units, so the padded ends are EXACTLY
+    /// `10^(-0.05*log10(16))` and `10^(1.05*log10(16))` for `x_range=[1,
+    /// 16]`, `pad=0.05` — see `smooth::tests`'s identical case for the
+    /// full contract.
+    #[test]
+    fn robust_x_range_pad_is_taken_in_the_demanded_axis_own_log_units() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+        let ys: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let batch = xy_batch(xs, ys);
+        let mut s = spec(10, None, 1.345, SmoothOutput::Fitted);
+        s.x_range = Some([1.0, 16.0]);
+        s.x_range_pad = Some(0.05);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        let grid = col(&out, "x");
+        let log16 = 16f64.log10();
+        let expected_lo = 10f64.powf(-0.05 * log16);
+        let expected_hi = 10f64.powf(1.05 * log16);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+        assert!(
+            close(grid.iter().cloned().reduce(f64::min).unwrap(), expected_lo),
+            "expected the padded low end {expected_lo}, got {grid:?}"
+        );
+        assert!(
+            close(grid.iter().cloned().reduce(f64::max).unwrap(), expected_hi),
+            "expected the padded high end {expected_hi}, got {grid:?}"
+        );
+    }
+
+    /// `x_range_pad` ALONE (no explicit `x_range`) pads the batch's own x
+    /// extent in the demanded axis's own LOG units, not data units: this
+    /// fixture's x spans exactly `[1, 16]`, the same span the test above
+    /// passes as an EXPLICIT `x_range`, so the two tests' expected padded
+    /// ends are identical — see `smooth::tests`'s identical case for the
+    /// full contract.
+    #[test]
+    fn robust_x_range_pad_alone_pads_the_batchs_own_extent_in_the_demanded_axis_own_log_units() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+        let ys: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let batch = xy_batch(xs, ys);
+        let mut s = spec(10, None, 1.345, SmoothOutput::Fitted);
+        s.x_range = None;
+        s.x_range_pad = Some(0.05);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        let grid = col(&out, "x");
+        let log16 = 16f64.log10();
+        let expected_lo = 10f64.powf(-0.05 * log16);
+        let expected_hi = 10f64.powf(1.05 * log16);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+        assert!(
+            close(grid.iter().cloned().reduce(f64::min).unwrap(), expected_lo),
+            "expected the padded low end {expected_lo}, got {grid:?}"
+        );
+        assert!(
+            close(grid.iter().cloned().reduce(f64::max).unwrap(), expected_hi),
+            "expected the padded high end {expected_hi}, got {grid:?}"
+        );
+    }
+
+    /// A range whose DATA-SPACE pad would go off-side: `x_range=[1, 100]`
+    /// padded 5% in data units would give a negative, unplaceable low end.
+    /// Padded in LOG units instead, the ends are exactly `10^-0.1` and
+    /// `10^2.1`, both strictly positive — see `smooth::tests`'s identical
+    /// case for the full contract.
+    #[test]
+    fn robust_x_range_pad_in_log_units_never_goes_off_side_where_a_data_space_pad_would() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = vec![1.0, 10.0, 100.0];
+        let ys: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let batch = xy_batch(xs, ys);
+        let mut s = spec(10, None, 1.345, SmoothOutput::Fitted);
+        s.x_range = Some([1.0, 100.0]);
+        s.x_range_pad = Some(0.05);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        let grid = col(&out, "x");
+        let expected_lo = 10f64.powf(-0.1);
+        let expected_hi = 10f64.powf(2.1);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+        assert!(grid.iter().all(|v| v.is_finite() && *v > 0.0), "every grid point must stay on-side: {grid:?}");
+        assert!(
+            close(grid.iter().cloned().reduce(f64::min).unwrap(), expected_lo),
+            "expected the padded low end {expected_lo}, got {grid:?}"
+        );
+        assert!(
+            close(grid.iter().cloned().reduce(f64::max).unwrap(), expected_hi),
+            "expected the padded high end {expected_hi}, got {grid:?}"
+        );
     }
 }

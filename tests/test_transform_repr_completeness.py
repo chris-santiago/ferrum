@@ -214,6 +214,7 @@ ROWS: list[Row] = [
             groupby=["sm_g"],
             name="sm_nm",
             x_range=(-1.25, 3.5),
+            x_range_pad=0.08,
         ),
         dict(
             x="x='sm_x'",
@@ -231,6 +232,7 @@ ROWS: list[Row] = [
             groupby='groupby=["sm_g"]',
             name='name=Some("sm_nm")',
             x_range="x_range=Some([-1.25, 3.5])",
+            x_range_pad="x_range_pad=Some(0.08)",
         ),
     ),
     Row(
@@ -630,6 +632,7 @@ ROWS: list[Row] = [
             groupby=["rb_g"],
             name="rb_nm",
             x_range=(-1.25, 3.5),
+            x_range_pad=0.08,
         ),
         dict(
             x="x='rb_x'",
@@ -645,6 +648,7 @@ ROWS: list[Row] = [
             groupby='groupby=["rb_g"]',
             name='name=Some("rb_nm")',
             x_range="x_range=Some([-1.25, 3.5])",
+            x_range_pad="x_range_pad=Some(0.08)",
         ),
     ),
     Row("PyIdentity", dict(name="id_nm"), dict(name='name=Some("id_nm")')),

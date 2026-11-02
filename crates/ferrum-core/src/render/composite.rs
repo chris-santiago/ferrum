@@ -1538,7 +1538,6 @@ fn leaf_positional_domain(
                 &enc.field,
                 leaf.final_batch,
                 leaf.transform_outputs,
-                false,
                 color.as_ref(),
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
@@ -1568,6 +1567,7 @@ fn leaf_positional_domain(
                 selection,
                 side,
                 color.as_ref(),
+                stacked.adjusted.as_ref(),
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
                 channel: channel.as_str(),

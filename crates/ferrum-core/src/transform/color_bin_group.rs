@@ -769,6 +769,57 @@ mod tests {
         assert!(!slot.records_caller_input, "v passes through unchanged, so the axis already reads it directly");
     }
 
+    fn smooth_step(x: &str, y: &str, name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({"type": "smooth", "x": x, "y": y, "method": "lm", "bandwidth": 0.75, "degree": 1, "n": 5});
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    /// `Smooth`'s Fitted output literally names its grid column `x`: when
+    /// the caller's own field is ALSO named `x` (as here), a name-based
+    /// `computes()` (`output != input`) would misread the collision as a
+    /// pass-through — like `DataWindow`'s sort field above, which really
+    /// does carry its input through unchanged — and drop the off-side
+    /// record. [`SpaceColumn::pass_through`] is declared explicitly
+    /// instead, so the record survives the name coincidence.
+    #[test]
+    fn a_smooth_fit_on_a_field_named_like_its_own_output_still_records_the_caller_column() {
+        let demand = space_demand(serde_json::json!([marker(), smooth_step("x", "y", None)]), &[(FINAL_OUTPUT_KEY, PositionalAxis::X, "x")]);
+        let slot = demand.space(&[1]).of(SpaceSlot::X).cloned().expect("Smooth demanded on its X slot");
+        assert!(
+            slot.records_caller_input,
+            "x is the caller's own field, genuinely computed (not passed through), even though it shares the Fitted output's own column name"
+        );
+    }
+
+    /// The same name-collision shape as the `Smooth` case above, for
+    /// `Kde`'s grid column (always named `value`): a caller field literally
+    /// named `value` must still have its off-side record kept.
+    #[test]
+    fn a_kde_on_a_field_named_like_its_own_output_still_records_the_caller_column() {
+        pyo3::Python::initialize();
+        let batch = arrow::array::RecordBatch::try_new(
+            std::sync::Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+                "value",
+                arrow::datatypes::DataType::Float64,
+                false,
+            )])),
+            vec![std::sync::Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 4.0]))],
+        )
+        .unwrap();
+        let chain = serde_json::json!([marker(), {"type": "kde", "field": "value", "bandwidth": {"kind": "scott"}, "n": 4}]);
+        let (_, lineages) = apply_transforms_named(&steps(chain), &batch, &Default::default()).expect("the chain runs");
+        let reads = vec![(FINAL_OUTPUT_KEY.to_string(), PositionalAxis::X, "value".to_string(), space())];
+        let demand = SpaceDemand::of(&lineages, &reads).expect("one space per slot");
+        let slot = demand.space(&[1]).of(SpaceSlot::Field).cloned().expect("Kde demanded on its field slot");
+        assert!(
+            slot.records_caller_input,
+            "value is the caller's own field, genuinely computed (not passed through), even though it shares the grid's own output name"
+        );
+    }
+
     /// A read through a branch input reaches the statistic it reads,
     /// exactly as the color demand's [`a_read_through_a_branch_input_bins_the_statistic_it_reads`]
     /// does — the space demand reuses the same lineage-walking mechanism.

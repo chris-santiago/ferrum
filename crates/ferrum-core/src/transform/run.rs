@@ -47,6 +47,27 @@ pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 /// the same id.
 pub(crate) type StepId = Vec<usize>;
 
+/// The `TransformSpec` a `StepId` names, read directly off the written
+/// chain rather than re-run: `id`'s elements index `transforms` the same
+/// way [`Run::chain`] assigned them (`[path, &[index]].concat()`), so a
+/// `Branch`'s own id descends one level into its `transforms` with the
+/// id's remaining elements. `None` for an empty id, an index past the end
+/// (a stale id from a different chain), or an id that descends into
+/// anything but a `Branch`. Lets a caller holding a [`LoweredStep::id`]
+/// (a `SpaceWalkStep`'s step) ask which kind of statistic actually computed
+/// it, without duplicating the runner's own walk.
+pub(crate) fn step_spec_at<'a>(transforms: &'a [TransformSpec], id: &[usize]) -> Option<&'a TransformSpec> {
+    let (&first, rest) = id.split_first()?;
+    let spec = transforms.get(first)?;
+    if rest.is_empty() {
+        return Some(spec);
+    }
+    match spec {
+        TransformSpec::Branch(branch) => step_spec_at(&branch.transforms, rest),
+        _ => None,
+    }
+}
+
 /// A lowered step a batch's rows passed, and the columns it groups by.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredStep {
@@ -75,13 +96,23 @@ pub(crate) struct SpaceWalkStep<'a> {
     pub(crate) output: &'a str,
     pub(crate) input: &'a str,
     pub(crate) is_root: bool,
+    /// [`SpaceColumn::pass_through`] of the column this step was found
+    /// under, negated: carried onto the walk step rather than re-derived
+    /// from `output`/`input` by name.
+    computes: bool,
 }
 
 impl SpaceWalkStep<'_> {
     /// Whether the step computes `output` from `input` rather than passing
     /// the input through under its own name (a `DataWindow` sort field).
+    /// Reads the step's own declaration (the column's
+    /// [`SpaceColumn::pass_through`]) rather than comparing `output` to
+    /// `input` by name: a computed output can happen to share its input's
+    /// name (a `Smooth` fit on a field called `x`, a `Kde` grid on a field
+    /// called `value`) without being a pass-through, which a name
+    /// comparison would misread as one.
     pub(crate) fn computes(&self) -> bool {
-        self.output != self.input
+        self.computes
     }
 }
 
@@ -175,7 +206,14 @@ impl OutputLineage {
             .find_map(|(i, step)| step.space_columns.iter().find(|c| c.output == target).map(|c| (i, c)))
         {
             let is_root = !self.lowered[..index].iter().any(|step| outputs(step, &column.input));
-            walk.push(SpaceWalkStep { index, slot: column.slot, output: &column.output, input: &column.input, is_root });
+            walk.push(SpaceWalkStep {
+                index,
+                slot: column.slot,
+                output: &column.output,
+                input: &column.input,
+                is_root,
+                computes: !column.pass_through,
+            });
             target = &column.input;
             search_upto = index;
         }

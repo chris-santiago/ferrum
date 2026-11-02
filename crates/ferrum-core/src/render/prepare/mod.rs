@@ -20,8 +20,8 @@ use crate::layout::{
 use crate::spec::chart::ChartSpec;
 use crate::transform::color_bin_group::{BinDemand, ColorBinPlan, LogAxisSpace, RunPlan, SpaceDemand};
 use crate::transform::context::{AllNullOutcome, AllNullPartition, StepInstance, TransformContext, TransformWarning};
-use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
-use crate::transform::run::{OutputLineage, OutputLineages};
+use crate::transform::core::{apply_transforms_named, SpaceSlot, TransformSpec, FINAL_OUTPUT_KEY};
+use crate::transform::run::{step_spec_at, OutputLineage, OutputLineages};
 
 use super::scale_resolve::{OverlayLegends, ResolvedScales};
 use std::borrow::Cow;
@@ -1849,12 +1849,23 @@ fn run_pipeline(
 ) -> Result<TransformRun, RenderError> {
     let first = run_transforms_with_facet(spec, normalized, viewport, theme, None)?;
 
+    // One list of every layer's drawn read into a demanded log axis,
+    // computed once — both the
+    // residplot-y and sqrt-x gates below read it rather than each
+    // re-resolving which layer and scale produced a read, and
+    // `SpaceDemand::of` still takes its own plain tuple shape, mapped from
+    // this list.
+    let space_reads = log_space_reads(spec, &first.0, leaf_scales);
+    refuse_residplot_log_y(spec, &space_reads)?;
+    refuse_sqrt_on_log_x(spec, &space_reads, &first.2)?;
+
     let color_reads = binned_color_reads(spec);
     let color_reads: Vec<(&str, &str)> = color_reads.iter().map(|(key, field)| (key.as_str(), field.as_str())).collect();
     let color_demand = BinDemand::of(&first.2, &color_reads);
 
-    let space_reads = log_space_reads(spec, &first.0, leaf_scales);
-    let space_demand = SpaceDemand::of(&first.2, &space_reads)?;
+    let space_demand_reads: Vec<(String, crate::spec::layer::PositionalAxis, String, LogAxisSpace)> =
+        space_reads.into_iter().map(LogSpaceRead::into_tuple).collect();
+    let space_demand = SpaceDemand::of(&first.2, &space_demand_reads)?;
 
     if !color_demand.any() && !space_demand.any() {
         return Ok(first);
@@ -1876,6 +1887,32 @@ fn run_pipeline(
 
     let plan = RunPlan { color: ColorBinPlan { demand: color_demand, edges }, space: space_demand };
     run_transforms_with_facet(spec, normalized, viewport, theme, Some(&plan))
+}
+
+/// One layer's drawn read into a demanded log axis ([`log_space_reads`]):
+/// `layer` is that layer's index in [`build_layers`]'s own order, read by
+/// both [`refuse_sqrt_on_log_x`] and [`refuse_residplot_log_y`] to voice
+/// their refusal in that layer's own [`public_layer`]/[`layer_entry`]
+/// rather than re-resolving which layer and scale produced each read a
+/// second time: the two gates
+/// read this ONE list, computed once in [`run_pipeline`] before
+/// [`SpaceDemand::of`], instead of each walking `build_layers`/
+/// `establishing_encoding`/`resolved_explicit_scale` on its own.
+pub(crate) struct LogSpaceRead {
+    pub(crate) layer: usize,
+    pub(crate) key: String,
+    pub(crate) axis: crate::spec::layer::PositionalAxis,
+    pub(crate) column: String,
+    pub(crate) space: LogAxisSpace,
+}
+
+impl LogSpaceRead {
+    /// This read's `(key, axis, column, space)` tuple — [`SpaceDemand::of`]'s
+    /// own plain shape, with `layer` dropped (that index is this gate's own
+    /// addition; `SpaceDemand::of`'s lineage walk never needed it).
+    fn into_tuple(self) -> (String, crate::spec::layer::PositionalAxis, String, LogAxisSpace) {
+        (self.key, self.axis, self.column, self.space)
+    }
 }
 
 /// For each layer (the chart itself when unlayered) whose drawn `x` or `y`
@@ -1906,7 +1943,7 @@ fn log_space_reads(
     spec: &ChartSpec,
     outputs: &HashMap<String, RecordBatch>,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
-) -> Vec<(String, crate::spec::layer::PositionalAxis, String, LogAxisSpace)> {
+) -> Vec<LogSpaceRead> {
     use crate::spec::encoding::ScaleSpec;
     use crate::spec::layer::PositionalAxis;
     let Some(primary_batch) = outputs.get(FINAL_OUTPUT_KEY) else { return Vec::new() };
@@ -1949,7 +1986,7 @@ fn log_space_reads(
             let drawn_column = if channel == "x" { layer.encoding.x.as_ref() } else { layer.encoding.y.as_ref() };
             let Some(drawn_column) = drawn_column.map(|e| e.field.clone()) else { continue };
             let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
-            reads.push((key, axis, drawn_column, space));
+            reads.push(LogSpaceRead { layer: idx, key, axis, column: drawn_column, space });
         }
     }
     // Each independent-y layer's own slot: its scale is resolved over the
@@ -1966,9 +2003,73 @@ fn log_space_reads(
         let space = LogAxisSpace { base: *base, side };
         let Some(drawn_column) = layer.encoding.y.as_ref().map(|e| e.field.clone()) else { continue };
         let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
-        reads.push((key, PositionalAxis::secondary_y(y_slot), drawn_column, space));
+        reads.push(LogSpaceRead { layer: layer_idx, key, axis: PositionalAxis::secondary_y(y_slot), column: drawn_column, space });
     }
     reads
+}
+
+/// `residplot(...)`'s residual axis draws signed residuals around 0, which
+/// no `LogScale` can place: refused the moment its y channel resolves to
+/// one, through any door (`y=fm.Y(scale=...)`, `encode=`,
+/// `.override(y_scale_type="log")`) — `reads` (`log_space_reads`) already
+/// folds every door into one resolution, so this gate reads it rather than
+/// re-resolving the scale itself.
+/// Refuses at the FIRST `reads` entry on a `y` axis (the primary slot `0`
+/// or any independent-y secondary slot) whose own layer's effective entry
+/// is `"residplot"`. `residplot` stamps every internal layer it builds
+/// with its own `entry` directly (it writes no chart-level `spec.entry` at
+/// all, [`layer_entry`]'s fallback never triggers here), so this reads
+/// that layer's own effective entry rather than the chart's.
+fn refuse_residplot_log_y(spec: &ChartSpec, reads: &[LogSpaceRead]) -> Result<(), RenderError> {
+    use crate::spec::layer::PositionalChannel;
+    let Ok(layers) = build_layers(spec) else { return Ok(()) };
+    for read in reads {
+        if read.axis.channel != PositionalChannel::Y {
+            continue;
+        }
+        let Some(layer) = layers.get(read.layer) else { continue };
+        if layer_entry(spec, read.layer, layer.mark) != "residplot" {
+            continue;
+        }
+        return Err(RenderError::ResidplotLogY.in_layer_context(public_layer(spec, read.layer, layer.mark), &layer_entry(spec, read.layer, layer.mark)));
+    }
+    Ok(())
+}
+
+/// `mark_smooth(method="sqrt")` composes with no other predictor transform:
+/// refused the moment a `LogScale` demands the x it fits, in the layer
+/// entry's own voice, before the fit ever runs in that space
+/// (`transform::smooth::apply_in_log_space` carries a backstop of the same
+/// refusal, unvoiced, for the case this gate somehow misses). Reads `reads`
+/// (`log_space_reads`) for which layers draw a demanded log `x` at all,
+/// then, for the first `x` read, walks that layer's own drawn x back
+/// through its lineage
+/// ([`OutputLineage::space_walk`], the same walk [`SpaceDemand::of`] takes)
+/// to the real `TransformSpec` that computed it ([`step_spec_at`]), since a
+/// drawn column's lineage carries no fact about which fit *method* produced
+/// it, only that something did.
+fn refuse_sqrt_on_log_x(spec: &ChartSpec, reads: &[LogSpaceRead], lineages: &OutputLineages) -> Result<(), RenderError> {
+    use crate::spec::layer::PositionalChannel;
+    use crate::transform::smooth::SmoothMethod;
+    let Ok(layers) = build_layers(spec) else { return Ok(()) };
+    for read in reads {
+        if read.axis.channel != PositionalChannel::X {
+            continue;
+        }
+        let Some(layer) = layers.get(read.layer) else { continue };
+        let Some(lineage) = lineages.get(&read.key) else { continue };
+        for step in lineage.space_walk(&read.column) {
+            if step.slot != SpaceSlot::X {
+                continue;
+            }
+            let Some(TransformSpec::Smooth(s)) = step_spec_at(&spec.transforms, &lineage.lowered[step.index].id) else { continue };
+            if matches!(s.method, SmoothMethod::SqrtX) {
+                return Err(RenderError::SmoothSqrtOnLogX
+                    .in_layer_context(public_layer(spec, read.layer, layer.mark), &layer_entry(spec, read.layer, layer.mark)));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The binned reads a run's demand comes from: for each layer (the chart

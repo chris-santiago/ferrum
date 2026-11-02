@@ -27,8 +27,8 @@ use pyo3::PyResult;
 
 use crate::transform::color_bin_group::SlotSpace;
 use crate::transform::context::TransformContext;
-use crate::transform::core::SpaceSlot;
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::core::{SpaceColumn, SpaceSlot};
+use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 use crate::transform::project::with_column;
 
 /// Which side of zero a `Log` axis places, and at what base: the space a
@@ -102,18 +102,31 @@ impl LogAxisSpace {
     }
 
     /// An extent-like spec field (a `Bin`'s or `Kde`'s `extent`, a `Kde`'s
-    /// `count_scale_extent`, one axis's half of a `Kde2D`'s `extent`) in
-    /// this space's units, for the step's arm to put into the spec its
-    /// body reads. An endpoint off this space's side is
-    /// refused in the step's own voice (`label`): malformed input for that
-    /// scale, not silently rendered against an extent the axis can never
-    /// place. `None` stays `None`.
-    pub(crate) fn extent_in_space(&self, label: &str, extent: Option<(f64, f64)>) -> PyResult<Option<(f64, f64)>> {
+    /// `count_scale_extent`, one axis's half of a `Kde2D`'s `extent`,
+    /// `Smooth`'s or `Robust`'s `x_range`) in this space's units, for the
+    /// step's arm to put into the spec its body reads. An endpoint off
+    /// this space's side is refused in the step's own voice (`label`):
+    /// malformed input for that scale, not silently rendered against an
+    /// extent the axis can never place. A non-finite endpoint is refused
+    /// the same way, so this function's own contract — `None` in gives
+    /// `None` out, `Some` in gives `Some` out or a refusal — holds by
+    /// construction for every caller: every caller (Bin/Kde/Kde2D/Smooth/
+    /// Robust) validates finiteness at its own binding, so this arm is
+    /// unreachable on a live path and none of their refusal texts come
+    /// from here — this check holds the contract for any caller that does
+    /// not. `param` names the caller-written keyword the
+    /// refusal quotes (`"extent"` for Bin/Kde/Kde2D, `"x_range"` for
+    /// Smooth/Robust), so the remedy names the parameter the caller
+    /// actually wrote rather than a generic `extent=` no fit door exposes.
+    pub(crate) fn extent_in_space(&self, label: &str, param: &str, extent: Option<(f64, f64)>) -> PyResult<Option<(f64, f64)>> {
         let Some((a, b)) = extent else { return Ok(None) };
+        if !a.is_finite() || !b.is_finite() {
+            return Err(PyValueError::new_err(format!("{label}: {param} ({a}, {b}) must be two finite numbers")));
+        }
         if let Some(v) = [a, b].into_iter().find(|&v| self.off_side(v)) {
             return Err(PyValueError::new_err(format!(
-                "{label}: extent ({a}, {b}) names {v}, which a LogScale cannot place (it is zero or \
-                 on the wrong side); state both endpoints on the scale's own side, or drop extent="
+                "{label}: {param} ({a}, {b}) names {v}, which a LogScale cannot place (it is zero or \
+                 on the wrong side); state both endpoints on the scale's own side, or drop {param}="
             )));
         }
         Ok(self.forward_extent((a, b)))
@@ -368,6 +381,77 @@ pub(crate) fn run_in_log_space(
     Ok(result)
 }
 
+/// [`run_in_log_space`] for `Smooth`, `Robust`, `Logistic` and `Glm`: the
+/// demand (`x`/`y`, each the field it reads and the slot it is demanded
+/// in, `None` when that slot is not demanded) and the map-back outputs
+/// both come from `columns` (`TransformSpec::fit_space_columns`/
+/// `fit_x_only_space_columns`), the one declaration of which output holds
+/// which slot's units, so a demanded column and its map-back can never
+/// drift apart — only the columns whose slot is actually demanded are
+/// mapped back, so a `Residuals` output (declaring `x` alone) never has
+/// its `y` touched even when a caller somehow demands that slot too.
+/// `body` receives the mapped batch and the mapped `x`/`y` column names
+/// (a slot not demanded keeps its caller name unchanged), plus the
+/// context `run_in_log_space` itself threads through (the degenerate
+/// scratch sink on an all-off-side slot).
+pub(crate) fn run_fit_in_log_space(
+    ctx: &TransformContext,
+    label: &str,
+    batch: &RecordBatch,
+    columns: &[SpaceColumn],
+    x: (&str, Option<&SlotSpace>),
+    y: (&str, Option<&SlotSpace>),
+    body: impl FnOnce(&RecordBatch, &str, &str, &TransformContext) -> PyResult<RecordBatch>,
+) -> PyResult<RecordBatch> {
+    let demand: Vec<DemandedField> = [(SpaceSlot::X, x.0, x.1), (SpaceSlot::Y, y.0, y.1)]
+        .into_iter()
+        .filter_map(|(slot, field, space)| space.map(|space| DemandedField { slot, field, space, shape: ColumnShape::Scalar }))
+        .collect();
+    let outputs: Vec<(&str, SpaceSlot, ColumnShape)> = columns
+        .iter()
+        .filter(|c| demand.iter().any(|d| d.slot == c.slot))
+        .map(|c| (c.output.as_str(), c.slot, ColumnShape::Scalar))
+        .collect();
+    run_in_log_space(
+        ctx,
+        label,
+        batch,
+        &demand,
+        |mapped_batch, cols, ctx| {
+            let xcol = cols.column(SpaceSlot::X, x.0);
+            let ycol = cols.column(SpaceSlot::Y, y.0);
+            body(mapped_batch, &xcol, &ycol, ctx)
+        },
+        &outputs,
+    )
+}
+
+/// `Smooth`'s and `Robust`'s facet pin for `x_range`
+/// (`render::prepare::extent::fix_transform_extents_for_facet_impl`): the
+/// whole pre-facet `batch`'s own `field` extent, in DATA units, under a
+/// demanded `space` on `slot` — the mapped column's on-side extent in log
+/// units ([`numeric_util::column_extent`] over the private column
+/// [`with_mapped_slot`] maps), backward-mapped to data units at both
+/// ends. Mirrors `bin::global_extent_in_space`'s identical shape for
+/// `Bin`'s own `extent`, generalized here so the fits' facet pin shares
+/// it instead of duplicating it per fit. `None` on a degenerate extent
+/// (no on-side value, or a missing/all-tied column), exactly as
+/// `column_extent` itself reports.
+///
+/// [`numeric_util::column_extent`]: crate::transform::numeric_util::column_extent
+pub(crate) fn column_extent_in_space(
+    batch: &RecordBatch,
+    field: &str,
+    slot: SpaceSlot,
+    space: &SlotSpace,
+    label: &str,
+) -> Option<(f64, f64)> {
+    let demand = DemandedField { slot, field, space, shape: ColumnShape::Scalar };
+    let (mapped_batch, mapped_name) = with_mapped_slot(batch, &demand, label).ok()?;
+    let (lo, hi) = column_extent(&mapped_batch, &mapped_name)?;
+    Some((space.space.backward(lo), space.space.backward(hi)))
+}
+
 /// One column `name` holding `values` in each numeric Arrow type a
 /// caller's frame can carry besides a nullable Float64 (Int64, Int32,
 /// UInt8, Float32), and as a Float64 field declared non-nullable: the
@@ -446,6 +530,39 @@ mod tests {
         let n = negative();
         assert!(n.forward(0.0).is_none());
         assert!(n.forward(1.0).is_none());
+    }
+
+    /// `extent_in_space` refuses a non-finite endpoint before its off-side
+    /// check runs, at either end, for each of NaN/+inf/-inf — a
+    /// regression test for this arm itself: were the finiteness check
+    /// deleted, `off_side` itself returns `false` for a non-finite value
+    /// (before its own `<= 0.0` reading even runs), and `forward` mirrors
+    /// that by returning `None` for one, so all six cases would return
+    /// `Ok(None)` instead of a refusal — the test would panic at
+    /// `.err().unwrap_or_else(..)` ("must be refused, not accepted"), never
+    /// reaching the text assertion below it.
+    #[test]
+    fn extent_in_space_refuses_a_non_finite_endpoint_at_either_end() {
+        pyo3::Python::initialize();
+        let p = positive();
+        for (a, b) in [
+            (f64::NAN, 8.0),
+            (8.0, f64::NAN),
+            (f64::INFINITY, 8.0),
+            (8.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 8.0),
+            (8.0, f64::NEG_INFINITY),
+        ] {
+            let err = p
+                .extent_in_space("stat_smooth", "x_range", Some((a, b)))
+                .err()
+                .unwrap_or_else(|| panic!("({a}, {b}) must be refused, not accepted"));
+            assert_eq!(
+                err.to_string(),
+                format!("ValueError: stat_smooth: x_range ({a}, {b}) must be two finite numbers"),
+                "({a}, {b})"
+            );
+        }
     }
 
     fn x_slot() -> SlotSpace {

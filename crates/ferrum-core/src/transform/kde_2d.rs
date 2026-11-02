@@ -208,7 +208,7 @@ fn apply_in_log_space(
     y_slot: Option<&SlotSpace>,
 ) -> PyResult<RecordBatch> {
     let in_space = |slot: Option<&SlotSpace>, extent: (f64, f64)| match slot {
-        Some(slot) => slot.space.extent_in_space(LABEL, Some(extent)),
+        Some(slot) => slot.space.extent_in_space(LABEL, "extent", Some(extent)),
         None => Ok(Some(extent)),
     };
     let mapped_extent = match spec.extent {

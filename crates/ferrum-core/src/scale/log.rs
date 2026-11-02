@@ -183,6 +183,26 @@ impl LogScaleData {
         !x.is_nan() && x != 0.0 && (self.domain[0] < 0.0) == (x < 0.0)
     }
 
+    /// The proportional domain→range mapping, with no bounds check at
+    /// either end: the arithmetic [`scale`](Self::scale) applies its own
+    /// NaN/clamp bounds to, and [`place_tick`](Self::place_tick) applies
+    /// its tolerance check to instead. Degenerate domain (d0 == d1, e.g. a
+    /// constant-valued data column): see `degenerate_ratio`'s doc comment
+    /// (GH #104) for why this must resolve to the range midpoint rather
+    /// than 0/0 = NaN.
+    fn mapped(&self, x: f64) -> f64 {
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let neg = d0 < 0.0;
+        let sign = if neg { -1.0 } else { 1.0 };
+        let log_base = self.base.ln();
+        let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
+        let ld0 = (d0 * sign).ln() / log_base;
+        let ld1 = (d1 * sign).ln() / log_base;
+        let t = degenerate_ratio(lx - ld0, ld1 - ld0);
+        r0 + t * (r1 - r0)
+    }
+
     fn scale(&self, x: f64) -> f64 {
         if x.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -190,15 +210,7 @@ impl LogScaleData {
         let neg = d0 < 0.0;
         let sign = if neg { -1.0 } else { 1.0 };
         if (x * sign) <= 0.0 && !self.clamp { return f64::NAN; }
-        let log_base = self.base.ln();
-        let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
-        let ld0 = (d0 * sign).ln() / log_base;
-        let ld1 = (d1 * sign).ln() / log_base;
-        // Degenerate domain (d0 == d1, e.g. a constant-valued data column):
-        // see `degenerate_ratio`'s doc comment (GH #104) for why this must
-        // resolve to the range midpoint rather than 0/0 = NaN.
-        let t = degenerate_ratio(lx - ld0, ld1 - ld0);
-        let mapped = r0 + t * (r1 - r0);
+        let mapped = self.mapped(x);
         if self.clamp {
             let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
             mapped.clamp(lo, hi)
@@ -206,6 +218,48 @@ impl LogScaleData {
             f64::NAN
         } else {
             mapped
+        }
+    }
+
+    /// Places a GENERATED tick [`breaks_log`](Self::breaks_log) admits
+    /// within [`TICK_DOMAIN_TOLERANCE`](Self::TICK_DOMAIN_TOLERANCE) of the
+    /// domain, even when it sits a float hair outside the exact domain
+    /// [`scale`](Self::scale) bounds-checks against — the one place that
+    /// admission tolerance and this scale's own placement are made to
+    /// agree, so a tick the generator emits is never the one value
+    /// [`scale`](Self::scale) cannot place.
+    ///
+    /// `scale(v)` when that is finite; otherwise, for `v` within
+    /// `TICK_DOMAIN_TOLERANCE` of `[lo, hi]`, placed EXACTLY at the
+    /// domain's own end — the range value paired with whichever of `d0`/
+    /// `d1` sits nearer `v`, not `mapped(v)`'s own extrapolated value (a
+    /// float hair past that end): a generated tick this close to the
+    /// boundary reads as sitting ON it, never visibly outside the plot
+    /// area. A `v` outside the domain AND outside that tolerance stays
+    /// unplaceable (`NaN`), exactly as `scale` already leaves it: a
+    /// caller-written tick value or a data row just past an explicit
+    /// domain is still left out and warned, not swept in by this.
+    fn place_tick(&self, v: f64) -> f64 {
+        let placed = self.scale(v);
+        if placed.is_finite() {
+            return placed;
+        }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let neg = d0 < 0.0;
+        let sign = if neg { -1.0 } else { 1.0 };
+        if (v * sign) <= 0.0 {
+            return f64::NAN;
+        }
+        let lo = (d0 * sign).min(d1 * sign);
+        let hi = (d0 * sign).max(d1 * sign);
+        if !Self::within_tick_tolerance(v.abs(), lo, hi) {
+            return f64::NAN;
+        }
+        if (v * sign - d0 * sign).abs() <= (v * sign - d1 * sign).abs() {
+            r0
+        } else {
+            r1
         }
     }
 
@@ -547,6 +601,10 @@ impl LogScale {
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
 
+    /// `ScaleKind::tick_position_internal`'s `Log` arm — see
+    /// [`LogScaleData::place_tick`].
+    pub(crate) fn place_tick_internal(&self, v: f64) -> f64 { self.data.place_tick(v) }
+
     /// `ScaleKind::to_pixel_f64`/`_extrapolated`'s gate — see
     /// [`LogScaleData::on_side`].
     pub(crate) fn on_side(&self, x: f64) -> bool { self.data.on_side(x) }
@@ -790,6 +848,33 @@ mod tests {
 
     fn d(domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool) -> LogScaleData {
         LogScaleData::new(domain, range, base, clamp)
+    }
+
+    /// A GENERATED tick within `TICK_DOMAIN_TOLERANCE` of the domain's own
+    /// end places EXACTLY at the corresponding range end (`r0` or `r1`),
+    /// not `mapped(v)`'s own extrapolated value a float hair past it; a
+    /// tick further out than that tolerance stays unplaceable (`NaN`), the
+    /// same as `scale` itself already refuses it. An in-domain `v` is
+    /// byte-identical to `scale`.
+    #[test]
+    fn place_tick_lands_exactly_on_the_nearer_range_end_within_tolerance() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert_eq!(s.place_tick(1000.0 * (1.0 + 1e-10)), 3.0, "just past hi, within tolerance: lands at r1 exactly");
+        assert_eq!(s.place_tick(1.0 * (1.0 - 1e-10)), 0.0, "just under lo, within tolerance: lands at r0 exactly");
+        assert!(s.place_tick(1000.0 * (1.0 + 1e-6)).is_nan(), "past the tolerance above hi: NaN");
+        assert!(s.place_tick(1.0 * (1.0 - 1e-6)).is_nan(), "past the tolerance below lo: NaN");
+        assert_eq!(s.place_tick(10.0), s.scale(10.0), "in-domain: byte-identical to scale");
+    }
+
+    /// The mirrored negative-domain side places the same way: `hi` in
+    /// magnitude is the MORE negative domain end, so a tick just past it
+    /// lands at the range end its signed domain endpoint pairs with.
+    #[test]
+    fn place_tick_lands_exactly_on_the_nearer_range_end_on_the_negative_side() {
+        let s = d([-1000.0, -1.0], [0.0, 3.0], 10.0, false);
+        assert_eq!(s.place_tick(-1000.0 * (1.0 + 1e-10)), 0.0, "just past the -1000 end, within tolerance: lands at r0 (d0's own range end)");
+        assert_eq!(s.place_tick(-1.0 * (1.0 - 1e-10)), 3.0, "just past the -1 end, within tolerance: lands at r1 (d1's own range end)");
+        assert!(s.place_tick(-1000.0 * (1.0 + 1e-6)).is_nan(), "past the tolerance: NaN");
     }
 
     #[test]

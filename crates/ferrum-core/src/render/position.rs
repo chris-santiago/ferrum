@@ -39,11 +39,57 @@ use crate::spec::position::{PositionAdjust, StackAnchor, StackValueAxis};
 /// `base` pairing is the only shape with a span partner — a continuous
 /// `Dodge`/`Jitter` preview carries no `base`.
 ///
+/// `adjusted` is the SAME pair the off-side tally reads ([`AdjustedRows`]):
+/// `Some` exactly when `batch` carries a preview (an adjustment applies on
+/// this axis), `None` otherwise.
+///
 /// [`FINAL_OUTPUT_KEY`]: crate::transform::core::FINAL_OUTPUT_KEY
 pub(crate) struct AdjustedAxisBatch<'a> {
     pub(crate) batch: Cow<'a, RecordBatch>,
     pub(crate) base: Option<crate::spec::encoding::EncodingSpec>,
     pub(crate) outputs: Cow<'a, HashMap<String, RecordBatch>>,
+    pub(crate) adjusted: Option<AdjustedRows<'a>>,
+}
+
+/// An `AdjustedRows` is a batch beside its OWN preview: the whole-frame
+/// unadjusted batch a position adjustment rewrites (`unadjusted`), paired
+/// with that SAME batch's own preview (`adjusted`) — the off-side tally's
+/// one source of truth for "the caller's own rows" and "the rows the
+/// adjustment itself moves off the side" (compared row for row against
+/// `unadjusted`). Every build site honors this by construction, whether it
+/// calls [`adjusted_rows`] or builds the struct literal directly (a build
+/// site already holding `preview`'s own output gains nothing from calling
+/// `preview` a second time through that fn): `adjusted` is row-aligned
+/// with `unadjusted` — [`adjusted_across_panels`] restores input row order
+/// after a faceted split, so row `i` of `adjusted` is always row `i`'s own
+/// adjustment, never reordered relative to `unadjusted` — and a build site
+/// with no row-aligned preview to offer (the whole-frame preview the
+/// adjustment itself failed to produce) gives no `AdjustedRows` at all
+/// rather than pairing `unadjusted` with a preview of a different batch.
+/// `base` names `adjusted`'s stack-base column (`STACK_BASE_COLUMN`) for a
+/// `Stack` preview, `None` for `Dodge`/`Jitter`: a stack's base feeds the
+/// EXTENT only (it is not caller data), never the tally.
+#[derive(Clone)]
+pub(crate) struct AdjustedRows<'a> {
+    pub(crate) unadjusted: &'a RecordBatch,
+    pub(crate) adjusted: RecordBatch,
+    pub(crate) base: Option<&'static str>,
+}
+
+/// Builds an [`AdjustedRows`] by running `preview` over `unadjusted`
+/// itself: `None` when `preview` returns `None` (no adjustment applies on
+/// this axis, or the adjustment failed on this exact batch). `is_stack`
+/// names `base` as [`STACK_BASE_COLUMN`] for a `Stack` preview, `None` for
+/// `Dodge`/`Jitter`. One of several build sites for an `AdjustedRows`
+/// (see its own doc) — `axis_previews`'s own pairings build the struct
+/// literal directly where they already hold the right preview in hand.
+pub(crate) fn adjusted_rows<'a>(
+    unadjusted: &'a RecordBatch,
+    preview: impl FnOnce(&RecordBatch) -> Result<Option<RecordBatch>, crate::render::RenderError>,
+    is_stack: bool,
+) -> Result<Option<AdjustedRows<'a>>, crate::render::RenderError> {
+    let Some(adjusted) = preview(unadjusted)? else { return Ok(None) };
+    Ok(Some(AdjustedRows { unadjusted, adjusted, base: is_stack.then_some(STACK_BASE_COLUMN) }))
 }
 
 /// The column `apply_stack` writes each segment's base into, whichever axis
@@ -124,8 +170,11 @@ pub(crate) fn read_own_values(encoding: &mut crate::spec::encoding::Encoding, ba
 /// batch it draws, in the layered domain union (`scale_resolve::domain`), so
 /// a layer reading a statistic's output widens there exactly as one reading
 /// the chart's rows, and an unadjusted sibling keeps reading its own values.
-/// `include_final` is the facet-shared flag the axis resolves under: when
-/// set, the all-panels batch the union reads is previewed too, per panel.
+/// The all-panels batch at `FINAL_OUTPUT_KEY`, when `transform_outputs`
+/// publishes one, is previewed too and put into `outputs`: a facet-shared
+/// axis's own EXTENT reads it there, so the axis spans the positions the
+/// adjustment draws on every panel, not just this one. The off-side TALLY
+/// is a separate concern, answered by `adjusted` below, never by `outputs`.
 /// Refuses a facet field the panel split cannot read ([`position_preview`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn axis_batch<'a>(
@@ -135,13 +184,13 @@ pub(crate) fn axis_batch<'a>(
     field: &str,
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
-    include_final: bool,
     color: Option<&crate::render::scale_resolve::ColorScale>,
 ) -> Result<AdjustedAxisBatch<'a>, crate::render::RenderError> {
     let unadjusted = AdjustedAxisBatch {
         batch: Cow::Borrowed(primary_batch),
         base: None,
         outputs: Cow::Borrowed(transform_outputs),
+        adjusted: None,
     };
     if spec.is_layered() {
         return Ok(unadjusted);
@@ -159,11 +208,15 @@ pub(crate) fn axis_batch<'a>(
         position_preview(batch, spec.position.as_ref(), &drawn, coord_flipped, axis, spec.facet.as_ref(), color)
     };
     let Some(adjusted) = preview(primary_batch)? else { return Ok(unadjusted) };
-    let all_panels = match include_final.then(|| transform_outputs.get(crate::transform::core::FINAL_OUTPUT_KEY)).flatten() {
+    // The all-panels preview of `FINAL_OUTPUT_KEY`, when the chart
+    // publishes one: feeds the facet-shared axis's own EXTENT (via
+    // `outputs`, below) on every panel, independent of which batch
+    // `whole_frame_batch` picks for the tally just below.
+    let all_panels = match transform_outputs.get(crate::transform::core::FINAL_OUTPUT_KEY) {
         Some(all_panels) => preview(all_panels)?,
         None => None,
     };
-    let outputs = match all_panels {
+    let outputs = match all_panels.clone() {
         Some(all_panels) => {
             let mut outputs = transform_outputs.clone();
             outputs.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), all_panels);
@@ -174,12 +227,27 @@ pub(crate) fn axis_batch<'a>(
     // Only `Stack` pairs a base column with the value it widens to (every
     // stacked segment's span, from base to top); a `Dodge`/`Jitter` preview
     // is the adjusted batch alone, with no span partner.
-    let base = matches!(
+    let is_stack = matches!(
         effective_position(spec.position.as_ref(), &drawn, coord_flipped)?.as_deref(),
         Some(PositionAdjust::Stack { .. })
-    )
-    .then(|| crate::spec::encoding::EncodingSpec { field: STACK_BASE_COLUMN.into(), ..Default::default() });
-    Ok(AdjustedAxisBatch { batch: Cow::Owned(adjusted), base, outputs })
+    );
+    let base = is_stack.then(|| crate::spec::encoding::EncodingSpec { field: STACK_BASE_COLUMN.into(), ..Default::default() });
+    // `AdjustedRows` pairs the WHOLE-FRAME unadjusted batch
+    // (`whole_frame_batch`'s own selection — `FINAL` when it holds
+    // `field`, else `primary_batch`, the SAME selection the Chart arm's
+    // own whole-frame tally rule makes) with that batch's own preview,
+    // reusing `adjusted`/`all_panels` (already computed above) rather than
+    // previewing a third time.
+    let whole_frame = crate::render::scale_resolve::whole_frame_batch(primary_batch, transform_outputs, field);
+    let whole_frame_rows = if std::ptr::eq(whole_frame, primary_batch) {
+        Some(AdjustedRows { unadjusted: whole_frame, adjusted: adjusted.clone(), base: is_stack.then_some(STACK_BASE_COLUMN) })
+    } else {
+        match all_panels {
+            Some(ap) => Some(AdjustedRows { unadjusted: whole_frame, adjusted: ap, base: is_stack.then_some(STACK_BASE_COLUMN) }),
+            None => adjusted_rows(whole_frame, preview, is_stack)?,
+        }
+    };
+    Ok(AdjustedAxisBatch { batch: Cow::Owned(adjusted), base, outputs, adjusted: whole_frame_rows })
 }
 
 /// The position preview of the batch an already-prepared layer draws, on the
@@ -464,20 +532,31 @@ fn adjusted_across_panels(
     adjust: impl Fn(&RecordBatch) -> Result<RecordBatch, crate::render::RenderError>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     let panels = facet_panels(batch, facet)?;
-    let per_panel: Vec<RecordBatch> = match &panels {
+    // `row_order` is `None` for the single-panel case (the whole batch
+    // stacks whole, already in input order) and `Some` for a real
+    // multi-panel split: `flat_indices[j]` is the ORIGINAL row `batch`'s
+    // `j`-th post-concat position came from, read by the inverse
+    // permutation below so the combined preview comes back in `batch`'s
+    // own row order, byte-aligned with `batch` itself ([`AdjustedRows`]'s
+    // doc — a row-aligned preview is what lets a caller-row column and the
+    // adjusted column it pairs with be read side by side with no
+    // reordering).
+    let (per_panel, row_order): (Vec<RecordBatch>, Option<Vec<u32>>) = match &panels {
         None => match adjust(batch) {
-            Ok(adjusted) => vec![adjusted],
+            Ok(adjusted) => (vec![adjusted], None),
             Err(_) => return Ok(None),
         },
         Some(panels) => {
             let mut out = Vec::with_capacity(panels.len());
-            for panel in panels {
+            let mut flat_indices: Vec<u32> = Vec::with_capacity(batch.num_rows());
+            for (panel, rows) in panels {
                 match adjust(panel) {
                     Ok(adjusted) => out.push(adjusted),
                     Err(_) => return Ok(None),
                 }
+                flat_indices.extend_from_slice(rows);
             }
-            out
+            (out, Some(flat_indices))
         }
     };
     match per_panel.len() {
@@ -486,6 +565,17 @@ fn adjusted_across_panels(
         _ => {
             let combined = crate::transform::concat::concat_by_name("position preview", per_panel)
                 .map_err(crate::render::RenderError::ScaleResolutionFailed)?;
+            let combined = match row_order {
+                Some(flat_indices) => {
+                    let mut order = vec![0u32; flat_indices.len()];
+                    for (post_concat, &original_row) in flat_indices.iter().enumerate() {
+                        order[original_row as usize] = post_concat as u32;
+                    }
+                    arrow::compute::take_record_batch(&combined, &arrow::array::UInt32Array::from(order))
+                        .map_err(|e| crate::render::RenderError::ScaleResolutionFailed(format!("position preview: restoring row order: {e}")))?
+                }
+                None => combined,
+            };
             Ok(Some(combined))
         }
     }
@@ -503,16 +593,25 @@ fn with_nonzero_bases(stacked: RecordBatch) -> Option<RecordBatch> {
     RecordBatch::try_new(stacked.schema(), columns).ok()
 }
 
+/// One facet panel's own batch, paired with the ORIGINAL row indices (into
+/// the un-split batch) it was built from — [`facet_panels`]'s own return
+/// shape, named so its signature and [`adjusted_across_panels`]'s match on
+/// it read as one thing rather than a repeated three-level generic nest.
+type FacetPanel = (RecordBatch, Vec<u32>);
+
 /// `batch`'s rows split by facet panel, in first-appearance order of each
 /// panel: one batch per distinct combination of `facet`'s fields that the
 /// batch holds, each read as the panel split reads it
-/// ([`crate::render::facet_key_column`]), and grouped in one pass over the
-/// rows. `Ok(None)` when there is no facet, the batch holds none of its
-/// fields, or every row sits in one panel, so the batch stacks whole.
+/// ([`crate::render::facet_key_column`]), paired with the ORIGINAL row
+/// indices (into `batch`) it was built from — [`adjusted_across_panels`]
+/// reads these to restore `batch`'s own row order after concatenating the
+/// panels back. Grouped in one pass over the rows. `Ok(None)` when there is
+/// no facet, the batch holds none of its fields, or every row sits in one
+/// panel, so the batch stacks whole.
 fn facet_panels(
     batch: &RecordBatch,
     facet: Option<&crate::layout::facet::FacetSpec>,
-) -> Result<Option<Vec<RecordBatch>>, crate::render::RenderError> {
+) -> Result<Option<Vec<FacetPanel>>, crate::render::RenderError> {
     let Some(facet) = facet else { return Ok(None) };
     let keys = std::iter::once(facet.field.as_str())
         .chain(facet.row.as_deref())
@@ -539,7 +638,8 @@ fn facet_panels(
     panels
         .into_iter()
         .map(|rows| {
-            arrow::compute::take_record_batch(batch, &arrow::array::UInt32Array::from(rows))
+            arrow::compute::take_record_batch(batch, &arrow::array::UInt32Array::from(rows.clone()))
+                .map(|panel| (panel, rows))
                 .map_err(|e| crate::render::RenderError::ScaleResolutionFailed(format!("facet split: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()
@@ -3334,7 +3434,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &batch, &no_outputs, false, None).unwrap().batch;
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &batch, &no_outputs, None).unwrap().batch;
         assert!(
             matches!(result, Cow::Borrowed(_)),
             "expected Borrowed fallback on stack failure"
@@ -3482,10 +3582,10 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "x", &b, &no_outputs, false, None).unwrap().batch;
+        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "x", &b, &no_outputs, None).unwrap().batch;
         assert!(matches!(x_result, Cow::Borrowed(_)), "x-side must be a no-op for a vertical stack");
 
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &b, &no_outputs, false, None).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "y", &b, &no_outputs, None).unwrap().batch;
         match y_result {
             Cow::Owned(out) => {
                 let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -3546,7 +3646,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "val", &batch, &no_outputs, false, None).unwrap().batch;
+        let x_result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "val", &batch, &no_outputs, None).unwrap().batch;
         match x_result {
             Cow::Owned(out) => {
                 let val_idx = out.schema().index_of("val").unwrap();
@@ -3560,7 +3660,7 @@ mod tests {
             Cow::Borrowed(_) => panic!("expected x-side widening to succeed through the CoordFlip fallback"),
         }
 
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false, None).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, None).unwrap().batch;
         assert!(matches!(y_result, Cow::Borrowed(_)), "y-side must be a no-op once value has flipped to x");
     }
 
@@ -3613,7 +3713,7 @@ mod tests {
         };
 
         let no_outputs = HashMap::new();
-        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, false, None).unwrap().batch;
+        let y_result = axis_batch(&spec, &spec.encoding, StackValueAxis::Y, "cat", &batch, &no_outputs, None).unwrap().batch;
         assert!(
             matches!(y_result, Cow::Borrowed(_)),
             "axis_batch_for_y must gate out (Cow::Borrowed) for a flipped numeric-category \
@@ -7268,6 +7368,362 @@ mod tests {
         assert_eq!(count, 2, "{svg}");
     }
 
+    /// `axis_batch`'s `AdjustedRows.unadjusted` is `whole_frame_batch`'s own
+    /// selection, pinned by POINTER IDENTITY: `FINAL_OUTPUT_KEY`'s batch
+    /// when it carries the bound field, else `primary_batch` — whether
+    /// `FINAL` is published at all. Pointer identity (not mere content
+    /// equality) is what lets `fold_adjusted_tally`'s content-dedupe
+    /// recognize the SAME caller column a plain sibling read already
+    /// counted, rather than a copy it would count a second time.
+    #[test]
+    fn axis_batch_adjusted_unadjusted_is_final_when_it_holds_the_field_else_primary() {
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        let spec = jitter_spec("v", "y2", JitterAxis::X, Some(3));
+
+        // No FINAL published at all: unadjusted must be `primary_batch` itself.
+        let no_final = HashMap::new();
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "v", &batch, &no_final, None).unwrap();
+        let adjusted = result.adjusted.expect("jitter adjusts this axis");
+        assert!(std::ptr::eq(adjusted.unadjusted, &batch), "no FINAL published: unadjusted must be primary_batch itself");
+
+        // FINAL published but missing the bound field: still falls back to primary.
+        let mut final_lacks_field = HashMap::new();
+        let other_only = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("other", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![1.0]))],
+        )
+        .unwrap();
+        final_lacks_field.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), other_only);
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "v", &batch, &final_lacks_field, None).unwrap();
+        let adjusted = result.adjusted.expect("jitter adjusts this axis");
+        assert!(std::ptr::eq(adjusted.unadjusted, &batch), "FINAL lacks the field: unadjusted must still fall back to primary_batch");
+
+        // FINAL published AND holds the bound field: unadjusted must be
+        // FINAL's own batch, not primary_batch.
+        let mut final_holds_field = HashMap::new();
+        final_holds_field.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), batch.clone());
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "v", &batch, &final_holds_field, None).unwrap();
+        let adjusted = result.adjusted.expect("jitter adjusts this axis");
+        let final_batch = final_holds_field.get(crate::transform::core::FINAL_OUTPUT_KEY).unwrap();
+        assert!(std::ptr::eq(adjusted.unadjusted, final_batch), "FINAL holds the field: unadjusted must be FINAL's own batch");
+        assert!(!std::ptr::eq(adjusted.unadjusted, &batch), "and NOT primary_batch, once FINAL holds the field");
+    }
+
+    /// `axis_batch` builds NO `AdjustedRows` pair when `whole_frame` is
+    /// FINAL (FINAL holds the drawn field "y") but FINAL's own preview
+    /// fails: `primary_batch` carries every column `Stack` needs ("x",
+    /// "y", "g"), so its own preview succeeds, but the published FINAL
+    /// batch carries no "x" column at all, so `apply_stack` fails on it
+    /// and `None => adjusted_rows(whole_frame, preview, is_stack)?`'s own
+    /// re-preview of `whole_frame` (deterministically the same failure)
+    /// also comes back `None`. Mirrors `domain.rs`'s identical
+    /// `axis_previews` case.
+    #[test]
+    fn axis_batch_builds_no_pair_when_finals_own_preview_fails_though_primarys_own_succeeds() {
+        use crate::spec::position::{StackAnchor, StackOffset};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p", "p"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let final_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), final_batch);
+        let encoding = Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: encoding.clone(),
+            position: Some(PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None }),
+            ..Default::default()
+        };
+        let result = axis_batch(&spec, &encoding, StackValueAxis::Y, "y", &primary, &outputs, None)
+            .expect("the layer's own panel rows still stack");
+        assert!(result.adjusted.is_none(), "FINAL's own preview failed, so no AdjustedRows pair must be built");
+    }
+
+    /// `axis_batch`'s `AdjustedRows.adjusted` is the batch's own preview
+    /// (the SAME values `result.batch` itself carries, with no FINAL to
+    /// prefer over `primary_batch`), and `axis_batch` returns `adjusted:
+    /// None` both for a layered spec (no adjustment preview is built at
+    /// all — the layered door's own mechanism is `axis_previews`, not
+    /// `axis_batch`) and for `PositionAdjust::Identity` (no adjustment
+    /// applies, so there is no preview to pair).
+    #[test]
+    fn axis_batch_adjusted_is_the_batchs_own_preview_and_none_for_layered_or_identity() {
+        use crate::spec::layer::Layer;
+        let batch = two_row_batch(vec![40.0, 60.0], vec![1.0, 2.0]);
+        let spec = jitter_spec("v", "y2", JitterAxis::X, Some(3));
+        let no_final = HashMap::new();
+        let result = axis_batch(&spec, &spec.encoding, StackValueAxis::X, "v", &batch, &no_final, None).unwrap();
+        let adjusted = result.adjusted.expect("jitter adjusts this axis");
+        let batch_v = crate::render::arrow_cast::col_as_f64(&result.batch, "v").unwrap();
+        let adjusted_v = crate::render::arrow_cast::col_as_f64(&adjusted.adjusted, "v").unwrap();
+        assert_eq!(adjusted_v, batch_v, "AdjustedRows.adjusted must be the SAME preview result.batch itself carries");
+        assert_ne!(batch_v, vec![Some(40.0), Some(60.0)], "sanity: the preview actually rewrote v");
+
+        let mut layered = jitter_spec("v", "y2", JitterAxis::X, Some(3));
+        layered.layers = Some(vec![Layer {
+            mark: crate::spec::mark::Mark::Point,
+            encoding: enc_xy("v", "y2", None),
+            position: Some(PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(3) }),
+            ..Default::default()
+        }]);
+        let result = axis_batch(&layered, &layered.encoding, StackValueAxis::X, "v", &batch, &no_final, None).unwrap();
+        assert!(result.adjusted.is_none(), "a layered spec builds no AdjustedRows through axis_batch — that is axis_previews's own door");
+
+        let mut identity_spec = jitter_spec("v", "y2", JitterAxis::X, Some(3));
+        identity_spec.position = Some(PositionAdjust::Identity);
+        let result = axis_batch(&identity_spec, &identity_spec.encoding, StackValueAxis::X, "v", &batch, &no_final, None).unwrap();
+        assert!(result.adjusted.is_none(), "Identity applies no adjustment, so there is no preview to pair");
+    }
+
+    /// Interleaved facet groups (`"a", "b", "a", "b"`) process panel a's
+    /// rows (0, 2) then panel b's rows (1, 3) — a DIFFERENT order than the
+    /// caller's own row order. `adjusted_across_panels`'s inverse
+    /// permutation after `concat_by_name` must restore row `i`'s OWN
+    /// adjustment to position `i`: unlike
+    /// `faceted_jitter_draws_every_point_matching_the_unfaceted_render`'s
+    /// fixture (whose facet groups are already contiguous, so a concat with
+    /// no restoration at all would still pass by coincidence), this fixture
+    /// only passes if the restoration actually runs.
+    #[test]
+    fn faceted_jitter_preview_restores_the_callers_own_row_order_when_panels_interleave() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        let all_v = vec![40.0, 41.0, 60.0, 61.0];
+        let all_y2 = vec![1.0, 1.0, 2.0, 2.0];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(all_v.clone())),
+                Arc::new(Float64Array::from(all_y2.clone())),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let facet = crate::layout::facet::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        };
+        let encoding = enc_xy("v", "y2", None);
+        let jitter = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(5) };
+        let faceted = position_preview(&batch, Some(&jitter), &encoding, false, StackValueAxis::X, Some(&facet), None)
+            .unwrap()
+            .expect("jitter widens the axis");
+        let faceted_v = crate::render::arrow_cast::col_as_f64(&faceted, "v").unwrap();
+        assert_eq!(faceted_v.len(), 4, "{faceted_v:?}");
+        // Panel "a" is original rows 0 and 2 (panel-local indices 0, 1);
+        // panel "b" is original rows 1 and 3, likewise.
+        for (panel_rows, group) in [(vec![0usize, 2], "a"), (vec![1, 3], "b")] {
+            let panel_batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_v[r]).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_y2[r]).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(panel_rows.iter().map(|_| group).collect::<Vec<_>>())),
+                ],
+            )
+            .unwrap();
+            let standalone = position_preview(&panel_batch, Some(&jitter), &encoding, false, StackValueAxis::X, None, None)
+                .unwrap()
+                .expect("jitter widens the axis");
+            let standalone_v = crate::render::arrow_cast::col_as_f64(&standalone, "v").unwrap();
+            for (panel_local_i, &original_row) in panel_rows.iter().enumerate() {
+                assert_eq!(
+                    faceted_v[original_row].map(f64::to_bits),
+                    standalone_v[panel_local_i].map(f64::to_bits),
+                    "row {original_row} (panel-local {panel_local_i}): faceted={:?} standalone={:?} — the caller's own row order must survive the facet split and concat",
+                    faceted_v[original_row],
+                    standalone_v[panel_local_i],
+                );
+            }
+        }
+    }
+
+    /// The same row-order-restoration property as the jitter test above,
+    /// for `Stack`: interleaved facet groups (`"p1","p2","p1","p2",...`)
+    /// process panel `p1`'s rows then panel `p2`'s, a DIFFERENT order than
+    /// the caller's own. Each panel's own `y` scale (tens for `p1`,
+    /// hundreds for `p2`) makes a wrong (unrestored) row order produce a
+    /// visibly different stacked value, not a value a coincidental
+    /// symmetry would hide.
+    #[test]
+    fn faceted_stack_preview_restores_the_callers_own_row_order_when_panels_interleave() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        let all_x = vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0];
+        let all_y = vec![10.0, 100.0, 20.0, 200.0, 30.0, 300.0, 40.0, 400.0];
+        let all_g = vec!["a", "a", "b", "b", "a", "a", "b", "b"];
+        let all_f = vec!["p1", "p2", "p1", "p2", "p1", "p2", "p1", "p2"];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(all_x.clone())),
+                Arc::new(Float64Array::from(all_y.clone())),
+                Arc::new(StringArray::from(all_g.clone())),
+                Arc::new(StringArray::from(all_f.clone())),
+            ],
+        )
+        .unwrap();
+        let facet = crate::layout::facet::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        };
+        let encoding = enc_xy("x", "y", Some("g"));
+        let stack = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
+        let faceted = position_preview(&batch, Some(&stack), &encoding, false, StackValueAxis::Y, Some(&facet), None)
+            .unwrap()
+            .expect("stack widens the axis");
+        let faceted_y = crate::render::arrow_cast::col_as_f64(&faceted, "y").unwrap();
+        assert_eq!(faceted_y.len(), 8, "{faceted_y:?}");
+        // Panel "p1" is original rows 0, 2, 4, 6 (panel-local 0..4); panel
+        // "p2" is original rows 1, 3, 5, 7, likewise.
+        for (panel_rows, group) in [(vec![0usize, 2, 4, 6], "p1"), (vec![1, 3, 5, 7], "p2")] {
+            let panel_batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_x[r]).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_y[r]).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(panel_rows.iter().map(|&r| all_g[r]).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(panel_rows.iter().map(|_| group).collect::<Vec<_>>())),
+                ],
+            )
+            .unwrap();
+            let standalone = position_preview(&panel_batch, Some(&stack), &encoding, false, StackValueAxis::Y, None, None)
+                .unwrap()
+                .expect("stack widens the axis");
+            let standalone_y = crate::render::arrow_cast::col_as_f64(&standalone, "y").unwrap();
+            for (panel_local_i, &original_row) in panel_rows.iter().enumerate() {
+                assert_eq!(
+                    faceted_y[original_row].map(f64::to_bits),
+                    standalone_y[panel_local_i].map(f64::to_bits),
+                    "row {original_row} (panel-local {panel_local_i}): faceted={:?} standalone={:?} — the caller's own row order must survive the facet split and concat",
+                    faceted_y[original_row],
+                    standalone_y[panel_local_i],
+                );
+            }
+        }
+    }
+
+    /// The same row-order-restoration property, for a continuous `Dodge`:
+    /// panel `p2`'s own `x` values (5, 6) sit far from panel `p1`'s (1, 2),
+    /// so a wrong (unrestored) row order reads a dodge offset computed
+    /// around the wrong panel's x values entirely, not a value that could
+    /// pass by coincidence.
+    #[test]
+    fn faceted_dodge_preview_restores_the_callers_own_row_order_when_panels_interleave() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        let all_x = vec![1.0, 5.0, 1.0, 5.0, 2.0, 6.0, 2.0, 6.0];
+        let all_y = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+        let all_g = vec!["a", "a", "b", "b", "a", "a", "b", "b"];
+        let all_f = vec!["p1", "p2", "p1", "p2", "p1", "p2", "p1", "p2"];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(all_x.clone())),
+                Arc::new(Float64Array::from(all_y.clone())),
+                Arc::new(StringArray::from(all_g.clone())),
+                Arc::new(StringArray::from(all_f.clone())),
+            ],
+        )
+        .unwrap();
+        let facet = crate::layout::facet::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        };
+        let encoding = enc_xy("x", "y", Some("g"));
+        let dodge = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let faceted = position_preview(&batch, Some(&dodge), &encoding, false, StackValueAxis::X, Some(&facet), None)
+            .unwrap()
+            .expect("dodge widens the axis");
+        let faceted_x = crate::render::arrow_cast::col_as_f64(&faceted, "x").unwrap();
+        assert_eq!(faceted_x.len(), 8, "{faceted_x:?}");
+        for (panel_rows, group) in [(vec![0usize, 2, 4, 6], "p1"), (vec![1, 3, 5, 7], "p2")] {
+            let panel_batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_x[r]).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from(panel_rows.iter().map(|&r| all_y[r]).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(panel_rows.iter().map(|&r| all_g[r]).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(panel_rows.iter().map(|_| group).collect::<Vec<_>>())),
+                ],
+            )
+            .unwrap();
+            let standalone = position_preview(&panel_batch, Some(&dodge), &encoding, false, StackValueAxis::X, None, None)
+                .unwrap()
+                .expect("dodge widens the axis");
+            let standalone_x = crate::render::arrow_cast::col_as_f64(&standalone, "x").unwrap();
+            for (panel_local_i, &original_row) in panel_rows.iter().enumerate() {
+                assert_eq!(
+                    faceted_x[original_row].map(f64::to_bits),
+                    standalone_x[panel_local_i].map(f64::to_bits),
+                    "row {original_row} (panel-local {panel_local_i}): faceted={:?} standalone={:?} — the caller's own row order must survive the facet split and concat",
+                    faceted_x[original_row],
+                    standalone_x[panel_local_i],
+                );
+            }
+        }
+    }
+
     fn dodge_batch_4rows() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -7349,7 +7805,6 @@ mod tests {
             "x",
             &batch,
             &empty_outputs,
-            false,
             None,
         )
         .unwrap();
@@ -7412,7 +7867,6 @@ mod tests {
             "x",
             &batch,
             &empty_outputs,
-            false,
             Some(&color),
         )
         .unwrap();

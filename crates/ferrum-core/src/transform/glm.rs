@@ -33,11 +33,13 @@ use std::sync::Arc;
 use crate::transform::logistic::inv_normal_cdf;
 use crate::transform::context::{TransformContext, Unfittable};
 use crate::transform::context::describe_group_keys;
+use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
     stack_grouped_batches, FitRows, KeyValue,
     NullKeyPolicy,
 };
+use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,12 +284,36 @@ pub(crate) fn apply(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
+/// When a drawn log axis demands this fit's `x`, the fit runs over `x`
+/// mapped into that axis's own log units ([`run_fit_in_log_space`]); the
+/// response `y` is drawn on the link's own scale (a mean or a probability)
+/// and never joins this demand — a `Glm` under a log y keeps fitting in
+/// data space. Otherwise dispatches to [`apply_in_data_space`] unchanged.
+pub(crate) fn apply_with_context(
+    spec: &GlmSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    let Some(slot) = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X)) else {
+        return apply_in_data_space(spec, batch, ctx);
+    };
+    run_fit_in_log_space(
+        ctx,
+        "Glm",
+        batch,
+        &TransformSpec::fit_x_only_space_columns(&spec.x),
+        (&spec.x, Some(slot)),
+        (&spec.y, None),
+        |mapped_batch, x, _y, ctx| apply_in_data_space(&GlmSpec { x: x.to_string(), ..spec.clone() }, mapped_batch, ctx),
+    )
+}
+
 /// Fit the whole batch, or, under `spec.groupby`, each group on its own rows
 /// and stack the per-group curves with the group columns appended, as
 /// `robust::apply_grouped` does. `SkipWithWholeBatchFallback` is the
 /// partition's policy: a batch whose every key is null is fit whole, and the
 /// partition's warning says so.
-pub(crate) fn apply_with_context(
+fn apply_in_data_space(
     spec: &GlmSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
@@ -590,8 +616,6 @@ fn build_glm_batch(
 
 use pyo3::prelude::*;
 
-use crate::transform::core::TransformSpec;
-
 fn parse_family(s: &str) -> PyResult<GlmFamily> {
     match s {
         "gaussian" => Ok(GlmFamily::Gaussian),
@@ -780,6 +804,59 @@ mod tests {
             x: "x".into(), y: "y".into(),
             family, link, n_grid, ci,
             max_iter: 50, tol: 1e-9, groupby: Vec::new(), name: None,
+        }
+    }
+
+    // ── A drawn log axis demands this fit in its own space ───────────────
+
+    use crate::transform::color_bin_group::{SlotSpace, StepSpace};
+    type LogSpace = crate::transform::color_bin_group::LogAxisSpace;
+
+    fn ctx_demanding(space: StepSpace) -> TransformContext {
+        TransformContext { log_space: Some(std::rc::Rc::new(space)), ..TransformContext::default() }
+    }
+
+    /// The `x` slot demanded along `x` in `x_space` — `Glm` carries only
+    /// `x` ([`TransformSpec::fit_x_only_space_columns`]), mirroring
+    /// `logistic::tests`'s identical helper.
+    fn x_slot(x_space: LogSpace) -> StepSpace {
+        StepSpace::for_slots(std::iter::once((SpaceSlot::X, SlotSpace { space: x_space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true })))
+    }
+
+    fn positive_space() -> LogSpace {
+        LogSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// Demanded on a positive-side log x, a Poisson/log `Glm` fits over
+    /// `x` mapped into log10 units and maps its `x` grid back
+    /// ([`run_fit_in_log_space`]) — this must equal, point for point,
+    /// running the SAME fit directly (no demand) on a batch whose `x` is
+    /// already substituted with `log10(x)`: the grid mapped back through
+    /// `10^v`, and the fitted mean `y` (which never joins the x demand —
+    /// the response sits on the link's own scale) identical outright,
+    /// mirroring `logistic::tests`'s identical case.
+    #[test]
+    fn glm_on_a_demanded_x_equals_its_own_fit_on_log10_substituted_data() {
+        pyo3::Python::initialize();
+        let xs_raw: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
+        let ys: Vec<f64> = xs_raw.iter().enumerate().map(|(i, &x)| ((x.log10() * 1.5).exp().round() + (i % 2) as f64).max(0.0)).collect();
+        let xs_log: Vec<f64> = xs_raw.iter().map(|x| x.log10()).collect();
+        let batch_raw = xy_batch(xs_raw, ys.clone());
+        let batch_log = xy_batch(xs_log, ys);
+        let s = spec(GlmFamily::Poisson, GlmLink::Log, 8, None);
+        let ctx = ctx_demanding(x_slot(positive_space()));
+        let demanded = apply_with_context(&s, &batch_raw, &ctx).expect("demanded fit on positive x");
+        let oracle = apply_with_context(&s, &batch_log, &TransformContext::default()).expect("oracle fit on log10(x)-substituted data");
+        let demanded_x = col(&demanded, "x");
+        let oracle_x = col(&oracle, "x");
+        assert_eq!(demanded_x.len(), oracle_x.len());
+        for (i, (&dx, &ox)) in demanded_x.iter().zip(oracle_x.iter()).enumerate() {
+            assert!((dx - 10f64.powf(ox)).abs() < 1e-9, "row {i}: demanded grid x={dx} must equal 10^(oracle log10 grid)={}", 10f64.powf(ox));
+        }
+        let demanded_y = col(&demanded, "y");
+        let oracle_y = col(&oracle, "y");
+        for (i, (&dy, &oy)) in demanded_y.iter().zip(oracle_y.iter()).enumerate() {
+            assert!((dy - oy).abs() < 1e-6, "row {i}: the fitted mean never joins the x demand, so it must match the oracle: {dy} vs {oy}");
         }
     }
 

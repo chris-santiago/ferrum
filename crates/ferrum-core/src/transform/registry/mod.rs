@@ -390,7 +390,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec![
                 "x", "y", "method", "ci", "bandwidth", "degree", "k", "n", "seed", "x_bins",
                 "x_estimator", "output", "inject_zero_ref", "inject_metrics", "groupby", "name",
-                "x_range",
+                "x_range", "x_range_pad",
             ],
         },
         // `aggregate`/`join_aggregate` publish `AggFn`'s vocabulary (aliases
@@ -606,7 +606,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec![
                 "x", "y", "n_grid", "ci", "huber_c", "max_iter", "tol", "output",
-                "inject_zero_ref", "inject_metrics", "groupby", "name", "x_range",
+                "inject_zero_ref", "inject_metrics", "groupby", "name", "x_range", "x_range_pad",
             ],
             ..Default::default()
         },

@@ -604,6 +604,7 @@ class Smooth:
         groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
+        x_range_pad: Optional[float] = None,
     ) -> None: ...
 
 class AggregateOp:
@@ -816,6 +817,7 @@ class Robust:
         groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
+        x_range_pad: Optional[float] = None,
     ) -> None: ...
 
 # ---------- Data transforms (Vega-lite-style, declared missing from stub) ----------

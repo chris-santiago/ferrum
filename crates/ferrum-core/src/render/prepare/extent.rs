@@ -197,6 +197,44 @@ fn fix_transform_extents_for_facet_impl(
                 )
                 .unwrap_or_else(|| t.clone())
             }
+            // `Smooth`/`Robust`: `x_range_pad` without a caller-written
+            // `x_range` means "extend past the data's own range", so the
+            // facet pin gives every panel the SAME `x_range` to extend
+            // from — the whole
+            // pre-facet batch's own `x` extent, in data units, under the
+            // step's demanded `X` slot the on-side extent mapped back
+            // (`log_space::column_extent_in_space`, mirroring
+            // `bin::global_extent_in_space`). `x_range_pad` itself is left
+            // on the spec, so each panel still pads this shared range in
+            // its own space inside `apply_one_group`. A caller-written
+            // `x_range` is never touched here — the explicit guard mirrors
+            // every other arm's "only pin what the user left unset" rule.
+            TransformSpec::Smooth(spec) if spec.x_range.is_none() && spec.x_range_pad.is_some() => {
+                let extent = match space.of(SpaceSlot::X) {
+                    Some(slot) => crate::transform::log_space::column_extent_in_space(batch, &spec.x, SpaceSlot::X, slot, "stat_smooth"),
+                    None => crate::transform::numeric_util::column_extent(batch, &spec.x),
+                };
+                pin_single_extent(extent, |(lo, hi)| {
+                    TransformSpec::Smooth(crate::transform::smooth::SmoothSpec {
+                        x_range: Some([lo, hi]),
+                        ..spec.clone()
+                    })
+                })
+                .unwrap_or_else(|| t.clone())
+            }
+            TransformSpec::Robust(spec) if spec.x_range.is_none() && spec.x_range_pad.is_some() => {
+                let extent = match space.of(SpaceSlot::X) {
+                    Some(slot) => crate::transform::log_space::column_extent_in_space(batch, &spec.x, SpaceSlot::X, slot, "Robust"),
+                    None => crate::transform::numeric_util::column_extent(batch, &spec.x),
+                };
+                pin_single_extent(extent, |(lo, hi)| {
+                    TransformSpec::Robust(crate::transform::robust::RobustSpec {
+                        x_range: Some([lo, hi]),
+                        ..spec.clone()
+                    })
+                })
+                .unwrap_or_else(|| t.clone())
+            }
             // ── 2-D dual-axis extent transforms ───────────────────────────────
             // Each carries per-axis `extent_x`/`extent_y` (or a single 4-tuple
             // `extent`). Pin each axis only when that axis is unset, so a
@@ -918,6 +956,107 @@ mod tests {
         assert!(lo > 0.0 && hi > 0.0, "the grid pin must stay on-side: ({lo}, {hi})");
         let (clo, chi) = pinned.count_scale_extent.expect("log-space count-scale pin");
         assert!(clo > 0.0 && chi > 0.0, "the count-scale pin must stay on-side: ({clo}, {chi})");
+    }
+
+    // ── `Smooth`/`Robust`: the `x_range` facet pin ──────────────────────────
+    //
+    // Unlike the unconditional arms above, these only fire when the caller
+    // left `x_range` unset AND wrote `x_range_pad` (the arm's own guard) —
+    // see this file's `TransformSpec::Smooth`/`TransformSpec::Robust` arms'
+    // doc comment for why. Both routes (demanded and plain) must equal the
+    // SAME function the arm itself calls, not a value a test recomputes by
+    // hand — `column_extent_in_space` on a demanded slot, `column_extent`
+    // in data space otherwise.
+
+    /// A step demanded on its `x` slot along `x` in `space` — the `Smooth`/
+    /// `Robust` twin of `field_slot` above (their slot is `X`, not `Field`).
+    fn x_slot(space: LogAxisSpace) -> StepSpace {
+        StepSpace::for_slots([(SpaceSlot::X, SlotSpace { space, axes: vec![crate::spec::layer::PositionalAxis::X], records_caller_input: true })])
+    }
+
+    fn smooth_pad_spec(x_range_pad: f64) -> crate::transform::smooth::SmoothSpec {
+        crate::transform::smooth::SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: crate::transform::smooth::SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: crate::transform::smooth::SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None, x_range_pad: Some(x_range_pad),
+            groupby: vec![],
+            name: None,
+        }
+    }
+
+    /// A demanded `Smooth`'s facet pin equals `column_extent_in_space`'s
+    /// own on-side result exactly — not a linear pin that happens to stay
+    /// on-side for this data, but the SAME value the arm itself calls.
+    #[test]
+    fn log_demanded_smooth_facet_pin_equals_column_extent_in_space() {
+        let batch = xy_batch();
+        let spec = smooth_pad_spec(0.1);
+        let step_space = x_slot(positive_space());
+        let demand = SpaceDemand::single(vec![0], x_slot(positive_space()));
+        let slot_space = step_space.of(SpaceSlot::X).expect("x slot demanded");
+        let expected = crate::transform::log_space::column_extent_in_space(&batch, "x", SpaceSlot::X, slot_space, "stat_smooth");
+        let out = fix_transform_extents_for_facet_in_space(&[TransformSpec::Smooth(spec)], &batch, Some(&demand));
+        let TransformSpec::Smooth(pinned) = &out[0] else { panic!("expected a Smooth") };
+        let range = pinned.x_range.expect("demanded pin");
+        assert!(range[0] > 0.0 && range[1] > 0.0, "a positive-side pin must stay on-side: {range:?}");
+        let expected = expected.expect("the fixture's x column has a real extent");
+        assert_eq!(range, [expected.0, expected.1], "the pin must equal column_extent_in_space's own on-side result, not a value this test recomputes");
+    }
+
+    /// The same `Smooth` with no demand at all pins from `column_extent` in
+    /// plain data space — the arm's other branch.
+    #[test]
+    fn undemanded_smooth_facet_pin_equals_column_extent_in_data_space() {
+        let batch = xy_batch();
+        let spec = smooth_pad_spec(0.1);
+        let expected = crate::transform::numeric_util::column_extent(&batch, "x").expect("the fixture's x column has a real extent");
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Smooth(spec)], &batch);
+        let TransformSpec::Smooth(pinned) = &out[0] else { panic!("expected a Smooth") };
+        let range = pinned.x_range.expect("plain pin");
+        assert_eq!(range, [expected.0, expected.1], "the undemanded pin must equal column_extent's own data-space result");
+    }
+
+    /// `Robust` mirrors `Smooth`'s arm exactly — same guard, same two
+    /// routes, same underlying extent functions.
+    fn robust_pad_spec(x_range_pad: f64) -> crate::transform::robust::RobustSpec {
+        crate::transform::robust::RobustSpec {
+            x: "x".into(), y: "y".into(),
+            n_grid: 5, ci: None, huber_c: 1.345, max_iter: 50, tol: 1e-9,
+            output: crate::transform::smooth::SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None, x_range_pad: Some(x_range_pad),
+            groupby: vec![],
+            name: None,
+        }
+    }
+
+    #[test]
+    fn log_demanded_robust_facet_pin_equals_column_extent_in_space() {
+        let batch = xy_batch();
+        let spec = robust_pad_spec(0.1);
+        let step_space = x_slot(positive_space());
+        let demand = SpaceDemand::single(vec![0], x_slot(positive_space()));
+        let slot_space = step_space.of(SpaceSlot::X).expect("x slot demanded");
+        let expected = crate::transform::log_space::column_extent_in_space(&batch, "x", SpaceSlot::X, slot_space, "Robust");
+        let out = fix_transform_extents_for_facet_in_space(&[TransformSpec::Robust(spec)], &batch, Some(&demand));
+        let TransformSpec::Robust(pinned) = &out[0] else { panic!("expected a Robust") };
+        let range = pinned.x_range.expect("demanded pin");
+        assert!(range[0] > 0.0 && range[1] > 0.0, "a positive-side pin must stay on-side: {range:?}");
+        let expected = expected.expect("the fixture's x column has a real extent");
+        assert_eq!(range, [expected.0, expected.1], "the pin must equal column_extent_in_space's own on-side result, not a value this test recomputes");
+    }
+
+    #[test]
+    fn undemanded_robust_facet_pin_equals_column_extent_in_data_space() {
+        let batch = xy_batch();
+        let spec = robust_pad_spec(0.1);
+        let expected = crate::transform::numeric_util::column_extent(&batch, "x").expect("the fixture's x column has a real extent");
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Robust(spec)], &batch);
+        let TransformSpec::Robust(pinned) = &out[0] else { panic!("expected a Robust") };
+        let range = pinned.x_range.expect("plain pin");
+        assert_eq!(range, [expected.0, expected.1], "the undemanded pin must equal column_extent's own data-space result");
     }
 
     /// A `Kde2D` step demanded on its `x` slot, `y` slot, or both, each

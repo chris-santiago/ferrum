@@ -119,13 +119,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
+use crate::transform::color_bin_group::SlotSpace;
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
+use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::gam;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, pooled_group_key, stack_grouped_batches,
     NullKeyPolicy,
     KeyValue,
 };
+use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::numeric_util::coerce_to_float64;
 use crate::transform::residuals;
 use fits::{
@@ -260,6 +263,18 @@ pub(crate) struct SmoothSpec {
     /// boundary — never extrapolates past it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub x_range: Option<[f64; 2]>,
+    /// A symmetric proportional margin (`(hi - lo) * x_range_pad` on both
+    /// ends) applied to the evaluation range `apply_one_group` resolves
+    /// ([`crate::transform::numeric_util::evaluation_range`]): `x_range`
+    /// when the caller wrote one, else the whole `batch`'s own `x` extent
+    /// — "extend past the data's own range" — either way padded in
+    /// whichever units the fit actually runs in (data units on a linear
+    /// x, log units once a demanded log x has mapped `x_range` and the
+    /// batch there). `None` pads nothing. Unlike `x_range`, `x_range_pad`
+    /// alone (no `x_range`) is not a no-op: it is the whole request
+    /// `truncate=False` makes when the caller gave no explicit range.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_range_pad: Option<f64>,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -273,15 +288,99 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
 /// forwards here with a default context (`is_partition: false`), preserving
 /// its pre-round-3 whole-frame behavior for direct calls, unit tests, and
 /// WASM/notebook usage.
+///
+/// When a drawn log axis demands this fit on its `X` slot, its `Y` slot, or
+/// both independently (an independent-y layer can resolve a different, or
+/// no, `LogScale` from the primary's), the fit runs in that space instead
+/// ([`apply_in_log_space`]); otherwise it runs as written
+/// ([`apply_in_data_space`]).
 pub(crate) fn apply_with_context(
     spec: &SmoothSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
+    let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
+    if x_slot.is_none() && y_slot.is_none() {
+        return apply_in_data_space(spec, batch, ctx);
+    }
+    apply_in_log_space(spec, batch, ctx, x_slot, y_slot)
+}
+
+/// [`apply_with_context`]'s ordinary (data-space) body: every `Smooth`,
+/// demanded or not, runs through this once its `x`/`y` columns (and
+/// `x_range`, when the caller wrote one) are already in its own fit
+/// space — data units when not demanded, the mapped batch's log units
+/// under [`apply_in_log_space`]. `apply_one_group` resolves the actual
+/// evaluation range (`spec.x_range`, or the whole batch's own `x` extent,
+/// padded by `x_range_pad`) via
+/// [`crate::transform::numeric_util::evaluation_range`], so the pad is
+/// applied once, in whichever space this body is already running in,
+/// identically on both routes.
+fn apply_in_data_space(spec: &SmoothSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
         return apply_grouped(spec, batch, &spec.groupby, ctx.is_partition, ctx);
     }
     apply_one_group(spec, batch, None, ctx.is_partition, ctx, None)
+}
+
+/// `method='sqrt'` on a demanded log x, voiced by both the primary refusal
+/// ([`crate::render::prepare::refuse_sqrt_on_log_x`], through
+/// `RenderError::SmoothSqrtOnLogX`'s `Display`) and this transform's own
+/// backstop ([`apply_in_log_space`]), so the two can never drift apart.
+pub(crate) const SQRT_ON_LOG_X_REASON: &str =
+    "method='sqrt' fits y on sqrt(x), while the log x axis fits in log(x); use method='lm' or 'loess', or drop the log scale";
+
+/// `apply_with_context` under a drawn log axis's demand on the `x` slot,
+/// the `y` slot, or both independently: a caller-written `x_range` is
+/// mapped into the demanded `x` axis's units (unpadded —
+/// [`apply_in_data_space`]'s `apply_one_group` pads it, in whichever
+/// space this body runs in) before the ordinary body runs over the mapped
+/// columns, so the grid, `x_bins`, and every method's fit and CI compute
+/// in log units and map back ([`run_fit_in_log_space`]). `method="log"` is
+/// a predictor transform that is linear in log x (`ln`/`log10` only
+/// rescale the coefficient), so under a demanded x it runs the `Lm` body
+/// directly on the already-mapped x rather than taking `ln` of log units a
+/// second time. `method="sqrt"` composes with no scale transform and is
+/// refused outright: a caller reaching this function with it demanded is a
+/// bug in the prepare-time gate (`render::prepare::refuse_sqrt_on_log_x`),
+/// which is the one place this refusal is voiced in the layer entry's own
+/// text — this is the backstop, not the primary refusal.
+fn apply_in_log_space(
+    spec: &SmoothSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    x_slot: Option<&SlotSpace>,
+    y_slot: Option<&SlotSpace>,
+) -> PyResult<RecordBatch> {
+    if x_slot.is_some() && matches!(spec.method, SmoothMethod::SqrtX) {
+        return Err(PyValueError::new_err(format!("stat_smooth: {SQRT_ON_LOG_X_REASON}")));
+    }
+    let method = if x_slot.is_some() && matches!(spec.method, SmoothMethod::LogX) { SmoothMethod::Lm } else { spec.method };
+    // `x_slot.map_or(Ok(spec.x_range), ...)`: no demanded X slot passes
+    // `spec.x_range` through unchanged; a demanded slot maps it into that
+    // slot's units through `extent_in_space`, Bin's own one-line Option
+    // pass-through (`bin.rs`'s `extent` arm) — `extent_in_space` never
+    // returns `Ok(None)` for a `Some` input (the binding already refused a
+    // non-finite endpoint), so this arm needs no fallback branch for that
+    // case.
+    let x_range = x_slot.map_or(Ok(spec.x_range), |slot| {
+        slot.space
+            .extent_in_space("stat_smooth", "x_range", spec.x_range.map(|[a, b]| (a, b)))
+            .map(|r| r.map(|(a, b)| [a, b]))
+    })?;
+    let mapped_spec = SmoothSpec { method, x_range, ..spec.clone() };
+    run_fit_in_log_space(
+        ctx,
+        "stat_smooth",
+        batch,
+        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output),
+        (&spec.x, x_slot),
+        (&spec.y, y_slot),
+        |mapped_batch, x, y, ctx| {
+            apply_in_data_space(&SmoothSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, mapped_batch, ctx)
+        },
+    )
 }
 
 /// User-facing label for a `SmoothMethod`, for `TransformWarning` text —
@@ -420,9 +519,15 @@ fn apply_one_group(
     let (data_x_min, data_x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
 
-    // WI-7: when x_range is set (truncate=False), use it as the evaluation
-    // domain instead of the observed data extent. Clip to valid range.
-    let (x_min, x_max) = match spec.x_range {
+    // The evaluation range is `spec.x_range` when the caller gave one, else
+    // the whole (pre-group) batch's own `x` extent -- every group spans
+    // the SAME range -- either way padded by `x_range_pad` in whichever
+    // units `batch`'s `x` column is already
+    // stated in (data units on a linear x, this slot's log units once a
+    // demanded log x has mapped both the batch and `spec.x` there before
+    // this call). `None` (no `x_range` and no `x_range_pad`) keeps the
+    // observed per-group data extent.
+    let (x_min, x_max) = match crate::transform::numeric_util::evaluation_range(spec.x_range, spec.x_range_pad, batch, &spec.x) {
         Some([lo, hi]) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
         _ => (data_x_min, data_x_max),
     };

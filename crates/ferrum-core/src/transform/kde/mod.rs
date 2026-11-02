@@ -318,8 +318,8 @@ pub(crate) fn apply_with_context(
 /// ever maps.
 fn apply_in_log_space(spec: &KdeSpec, batch: &RecordBatch, ctx: &TransformContext, slot: &SlotSpace) -> PyResult<RecordBatch> {
     let mapped_spec = KdeSpec {
-        extent: slot.space.extent_in_space(LABEL, spec.extent)?,
-        count_scale_extent: slot.space.extent_in_space(LABEL, spec.count_scale_extent)?,
+        extent: slot.space.extent_in_space(LABEL, "extent", spec.extent)?,
+        count_scale_extent: slot.space.extent_in_space(LABEL, "extent", spec.count_scale_extent)?,
         ..spec.clone()
     };
     let demand = [DemandedField { slot: SpaceSlot::Field, field: &spec.field, space: slot, shape: ColumnShape::Scalar }];

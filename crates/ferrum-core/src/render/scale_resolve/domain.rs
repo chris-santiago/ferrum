@@ -6,6 +6,7 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use super::{sided_min_max_f64, LeftOutTally, SidedExtent};
+use crate::render::position::AdjustedRows;
 use crate::render::prepare::LayerPrepared;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
@@ -107,16 +108,44 @@ impl<'a> LayerSource<'a> {
     }
 }
 
+/// What `read()` does with `field`'s column for the off-side TALLY, once
+/// located (the EXTENT always reads the column `source` locates, whichever
+/// variant this is): a plain caller column, folded through the ordinary
+/// content-deduplicated `tally_only` ([`Column`](Self::Column)); a
+/// previewed layer's [`crate::render::position::AdjustedRows`] pair, folded
+/// through [`fold_adjusted_tally`] ([`Adjusted`](Self::Adjusted)) — the
+/// caller's own rows plus the rows the adjustment itself moves off the
+/// side; or neither — a span read that is the adjusted layer's own stack
+/// base column, which feeds the extent only, since a stack's base is not
+/// caller data ([`ExtentOnly`](Self::ExtentOnly)). `Adjusted` carries its
+/// own CLONE of the layer's [`AdjustedRows`] pair (cheap: an `Arc`-backed
+/// `RecordBatch` and a plain reference) rather than a borrow of it, since a
+/// borrow tied to [`AxisReads`]'s own (function-local) lifetime cannot
+/// outlive the method call that reads it — [`Clone`], not [`Copy`], follows
+/// from that; [`SeedRead`]'s own derive matches.
+#[derive(Clone)]
+enum TallyRead<'a> {
+    Column,
+    Adjusted(AdjustedRows<'a>),
+    ExtentOnly,
+}
+
 /// One read of a layered axis's seed: the batch, and the fields a layer draws
 /// there on the axis: the value `field`, its paired `x2`/`y2` `span`, and the
 /// `opposite` positional field the ordinal null-band rule judges rows by.
 /// `inheritor` is the index of the later layer whose inherited field this
 /// read is, judged like that layer's own column; `None` for the bound field.
-#[derive(Clone, Copy)]
+/// `tally` is [`TallyRead`] for this seed's own layer's VALUE field;
+/// `span_tally` the same for `span` ([`AxisReads::span_tally`] — `Column`
+/// for a caller's own `x2`/`y2`, `ExtentOnly` when `span` is the layer's own
+/// stack-base column instead).
+#[derive(Clone)]
 struct SeedRead<'a> {
     source: LayerSource<'a>,
+    tally: TallyRead<'a>,
     field: &'a str,
     span: Option<&'a str>,
+    span_tally: TallyRead<'a>,
     opposite: Option<&'a str>,
     inheritor: Option<usize>,
 }
@@ -144,13 +173,17 @@ fn seed_reads<'a>(
     let (field, span, opposite) = bound;
     let Some((index, establisher)) = establishing_axis_layer(spec, layers, channel) else { return Vec::new() };
     let first = if index == 0 {
-        SeedRead { source: reads.source(index), field, span: reads.span(index, span), opposite, inheritor: None }
+        let span = reads.span(index, span);
+        SeedRead { source: reads.source(index), tally: reads.tally(index), field, span, span_tally: reads.span_tally(index, span), opposite, inheritor: None }
     } else {
         let drawn = drawn_channel_slots(spec, establisher, channel);
+        let span = reads.span(index, span.and(drawn.span));
         SeedRead {
             source: reads.source(index),
+            tally: reads.tally(index),
             field,
-            span: reads.span(index, span.and(drawn.span)),
+            span,
+            span_tally: reads.span_tally(index, span),
             opposite: opposite.and(drawn.opposite),
             inheritor: None,
         }
@@ -170,7 +203,16 @@ fn seed_reads<'a>(
         if seeds.iter().any(|r| r.source == source && r.field == field) {
             continue;
         }
-        seeds.push(SeedRead { source, field, span: reads.span(index, drawn.span), opposite: drawn.opposite, inheritor: Some(index) });
+        let span = reads.span(index, drawn.span);
+        seeds.push(SeedRead {
+            source,
+            tally: reads.tally(index),
+            field,
+            span,
+            span_tally: reads.span_tally(index, span),
+            opposite: drawn.opposite,
+            inheritor: Some(index),
+        });
     }
     seeds
 }
@@ -186,19 +228,31 @@ fn seed_reads<'a>(
 struct AxisReads<'a> {
     sources: Vec<LayerSource<'a>>,
     base: Vec<Option<&'static str>>,
+    /// Each layer's own [`AdjustedRows`] pair — `Some` exactly when
+    /// `sources[i]` is a preview `Batch` (`axis_previews` builds one for
+    /// every layer with a preview; `unstacked`'s layers, on a categorical
+    /// axis no layer adjusts, carry none). [`Self::tally`] reads this
+    /// instead of `sources[i]` for the off-side tally, so a previewed
+    /// `Dodge`/`Jitter`/`Stack` layer counts the caller's own rows (plus
+    /// the rows the adjustment itself moves off the side) rather than
+    /// re-reading its own adjusted preview as if it were caller data.
+    adjusted: Vec<Option<AdjustedRows<'a>>>,
 }
 
 impl<'a> AxisReads<'a> {
     /// Every layer read from the batch it draws, as an axis no layer adjusts
     /// on (a categorical one) reads them.
     fn unstacked(layers: &'a [Layer]) -> Self {
-        Self { sources: layers.iter().map(LayerSource::of).collect(), base: vec![None; layers.len()] }
+        let sources: Vec<LayerSource<'a>> = layers.iter().map(LayerSource::of).collect();
+        let len = sources.len();
+        Self { sources, base: vec![None; len], adjusted: (0..len).map(|_| None).collect() }
     }
 
     /// Each layer read from its own preview in `previews` where it has one,
     /// else from the batch it draws; `base` is each layer's own stack-base
-    /// pairing ([`axis_previews`]'s doc).
-    fn over(layers: &'a [Layer], previews: &'a [Option<RecordBatch>], base: Vec<Option<&'static str>>) -> Self {
+    /// pairing and `adjusted` its own tally pair, both [`axis_previews`]'s
+    /// own output.
+    fn over(layers: &'a [Layer], previews: &'a [Option<RecordBatch>], base: Vec<Option<&'static str>>, adjusted: Vec<Option<AdjustedRows<'a>>>) -> Self {
         Self {
             sources: layers
                 .iter()
@@ -206,11 +260,26 @@ impl<'a> AxisReads<'a> {
                 .map(|(layer, preview)| preview.as_ref().map_or(LayerSource::of(layer), LayerSource::Batch))
                 .collect(),
             base,
+            adjusted,
         }
     }
 
     fn source(&self, layer: usize) -> LayerSource<'a> {
         self.sources[layer]
+    }
+
+    /// What the off-side tally reads for `layer`'s own VALUE field (never a
+    /// span — a caller's `x2`/`y2` stays [`TallyRead::Column`] unconditionally,
+    /// and a stack-base span is [`TallyRead::ExtentOnly`], both decided at the
+    /// call site since this answer only ever concerns the value slot):
+    /// [`TallyRead::Adjusted`] when `layer` has its own `AdjustedRows` pair
+    /// (a previewed `Dodge`/`Jitter`/`Stack` layer), else
+    /// [`TallyRead::Column`] (an unadjusted layer's plain caller column).
+    fn tally(&self, layer: usize) -> TallyRead<'a> {
+        match &self.adjusted[layer] {
+            Some(rows) => TallyRead::Adjusted(rows.clone()),
+            None => TallyRead::Column,
+        }
     }
 
     /// The stack's base column for a layer that stacks on the axis: a
@@ -226,13 +295,28 @@ impl<'a> AxisReads<'a> {
     fn span<'s>(&self, layer: usize, span: Option<&'s str>) -> Option<&'s str> {
         span.or(self.base(layer))
     }
+
+    /// What the off-side tally reads for a SPAN field at `span` (the value
+    /// field's own answer is [`Self::tally`]): [`TallyRead::ExtentOnly`]
+    /// when `span` IS `layer`'s own stack-base column — the span
+    /// [`Self::span`]'s `.or` fallback filled in, not a field the caller
+    /// wrote — since a stack's base is not caller data; [`TallyRead::Column`]
+    /// for every other span, a caller's own `x2`/`y2`.
+    fn span_tally(&self, layer: usize, span: Option<&str>) -> TallyRead<'a> {
+        if span.is_some() && span == self.base(layer) {
+            TallyRead::ExtentOnly
+        } else {
+            TallyRead::Column
+        }
+    }
 }
 
 /// [`axis_previews`]'s per-layer result: each layer's own preview batch
 /// (`None` for a layer that adjusts nothing on the axis) paired with its
 /// stack-base column name (`Some` only for a layer whose effective
-/// position is `Stack`, [`AxisReads::over`]'s doc).
-type LayerAxisPreviews = (Vec<Option<RecordBatch>>, Vec<Option<&'static str>>);
+/// position is `Stack`, [`AxisReads::over`]'s doc) and, for the off-side
+/// tally, its own [`crate::render::position::AdjustedRows`] pair.
+type LayerAxisPreviews<'a> = (Vec<Option<RecordBatch>>, Vec<Option<&'static str>>, Vec<Option<crate::render::position::AdjustedRows<'a>>>);
 
 /// The position adjustment each layer draws on the numeric axis `channel`,
 /// by layer index: [`crate::render::position::layer_position_preview`] over
@@ -250,29 +334,31 @@ type LayerAxisPreviews = (Vec<Option<RecordBatch>>, Vec<Option<&'static str>>);
 /// (`position::position_preview`). `color` is the panel's one resolved
 /// color scale, threaded to every layer's `Dodge` preview so its sub-band
 /// order never diverges from the draw's.
-fn axis_previews(
+fn axis_previews<'a>(
     spec: &ChartSpec,
-    layers: &[Layer],
+    layers: &'a [Layer],
     channel: &str,
-    primary_batch: &RecordBatch,
-    transform_outputs: &HashMap<String, RecordBatch>,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
     include_final: bool,
     color: Option<&crate::render::scale_resolve::ColorScale>,
-) -> Result<LayerAxisPreviews, RenderError> {
+) -> Result<LayerAxisPreviews<'a>, RenderError> {
     use crate::spec::position::StackValueAxis;
     let axis = match channel {
         "x" => StackValueAxis::X,
         "y" => StackValueAxis::Y,
-        _ => return Ok((vec![None; layers.len()], vec![None; layers.len()])),
+        _ => return Ok((vec![None; layers.len()], vec![None; layers.len()], vec![None; layers.len()])),
     };
     let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
     let mut previews = Vec::with_capacity(layers.len());
     let mut bases = Vec::with_capacity(layers.len());
+    let mut adjusted = Vec::with_capacity(layers.len());
     for (index, layer) in layers.iter().enumerate() {
         let exchanges = index != 0 && layer_flips(layer, spec.coord.as_ref()) != chart_flipped;
         if exchanges || (axis == StackValueAxis::Y && layer.independent_y) {
             previews.push(None);
             bases.push(None);
+            adjusted.push(None);
             continue;
         }
         // Read the same way `axis_batch`'s own inline `base` check reads it
@@ -286,38 +372,86 @@ fn axis_previews(
             .then_some(crate::render::position::STACK_BASE_COLUMN);
         let preview =
             |batch: &RecordBatch| crate::render::position::layer_position_preview(spec, layer, axis, batch, color);
-        let result = match LayerSource::of(layer) {
+        // This layer's own drawn field on `channel`, for pairing its
+        // whole-frame unadjusted batch ([`whole_frame_batch`]) with its
+        // preview below — `None` for a layer whose completed encoding
+        // draws nothing on this channel, which already took the `None`
+        // branches above or below.
+        let field = drawn_channel_slots(spec, layer, channel).value;
+        let (result, layer_adjusted) = match LayerSource::of(layer) {
             LayerSource::Chart => match preview(primary_batch)? {
-                None => None,
+                None => (None, None),
                 Some(rows) => {
-                    let all_panels = match include_final.then(|| transform_outputs.get(FINAL_OUTPUT_KEY)).flatten() {
+                    // The all-panels preview of `FINAL_OUTPUT_KEY`, computed
+                    // whenever the chart publishes one — not only under
+                    // `include_final` (the facet-SHARED case the EXTENT
+                    // concat below still gates on, unchanged): the TALLY's
+                    // own `AdjustedRows` pairing needs it whenever
+                    // `whole_frame_batch` picks `FINAL` over `primary_batch`,
+                    // which happens on an independent facet and on no facet
+                    // at all too (`field` published only in `FINAL`).
+                    let final_preview = match transform_outputs.get(FINAL_OUTPUT_KEY) {
                         Some(all_panels) => preview(all_panels)?,
                         None => None,
                     };
-                    match all_panels {
-                        // `concat_by_name`, not a positional `concat_batches`: a
-                        // chart-data layer's own-panel preview and the all-panels
-                        // preview can disagree on dtype exactly the way two facet
-                        // panels can (an Int64/Float32/Timestamp no-op `Dodge`
-                        // beside a `Float64` dodged one), and a plain
-                        // `concat_batches` either errors or, via `.ok()`, drops
-                        // the whole layer's preview silently on any mismatch —
-                        // including a genuine column-count difference, which it
-                        // would otherwise align POSITIONALLY. Reconciles the
-                        // same way `position::adjusted_across_panels` does; a
-                        // real failure refuses instead of leaving the axis
-                        // unwidened with no warning.
-                        Some(all_panels) => Some(
-                            crate::transform::concat::concat_by_name("position preview", vec![rows, all_panels])
-                                .map_err(RenderError::ScaleResolutionFailed)?,
-                        ),
-                        None => Some(rows),
-                    }
+                    let extent_result = if include_final {
+                        match final_preview.clone() {
+                            // `concat_by_name`, not a positional `concat_batches`: a
+                            // chart-data layer's own-panel preview and the all-panels
+                            // preview can disagree on dtype exactly the way two facet
+                            // panels can (an Int64/Float32/Timestamp no-op `Dodge`
+                            // beside a `Float64` dodged one), and a plain
+                            // `concat_batches` either errors or, via `.ok()`, drops
+                            // the whole layer's preview silently on any mismatch —
+                            // including a genuine column-count difference, which it
+                            // would otherwise align POSITIONALLY. Reconciles the
+                            // same way `position::adjusted_across_panels` does; a
+                            // real failure refuses instead of leaving the axis
+                            // unwidened with no warning.
+                            Some(all_panels) => Some(
+                                crate::transform::concat::concat_by_name("position preview", vec![rows.clone(), all_panels])
+                                    .map_err(RenderError::ScaleResolutionFailed)?,
+                            ),
+                            None => Some(rows.clone()),
+                        }
+                    } else {
+                        Some(rows.clone())
+                    };
+                    // An `AdjustedRows` is a batch beside its OWN preview:
+                    // when `whole_frame` is `primary_batch`, `rows` (its own
+                    // preview) pairs with it directly; when `whole_frame` is
+                    // `FINAL` instead, only `final_preview` (FINAL's own
+                    // preview, computed above) is `FINAL`'s own — `rows` is
+                    // a preview of `primary_batch`, a DIFFERENT, narrower
+                    // batch (this panel's own rows), so pairing it with
+                    // `whole_frame` would misalign row `i` of one against
+                    // row `i` of the other. A missing `final_preview` (the
+                    // adjustment failed on a later panel inside
+                    // `adjusted_across_panels`) gives no pair at all, the
+                    // same outcome `axis_batch`'s own handling of this case
+                    // gives.
+                    let tally_pair = field.and_then(|field| {
+                        let whole_frame = whole_frame_batch(primary_batch, transform_outputs, field);
+                        if std::ptr::eq(whole_frame, primary_batch) {
+                            Some(crate::render::position::AdjustedRows { unadjusted: whole_frame, adjusted: rows, base })
+                        } else {
+                            final_preview.clone().map(|adjusted| crate::render::position::AdjustedRows { unadjusted: whole_frame, adjusted, base })
+                        }
+                    });
+                    (extent_result, tally_pair)
                 }
             },
             LayerSource::Output(key) => match transform_outputs.get(key) {
-                Some(batch) => preview(batch)?,
-                None => None,
+                Some(batch) => match preview(batch)? {
+                    None => (None, None),
+                    Some(rows) => {
+                        // An Output-source layer's own named output IS its
+                        // whole frame — there is no wider batch to prefer.
+                        let tally_pair = Some(crate::render::position::AdjustedRows { unadjusted: batch, adjusted: rows.clone(), base });
+                        (Some(rows), tally_pair)
+                    }
+                },
+                None => (None, None),
             },
             // This match's scrutinee is `LayerSource::of(layer)`, which
             // returns only `Chart`/`Output` — never `Batch` (a position
@@ -329,12 +463,13 @@ fn axis_previews(
             // the shared enum. A `Member`'s embedded lineage plays no role
             // in a position preview either way, so folding it with `Batch`
             // costs nothing even if it were reached.
-            LayerSource::Batch(batch) | LayerSource::Member(batch, _) => preview(batch)?,
+            LayerSource::Batch(batch) | LayerSource::Member(batch, _) => (preview(batch)?, None),
         };
         previews.push(result);
         bases.push(base);
+        adjusted.push(layer_adjusted);
     }
-    Ok((previews, bases))
+    Ok((previews, bases, adjusted))
 }
 
 /// The positional bindings `layer` draws on the shared `channel`: the
@@ -2264,8 +2399,26 @@ pub(in crate::render) fn numeric_domain_union(
         LayerUnion::Every,
         None,
         color,
+        None,
     )
     .map(|(e, _)| (e.lo, e.hi))
+}
+
+/// The batch the off-side tally's whole-frame rule reads for `field`:
+/// `FINAL_OUTPUT_KEY`'s batch when it holds `field`, else `primary`. The
+/// ONE selection every reader of "the caller's whole frame" shares — the
+/// `Chart`-source arm of [`numeric_domain_union_over`]'s own `read`
+/// closure, [`crate::render::position::axis_batch`] (the unlayered door),
+/// [`axis_previews`] (a Chart-source layer on the layered door), and
+/// `composite::leaf_positional_domain` (a composite leaf) all call this
+/// instead of each re-deriving "is `FINAL` the right batch to pair a
+/// preview against" on its own.
+pub(in crate::render) fn whole_frame_batch<'a>(
+    primary: &'a RecordBatch,
+    outputs: &'a HashMap<String, RecordBatch>,
+    field: &str,
+) -> &'a RecordBatch {
+    outputs.get(FINAL_OUTPUT_KEY).filter(|b| b.column_by_name(field).is_some()).unwrap_or(primary)
 }
 
 /// Which of `spec.layers` [`numeric_domain_union_over`] reads beyond the bound
@@ -2612,6 +2765,37 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
     Ok(())
 }
 
+/// Folds a previewed layer's off-side rows into `tally`, through
+/// [`LeftOutTally::count_adjusted`]: `rows.unadjusted`'s own `field` column
+/// (the caller's rows, content-deduplicated the same way a plain
+/// [`LeftOutTally::count`] read dedupes, so this layer's caller column and a
+/// demanded statistic's own recorded lineage input on the SAME raw column
+/// fold into one count) plus every row the adjustment itself moves off the
+/// side. A missing `field` column on either side of `rows` is a no-op — the
+/// caller's own EXTENT read already found (or did not find) this field, so
+/// this fold only adds to the tally when both halves of the pair actually
+/// carry it. The only write path for an [`AdjustedRows`] pair; every caller
+/// of [`TallyRead::Adjusted`] in `read()`'s own two arms goes through it.
+fn fold_adjusted_tally(
+    tally: &std::cell::RefCell<LeftOutTally>,
+    rows: &AdjustedRows<'_>,
+    field: &str,
+    side: crate::scale::log::LogSide,
+) -> Result<(), RenderError> {
+    let (Some(caller), Some(adjusted)) = (rows.unadjusted.column_by_name(field), rows.adjusted.column_by_name(field)) else {
+        return Ok(());
+    };
+    let caller_extent = sided_min_max_f64(caller.as_ref(), Some(side)).map_err(|_| RenderError::UnsupportedDtype {
+        field: field.to_string(),
+        dtype: format!("{:?}", caller.data_type()),
+        context: None,
+    })?;
+    tally
+        .borrow_mut()
+        .count_adjusted(caller.as_ref(), caller_extent, adjusted.as_ref(), side)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("{field}: {e}")))
+}
+
 /// [`numeric_domain_union`] with the layer selection spelled out.
 ///
 /// `side`: a `Log` channel's side of zero (always `None` for every other
@@ -2625,7 +2809,11 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
 /// — a faceted chart's shared extent (`include_final`) and a layered
 /// chart's every layer alike, so the count
 /// `RenderWarning::LogScaleRowsLeftOut`/`RenderError::LogScaleNoValueOnSide`
-/// report is the whole frame's, on every door.
+/// report is the whole frame's, on every door. `adjusted` is the unlayered
+/// read's own [`AdjustedRows`] pair (`position::axis_batch`'s own build),
+/// `Some` only when a position adjustment applies on this axis — a layered
+/// spec threads its own per-layer pairs through [`AxisReads`] instead, so
+/// every caller but the unlayered one passes `None` here.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union_over(
     channel: &str,
@@ -2643,6 +2831,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     // every caller that is not itself resolving the axis a `Dodge` reads
     // (a direct test, or a context with no color scale to offer).
     color: Option<&crate::render::scale_resolve::ColorScale>,
+    adjusted: Option<&AdjustedRows<'_>>,
 ) -> Result<(SidedExtent, LeftOutTally), RenderError> {
     // `(mn, mx)` in a `Cell` while the closures below are live: `extent_only`
     // and `read`'s `take_extent_only` both need to update it, and a `Cell`
@@ -2697,7 +2886,6 @@ pub(in crate::render) fn numeric_domain_union_over(
         extent_only(c, source_field)?;
         tally_only(c, source_field)
     };
-
     // Reads `f` from one source and returns whether that source holds it.
     // `Ok(false)` is the normal "this batch has no such column" outcome, not an
     // error. The bar zero-anchor rule below needs the bool so a layer's
@@ -2727,7 +2915,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     // reports the whole frame's count — the restatements then collapse to
     // one via `panel_pass_warning_restated_by_every_panel`, the same way
     // every other per-panel-restated warning already does.
-    let read = |source: Option<LayerSource<'_>>, f: &str| -> Result<bool, RenderError> {
+    let read = |source: Option<LayerSource<'_>>, tally_read: TallyRead<'_>, f: &str| -> Result<bool, RenderError> {
         let mut found = false;
         let primary_has = primary_batch.column_by_name(f).is_some();
         let take = |batch: &RecordBatch, found: &mut bool| -> Result<(), RenderError> {
@@ -2758,14 +2946,59 @@ pub(in crate::render) fn numeric_domain_union_over(
             // `AxisReads`). A `Member`'s embedded lineage plays no role in
             // this numeric union either way, so folding it with `Batch`
             // costs nothing even if it were reached.
-            Some(LayerSource::Batch(batch) | LayerSource::Member(batch, _)) => take(batch, &mut found)?,
+            //
+            // The extent always reads `batch` (the preview — the extent
+            // always comes from the adjusted rows, unconditionally). The
+            // tally dispatches on `tally_read`: a plain caller column
+            // ([`TallyRead::Column`]) still reads `batch` itself (an
+            // unadjusted layer never substitutes a preview for `batch` in
+            // the first place); a previewed layer's own
+            // [`AdjustedRows`] pair ([`TallyRead::Adjusted`]) folds through
+            // [`fold_adjusted_tally`] instead, which reads the CALLER's
+            // rows from `rows.unadjusted` plus the rows the adjustment
+            // itself moves off the side; a stack-base span
+            // ([`TallyRead::ExtentOnly`]) contributes nothing to the tally
+            // at all — a stack's base is not caller data.
+            Some(LayerSource::Batch(batch) | LayerSource::Member(batch, _)) => {
+                if let Some(c) = batch.column_by_name(f) {
+                    extent_only(c.as_ref(), f)?;
+                    found = true;
+                }
+                match tally_read {
+                    TallyRead::Column => {
+                        if let Some(c) = batch.column_by_name(f) {
+                            tally_only(c.as_ref(), f)?;
+                        }
+                    }
+                    TallyRead::Adjusted(rows) => {
+                        if let Some(side) = side {
+                            fold_adjusted_tally(&tally, &rows, f, side)?;
+                        }
+                    }
+                    TallyRead::ExtentOnly => {}
+                }
+            }
             Some(LayerSource::Chart) | None => {
                 let final_col = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(f));
                 let final_batch = transform_outputs
                     .get(FINAL_OUTPUT_KEY)
                     .filter(|_| include_final && final_col.is_some());
+                // Consumed exactly once here: `plain_tally` and
+                // `adjusted_rows` cover every later read of `tally_read` in
+                // this arm, so no later line touches the moved value again.
+                let (plain_tally, adjusted_rows) = match tally_read {
+                    TallyRead::Column => (true, None),
+                    TallyRead::Adjusted(rows) => (false, Some(rows)),
+                    TallyRead::ExtentOnly => (false, None),
+                };
                 if let Some(batch) = final_batch {
-                    take(batch, &mut found)?;
+                    if let Some(c) = batch.column_by_name(f) {
+                        extent_only(c.as_ref(), f)?;
+                        found = true;
+                        if plain_tally {
+                            tally_only(c.as_ref(), f)?;
+                        }
+                    }
                 } else {
                     // EXTENT only here — the panel's own domain stays
                     // independent (or there is no `FINAL` to union with);
@@ -2791,7 +3024,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                             take(batch, &mut found)?;
                         }
                     }
-                    if side.is_some() {
+                    if side.is_some() && plain_tally {
                         // The whole-frame tally rule: `FINAL`'s
                         // column when the chart publishes one, else the
                         // panel's own (an unfaceted call, or a field not
@@ -2806,6 +3039,9 @@ pub(in crate::render) fn numeric_domain_union_over(
                             }
                         }
                     }
+                }
+                if let (Some(rows), Some(side)) = (&adjusted_rows, side) {
+                    fold_adjusted_tally(&tally, rows, f, side)?;
                 }
             }
         }
@@ -2822,20 +3058,26 @@ pub(in crate::render) fn numeric_domain_union_over(
     // kept for the layer loop below, so a layer drawing a seed read's field
     // from its batch is not read twice.
     let layers = spec.layers.as_deref().unwrap_or_default();
-    let (previews, bases) = axis_previews(spec, layers, channel, primary_batch, transform_outputs, include_final, color)?;
-    let reads = AxisReads::over(layers, &previews, bases);
+    let (previews, bases, layer_adjusted) = axis_previews(spec, layers, channel, primary_batch, transform_outputs, include_final, color)?;
+    let reads = AxisReads::over(layers, &previews, bases, layer_adjusted);
     let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
     // Unlayered ([`ChartSpec::is_layered`]): with no layer there is no
-    // seed, so the chart's one batch is the read.
+    // seed, so the chart's one batch is the read. `adjusted` pairs the
+    // VALUE field with its own caller-row tally; the paired field is
+    // `ExtentOnly` when it is literally the stack's base column
+    // (`position::axis_batch`'s own `base`), `Column` for a caller's own
+    // `x2`/`y2`.
     if !spec.is_layered() {
-        read(None, field)?;
+        let value_tally = adjusted.map_or(TallyRead::Column, |rows| TallyRead::Adjusted(rows.clone()));
+        read(None, value_tally, field)?;
         if let Some(p) = paired_field {
-            read(None, p)?;
+            let span_tally = if adjusted.is_some_and(|rows| rows.base == Some(p)) { TallyRead::ExtentOnly } else { TallyRead::Column };
+            read(None, span_tally, p)?;
         }
     }
     let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
-    for &seed in &seeds {
+    for seed in &seeds {
         // An inherited field is a later layer's column, judged as that
         // layer's own column is in the loop below: placeable on this axis
         // first, or, for a layer whose own coord exchanges its channels,
@@ -2844,10 +3086,10 @@ pub(in crate::render) fn numeric_domain_union_over(
             layer_flips(&layers[index], spec.coord.as_ref()) != chart_flipped
         });
         if exchanges {
-            let found = read(Some(seed.source), seed.field).unwrap_or(false);
-            seed_found.push((seed, found));
+            let found = read(Some(seed.source), seed.tally.clone(), seed.field).unwrap_or(false);
+            seed_found.push((seed.clone(), found));
             if let Some(span) = seed.span {
-                read(Some(seed.source), span).unwrap_or(false);
+                read(Some(seed.source), seed.span_tally.clone(), span).unwrap_or(false);
             }
             continue;
         }
@@ -2861,9 +3103,10 @@ pub(in crate::render) fn numeric_domain_union_over(
                 located.col.data_type(),
             )?;
         }
-        seed_found.push((seed, read(Some(seed.source), seed.field)?));
+        let found = read(Some(seed.source), seed.tally.clone(), seed.field)?;
+        seed_found.push((seed.clone(), found));
         if let Some(span) = seed.span {
-            read(Some(seed.source), span)?;
+            read(Some(seed.source), seed.span_tally.clone(), span)?;
         }
     }
 
@@ -2987,6 +3230,13 @@ pub(in crate::render) fn numeric_domain_union_over(
             let mut value_field_contributed = false;
             for (i, lf) in layer_fields.into_iter().enumerate() {
                 let Some(lf) = lf else { continue };
+                // Only the VALUE slot (index 0) is the field a `Dodge`/
+                // `Jitter`/`Stack` preview pairs with its own `AdjustedRows`
+                // — the paired span (`x2`/`y2`, index 1) is always a
+                // caller-written field here (a stacking layer's base column
+                // is read separately, below, never through `layer_fields`),
+                // so it stays `Column` unconditionally.
+                let tally_read = if i == 0 { reads.tally(layer_index) } else { TallyRead::Column };
                 let seeded = seed_found
                     .iter()
                     .find(|(s, _)| s.source == source && s.field == lf)
@@ -2998,7 +3248,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                     // `validate_layer_coord_exchange_is_servable` (see this
                     // loop's own doc above), not by this union: a failure to
                     // find or read it here belongs to that gate, not this one.
-                    read(Some(source), lf).unwrap_or(false)
+                    read(Some(source), tally_read, lf).unwrap_or(false)
                 } else {
                     match source.locate(lf, primary_batch, transform_outputs) {
                         // Absent from the batch this layer draws is the
@@ -3025,7 +3275,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                                 lf,
                                 located.col.data_type(),
                             )?;
-                            read(Some(source), lf)?
+                            read(Some(source), tally_read, lf)?
                         }
                     }
                 };
@@ -3033,9 +3283,11 @@ pub(in crate::render) fn numeric_domain_union_over(
                     value_field_contributed = contributed;
                 }
             }
-            // A stacking layer's segments reach down (or up) to their bases.
+            // A stacking layer's segments reach down (or up) to their bases:
+            // extent only, never the tally — a stack's base is not caller
+            // data.
             if let Some(base) = reads.base(layer_index) {
-                read(Some(source), base)?;
+                read(Some(source), TallyRead::ExtentOnly, base)?;
             }
             // The authored `y` decides the bar's orientation: categorical by
             // its declared type or by the column it reads in this layer's batch.
@@ -3509,7 +3761,7 @@ pub(in crate::render) fn positional_category_union(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::StringArray;
+    use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -4701,6 +4953,7 @@ mod tests {
             LayerUnion::CarryingScale(&scale),
             None,
             None,
+            None,
         )
         .expect("an all-null Float64 column is readable");
         assert_eq!((extent.lo, extent.hi), (0.0, 1.0));
@@ -4729,6 +4982,7 @@ mod tests {
                 &spec,
                 false,
                 union,
+                None,
                 None,
                 None,
             )
@@ -5258,6 +5512,7 @@ mod tests {
             LayerUnion::CarryingScale(&scale),
             None,
             None,
+            None,
         )
         .expect("every column is Float64");
         assert_eq!((extent.lo, extent.hi), (-0.2, 20.0));
@@ -5502,6 +5757,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             None,
             &mut warnings,
@@ -5886,7 +6142,7 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (_, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, true, LayerUnion::Every, side, None)
+        let (_, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, true, LayerUnion::Every, side, None, None)
             .expect("v is Float64 in this fixture");
         assert_eq!(tally.rows(), 2, "the whole frame has 2 off-side rows, not 3 (the panel's 1 double-counted): {tally:?}");
     }
@@ -5902,7 +6158,7 @@ mod tests {
         let column = || -> arrow::array::ArrayRef { Arc::new(Float64Array::from(vec![0.0, -1.0, 1.0, 10.0])) };
         let panel = RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])), vec![column()]).unwrap();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (_, mut tally) = numeric_domain_union_over("x", "v", None, &panel, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None)
+        let (_, mut tally) = numeric_domain_union_over("x", "v", None, &panel, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None, None)
             .expect("v is Float64 here");
         assert_eq!(tally.rows(), 2, "the primitive read alone: {tally:?}");
         let mut lineages: OutputLineages = HashMap::new();
@@ -5955,6 +6211,25 @@ mod tests {
         assert_eq!(tally.rows(), 0, "a refused column folds nothing into the tally: {tally:?}");
     }
 
+    /// An unlayered spec with no `AdjustedRows` (`adjusted: None` — no
+    /// position adjustment applies on this axis) reads `primary_batch`
+    /// directly (the `Chart | None` arm's whole-frame tally rule, no
+    /// `FINAL_OUTPUT_KEY` published): `_over` counts every off-side row of
+    /// WHATEVER unadjusted batch it is given, with no transform outputs at
+    /// all.
+    #[test]
+    fn an_unlayered_tally_counts_every_off_side_row_of_the_batch_it_is_given() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![5.0, -1.0, -2.0, 10.0, -3.0]))],
+        )
+        .unwrap();
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("x", "v", None, &batch, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None, None)
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 3, "{tally:?}");
+    }
+
     /// The same two batches, but INDEPENDENT facet resolution
     /// (`include_final: false`): the panel's own extent still comes from
     /// its own batch alone (unchanged, independent-panel domain), but the
@@ -5979,7 +6254,7 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), global);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, false, LayerUnion::Every, side, None)
+        let (extent, tally) = numeric_domain_union_over("y", "v", None, &panel, &outputs, &spec, false, LayerUnion::Every, side, None, None)
             .expect("v is Float64 in this fixture");
         assert_eq!((extent.lo, extent.hi), (1.0, 10.0), "the panel's own on-side extent stays independent");
         assert_eq!(tally.rows(), 2, "the tally reads the whole frame regardless of facet resolution: {tally:?}");
@@ -6011,10 +6286,305 @@ mod tests {
         );
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None, None)
             .expect("f is Float64 in the 'box' output");
         assert_eq!((extent.lo, extent.hi), (1.0, 10.0));
         assert_eq!(tally.rows(), 1, "the one off-side row (-5) must be counted: {tally:?}");
+    }
+
+    // ── `AdjustedRows`: the position-adjustment tally ───────────────────────
+    //
+    // `position::adjusted_rows`'s pairing of a layer's whole-frame caller
+    // batch with its own preview, folded through `fold_adjusted_tally` /
+    // `LeftOutTally::count_adjusted`: the one mechanism for pairing
+    // adjusted and unadjusted rows that stays correct across different
+    // batches and row orders, rather than matching them up positionally.
+
+    /// A caller value of exactly `0.0` — off-side on the positive side,
+    /// never on-side — "lifted" by a position adjustment (a stack's base,
+    /// say) to an on-side value: the row stays counted via the CALLER'S
+    /// OWN off-side extent, not dropped just because its adjusted
+    /// counterpart now looks on-side. `count_adjusted`'s `moved` fold never
+    /// touches it either (it only tracks a caller row that starts ON-side
+    /// and is pushed OFF by the adjustment — the opposite direction), so
+    /// the row's single count comes from `caller_extent.left_out` alone.
+    #[test]
+    fn an_unlayered_adjusted_tally_still_counts_a_lifted_zero_via_the_callers_own_extent() {
+        let caller = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![0.0, 5.0, -2.0]))],
+        )
+        .unwrap();
+        let lifted = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![3.0, 5.0, -2.0]))],
+        )
+        .unwrap();
+        let adjusted = AdjustedRows { unadjusted: &caller, adjusted: lifted, base: None };
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("y", "v", None, &caller, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None, Some(&adjusted))
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 2, "both the lifted zero and the plain negative row must stay counted: {tally:?}");
+    }
+
+    /// The opposite direction from the lifted-zero case above: a caller
+    /// row that starts ON-side (`5.0`) is pushed OFF-side by the
+    /// adjustment itself (to `-3.0`) — a tally that reads only the
+    /// caller's own rows (ignoring what the adjustment moved) would see
+    /// no off-side row at all here (both caller values are on-side) and
+    /// undercount to 0; the correct count is 1, the moved row.
+    #[test]
+    fn an_unlayered_adjusted_tally_counts_a_row_the_adjustment_moves_off_side() {
+        let caller = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![5.0, 8.0]))],
+        )
+        .unwrap();
+        let moved = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-3.0, 8.0]))],
+        )
+        .unwrap();
+        let adjusted = AdjustedRows { unadjusted: &caller, adjusted: moved, base: None };
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("y", "v", None, &caller, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None, Some(&adjusted))
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 1, "a caller-rows-only tally would read 0 here (no caller row is off-side); the adjustment-moved row must still be counted: {tally:?}");
+    }
+
+    /// The identical caller column, read once PLAINLY (a fit sibling layer
+    /// drawing the same raw field) and once through a jittered layer's own
+    /// `AdjustedRows` pair, dedupes to the caller's own off-side count —
+    /// `LeftOutTally`'s content-dedup (`count`'s `ArrayData` equality check,
+    /// mirrored by `count_adjusted`'s own) treats the two reads as the same
+    /// column, not two different ones to sum.
+    #[test]
+    fn a_jittered_layers_adjusted_tally_dedupes_with_a_plain_siblings_read_of_the_same_caller_column() {
+        let caller = Float64Array::from(vec![-5.0, 1.0, 10.0]);
+        let side = crate::scale::log::LogSide::Positive;
+        let tally = std::cell::RefCell::new(LeftOutTally::new());
+        let extent = sided_min_max_f64(&caller, Some(side)).expect("v is Float64 here");
+        tally.borrow_mut().count(&caller, extent);
+        assert_eq!(tally.borrow().rows(), 1, "the plain read alone counts the one off-side row");
+
+        let unadjusted_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(caller.clone())],
+        )
+        .unwrap();
+        // The jitter moves -5.0 to -3.0 — still off-side, so nothing new
+        // moves across the side either; this isolates the dedup itself from
+        // any "moved" contribution.
+        let adjusted_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-3.0, 1.0, 10.0]))],
+        )
+        .unwrap();
+        let rows = AdjustedRows { unadjusted: &unadjusted_batch, adjusted: adjusted_batch, base: None };
+        fold_adjusted_tally(&tally, &rows, "v", side).expect("v is Float64 here");
+        assert_eq!(
+            tally.borrow().rows(),
+            1,
+            "the identical caller column, read once plainly and once through the jittered layer's own AdjustedRows, must dedupe to one count: {:?}",
+            tally.borrow()
+        );
+    }
+
+    /// A stacked layer's base column (`AdjustedRows::base`) feeds the
+    /// EXTENT only, never the tally: `numeric_domain_union_over`'s paired-
+    /// span read takes `TallyRead::ExtentOnly` exactly when the paired
+    /// field names the stack's own base column, so a base value that sits
+    /// off-side (every stacked segment's own base, by construction, since a
+    /// stack starts at zero or the prior segment's own top) never inflates
+    /// the off-side count — only the stacked VALUE column's own rows (read
+    /// separately, through the value field's own `TallyRead`) can.
+    #[test]
+    fn an_unlayered_stacked_base_column_feeds_extent_only_never_the_tally() {
+        let caller = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("base", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 8.0])),
+                Arc::new(Float64Array::from(vec![-1.0, -1.0])),
+            ],
+        )
+        .unwrap();
+        let stacked = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("base", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![4.0, 7.0])),
+                Arc::new(Float64Array::from(vec![-1.0, -1.0])),
+            ],
+        )
+        .unwrap();
+        let adjusted = AdjustedRows { unadjusted: &caller, adjusted: stacked, base: Some("base") };
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("y", "v", Some("base"), &caller, &HashMap::new(), &ChartSpec::default(), false, LayerUnion::Every, side, None, Some(&adjusted))
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 0, "the base column's own off-side rows must never reach the tally — extent only: {tally:?}");
+    }
+
+    // ── The layered door end to end: axis_previews -> AxisReads::tally ->
+    // TallyRead::Adjusted -> fold_adjusted_tally ────────────────────────────
+
+    /// A jittered layer's off-side tally, reached through the full layered
+    /// pipeline (`axis_previews` builds its `AdjustedRows`, `AxisReads`
+    /// pairs it with the layer via `tally()`, `read()` dispatches
+    /// `TallyRead::Adjusted` into `fold_adjusted_tally`), counts the SAME
+    /// raw `v` column a plain sibling layer reads from the chart's own
+    /// batch — the two content-dedupe into ONE count, not two (the
+    /// jittered preview's own rewritten column, read verbatim, would never
+    /// equal the raw one by content and so would never dedupe against
+    /// it). `v = [-5, 1, 10]` has exactly one off-side row (`-5`).
+    #[test]
+    fn a_jittered_layer_tallies_the_same_raw_rows_a_plain_sibling_reads() {
+        use crate::spec::position::{JitterAxis, PositionAdjust};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0]))],
+        )
+        .unwrap();
+        let jitter_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() },
+            position: Some(PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(7) }),
+            ..Default::default()
+        };
+        let plain_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![jitter_layer, plain_layer]), ..Default::default() };
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("x", "v", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, side, None, None)
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 1, "the jittered layer's tally must count the SAME raw row the plain sibling counts, not a second one of the jittered preview's own (different) content: {tally:?}");
+    }
+
+    /// The same dedupe holds between two layers that BOTH jitter the same
+    /// field, with different seeds (so their own adjusted columns differ
+    /// from each other too): both tallies still read the layer's own
+    /// `AdjustedRows.unadjusted` — the same raw `v` column — so the
+    /// whole-frame count stays 1 regardless of which layer's randomness is
+    /// read.
+    #[test]
+    fn two_jittered_layers_on_the_same_field_still_dedupe_to_one_count() {
+        use crate::spec::position::{JitterAxis, PositionAdjust};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-5.0, 1.0, 10.0]))],
+        )
+        .unwrap();
+        let jitter_layer = |seed: u64| Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() },
+            position: Some(PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(seed) }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![jitter_layer(7), jitter_layer(11)]), ..Default::default() };
+        let side = Some(crate::scale::log::LogSide::Positive);
+        let (_, tally) = numeric_domain_union_over("x", "v", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, side, None, None)
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 1, "two differently-seeded jittered layers on the same field must still dedupe to the one raw off-side row: {tally:?}");
+    }
+
+    /// The same mechanism holds on the NEGATIVE side: a jittered layer's
+    /// tally, reached through the full layered pipeline, still counts the
+    /// raw column a plain sibling reads, not the jittered preview's own
+    /// rewritten one.
+    #[test]
+    fn a_jittered_layer_tallies_the_same_raw_rows_on_the_negative_side() {
+        use crate::spec::position::{JitterAxis, PositionAdjust};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![5.0, -1.0, -10.0]))],
+        )
+        .unwrap();
+        let jitter_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() },
+            position: Some(PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(3) }),
+            ..Default::default()
+        };
+        let plain_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "v".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![jitter_layer, plain_layer]), ..Default::default() };
+        let side = Some(crate::scale::log::LogSide::Negative);
+        let (_, tally) = numeric_domain_union_over("x", "v", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, side, None, None)
+            .expect("v is Float64 here");
+        assert_eq!(tally.rows(), 1, "the one off-side row (5.0) counted once, not doubled against the jittered preview's own content: {tally:?}");
+    }
+
+    /// A layer's off-side tally gets NO `AdjustedRows` pair when
+    /// `whole_frame` is FINAL (FINAL holds the drawn field "y", so
+    /// `whole_frame_batch` selects it over `primary_batch`) but FINAL's
+    /// own preview fails: `primary_batch` carries every column `Stack`
+    /// needs (its category field "x", its value field "y", its by-group
+    /// field "g"), so its own preview succeeds, but the published FINAL
+    /// batch carries no "x" column at all, so `apply_stack` fails on it
+    /// with `PositionAdjustFailed` and `adjusted_across_panels` returns
+    /// `Ok(None)` for FINAL's whole preview. A regression that paired
+    /// `whole_frame` with `rows` (`primary_batch`'s own preview, a
+    /// DIFFERENT batch) instead of giving up would build a row-misaligned
+    /// `AdjustedRows` here.
+    #[test]
+    fn axis_previews_builds_no_pair_when_finals_own_preview_fails_though_primarys_own_succeeds() {
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let primary = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Utf8, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p", "p"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let final_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("y", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), final_batch);
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            position: Some(PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let layers = spec.layers.as_deref().unwrap();
+        let (_, _, adjusted) = axis_previews(&spec, layers, "y", &primary, &outputs, true, None)
+            .expect("the layer's own panel rows still stack");
+        assert_eq!(adjusted.len(), 1);
+        assert!(adjusted[0].is_none(), "FINAL's own preview failed, so no AdjustedRows pair must be built: {:?}", adjusted[0].is_some());
     }
 
     /// The same shape, every row off-side: today's silent `[1, base]` axis
@@ -6039,7 +6609,7 @@ mod tests {
         );
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
+        let (extent, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None, None)
             .expect("f is Float64 in the 'box' output");
         assert_eq!(tally.rows(), 2);
         assert!(!tally.any_on_side());
@@ -6068,7 +6638,7 @@ mod tests {
         outputs.insert(FINAL_OUTPUT_KEY.to_string(), f_batch);
         let spec = ChartSpec::default();
         let side = Some(crate::scale::log::LogSide::Positive);
-        let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None)
+        let (_, tally) = numeric_domain_union_over("y", "f", None, &primary, &outputs, &spec, false, LayerUnion::Every, side, None, None)
             .expect("f is Float64");
         assert_eq!(tally.rows(), 1, "'box' and FINAL are equal by content: counted once, not twice: {tally:?}");
     }
@@ -6154,7 +6724,7 @@ mod tests {
         };
 
         let (extent, _tally) =
-            numeric_domain_union_over("x", "x", None, &panel_a, &outputs, &spec, true, LayerUnion::Every, None, None)
+            numeric_domain_union_over("x", "x", None, &panel_a, &outputs, &spec, true, LayerUnion::Every, None, None, None)
                 .expect("the reconciled Float64 preview must be readable");
         assert!((extent.lo - 0.75).abs() < 1e-9, "lo={}", extent.lo);
         assert!((extent.hi - 2.25).abs() < 1e-9, "hi={}", extent.hi);

@@ -280,6 +280,15 @@ pub(in crate::render) fn build_axis_scale(
     // over the real lineages); `None` resolves `LogAxisReads::chart` from
     // `transform_lineages`/`channel`/`spec` instead — the chart's own axis.
     slot_reads: Option<LogAxisReads<'_>>,
+    // The unlayered axis's own `AdjustedRows` pair (`position::axis_batch`'s
+    // own build), `Some` only when a position adjustment (`Stack`,
+    // continuous `Dodge`, data-space `Jitter`) applies on this axis.
+    // Threaded straight through to `data_extent`'s own
+    // `numeric_domain_union_over` call, the one place a `Log` channel's
+    // off-side tally reads it; every other scale kind ignores it exactly as
+    // `numeric_domain_union_over` itself does. `None` for a layered spec,
+    // which threads its own per-layer pairs through `AxisReads` instead.
+    adjusted: Option<&crate::render::position::AdjustedRows<'_>>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     // The bound field is typed, and a caller's categorical scale takes its
@@ -417,6 +426,7 @@ pub(in crate::render) fn build_axis_scale(
                 LayerUnion::CarryingScale(scale_spec),
                 side,
                 color,
+                adjusted,
             )
             .map_err(|e| match e {
                 RenderError::UnsupportedDtype { field, dtype, context: None } => {
@@ -2419,6 +2429,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -2706,6 +2717,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -2922,7 +2934,7 @@ mod tests {
                     shared: false,
                     space_columns: step
                         .iter()
-                        .map(|(output, slot, input)| crate::transform::core::SpaceColumn { output: output.to_string(), slot: *slot, input: input.to_string() })
+                        .map(|(output, slot, input)| crate::transform::core::SpaceColumn { output: output.to_string(), slot: *slot, input: input.to_string(), pass_through: false })
                         .collect(),
                 })
                 .collect(),
@@ -3263,6 +3275,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &mut warnings,
         )
         .unwrap()
@@ -3354,6 +3367,7 @@ mod tests {
             false,
             shared,
             false,
+            None,
             None,
             None,
             &mut warnings,
@@ -3512,6 +3526,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &mut warnings,
         )
     }
@@ -3585,6 +3600,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &mut warnings,
         )
         .unwrap_err();
@@ -3616,6 +3632,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             None,
             &mut warnings,
@@ -3861,6 +3878,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             None,
             &mut warnings,

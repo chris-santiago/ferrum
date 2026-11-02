@@ -29,7 +29,7 @@ use crate::transform::logistic::LogisticSpec;
 use crate::transform::glm::GlmSpec;
 use crate::transform::identity::IdentitySpec;
 use crate::transform::robust::RobustSpec;
-use crate::transform::smooth::SmoothSpec;
+use crate::transform::smooth::{SmoothOutput, SmoothSpec};
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
 
@@ -436,12 +436,20 @@ pub(crate) enum SpaceSlot {
 
 /// One output column a lowered step computes in the units of one of its
 /// input slots: `output` holds the units of the column `input` the step
-/// reads through `slot`.
+/// reads through `slot`. `pass_through` is `true` only for a column the
+/// step carries through unchanged under its own name (a `DataWindow` sort
+/// field) rather than computing — declared explicitly, not read off
+/// `output != input` by name: a computed output can happen to share its
+/// input's name (a `Smooth` fit on a field literally called `x`, a `Kde`
+/// grid on a field called `value`) without being a pass-through, which a
+/// name comparison would misread as one and so drop its off-side record
+/// ([`crate::transform::run::SpaceWalkStep::computes`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpaceColumn {
     pub(crate) output: String,
     pub(crate) slot: SpaceSlot,
     pub(crate) input: String,
+    pub(crate) pass_through: bool,
 }
 
 impl TransformSpec {
@@ -561,6 +569,33 @@ impl TransformSpec {
         }
     }
 
+    /// `Smooth`'s and `Robust`'s one declaration of which output column
+    /// holds which input slot's units, read both by `space_columns` below
+    /// and by [`crate::transform::log_space::run_fit_in_log_space`]'s own
+    /// map-back, so the demand and the map-back can never drift apart —
+    /// see `space_columns`'s own doc for why `Fitted` carries
+    /// `_metrics_y` and `Residuals` carries only `x`.
+    pub(crate) fn fit_space_columns(x: &str, y: &str, output: SmoothOutput) -> Vec<SpaceColumn> {
+        let column = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string(), pass_through: false };
+        match output {
+            SmoothOutput::Fitted => vec![
+                column("x", SpaceSlot::X, x),
+                column("y", SpaceSlot::Y, y),
+                column("ci_lower", SpaceSlot::Y, y),
+                column("ci_upper", SpaceSlot::Y, y),
+                column("_metrics_y", SpaceSlot::Y, y),
+            ],
+            SmoothOutput::Residuals => vec![column("x", SpaceSlot::X, x)],
+        }
+    }
+
+    /// `Logistic`'s and `Glm`'s one `x` column, in `X`-slot units: their
+    /// response is drawn on the link's own scale (a probability or a
+    /// mean), never the positional axis's, so neither carries a `Y` entry.
+    pub(crate) fn fit_x_only_space_columns(x: &str) -> Vec<SpaceColumn> {
+        vec![SpaceColumn { output: "x".to_string(), slot: SpaceSlot::X, input: x.to_string(), pass_through: false }]
+    }
+
     /// The output columns whose values sit in one input's units, each with
     /// the input role ([`SpaceSlot`]) that computes it and that input's
     /// column: a channel drawing the output column needs the input slot's
@@ -576,12 +611,22 @@ impl TransformSpec {
     /// and its four output columns name them (`contour_x`/`contour_x2`
     /// from `grid_x`, `contour_y`/`contour_y2` from `grid_y`);
     /// `DataWindow`'s sorted columns pass through unchanged, one per `sort`
-    /// field. `Bin2D`, `Hex`, `Raster`, `Violin` and `DensityData` carry
-    /// none (not reached by this crate's log-space demand).
+    /// field. `Smooth`'s `Fitted` output computes `x` from its `X` slot and
+    /// `y`/`ci_lower`/`ci_upper`/`_metrics_y` from its `Y` slot (a residual
+    /// metric anchor sits in the fitted y's units too); its `Residuals`
+    /// output computes only `x` from `X` — a residual is a signed
+    /// difference, not a position, so it stays in data units even when `x`
+    /// fits in log space. `Robust` carries the identical shape on both
+    /// outputs. `Logistic` and `Glm` carry only `x`: their response is
+    /// drawn on their link's own scale (a probability or a mean), never the
+    /// positional axis's. `Bin2D`, `Hex`, `Raster`, `Violin` and
+    /// `DensityData` carry none (not reached by this crate's log-space
+    /// demand).
     ///
     /// [`SpaceDemand::of`]: crate::transform::color_bin_group::SpaceDemand::of
     pub(crate) fn space_columns(&self) -> Vec<SpaceColumn> {
-        let column = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string() };
+        let column = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string(), pass_through: false };
+        let pass_through = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string(), pass_through: true };
         match self {
             Self::Bin(s) => vec![column("bin_start", SpaceSlot::Field, &s.field), column("bin_end", SpaceSlot::Field, &s.field)],
             Self::Kde(s) => vec![column("value", SpaceSlot::Field, &s.field)],
@@ -592,9 +637,12 @@ impl TransformSpec {
                 column("contour_y", SpaceSlot::GridY, "grid_y"),
                 column("contour_y2", SpaceSlot::GridY, "grid_y"),
             ],
-            Self::DataWindow(s) => s.sort.iter().flatten().enumerate().map(|(i, f)| column(f, SpaceSlot::Sort(i), f)).collect(),
+            Self::DataWindow(s) => s.sort.iter().flatten().enumerate().map(|(i, f)| pass_through(f, SpaceSlot::Sort(i), f)).collect(),
+            Self::Smooth(s) => Self::fit_space_columns(&s.x, &s.y, s.output),
+            Self::Robust(s) => Self::fit_space_columns(&s.x, &s.y, s.output),
+            Self::Logistic(s) => Self::fit_x_only_space_columns(&s.x),
+            Self::Glm(s) => Self::fit_x_only_space_columns(&s.x),
             Self::Bin2D(_)
-            | Self::Smooth(_)
             | Self::Aggregate(_)
             | Self::Summary(_)
             | Self::Outliers(_)
@@ -610,9 +658,6 @@ impl TransformSpec {
             | Self::Reorder(_)
             | Self::ReferenceLine(_)
             | Self::LetterValue(_)
-            | Self::Logistic(_)
-            | Self::Glm(_)
-            | Self::Robust(_)
             | Self::Identity(_)
             | Self::Filter(_)
             | Self::Calculate(_)
@@ -1194,7 +1239,7 @@ mod tests {
                 n_grid: 8, ci: None, huber_c: 1.345, max_iter: 50, tol: 1e-10,
                 output: SmoothOutput::Fitted,
                 inject_zero_ref: false, inject_metrics: false,
-                groupby: vec![], x_range: None, name: None,
+                groupby: vec![], x_range: None, x_range_pad: None, name: None,
             }),
             f64_batch(&[("x", vec![1.0]), ("y", vec![1.0])]),
         ));
@@ -1210,7 +1255,7 @@ mod tests {
                     method: SmoothMethod::Gam,
                     ci: None, bandwidth: 0.75, degree: 1, k, n: 20, seed: 0,
                     x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
-                    inject_zero_ref: false, inject_metrics: false, x_range: None,
+                    inject_zero_ref: false, inject_metrics: false, x_range: None, x_range_pad: None,
                     groupby: vec![], name: None,
                 }),
                 f64_batch(&[("x", xs), ("y", ys)]),

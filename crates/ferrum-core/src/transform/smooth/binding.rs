@@ -118,7 +118,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = None, degree = None, k = None, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = None, degree = None, k = None, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None, x_range_pad = None))]
     pub(super) fn new(
         x: &str, y: &str,
         method: &str,
@@ -136,9 +136,24 @@ impl PySmooth {
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
         x_range: Option<[f64; 2]>,
+        x_range_pad: Option<f64>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Smooth: x and y must be non-empty"));
+        }
+        if let Some([a, b]) = x_range {
+            if !a.is_finite() || !b.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: x_range must be (lo, hi) with both finite; received [{a}, {b}]"
+                )));
+            }
+        }
+        if let Some(pad) = x_range_pad {
+            if !pad.is_finite() || pad < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: x_range_pad must be a finite fraction >= 0; received {pad}"
+                )));
+            }
         }
         if n == 0 {
             return Err(PyValueError::new_err("Smooth: n must be > 0"));
@@ -345,17 +360,18 @@ impl PySmooth {
             groupby,
             name,
             x_range,
+            x_range_pad,
         })))
     }
 
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, k={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?})",
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, k={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?}, x_range_pad={:?})",
                 s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.k, s.n, s.seed,
                 // The canonical `AggFn` spelling, as `AggregateOp`'s `fn_=`.
                 s.x_bins, s.x_estimator.map(<&'static str>::from), s.output,
-                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range, s.x_range_pad,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

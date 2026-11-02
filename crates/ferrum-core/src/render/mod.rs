@@ -460,6 +460,24 @@ pub enum RenderError {
         reason: String,
         coord_flipped: bool,
     },
+    /// `mark_smooth(method="sqrt")` (or an `lmplot`/`regplot` door routed
+    /// through it) drawn on an x channel a `LogScale` demands: `sqrt(x)` and
+    /// `log(x)` are two different predictor transforms, and a statistic
+    /// computes each input in one space (the same rule
+    /// `color_bin_group::StepSpace::demand` refuses two axes over, here
+    /// refused before the fit ever runs). Raised at prepare time
+    /// ([`prepare::refuse_sqrt_on_log_x`]), voiced through the layer entry
+    /// like every other layer-voiced refusal, so the text lives here, not in
+    /// `transform::smooth`.
+    SmoothSqrtOnLogX,
+    /// `residplot(...)` drawn against a y channel that resolves to a
+    /// `LogScale`, through any door (`y=fm.Y(scale=...)`, `encode=`,
+    /// `.override(y_scale_type="log")`): the residual axis draws signed
+    /// residuals around 0, which no `LogScale` can place. Raised at prepare
+    /// time ([`prepare::refuse_residplot_log_y`]) the moment the chart's own
+    /// `entry` is `residplot`'s, so every door that reaches a log y reaches
+    /// this refusal the same way.
+    ResidplotLogY,
     /// A binned color (`Color(bin=...)`, a `bin-ordinal` scale carrying
     /// `bin`) over a column the `Bin` transform cannot read as numbers.
     /// `channel` is the class the binding was written with (`Color`, `Fill`
@@ -1286,6 +1304,12 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // auxiliary site is never corrected, since an auxiliary channel
         // never flips.
         | RenderError::LogScaleNoValueOnSide { .. }
+        // Carries no channel token: `SmoothSqrtOnLogX` names no channel at
+        // all (the demanded axis is always x), and `ResidplotLogY` names
+        // `y` as a hardcoded wire token (the residual axis), not a channel
+        // the caller wrote — nothing here to un-flip on either.
+        | RenderError::SmoothSqrtOnLogX
+        | RenderError::ResidplotLogY
         // #126: carries no channel token at all — a color string, not a
         // positional channel.
         | RenderError::ColorRangeParseFailure { .. }
@@ -1474,6 +1498,24 @@ impl std::fmt::Display for RenderError {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 write!(f, "{channel} scale: {reason}")
             }
+            // The fallback arm of `fmt_as` below writes `"{entry}: {other}"`,
+            // so this plain text is this refusal's own suffix once voiced
+            // through the layer entry; bare (unwrapped) `Display` gets the
+            // same sentence with no entry at all, which still reads.
+            Self::SmoothSqrtOnLogX => write!(f, "{}", crate::transform::smooth::SQRT_ON_LOG_X_REASON),
+            // `entry` is always `residplot`'s own: the gate
+            // (`prepare::refuse_residplot_log_y`) reads each layer's own
+            // effective entry off the precomputed `log_space_reads` list
+            // and only raises this for a read whose layer's entry IS
+            // `"residplot"`, so this unwrapped case can hardcode the name;
+            // the voiced case goes through `fmt_as` below, which
+            // substitutes the real entry the same way.
+            Self::ResidplotLogY => write!(
+                f,
+                "residplot(y=<log scale>) is not supported: the residual axis draws signed \
+                 residuals around 0, which a LogScale cannot place. Use fm.SymlogScale(), or \
+                 drop scale="
+            ),
             Self::SharedColorScalesDiffer { first, other } => write!(
                 f,
                 "a shared color needs one color scale on every panel, but one panel colors by {first} \
@@ -1917,6 +1959,16 @@ impl RenderError {
                      panel's), or drop it."
                 )
             }
+            // Not `"{entry}: {other}"` (the fallback below): residplot's
+            // text opens `{entry}(y=...)`, mirroring a mark-style refusal's
+            // `{entry}(size=...)` shape rather than a plain `{entry}:`
+            // sentence.
+            Self::ResidplotLogY => write!(
+                f,
+                "{entry}(y=<log scale>) is not supported: the residual axis draws signed \
+                 residuals around 0, which a LogScale cannot place. Use fm.SymlogScale(), or \
+                 drop scale="
+            ),
             Self::UnsupportedChannelCombination { channel, hint, hint_alt_channel, coord_flipped, .. } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 let hint: std::borrow::Cow<str> = match hint_alt_channel {

@@ -22,7 +22,9 @@ in.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import warnings
 from typing import Any, Callable
@@ -31,6 +33,7 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 import pytest
+from scipy.optimize import linear_sum_assignment
 
 import ferrum as fm
 from tests._hue_probe import legend_labels
@@ -38,6 +41,7 @@ from tests._svg_extents import (
     log_axis_pixels_per_unit,
     log_value_for_pixel,
     panel_x_ladder,
+    pixel_for,
     value_axis_ladder,
     value_axis_ladders,
     value_for_pixel,
@@ -2508,3 +2512,1704 @@ def test_an_independent_y_slots_off_side_rows_warn_by_its_own_field(case, door, 
     assert len(msgs) == 1, (case, door, secondary_kind, msgs)
     assert "2 row(s) of 'v'" in msgs[0], (case, door, secondary_kind, msgs[0])
     assert "'w'" not in msgs[0], (case, door, secondary_kind, msgs[0])
+
+# ---------------------------------------------------------------------------
+# A fit (mark_smooth, regplot, lmplot, residplot) on a log positional axis
+# computes in that axis's own space, as the Bin/Kde/Kde2D statistics above
+# already do: a straight-line method draws a straight line in log x, its
+# off-side warning counts the caller's own rows under the caller's own
+# field, and `truncate=False` pads the evaluation range in that same
+# space. `method="sqrt"` on a demanded log x and a `residplot` whose
+# residual axis resolves a log scale mean nothing in that space and are
+# refused instead.
+# ---------------------------------------------------------------------------
+
+
+def _loglinear_df(n: int = 60, *, lo: float = 1.0, hi: float = 1000.0) -> pl.DataFrame:
+    """`n` rows where `w` is an EXACT linear function of `log10(v)`, over
+    strictly positive `v` spanning `lo` to `hi`. Every least-squares fit
+    below (lm, loess, quadratic, cubic, gam, a gaussian glm, robust)
+    minimizes squared error on a noiseless target that is linear in
+    log10(v): fit directly on `log10(v)` (the intended space) and the fit
+    IS this line; fit on raw `v` (data space) and it draws a curve."""
+    v = np.geomspace(lo, hi, n)
+    w = 2.0 + 3.0 * np.log10(v)
+    return pl.DataFrame({"v": v, "w": w})
+
+
+def _loglinear_grouped_df(n: int = 60) -> pl.DataFrame:
+    """Two groups, `'a'` and `'b'`, each `_loglinear_df`'s own rows: one
+    shared line for a grouped-fit or faceted-fit door to match in every
+    group or panel."""
+    base = _loglinear_df(n)
+    v = base["v"].to_numpy()
+    w = base["w"].to_numpy()
+    return pl.DataFrame(
+        {
+            "v": np.concatenate([v, v]),
+            "w": np.concatenate([w, w]),
+            "g": ["a"] * n + ["b"] * n,
+        }
+    )
+
+
+def _assert_fit_matches_log10_line(
+    points: list[tuple[float, float]],
+    x_ladder: dict[float, float],
+    y_ladder: dict[float, float],
+    *,
+    a: float = 2.0,
+    b: float = 3.0,
+    tol: float = 0.01,
+) -> None:
+    """Every vertex, read back through its own x (log10) and y (linear)
+    tick ladders, lands within `tol` data units of `w = a + b*log10(v)` --
+    the straightness claim and the ladder's own honesty at once. A ladder
+    whose ticks sit in uniform category slots instead of true log
+    positions (the lying-axis defect) back-maps a vertex to the wrong
+    value, which a pixel-only collinearity check cannot see."""
+    xs, ys = _vertices_in_data_units(points, x_ladder, y_ladder, x_log=True, y_log=False)
+    assert xs, "no vertices read"
+    for x, y in zip(xs, ys):
+        assert y == pytest.approx(a + b * np.log10(x), abs=tol), (x, y)
+
+
+_LOG_FIT_STRAIGHT_DOORS: dict[str, Callable[[pl.DataFrame], fm.Chart]] = {
+    "mark_smooth lm": lambda df: fm.Chart(df)
+    .mark_smooth(method="lm", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth loess": lambda df: fm.Chart(df)
+    .mark_smooth(method="loess", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth quadratic": lambda df: fm.Chart(df)
+    .mark_smooth(method="quadratic", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth cubic": lambda df: fm.Chart(df)
+    .mark_smooth(method="cubic", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth gam": lambda df: fm.Chart(df)
+    .mark_smooth(method="gam", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth x_bins": lambda df: fm.Chart(df)
+    .mark_smooth(method="lm", ci=None, x_bins=5)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "mark_smooth ci": lambda df: fm.Chart(df)
+    .mark_smooth(method="lm", ci=0.95)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "point then smooth": lambda df: fm.Chart(df)
+    .mark_point()
+    .mark_smooth(method="lm", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="w"),
+    "regplot logx": lambda df: fm.regplot(df, x="v", y="w", logx=True, ci=None, scatter=False),
+    "lmplot logx": lambda df: fm.lmplot(df, x="v", y="w", logx=True, ci=None, scatter=False),
+    "regplot channel scale": lambda df: fm.regplot(
+        df, x=fm.X("v", scale=fm.LogScale()), y="w", ci=None, scatter=False
+    ),
+    "regplot robust logx": lambda df: fm.regplot(
+        df, x="v", y="w", method="robust", logx=True, ci=None, scatter=False
+    ),
+    "regplot glm logx": lambda df: fm.regplot(
+        df, x="v", y="w", method="glm", logx=True, ci=None, scatter=False
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_LOG_FIT_STRAIGHT_DOORS))
+def test_a_fit_on_a_log_axis_is_straight_in_log_space(door):
+    """Every straight-line-reducible fit door -- `mark_smooth` (lm, loess,
+    quadratic, cubic, gam, `x_bins=`), its CI line, a point-then-smooth
+    chart, `regplot`/`lmplot` `logx=True`, a channel `scale=fm.LogScale()`,
+    and the `robust`/`glm` dedicated methods -- draws `w = 2 + 3*log10(v)`
+    exactly: every vertex, read back through the axis's own tick ladder,
+    matches that line. A fit that computes on raw `v` draws a visibly
+    curved line, and a ladder whose ticks lie about where those vertices
+    sit (placed in uniform category slots instead of true log positions)
+    back-maps them to the wrong values -- both fail this one check, since
+    reading the vertices back is how the line is observed at all."""
+    df = _loglinear_df()
+    svg = _LOG_FIT_STRAIGHT_DOORS[door](df).to_svg()
+    lines = polylines(svg)
+    assert len(lines) == 1, (door, len(lines))
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    _, points = lines[0]
+    _assert_fit_matches_log10_line(points, x_ladder, y_ladder)
+
+
+def test_a_grouped_fit_on_a_log_axis_matches_the_line_in_every_group():
+    """A hue-grouped fit on a log x fits each group in log space: both
+    groups' polylines, read back through the one shared x ladder, match
+    `w = 2 + 3*log10(v)` -- the same line every group's rows trace."""
+    df = _loglinear_grouped_df()
+    svg = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w", color="g")
+        .to_svg()
+    )
+    lines = polylines(svg)
+    assert len(lines) == 2, lines
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    for _, points in lines:
+        _assert_fit_matches_log10_line(points, x_ladder, y_ladder)
+
+
+def test_a_faceted_fit_on_a_log_axis_matches_the_line_in_every_panel():
+    """A `col=`-faceted fit on a log x fits each panel in log space: every
+    panel's own x ladder (`panel_x_ladder`) places its polyline's vertices
+    on `w = 2 + 3*log10(v)`."""
+    df = _loglinear_grouped_df()
+    svg = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .facet(col="g")
+        .to_svg()
+    )
+    frames = mark_groups_by_frame(svg)
+    assert len(frames) == 2, frames
+    y_ladder = _leftmost_ladder(svg, axis="y")
+    for frame, content in frames:
+        x_ladder = panel_x_ladder(svg, frame)
+        lines = polylines(content)
+        assert len(lines) == 1, (frame, lines)
+        _, points = lines[0]
+        _assert_fit_matches_log10_line(points, x_ladder, y_ladder)
+
+
+def _metrics_text(svg: str) -> str:
+    """The metrics corner's `R²` line (`show_metrics=True`'s `<tspan>`)."""
+    i = svg.find("R²")
+    assert i >= 0, "no metrics corner drawn"
+    return svg[i : i + 8]
+
+
+def test_the_metrics_corner_reports_the_fit_drawn_in_log_space():
+    """`show_metrics=True`'s `R²` corner describes the fit in the space it
+    actually ran in: `1.000` for a fit on `log10(v)` (the exact
+    relationship this data holds), not `0.613`, the R² a fit on raw `v`
+    gives the same rows."""
+    df = _loglinear_df()
+    svg = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=None, show_metrics=True)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    assert _metrics_text(svg) == "R² 1.000", _metrics_text(svg)
+
+
+def test_residplots_lowess_overlay_on_a_log_x_has_no_residual_pattern():
+    """`residplot`'s own regression (and its `lowess=True` overlay) fits
+    `x` in log space too: over data where `w` is an exact function of
+    `log10(v)`, fitting raw `v` instead would leave a curved, nonzero
+    residual pattern. Every residual here is zero, naming the caller's
+    field `'v'`."""
+    df = _loglinear_df()
+    svg = fm.residplot(
+        df, x=fm.X("v", scale=fm.LogScale()), y="w", lowess=True, order=1
+    ).to_svg()
+    y_ladder = value_axis_ladder(svg, axis="y")
+    circles = svg_elements(svg, "circle", lambda a: "cy" in a)
+    residuals = [value_for_pixel(y_ladder, float(a["cy"])) for a in circles]
+    assert max(abs(r) for r in residuals) < 1e-6, residuals
+
+
+def test_a_logistic_fit_on_a_log_axis_matches_its_log10_transformed_oracle():
+    """`method="logistic"` on a demanded log x fits `logit(p) ~ log10(v)`:
+    its curve, read back to data units through the log x ladder, lands
+    where fitting the identical logistic model directly on `log10(v)` with
+    a linear x axis does -- the oracle comparison every other statistic in
+    this module uses, since a sigmoid is not itself a straight line."""
+    rng = np.random.default_rng(4)
+    v = np.geomspace(1.0, 1000.0, 120)
+    midpoint = np.log10(v).mean()
+    p = 1.0 / (1.0 + np.exp(-(np.log10(v) - midpoint)))
+    y = (rng.uniform(size=v.size) < p).astype(float)
+    df = pl.DataFrame({"v": v, "y": y})
+
+    log_svg = fm.lmplot(
+        df, x="v", y="y", method="logistic", logx=True, ci=None, scatter=False
+    ).to_svg()
+    oracle_svg = fm.lmplot(
+        pl.DataFrame({"logv": np.log10(v), "y": y}),
+        x="logv",
+        y="y",
+        method="logistic",
+        ci=None,
+        scatter=False,
+    ).to_svg()
+
+    _, log_points = polylines(log_svg)[0]
+    _, oracle_points = polylines(oracle_svg)[0]
+    log_x, log_y = _vertices_in_data_units(
+        log_points,
+        value_axis_ladder(log_svg, axis="x"),
+        value_axis_ladder(log_svg, axis="y"),
+        x_log=True,
+        y_log=False,
+    )
+    oracle_x, oracle_y = _vertices_in_data_units(
+        oracle_points,
+        value_axis_ladder(oracle_svg, axis="x"),
+        value_axis_ladder(oracle_svg, axis="y"),
+        x_log=False,
+        y_log=False,
+    )
+    _assert_vertices_match_oracle(
+        log_x, log_y, oracle_x, oracle_y, x_from_oracle=_from_log10, y_from_oracle=_unchanged
+    )
+
+
+# ---------------------------------------------------------------------------
+# Every fit door's off-side warning counts and names the caller's own rows.
+# ---------------------------------------------------------------------------
+
+#: Six rows, two zero-or-negative, for the off-side-row-count assertion
+#: every fit door below shares: `v` doubles as the fit's own x and y, so
+#: the fit's actual shape never matters to the count.
+_OFF_SIDE_SIX_ROWS = pl.DataFrame({"v": [-1.0, 0.0, 1.0, 2.0, 4.0, 8.0]})
+
+#: A larger fixture for `method="gam"`, which needs more distinct x values
+#: than `_OFF_SIDE_SIX_ROWS` to honor its default spline basis dimension
+#: without a separate, unrelated warning crowding the one this module
+#: asserts on; still exactly two zero-or-negative rows.
+_OFF_SIDE_GAM_ROWS = pl.DataFrame({"v": np.concatenate([np.geomspace(1, 100, 20), [0.0, -1.0]])})
+
+#: `logistic`'s binary response needs enough on-side rows to avoid a
+#: singular design, so it gets its own larger fixture, still exactly two
+#: zero-or-negative rows.
+_OFF_SIDE_LOGISTIC_ROWS = pl.DataFrame(
+    {
+        "v": np.concatenate([np.geomspace(1, 100, 40), [0.0, -1.0]]),
+        "y": np.concatenate(
+            [
+                (
+                    np.random.default_rng(7).uniform(size=40)
+                    < 1.0
+                    / (
+                        1.0
+                        + np.exp(
+                            -(
+                                np.log10(np.geomspace(1, 100, 40))
+                                - np.log10(np.geomspace(1, 100, 40)).mean()
+                            )
+                        )
+                    )
+                ).astype(float),
+                [0.0, 1.0],
+            ]
+        ),
+    }
+)
+
+
+def _off_side_message(msgs: list[str]) -> str:
+    assert len(msgs) == 1, msgs
+    return msgs[0]
+
+
+_OFF_SIDE_SENTENCE = (
+    "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
+    "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+    "data that reaches zero"
+)
+
+
+_LOG_FIT_OFF_SIDE_DOORS: dict[str, Callable[[], fm.Chart]] = {
+    "mark_smooth lm": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_smooth(method="lm", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "mark_smooth loess": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_smooth(method="loess", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "mark_smooth cubic": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_smooth(method="cubic", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "mark_smooth gam": lambda: fm.Chart(_OFF_SIDE_GAM_ROWS)
+    .mark_smooth(method="gam", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "mark_smooth x_bins": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_smooth(method="lm", ci=None, x_bins=3)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "mark_smooth ci": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_smooth(method="lm", ci=0.95)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "point then smooth": lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+    .mark_point()
+    .mark_smooth(method="lm", ci=None)
+    .encode(x=fm.X("v", scale=fm.LogScale()), y="v"),
+    "lmplot logx": lambda: fm.lmplot(_OFF_SIDE_SIX_ROWS, x="v", y="v", logx=True, ci=None),
+    "lmplot log method": lambda: fm.lmplot(
+        _OFF_SIDE_SIX_ROWS, x="v", y="v", method="log", logx=True, ci=None
+    ),
+    "lmplot logistic": lambda: fm.lmplot(
+        _OFF_SIDE_LOGISTIC_ROWS, x="v", y="y", method="logistic", logx=True, ci=None
+    ),
+    "regplot logx": lambda: fm.regplot(_OFF_SIDE_SIX_ROWS, x="v", y="v", logx=True, ci=None),
+    "regplot robust logx": lambda: fm.regplot(
+        _OFF_SIDE_SIX_ROWS, x="v", y="v", method="robust", logx=True, ci=None
+    ),
+    "regplot glm logx": lambda: fm.regplot(
+        _OFF_SIDE_SIX_ROWS, x="v", y="v", method="glm", logx=True, ci=None
+    ),
+    "residplot x log": lambda: fm.residplot(
+        _OFF_SIDE_SIX_ROWS, x=fm.X("v", scale=fm.LogScale()), y="v"
+    ),
+    "residplot x log lowess": lambda: fm.residplot(
+        _OFF_SIDE_SIX_ROWS, x=fm.X("v", scale=fm.LogScale()), y="v", lowess=True
+    ),
+    "residplot x log robust": lambda: fm.residplot(
+        _OFF_SIDE_SIX_ROWS, x=fm.X("v", scale=fm.LogScale()), y="v", robust=True
+    ),
+    "truncate=False": lambda: fm.lmplot(
+        _OFF_SIDE_SIX_ROWS, x="v", y="v", logx=True, ci=None, truncate=False
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_LOG_FIT_OFF_SIDE_DOORS))
+def test_a_fit_on_a_log_axis_warns_the_callers_rows(door):
+    """Every fit door -- every `mark_smooth`-routed method, `x_bins=`, the
+    `robust`/`glm`/`logistic` dedicated methods, `residplot` with and
+    without `lowess=`/`robust=`, and `truncate=False` -- warns exactly
+    `2 row(s) of 'v'` on six rows with two zero-or-negative: the caller's
+    own off-side rows, under the caller's own field, never an internal
+    fit-grid-point count and never the residual batch's own internal
+    column name."""
+    msgs, _ = _warnings_of(lambda: _LOG_FIT_OFF_SIDE_DOORS[door]().to_svg())
+    assert _off_side_message(msgs) == _OFF_SIDE_SENTENCE, (door, msgs)
+
+
+def test_jointplot_reg_warns_the_callers_rows():
+    """`jointplot(kind="reg")` draws the fit in its center panel and its
+    marginal; every warning it emits names the caller's own off-side
+    rows under the caller's own field, and at least one is emitted. How
+    many panels warn is a separate, composite-wide behavior (any
+    multi-panel composite over the same off-side data warns once per
+    panel), not asserted here."""
+    df = pl.DataFrame({"v": [-1.0, 0.0, 1.0, 2.0, 4.0, 8.0], "w": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]})
+    msgs, _ = _warnings_of(
+        lambda: fm.jointplot(df, x=fm.X("v", scale=fm.LogScale()), y="w", kind="reg").to_svg()
+    )
+    assert msgs, "expected at least one off-side warning"
+    assert all(msg == _OFF_SIDE_SENTENCE for msg in msgs), msgs
+
+
+def _two_hundred_rows_six_off_side() -> pl.DataFrame:
+    rng = np.random.default_rng(0)
+    v = np.concatenate([np.geomspace(1, 100, 194), [0.0, -1.0, -2.0, -3.0, -4.0, -5.0]])
+    w = rng.normal(size=200)
+    return pl.DataFrame({"v": v, "w": w})
+
+
+def test_logx_warns_once_for_the_callers_rows_not_once_per_layer():
+    """`regplot(logx=True)`'s scatter and fit layers read the same six
+    off-side rows of `v`: the warning counts them once (`6`), never once
+    per layer that shares them."""
+    df = _two_hundred_rows_six_off_side()
+    msgs, _ = _warnings_of(lambda: fm.regplot(df, x="v", y="w", logx=True, ci=None).to_svg())
+    assert _off_side_message(msgs) == (
+        "x scale: 6 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), msgs
+
+
+def test_x_jitter_with_logx_warns_the_callers_rows():
+    """`x_jitter=` with `logx=True` warns the same six off-side rows of
+    `v` the un-jittered call does."""
+    df = _two_hundred_rows_six_off_side()
+    msgs, _ = _warnings_of(
+        lambda: fm.regplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1).to_svg()
+    )
+    assert _off_side_message(msgs) == (
+        "x scale: 6 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), msgs
+
+
+def test_a_point_on_the_same_axis_keeps_its_byte_identical_sentence():
+    """A bare `mark_point` on a `LogScale` warns the exact off-side
+    sentence every other door in this module pins."""
+    msgs, _ = _warnings_of(
+        lambda: fm.Chart(_OFF_SIDE_SIX_ROWS)
+        .mark_point()
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="v")
+        .to_svg()
+    )
+    assert _off_side_message(msgs) == _OFF_SIDE_SENTENCE, msgs
+
+
+# ---------------------------------------------------------------------------
+# `truncate=False` pads the fit's own whole-batch extent in the fit's own
+# space; Rust derives the range, Python only requests the pad fraction.
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_false_on_a_log_axis_pads_in_log_space():
+    """`truncate=False` extends the fit past its own on-side extent
+    `[1, 8]` by a 5% margin computed in log units: the padded endpoints
+    land exactly `8**-0.05` and `8**1.05` (since `log10(1) == 0`, any log
+    base gives the same answer) -- never the linear-space margin that
+    pushes the evaluation grid negative, and never a raised refusal. The
+    data here has no off-side row at all, so the padded grid staying
+    on-side is the only thing that could warn."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0]})
+    msgs, svg = _warnings_of(
+        lambda: fm.regplot(
+            df, x="v", y="v", logx=True, truncate=False, ci=None, scatter=False
+        ).to_svg()
+    )
+    assert msgs == [], msgs
+
+    x_ladder = value_axis_ladder(svg, axis="x")
+    _, points = polylines(svg)[0]
+    xs = [px for px, _py in points]
+    lo_v = _invert_log(min(xs), x_ladder)
+    hi_v = _invert_log(max(xs), x_ladder)
+
+    assert lo_v == pytest.approx(8.0**-0.05, rel=1e-3)
+    assert hi_v == pytest.approx(8.0**1.05, rel=1e-3)
+
+
+def test_truncate_false_shares_one_padded_range_across_facet_panels():
+    """A faceted fit's `truncate=False` range comes from the whole
+    frame's on-side extent, not each panel's own narrower slice: both
+    panels' fits span the identical `[10**-0.1, 10**2.1]` range, the
+    frame's full `[1, 100]` padded 5% in log units, even though panel `a`
+    holds only `[1, 10]` and panel `b` only `[10, 100]`."""
+    v_a = np.geomspace(1.0, 10.0, 30)
+    v_b = np.geomspace(10.0, 100.0, 30)
+    df = pl.DataFrame(
+        {
+            "v": np.concatenate([v_a, v_b]),
+            "w": np.concatenate(
+                [2.0 + 3.0 * np.log10(v_a), 2.0 + 3.0 * np.log10(v_b)]
+            ),
+            "g": ["a"] * 30 + ["b"] * 30,
+        }
+    )
+    svg = fm.lmplot(
+        df, x="v", y="w", logx=True, truncate=False, ci=None, scatter=False, col="g"
+    ).to_svg()
+    frames = mark_groups_by_frame(svg)
+    assert len(frames) == 2, frames
+
+    ranges = []
+    for frame, content in frames:
+        x_ladder = panel_x_ladder(svg, frame)
+        _, points = polylines(content)[0]
+        xs = [px for px, _py in points]
+        ranges.append((_invert_log(min(xs), x_ladder), _invert_log(max(xs), x_ladder)))
+
+    assert ranges[0] == pytest.approx(ranges[1], rel=1e-3)
+    assert ranges[0][0] == pytest.approx(10.0**-0.1, rel=1e-3)
+    assert ranges[0][1] == pytest.approx(10.0**2.1, rel=1e-3)
+
+
+def test_truncate_false_on_an_all_off_side_log_x_refuses_like_the_sibling_route():
+    """`truncate=False` over data every row of which is off-side refuses
+    with the axis's own `LogScaleNoValueOnSide` text, naming the caller's
+    field and row count exactly as the sibling primitive route does --
+    never an internal fit-grid column or count."""
+    df = pl.DataFrame({"v": [-1.0, -2.0, -3.0, -4.0, -5.0]})
+
+    def refuse(build: Callable[[], fm.Chart]) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            build().to_svg()
+        return str(excinfo.value)
+
+    fit_message = refuse(
+        lambda: fm.regplot(
+            df, x=fm.X("v", scale=fm.LogScale()), y="v", truncate=False, ci=None, scatter=False
+        )
+    )
+    point_message = refuse(
+        lambda: fm.Chart(df).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="v")
+    )
+    assert fit_message == point_message
+    assert fit_message == f"x scale: every value of 'v' (5 rows) {_NO_VALUE_ON_SIDE_REMEDY}"
+
+
+def _truncate_false_two_off_side_df() -> pl.DataFrame:
+    """Six rows of `v`, two zero-or-negative; `g` splits the four on-side
+    rows into two panels with unequal on-side extents (`[1, 4]` and
+    `[2, 8]`), each still off-side by exactly one of its own rows."""
+    return pl.DataFrame(
+        {
+            "v": [-1.0, 0.0, 1.0, 2.0, 4.0, 8.0],
+            "w": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "g": ["a", "b", "a", "b", "a", "b"],
+        }
+    )
+
+
+#: door name -> builder. `truncate=False` leaves an off-side row out of
+#: its evaluation range and warns it, exactly as the on-side sibling
+#: route does, through every door that can demand a log x.
+_TRUNCATE_FALSE_TWO_OFF_SIDE_DOORS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "regplot logx=": lambda df: fm.regplot(df, x="v", y="w", logx=True, truncate=False, ci=None),
+    "lmplot logx=": lambda df: fm.lmplot(df, x="v", y="w", logx=True, truncate=False, ci=None),
+    "channel LogScale": lambda df: fm.regplot(
+        df, x=fm.X("v", scale=fm.LogScale()), y="w", truncate=False, ci=None
+    ),
+    "override x_scale_type=log": lambda df: fm.regplot(
+        df, x="v", y="w", truncate=False, ci=None
+    ).override(x_scale_type="log"),
+    "method=robust": lambda df: fm.regplot(
+        df, x="v", y="w", logx=True, truncate=False, ci=None, method="robust"
+    ),
+    "hue=": lambda df: fm.lmplot(df, x="v", y="w", logx=True, truncate=False, ci=None, hue="g"),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_TRUNCATE_FALSE_TWO_OFF_SIDE_DOORS))
+def test_truncate_false_warns_off_side_rows_instead_of_refusing(door):
+    """`truncate=False` leaves its two off-side rows out of the padded
+    evaluation range and warns them, through `logx=`, a channel
+    `LogScale`, `.override(x_scale_type="log")`, `method="robust"`, and
+    `hue=` -- never raising the raw internal-extent refusal a caller
+    never wrote."""
+    df = _truncate_false_two_off_side_df()
+    msgs, _ = _warnings_of(lambda: _TRUNCATE_FALSE_TWO_OFF_SIDE_DOORS[door](df).to_svg())
+    assert _off_side_message(msgs) == (
+        "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), (door, msgs)
+
+
+def test_truncate_false_col_with_unequal_panel_extents_warns_and_shares_one_fit_range():
+    """`truncate=False` through `col=`, whose two panels hold unequal
+    on-side extents (`[1, 4]` and `[2, 8]`), warns the frame's 2 off-side
+    rows and still shares one padded range across panels: each panel's
+    fit polyline, read back through that panel's own ladder, spans the
+    identical data-space range."""
+    df = _truncate_false_two_off_side_df()
+    msgs, svg = _warnings_of(
+        lambda: fm.lmplot(df, x="v", y="w", logx=True, truncate=False, ci=None, col="g").to_svg()
+    )
+    assert _off_side_message(msgs) == (
+        "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), msgs
+
+    frames = mark_groups_by_frame(svg)
+    assert len(frames) == 2, frames
+    ranges = []
+    for frame, content in frames:
+        x_ladder = panel_x_ladder(svg, frame)
+        _, points = polylines(content)[0]
+        xs = [px for px, _py in points]
+        ranges.append((_invert_log(min(xs), x_ladder), _invert_log(max(xs), x_ladder)))
+    assert ranges[0] == pytest.approx(ranges[1], rel=1e-3), ranges
+
+
+def test_a_caller_written_x_range_off_side_is_refused_naming_x_range():
+    """A caller-written `x_range=` whose endpoint a demanded log x cannot
+    place is refused naming `x_range=`, the parameter the caller actually
+    wrote -- never `extent=`, a parameter no fit door exposes."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [1.0, 2.0, 3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(df).mark_smooth(method="lm", ci=None, x_range=[-1, 8]).encode(
+            x=fm.X("v", scale=fm.LogScale()), y="w"
+        ).to_svg()
+    assert str(excinfo.value) == (
+        "transform failed: ValueError: stat_smooth: x_range (-1, 8) names -1, "
+        "which a LogScale cannot place (it is zero or on the wrong side); "
+        "state both endpoints on the scale's own side, or drop x_range="
+    )
+
+
+def test_x_range_pad_alone_extends_the_fit_past_its_own_data():
+    """`mark_smooth(x_range_pad=0.1)` with no `x_range` derives the range
+    itself from its own whole-column x extent `[1, 8]` and pads that by 10%
+    in log units, extending the grid to `[8**-0.1, 8**1.1]` -- rather than
+    being silently dropped."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [1.0, 2.0, 3.0, 4.0]})
+    svg = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=None, x_range_pad=0.1)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    x_ladder = value_axis_ladder(svg, axis="x")
+    _, points = polylines(svg)[0]
+    xs = [px for px, _py in points]
+    lo_v = _invert_log(min(xs), x_ladder)
+    hi_v = _invert_log(max(xs), x_ladder)
+    assert lo_v == pytest.approx(8.0**-0.1, rel=1e-3)
+    assert hi_v == pytest.approx(8.0**1.1, rel=1e-3)
+
+
+def test_x_range_pad_negative_is_refused():
+    """A negative `x_range_pad` could shrink or invert the range, so
+    `Smooth` and `Robust` both refuse it with the full message, naming the
+    value received."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [1.0, 2.0, 3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(df).mark_smooth(method="lm", ci=None, x_range_pad=-0.1).encode(
+            x="v", y="w"
+        ).to_svg()
+    assert str(excinfo.value) == "Smooth: x_range_pad must be a finite fraction >= 0; received -0.1"
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(df)._with_statistics(
+            fm.Robust(x="v", y="w", ci=None, x_range_pad=-0.1)
+        ).mark_line().encode(x="v", y="w").to_svg()
+    assert str(excinfo.value) == "Robust: x_range_pad must be a finite fraction >= 0; received -0.1"
+
+
+def _rust_f64_display(value: float) -> str:
+    """Rust's `{}` Display for `f64`, narrowed to the values this module's
+    `x_range` refusal tests ever pass through it: `NaN` for not-a-number,
+    `inf`/`-inf` for the infinities, and the two whole-valued finite
+    endpoints the fixture below uses (`1.0`, `8.0`), which print with no
+    trailing `.0`. Not a general `f64` formatter: a non-whole finite
+    value falls through to Python's `repr`, which disagrees with Rust's
+    `{}` in exponent form (e.g. `1e-07` vs `0.0000001`)."""
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "inf" if value > 0 else "-inf"
+    return str(int(value)) if value == int(value) else repr(value)
+
+
+#: value name -> the float it names, for every non-finite `x_range`
+#: endpoint the table below tries.
+_NON_FINITE_X_RANGE_VALUES: dict[str, float] = {
+    "NaN": float("nan"),
+    "+inf": float("inf"),
+    "-inf": float("-inf"),
+}
+#: door name -> (builder, the transform's own refusal voice), for every
+#: door that constructs a `Smooth` or `Robust` transform with an
+#: `x_range=`.
+_NON_FINITE_X_RANGE_DOORS: dict[str, tuple[Callable[[list[float]], Any], str]] = {
+    "Smooth": (lambda x_range: fm.Smooth(x="v", y="w", x_range=x_range), "Smooth"),
+    "Robust": (lambda x_range: fm.Robust(x="v", y="w", x_range=x_range), "Robust"),
+    "mark_smooth": (
+        lambda x_range: fm.Chart(
+            pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [1.0, 2.0, 3.0, 4.0]})
+        )
+        .mark_smooth(method="lm", x_range=x_range)
+        .encode(x="v", y="w")
+        .to_svg(),
+        "Smooth",
+    ),
+}
+
+
+@pytest.mark.parametrize("value_name", sorted(_NON_FINITE_X_RANGE_VALUES))
+@pytest.mark.parametrize("position", ["lo", "hi"])
+@pytest.mark.parametrize("door", sorted(_NON_FINITE_X_RANGE_DOORS))
+def test_a_non_finite_x_range_endpoint_is_refused(door, position, value_name):
+    """`Smooth(x_range=)` and `Robust(x_range=)` refuse a non-finite
+    `x_range` endpoint -- `NaN`, `+inf` or `-inf`, at either the low or
+    the high end -- at construction; `mark_smooth(x_range=)` constructs
+    the same `Smooth` only when its chart lowers, so its refusal surfaces
+    at `.to_svg()`. Every door names the exact pair received."""
+    build, label = _NON_FINITE_X_RANGE_DOORS[door]
+    value = _NON_FINITE_X_RANGE_VALUES[value_name]
+    x_range = [value, 8.0] if position == "lo" else [1.0, value]
+    with pytest.raises(ValueError) as excinfo:
+        build(x_range)
+    lo_text, hi_text = (_rust_f64_display(x_range[0]), _rust_f64_display(x_range[1]))
+    assert str(excinfo.value) == (
+        f"{label}: x_range must be (lo, hi) with both finite; "
+        f"received [{lo_text}, {hi_text}]"
+    ), (door, position, value_name)
+
+
+#: SHA-256 of the expected rendering of `regplot(..., truncate=False,
+#: ci=None)` on a linear axis, for each parametrized case: the transform
+#: pads in its own fit space, which on a linear axis is the identical
+#: arithmetic a Python-side pad would give, so the rendered SVG is
+#: pinned exactly. Regenerate ONLY alongside a deliberate, disclosed
+#: change to one of these renders.
+_LINEAR_TRUNCATE_FALSE_DIGESTS = {
+    "lm": "415578ca7906cb065af45296e931bd4b7032335e325a802f2e0b32a555991733",
+    "robust": "4d1f6c02dc721a98f64dfde929e933d2994cee0c52e6cf10ffbdbfa8e699f4f6",
+    "hue": "276d4804194d2a1bc2920b673dc3dfc09690af06abce8a2152636b8d9808df64",
+    "col": "b952c5d2eee01f314df78a296bef4e90b4446e23e5a118df17c1db9f55db20f7",
+    "int64": "6abd1ed0b755c9afbf83ac9d991a13f76a4e5338b28230e35a7276b74a7d79d8",
+}
+
+
+def _linear_truncate_false_svg(case: str) -> str:
+    rng = np.random.default_rng(3)
+    v = np.linspace(1, 100, 60)
+    w = 2.0 + 0.5 * v + rng.normal(scale=2.0, size=60)
+    df = pl.DataFrame({"v": v, "w": w})
+    if case == "lm":
+        return fm.regplot(df, x="v", y="w", method="lm", truncate=False, ci=None).to_svg()
+    if case == "robust":
+        return fm.regplot(df, x="v", y="w", method="robust", truncate=False, ci=None).to_svg()
+    if case == "hue":
+        g = ["a" if i % 2 == 0 else "b" for i in range(60)]
+        df = df.with_columns(pl.Series("g", g))
+        return fm.regplot(
+            df, x="v", y="w", method="lm", truncate=False, ci=None, hue="g"
+        ).to_svg()
+    if case == "col":
+        g = ["a" if i % 2 == 0 else "b" for i in range(60)]
+        df = df.with_columns(pl.Series("g", g))
+        return fm.lmplot(
+            df, x="v", y="w", method="lm", truncate=False, ci=None, col="g"
+        ).to_svg()
+    assert case == "int64"
+    v_int = np.arange(1, 61, dtype=np.int64)
+    w_int = 2.0 + 0.5 * v_int + rng.normal(scale=2.0, size=60)
+    df_int = pl.DataFrame({"v": v_int, "w": w_int})
+    return fm.regplot(df_int, x="v", y="w", method="lm", truncate=False, ci=None).to_svg()
+
+
+@pytest.mark.parametrize("case", sorted(_LINEAR_TRUNCATE_FALSE_DIGESTS))
+def test_truncate_false_on_a_linear_axis_is_byte_identical(case):
+    """`truncate=False`'s 5% margin is computed and applied in the
+    transform's own fit space, which on a linear axis renders the same
+    SVG the pinned digest below describes, for `lm`, `robust`, a `hue`
+    grouping, a `col=` facet and an `Int64` predictor."""
+    digest = hashlib.sha256(_linear_truncate_false_svg(case).encode()).hexdigest()
+    assert digest == _LINEAR_TRUNCATE_FALSE_DIGESTS[case], (
+        f"regplot/lmplot(truncate=False) output moved on a linear axis ({case})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `method="sqrt"` on a demanded log x, and a `residplot` whose residual
+# axis resolves a log scale, mean nothing in that space and are refused.
+# ---------------------------------------------------------------------------
+
+
+def test_method_sqrt_is_refused_on_a_demanded_log_x():
+    """`method="sqrt"` composes two predictor transforms on one x axis (its
+    own sqrt, then the axis's own log) -- refused in the entry's own
+    voice, naming a remedy that runs as written, rather than silently
+    fitting `sqrt(v)` in data space."""
+    v = np.geomspace(1.0, 1000.0, 50)
+    w = 2.0 + 3.0 * np.sqrt(v)
+    df = pl.DataFrame({"v": v, "w": w})
+
+    def remedy(voice: str) -> str:
+        return (
+            f"{voice}: method='sqrt' fits y on sqrt(x), while the log x axis "
+            "fits in log(x); use method='lm' or 'loess', or drop the log scale"
+        )
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(df).mark_smooth(method="sqrt", ci=None).encode(
+            x=fm.X("v", scale=fm.LogScale()), y="w"
+        ).to_svg()
+    assert str(excinfo.value) == remedy("mark_smooth")
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.lmplot(df, x="v", y="w", method="sqrt", logx=True, ci=None).to_svg()
+    assert str(excinfo.value) == remedy("lmplot")
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.regplot(df, x="v", y="w", method="sqrt", logx=True, ci=None).to_svg()
+    assert str(excinfo.value) == remedy("regplot")
+
+
+#: SHA-256 of the expected rendering of `mark_smooth(method="sqrt")` on a
+#: plain (linear) x axis: the negative control for the sqrt refusal,
+#: which fires only on a demanded log x.
+_SQRT_LINEAR_DIGEST = "923b21304ed10c37e1b53991c0ff4592f7f2d666e26ed35ef0f09bf60e1f842b"
+
+
+def test_method_sqrt_on_a_linear_x_is_unaffected():
+    """Negative control: `method="sqrt"` on a plain (non-log) x axis
+    renders exactly the pinned digest below -- the refusal fires only
+    when a log x demands log(x) for the same fit."""
+    v = np.linspace(1.0, 1000.0, 50)
+    w = 2.0 + 3.0 * np.sqrt(v)
+    df = pl.DataFrame({"v": v, "w": w})
+    svg = fm.Chart(df).mark_smooth(method="sqrt", ci=None).encode(x="v", y="w").to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _SQRT_LINEAR_DIGEST
+
+
+_RESIDPLOT_LOG_Y_MESSAGE = (
+    "residplot(y=<log scale>) is not supported: the residual axis draws "
+    "signed residuals around 0, which a LogScale cannot place. Use "
+    "fm.SymlogScale(), or drop scale="
+)
+
+
+def _residplot_log_y_df() -> pl.DataFrame:
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=60) * 3 + 5
+    y = x * 2 + rng.normal(size=60)
+    return pl.DataFrame({"x": x, "y": y})
+
+
+def test_residplot_refuses_a_log_y():
+    """The residual axis draws signed residuals around 0, which a
+    `LogScale` cannot place -- refused through the keyword and
+    `.override()` doors (the `encode=`, `+` and independent-y-slot doors
+    are pinned separately below), rather than warning every row off the
+    side."""
+    df = _residplot_log_y_df()
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.residplot(df, x="x", y=fm.Y("y", scale=fm.LogScale())).to_svg()
+    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.residplot(df, x="x", y="y").override(y_scale_type="log").to_svg()
+    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+
+
+#: SHA-256 of the expected rendering of `residplot` with no log y: the
+#: negative control for the residplot log-y refusal.
+_RESIDPLOT_LINEAR_DIGEST = "30e8f989948c7f8c04f75c58cf1d7d98a4bf61431f7e7351297cfbb373feaa17"
+
+
+def test_residplot_on_a_linear_y_is_unaffected():
+    """Negative control: `residplot` with no log y renders exactly the
+    pinned digest below -- the refusal fires only when the residual
+    axis itself resolves a log scale."""
+    svg = fm.residplot(_residplot_log_y_df(), x="x", y="y").to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _RESIDPLOT_LINEAR_DIGEST
+
+
+# ---------------------------------------------------------------------------
+# The log tick generator and the log scale agree about a domain end a
+# float hair inside a decade or multiple: the tick still places there, at
+# the mark's own position, not in a uniform category slot.
+# ---------------------------------------------------------------------------
+
+
+def test_a_log_axis_places_a_hair_inside_decade_tick_at_the_marks_own_pixel():
+    """A raw `mark_point` whose column max is `999.999999999999` (a decade
+    endpoint's `ln`/`log10` round trip, a float hair inside `1000`) still
+    places its `1000` tick at that point's own drawn pixel: the ladder is
+    a genuine log projection, and the `1000` tick's pixel equals the
+    mark's own rightmost pixel, not a uniform-slot position that
+    disagrees with it."""
+    df = pl.DataFrame({"v": [1.0, 999.999999999999], "w": [1.0, 2.0]})
+    svg = fm.Chart(df).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="w").to_svg()
+    assert log_axis_pixels_per_unit(svg, axis="x") is not None, "x axis is not a genuine log projection"
+    ladder = value_axis_ladder(svg, axis="x")
+    cxs = [float(a["cx"]) for a in svg_elements(svg, "circle", lambda a: "cx" in a)]
+    assert ladder[1000.0] == pytest.approx(max(cxs), abs=0.5)
+
+
+def test_a_log_axis_places_a_hair_inside_decade_low_tick_at_the_marks_own_pixel():
+    """The low-end mirror of the test above: a raw `mark_point` whose
+    column min is `0.001*(1+2e-16)` (the same round trip, at the other
+    decade) still places its `0.001` tick at that point's own drawn
+    pixel. `log_axis_pixels_per_unit` alone does not catch this door --
+    the ladder it fits is internally a genuine log line either way, lying
+    tick-for-tick-for-tick with where the renderer happened to put it, not
+    with where the mark itself sits -- so the tick-vs-mark-pixel
+    comparison is the one check that discriminates it."""
+    lo = 0.001 * (1 + 2e-16)
+    df = pl.DataFrame({"v": [lo, 1000.0], "w": [1.0, 2.0]})
+    svg = fm.Chart(df).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="w").to_svg()
+    ladder = value_axis_ladder(svg, axis="x")
+    cxs = [float(a["cx"]) for a in svg_elements(svg, "circle", lambda a: "cx" in a)]
+    assert ladder[0.001] == pytest.approx(min(cxs), abs=0.5)
+
+
+def test_a_log_axis_bin_nice_false_ladder_is_a_genuine_log_projection():
+    """`mark_bar` with a channel `bin={"nice": False}` -- the one public
+    door left for a per-row `Bin` statistic on a log x once
+    `mark_histogram`'s own channel `bin=` is refused -- keeps a genuine
+    log ladder over the same decade-hair data `mark_density` does."""
+    df = pl.DataFrame({"v": np.concatenate([np.geomspace(1, 1000, 100), [999.999999999999]])})
+    svg = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("v", bin={"nice": False}, scale=fm.LogScale()), y="count()")
+        .to_svg()
+    )
+    assert log_axis_pixels_per_unit(svg, axis="x") is not None, "x axis is not a genuine log projection"
+
+
+def test_a_log_axis_density_ladder_is_a_genuine_log_projection():
+    """A univariate `mark_density` whose data's max is the same
+    `999.999999999999` decade-hair value keeps a genuine log ladder: every
+    tick, including the interior ones, fits one log projection, rather
+    than falling back to uniform category slots."""
+    df = pl.DataFrame({"v": np.concatenate([np.geomspace(1, 1000, 100), [999.999999999999]])})
+    svg = fm.Chart(df).mark_density().encode(x=fm.X("v", scale=fm.LogScale())).to_svg()
+    assert log_axis_pixels_per_unit(svg, axis="x") is not None, "x axis is not a genuine log projection"
+
+
+#: SHA-256 of the expected rendering of a `mark_point` chart with an
+#: EXPLICIT `fm.LogScale(domain=[1, 1000])` over the same decade-hair
+#: data: an explicit domain resolves exactly, with no float round trip
+#: through the tick generator at all.
+_EXPLICIT_LOG_DOMAIN_DIGEST = "c6dbfcba66c5cb58404b39cdb4e368cce187a975ec16d4bd3171f6025a74b768"
+
+
+def test_an_explicit_log_domain_is_byte_identical():
+    """Negative control: an explicit `domain=[1, 1000]` never round-trips
+    through `forward`/`backward` at all, so its render is exactly the
+    pinned digest below regardless of how the tick generator places a
+    derived domain's own ticks."""
+    df = pl.DataFrame({"v": [1.0, 999.999999999999], "w": [1.0, 2.0]})
+    svg = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("v", scale=fm.LogScale(domain=[1, 1000])), y="w")
+        .to_svg()
+    )
+    assert hashlib.sha256(svg.encode()).hexdigest() == _EXPLICIT_LOG_DOMAIN_DIGEST
+
+
+# ---------------------------------------------------------------------------
+# A CI band on a log y maps back asymmetric in data, symmetric in log units.
+# ---------------------------------------------------------------------------
+
+
+def test_a_cis_band_on_a_log_y_maps_back_symmetric_in_log_units():
+    """`mark_smooth(ci=0.95)` on a demanded log y computes its interval in
+    log units (symmetric around the mean there) and maps `ci_lower`/
+    `ci_upper` back through the axis's own `backward`, which is not
+    linear: the band is asymmetric around the fit line in data units even
+    though it is symmetric in log units."""
+    rng = np.random.default_rng(5)
+    v = np.linspace(0.0, 3.0, 60)
+    logw = 2.0 + 1.0 * v
+    w = 10.0 ** (logw + rng.normal(scale=0.05, size=60))
+    df = pl.DataFrame({"v": v, "w": w})
+
+    svg = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=0.95)
+        .encode(x="v", y=fm.Y("w", scale=fm.LogScale()))
+        .to_svg()
+    )
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+
+    _, line_points = polylines(svg)[0]
+    _, line_y = _vertices_in_data_units(line_points, x_ladder, y_ladder, x_log=False, y_log=True)
+
+    band_coords = _path_vertices(svg)
+    _, band_y = _vertices_in_data_units(band_coords, x_ladder, y_ladder, x_log=False, y_log=True)
+    half = len(band_y) // 2
+    upper_y, lower_y = band_y[:half], band_y[half:]
+
+    mean0 = line_y[0]
+    upper0 = upper_y[0]
+    lower0 = lower_y[-1]  # the lower edge is traced in reverse order
+
+    data_upper_gap = upper0 - mean0
+    data_lower_gap = mean0 - lower0
+    log_upper_gap = np.log10(upper0) - np.log10(mean0)
+    log_lower_gap = np.log10(mean0) - np.log10(lower0)
+
+    assert abs(data_upper_gap - data_lower_gap) > 0.1, "expected a visibly asymmetric data-space band"
+    assert log_upper_gap == pytest.approx(log_lower_gap, abs=1e-4)
+
+
+def test_an_independent_log_y_slot_fit_computes_in_that_slots_space():
+    """A `mark_smooth` fit on an independent y slot (a secondary axis under
+    `LayerChart(resolve={"y": "independent"})`) fits in that slot's own
+    log space: its line, read back through the secondary's own y ladder,
+    matches `w = 10**(2 + v)` -- the exponential relationship this data
+    holds exactly in log10(w) terms."""
+    v = np.linspace(0.0, 3.0, 40)
+    logw = 2.0 + 1.0 * v
+    w = 10.0**logw
+    df = pl.DataFrame({"v": v, "w": w})
+
+    primary = fm.Chart(_IND_Y_PRIMARY).mark_point().encode(x="t", y="w")
+    secondary = (
+        fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x="v", y=fm.Y("w", scale=fm.LogScale()))
+    )
+    svg = fm.LayerChart(primary, secondary, resolve={"y": "independent"}).to_svg()
+
+    _, content, _ = _first_panel(svg)
+    y_ladder = _secondary_y_ladder(svg)
+    x_ladder = value_axis_ladder(svg, axis="x")
+    _, points = polylines(content)[0]
+    xs, ys = _vertices_in_data_units(points, x_ladder, y_ladder, x_log=False, y_log=True)
+    for x, y in zip(xs, ys):
+        assert y == pytest.approx(10.0 ** (2.0 + x), rel=1e-3), (x, y)
+
+
+# ---------------------------------------------------------------------------
+# On a LogScale channel, a data-space Jitter (or a continuous Dodge, or a
+# Stack) counts the caller's rows once: a row whose own value is off-side,
+# or whose drawn position the adjustment itself moves off-side, however
+# many layers, facets or independent slots read it. A Jitter can lift a
+# caller's off-side row on-side, where it draws and is still counted; a
+# Stack's base column is never a row.
+# ---------------------------------------------------------------------------
+
+
+def _two_hundred_rows_six_off_side_with_group() -> pl.DataFrame:
+    """`_two_hundred_rows_six_off_side()` plus a `g` column alternating
+    row by row, so a `col="g"` facet's panels interleave the fixture's
+    rows rather than grouping them contiguously, and a `panel` column
+    alternating in blocks of two, independent of `g`, so a `col="panel"`
+    facet still carries both `g` groups into every panel for a door that
+    dodges by `g` while it facets."""
+    df = _two_hundred_rows_six_off_side()
+    return df.with_columns(
+        g=pl.Series(["a", "b"] * (df.height // 2)),
+        panel=pl.Series(["m", "m", "n", "n"] * (df.height // 4)),
+    )
+
+
+def _jittered_x_point(df: pl.DataFrame, *, width: float = 0.1, seed: int | None = None) -> fm.Chart:
+    return (
+        fm.Chart(df)
+        .mark_point(position=fm.Jitter(axis="x", width=width, seed=seed))
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+    )
+
+
+def _raw_x_point(df: pl.DataFrame) -> fm.Chart:
+    return fm.Chart(df).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+
+
+def _x_fit(df: pl.DataFrame) -> fm.Chart:
+    return fm.Chart(df).mark_smooth(method="lm", ci=None).encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+
+
+#: door name -> (builder, axis, field). Every entry below warns exactly
+#: six rows on `_two_hundred_rows_six_off_side_with_group()`'s 200 rows
+#: (6 zero-or-negative): the caller's own rows, deduped across whichever
+#: layer, facet panel, composite entry point or independent-y slot reads
+#: the column, never summed with the jittered preview's own count.
+_JITTER_AND_DODGE_SIX_OFF_SIDE_DOORS: dict[str, tuple[Callable[[pl.DataFrame], Any], str, str]] = {
+    "unlayered jitter": (lambda df: _jittered_x_point(df), "x", "v"),
+    "'+' jitter plus raw": (lambda df: _jittered_x_point(df) + _raw_x_point(df), "x", "v"),
+    "'+' raw plus jitter": (lambda df: _raw_x_point(df) + _jittered_x_point(df), "x", "v"),
+    "'+' jitter plus jitter": (lambda df: _jittered_x_point(df) + _jittered_x_point(df), "x", "v"),
+    "'+' jitter plus fit": (lambda df: _jittered_x_point(df) + _x_fit(df), "x", "v"),
+    "Chart(jitter).layer(point)": (
+        lambda df: _jittered_x_point(df).layer(fm.Layer(mark="point")),
+        "x",
+        "v",
+    ),
+    "fm.layer(jitter, raw)": (lambda df: fm.layer(_jittered_x_point(df), _raw_x_point(df)), "x", "v"),
+    "LayerChart(jitter, raw)": (
+        lambda df: fm.LayerChart(_jittered_x_point(df), _raw_x_point(df)),
+        "x",
+        "v",
+    ),
+    "LayerChart(raw, jitter)": (
+        lambda df: fm.LayerChart(_raw_x_point(df), _jittered_x_point(df)),
+        "x",
+        "v",
+    ),
+    "LayerChart(jitter, jitter)": (
+        lambda df: fm.LayerChart(_jittered_x_point(df), _jittered_x_point(df)),
+        "x",
+        "v",
+    ),
+    "facet col= unlayered jitter": (lambda df: _jittered_x_point(df).facet(col="g"), "x", "v"),
+    "facet col= jitter plus raw": (
+        lambda df: (_jittered_x_point(df) + _raw_x_point(df)).facet(col="g"),
+        "x",
+        "v",
+    ),
+    "facet col= jitter plus fit": (
+        lambda df: (_jittered_x_point(df) + _x_fit(df)).facet(col="g"),
+        "x",
+        "v",
+    ),
+    "facet share_scale(x=independent) unlayered jitter": (
+        lambda df: _jittered_x_point(df).facet(col="g").share_scale(x="independent"),
+        "x",
+        "v",
+    ),
+    "regplot x_jitter": (
+        lambda df: fm.regplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1),
+        "x",
+        "v",
+    ),
+    "lmplot x_jitter": (
+        lambda df: fm.lmplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1),
+        "x",
+        "v",
+    ),
+    "lmplot x_jitter col=": (
+        lambda df: fm.lmplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1, col="g"),
+        "x",
+        "v",
+    ),
+    "lmplot x_jitter hue=": (
+        lambda df: fm.lmplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1, hue="g"),
+        "x",
+        "v",
+    ),
+    "continuous Dodge unlayered": (
+        lambda df: fm.Chart(df)
+        .mark_point(position=fm.Dodge(by="g"))
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w", color="g"),
+        "x",
+        "v",
+    ),
+    "continuous Dodge plus raw": (
+        lambda df: fm.Chart(df)
+        .mark_point(position=fm.Dodge(by="g"))
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w", color="g")
+        + _raw_x_point(df),
+        "x",
+        "v",
+    ),
+    "facet col= continuous Dodge unlayered": (
+        lambda df: fm.Chart(df)
+        .mark_point(position=fm.Dodge(by="g"))
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w", color="g")
+        .facet(col="panel"),
+        "x",
+        "v",
+    ),
+    "y-axis jitter on a log y": (
+        lambda df: fm.Chart(df.rename({"v": "yv"}))
+        .mark_point(position=fm.Jitter(axis="y", width=0.1))
+        .encode(y=fm.Y("yv", scale=fm.LogScale()), x="w"),
+        "y",
+        "yv",
+    ),
+    "jitter on an independent log y slot": (
+        lambda df: fm.LayerChart(
+            fm.Chart(df.rename({"v": "yv"})).mark_point().encode(x="w", y="yv"),
+            fm.Chart(df.rename({"v": "yv"}))
+            .mark_point(position=fm.Jitter(axis="y", width=0.1))
+            .encode(x="w", y=fm.Y("yv", scale=fm.LogScale())),
+            resolve={"y": "independent"},
+        ),
+        "y",
+        "yv",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_JITTER_AND_DODGE_SIX_OFF_SIDE_DOORS))
+def test_a_jittered_layer_on_a_log_axis_warns_the_callers_rows(door):
+    """Every door pairing a data-space `Jitter` (or a continuous `Dodge`)
+    with a sibling layer, a facet, a composite entry point, or an
+    independent-y slot warns exactly its own caller's six off-side rows --
+    deduped across whichever route reads the column, never summed with
+    the adjustment's own (different-by-content) preview."""
+    df = _two_hundred_rows_six_off_side_with_group()
+    build, axis, field = _JITTER_AND_DODGE_SIX_OFF_SIDE_DOORS[door]
+    msgs, _ = _warnings_of(lambda: build(df).to_svg())
+    assert _off_side_message(msgs) == (
+        f"{axis} scale: 6 row(s) of '{field}' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), (door, msgs)
+
+
+def _wide_jitter_extra_moved_rows(
+    df: pl.DataFrame, *, width: float, seed: int | None = None
+) -> set[int]:
+    """Which of `df`'s on-side (`v > 0`) row positions a
+    `Jitter(width=width, seed=seed)` draws at an off-side pixel, found by
+    rendering the caller's own unlayered chart and matching every row's
+    unique `w` value against a drawn circle's y pixel -- the render's own
+    per-row truth, not a formula reimplementing the adjustment. Jitter
+    moves x only, so each row's own y pixel is exact; every row competes
+    for a circle in one assignment that minimizes the total pixel
+    distance across every pairing at once (an optimal assignment,
+    `scipy.optimize.linear_sum_assignment`), not a greedy
+    nearest-neighbor walk, since two rows can land within a pixel of
+    each other and a greedy match can steal one row's circle for its
+    neighbor; an off-side row the jitter lifts on-side still draws a
+    circle and must compete for it too, or a true on-side row's circle
+    gets stolen for the nearest unassigned slot instead. An on-side row
+    the assignment leaves unmatched is one the adjustment itself drew at
+    an off-side pixel."""
+    _, svg = _warnings_of(
+        lambda: _jittered_x_point(df, width=width, seed=seed).to_svg()
+    )
+    y_ladder = value_axis_ladder(svg, axis="y")
+    circle_ys = np.array(
+        [float(a["cy"]) for a in svg_elements(svg, "circle", lambda a: "cx" in a)]
+    )
+    v = df["v"].to_list()
+    expected = np.array([pixel_for(y_ladder, float(w)) for w in df["w"].to_list()])
+    cost = np.abs(expected[:, None] - circle_ys[None, :])
+    matched_rows, _matched_circles = linear_sum_assignment(cost)
+    matched = set(matched_rows.tolist())
+    return {i for i in range(len(df)) if v[i] > 0 and i not in matched}
+
+
+def _wide_jitter_per_row_truth(df: pl.DataFrame, *, width: float) -> int:
+    """The off-side tally a single `Jitter(width=width)` ought to warn on
+    `df`: every row whose own `v` is zero or negative, plus every on-side
+    row the adjustment itself draws at an off-side pixel."""
+    inherent = sum(1 for v in df["v"].to_list() if v <= 0)
+    return inherent + len(_wide_jitter_extra_moved_rows(df, width=width))
+
+
+@pytest.mark.parametrize(
+    ("seed", "moved_rows"),
+    [(None, {2, 8, 9, 14, 15, 22}), (6, {1, 2, 3, 6, 10, 12})],
+)
+def test_the_per_row_truth_helper_identifies_the_moved_rows_themselves(seed, moved_rows):
+    """`_wide_jitter_extra_moved_rows` names the exact rows a
+    `Jitter(width=4.0, seed=seed)` draws at an off-side pixel, not merely
+    the right count of them: on this fixture, two rows land within a
+    pixel of each other 94 times out of 199 adjacent gaps, so an oracle
+    that claims circles by nearest pixel rather than by one assignment
+    minimizing every pairing's distance at once can report the wrong row
+    for the right count."""
+    df = _two_hundred_rows_six_off_side()
+    assert _wide_jitter_extra_moved_rows(df, width=4.0, seed=seed) == moved_rows
+
+
+#: door name -> builder, every entry warning the same per-row truth
+#: (pinned at 12 on this fixture) as the unlayered door it's checked
+#: against: `_two_hundred_rows_six_off_side_with_group()`'s 6 inherently
+#: off-side rows, plus the 6 on-side rows a `width=4.0` Jitter itself
+#: draws at an off-side pixel.
+_WIDE_JITTER_TWELVE_DOORS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "unlayered jitter": lambda df: _jittered_x_point(df, width=4.0),
+    "'+' jitter plus raw": lambda df: _jittered_x_point(df, width=4.0) + _raw_x_point(df),
+    "'+' jitter plus jitter": lambda df: (
+        _jittered_x_point(df, width=4.0) + _jittered_x_point(df, width=4.0)
+    ),
+    "'+' jitter plus fit": lambda df: _jittered_x_point(df, width=4.0) + _x_fit(df),
+    "LayerChart(jitter, raw)": lambda df: fm.LayerChart(
+        _jittered_x_point(df, width=4.0), _raw_x_point(df)
+    ),
+    "LayerChart(jitter, jitter)": lambda df: fm.LayerChart(
+        _jittered_x_point(df, width=4.0), _jittered_x_point(df, width=4.0)
+    ),
+    "facet col= unlayered jitter": lambda df: _jittered_x_point(df, width=4.0).facet(col="g"),
+    "facet col= jitter plus raw": lambda df: (
+        _jittered_x_point(df, width=4.0) + _raw_x_point(df)
+    ).facet(col="g"),
+    "regplot x_jitter=4": lambda df: fm.regplot(df, x="v", y="w", logx=True, ci=None, x_jitter=4.0),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_WIDE_JITTER_TWELVE_DOORS))
+def test_a_wide_jitter_table_matches_its_own_unlayered_per_row_truth(door):
+    """Every door warns the same per-row truth the unlayered jittered
+    chart's own render establishes: 12 on this fixture, pinned as a
+    sanity check on the helper itself -- 6 rows already off-side plus 6
+    more a `width=4.0` Jitter draws at an off-side pixel, whether the
+    chart is unlayered, composed with `'+'`, a `LayerChart`, faceted
+    (whose panels interleave the fixture's row order), or reached through
+    `regplot`."""
+    df = _two_hundred_rows_six_off_side_with_group()
+    truth = _wide_jitter_per_row_truth(df, width=4.0)
+    assert truth == 12, truth
+    msgs, _ = _warnings_of(lambda: _WIDE_JITTER_TWELVE_DOORS[door](df).to_svg())
+    assert _off_side_message(msgs) == (
+        f"x scale: {truth} row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), (door, msgs)
+
+
+def test_two_different_jitters_on_one_column_union_their_moved_rows():
+    """Two `Jitter`s with different seeds, laid beside each other, each
+    move a different set of on-side rows to an off-side pixel: the tally
+    is the caller's 6 off-side rows plus the UNION of both adjustments'
+    own moved rows, never their sum -- 17 on this fixture, not 18, which
+    is what counting each adjustment's moved rows separately (double
+    counting the row both move off) would give."""
+    df = _two_hundred_rows_six_off_side()
+    inherent = sum(1 for v in df["v"].to_list() if v <= 0)
+    moved_a = _wide_jitter_extra_moved_rows(df, width=4.0, seed=None)
+    moved_b = _wide_jitter_extra_moved_rows(df, width=4.0, seed=6)
+    truth = inherent + len(moved_a | moved_b)
+    assert truth == 17, (truth, len(moved_a), len(moved_b))
+
+    msgs, _ = _warnings_of(
+        lambda: (
+            _jittered_x_point(df, width=4.0, seed=None) + _jittered_x_point(df, width=4.0, seed=6)
+        ).to_svg()
+    )
+    assert _off_side_message(msgs) == (
+        f"x scale: {truth} row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), msgs
+
+
+def test_a_wide_jitter_with_no_caller_off_side_rows_still_warns_the_rows_it_moves_off_side():
+    """`v` here has no zero-or-negative row at all, so the only off-side
+    rows a wide `Jitter(width=4.0)` can produce are ones IT moves across
+    zero. The tally must still count them, naming the same rows the
+    render actually leaves undrawn -- the number of rows warned must equal
+    the rows minus the circles the chart actually draws."""
+    rng = np.random.default_rng(0)
+    df = pl.DataFrame({"v": np.geomspace(1, 100, 200), "w": rng.normal(size=200)})
+    msgs, svg = _warnings_of(
+        lambda: fm.Chart(df)
+        .mark_point(position=fm.Jitter(axis="x", width=4.0))
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    drawn = len(svg_elements(svg, "circle", lambda a: "cx" in a))
+    moved_off = 200 - drawn
+    assert moved_off > 0, "the wide jitter did not move any row off the side; fixture needs a wider width"
+    assert msgs == [
+        f"x scale: {moved_off} row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ], (moved_off, msgs)
+
+
+def _stack_two_negative_segments_df() -> pl.DataFrame:
+    """One bar (`g="a"`) stacking two wholly off-side segments, and one
+    bar (`g="b"`) stacking two on-side segments: a `LogScale` y axis can
+    place neither of `g="a"`'s rows, and both of `g="b"`'s."""
+    return pl.DataFrame({"g": ["a", "a", "b", "b"], "c": ["p", "q"] * 2, "v": [-1.0, -2.0, 4.0, 3.0]})
+
+
+_STACK_TWO_OFF_SIDE_DOORS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "unlayered stack": lambda df: fm.Chart(df)
+    .mark_bar(position=fm.Stack())
+    .encode(x="g", y=fm.Y("v", scale=fm.LogScale()), color="c"),
+    "'+' stack plus raw point": lambda df: fm.Chart(df)
+    .mark_bar(position=fm.Stack())
+    .encode(x="g", y=fm.Y("v", scale=fm.LogScale()), color="c")
+    + fm.Chart(df).mark_point().encode(x="g", y=fm.Y("v", scale=fm.LogScale())),
+    "LayerChart(stack, raw point)": lambda df: fm.LayerChart(
+        fm.Chart(df).mark_bar(position=fm.Stack()).encode(x="g", y=fm.Y("v", scale=fm.LogScale()), color="c"),
+        fm.Chart(df).mark_point().encode(x="g", y=fm.Y("v", scale=fm.LogScale())),
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_STACK_TWO_OFF_SIDE_DOORS))
+def test_a_stacked_bars_two_off_side_segments_warn_the_callers_rows(door):
+    """A bar stacking two wholly off-side segments warns exactly its own
+    2 off-side rows, never 3 (the base column tallied as a row) and never
+    5 (a sibling layer's identical read summed in alongside it), whether
+    the chart is unlayered, composed with `'+'`, or a `LayerChart`."""
+    df = _stack_two_negative_segments_df()
+    msgs, _ = _warnings_of(lambda: _STACK_TWO_OFF_SIDE_DOORS[door](df).to_svg())
+    assert _off_side_message(msgs) == (
+        "y scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), (door, msgs)
+
+
+def _stack_two_off_side_segments_per_panel_df() -> pl.DataFrame:
+    """Two bars per facet panel -- `g="a"` stacking two wholly off-side
+    segments, `g="b"` stacking two on-side segments -- across two
+    interleaved panels, so each panel stacks the same real two-segment
+    bar the unfaceted table above pins, giving 4 off-side rows in total
+    (2 per panel), never the 2 a single panel alone would hold."""
+    return pl.DataFrame(
+        {
+            "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
+            "c": ["p", "p", "q", "q", "p", "p", "q", "q"],
+            "v": [-1.0, -3.0, -2.0, -4.0, 4.0, 5.0, 3.0, 6.0],
+            "panel": ["m", "n", "m", "n", "m", "n", "m", "n"],
+        }
+    )
+
+
+_STACK_FOUR_OFF_SIDE_FACETED_DOORS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "facet col= interleaved panel unlayered stack": lambda df: fm.Chart(df)
+    .mark_bar(position=fm.Stack())
+    .encode(x="g", y=fm.Y("v", scale=fm.LogScale()), color="c")
+    .facet(col="panel"),
+    "facet col= interleaved panel stack plus raw point": lambda df: (
+        fm.Chart(df)
+        .mark_bar(position=fm.Stack())
+        .encode(x="g", y=fm.Y("v", scale=fm.LogScale()), color="c")
+        + fm.Chart(df).mark_point().encode(x="g", y=fm.Y("v", scale=fm.LogScale()))
+    ).facet(col="panel"),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_STACK_FOUR_OFF_SIDE_FACETED_DOORS))
+def test_a_faceted_stacked_bars_two_off_side_segments_per_panel_warn_the_callers_rows(door):
+    """A bar stacking two wholly off-side segments in each of two
+    interleaved facet panels warns exactly 4 off-side rows (the two
+    panels' own rows summed, never a single panel's 2), whether the
+    chart is unlayered or composed with `'+'` beside a raw point before
+    faceting."""
+    df = _stack_two_off_side_segments_per_panel_df()
+    msgs, _ = _warnings_of(lambda: _STACK_FOUR_OFF_SIDE_FACETED_DOORS[door](df).to_svg())
+    assert _off_side_message(msgs) == (
+        "y scale: 4 row(s) of 'v' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ), (door, msgs)
+
+
+# ---------------------------------------------------------------------------
+# The refusal table: every door that resolves `method="sqrt"` on a
+# demanded log x, or a log scale on a `residplot`'s residual axis.
+# ---------------------------------------------------------------------------
+
+
+def test_method_sqrt_is_refused_through_the_channel_scale_door_too():
+    """`regplot(x=fm.X(scale=fm.LogScale()), method="sqrt")` -- the
+    channel `scale=` door, reached with no `logx=` keyword at all --
+    refuses the same way `logx=True` does, voiced `regplot`."""
+    v = np.geomspace(1.0, 1000.0, 50)
+    w = 2.0 + 3.0 * np.sqrt(v)
+    df = pl.DataFrame({"v": v, "w": w})
+    with pytest.raises(ValueError) as excinfo:
+        fm.regplot(df, x=fm.X("v", scale=fm.LogScale()), y="w", method="sqrt", ci=None).to_svg()
+    assert str(excinfo.value) == (
+        "regplot: method='sqrt' fits y on sqrt(x), while the log x axis "
+        "fits in log(x); use method='lm' or 'loess', or drop the log scale"
+    )
+
+
+def test_residplot_refuses_a_log_y_through_the_encode_door():
+    """`residplot(x=, y=, encode={"y": fm.Y(<same field>, scale=
+    fm.LogScale())})` -- the `encode=` door, naming the same field the
+    keyword already bound -- refuses the same way the keyword and
+    `.override()` doors already do."""
+    df = _residplot_log_y_df()
+    with pytest.raises(ValueError) as excinfo:
+        fm.residplot(df, x="x", y="y", encode={"y": fm.Y("y", scale=fm.LogScale())}).to_svg()
+    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+
+
+def test_residplot_refuses_a_log_y_as_the_second_plus_operand():
+    """`other + residplot(...)`, with `residplot` as the right (second)
+    `+` operand: the refusal names the residual axis's own log scale
+    exactly as it does when `residplot` is the only chart, rather than
+    reading only the left operand's (layer-0) entry and letting the
+    residuals warn off the side under the wrong field name."""
+    df = _residplot_log_y_df()
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    resid = fm.residplot(df, x="x", y=fm.Y("y", scale=fm.LogScale()))
+    with pytest.raises(ValueError) as excinfo:
+        (other + resid).to_svg()
+    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+
+
+def test_residplot_refuses_a_log_y_on_an_independent_y_slot():
+    """A `residplot` placed on a `LayerChart(resolve={"y": "independent"})`
+    secondary slot refuses the same way, rather than only checking the
+    primary (first) member's y scale."""
+    df = _residplot_log_y_df()
+    primary = fm.Chart(df).mark_point().encode(x="x", y="x")
+    resid = fm.residplot(
+        df, x="x", y=fm.Y("y", scale=fm.LogScale()), zero_line=False, show_metrics=False
+    )
+    with pytest.raises(ValueError) as excinfo:
+        fm.LayerChart(primary, resid, resolve={"y": "independent"}).to_svg()
+    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# Boundary rows: degenerate fits, nulls, zero rows, an explicit
+# `x_range_pad=None`, the dedicated methods' still-open log-y gap, and a
+# caller's own direct transform staying in data space.
+# ---------------------------------------------------------------------------
+
+
+def test_one_row_on_a_log_x_degrades_like_any_other_sparse_fit():
+    """A single row is the ordinary degenerate-fit outcome (too few
+    points to fit at all) on any axis; a log x adds no new failure mode
+    on top of it, and no off-side warning is possible since the one row
+    is on-side."""
+    df = pl.DataFrame({"v": [5.0], "w": [5.0]})
+    msgs, svg = _warnings_of(
+        lambda: fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    assert msgs == [
+        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
+        "x/y points); it degraded to an empty/flat output instead of failing "
+        "the whole chart"
+    ], msgs
+    assert "<svg" in svg
+
+
+def test_all_tied_x_on_a_log_x_degrades_like_any_other_sparse_fit():
+    """Every row sharing one x value is the ordinary zero-x-variance
+    degenerate outcome; a log x still ticks and still computes the
+    extent (`5.0` is on-side), so only the ordinary degenerate-fit
+    warning fires."""
+    df = pl.DataFrame({"v": [5.0, 5.0, 5.0, 5.0], "w": [1.0, 2.0, 3.0, 4.0]})
+    msgs, svg = _warnings_of(
+        lambda: fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    assert msgs == [
+        "Smooth: could not fit the data (the lm fit could not be computed "
+        "for this data); it degraded to an empty/flat output instead of "
+        "failing the whole chart"
+    ], msgs
+    assert "<svg" in svg
+
+
+def test_zero_rows_on_a_log_x_degrades_like_any_other_sparse_fit():
+    """An empty frame hits the same degenerate-fit path a one-row frame
+    does, not a log-specific failure."""
+    df = pl.DataFrame({"v": pl.Series([], dtype=pl.Float64), "w": pl.Series([], dtype=pl.Float64)})
+    msgs, svg = _warnings_of(
+        lambda: fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    assert msgs == [
+        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
+        "x/y points); it degraded to an empty/flat output instead of failing "
+        "the whole chart"
+    ], msgs
+    assert "<svg" in svg
+
+
+def test_all_off_side_x_on_a_log_x_refuses_without_a_truncate_false_range():
+    """Every row off-side, with no `truncate=False` range in play at
+    all: the axis's own all-negative-no-domain refusal fires, naming the
+    caller's `'v'` and its true row count, exactly as it does on the
+    sibling primitive route."""
+    df = pl.DataFrame({"v": [-1.0, -2.0, -3.0, -4.0, -5.0], "w": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(df).mark_smooth(method="lm", ci=None).encode(
+            x=fm.X("v", scale=fm.LogScale()), y="w"
+        ).to_svg()
+    assert str(excinfo.value) == f"x scale: every value of 'v' (5 rows) {_NO_VALUE_ON_SIDE_REMEDY}"
+
+
+def test_nulls_are_dropped_before_the_fit_and_never_counted_off_side():
+    """A null row is excluded before the off-side count runs at all --
+    neither drawn nor warned about -- so a chart with one null among
+    otherwise on-side rows renders with no warning."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0, None], "w": [1.0, 2.0, 3.0, 4.0, None]})
+    msgs, svg = _warnings_of(
+        lambda: fm.Chart(df)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="w")
+        .to_svg()
+    )
+    assert msgs == [], msgs
+    assert "<svg" in svg
+
+
+def test_x_range_pad_none_is_the_same_as_leaving_it_unset():
+    """`x_range_pad=None` is `truncate=True`'s own default spelled out
+    explicitly: byte-identical to the bare, unset call."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 4.0, 8.0], "w": [1.0, 2.0, 3.0, 4.0]})
+    with_none = (
+        fm.Chart(df).mark_smooth(method="lm", ci=None, x_range_pad=None).encode(x="v", y="w").to_svg()
+    )
+    unset = fm.Chart(df).mark_smooth(method="lm", ci=None).encode(x="v", y="w").to_svg()
+    assert with_none == unset
+
+
+def _off_side_logistic_glm_df() -> pl.DataFrame:
+    rng = np.random.default_rng(2)
+    v = np.geomspace(1, 100, 60)
+    p = 1.0 / (1.0 + np.exp(-(np.log10(v) - 1)))
+    y = (rng.uniform(size=60) < p).astype(float)
+    return pl.DataFrame({"v": v, "y": y})
+
+
+#: SHA-256 of the expected rendering of `lmplot(method="logistic")` on a
+#: demanded log y: `Logistic` fits `y` on its own raw (probability)
+#: scale, unaffected by the y channel's `LogScale`, which maps the
+#: fitted curve for drawing but never the fit itself -- a separate
+#: mechanism from the one this suite pins -- so both the off-side count
+#: and the full render are pinned exactly.
+_LOGISTIC_LOG_Y_DIGEST = "cb72d4cdaf53d30c39550fa002382f53cdedbdb800168cac3506a0579230b708"
+
+
+def test_logistic_under_a_log_y_fits_y_on_its_raw_scale():
+    """`Logistic` under a demanded log y fits `y` on its own raw
+    (probability) scale, unaffected by the y channel's `LogScale`: the
+    off-side count and the full rendered SVG are both pinned exactly."""
+    df = _off_side_logistic_glm_df()
+    msgs, svg = _warnings_of(
+        lambda: fm.lmplot(
+            df, x="v", y=fm.Y("y", scale=fm.LogScale()), method="logistic", ci=None
+        ).to_svg()
+    )
+    assert msgs == [
+        "y scale: 33 row(s) of 'y' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ], msgs
+    assert hashlib.sha256(svg.encode()).hexdigest() == _LOGISTIC_LOG_Y_DIGEST
+
+
+#: SHA-256 of the expected rendering of `lmplot(method="glm")` on a
+#: demanded log y, the `Glm` mirror of the digest above.
+_GLM_LOG_Y_DIGEST = "72c494bc6f5b33f2c2e5ca0053168e140f6135d98e7ebf09fa64168bc3975636"
+
+
+def test_glm_under_a_log_y_fits_y_on_its_raw_scale():
+    """The `Glm` mirror of the test above, on data with real off-side
+    `y` rows rather than a binary response."""
+    rng = np.random.default_rng(3)
+    v = np.geomspace(1, 100, 60)
+    w = 2.0 + 3.0 * np.log10(v) + rng.normal(scale=3.0, size=60) - 5.0
+    df = pl.DataFrame({"v": v, "w": w})
+    msgs, svg = _warnings_of(
+        lambda: fm.lmplot(df, x="v", y=fm.Y("w", scale=fm.LogScale()), method="glm", ci=None).to_svg()
+    )
+    assert msgs == [
+        "y scale: 74 row(s) of 'w' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
+        "data that reaches zero"
+    ], msgs
+    assert hashlib.sha256(svg.encode()).hexdigest() == _GLM_LOG_Y_DIGEST
+
+
+def test_a_callers_own_transform_regression_stays_in_data_space():
+    """A caller who writes `.transform(fm.transform_regression(...))`
+    directly, then puts the output on a log x, gets a fit computed on
+    raw `v`, in data space: this transform never declares space columns
+    and is not routed through log-space fitting, so its own fitted `y`
+    values are exactly what a data-space fit gives, regardless of how
+    the axis itself resolves its ticks."""
+    v = np.geomspace(1, 1000, 60)
+    w = 2.0 + 3.0 * np.log10(v)
+    df = pl.DataFrame({"v": v, "w": w})
+    chart = (
+        fm.Chart(df)
+        .transform(fm.transform_regression("v", "w", method="linear", as_=("rx", "ry")))
+        .mark_line()
+        .encode(x=fm.X("rx", scale=fm.LogScale()), y="ry")
+    )
+    svg = chart.to_svg()
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    _, points = polylines(svg)[0]
+    _, ys = _vertices_in_data_units(points, x_ladder, y_ladder, x_log=True, y_log=False)
+    assert ys[0] == pytest.approx(5.20429134395849, rel=1e-9)
+    assert ys[-1] == pytest.approx(13.850257055123162, rel=1e-9)
+
+
+def test_a_callers_own_transform_loess_stays_in_data_space():
+    """The `transform_loess` mirror of the test above: its fitted `y`
+    values are pinned to the exact floats a data-space fit produces,
+    read back through whichever ladder the tick generator places --
+    a value match here, unlike a byte-digest match, is unaffected by
+    where the generator happens to place the axis's own ticks."""
+    v = np.geomspace(1, 1000, 60)
+    w = 2.0 + 3.0 * np.log10(v)
+    df = pl.DataFrame({"v": v, "w": w})
+    chart = (
+        fm.Chart(df)
+        .transform(fm.transform_loess("v", "w", as_=("lx", "ly")))
+        .mark_line()
+        .encode(x=fm.X("lx", scale=fm.LogScale()), y="ly")
+    )
+    svg = chart.to_svg()
+    x_ladder = value_axis_ladder(svg, axis="x")
+    y_ladder = value_axis_ladder(svg, axis="y")
+    _, points = polylines(svg)[0]
+    _, ys = _vertices_in_data_units(points, x_ladder, y_ladder, x_log=True, y_log=False)
+    assert ys[0] == pytest.approx(2.264281216137249, rel=1e-9)
+    assert ys[-1] == pytest.approx(11.091113846921928, rel=1e-9)

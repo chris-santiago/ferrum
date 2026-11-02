@@ -534,7 +534,7 @@ fn apply_in_data_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformConte
 /// map back to data units; `count`/`density`/the per-bin aggregates are
 /// computed from the (log-space) edges and never mapped themselves.
 fn apply_in_log_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformContext, slot: &SlotSpace) -> PyResult<RecordBatch> {
-    let mapped_spec = BinSpec { extent: slot.space.extent_in_space(LABEL, spec.extent)?, ..spec.clone() };
+    let mapped_spec = BinSpec { extent: slot.space.extent_in_space(LABEL, "extent", spec.extent)?, ..spec.clone() };
     let demand = [DemandedField { slot: SpaceSlot::Field, field: &spec.field, space: slot, shape: ColumnShape::Scalar }];
     run_in_log_space(
         ctx,

@@ -161,18 +161,17 @@ pub(in crate::render) fn require_exchanged_column_servable(
     })
 }
 
-/// Read any supported numeric Arrow column as `Vec<Option<f64>>`, preserving
-/// null positions. Returns `Err(ScaleResolutionFailed)` for unsupported
-/// dtypes — matches the prior `draw::col_as_f64` semantics exactly.
+/// The array-level core [`col_as_f64`] and [`LeftOutTally::count_adjusted`]
+/// both read through: any supported numeric Arrow column as
+/// `Vec<Option<f64>>`, preserving null positions. `Err(dtype string)` for an
+/// unsupported dtype — the caller attaches its own field-naming context.
 ///
 /// Supported dtypes: Float64/32, Int64/32/16/8, UInt64/32/16/8,
 /// Timestamp(any unit). `Date32`/`Date64`/`Duration` are pre-cast to
 /// `Timestamp(ms)` by `_coerce.normalize_for_rust` before reaching the render
 /// layer, so they hit the unsupported-dtype error arm here (and never occur on
 /// live paths); see [`supported_numeric_dtype`].
-pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<f64>>, RenderError> {
-    let col = batch.column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+fn array_as_f64(col: &dyn Array) -> Result<Vec<Option<f64>>, String> {
     macro_rules! collect_as {
         ($t:ty) => {{
             let a = col.as_any().downcast_ref::<$t>().expect("dtype matched");
@@ -182,7 +181,7 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
     match col.data_type() {
         DataType::Float64 => {
             let a = col.as_any().downcast_ref::<Float64Array>().expect("Float64");
-            return Ok(a.iter().collect());
+            Ok(a.iter().collect())
         }
         DataType::Float32 => collect_as!(Float32Array),
         DataType::Int64 => collect_as!(Int64Array),
@@ -197,12 +196,21 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::Timestamp(TimeUnit::Microsecond, _) => collect_as!(TimestampMicrosecondArray),
         DataType::Timestamp(TimeUnit::Millisecond, _) => collect_as!(TimestampMillisecondArray),
         DataType::Timestamp(TimeUnit::Second, _) => collect_as!(TimestampSecondArray),
-        other => Err(RenderError::UnsupportedDtype {
-            field: field.to_string(),
-            dtype: format!("{other:?}"),
-            context: None,
-        }),
+        other => Err(format!("{other:?}")),
     }
+}
+
+/// Read any supported numeric Arrow column as `Vec<Option<f64>>`, preserving
+/// null positions. Returns `Err(ScaleResolutionFailed)` for unsupported
+/// dtypes — matches the prior `draw::col_as_f64` semantics exactly.
+pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<f64>>, RenderError> {
+    let col = batch.column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    array_as_f64(col.as_ref()).map_err(|dtype| RenderError::UnsupportedDtype {
+        field: field.to_string(),
+        dtype,
+        context: None,
+    })
 }
 
 /// Read a Utf8 column as `Vec<Option<String>>`. Returns
@@ -525,18 +533,28 @@ pub(crate) struct SidedExtent {
 /// counted a faceted-shared panel's rows against the all-panels batch, and
 /// summed a column two layers both draw).
 ///
-/// [`count`](Self::count) is the one write path: a column counts only when
-/// no column already counted compares equal by content
-/// (`ArrayData`'s `PartialEq`, the same "equal values are one frame" rule
-/// `ferrum._compose._same_frame` already applies in Python for `+`), and
-/// only when it left rows out (`extent.left_out > 0`) — a column with
-/// nothing left out contributes nothing to store, only to `any_on_side`.
+/// [`count`](Self::count) is the one write path for a plain (unadjusted)
+/// read: a column counts only when no column already counted compares equal
+/// by content (`ArrayData`'s `PartialEq`, the same "equal values are one
+/// frame" rule `ferrum._compose._same_frame` already applies in Python for
+/// `+`), and only when it left rows out (`extent.left_out > 0`) — a column
+/// with nothing left out contributes nothing to store, only to
+/// `any_on_side`. [`count_adjusted`](Self::count_adjusted) is the write path
+/// for a position-adjusted layer's own caller rows plus the rows the
+/// adjustment moves off the side; it shares the same content-dedupe key, so
+/// a caller column `count` already stored and one `count_adjusted` later
+/// reads (a demanded fit's own recorded lineage column beside a jittered
+/// sibling reading the SAME raw column) fold into ONE entry. Each entry's
+/// third element is the moved-off ADJUSTED value at each row `count_adjusted`
+/// found moved, `None` elsewhere (and every position for a plain `count`
+/// entry, which moves nothing) — doubling as the "is this row moved" mask
+/// `rows()` counts and the value `zero()`/`opposite()` characterize.
 /// [`merge`](Self::merge) folds another tally in with the same dedupe, for
 /// composite groups whose members each build their own tally before the
 /// group combines them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LeftOutTally {
-    columns: Vec<(ArrayData, SidedExtent)>,
+    columns: Vec<(ArrayData, SidedExtent, Vec<Option<f64>>)>,
     any_on_side: bool,
 }
 
@@ -559,45 +577,133 @@ impl LeftOutTally {
             return;
         }
         let data = col.to_data();
-        if self.columns.iter().any(|(d, _)| d == &data) {
+        if self.columns.iter().any(|(d, _, _)| d == &data) {
             return;
         }
-        self.columns.push((data, extent));
+        self.columns.push((data, extent, vec![None; col.len()]));
+    }
+
+    /// Record a position-adjusted layer's off-side rows: `caller`'s own rows
+    /// (already-folded `caller_extent`, stored the same content-deduplicated
+    /// way [`count`](Self::count) stores a plain read) PLUS every row whose
+    /// `caller` value is on-side but whose `adjusted` value the position
+    /// adjustment itself pushed off the side — a caller row is never also
+    /// counted as moved (an off-side caller row stays `None` here; `count`'s
+    /// own tally already has it), so a row two different layers or two
+    /// different adjustments both move off still counts once, by the SAME
+    /// `None`-vs-`Some` OR this performs against a caller column already
+    /// stored (by `count` or an earlier `count_adjusted`). `any_on_side`
+    /// follows the ADJUSTED values, not the caller's: a channel whose every
+    /// drawn (adjusted) row is off-side still refuses as a frame with no
+    /// value anywhere does, even when the caller's own rows are on-side.
+    /// `Err` names the row-count mismatch when `caller` and `adjusted` are
+    /// not the same length — [`AdjustedRows`](crate::render::position::AdjustedRows)'s
+    /// own invariant keeps this from happening on a live path; the caller
+    /// maps it to a typed refusal rather than silently truncating or
+    /// panicking.
+    pub(crate) fn count_adjusted(
+        &mut self,
+        caller: &dyn Array,
+        caller_extent: SidedExtent,
+        adjusted: &dyn Array,
+        side: crate::scale::log::LogSide,
+    ) -> Result<(), String> {
+        if caller.len() != adjusted.len() {
+            return Err(format!(
+                "the adjusted column has {} row(s), the caller column {} — they must be row-aligned",
+                adjusted.len(),
+                caller.len()
+            ));
+        }
+        let caller_values = array_as_f64(caller)?;
+        let adjusted_values = array_as_f64(adjusted)?;
+        let on_side = |v: f64| match side {
+            crate::scale::log::LogSide::Positive => v > 0.0,
+            crate::scale::log::LogSide::Negative => v < 0.0,
+        };
+        if adjusted_values.iter().flatten().any(|&v| v.is_finite() && on_side(v)) {
+            self.any_on_side = true;
+        }
+        let moved: Vec<Option<f64>> = caller_values
+            .iter()
+            .zip(&adjusted_values)
+            .map(|(c, a)| {
+                let c = (*c)?;
+                if !c.is_finite() || !on_side(c) {
+                    return None;
+                }
+                let a = (*a)?;
+                (a.is_finite() && !on_side(a)).then_some(a)
+            })
+            .collect();
+        let data = caller.to_data();
+        if let Some(idx) = self.columns.iter().position(|(d, _, _)| d == &data) {
+            let (_, _, existing) = &mut self.columns[idx];
+            for (slot, new) in existing.iter_mut().zip(&moved) {
+                if slot.is_none() {
+                    *slot = *new;
+                }
+            }
+            return Ok(());
+        }
+        if caller_extent.left_out == 0 && !moved.iter().any(Option::is_some) {
+            return Ok(());
+        }
+        self.columns.push((data, caller_extent, moved));
+        Ok(())
     }
 
     /// Fold `other`'s counted columns into `self`, with the same
     /// content-equality dedupe [`count`](Self::count) applies — a composite
-    /// group merging its members' tallies.
+    /// group merging its members' tallies. A caller column both tallies
+    /// already hold ORs their moved-row masks together (the SAME union
+    /// [`count_adjusted`](Self::count_adjusted) performs against its own
+    /// prior entry), rather than keeping two separate entries for one
+    /// column.
     pub(crate) fn merge(&mut self, other: LeftOutTally) {
         self.any_on_side |= other.any_on_side;
-        for (data, extent) in other.columns {
-            if self.columns.iter().any(|(d, _)| d == &data) {
+        for (data, extent, moved) in other.columns {
+            if let Some(idx) = self.columns.iter().position(|(d, _, _)| d == &data) {
+                let (_, _, existing) = &mut self.columns[idx];
+                for (slot, new) in existing.iter_mut().zip(&moved) {
+                    if slot.is_none() {
+                        *slot = *new;
+                    }
+                }
                 continue;
             }
-            self.columns.push((data, extent));
+            self.columns.push((data, extent, moved));
         }
     }
 
-    /// The whole-frame left-out row count: the sum of every distinct
-    /// counted column's own `left_out`.
+    /// The whole-frame left-out row count: each distinct counted column's
+    /// own `left_out` plus the count of its own moved-off rows (`Some`
+    /// entries in its mask).
     pub(crate) fn rows(&self) -> usize {
-        self.columns.iter().map(|(_, e)| e.left_out).sum()
+        self.columns.iter().map(|(_, e, moved)| e.left_out + moved.iter().filter(|m| m.is_some()).count()).sum()
     }
 
-    /// Whether any counted column's left-out values include an exact zero.
+    /// Whether any counted column's left-out values, or any moved-off
+    /// adjusted value, is an exact zero.
     pub(crate) fn zero(&self) -> bool {
-        self.columns.iter().any(|(_, e)| e.left_out_zero)
+        self.columns.iter().any(|(_, e, moved)| e.left_out_zero || moved.iter().flatten().any(|v| *v == 0.0))
     }
 
     /// The combined `(min, max)` of every counted column's strictly
-    /// opposite-signed left-out values, when any exist.
+    /// opposite-signed left-out values, folded with every moved-off row's
+    /// own (strictly opposite-signed) adjusted value, when any exist.
     pub(crate) fn opposite(&self) -> Option<(f64, f64)> {
-        self.columns.iter().filter_map(|(_, e)| e.left_out_opposite).fold(None, |acc, (lo, hi)| {
-            Some(match acc {
-                Some((a_lo, a_hi)) => (a_lo.min(lo), a_hi.max(hi)),
-                None => (lo, hi),
+        self.columns
+            .iter()
+            .flat_map(|(_, e, moved)| {
+                e.left_out_opposite.into_iter().chain(moved.iter().flatten().filter(|v| **v != 0.0).map(|v| (*v, *v)))
             })
-        })
+            .fold(None, |acc, (lo, hi)| {
+                Some(match acc {
+                    Some((a_lo, a_hi)) => (a_lo.min(lo), a_hi.max(hi)),
+                    None => (lo, hi),
+                })
+            })
     }
 
     /// Whether any read this tally has seen held an on-side value, counted
@@ -2031,5 +2137,112 @@ mod tests {
             vec!["a", NULL_CATEGORY],
             "one band, spelled by the real string; the unoccupied null does not add a second"
         );
+    }
+
+    // ── `LeftOutTally::count_adjusted` ──────────────────────────────────────
+
+    use crate::scale::log::LogSide;
+
+    /// A caller row moved off-side by TWO different adjustments (two
+    /// `count_adjusted` calls against the SAME caller column, each with its
+    /// own `adjusted` array) counts once: the second call's merge only
+    /// fills a `None` slot, never overwrites a `Some` one, so the first
+    /// adjustment's own moved-off value wins and the row is not summed
+    /// twice.
+    #[test]
+    fn count_adjusted_a_row_moved_off_by_two_adjustments_counts_once() {
+        let caller = Float64Array::from(vec![5.0]);
+        let extent = sided_min_max_f64(&caller, Some(LogSide::Positive)).unwrap();
+        assert_eq!(extent.left_out, 0, "the caller's own row is on-side");
+        let mut tally = LeftOutTally::new();
+        tally.count_adjusted(&caller, extent, &Float64Array::from(vec![-1.0]), LogSide::Positive).expect("f64 columns");
+        tally.count_adjusted(&caller, extent, &Float64Array::from(vec![-2.0]), LogSide::Positive).expect("f64 columns");
+        assert_eq!(tally.rows(), 1, "one caller row, moved off by two adjustments, must count once: {tally:?}");
+    }
+
+    /// A caller row that is already off-side is never ALSO counted as
+    /// "moved" by the same adjustment: `count_adjusted`'s own on-side guard
+    /// on the caller value excludes it before the adjusted value is even
+    /// read, so the row's single count comes from `caller_extent.left_out`
+    /// alone, not `left_out` PLUS a moved entry for the same row.
+    #[test]
+    fn count_adjusted_a_caller_off_side_row_is_never_also_counted_as_moved() {
+        let caller = Float64Array::from(vec![-5.0]);
+        let extent = sided_min_max_f64(&caller, Some(LogSide::Positive)).unwrap();
+        assert_eq!(extent.left_out, 1, "the caller's own row is off-side");
+        let mut tally = LeftOutTally::new();
+        // The adjustment moves it further (still off-side) — direction does
+        // not matter, since the caller-side guard fires first either way.
+        tally.count_adjusted(&caller, extent, &Float64Array::from(vec![-10.0]), LogSide::Positive).expect("f64 columns");
+        assert_eq!(tally.rows(), 1, "the off-side caller row must count exactly once, not once via the extent and again as moved: {tally:?}");
+    }
+
+    /// `merge` ORs two tallies' masks for the SAME caller column: one tally
+    /// moved row 0 off-side, the other moved row 1 — after merging, both
+    /// rows are counted, not just whichever tally's entry happened to be
+    /// kept.
+    #[test]
+    fn count_adjusted_merge_ors_equal_caller_masks() {
+        let caller = Float64Array::from(vec![5.0, 8.0]);
+        let extent = sided_min_max_f64(&caller, Some(LogSide::Positive)).unwrap();
+        assert_eq!(extent.left_out, 0);
+        let mut tally_a = LeftOutTally::new();
+        tally_a.count_adjusted(&caller, extent, &Float64Array::from(vec![-1.0, 8.0]), LogSide::Positive).expect("f64 columns");
+        let mut tally_b = LeftOutTally::new();
+        tally_b.count_adjusted(&caller, extent, &Float64Array::from(vec![5.0, -2.0]), LogSide::Positive).expect("f64 columns");
+        tally_a.merge(tally_b);
+        assert_eq!(tally_a.rows(), 2, "row 0 (moved by tally_a) and row 1 (moved by tally_b) must both survive the merge: {tally_a:?}");
+    }
+
+    /// `any_on_side` follows the ADJUSTED values, not the caller's: an
+    /// all-off-side caller lifted to an on-side value by its own
+    /// adjustment still sets it, and an all-on-side caller pushed off-side
+    /// by its adjustment does NOT set it — the opposite of what reading the
+    /// caller's own extent would report.
+    #[test]
+    fn count_adjusted_any_on_side_follows_the_adjusted_values_not_the_callers() {
+        let lifted_caller = Float64Array::from(vec![-5.0]);
+        let lifted_extent = sided_min_max_f64(&lifted_caller, Some(LogSide::Positive)).unwrap();
+        assert_eq!(lifted_extent.left_out, 1, "the caller's own row is off-side");
+        let mut tally = LeftOutTally::new();
+        tally.count_adjusted(&lifted_caller, lifted_extent, &Float64Array::from(vec![3.0]), LogSide::Positive).expect("f64 columns");
+        assert!(tally.any_on_side(), "the adjusted value is on-side even though the caller's own was not");
+
+        let pushed_caller = Float64Array::from(vec![5.0]);
+        let pushed_extent = sided_min_max_f64(&pushed_caller, Some(LogSide::Positive)).unwrap();
+        assert_eq!(pushed_extent.left_out, 0, "the caller's own row is on-side");
+        let mut tally = LeftOutTally::new();
+        tally.count_adjusted(&pushed_caller, pushed_extent, &Float64Array::from(vec![-3.0]), LogSide::Positive).expect("f64 columns");
+        assert!(!tally.any_on_side(), "the adjusted value is off-side even though the caller's own was not");
+    }
+
+    /// `count_adjusted`'s `on_side` closure is symmetric by reading
+    /// (`LogSide::Negative` flips `v > 0.0` to `v < 0.0`), pinned directly
+    /// here rather than left to the layered/unlayered tests' own
+    /// positive-side fixtures: a caller row on-side on the negative side
+    /// (`-5.0`), moved by the adjustment to an off-side value (`3.0`,
+    /// positive), counts as moved; a caller row already off-side on the
+    /// negative side (`5.0`) does not count twice.
+    #[test]
+    fn count_adjusted_on_the_negative_side() {
+        let caller = Float64Array::from(vec![-5.0, 5.0]);
+        let extent = sided_min_max_f64(&caller, Some(LogSide::Negative)).unwrap();
+        assert_eq!(extent.left_out, 1, "row 1 (5.0) is off-side on the negative side");
+        let mut tally = LeftOutTally::new();
+        tally.count_adjusted(&caller, extent, &Float64Array::from(vec![3.0, 8.0]), LogSide::Negative).expect("f64 columns");
+        assert_eq!(tally.rows(), 2, "row 0 (-5.0 on-side, moved to 3.0 off-side) plus row 1 (already off-side): {tally:?}");
+    }
+
+    /// A caller and adjusted column of different lengths refuse rather than
+    /// silently truncating or panicking — `AdjustedRows`'s own invariant
+    /// keeps this from happening on a live path, so this pins the typed
+    /// `Err` the caller maps to a refusal instead.
+    #[test]
+    fn count_adjusted_mismatched_lengths_return_err() {
+        let caller = Float64Array::from(vec![1.0, 2.0]);
+        let extent = sided_min_max_f64(&caller, Some(LogSide::Positive)).unwrap();
+        let mut tally = LeftOutTally::new();
+        let err = tally.count_adjusted(&caller, extent, &Float64Array::from(vec![1.0]), LogSide::Positive).unwrap_err();
+        assert!(err.contains("row-aligned"), "{err}");
     }
 }

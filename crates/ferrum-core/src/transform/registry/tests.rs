@@ -316,7 +316,7 @@ fn smooth_fitted_outputs_match_shared_fit_schema() {
         inject_metrics: false,
         groupby: vec![],
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     };
     let batch = f64_batch(&[("x", &[0.0, 1.0, 2.0, 3.0, 4.0]), ("y", &[0.0, 2.0, 4.0, 6.0, 8.0])]);
     let out = crate::transform::smooth::apply(&spec, &batch).unwrap();
@@ -596,7 +596,7 @@ fn robust_outputs_match_shared_fit_schema() {
         inject_metrics: false,
         groupby: vec![],
         name: None,
-        x_range: None,
+        x_range: None, x_range_pad: None,
     };
     let batch = f64_batch(&[("x", &[0.0, 1.0, 2.0, 3.0, 4.0]), ("y", &[0.0, 2.0, 4.0, 6.0, 8.0])]);
     let out = crate::transform::robust::apply(&spec, &batch).unwrap();
@@ -862,7 +862,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
         ("smooth", Smooth(SmoothSpec {
             x: "x".into(), y: "y".into(), method: SmoothMethod::Lm, ci: None, bandwidth: 0.75,
             degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0, x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
-            inject_zero_ref: false, inject_metrics: false, groupby: vec![], name: None, x_range: None,
+            inject_zero_ref: false, inject_metrics: false, groupby: vec![], name: None, x_range: None, x_range_pad: None,
         })),
         ("aggregate", Aggregate(AggregateSpec { ops: vec![], groupby: vec![], name: None })),
         ("summary", Summary(SummarySpec {
@@ -932,7 +932,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
         ("robust", Robust(RobustSpec {
             x: "x".into(), y: "y".into(), n_grid: 10, ci: None, huber_c: 1.345, max_iter: 25,
             tol: 1e-8, output: SmoothOutput::Fitted, inject_zero_ref: false, inject_metrics: false,
-            groupby: vec![], name: None, x_range: None,
+            groupby: vec![], name: None, x_range: None, x_range_pad: None,
         })),
         ("identity", Identity(IdentitySpec { name: None, statistics: false })),
         ("filter", Filter(FilterSpec { predicate: "x > 0".into(), name: None, param: None })),

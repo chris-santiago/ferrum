@@ -300,6 +300,61 @@ pub(crate) fn column_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f6
     finite_extent(&arr)
 }
 
+/// `range`'s two endpoints padded by a symmetric proportional margin,
+/// `(hi - lo) * pad`, on both sides, in whichever units `range` is already
+/// stated in: data units on a linear axis, or log units once a demanded
+/// log x's own evaluation range is already stated there — this is `lmplot`'s
+/// `truncate=False` margin and `Smooth`/`Robust`'s `x_range_pad`, computed
+/// in the SAME space the range itself is given in, so the margin itself
+/// never lands off-side even when the unpadded range sits close to the
+/// axis's excluded side. Not log-specific — a plain arithmetic helper, so
+/// it lives beside [`column_extent`] rather than in `log_space.rs`. `pad`
+/// of `None` returns `range` unchanged.
+pub(crate) fn padded_extent(range: [f64; 2], pad: Option<f64>) -> [f64; 2] {
+    let Some(pad) = pad else { return range };
+    let [lo, hi] = range;
+    let margin = (hi - lo) * pad;
+    [lo - margin, hi + margin]
+}
+
+/// The evaluation range `Smooth`'s and `Robust`'s per-group fit body
+/// grids over: `x_range` when the caller wrote one, else the WHOLE
+/// `batch`'s own `x_field` extent (`column_extent`, before any `groupby`
+/// split, so every group spans the SAME full-column range) — either way
+/// padded by `x_range_pad`
+/// ([`padded_extent`]). `x_range` arrives already mapped into the fit's
+/// own space when one is demanded (`LogAxisSpace::extent_in_space`, called
+/// by the caller before this), and `batch`/`x_field` are themselves
+/// already in that space too (the demanded route's body runs on the
+/// mapped batch, off-side rows null), so this function itself carries no
+/// log-space knowledge at all: a plain extent-and-pad fold, run after
+/// mapping rather than before it.
+///
+/// `None` when there is nothing to derive a range from: both `x_range` and
+/// `x_range_pad` unset (the per-group data extent stands unchanged), or `x_range`
+/// unset and the whole batch's `x_field` extent is itself `None` (no finite
+/// values, or every row off-side on the mapped route — the axis's own
+/// `LogScaleNoValueOnSide` refusal speaks there instead of this function
+/// inventing a range).
+pub(crate) fn evaluation_range(
+    x_range: Option<[f64; 2]>,
+    x_range_pad: Option<f64>,
+    batch: &RecordBatch,
+    x_field: &str,
+) -> Option<[f64; 2]> {
+    if x_range.is_none() && x_range_pad.is_none() {
+        return None;
+    }
+    let base = match x_range {
+        Some(range) => range,
+        None => {
+            let (lo, hi) = column_extent(batch, x_field)?;
+            [lo, hi]
+        }
+    };
+    Some(padded_extent(base, x_range_pad))
+}
+
 /// [`column_extent`] restricted to the rows a GROUPED transform will actually
 /// draw — those whose `groupby` key survives GH #197's null-key policy.
 ///
@@ -962,6 +1017,48 @@ mod tests {
         pyo3::Python::initialize();
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 2.0])));
         assert_eq!(column_extent(&b, "ghost"), None);
+    }
+
+    #[test]
+    fn evaluation_range_both_none_keeps_the_per_group_extent() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0])));
+        assert_eq!(evaluation_range(None, None, &b, "x"), None, "no x_range and no pad: the caller's per-group data extent stands");
+    }
+
+    #[test]
+    fn evaluation_range_pad_alone_pads_the_whole_batchs_own_extent() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0, 8.0, 16.0])));
+        // The whole batch's own extent is [1, 16], padded 10% on each
+        // side: margin = 15 * 0.1 = 1.5.
+        assert_eq!(evaluation_range(None, Some(0.1), &b, "x"), Some([-0.5, 17.5]), "pad alone means extend past the data's own range");
+    }
+
+    #[test]
+    fn evaluation_range_x_range_plus_pad_pads_the_caller_written_range() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0])));
+        // x_range overrides the batch's own extent entirely; the pad still
+        // applies, in whichever units x_range is already stated in.
+        assert_eq!(
+            evaluation_range(Some([10.0, 20.0]), Some(0.1), &b, "x"),
+            Some([9.0, 21.0]),
+            "x_range wins over the batch's own extent, with the pad applied to IT"
+        );
+    }
+
+    #[test]
+    fn evaluation_range_all_tied_batch_extent_returns_none() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])));
+        assert_eq!(
+            evaluation_range(None, Some(0.1), &b, "x"),
+            None,
+            "a degenerate (all-tied) batch extent has no range to derive or pad"
+        );
+    }
+
+    #[test]
+    fn evaluation_range_empty_batch_returns_none() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(Vec::<f64>::new())));
+        assert_eq!(evaluation_range(None, Some(0.1), &b, "x"), None, "an empty column has no extent to derive or pad");
     }
 
     #[test]

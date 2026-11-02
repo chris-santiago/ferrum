@@ -2930,7 +2930,7 @@ mod composite_warning_tests {
                 inject_metrics: false,
                 groupby: vec![],
                 name: None,
-                x_range: None,
+                x_range: None, x_range_pad: None,
             })];
 
             let schema = Arc::new(Schema::new(vec![

@@ -44,7 +44,7 @@ def _request() -> regression._FitRequest:
         x_bins=None,
         x_estimator=None,
         order=None,
-        x_range=None,
+        x_range_pad=None,
         metrics=False,
         has_scatter=True,
     )
