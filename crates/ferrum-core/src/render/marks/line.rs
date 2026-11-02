@@ -30,6 +30,13 @@
 //! tied rows keep their row order), except an `Ordinal` advancing axis, which
 //! has no numeric value to order by and keeps batch order regardless.
 //!
+//! A line that declares `mark_style.rise_from_zero` draws one extra vertex
+//! ahead of each group's first placed one, pinned to that same row, rising
+//! from the value axis's own zero baseline — so a group with only one placed
+//! vertex, or every vertex tied, still draws a visible riser instead of
+//! drawing nothing. Read after `sort_vertices` orders a series, so the riser
+//! always leads the lowest-ordered vertex.
+//!
 //! Width: a `size` field tapers each series along its length, every vertex
 //! as wide as a point of the same value is across (see [`dot_diameter`]); a
 //! constant `size=` kwarg is the same mapping at one width. `size` and
@@ -239,10 +246,13 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
 
 /// This mark's [`VertexFrame`](crate::render::draw::VertexFrame): its own
 /// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
-/// of 2 vertices per polyline.
+/// of 2 vertices per polyline — 1 for a line declaring
+/// `mark_style.rise_from_zero`, whose one placed vertex still draws, joined
+/// to the riser `build` prepends ahead of it.
 pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
     let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
-    crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), 2)
+    let min_vertices = if ctx.mark_style.line.rise_from_zero { 1 } else { 2 };
+    crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), min_vertices)
 }
 
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
@@ -303,6 +313,21 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .then(|| advancing_field.and_then(|f| col_as_f64(ctx.batch, f).ok()))
             .flatten();
 
+    // A declared rise-from-zero riser (`mark_style.rise_from_zero`, set by
+    // `displot(kind="ecdf")`'s step line): the VALUE axis's own baseline
+    // pixel, the same one `area`'s unstacked fill closes against
+    // (`ScaleKind::value_baseline_px`) — the 0 pixel when 0 is in the value
+    // axis's domain, else the plot edge on zero's side, so a log value axis
+    // rises from its edge. Computed once: it does not depend on the group.
+    // `None`/unset prepends nothing, byte-identical.
+    let rise_baseline_px = ctx.mark_style.line.rise_from_zero.then(|| {
+        let panel = ctx.panel.plot_area;
+        match curve_axis {
+            CurveAxis::X => ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y),
+            CurveAxis::Y => ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w),
+        }
+    });
+
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
     let sw_vals = stroke_width_column(ctx);
     // Per-row `(value, area)` from an encoded `size`, through the shared size
@@ -357,6 +382,19 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             let Some((cx, cy)) = vertices[i] else { continue };
             points.push((cx, cy));
             row_indices.push(i);
+        }
+        // Prepend the riser, pinned to the first PLACED vertex's own row —
+        // a null or non-finite observation ahead of it already never
+        // reached `points` above, so this is the first observation that
+        // placed. Nothing to prepend to an empty series (zero placed
+        // vertices keeps the existing empty path).
+        if let (Some(baseline), Some(&first_row)) = (rise_baseline_px, row_indices.first()) {
+            let riser = match curve_axis {
+                CurveAxis::X => (points[0].0, baseline),
+                CurveAxis::Y => (baseline, points[0].1),
+            };
+            points.insert(0, riser);
+            row_indices.insert(0, first_row);
         }
         if points.len() < 2 {
             single_point_series += usize::from(points.len() == 1);
@@ -2763,12 +2801,401 @@ mod tests {
         assert_eq!(err, RenderError::MarkStyleNotDrawn { mark: Mark::Point, field: "sort_vertices" });
     }
 
+    // ── declared rise-from-zero riser (`rise_from_zero`) ─────────────────────
+
+    /// One row's x/y scales, both Linear with a domain spanning 0: `x` in
+    /// `[0, 10]` over `[0, 100]`px, `y` in `[0, 10]` over `[100, 0]`px (pixel
+    /// 100 at the panel bottom, matching `area`'s own y-axis convention).
+    fn zero_spanning_scales() -> crate::render::scale_resolve::ResolvedScales {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None,
+            stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None,
+            y_slots: Default::default(), raster_cells: None,
+        }
+    }
+
+    fn one_row_batch(x: f64, y: f64) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![x])),
+            Arc::new(Float64Array::from(vec![y])),
+        ]).unwrap()
+    }
+
+    /// A declared line with one placed vertex draws a riser from the value
+    /// axis's zero pixel to that vertex, instead of drawing nothing:
+    /// `vertex_frame`'s minimum drops to 1 placed vertex, and `build` emits
+    /// a two-point polyline.
+    #[test]
+    fn declared_line_with_one_vertex_draws_a_riser() {
+        let spec = line_spec();
+        let batch = one_row_batch(5.0, 3.0);
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(super::vertex_frame(&ctx).min_vertices, 1, "a declared line's minimum drops to one placed vertex");
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        assert_eq!(points, &vec![(50.0, 100.0), (50.0, 70.0)], "the riser leads from the value axis's 0 pixel to the one placed vertex");
+    }
+
+    /// The negative control: the identical single-row fixture, undeclared,
+    /// draws nothing — `vertex_frame`'s minimum stays 2, and `build`'s own
+    /// `< 2` gate drops the lone point.
+    #[test]
+    fn undeclared_line_with_one_vertex_draws_nothing() {
+        let spec = line_spec();
+        let batch = one_row_batch(5.0, 3.0);
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(super::vertex_frame(&ctx).min_vertices, 2, "an undeclared line keeps its ordinary two-vertex minimum");
+        let result = super::build(&ctx).unwrap();
+        assert!(result.nodes.is_empty(), "an undeclared single-vertex series must still draw nothing");
+    }
+
+    /// Three tied rows (same x, ascending y) draw a riser to the tied count:
+    /// the riser plus all three tied vertices, none deduplicated away.
+    #[test]
+    fn tied_vertices_draw_a_riser_to_the_tied_count() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        assert_eq!(
+            points,
+            &vec![(50.0, 100.0), (50.0, 90.0), (50.0, 80.0), (50.0, 70.0)],
+            "the riser joins the tied count exactly as any other vertex does"
+        );
+    }
+
+    /// A log value axis never reaches 0, so the riser rises from the plot
+    /// edge on zero's side instead — the low edge here, the same pixel the
+    /// domain's own near-zero end already maps to.
+    #[test]
+    fn baseline_sits_at_the_edge_under_a_log_value_axis() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::log::LogScale;
+        let spec = line_spec();
+        let batch = one_row_batch(5.0, 10.0);
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Log(LogScale::new_internal(vec![1.0, 100.0], vec![100.0, 0.0], 10.0, false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None,
+            stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None,
+            y_slots: Default::default(), raster_cells: None,
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        assert_eq!(points, &vec![(50.0, 100.0), (50.0, 50.0)], "a log value axis rises from its low edge, not a literal-0 pixel");
+    }
+
+    /// An explicit value-axis domain that excludes 0 still wins: the riser
+    /// rises from the plot edge on zero's side, never from an extrapolated
+    /// 0 pixel outside the resolved domain.
+    #[test]
+    fn an_explicit_domain_excluding_zero_still_wins() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        let spec = line_spec();
+        let batch = one_row_batch(8.0, 100.0);
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![0.0, 200.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![50.0, 150.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None,
+            stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None,
+            y_slots: Default::default(), raster_cells: None,
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        assert_eq!(points, &vec![(80.0, 100.0), (80.0, 50.0)], "an explicit domain excluding 0 keeps the riser at its own edge");
+    }
+
+    /// Both declarations compose: `sort_vertices` puts the lowest-data-value
+    /// row first wherever it sits on a reversed x scale, and the riser leads
+    /// from there — the lowest OBSERVATION, not the lowest pixel.
+    #[test]
+    fn a_reversed_x_scale_still_rises_at_the_lowest_observation() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 1.0, 9.0])),
+            Arc::new(Float64Array::from(vec![2.0, 1.0, 3.0])),
+        ]).unwrap();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![300.0, 0.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None,
+            stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None,
+            y_slots: Default::default(), raster_cells: None,
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { sort_vertices: Some(true), rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        // Ascending data order visits x=1 (pixel 270), 5 (150), 9 (30); the
+        // riser leads at x=1's pixel even though it sits on the panel's
+        // RIGHT, not its left.
+        assert_eq!(
+            points,
+            &vec![(270.0, 0.0), (270.0, 10.0), (150.0, 20.0), (30.0, 30.0)],
+            "the riser must lead at the lowest DATA observation's pixel, wherever the reversed scale puts it"
+        );
+    }
+
+    /// `rise_from_zero` is a `mark_line`-only declaration; any other mark
+    /// carrying it refuses through the existing style-table gate, exactly as
+    /// `sort_vertices` does.
+    #[test]
+    fn a_non_line_mark_carrying_rise_from_zero_refuses() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let err = resolve_mark_style(Some(&overrides), &theme, &Mark::Point).unwrap_err();
+        assert_eq!(err, RenderError::MarkStyleNotDrawn { mark: Mark::Point, field: "rise_from_zero" });
+    }
+
+    /// Zero placed vertices (every row null) draw nothing and keep the
+    /// existing empty path, whether or not `rise_from_zero` is declared:
+    /// there is no first placed vertex to pin a riser to.
+    #[test]
+    fn zero_placed_vertices_draw_nothing_even_when_declared() {
+        let all_null = build_series(
+            vec![None, None],
+            vec![None, None],
+            None,
+            Some(&MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() }),
+        );
+        assert!(all_null.nodes.is_empty());
+        assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
+    }
+
+    /// A null first observation is unplaced, so the riser sits at the first
+    /// observation that DID place, not at the null one — its exact
+    /// position, not only the vertex count.
+    #[test]
+    fn a_null_first_observation_leaves_the_riser_at_the_first_placed_ones_position() {
+        let points = riser_points_over(vec![None, Some(5.0)], vec![None, Some(3.0)]);
+        assert_eq!(
+            points,
+            vec![(50.0, 100.0), (50.0, 70.0)],
+            "the riser sits at the first PLACED vertex's own position, not a phantom one for the null row"
+        );
+    }
+
+    /// A non-finite (NaN) first observation is unplaced exactly as a null
+    /// one is — same riser position, same reason.
+    #[test]
+    fn a_non_finite_first_observation_leaves_the_riser_at_the_first_placed_ones_position() {
+        let points = riser_points_over(vec![Some(f64::NAN), Some(5.0)], vec![Some(f64::NAN), Some(3.0)]);
+        assert_eq!(
+            points,
+            vec![(50.0, 100.0), (50.0, 70.0)],
+            "a non-finite first vertex is unplaced, so the riser sits at the first placed one, exactly as a null does"
+        );
+    }
+
+    /// A declared line's riser, over a batch whose x/y columns may carry
+    /// nulls, under the deterministic `zero_spanning_scales` fixture.
+    fn riser_points_over(xs: Vec<Option<f64>>, ys: Vec<Option<f64>>) -> Vec<(f64, f64)> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ]).unwrap();
+        let spec = line_spec();
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Polyline { points, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser polyline, got {:?}", result.nodes);
+        };
+        points.clone()
+    }
+
+    /// `rise_from_zero: Some(false)` is byte-identical to `None` in the
+    /// builder itself — not only at the domain's eligibility gate.
+    #[test]
+    fn rise_from_zero_some_false_is_byte_identical_to_none_in_the_builder() {
+        let spec = line_spec();
+        let batch = one_row_batch(5.0, 3.0);
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let build_with = |overrides: Option<&MarkKwargsSpec>| {
+            let mark_style = resolve_mark_style(overrides, &theme, &Mark::Line).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            super::build(&ctx).unwrap()
+        };
+        let unset = build_with(None);
+        let explicit_false = build_with(Some(&MarkKwargsSpec { rise_from_zero: Some(false), ..Default::default() }));
+        assert_eq!(explicit_false.nodes, unset.nodes, "Some(false) must draw byte-identically to unset");
+        assert!(unset.nodes.is_empty(), "the one-vertex control must still draw nothing undeclared");
+    }
+
+    /// The riser survives under `interpolate="step-after"` — the Path /
+    /// `cmd_points` branch the ECDF's own step line actually draws through,
+    /// not only the linear `Polyline` branch every other riser test uses.
+    /// The riser's baseline corner leads the path, then a vertical rise
+    /// (`VLineTo`) carries it to the one placed vertex.
+    #[test]
+    fn declared_line_with_step_after_emits_the_riser_as_its_leading_corner() {
+        let spec = line_spec();
+        let batch = one_row_batch(5.0, 3.0);
+        let scales = zero_spanning_scales();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let overrides = MarkKwargsSpec {
+            rise_from_zero: Some(true),
+            interpolate: Some("step-after".into()),
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let [SceneNode::Path { commands, .. }] = result.nodes.as_slice() else {
+            panic!("expected one riser Path, got {:?}", result.nodes);
+        };
+        assert_eq!(
+            commands,
+            &vec![
+                ferrum_scene::PathCmd::MoveTo { x: 50.0, y: 100.0 },
+                ferrum_scene::PathCmd::HLineTo { x: 50.0 },
+                ferrum_scene::PathCmd::VLineTo { y: 70.0 },
+            ],
+            "the riser's baseline leads the path, then a vertical rise to the one placed vertex"
+        );
+    }
+
+    /// The prepended riser vertex maps to the first observation's own row
+    /// in `vertex_rows`, through `cmd_points` (the Path branch's own
+    /// per-command row mapping, not just the Polyline branch's plain
+    /// `0..points.len()`): a size conditional's recorded rows for the
+    /// riser's commands must read the SAME row the series' real first
+    /// vertex does, and a later point's commands must read its own row.
+    #[test]
+    fn the_riser_vertex_maps_to_the_first_observations_row_through_cmd_points() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 9.0, 13.0])),
+            Arc::new(Float64Array::from(vec![3.0, 7.0, 11.0])),
+        ]).unwrap();
+        let overrides = MarkKwargsSpec {
+            rise_from_zero: Some(true),
+            interpolate: Some("step-after".into()),
+            ..Default::default()
+        };
+        let result = build_line(&with_size_conditional(line_spec(), 100.0, 20.0), &batch, &overrides, &ThemeInputs::default()).unwrap();
+        let rows = all_row_numbers(result.vertex_rows).expect("rows recorded");
+        // Three real rows (0, 1, 2), plus the riser pinned to row 0: the
+        // riser's own corners read row 0 (the FIRST observation's row, not
+        // a phantom one), and each later corner reads its own observation's
+        // row in order, ending at row 2 (the last).
+        assert_eq!(rows, vec![vec![0, 0, 0, 0, 1, 1, 2]]);
+    }
+
+    /// The interactive scene draws the same riser the static SVG does,
+    /// through the one shared builder `render_scene_json` dispatches to
+    /// (`render::draw`'s single `Mark::Line => line::build` entry) — there
+    /// is no separate interactive-only code path to miss.
+    #[test]
+    fn the_interactive_scene_draws_the_riser() {
+        let mut spec = line_spec();
+        spec.mark_style = Some(MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 9.0])),
+            Arc::new(Float64Array::from(vec![3.0, 7.0])),
+        ]).unwrap();
+        let (json, _, _) = crate::render::render_scene_json(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 400.0, height: 300.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .unwrap();
+        let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).unwrap();
+        let [SceneNode::Polyline { points, .. }] = scene.panels[0].marks[0].nodes.as_slice() else {
+            panic!("expected one riser polyline in the interactive scene, got {:?}", scene.panels[0].marks[0].nodes);
+        };
+        assert_eq!(points.len(), 3, "the interactive scene draws the riser too: the baseline plus both observations");
+    }
+
     /// `build` over nullable `x`/`y` columns, with a categorical `c` color
     /// column splitting the series when `colors` is given.
     fn build_series(
         xs: Vec<Option<f64>>,
         ys: Vec<Option<f64>>,
         colors: Option<Vec<&str>>,
+        overrides: Option<&MarkKwargsSpec>,
     ) -> crate::render::draw::MarkBuildResult {
         let mut spec = line_spec();
         let mut fields = vec![Field::new("x", DataType::Float64, true), Field::new("y", DataType::Float64, true)];
@@ -2782,7 +3209,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let mark_style = resolve_mark_style(overrides, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         super::build(&ctx).unwrap()
     }
@@ -2791,7 +3218,7 @@ mod tests {
     /// and names why, counting its series.
     #[test]
     fn a_line_whose_every_series_has_one_point_names_its_emptiness() {
-        let one_row = build_series(vec![Some(1.0)], vec![Some(2.0)], None);
+        let one_row = build_series(vec![Some(1.0)], vec![Some(2.0)], None, None);
         assert!(one_row.nodes.is_empty());
         assert_eq!(
             one_row.empty_reason.map(|reason| reason.0).as_deref(),
@@ -2802,6 +3229,7 @@ mod tests {
             (0..5).map(|i| Some(f64::from(i))).collect(),
             (0..5).map(|i| Some(f64::from(i))).collect(),
             Some(vec!["a", "b", "c", "d", "e"]),
+            None,
         );
         assert!(five_groups.nodes.is_empty());
         assert_eq!(
@@ -2815,15 +3243,15 @@ mod tests {
     /// an all-null batch.
     #[test]
     fn a_line_that_draws_or_had_no_point_carries_no_empty_reason() {
-        let partial = build_series(vec![Some(0.0), Some(1.0), Some(2.0)], vec![Some(0.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]));
+        let partial = build_series(vec![Some(0.0), Some(1.0), Some(2.0)], vec![Some(0.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]), None);
         assert_eq!(partial.nodes.len(), 1);
         assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
 
-        let zero_rows = build_series(vec![], vec![], None);
+        let zero_rows = build_series(vec![], vec![], None, None);
         assert!(zero_rows.nodes.is_empty());
         assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
 
-        let all_null = build_series(vec![None, None], vec![None, None], None);
+        let all_null = build_series(vec![None, None], vec![None, None], None, None);
         assert!(all_null.nodes.is_empty());
         assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
     }

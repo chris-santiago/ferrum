@@ -222,7 +222,7 @@ fn seed_reads<'a>(
 /// preview produced one, the preview it draws ([`axis_previews`]). `base` is
 /// the per-layer stack-base pairing: `Some` only for a layer whose own
 /// effective position is `Stack` on this axis
-/// ([`crate::render::position::layer_prepared_stacks`]), so a dodged or
+/// ([`crate::render::position::layer_prepared_stack_axis`]), so a dodged or
 /// jittered layer's contribution carries no span partner, as `axis_batch`'s
 /// unlayered `base` already decides it.
 struct AxisReads<'a> {
@@ -368,7 +368,8 @@ fn axis_previews<'a>(
         // `Some` (a `Dodge`/`Jitter` preview is `Some` too: its own adjusted
         // rows alone, never a union with the unadjusted ones).
         let drawn = crate::render::prepare::LayerPrepared::from_chart_and_layer(spec, layer).in_its_coord();
-        let base = crate::render::position::layer_prepared_stacks(&drawn)?
+        let base = crate::render::position::layer_prepared_stack_axis(&drawn)?
+            .is_some()
             .then_some(crate::render::position::STACK_BASE_COLUMN);
         let preview =
             |batch: &RecordBatch| crate::render::position::layer_position_preview(spec, layer, axis, batch, color);
@@ -2052,8 +2053,10 @@ fn sort_domain_by_aggregate(
 }
 
 /// Would Python's own single-chart zero-anchor injection have anchored this
-/// layer on this channel? The eligibility half of the bar zero-anchor rule
-/// (T5r), extracted from `numeric_domain_union`'s
+/// layer on this channel — or, for a line, would a declared
+/// `rise_from_zero` riser rise from it? The eligibility half of the
+/// zero-anchor rule (T5r), "a mark whose style anchors its value at
+/// zero", extracted from `numeric_domain_union`'s
 /// union loop so the concept is nameable and directly unit-testable rather
 /// than reachable only end-to-end through a 285-line function.
 /// `numeric_domain_union` owns the *arithmetic* (the two guarded
@@ -2068,44 +2071,54 @@ fn sort_domain_by_aggregate(
 /// batch, so a merely-DECLARED field (wrong `data_source`, not loaded yet)
 /// cannot force a zero-anchor on the strength of its name alone.
 ///
-/// The terms mirror the single-chart injection's guards
+/// The bar terms mirror the single-chart injection's guards
 /// (`_spec_build.py::_build_encoding_specs`'s zero-anchor block), not just
-/// its arithmetic:
-///   (a) the value axis there — the anchor is the bar's EXTENT axis only,
-///       never its POSITION axis. A bar's value channel follows its
-///       orientation ([`bar_value_on_x`]): `y`, or `x` when the bar is
-///       horizontal (a categorical `y`, a native horizontal bar), and the
-///       other one under `CoordFlip`, which the caller's
-///       `coord_flipped`/`encoding` normalization already applies. Dropping
-///       this guard is what fired the anchor on a histogram bar's `x`
-///       (bin-range position) channel too, squeezing `displot(kind="hist")`
-///       bars into a fraction of the panel when the data doesn't straddle
-///       zero. A floating horizontal bar such as
-///       `_explanation.py::desugar_shap_waterfall`'s (`x=x0`, `x2=x1`,
-///       `y=feature`) has its value on `x` and is excluded by guard (b): its
-///       value channel carries `x2`.
-///   (b) `not _y2_bound` there — when this layer's OWN value
-///       channel carries a paired span field (`y2`, or `x2` on an x value
+/// its arithmetic; a declared line's riser reuses the same four-term shape
+/// with its own value-axis orientation
+/// ([`crate::render::marks::curve::resolve_curve_axis`], the one rule the
+/// builder's own `DrawCtx::series_curve_axis` reads too, so the two can
+/// never disagree) and its own eligibility ([`mark_wants_zero_anchor`]):
+///   (a) the value axis there — the anchor is the EXTENT axis only, never
+///       the POSITION axis. A bar's value channel follows its orientation
+///       ([`bar_value_on_x`]): `y`, or `x` when the bar is horizontal (a
+///       categorical `y`, a native horizontal bar), and the other one under
+///       `CoordFlip`, which the caller's `coord_flipped`/`encoding`
+///       normalization already applies. Dropping this guard is what fired
+///       the anchor on a histogram bar's `x` (bin-range position) channel
+///       too, squeezing `displot(kind="hist")` bars into a fraction of the
+///       panel when the data doesn't straddle zero. A floating horizontal
+///       bar such as `_explanation.py::desugar_shap_waterfall`'s (`x=x0`,
+///       `x2=x1`, `y=feature`) has its value on `x` and is excluded by guard
+///       (b): its value channel carries `x2`. A line's value channel is the
+///       series' own non-advancing axis (`resolve_curve_axis`'s answer) —
+///       the observation axis it advances along is its POSITION axis and is
+///       never anchored, the line sibling of the bar's bin-range guard.
+///   (b) the value channel's span partner stays unbound there — when
+///       this layer's OWN value channel carries a paired span field (`y2`, or `x2` on an x value
 ///       channel — `layer_fields[1]`), the extent is taken literally from
 ///       `[value, span]` and force-anchoring to zero would distort a domain
 ///       that was never meant to touch zero. `desugar_shap_waterfall` is the
 ///       concrete horizontal instance (its value channel carries `x2`);
 ///       `y2_bound_bar_layer_never_zero_extends` below pins the vertical one.
-///   (c) the layer's own opt-out ([`bar_wants_zero`]) — `layer.mark_style.zero == Some(false)`,
-///       the per-layer mirror of `mark_bar(zero=False)` / `_mark_zero`
+///   (c) the layer's own opt-out ([`mark_wants_zero_anchor`]) —
+///       `layer.mark_style.zero == Some(false)`, the per-layer mirror of
+///       `mark_bar(zero=False)` / `_mark_zero`
 ///       (`spec::mark_style::MarkKwargsSpec::zero`, T5r). Live and
 ///       user-reachable today via the generic per-layer `mark=` passthrough
 ///       on layered figure functions — e.g. `fm.catplot(..., kind="bar",
 ///       mark={"bar": {"zero": False}})` resolves the value axis to the raw
 ///       data range (measured: `58..61.5`, not `0..61.5`) — see that field's
-///       doc comment for the plumbing and the one path that stays inert.
+///       doc comment for the plumbing and the one path that stays inert. A
+///       line's own opt-IN is `rise_from_zero == Some(true)`
+///       (`spec::mark_style::MarkKwargsSpec::rise_from_zero`): unlike a
+///       bar's default-on opt-out, an undeclared line never anchors.
 ///
 /// The Python rule's remaining guard (`_y_is_categorical`) needs no mirror:
 /// `numeric_domain_union` is only ever called for a quantitative/temporal
 /// axis (`build_axis_scale`'s ordinal/nominal branch never reaches here), so
 /// an ordinal position channel is excluded structurally, not by an extra
 /// flag.
-fn layer_wants_bar_zero_anchor(
+fn layer_wants_zero_anchor(
     layer: &Layer,
     channel: &str,
     value_on_x: bool,
@@ -2114,7 +2127,7 @@ fn layer_wants_bar_zero_anchor(
 ) -> bool {
     let is_value_channel = if value_on_x { channel == "x" } else { channel == "y" };
     is_value_channel
-        && bar_wants_zero(layer.mark, layer.mark_style.as_ref())
+        && mark_wants_zero_anchor(layer.mark, layer.mark_style.as_ref())
         && value_field_contributed
         && layer_fields[1].is_none()
 }
@@ -2130,13 +2143,41 @@ fn bar_value_on_x(coord_flipped: bool, y_categorical: bool) -> bool {
     coord_flipped != y_categorical
 }
 
-/// Whether a mark is a bar that keeps its zero anchor: any bar whose own
-/// `mark_bar(zero=False)` (`MarkKwargsSpec::zero`) has not opted out.
-fn bar_wants_zero(
+/// Whether a line draws its value along x, in the coordinates it renders
+/// in: builds `layer` exactly as the draw pass does
+/// (`LayerPrepared::from_chart_and_layer(..).in_its_coord()`, the same
+/// construction [`axis_previews`] already runs) and reads its orientation
+/// off that prepared layer's own post-flip declaration and its coord's real
+/// flip — the same two facts
+/// [`crate::render::draw::DrawCtx::series_curve_axis`] reads off the drawn
+/// batch — plus its declared stack axis
+/// ([`crate::render::position::layer_prepared_stack_axis`], read ahead of
+/// any batch), which agrees with the builder's own `apply_stack`-stamped
+/// reading for every stack `apply_stack` actually cumulates, through the
+/// one shared rule ([`crate::render::marks::curve::resolve_curve_axis`])
+/// both readers call.
+fn curve_value_on_x(spec: &ChartSpec, layer: &Layer) -> Result<bool, RenderError> {
+    use crate::render::marks::curve::{resolve_curve_axis, CurveAxis};
+    let drawn = crate::render::prepare::LayerPrepared::from_chart_and_layer(spec, layer).in_its_coord();
+    let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
+    let stack_on_x = crate::render::position::layer_prepared_stack_axis(&drawn)? == Some(StackValueAxis::X);
+    Ok(resolve_curve_axis(drawn.mark_style.and_then(|m| m.value_axis), coord_flipped, stack_on_x) == CurveAxis::Y)
+}
+
+/// Whether a mark keeps its style's zero anchor on its value channel: a bar
+/// whose own `mark_bar(zero=False)` (`MarkKwargsSpec::zero`) has not opted
+/// out, or a line whose own `rise_from_zero` (`mark_line`-only, set only by
+/// `displot(kind="ecdf")`'s step line) opted in. Every other mark never
+/// anchors.
+fn mark_wants_zero_anchor(
     mark: Mark,
     mark_style: Option<&crate::spec::mark_style::MarkKwargsSpec>,
 ) -> bool {
-    mark == Mark::Bar && mark_style.and_then(|m| m.zero).unwrap_or(true)
+    match mark {
+        Mark::Bar => mark_style.and_then(|m| m.zero).unwrap_or(true),
+        Mark::Line => mark_style.is_some_and(|m| m.rise_from_zero == Some(true)),
+        _ => false,
+    }
 }
 
 /// One `Mark::Text` row's physical ink requirement on a continuous
@@ -2347,36 +2388,41 @@ pub(in crate::render) fn primary_axis_text_rows<'a>(
 ///     `false`, keeping the per-panel-only behavior byte-identical.
 ///   - Every OTHER layer's fields for this channel are unioned too, read in
 ///     the channel's own coordinate space — see the `spec.layers` loop below.
-///   - **Bar zero-anchor (T5r, catplot aggregation).** When a
-///     `Mark::Bar` layer binds this channel's VALUE slot (never its position
-///     slot — `"y"` unflipped, `"x"` under `CoordFlip`, in the channel's own
-///     coordinate space, same `coord_flipped` normalization the layer-union
-///     loop already applies) with data that actually contributed to the
-///     union, AND that layer does not itself bind the paired span field on
-///     this channel (`y2`/`x2`), AND the layer does not explicitly opt out
-///     (`mark_style.zero == Some(false)`), the resolved extent is widened to
-///     include zero — mirroring `resolve_continuous_domain_and_range`'s
-///     `zero: true` block (`d[0] > 0.0 → 0.0`, `d[1] < 0.0 → 0.0`) exactly,
-///     just applied on the AUTO-INFERRED path instead of an explicit
-///     `ScaleSpec`. The eligibility question — all four conditions, and why
-///     each one mirrors a guard of the single-chart injection
-///     (`_spec_build.py::_build_encoding_specs`: `axis == "y"`,
-///     `_y2_bound`, `_mark_zero`) — lives in
-///     [`layer_wants_bar_zero_anchor`], which owns the per-term rationale;
-///     this function owns only the arithmetic. A single (non-layered)
-///     `mark_bar` never reaches this function at all: Python's
-///     `_spec_build.py::_build_encoding_specs` already injects an explicit
-///     `scale={"zero": True}` onto that chart's y encoding, which routes
-///     through `build_from_scale_spec` and returns before this function is
-///     even called. This rule exists for the case Python's injection cannot
-///     serve without silently clipping other layers: a layered spec
-///     (`catplot(kind="bar")`'s bar + CI-whisker `rule`), where an explicit
-///     per-layer `ScaleSpec` would replace this cross-layer union with a
-///     single-column domain and clip whichever layer's field extends
-///     furthest (measured: 3 of 4 upper CI whiskers vanished off-panel).
-///     Scoped to `spec.layers` only (never `spec.mark`), so a genuinely
-///     unlayered spec's auto path is untouched — byte-identical, because a
-///     single-chart bar never reaches the auto path in the first place.
+///   - **Zero anchor (T5r, catplot aggregation; a declared line's riser
+///     reuses the same rule).** When a layer whose mark style anchors its
+///     value at zero — an opted-in `Mark::Bar`, or a `Mark::Line` declaring
+///     `rise_from_zero` ([`mark_wants_zero_anchor`]) — binds this channel's
+///     VALUE slot (never its position slot — `"y"` unflipped, `"x"` under
+///     `CoordFlip` for a bar, the series' own non-advancing axis for a line,
+///     in the channel's own coordinate space, same `coord_flipped`
+///     normalization the layer-union loop already applies) with data that
+///     actually contributed to the union, AND that layer does not itself
+///     bind the paired span field on this channel (`y2`/`x2`), the resolved
+///     extent is widened to include zero — mirroring
+///     `resolve_continuous_domain_and_range`'s `zero: true` block
+///     (`d[0] > 0.0 → 0.0`, `d[1] < 0.0 → 0.0`) exactly, just applied on the
+///     AUTO-INFERRED path instead of an explicit `ScaleSpec`. The
+///     eligibility question — every condition, and why each one mirrors a
+///     guard of the single-chart injection
+///     (`_spec_build.py::_mark_zero_anchor`: the value axis, the value
+///     channel's span partner, the mark's own opt-out or opt-in) — lives in
+///     [`layer_wants_zero_anchor`], which owns the per-term rationale; this
+///     function owns only the arithmetic. A single (non-layered) `mark_bar`
+///     or declared line never reaches this function at all: Python's
+///     `_spec_build.py::_mark_zero_anchor` already injects an explicit
+///     `scale={"zero": True}` onto that chart's value encoding for either
+///     mark, which routes through `build_from_scale_spec` and returns
+///     before this function is even called. This rule exists for the case
+///     Python's injection cannot serve without silently clipping other
+///     layers: a layered spec (`catplot(kind="bar")`'s bar + CI-whisker
+///     `rule`, or a declared line sharing an axis with a sibling layer),
+///     where an explicit per-layer `ScaleSpec` would replace this
+///     cross-layer union with a single-column domain and clip whichever
+///     layer's field extends furthest (measured: 3 of 4 upper CI whiskers
+///     vanished off-panel). Scoped to `spec.layers` only (never
+///     `spec.mark`), so a genuinely unlayered spec's auto path is untouched
+///     — byte-identical, because a single-chart bar or declared line never
+///     reaches the auto path in the first place.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
@@ -2846,10 +2892,12 @@ pub(in crate::render) fn numeric_domain_union_over(
     // whole-frame read below (independent facets only) share one tally
     // without two simultaneous `&mut` captures.
     let tally = std::cell::RefCell::new(LeftOutTally::new());
-    // T5r bar zero-anchor: set when a `Mark::Bar` layer binds this channel's
-    // primary (non-paired) field, in the channel's own coordinate space. See
-    // this function's doc comment ("Bar zero-anchor") for the full rationale.
-    let mut bar_zero_wanted = false;
+    // T5r zero anchor: set when a layer whose mark style anchors its value
+    // at zero (an opted-in `Mark::Bar`, or a `Mark::Line` declaring
+    // `rise_from_zero`) binds this channel's primary (non-paired) field, in
+    // the channel's own coordinate space. See this function's doc comment
+    // ("Zero anchor") for the full rationale.
+    let mut zero_anchor_wanted = false;
     // `extent_only`: updates `mn`/`mx` alone. `with_tally`: also feeds the
     // tally. Split so the Chart-source branch below can fold a panel's
     // column into the EXTENT without ALSO counting it into the tally —
@@ -3291,19 +3339,31 @@ pub(in crate::render) fn numeric_domain_union_over(
             }
             // The authored `y` decides the bar's orientation: categorical by
             // its declared type or by the column it reads in this layer's batch.
+            // A line's own value-axis orientation follows its declaration
+            // instead (`curve_value_on_x`). Every other mark, and an
+            // undeclared line through the `_` arm below, still reaches
+            // `layer_wants_zero_anchor`: its own mark term
+            // (`mark_wants_zero_anchor`) refuses it there, so the
+            // orientation computed for it here is moot, not unreached.
             let y_categorical = layer.encoding.y.as_ref().is_some_and(|y| {
                 column_reads_categorical(y, source.locate(&y.field, primary_batch, transform_outputs))
             });
-            if matches!(layer_union, LayerUnion::Every)
-                && layer_wants_bar_zero_anchor(
-                    layer,
-                    channel,
-                    bar_value_on_x(coord_flipped, y_categorical),
-                    layer_fields,
-                    value_field_contributed,
-                )
-            {
-                bar_zero_wanted = true;
+            // Only a layer the eligibility check could actually accept pays
+            // for an orientation answer: a bar's is a plain dtype read, but
+            // a line's builds the layer exactly as the draw pass does
+            // (`curve_value_on_x`) and can fail the way that pass can, so an
+            // ineligible line (undeclared, or a caller scale this channel
+            // yields to) never builds one and never reaches that error path.
+            if matches!(layer_union, LayerUnion::Every) {
+                let value_on_x = match layer.mark {
+                    Mark::Line if mark_wants_zero_anchor(layer.mark, layer.mark_style.as_ref()) => {
+                        curve_value_on_x(spec, layer)?
+                    }
+                    _ => bar_value_on_x(coord_flipped, y_categorical),
+                };
+                if layer_wants_zero_anchor(layer, channel, value_on_x, layer_fields, value_field_contributed) {
+                    zero_anchor_wanted = true;
+                }
             }
         }
     }
@@ -3321,7 +3381,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     if matches!(layer_union, LayerUnion::CarryingScale(_)) {
         return Ok((SidedExtent { lo: mn, hi: mx, left_out: 0, left_out_zero: false, left_out_opposite: None }, tally.into_inner()));
     }
-    if bar_zero_wanted {
+    if zero_anchor_wanted {
         // The SAME widening `resolve_continuous_domain_and_range` applies for a
         // `ScaleSpec::Linear { zero: true }`, through the one helper both call
         // (`positional::extend_extent_to_zero`) rather than a second copy of its
@@ -3798,9 +3858,9 @@ mod tests {
         assert!(locate_field("group", &primary).is_some_and(|located| std::ptr::eq(located.batch, &primary)));
     }
 
-    // --- layer_wants_bar_zero_anchor: per-term unit tests --------------------
+    // --- layer_wants_zero_anchor: per-term unit tests --------------------
     //
-    // `layer_wants_bar_zero_anchor` is a five-term boolean that the
+    // `layer_wants_zero_anchor` is a five-term boolean that the
     // `*_SPEC_JSON` tests below reach only end to end, through a whole
     // spec + batch fixture. Here each term gets a direct negative case:
     // flip exactly one input away from the eligible baseline and the
@@ -3826,7 +3886,7 @@ mod tests {
     #[test]
     fn bar_zero_anchor_baseline_is_eligible() {
         let layer = zero_anchor_layer(Mark::Bar, None);
-        assert!(layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], true));
+        assert!(layer_wants_zero_anchor(&layer, "y", false, [Some("v"), None], true));
     }
 
     /// Term (a), position half: the bar's POSITION channel is never anchored.
@@ -3835,7 +3895,7 @@ mod tests {
     #[test]
     fn bar_zero_anchor_refuses_position_channel() {
         let layer = zero_anchor_layer(Mark::Bar, None);
-        assert!(!layer_wants_bar_zero_anchor(&layer, "x", false, [Some("v"), None], true));
+        assert!(!layer_wants_zero_anchor(&layer, "x", false, [Some("v"), None], true));
     }
 
     /// Term (a), flip half: under `CoordFlip` the value channel is `x`, not
@@ -3844,19 +3904,19 @@ mod tests {
     #[test]
     fn bar_zero_anchor_follows_the_flip() {
         let layer = zero_anchor_layer(Mark::Bar, None);
-        assert!(layer_wants_bar_zero_anchor(&layer, "x", true, [Some("v"), None], true));
-        assert!(!layer_wants_bar_zero_anchor(&layer, "y", true, [Some("v"), None], true));
+        assert!(layer_wants_zero_anchor(&layer, "x", true, [Some("v"), None], true));
+        assert!(!layer_wants_zero_anchor(&layer, "y", true, [Some("v"), None], true));
     }
 
-    /// Mark term: only `Mark::Bar` anchors. A point/line/rule layer on the
-    /// same value channel leaves the union alone.
+    /// Mark term: a point, rule or area, and a line that does not declare
+    /// `rise_from_zero`, leave the union alone on the same value channel.
     #[test]
-    fn bar_zero_anchor_refuses_non_bar_marks() {
+    fn undeclared_non_bar_marks_never_anchor() {
         for mark in [Mark::Point, Mark::Line, Mark::Rule, Mark::Area] {
             let layer = zero_anchor_layer(mark, None);
             assert!(
-                !layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], true),
-                "only Mark::Bar anchors, got an anchor for {mark:?}"
+                !layer_wants_zero_anchor(&layer, "y", false, [Some("v"), None], true),
+                "an undeclared mark must never anchor, got an anchor for {mark:?}"
             );
         }
     }
@@ -3866,9 +3926,9 @@ mod tests {
     #[test]
     fn bar_zero_anchor_honors_the_per_layer_opt_out() {
         let opted_out = zero_anchor_layer(Mark::Bar, Some(false));
-        assert!(!layer_wants_bar_zero_anchor(&opted_out, "y", false, [Some("v"), None], true));
+        assert!(!layer_wants_zero_anchor(&opted_out, "y", false, [Some("v"), None], true));
         let opted_in = zero_anchor_layer(Mark::Bar, Some(true));
-        assert!(layer_wants_bar_zero_anchor(&opted_in, "y", false, [Some("v"), None], true));
+        assert!(layer_wants_zero_anchor(&opted_in, "y", false, [Some("v"), None], true));
     }
 
     /// Term (b): a value channel carrying a paired span field (`y2`, or `x2`
@@ -3876,7 +3936,7 @@ mod tests {
     #[test]
     fn bar_zero_anchor_refuses_a_span_bound_value_channel() {
         let layer = zero_anchor_layer(Mark::Bar, None);
-        assert!(!layer_wants_bar_zero_anchor(
+        assert!(!layer_wants_zero_anchor(
             &layer,
             "y",
             false,
@@ -3891,7 +3951,76 @@ mod tests {
     #[test]
     fn bar_zero_anchor_refuses_a_field_that_contributed_no_data() {
         let layer = zero_anchor_layer(Mark::Bar, None);
-        assert!(!layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], false));
+        assert!(!layer_wants_zero_anchor(&layer, "y", false, [Some("v"), None], false));
+    }
+
+    // --- a declared line's riser reuses the same eligibility rule ----------
+
+    fn rise_from_zero_layer(rise: Option<bool>) -> Layer {
+        Layer {
+            mark: Mark::Line,
+            encoding: Default::default(),
+            mark_style: rise.map(|r| crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(r),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Term (c), the line's own opt-in: `rise_from_zero: Some(true)` anchors;
+    /// `Some(false)` and an absent `mark_style` both stay off — the opposite
+    /// default from a bar's `zero`, which anchors unless opted OUT.
+    #[test]
+    fn line_zero_anchor_honors_the_declared_opt_in() {
+        let declared = rise_from_zero_layer(Some(true));
+        assert!(layer_wants_zero_anchor(&declared, "y", false, [Some("v"), None], true));
+        let undeclared = rise_from_zero_layer(None);
+        assert!(!layer_wants_zero_anchor(&undeclared, "y", false, [Some("v"), None], true));
+        let declared_false = rise_from_zero_layer(Some(false));
+        assert!(!layer_wants_zero_anchor(&declared_false, "y", false, [Some("v"), None], true));
+    }
+
+    /// Term (a) for a line: only its VALUE channel (the series' own
+    /// non-advancing axis) anchors — the observation axis it advances along
+    /// never does, the line sibling of `bar_zero_anchor_refuses_position_channel`.
+    #[test]
+    fn line_zero_anchor_refuses_the_advancing_axis() {
+        let layer = rise_from_zero_layer(Some(true));
+        assert!(!layer_wants_zero_anchor(&layer, "x", false, [Some("v"), None], true));
+    }
+
+    /// The domain's zero-anchor orientation reads `resolve_curve_axis`, the
+    /// exact rule `DrawCtx::series_curve_axis` reads too: a declaration
+    /// (already post-flip) answers outright, flip or not; undeclared, the
+    /// vertical default is exchanged by the coord flip or by a stacked
+    /// value landing on x — the two transforms a real input never sets at
+    /// once, so the `||` never needs to choose between them.
+    #[test]
+    fn resolve_curve_axis_reads_the_declared_axis_else_the_flip_or_the_stack() {
+        use crate::render::marks::curve::{resolve_curve_axis, CurveAxis};
+        assert_eq!(resolve_curve_axis(Some(StackValueAxis::X), false, false), CurveAxis::Y);
+        assert_eq!(
+            resolve_curve_axis(Some(StackValueAxis::X), true, false),
+            CurveAxis::Y,
+            "a declaration answers outright, flip or not"
+        );
+        assert_eq!(resolve_curve_axis(Some(StackValueAxis::Y), true, true), CurveAxis::X);
+        assert_eq!(
+            resolve_curve_axis(None, false, false),
+            CurveAxis::X,
+            "undeclared defaults to vertical: value on y"
+        );
+        assert_eq!(
+            resolve_curve_axis(None, true, false),
+            CurveAxis::Y,
+            "undeclared, flipped: value exchanges onto x"
+        );
+        assert_eq!(
+            resolve_curve_axis(None, false, true),
+            CurveAxis::Y,
+            "undeclared, unflipped, but a stack cumulates the value onto x"
+        );
     }
 
     /// A malformed sort-field object reaching `apply_sort_to_domain`
@@ -4521,7 +4650,7 @@ mod tests {
     // ONE column, so it silently clipped the whisker layer's own extent (3 of
     // 4 upper CI whiskers vanished off-panel) — see
     // this function's own doc comment
-    // ("Bar zero-anchor") above.
+    // ("Zero anchor") above.
 
     /// Verbatim `chart.to_dict()` JSON for `fm.catplot(df, x="cat", y="val",
     /// kind="bar")` (T5r, with `df` mapping `cat` to
@@ -4601,7 +4730,7 @@ mod tests {
     /// header above) could not
     /// preserve.
     ///
-    /// RED (verified in place): commenting out the `if bar_zero_wanted`
+    /// RED (verified in place): commenting out the `if zero_anchor_wanted`
     /// block in `numeric_domain_union` makes this fail with `(40.0, 90.0)`.
     #[test]
     fn layered_bar_and_whisker_value_domain_includes_zero() {
@@ -4633,7 +4762,7 @@ mod tests {
     /// anchor), mirroring `coord_flipped_layer_paired_endpoint_widens_the_other_axis`
     /// above.
     ///
-    /// RED (verified in place): commenting out the `if bar_zero_wanted`
+    /// RED (verified in place): commenting out the `if zero_anchor_wanted`
     /// block makes this fail with `(40.0, 90.0)` too — proving the anchor
     /// follows the coordinate-space normalization, not just the unflipped
     /// case. Also genuinely discriminating on the flip normalization itself
@@ -4690,7 +4819,8 @@ mod tests {
     // VALUE axis and its POSITION axis, and no exclusion for a layer whose
     // own value channel already carries a paired span field. Both guards
     // mirror `_spec_build.py::_build_encoding_specs`'s single-chart
-    // injection exactly (`axis == "y"`, `not _y2_bound`). Missing them let a
+    // injection exactly (the value axis, the value channel's span partner
+    // left unbound). Missing them let a
     // `displot(kind="hist")` histogram bar's `x`/`x2` bin-range POSITION
     // widen to zero — a live regression in the histogram bar's position
     // channel, not covered by the earlier tests (none of them exercised a
@@ -4772,7 +4902,7 @@ mod tests {
     /// layer whose own VALUE channel carries a paired span field, reachable
     /// from the public `Chart` API (`.encode(y2=...)` is a generically
     /// honored channel on any mark). Mirrors the rule
-    /// `_spec_build.py::_build_encoding_specs`'s `_y2_bound`/`_zero_anchor_wanted`
+    /// `_spec_build.py::_build_encoding_specs`'s span-partner guard
     /// already applies to the single-chart case: an explicit `[y, y2]`
     /// extent is taken literally and must not be force-anchored to zero.
     const Y2_BOUND_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}}},{"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"lo"}}}]}"#;
@@ -4813,6 +4943,401 @@ mod tests {
             (50.0, 90.0),
             "a bar layer that binds its own value channel's paired span \
              field must not be force-anchored to zero"
+        );
+    }
+
+    /// A layered line declaring `rise_from_zero` on its `mark_style`: its
+    /// VALUE channel (`y`, count) end-to-end zero-anchors through the same
+    /// rule a bar's does.
+    const RISE_FROM_ZERO_LINE_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"line","encoding":{"x":{"field":"v"},"y":{"field":"count"}},"layers":[{"mark":"line","encoding":{"x":{"field":"v"},"y":{"field":"count"}},"mark_style":{"rise_from_zero":true}}]}"#;
+
+    fn rise_from_zero_line_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// With counts in `[1, 3]`, an unguarded union would read `(1.0, 3.0)`;
+    /// the declared riser's value axis zero-extends it to `(0.0, 3.0)`.
+    #[test]
+    fn rise_from_zero_line_value_axis_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(RISE_FROM_ZERO_LINE_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = rise_from_zero_line_batch();
+        let extent = numeric_domain_union("y", "count", None, &batch, &HashMap::new(), &spec, false, None)
+            .expect("count is Float64");
+        assert_eq!(extent, (0.0, 3.0), "a declared line's value axis must zero-anchor");
+    }
+
+    /// The series' own observation axis (`x`) is the line's POSITION
+    /// channel and is never anchored, whatever `rise_from_zero` says.
+    #[test]
+    fn rise_from_zero_line_position_channel_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(RISE_FROM_ZERO_LINE_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = rise_from_zero_line_batch();
+        let extent = numeric_domain_union("x", "v", None, &batch, &HashMap::new(), &spec, false, None)
+            .expect("v is Float64");
+        assert_eq!(extent, (5.0, 7.0), "a line's observation axis must never gain the value-channel anchor");
+    }
+
+    /// A declared line whose own `Stack` cumulates its value onto x (a
+    /// horizontal stack, `value_axis: Some(X)`) anchors ITS value axis, x —
+    /// not y, where an unflipped undeclared line's value ordinarily rides.
+    /// `resolve_curve_axis`'s stack term exists for exactly this: without
+    /// it, the domain would anchor y while the builder (reading the same
+    /// stamped stack metadata through `DrawCtx::series_curve_axis`) rises
+    /// along x.
+    #[test]
+    fn a_declared_line_stacked_with_its_value_on_x_anchors_x_not_y() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        // Two rows share one category position ("g"="cat") and stack into
+        // separate segments by "s" (the `by` grouping): row s1's top is 10,
+        // row s2's cumulates to 30, with a base of 0.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+                Field::new("s", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["cat", "cat"])),
+                Arc::new(StringArray::from(vec!["s1", "s2"])),
+            ],
+        )
+        .unwrap();
+        let layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(true),
+                ..Default::default()
+            }),
+            position: Some(PositionAdjust::Stack {
+                by: Some("s".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: Some(StackValueAxis::X),
+            }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let (extent, _) = numeric_domain_union_over(
+            "x", "v", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("the stacked v column resolves");
+        assert_eq!(
+            (extent.lo, extent.hi),
+            (0.0, 30.0),
+            "the stack's own value axis (x) must zero-anchor from its stacked (not raw) extent"
+        );
+    }
+
+    /// A layer whose own `Stack` DECLINES to cumulate (no `by`, color or
+    /// group column: `group_keys` finds nothing, `apply_stack` is a no-op,
+    /// and `axis_previews`' own preview for either channel comes back
+    /// `None`) still anchors the DECLARED stack axis — the vertical default
+    /// here, since `value_axis` is unset. Reading the preview's presence
+    /// instead of the declaration would answer this wrong: an absent
+    /// preview on `y` would read as "the stack's value is on x", anchoring
+    /// the wrong channel while the builder, which also sees no stamp
+    /// (`DrawCtx::series_curve_axis`'s stack term is `false` whenever the
+    /// batch metadata key is absent), still rises along y.
+    #[test]
+    fn a_declared_line_with_a_declined_vertical_stack_still_anchors_y() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("cat", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(true),
+                ..Default::default()
+            }),
+            position: Some(PositionAdjust::Stack {
+                by: None,
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let (extent, _) = numeric_domain_union_over(
+            "y", "v", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("v resolves");
+        assert_eq!(
+            (extent.lo, extent.hi),
+            (0.0, 2.0),
+            "a declined vertical Stack must still anchor y, read from its declaration, not from whether a preview happened to exist"
+        );
+    }
+
+    /// A layered declared line with its value AUTHORED on x (a horizontal
+    /// orientation, `value_axis: Some(X)`) plus a point sharing its axes,
+    /// under a chart `CoordFlip`: `LayerPrepared::flip_coords` swaps the
+    /// declaration together with the encoding, so the value lands on
+    /// DRAWN y (the count), and the observation lands on drawn x — the
+    /// same axes the flat (unlayered) twin and the builder both draw.
+    /// Reading the RAW authored `value_axis` instead would anchor drawn x,
+    /// the observation, while the builder rises along drawn y.
+    #[test]
+    fn a_layered_declared_line_with_a_horizontal_value_axis_anchors_the_drawn_count_axis_under_a_flip() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("cnt", DataType::Float64, false),
+                Field::new("obs", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0])),
+            ],
+        )
+        .unwrap();
+        let axes = || Encoding {
+            x: Some(EncodingSpec { field: "cnt".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "obs".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let line = Layer {
+            mark: Mark::Line,
+            encoding: axes(),
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(true),
+                value_axis: Some(StackValueAxis::X),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let point = Layer { mark: Mark::Point, encoding: axes(), ..Default::default() };
+        let spec = ChartSpec { layers: Some(vec![line, point]), coord: Some(CoordKind::Flip), ..Default::default() };
+        let (y_extent, _) = numeric_domain_union_over(
+            "y", "cnt", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("cnt resolves");
+        assert_eq!(
+            (y_extent.lo, y_extent.hi),
+            (0.0, 3.0),
+            "drawn y (the authored value, moved there by the flip) must zero-anchor"
+        );
+        let (x_extent, _) = numeric_domain_union_over(
+            "x", "obs", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("obs resolves");
+        assert_eq!(
+            (x_extent.lo, x_extent.hi),
+            (5.0, 7.0),
+            "drawn x (the observation, moved there by the flip) must never anchor"
+        );
+    }
+
+    /// The same shape, undeclared: the vertical default is what the flip
+    /// moves, so drawn x (the authored y, moved there by the flip) anchors
+    /// and drawn y (the authored x) does not — the mirror of the declared
+    /// case above, guarding that an undeclared line's flip handling still
+    /// works once the declared one reads the post-flip style.
+    #[test]
+    fn a_layered_undeclared_line_anchors_the_drawn_count_axis_under_a_flip() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("obs", DataType::Float64, false),
+                Field::new("cnt", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let axes = || Encoding {
+            x: Some(EncodingSpec { field: "obs".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "cnt".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let line = Layer {
+            mark: Mark::Line,
+            encoding: axes(),
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let point = Layer { mark: Mark::Point, encoding: axes(), ..Default::default() };
+        let spec = ChartSpec { layers: Some(vec![line, point]), coord: Some(CoordKind::Flip), ..Default::default() };
+        let (x_extent, _) = numeric_domain_union_over(
+            "x", "cnt", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("cnt resolves");
+        assert_eq!(
+            (x_extent.lo, x_extent.hi),
+            (0.0, 3.0),
+            "drawn x (the undeclared default value, moved there by the flip) must zero-anchor"
+        );
+        let (y_extent, _) = numeric_domain_union_over(
+            "y", "obs", None, &batch, &HashMap::new(), &spec, false, LayerUnion::Every, None, None, None,
+        )
+        .expect("obs resolves");
+        assert_eq!(
+            (y_extent.lo, y_extent.hi),
+            (5.0, 7.0),
+            "drawn y (the observation, moved there by the flip) must never anchor"
+        );
+    }
+
+    /// A caller's explicit `domain=` on a declared line's value axis wins
+    /// at domain resolution itself — through `resolve_scales`, the real
+    /// resolver every render call goes through. `build_from_scale_spec`
+    /// resolves a scale that states a domain FROM that domain, without
+    /// asking the data extent, so no cross-layer union and no zero-anchor
+    /// eligibility check runs at all for this route; see
+    /// `positional::a_scaled_declared_line_takes_its_scales_zero_not_the_line_anchor`
+    /// for the sibling pin that reaches `numeric_domain_union_over`'s
+    /// `LayerUnion::CarryingScale` early return (a domain-less caller
+    /// scale).
+    #[test]
+    fn an_explicit_domain_wins_through_the_real_resolver() {
+        use crate::spec::encoding::{ContinuousScaleCommon, Encoding, EncodingSpec, ScaleSpec};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("count", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![12.0, 15.0, 18.0])),
+            ],
+        )
+        .unwrap();
+        let explicit_domain = ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: Some(vec![10.0, 20.0]),
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+            zero: false,
+            system_injected: false,
+        };
+        let layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "count".into(), scale: Some(explicit_domain), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                rise_from_zero: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { layers: Some(vec![layer]), ..Default::default() };
+        let theme = crate::layout::ThemeInputs::default();
+        let (scales, _) =
+            crate::render::scale_resolve::resolve_scales(&spec, &batch, (0.0, 100.0), (100.0, 0.0), &theme)
+                .expect("the explicit domain resolves");
+        assert_eq!(
+            scales.y.data_domain(),
+            Some((10.0, 20.0)),
+            "a caller's explicit domain= must win, not zero-extend to (0, 20)"
+        );
+    }
+
+    /// A flat (unlayered) spec whose value channel carries exactly the
+    /// wire shape Python's `_mark_zero_anchor` emits for a channel with no
+    /// prior scale (`{"type": "linear", "zero": true, "systemInjected":
+    /// true}`) resolves a domain that includes 0, so the riser's baseline
+    /// is the 0 pixel — the EXISTING generic `ScaleSpec::Linear { zero:
+    /// true }` handling, mark-agnostic already, carries a declared line's
+    /// riser on every door Python's injection reaches (the flat chart,
+    /// here) once Python injects it for a line too.
+    #[test]
+    fn a_flat_spec_carrying_pythons_injected_zero_anchor_rises_from_zero() {
+        use crate::spec::encoding::{ContinuousScaleCommon, Encoding, EncodingSpec, ScaleSpec};
+        let injected: ScaleSpec = serde_json::from_str(r#"{"type":"linear","zero":true,"systemInjected":true}"#)
+            .expect("Python's exact wire shape must deserialize");
+        assert_eq!(
+            injected,
+            ScaleSpec::Linear {
+                common: ContinuousScaleCommon {
+                    domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
+                },
+                nice: false,
+                zero: true,
+                system_injected: true,
+            },
+            "agree the exact wire shape with _mark_zero_anchor before trusting it resolves"
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("count", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![5.0, 8.0, 10.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "count".into(), scale: Some(injected), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() }),
+            ..Default::default()
+        };
+        let theme = crate::layout::ThemeInputs::default();
+        let (scales, _) =
+            crate::render::scale_resolve::resolve_scales(&spec, &batch, (0.0, 100.0), (100.0, 0.0), &theme)
+                .expect("the injected scale resolves");
+        assert_eq!(
+            scales.y.value_baseline_px(100.0, 0.0),
+            scales.y.to_pixel_f64(0.0).unwrap(),
+            "0 is in the resolved domain, so the riser's baseline is exactly the 0 pixel"
         );
     }
 
@@ -5024,7 +5549,7 @@ mod tests {
     /// `4.5..5.5`, THEN zero-extending `4.5 -> 0.0`) would instead yield the
     /// wrong `(0.0, 5.5)`.
     ///
-    /// RED (verified in place): moving the `if bar_zero_wanted { ... }`
+    /// RED (verified in place): moving the `if zero_anchor_wanted { ... }`
     /// block below the "Degenerate domain" widening block makes this fail
     /// with `(0.0, 5.5)`.
     #[test]

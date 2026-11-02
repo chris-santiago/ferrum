@@ -166,8 +166,8 @@ pub struct MarkKwargsSpec {
     /// otherwise eligible — value channel, no bound span field) — byte-stable,
     /// matching every layer before this field existed. `Some(false)` opts a
     /// `Mark::Bar` layer out of the anchor even when eligible, mirroring
-    /// `_spec_build.py`'s D3 `not _y2_bound`-style suppression but keyed on
-    /// an explicit request rather than a span binding.
+    /// `_spec_build.py`'s span-partner-unbound suppression but keyed on an
+    /// explicit request rather than a span binding.
     ///
     /// Live and user-reachable today via the generic per-layer `mark=`
     /// passthrough on layered figure functions — e.g.
@@ -256,6 +256,31 @@ pub struct MarkKwargsSpec {
     /// every mark but `mark_line`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_vertices: Option<bool>,
+    // ── declared rise-from-zero riser (line) ─────────────────────────────────
+    /// A producer's declaration that this series draws a vertical riser from
+    /// its value axis's zero baseline at its first observation — the shape
+    /// seaborn's `ecdfplot` and ggplot2's `stat_ecdf` draw, so a one-point or
+    /// all-tied series is visible and the value axis starts at 0 rather than
+    /// at the data's own minimum. Read after [`Self::sort_vertices`] orders a
+    /// series: [`crate::render::marks::line::build`] prepends one vertex at
+    /// the first placed vertex's own advancing coordinate, paired with the
+    /// value axis's baseline pixel
+    /// ([`crate::render::scale_resolve::ScaleKind::value_baseline_px`], the
+    /// same baseline an area's unstacked fill closes against — the 0 pixel
+    /// when 0 is in the value axis's domain, else the plot edge on zero's
+    /// side, so a log value axis rises from its edge), and maps that
+    /// prepended vertex to the first observation's own row. The eligibility
+    /// half lives in [`crate::render::scale_resolve::domain`]'s zero-anchor
+    /// rule, the one a bar's value axis uses, so a caller's explicit
+    /// `domain=` or a `zero=False`-equivalent scale still wins.
+    ///
+    /// `None`/unset or `Some(false)` draws nothing extra, byte-identical to
+    /// an undeclared line — including a series with only one placed
+    /// vertex, which still draws nothing (the ordinary `mark_line`
+    /// contract: two or more points per series). Refused on every mark but
+    /// `mark_line`, like `sort_vertices`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rise_from_zero: Option<bool>,
 }
 
 /// Every `MarkKwargsSpec` wire key, in declaration order: the field list
@@ -461,6 +486,7 @@ mod tests {
             arrow_size: _,
             value_axis: _,
             sort_vertices: _,
+            rise_from_zero: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_numeric_kwarg_names(),
@@ -561,10 +587,11 @@ mod tests {
             arrow_size: _,
             value_axis: _,
             sort_vertices: _,
+            rise_from_zero: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_bool_kwarg_names(),
-            vec!["filled", "line", "borders", "leader_line", "clip", "zero", "arrow", "sort_vertices"]
+            vec!["filled", "line", "borders", "leader_line", "clip", "zero", "arrow", "sort_vertices", "rise_from_zero"]
         );
     }
 
@@ -611,6 +638,7 @@ mod tests {
             arrow_size: _,
             value_axis: _,
             sort_vertices: _,
+            rise_from_zero: _,
         } = super::MarkKwargsSpec::default();
         assert_eq!(
             super::mark_string_kwarg_names(),
@@ -682,12 +710,12 @@ mod tests {
     /// Every traced name is a real field: a wrong-typed value under it is
     /// refused for its type, where an unknown key is refused as unknown. The
     /// reverse holds by construction: the list is serde's own.
-    /// `size`/`sort_vertices` bracket the declaration order.
+    /// `size`/`rise_from_zero` bracket the declaration order.
     #[test]
     fn mark_kwargs_field_names_are_the_structs_fields() {
         let names = super::mark_kwargs_field_names();
         assert_eq!(names.first(), Some(&"size"));
-        assert_eq!(names.last(), Some(&"sort_vertices"));
+        assert_eq!(names.last(), Some(&"rise_from_zero"));
         for name in names {
             let json = serde_json::json!({ *name: [[[]]] });
             let err = serde_json::from_value::<super::MarkKwargsSpec>(json).unwrap_err().to_string();
@@ -920,5 +948,48 @@ mod tests {
         assert_eq!(m.arrow, None);
         assert_eq!(m.arrow_size, None);
         assert_eq!(m.stroke.as_deref(), Some("#ff0000"));
+    }
+
+    // ── declared rise-from-zero riser (line) ─────────────────────────────────
+
+    #[test]
+    fn mark_kwargs_default_rise_from_zero_is_none_and_omitted() {
+        // Covered by `mark_kwargs_default_omits_all_fields` too, but this
+        // pins the specific field so a future refactor of that test can't
+        // silently stop covering it.
+        let m = MarkKwargsSpec::default();
+        assert_eq!(m.rise_from_zero, None);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("rise_from_zero"), "unset rise_from_zero must be omitted: {json}");
+    }
+
+    #[test]
+    fn mark_kwargs_round_trip_with_rise_from_zero_true() {
+        let m = MarkKwargsSpec { rise_from_zero: Some(true), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"rise_from_zero":true}"#);
+        let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn mark_kwargs_pre_existing_layer_json_without_rise_from_zero_key_deserializes_default() {
+        // Same wire back-compat guarantee as `sort_vertices`: a `mark_style`
+        // dict that omits the `rise_from_zero` key must deserialize to
+        // `rise_from_zero: None`, not an error and not a spurious `Some(_)`.
+        let json = r#"{"sort_vertices":true}"#;
+        let m: MarkKwargsSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(m.rise_from_zero, None);
+        assert_eq!(m.sort_vertices, Some(true));
+    }
+
+    /// A non-bool value under `rise_from_zero`'s key is refused by serde's
+    /// own typed error, exactly as every other bool-shaped field is.
+    #[test]
+    fn mark_kwargs_rise_from_zero_refuses_a_non_bool() {
+        let err = serde_json::from_value::<MarkKwargsSpec>(serde_json::json!({ "rise_from_zero": "yes" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected a boolean"), "{err}");
     }
 }

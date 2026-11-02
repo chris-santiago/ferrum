@@ -332,9 +332,9 @@ pub enum ScaleSpec {
         /// excludes it from the auto-derived `<channel>_scale_<leaf>` surface),
         /// so the hand-written raw dict is the only spelling that reaches it.
         ///
-        /// **Not the north star.** Rust already owns an auto-path bar
-        /// zero-anchor for layered specs
-        /// (`render::scale_resolve::domain::layer_wants_bar_zero_anchor`), and
+        /// **Not the north star.** Rust already owns an auto-path zero
+        /// anchor for layered specs
+        /// (`render::scale_resolve::domain::layer_wants_zero_anchor`), and
         /// deleting Python's injection in favour of it would leave one
         /// mechanism instead of two. That unification is a logged follow-up, not
         /// this field: the auto-inferred path applies padding/`nice` treatment

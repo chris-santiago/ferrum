@@ -342,7 +342,7 @@ pub(in crate::render) fn build_axis_scale(
     //   * `spec.layers.is_some()` — the flat layered lowering (`bar + point`,
     //     whose chart-level encoding is the LHS bar's, so the injected scale sat
     //     on the axis every layer resolves against). Here the anchor comes from
-    //     `domain::numeric_domain_union`'s own `layer_wants_bar_zero_anchor`,
+    //     `domain::numeric_domain_union`'s own `layer_wants_zero_anchor`,
     //     which exists for precisely this shape and was unreachable through it
     //     while the bypass fired first. That asymmetry was visible: `bar + point`
     //     rendered `0..3` while `point + bar` (chart-level encoding = the point's,
@@ -1422,7 +1422,7 @@ pub(in crate::render) fn log_axis_name(enc: &crate::spec::encoding::EncodingSpec
 /// * `composite::leaf_positional_domain` — a zero-anchored bar leaf's
 ///   contribution to a cross-leaf domain union (#247A), where an injected
 ///   scale's anchor lands now that the leaf no longer takes the bypass;
-/// * `domain::numeric_domain_union`'s `bar_zero_wanted` block — a layered bar on
+/// * `domain::numeric_domain_union`'s `zero_anchor_wanted` block — a layered bar on
 ///   the auto path, which is the mechanism [`build_axis_scale`]'s own
 ///   system-injected gate hands the flat-layered arm's anchor to, so it is
 ///   downstream of that gate rather than a neighbour of it.
@@ -3391,7 +3391,7 @@ mod tests {
     /// (`bar + point`), where the injected scale sits on the chart-level
     /// encoding every layer resolves against. No shared domain exists here — the
     /// cross-layer union inside `domain::numeric_domain_union` is what the scale
-    /// yields to, and that union's own `layer_wants_bar_zero_anchor` supplies the
+    /// yields to, and that union's own `layer_wants_zero_anchor` supplies the
     /// anchor, which is the rule's whole purpose and was unreachable through this
     /// shape while the bypass fired first.
     ///
@@ -3750,6 +3750,30 @@ mod tests {
         assert_eq!(scale.data_domain(), Some((1.0, 80.0)));
     }
 
+    /// The line twin: a declared line carrying a caller scale with
+    /// `zero: false` is not anchored at zero either — its scale's own
+    /// `zero` decides. The scale states no `domain`, so `build_axis_scale`'s
+    /// `data_extent` closure asks `numeric_domain_union_over` under
+    /// `LayerUnion::CarryingScale`, where the zero-anchor eligibility check
+    /// (`curve_value_on_x`/`layer_wants_zero_anchor`, gated to
+    /// `LayerUnion::Every`) never runs and the `CarryingScale` early return
+    /// applies no widening. `v = [1, 3]` and `p = [40, 80]`, both scaled,
+    /// resolve `(1, 80)`, not `(0, 80)`.
+    #[test]
+    fn a_scaled_declared_line_takes_its_scales_zero_not_the_line_anchor() {
+        use crate::spec::mark::Mark;
+        let batch = bar_and_sibling_batch();
+        let enc = linear_y("v", false, false);
+        let mut line = scaled_layer(Mark::Line, enc.clone());
+        line.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+            rise_from_zero: Some(true),
+            ..Default::default()
+        });
+        let layers = vec![line, scaled_layer(Mark::Point, linear_y("p", false, false))];
+        let scale = resolve_y(&batch, &enc, None, Some(layers));
+        assert_eq!(scale.data_domain(), Some((1.0, 80.0)));
+    }
+
     /// The layer selection a caller's scale unions, as a matrix: the bound
     /// layer (`v = [1, 3]`) carries the caller's linear scale, domain-less or
     /// stating `[1, 4]`, and a point sibling (`p = [40, 80]`) declares one of
@@ -3810,7 +3834,7 @@ mod tests {
     /// no shared domain and a faceted single-mark spec has no layers, so it stays
     /// on the bypass, whose extent spans the all-panels rows on a facet-shared
     /// channel. Yielding to the auto path instead would lose the zero baseline:
-    /// with no layers, `layer_wants_bar_zero_anchor` has nothing to fire on.
+    /// with no layers, `layer_wants_zero_anchor` has nothing to fire on.
     #[test]
     fn injected_scale_on_an_unlayered_standalone_chart_keeps_the_bypass() {
         let scale = build_zero_anchored_y(true, None, None);

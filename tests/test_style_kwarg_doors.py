@@ -268,6 +268,7 @@ _INTERNAL_DOORS = {
     "clip": "mark_function(clip=...)",
     "value_axis": "the orient= of the statistical mark that draws it",
     "sort_vertices": "displot(kind='ecdf')",
+    "rise_from_zero": "displot(kind='ecdf')",
 }
 _METHOD_ONLY = {"bar": frozenset({"orient"}), "tick": frozenset({"orient"})}
 
@@ -311,6 +312,7 @@ _SAMPLE: dict[str, Any] = {
     "arrow_size": 14.0,
     "value_axis": "x",
     "sort_vertices": True,
+    "rise_from_zero": True,
 }
 
 

@@ -286,21 +286,34 @@ pub(crate) fn layer_position_preview(
     layer_prepared_position_preview(&drawn, axis, batch, spec.facet.as_ref(), color)
 }
 
-/// Whether `drawn`'s own effective position adjustment is `Stack`: the
-/// layered counterpart of `axis_batch`'s inline `base` check, read the same
-/// way (`effective_position` over the layer's own post-flip encoding and
-/// position). `AxisReads::over` pairs a stack base column with a layer only
-/// when this is `true`, so a dodged or jittered layer's contribution never
-/// reads a span partner that only `Stack` writes.
-pub(crate) fn layer_prepared_stacks(
+/// Whether `drawn`'s own effective position adjustment is a `Stack`, and if
+/// so which DRAWN axis (post-flip) it cumulates on: the layered counterpart
+/// of `axis_batch`'s inline `base` check, read the same way
+/// (`effective_position` over the layer's own post-flip encoding and
+/// position). `None` when the effective position is not a `Stack`;
+/// otherwise the axis [`resolve_stack_value_on_x`] names, the same pair
+/// [`apply_stack`] stamps from whenever it cumulates. `AxisReads::over`
+/// pairs a stack base column with a layer only when this is `Some`, so a
+/// dodged or jittered layer's contribution never reads a span partner that
+/// only `Stack` writes. `domain::curve_value_on_x` reads this to answer
+/// "which drawn axis does a declared line's value ride" without inferring
+/// it from whether a position preview happens to exist on either channel.
+pub(crate) fn layer_prepared_stack_axis(
     drawn: &crate::render::prepare::LayerPrepared,
-) -> Result<bool, crate::render::RenderError> {
+) -> Result<Option<StackValueAxis>, crate::render::RenderError> {
     let coord_flipped = crate::spec::coord::flips_positional_channels(drawn.coord.as_ref());
     let encoding = position_encoding(drawn.mark, drawn.coord.as_ref(), &drawn.encoding);
-    Ok(matches!(
-        effective_position(drawn.position.as_ref(), &encoding, coord_flipped)?.as_deref(),
-        Some(PositionAdjust::Stack { .. })
-    ))
+    let Some(effective) = effective_position(drawn.position.as_ref(), &encoding, coord_flipped)? else {
+        return Ok(None);
+    };
+    let PositionAdjust::Stack { value_axis, .. } = effective.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(if resolve_stack_value_on_x(*value_axis, coord_flipped) {
+        StackValueAxis::X
+    } else {
+        StackValueAxis::Y
+    }))
 }
 
 /// The batch the axis `axis` resolves against under the position adjustment
@@ -3806,6 +3819,65 @@ mod tests {
             resolve_stack_value_on_x(Some(Y), true),
             "declared y + flip → the mirror of the same defect"
         );
+    }
+
+    /// `layer_prepared_stack_axis`'s own cells, built via
+    /// `LayerPrepared::from_chart_only(..).in_its_coord()` — a valid way to
+    /// exercise the function, which reads only `mark`, `encoding`,
+    /// `position` and `coord`, the fields `from_chart_only` sets the same
+    /// way the `from_chart_and_layer` construction its production callers
+    /// (`axis_previews`, `curve_value_on_x`) actually use does. `position`
+    /// carries the authored declaration and `coord` the real flip, exactly
+    /// as the function reads them.
+    #[test]
+    fn layer_prepared_stack_axis_cells() {
+        use crate::render::prepare::LayerPrepared;
+        use crate::spec::coord::CoordKind;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::position::StackOffset;
+        use crate::spec::position::StackValueAxis::{X, Y};
+
+        let drawn_of = |position: Option<PositionAdjust>, encoding: Encoding, coord: Option<CoordKind>| {
+            let spec = ChartSpec { position, encoding, coord, ..Default::default() };
+            LayerPrepared::from_chart_only(&spec).in_its_coord()
+        };
+        let stack = |value_axis| PositionAdjust::Stack {
+            by: None,
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis,
+        };
+
+        // No position at all: not a Stack, so no axis.
+        let no_position = drawn_of(None, Encoding::default(), None);
+        assert_eq!(layer_prepared_stack_axis(&no_position).unwrap(), None, "no position");
+
+        // A Dodge is a position adjustment, but not a Stack.
+        let dodge = drawn_of(Some(PositionAdjust::Dodge { by: None, padding: 0.1 }), Encoding::default(), None);
+        assert_eq!(layer_prepared_stack_axis(&dodge).unwrap(), None, "a Dodge");
+
+        // A vertical Stack (undeclared value_axis), unflipped: value on y.
+        let vertical_stack = drawn_of(Some(stack(None)), Encoding::default(), None);
+        assert_eq!(layer_prepared_stack_axis(&vertical_stack).unwrap(), Some(Y), "a vertical Stack");
+
+        // A horizontal Stack (declared value_axis: X), unflipped: value on x.
+        let horizontal_stack = drawn_of(Some(stack(Some(X))), Encoding::default(), None);
+        assert_eq!(layer_prepared_stack_axis(&horizontal_stack).unwrap(), Some(X), "value_axis: X");
+
+        // The same horizontal Stack under a flip: the flip moves it back to y.
+        let horizontal_stack_flipped = drawn_of(Some(stack(Some(X))), Encoding::default(), Some(CoordKind::Flip));
+        assert_eq!(layer_prepared_stack_axis(&horizontal_stack_flipped).unwrap(), Some(Y), "value_axis: X, flipped");
+
+        // An authored `y` stack shorthand under a flip: the shorthand's
+        // channel moves to drawn x with the rest of the encoding
+        // (`flip_coords`), and the flip then moves the stack's own value
+        // axis back onto drawn x too.
+        let y_shorthand_flipped = drawn_of(
+            None,
+            Encoding { y: Some(EncodingSpec { field: "v".into(), stack: Some("zero".into()), ..Default::default() }), ..Default::default() },
+            Some(CoordKind::Flip),
+        );
+        assert_eq!(layer_prepared_stack_axis(&y_shorthand_flipped).unwrap(), Some(X), "a y stack shorthand, flipped");
     }
 
     /// The F3 defect at the cumulation seam: an authored horizontal stack

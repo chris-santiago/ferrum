@@ -252,7 +252,7 @@ impl Mark {
         const LINE: &[StyleField] = &[
             drawn("size"), drawn("stroke"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
             drawn("detail"), drawn("interpolate"), drawn("stroke_cap"), drawn("stroke_join"), drawn("clip"),
-            drawn("blend"), drawn("value_axis"), drawn("sort_vertices"),
+            drawn("blend"), drawn("value_axis"), drawn("sort_vertices"), drawn("rise_from_zero"),
         ];
         const BAR: &[StyleField] = &[
             drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("corner_radius"),

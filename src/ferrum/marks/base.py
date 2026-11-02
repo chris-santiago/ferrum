@@ -226,6 +226,7 @@ _INTERNAL_STYLE_DOORS: dict[str, str] = {
     "clip": "mark_function(clip=...)",
     "value_axis": "the orient= of the statistical mark that draws it",
     "sort_vertices": "displot(kind='ecdf')",
+    "rise_from_zero": "displot(kind='ecdf')",
 }
 
 #: The kwargs a ``mark_<name>()`` method consumes itself rather than

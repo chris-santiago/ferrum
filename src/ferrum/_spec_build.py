@@ -208,27 +208,78 @@ def _column_reads_categorical(data: Any, field: Any) -> bool:
     return _core_column_reads_categorical(normalize_for_rust(empty).schema, field)
 
 
-def _bar_zero_anchor(
-    d: dict, *, mark: Any, mark_zero: bool, value_on_x: bool, axis: str, enc: dict
+def _curve_value_on_x(mark_kwargs: dict) -> bool:
+    """Whether a declared line draws its value along its authored ``x`` channel.
+
+    The declared ``value_axis`` style kwarg (``mark_kwargs={"value_axis": "x"}``)
+    names the authored channel that holds the value; an undeclared line holds
+    its value on ``y`` (the vertical default). ``CoordFlip`` moves where the
+    authored channels draw, not which one holds the value -- Rust's
+    ``LayerPrepared::flip_coords`` swaps the declaration together with the
+    channels, so the flip is spent exactly once, there -- so it does not
+    enter here, the same split :func:`_bar_value_on_x` keeps. A line never
+    stacks on any Python door (``position.py``'s
+    ``_STACK_ELIGIBLE``/``_STACKABLE_MARKS`` both exclude ``"line"``, so
+    ``Chart.mark_line(position=fm.Stack())`` refuses at construction and a
+    ``stack=`` channel shorthand is stripped with a warning before the wire),
+    so no stack term applies either.
+    """
+    return mark_kwargs.get("value_axis") == "x"
+
+
+class _ZeroAnchorTarget(NamedTuple):
+    """Whether a mark wants its value channel anchored at zero, and which axis that is."""
+
+    wants_anchor: bool
+    value_on_x: bool
+
+
+def _zero_anchor_target(
+    mark: str, mark_kwargs: dict, enc: dict, data: Any, *, mark_zero: bool
+) -> _ZeroAnchorTarget:
+    """What :func:`_mark_zero_anchor` should anchor for *mark*, carrying *mark_kwargs*.
+
+    A bar wants its zero anchor unless its own ``zero=False`` suppressed it
+    (*mark_zero*, already resolved by the caller: ``Chart._set_mark``'s
+    ``zero_anchor()`` for a flat bar, a layer's own ``mark_kwargs["zero"]``
+    for an independent-y one), on the value channel :func:`_bar_value_on_x`
+    names. A declared line -- one whose mark kwargs carry
+    ``rise_from_zero=True``, the internal flag only ``displot(kind='ecdf')``
+    sets (see :data:`ferrum.marks.base._INTERNAL_STYLE_DOORS`) -- always
+    wants it once declared: there is no public ``zero=`` door on a line
+    (Rust draws ``zero`` only on ``bar``'s style table), so the producer's
+    own declaration is the whole answer, on the value channel
+    :func:`_curve_value_on_x` names. Any other mark never wants it.
+    """
+    if mark == "bar":
+        return _ZeroAnchorTarget(mark_zero, _bar_value_on_x(enc, data))
+    if mark == "line" and mark_kwargs.get("rise_from_zero") is True:
+        return _ZeroAnchorTarget(True, _curve_value_on_x(mark_kwargs))
+    return _ZeroAnchorTarget(False, False)
+
+
+def _mark_zero_anchor(
+    d: dict, *, wants_anchor: bool, value_on_x: bool, axis: str, enc: dict
 ) -> dict:
-    """Return channel dict *d* with a bar's zero anchor injected, when it applies.
+    """Return channel dict *d* with a mark's zero anchor injected, when it applies.
 
-    The one producer of the bar zero anchor: ``scale.zero=True`` on a bar's
-    value channel, so a bar starts at zero unless the caller set ``domain`` or
-    ``zero`` on that channel. Used for a flat chart's encoding and for every
-    independent-y bar layer (a ``SecondaryY`` slot, a
-    ``LayerChart(resolve={"y": "independent"})`` member), so each gets the
-    same answer for every caller-scale shape. *d* is never mutated.
+    The one producer of a mark's zero anchor: ``scale.zero=True`` on the
+    mark's value channel, so a bar or a declared line (see
+    :func:`_zero_anchor_target`) starts at zero unless suppressed. Used for a
+    flat chart's encoding and for every independent-y bar or declared-line
+    layer (a ``SecondaryY`` slot, a ``LayerChart(resolve={"y": "independent"})``
+    member), so each gets the same answer for every caller-scale shape; a
+    layer on the shared axes is anchored by Rust's layered rule instead
+    (``numeric_domain_union_over``). *wants_anchor* and *value_on_x* are the
+    caller's answers from :func:`_zero_anchor_target`. *d* is never mutated.
 
-    - The value channel is ``y``, or ``x`` for a native horizontal bar
-      (*value_on_x*, from :func:`_bar_value_on_x`); any other *axis* is
-      returned unchanged.
-    - Suppressed when the bar opted out (*mark_zero* false, ``zero=False``) or
-      the value channel's span partner (``y2`` for ``y``, ``x2`` for ``x``) is
-      bound in *enc*: the bar's extent is then taken literally from
-      ``[y, y2]``, and anchoring at zero would distort the domain. The other
-      channel's partner only sets a histogram's bin width, so it does not
-      suppress.
+    - The value channel is ``y``, or ``x`` when *value_on_x*; any other
+      *axis* is returned unchanged.
+    - Suppressed when *wants_anchor* is false, or the value channel's span
+      partner (``y2`` for ``y``, ``x2`` for ``x``) is bound in *enc*: the
+      mark's extent is then taken literally from ``[y, y2]``, and anchoring
+      at zero would distort the domain. The other channel's partner only
+      sets a histogram's bin width, so it does not suppress.
     - Only a quantitative value channel takes the linear+zero scale: an
       ordinal/nominal one needs a band scale, and forcing linear raises
       "unsupported dtype: Utf8" in the Rust scale resolver. An absent
@@ -242,17 +293,16 @@ def _bar_zero_anchor(
     - ``systemInjected`` marks the scale as ferrum's only when this function
       authored all of it, so Rust's "is there an explicit scale here" gates
       (``composite::leaf_positional_domain``'s sharing exclusion and
-      ``positional::build_axis_scale``'s bypass) let a layered bar join the
-      shared domain union. A caller's own ``scale=`` (or an
-      ``override(<axis>_scale_*=...)`` leaf) that only gained ``zero`` here is
-      not marked: its ``padding``/``nice``/``range``/``clamp`` are real intent,
-      which only the explicit-scale path honors.
+      ``positional::build_axis_scale``'s bypass) let a layered bar or
+      declared line join the shared domain union. A caller's own ``scale=``
+      (or an ``override(<axis>_scale_*=...)`` leaf) that only gained ``zero``
+      here is not marked: its ``padding``/``nice``/``range``/``clamp`` are
+      real intent, which only the explicit-scale path honors.
     """
     is_value_channel = axis == "x" if value_on_x else axis == "y"
     if (
         not is_value_channel
-        or mark != "bar"
-        or not mark_zero
+        or not wants_anchor
         or f"{axis}2" in enc
         or d.get("type_") in _CATEGORICAL_TYPES
     ):
@@ -272,7 +322,7 @@ def _scale_type_accepts_zero(scale_type: Any) -> bool:
 
     Asked of the gate's own published table
     (``ferrum._core.scale_accepted_keys``) rather than compared against a
-    ``"linear"`` literal, so the bar zero-anchor tracks the Rust schema instead
+    ``"linear"`` literal, so the zero-anchor tracks the Rust schema instead
     of mirroring one row of it.  ``None`` means the dict carries no ``type`` at
     all, which reaches the wire as ``linear`` (``_scale_to_dict``'s default);
     any non-``str`` or unknown tag answers ``False`` so the zero-anchor stays
@@ -541,27 +591,29 @@ class SpecBuildMixin:
 
         Iterates over ``_RENDERER_HONORED_CHANNELS``, converts each present
         channel to an ``EncodingSpec``, handles multi-field tooltip serialization,
-        applies the bar-chart y-zero-anchor injection, and warns on unrecognized
-        channels.
+        applies the zero-anchor injection (a bar, or a declared line), and warns
+        on unrecognized channels.
 
         Parameters
         ----------
         resolved :
-            The resolved ``Chart`` whose ``_mark`` is inspected for bar-chart
-            zero-anchor injection.
+            The resolved ``Chart`` whose ``_mark`` and ``_mark_kwargs`` are
+            inspected for the zero-anchor injection.
         enc :
             Encoding dict after alias remapping, polar remapping and statistic
             lowering: an aggregated channel already names its output column.
         override :
             The resolved ``Chart.override`` payload, or ``None``. Its
             ``encoding``/``encoding_paths`` fields are applied FIRST per
-            channel, before the bar zero-anchor injection (see the in-body
+            channel, before the zero-anchor injection (see the in-body
             comment below for why), so an override scale leaf beats the
             channel's own ``scale=`` setting (override wins the cascade,
             spec §7).
         mark_zero :
             Whether a bar chart's y-scale is anchored at zero: ``False`` once
             the chart's ``zero=False`` has been consumed, whichever door set it.
+            A declared line has no such door; its own ``rise_from_zero`` flag
+            is read from ``resolved._mark_kwargs`` instead.
 
         Returns
         -------
@@ -585,7 +637,13 @@ class SpecBuildMixin:
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw: dict = {}
-        bar_value_on_x = _bar_value_on_x(enc, resolved._data)
+        zero_anchor = _zero_anchor_target(
+            resolved._mark,
+            resolved._mark_kwargs,
+            enc,
+            resolved._data,
+            mark_zero=mark_zero,
+        )
         theta_axis = _theta_axis(resolved._coord)
         for axis in _RENDERER_HONORED_CHANNELS:
             if axis not in enc:
@@ -623,7 +681,7 @@ class SpecBuildMixin:
             # Chart.override(<channel>_scale_<leaf>=...) wins over the channel's
             # own scale= (spec §7).
             #
-            # Applied BEFORE the bar zero-anchor injection below (not after,
+            # Applied BEFORE the zero-anchor injection below (not after,
             # as an earlier revision had it) so the zero-anchor sees the
             # FINAL, fully-resolved effective scale type. Injecting zero
             # first and merging an ``override(y_scale_type=...)`` on top
@@ -634,11 +692,10 @@ class SpecBuildMixin:
             # just reached through override composition instead of a direct
             # scale= dict.
             d = _with_override_scale(d, axis, override, _color_source(axis, color_source))
-            d = _bar_zero_anchor(
+            d = _mark_zero_anchor(
                 d,
-                mark=resolved._mark,
-                mark_zero=mark_zero,
-                value_on_x=bar_value_on_x,
+                wants_anchor=zero_anchor.wants_anchor,
+                value_on_x=zero_anchor.value_on_x,
                 axis=axis,
                 enc=enc,
             )
@@ -739,12 +796,21 @@ class SpecBuildMixin:
             encoding_dict: dict = {}
             # An independent-y layer (a `SecondaryY` slot, a
             # `LayerChart(resolve={"y": "independent"})` member) resolves its own
-            # y scale, so a bar there takes the bar zero anchor from the same
-            # producer a flat bar does; a layer on the shared axes is anchored by
-            # Rust's layered rule instead.
+            # y scale, so a bar or a declared line there takes the zero anchor
+            # from the same producer the flat path does; a layer on the shared
+            # axes is anchored by Rust's layered rule instead.
             layer_theta_axis = _theta_axis(layer.coord if layer.coord is not None else self._coord)
-            anchor_bar_value = layer.independent_y and layer_mark(layer.mark) == "bar"
-            layer_value_on_x = anchor_bar_value and _bar_value_on_x(layer_enc, self._data)
+            layer_zero_anchor = (
+                _zero_anchor_target(
+                    layer_mark(layer.mark),
+                    layer_mk,
+                    layer_enc,
+                    self._data,
+                    mark_zero=layer_mk.get("zero") is not False,
+                )
+                if layer.independent_y
+                else _ZeroAnchorTarget(False, False)
+            )
             for axis in _RENDERER_HONORED_CHANNELS:
                 ch = layer_enc.get(axis)
                 if ch is None:
@@ -761,12 +827,11 @@ class SpecBuildMixin:
                     d = _with_override_scale(
                         d, axis, override, _color_source(axis, layer_color_source)
                     )
-                    if anchor_bar_value:
-                        d = _bar_zero_anchor(
+                    if layer_zero_anchor.wants_anchor:
+                        d = _mark_zero_anchor(
                             d,
-                            mark="bar",
-                            mark_zero=layer_mk.get("zero") is not False,
-                            value_on_x=layer_value_on_x,
+                            wants_anchor=True,
+                            value_on_x=layer_zero_anchor.value_on_x,
                             axis=axis,
                             enc=layer_enc,
                         )
@@ -859,16 +924,15 @@ class SpecBuildMixin:
                     d = _with_override_scale(
                         {"field": ch}, axis, override, _color_source(axis, layer_color_source)
                     )
-                    if anchor_bar_value:
+                    if layer_zero_anchor.wants_anchor:
                         # The shorthand's declared type decides the anchor, as
                         # a channel object's `type_` does; the wire dict keeps
                         # the string's own spelling.
                         _field, declared = _encoding_field_and_type(ch)
-                        scale = _bar_zero_anchor(
+                        scale = _mark_zero_anchor(
                             {**d, "type_": declared},
-                            mark="bar",
-                            mark_zero=layer_mk.get("zero") is not False,
-                            value_on_x=layer_value_on_x,
+                            wants_anchor=True,
+                            value_on_x=layer_zero_anchor.value_on_x,
                             axis=axis,
                             enc=layer_enc,
                         ).get("scale")

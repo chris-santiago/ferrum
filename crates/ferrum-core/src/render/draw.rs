@@ -104,22 +104,11 @@ impl DrawCtx<'_> {
     /// describes (a `y2` band, whose bottom edge rides the row's own x) must
     /// override this — see `marks::area::BottomEdge::axis`.
     pub(crate) fn series_curve_axis(&self) -> super::marks::curve::CurveAxis {
-        use super::marks::curve::CurveAxis;
-        use crate::spec::position::StackValueAxis;
-        let value_on_x = match self.mark_style.misc.value_axis {
-            // Declared, in post-flip space: the whole answer.
-            Some(StackValueAxis::X) => true,
-            Some(StackValueAxis::Y) => false,
-            // Undeclared, so the authored orientation is the default (vertical)
-            // and the series is horizontal exactly if something turned it: the
-            // user's flip, or a stack that cumulated the x column.
-            None => {
-                self.coord_flipped()
-                    || super::position::BatchPositionMeta::from_batch(self.batch)
-                        .stack_value_on_x()
-            }
-        };
-        if value_on_x { CurveAxis::Y } else { CurveAxis::X }
+        super::marks::curve::resolve_curve_axis(
+            self.mark_style.misc.value_axis,
+            self.coord_flipped(),
+            super::position::BatchPositionMeta::from_batch(self.batch).stack_value_on_x(),
+        )
     }
 
     /// Project a quantitative value to a pixel coordinate, honoring this mark's
@@ -814,6 +803,12 @@ pub struct LineStyle {
     /// batch order. `false` — every spec written before this field existed —
     /// is batch order, byte-identical.
     pub sort_vertices: bool,
+    /// [`MarkKwargsSpec::rise_from_zero`], resolved straight through: a
+    /// declared series draws one extra vertex ahead of its first placed one,
+    /// pinned to the value axis's zero baseline (read by
+    /// [`super::marks::line::build`]). `false` — a spec that omits the
+    /// field — draws nothing extra, byte-identical.
+    pub rise_from_zero: bool,
 }
 
 /// `mark_area`-only overrides: whether to draw the area's top border line and
@@ -1294,6 +1289,8 @@ pub fn resolve_mark_style(
     if let Some(va) = o.value_axis { style.misc.value_axis = Some(va); }
     // The producer's declared vertex join order (line family).
     if let Some(sv) = o.sort_vertices { style.line.sort_vertices = sv; }
+    // The producer's declared rise-from-zero riser (line family).
+    if let Some(rz) = o.rise_from_zero { style.line.rise_from_zero = rz; }
     // A constant `size=` on a line is a width: the diameter of a dot of that
     // area. Beside a `stroke_width=` it is refused by the line build, which
     // reads both bindings from `style.line`.

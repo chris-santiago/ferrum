@@ -1624,10 +1624,10 @@ fn leaf_positional_domain(
             // the group union, so a sibling leaf never inherits an anchor its own
             // mark never asked for.
             //
-            // Dtype-blind, like the auto path's own layered-bar anchor
-            // (`domain::layer_wants_bar_zero_anchor`, which is reached from both
+            // Dtype-blind, like the auto path's own layered zero anchor
+            // (`domain::layer_wants_zero_anchor`, which is reached from both
             // the Quantitative and Temporal arms of `build_axis_scale` and asks
-            // nothing about dtype): one rule for "a bar's value axis reaches
+            // nothing about dtype): one rule for "a mark's value axis reaches
             // zero", not one per dtype. A temporal value axis on a bar is a
             // latent shape either way — Python injects `type: "linear"` without
             // consulting the `:T` annotation — and the two mechanisms agreeing

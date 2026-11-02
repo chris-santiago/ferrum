@@ -204,6 +204,42 @@ impl CurveAxis {
     }
 }
 
+/// The one rule deciding which screen coordinate a line's value rides,
+/// given its own declared axis, its layer's coord flip, and whether a
+/// `Stack` position adjustment cumulates its value on x. Read by
+/// [`crate::render::draw::DrawCtx::series_curve_axis`] and by the domain
+/// resolver's zero-anchor orientation for a declared `rise_from_zero` line
+/// (`domain::curve_value_on_x`). Both readers pass the prepared layer's own
+/// post-flip declaration and its coord's real flip; for the stack term, the
+/// builder passes whatever `apply_stack`'s own stamp records whenever it
+/// cumulates (through [`resolve_stack_value_on_x`](crate::render::position::resolve_stack_value_on_x)),
+/// and the domain passes that same layer's DECLARED stack axis
+/// ([`layer_prepared_stack_axis`](crate::render::position::layer_prepared_stack_axis),
+/// read ahead of any batch), so the two agree for every stack `apply_stack`
+/// actually cumulates.
+///
+/// A declaration (`value_axis`, itself already post-flip — see
+/// [`crate::spec::mark_style::MarkKwargsSpec::value_axis`]'s doc) answers
+/// outright; undeclared, the vertical default (value on y) is exchanged by
+/// the coord flip or by the stack, whichever transform applies
+/// ([`crate::render::draw::DrawCtx::series_curve_axis`]'s doc owns the full
+/// precedence rationale: a declaration beats every transformation, and the
+/// transformations compose as a disjunction only because no real input sets
+/// both at once).
+pub(crate) fn resolve_curve_axis(
+    value_axis: Option<crate::spec::position::StackValueAxis>,
+    coord_flipped: bool,
+    stack_value_on_x: bool,
+) -> CurveAxis {
+    use crate::spec::position::StackValueAxis;
+    let value_on_x = match value_axis {
+        Some(StackValueAxis::X) => true,
+        Some(StackValueAxis::Y) => false,
+        None => coord_flipped || stack_value_on_x,
+    };
+    if value_on_x { CurveAxis::Y } else { CurveAxis::X }
+}
+
 /// How step segments are spelled as [`PathCmd`]s.
 ///
 /// The two spellings describe the SAME geometry but serialize to different
