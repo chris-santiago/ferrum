@@ -203,25 +203,22 @@ def test_a_flat_figure_mark_dict_none_sets_nothing() -> None:
     assert chart.to_svg() == fm.relplot(_DF, x="x", y="y").to_svg()
 
 
-# ── a single-mark composite desugar merges onto the chart's own style ──────
+# ── a single-mark composite draws its own style, not the replaced mark's ──
 
 
-def test_a_single_mark_composites_own_style_merges_onto_the_charts_own_mark_kwargs() -> None:
+def test_a_single_mark_composite_draws_its_own_style_not_the_replaced_marks() -> None:
     """``_desugar.py``'s single-mark dispatch path (``mark_histogram``'s
     desugar returns one unlayered mark, not ``.layers``) merges the
-    composite's own resolved style *onto* the chart's own ``_mark_kwargs``
-    via ``merge_style(new._mark_kwargs, merged_mark_kwargs)`` -- not the
-    other way around. Calling ``merge_style(merged_mark_kwargs,
-    new._mark_kwargs)``, or replacing the chart's kwargs with
-    ``merged_mark_kwargs`` outright, would silently drop whichever side
-    the chart already carried before the composite call. A primitive
-    mark's own style kwarg (``stroke_width=7``, set before the composite
-    runs) and the composite's own catch-all (``fill="red"``) must both
-    survive."""
+    composite's own resolved style onto the chart's ``_mark_kwargs`` via
+    ``merge_style(new._mark_kwargs, merged_mark_kwargs)``. ``mark_histogram``
+    replaces ``mark_bar``, so ``Chart._set_composite_mark`` resets
+    ``_mark_kwargs`` first (as a primitive mark call does): the replaced
+    bar's own style kwarg (``stroke_width=7``) does not survive onto the
+    histogram, while the composite's own catch-all (``fill="red"``) does."""
     chart = (
         fm.Chart(_DF).mark_bar(stroke_width=7).mark_histogram(bin_count=5, fill="red").encode(x="x")
     )
-    assert _flat(chart, "stroke_width") == 7
+    assert _flat(chart, "stroke_width") is None
     assert _flat(chart, "fill") == "red"
 
 

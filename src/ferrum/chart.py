@@ -1462,6 +1462,17 @@ class Chart(
         new._composite_source = None
         new._position = position
         new._composite_kind = name
+        if prior_mark is None:
+            # A composite mark call replaces the chart's mark as a primitive
+            # call does (`_set_mark`, above): its style and `zero=` go with
+            # it, so a chained `mark_point(size=30).mark_ribbon()` draws the
+            # ribbon `mark_ribbon()` draws on its own, not one restyled by
+            # the point it replaced. `mark_smooth()` with `prior_mark` set
+            # keeps the prior primitive as its own layer, which the
+            # dispatcher builds from this style (`_desugar.py`'s
+            # `_build_prior_layer` call), so both stay.
+            new._mark_kwargs = {}
+            new._mark_zero = True
         return new
 
     def _native_size(self) -> tuple[float, float]:

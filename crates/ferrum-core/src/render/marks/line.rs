@@ -51,8 +51,8 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
-use crate::render::marks::curve::{short_series_empty_reason, CurveAxis, SeriesNoun, StepSpelling, Trace};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBinding};
@@ -134,8 +134,10 @@ fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), Re
 /// own order (a binned color's bin order) — the SAME partition `build`
 /// draws one polyline per group from. Read by [`vertex_frame`] too, so the
 /// census's vertex-unit count and the real render can never group a
-/// statistic layer's rows differently.
-pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
+/// statistic layer's rows differently. The returned
+/// [`SeriesPartition::fields`] are the caller's own fields that actually
+/// split the series, for naming a dropped one.
+pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
@@ -177,19 +179,23 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> 
     // numeric field (or none) yields `dash_cols.categorical == None`, which
     // skips subdivision entirely — byte-identical grouping.
     let dash_cols = stroke_dash_column_loader(ctx);
+    let dash_field = ctx.scales.stroke_dash.is_some().then(|| spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str())).flatten();
 
     let grouping = grouping_series_values(ctx);
-    let mut groups = build_color_detail_groups(
-        color_values,
-        detail_values.as_ref(),
-        dash_cols.categorical.iter().chain(&grouping),
+    let mut partition = build_color_detail_groups(
+        cf.zip(color_values),
+        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
+        dash_field
+            .zip(dash_cols.categorical.as_ref())
+            .into_iter()
+            .chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
         ctx.scales.color.is_some(),
         n_rows,
     );
     if let Some(binned) = &binned {
-        binned.order(&mut groups);
+        binned.order(&mut partition.groups);
     }
-    groups
+    partition
 }
 
 /// `x` and `y`: Category on an `Ordinal` scale, [`PlacementRead::ClipAware`]
@@ -250,7 +256,7 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
 /// `mark_style.rise_from_zero`, whose one placed vertex still draws, joined
 /// to the riser `build` prepends ahead of it.
 pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
-    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    let groups = series_groups(ctx).groups.into_iter().map(|(_, rows)| rows).collect();
     let min_vertices = if ctx.mark_style.line.rise_from_zero { 1 } else { 2 };
     crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), min_vertices)
 }
@@ -272,7 +278,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let spec = ctx.spec;
     let Some(vertices) = vertex_pixels(ctx) else { return empty() };
 
-    let groups = series_groups(ctx);
+    let SeriesPartition { groups, fields: naming_fields } = series_groups(ctx);
     // The categorical `stroke_dash` column `series_groups` folds into the
     // series key, read again here for the per-row dash resolution below; a
     // numeric field (or none) yields `dash_cols.categorical == None`.
@@ -361,10 +367,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let mut acc = MarkNodes::with_capacity(groups.len());
     // Per node, the source row of each width vertex (see `vertex_rows`).
     let mut vertex_rows: Vec<Vec<ferrum_scene::VertexRow>> = Vec::new();
-    // Series the `< 2` gate below dropped with exactly one drawable point.
-    let mut single_point_series = 0;
+    const RULE: &str = "mark_line() joins two or more points per series";
+    let mut short_runs = ShortRuns::new(RULE, SeriesNoun::Series, groups.len());
 
-    for (key, mut rows) in groups {
+    for (ordinal, (key, mut rows)) in groups.into_iter().enumerate() {
         if let Some(values) = &vertex_sort_values {
             rows.sort_by(|&a, &b| {
                 let (va, vb) = (values.get(a).copied().flatten(), values.get(b).copied().flatten());
@@ -397,7 +403,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             row_indices.insert(0, first_row);
         }
         if points.len() < 2 {
-            single_point_series += usize::from(points.len() == 1);
+            short_runs.note(ordinal, &row_indices, points.len());
             continue;
         }
 
@@ -513,15 +519,11 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = short_series_empty_reason(
-        "mark_line() joins two or more points per series",
-        SeriesNoun::Series,
-        single_point_series,
-        nodes.len(),
-    );
+    let (empty_reason, dropped_series) = short_runs.finish(nodes.len(), ctx.batch, &naming_fields);
 
     let result = MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta)
-        .with_empty_reason(empty_reason);
+        .with_empty_reason(empty_reason)
+        .with_dropped_series(dropped_series);
     Ok(if size_conditional { result.with_vertex_rows(vertex_rows) } else { result })
 }
 
@@ -3239,20 +3241,211 @@ mod tests {
     }
 
     /// A line that draws any series, or had no drawable point at all, carries
-    /// no reason: a one-point series beside a drawn one, a zero-row batch and
-    /// an all-null batch.
+    /// no `empty_reason`: a one-point series beside a drawn one, a zero-row
+    /// batch and an all-null batch. A short series beside a drawn one is
+    /// reported by name.
     #[test]
     fn a_line_that_draws_or_had_no_point_carries_no_empty_reason() {
         let partial = build_series(vec![Some(0.0), Some(1.0), Some(2.0)], vec![Some(0.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]), None);
         assert_eq!(partial.nodes.len(), 1);
         assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+        let dropped = partial.dropped_series.expect("a drawn series beside a dropped one reports the dropped one");
+        assert_eq!(dropped.rule, "mark_line() joins two or more points per series");
+        assert_eq!(dropped.names(), vec!["c=b (one point)"]);
 
         let zero_rows = build_series(vec![], vec![], None, None);
         assert!(zero_rows.nodes.is_empty());
         assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+        assert!(zero_rows.dropped_series.is_none());
 
         let all_null = build_series(vec![None, None], vec![None, None], None, None);
         assert!(all_null.nodes.is_empty());
         assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
+        assert!(all_null.dropped_series.is_none());
+    }
+
+    /// A color group whose every `y` is null has no placed vertex at
+    /// all — the documented per-row skip, not a connectivity drop — so it
+    /// is never noted, even beside a group that drew: no `empty_reason`
+    /// (something drew) and no `dropped_series` (nothing was short, group
+    /// `b` was never counted a run at all).
+    #[test]
+    fn a_group_with_no_placed_vertex_is_not_counted_beside_a_drawn_one() {
+        let result = build_series(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), None, None],
+            Some(vec!["a", "a", "b", "b"]),
+            None,
+        );
+        assert_eq!(result.nodes.len(), 1, "only group a draws");
+        assert!(result.empty_reason.is_none(), "{:?}", result.empty_reason);
+        assert!(result.dropped_series.is_none(), "{:?}", result.dropped_series);
+    }
+
+    /// A line with a short series beside drawn ones reports the dropped
+    /// one's name and why, by the caller's own grouping field: a null
+    /// group value renders the way `describe_group_row` already renders a
+    /// null, and two identical points form a drawn (zero-length) series
+    /// rather than a dropped one.
+    #[test]
+    fn a_partial_short_series_drop_reports_the_dropped_series() {
+        // A null color value is named the way `describe_group_row` already
+        // renders a null group value.
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("c", DataType::Utf8, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), None])),
+            ],
+        )
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        assert_eq!(result.dropped_series.unwrap().names(), vec!["c=null (one point)"]);
+
+        // Two identical points form a drawn (zero-length) series, not a
+        // dropped one — the connectivity gate only drops a run below ITS
+        // mark's vertex minimum (one point here), never a degenerate but
+        // fully-placed one.
+        let tied = build_series(vec![Some(1.0), Some(1.0), Some(2.0)], vec![Some(1.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]), None);
+        assert_eq!(tied.nodes.len(), 1, "the tied pair draws a zero-length series");
+        assert_eq!(tied.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A series made short by a `NaN` y, or by a null y, is counted and
+    /// named by its own placed-vertex count (one), the same boundary a
+    /// null gets: a non-finite coordinate is not placed, exactly like a
+    /// missing one.
+    #[test]
+    fn a_nan_or_null_y_leaves_a_series_with_one_placed_point() {
+        let nan_case = build_series(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(f64::NAN)],
+            Some(vec!["a", "a", "b", "b"]),
+            None,
+        );
+        assert_eq!(nan_case.nodes.len(), 1);
+        assert!(nan_case.empty_reason.is_none(), "{:?}", nan_case.empty_reason);
+        assert_eq!(nan_case.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+
+        let null_case = build_series(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), None],
+            Some(vec!["a", "a", "b", "b"]),
+            None,
+        );
+        assert_eq!(null_case.nodes.len(), 1);
+        assert!(null_case.empty_reason.is_none(), "{:?}", null_case.empty_reason);
+        assert_eq!(null_case.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A `stroke_dash` field under a resolved [`crate::render::scale_resolve::StrokeDashScale`]
+    /// whose column [`col_as_ordinal_category_str`] refuses (a `Timestamp`,
+    /// which the Python scale resolver already rejects before any builder
+    /// runs) splits nothing: the zip in `series_groups` reads no
+    /// categorical values for it, so the partition is color alone. A
+    /// `Utf8` `d` column under the same kind of scale does split.
+    #[test]
+    fn a_stroke_dash_field_the_category_reader_refuses_does_not_split_the_series() {
+        use crate::render::scale_resolve::StrokeDashScale;
+        use arrow::array::TimestampMillisecondArray;
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+
+        // Resolve the chart's other scales from a spec with NO `stroke_dash`
+        // binding (the Python resolver refuses a Timestamp `stroke_dash`
+        // column outright, so this scale is never reached that way), then
+        // attach a dash scale by hand — a ctx `series_groups` could only see
+        // if the draw site itself skipped the category-reader refusal.
+        let mut resolve_spec = line_spec();
+        resolve_spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+        ]).unwrap();
+        let (mut scales, _) = resolve_scales(&resolve_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_none(), "the resolver must not have built a dash scale over the unreadable column");
+        scales.stroke_dash = Some(StrokeDashScale { domain: vec!["0".into()], patterns: vec![vec![]] });
+
+        let mut draw_spec = resolve_spec.clone();
+        draw_spec.encoding.stroke_dash = Some(EncodingSpec { field: "d".into(), type_: None, ..Default::default() });
+        let ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let partition = super::series_groups(&ctx);
+        assert_eq!(partition.fields, vec!["g".to_string()], "an unreadable dash column must not be named as a field that split the series");
+
+        // A Utf8 `d` column under the same kind of scale does split.
+        let utf8_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("d", DataType::Utf8, false),
+        ]));
+        let utf8_batch = arrow::record_batch::RecordBatch::try_new(utf8_schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(StringArray::from(vec!["x", "x", "y", "y"])),
+        ]).unwrap();
+        let (mut utf8_scales, _) = resolve_scales(&resolve_spec, &utf8_batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        utf8_scales.stroke_dash = Some(StrokeDashScale { domain: vec!["x".into(), "y".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
+        let utf8_ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &utf8_scales, batch: &utf8_batch, mark_style: &mark_style };
+        let utf8_partition = super::series_groups(&utf8_ctx);
+        assert_eq!(utf8_partition.fields, vec!["g".to_string(), "d".to_string()]);
+    }
+
+    /// A caller may bind one column to two splitting inputs at once — here
+    /// `color` and a categorical `stroke_dash` on the same field, the
+    /// standard redundant-encoding idiom — and the dropped series is still
+    /// named by that field exactly once, not once per input that split on
+    /// it.
+    #[test]
+    fn a_column_bound_to_color_and_stroke_dash_is_named_once() {
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        spec.encoding.stroke_dash = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_some(), "a Utf8 stroke_dash column must resolve a categorical dash scale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        assert_eq!(
+            result.dropped_series.unwrap().names(),
+            vec!["g=b (one point)"],
+            "a field bound to both color and stroke_dash must be named once, not 'g=b, g=b'",
+        );
     }
 }

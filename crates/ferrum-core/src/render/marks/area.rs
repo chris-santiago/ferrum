@@ -25,8 +25,8 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, BinnedColorSeries};
-use crate::render::marks::curve::{short_series_empty_reason, CurveAxis, SeriesNoun, StepSpelling, Trace};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
 /// `mark_area` spells its step risers as explicit `LineTo` vertices — the
@@ -192,7 +192,7 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Tra
 /// — the SAME partition `build` draws one area band per group from. Read
 /// by [`vertex_frame`] too, so the census's vertex-unit count and the real
 /// render can never group a statistic layer's rows differently.
-pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
+pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
@@ -211,17 +211,17 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> 
     // area does not consume the `stroke_dash` channel (only line, rule,
     // point, bar and rect draw it); only a statistic's grouping splits further.
     let grouping = grouping_series_values(ctx);
-    let mut groups = build_color_detail_groups(
-        color_values,
-        detail_values.as_ref(),
-        &grouping,
+    let mut partition = build_color_detail_groups(
+        cf.zip(color_values),
+        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
+        grouping.iter().map(|(field, values)| (field.as_str(), values)),
         ctx.scales.color.is_some(),
         n_rows,
     );
     if let Some(binned) = &binned {
-        binned.order(&mut groups);
+        binned.order(&mut partition.groups);
     }
-    groups
+    partition
 }
 
 /// `x` and `y`, always `ClipAware` (`ctx.to_pixel`, [`vertex_pixels`]' own
@@ -268,7 +268,7 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
 /// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
 /// of 2 top-edge vertices per band.
 pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
-    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    let groups = series_groups(ctx).groups.into_iter().map(|(_, rows)| rows).collect();
     crate::render::draw::VertexFrame::from_vertices(groups, vertex_pixels(ctx), ctx.batch.num_rows(), 2)
 }
 
@@ -299,7 +299,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let baseline_y = ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y);
     let baseline_x = ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w);
 
-    let groups = series_groups(ctx);
+    let SeriesPartition { groups, fields: naming_fields } = series_groups(ctx);
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -359,10 +359,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // *contributing row* while metadata was full-row, so the lengths diverged
     // for any grouped or multi-node-per-group area.
     let mut acc = MarkNodes::with_capacity(groups.len());
-    // Series the `< 2` gate below dropped with exactly one drawable point.
-    let mut single_point_series = 0;
+    const RULE: &str = "mark_area() spans two or more points per series";
+    let mut short_runs = ShortRuns::new(RULE, SeriesNoun::Series, groups.len());
 
-    for (key, rows) in groups {
+    for (ordinal, (key, rows)) in groups.into_iter().enumerate() {
         let mut top: Vec<(f64, f64)> = Vec::new();
         let mut bottom: Vec<(f64, f64)> = Vec::new();
         let mut row_indices: Vec<usize> = Vec::new();
@@ -408,7 +408,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
         }
         if top.len() < 2 {
-            single_point_series += usize::from(top.len() == 1);
+            short_runs.note(ordinal, &row_indices, top.len());
             continue;
         }
 
@@ -522,15 +522,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = short_series_empty_reason(
-        "mark_area() spans two or more points per series",
-        SeriesNoun::Series,
-        single_point_series,
-        nodes.len(),
-    );
+    let (empty_reason, dropped_series) = short_runs.finish(nodes.len(), ctx.batch, &naming_fields);
 
     MarkBuildResult::populated(MarkBatchKind::Area, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
+        .with_dropped_series(dropped_series)
 }
 
 #[cfg(test)]
@@ -2335,8 +2331,9 @@ mod tests {
     }
 
     /// An area that draws any series, or had no drawable point at all,
-    /// carries no reason: a one-point series beside a drawn one, a zero-row
-    /// batch and an all-null batch.
+    /// carries no `empty_reason`: a one-point series beside a drawn one, a
+    /// zero-row batch and an all-null batch. A short series beside a drawn
+    /// one is reported by name.
     #[test]
     fn an_area_that_draws_or_had_no_point_carries_no_empty_reason() {
         let partial = build_series(vec![Some(0.0), Some(1.0), Some(2.0)], vec![Some(0.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]));
@@ -2344,13 +2341,78 @@ mod tests {
         let drawn_rows = partial.data_indices.as_deref().unwrap_or_default();
         assert!(drawn_rows.iter().all(|&row| row == 0), "only series a draws; got rows {drawn_rows:?}");
         assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+        let dropped = partial.dropped_series.expect("a drawn series beside a dropped one reports the dropped one");
+        assert_eq!(dropped.rule, "mark_area() spans two or more points per series");
+        assert_eq!(dropped.names(), vec!["c=b (one point)"]);
 
         let zero_rows = build_series(vec![], vec![], None);
         assert!(zero_rows.nodes.is_empty());
         assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+        assert!(zero_rows.dropped_series.is_none());
 
         let all_null = build_series(vec![None, None], vec![None, None], None);
         assert!(all_null.nodes.is_empty());
         assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
+        assert!(all_null.dropped_series.is_none());
+    }
+
+    /// An area with a short series beside drawn ones reports the dropped
+    /// one's name and why: a null color value renders the way
+    /// `describe_group_row` already renders a null, and two identical
+    /// points form a drawn (zero-length) series rather than a dropped one.
+    #[test]
+    fn a_partial_short_series_drop_reports_the_dropped_series() {
+        let mut spec = area_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("c", DataType::Utf8, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), None])),
+            ],
+        )
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        assert_eq!(result.dropped_series.unwrap().names(), vec!["c=null (one point)"]);
+
+        let tied = build_series(vec![Some(1.0), Some(1.0), Some(2.0)], vec![Some(1.0), Some(1.0), Some(2.0)], Some(vec!["a", "a", "b"]));
+        assert_eq!(tied.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count(), 1, "the tied pair draws a zero-length series");
+        assert_eq!(tied.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A series made short by a `NaN` y, or by a null y, is counted and
+    /// named by its own placed-vertex count (one) — the same boundary
+    /// `line` keeps: a non-finite coordinate is not placed, exactly like a
+    /// missing one.
+    #[test]
+    fn a_nan_or_null_y_leaves_a_series_with_one_placed_point() {
+        let nan_case = build_series(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(f64::NAN)],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(nan_case.nodes.len(), 1);
+        assert!(nan_case.empty_reason.is_none(), "{:?}", nan_case.empty_reason);
+        assert_eq!(nan_case.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+
+        let null_case = build_series(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), None],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(null_case.nodes.len(), 1);
+        assert!(null_case.empty_reason.is_none(), "{:?}", null_case.empty_reason);
+        assert_eq!(null_case.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
     }
 }

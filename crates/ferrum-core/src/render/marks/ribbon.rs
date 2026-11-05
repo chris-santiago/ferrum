@@ -29,8 +29,8 @@
 
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries};
-use crate::render::marks::curve::{short_series_empty_reason, CurveAxis, SeriesNoun, StepSpelling, Trace};
+use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
 /// `mark_ribbon` spells its step risers as explicit `LineTo` vertices, like
@@ -129,7 +129,7 @@ fn resolve_shared_pixels(
 /// draws one closed band from per group. Read by [`vertex_frame`] too, so
 /// the census's vertex-unit count and the real render can never group a
 /// statistic layer's rows differently.
-pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> {
+pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
@@ -173,19 +173,23 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> Vec<(Option<String>, Vec<usize>)> 
     // `StrokeDashScale`; a numeric (or absent) `stroke_dash` field yields
     // `categorical == None`, which skips subdivision entirely.
     let dash_cols = stroke_dash_column_loader(ctx);
+    let dash_field = ctx.scales.stroke_dash.is_some().then(|| spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str())).flatten();
 
     let grouping = grouping_series_values(ctx);
-    let mut groups = build_color_detail_groups(
-        color_values,
-        detail_values.as_ref(),
-        dash_cols.categorical.iter().chain(&grouping),
+    let mut partition = build_color_detail_groups(
+        cf.zip(color_values),
+        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
+        dash_field
+            .zip(dash_cols.categorical.as_ref())
+            .into_iter()
+            .chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
         ctx.scales.color.is_some(),
         n_rows,
     );
     if let Some(binned) = &binned {
-        binned.order(&mut groups);
+        binned.order(&mut partition.groups);
     }
-    groups
+    partition
 }
 
 /// [`band_curve_axis`]'s shared channel (Category on an `Ordinal` scale,
@@ -255,7 +259,7 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<BandVertices> {
 /// [`series_groups`], [`vertex_pixels`]' placed rows and `build`'s minimum
 /// of 2 vertices per band.
 pub(crate) fn vertex_frame(ctx: &DrawCtx) -> crate::render::draw::VertexFrame {
-    let groups = series_groups(ctx).into_iter().map(|(_, rows)| rows).collect();
+    let groups = series_groups(ctx).groups.into_iter().map(|(_, rows)| rows).collect();
     let vertices = vertex_pixels(ctx).map(|band| band.pixels);
     crate::render::draw::VertexFrame::from_vertices(groups, vertices, ctx.batch.num_rows(), 2)
 }
@@ -269,7 +273,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let empty = || MarkBuildResult::empty(MarkBatchKind::Ribbon);
 
     let Some(BandVertices { pixels: vertices, curve_axis, shared_is_ordinal }) = vertex_pixels(ctx) else { return empty() };
-    let groups = series_groups(ctx);
+    let SeriesPartition { groups, fields: naming_fields } = series_groups(ctx);
     // A categorical `stroke_dash` field extends ribbon's series partition
     // key — read again here (beside `series_groups`' own read,
     // which folds it into the grouping key) for the per-group dash
@@ -298,10 +302,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // (bug #6). Before the fix, `data_indices` carried one entry per *contributing
     // row* while metadata was full-row, so node and metadata lengths diverged.
     let mut acc = MarkNodes::with_capacity(groups.len());
-    // Bands the `< 2` gate below dropped with exactly one drawable point.
-    let mut single_point_bands = 0;
+    const RULE: &str = "mark_ribbon() spans two or more points per band";
+    let mut short_runs = ShortRuns::new(RULE, SeriesNoun::Band, groups.len());
 
-    for (key, rows) in groups {
+    for (ordinal, (key, rows)) in groups.into_iter().enumerate() {
         let mut indices: Vec<usize> = rows.into_iter().filter(|&i| vertices.get(i).is_some_and(Option::is_some)).collect();
         if !shared_is_ordinal {
             indices.sort_by(|&a, &b| {
@@ -310,7 +314,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             });
         }
         if indices.len() < 2 {
-            single_point_bands += usize::from(indices.len() == 1);
+            short_runs.note(ordinal, &indices, indices.len());
             continue;
         }
         // Representative source row for this group's single polygon node: the
@@ -402,15 +406,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = short_series_empty_reason(
-        "mark_ribbon() spans two or more points per band",
-        SeriesNoun::Band,
-        single_point_bands,
-        nodes.len(),
-    );
+    let (empty_reason, dropped_series) = short_runs.finish(nodes.len(), ctx.batch, &naming_fields);
 
     MarkBuildResult::populated(MarkBatchKind::Ribbon, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
+        .with_dropped_series(dropped_series)
 }
 
 #[cfg(test)]
@@ -1300,8 +1300,9 @@ mod tests {
     }
 
     /// A ribbon that draws any band, or had no drawable point at all,
-    /// carries no reason: a one-point band beside a drawn one, a zero-row
-    /// batch and an all-null batch.
+    /// carries no `empty_reason`: a one-point band beside a drawn one, a
+    /// zero-row batch and an all-null batch. A short band beside a drawn
+    /// one is reported by name.
     #[test]
     fn a_ribbon_that_draws_or_had_no_point_carries_no_empty_reason() {
         let partial = render_bands(
@@ -1312,13 +1313,170 @@ mod tests {
         );
         assert_eq!(partial.nodes.len(), 1);
         assert!(partial.empty_reason.is_none(), "{:?}", partial.empty_reason);
+        let dropped = partial.dropped_series.expect("a drawn band beside a dropped one reports the dropped one");
+        assert_eq!(dropped.rule, "mark_ribbon() spans two or more points per band");
+        assert_eq!(dropped.names(), vec!["c=b (one point)"]);
 
         let zero_rows = render_bands(vec![], vec![], vec![], None);
         assert!(zero_rows.nodes.is_empty());
         assert!(zero_rows.empty_reason.is_none(), "{:?}", zero_rows.empty_reason);
+        assert!(zero_rows.dropped_series.is_none());
 
         let all_null = render_bands(vec![None, None], vec![None, None], vec![None, None], None);
         assert!(all_null.nodes.is_empty());
         assert!(all_null.empty_reason.is_none(), "{:?}", all_null.empty_reason);
+        assert!(all_null.dropped_series.is_none());
+    }
+
+    /// A ribbon with a short band beside drawn ones reports the dropped
+    /// one's name and why: a null color value renders the way
+    /// `describe_group_row` already renders a null, and two identical
+    /// shared-coordinate points form a drawn (zero-length) band rather than
+    /// a dropped one.
+    #[test]
+    fn a_partial_short_series_drop_reports_the_dropped_series() {
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("y2", DataType::Float64, true),
+            Field::new("c", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0)])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0)])),
+                Arc::new(arrow::array::StringArray::from(vec![Some("a"), Some("a"), None])),
+            ],
+        )
+        .unwrap();
+        let result = render(&spec, &batch);
+        assert_eq!(result.dropped_series.unwrap().names(), vec!["c=null (one point)"]);
+
+        let tied = render_bands(
+            vec![Some(1.0), Some(1.0), Some(2.0)],
+            vec![Some(1.0), Some(1.0), Some(2.0)],
+            vec![Some(2.0), Some(2.0), Some(3.0)],
+            Some(vec!["a", "a", "b"]),
+        );
+        assert_eq!(tied.nodes.len(), 1, "the tied pair draws a zero-length band");
+        assert_eq!(tied.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A band made short by a `NaN` or a null vertex, on either `y` or
+    /// `y2`, is counted and named by its own placed-vertex count (one) —
+    /// the same boundary `line` and `area` keep: a non-finite coordinate is
+    /// not placed, exactly like a missing one.
+    #[test]
+    fn a_nan_or_null_y_or_y2_leaves_a_band_with_one_placed_point() {
+        let y_nan = render_bands(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(f64::NAN)],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(y_nan.nodes.len(), 1);
+        assert!(y_nan.empty_reason.is_none(), "{:?}", y_nan.empty_reason);
+        assert_eq!(y_nan.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+
+        let y_null = render_bands(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), None],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(y_null.nodes.len(), 1);
+        assert!(y_null.empty_reason.is_none(), "{:?}", y_null.empty_reason);
+        assert_eq!(y_null.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+
+        let y2_nan = render_bands(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(f64::NAN)],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(y2_nan.nodes.len(), 1);
+        assert!(y2_nan.empty_reason.is_none(), "{:?}", y2_nan.empty_reason);
+        assert_eq!(y2_nan.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+
+        let y2_null = render_bands(
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0)],
+            vec![Some(1.0), Some(2.0), Some(3.0), None],
+            Some(vec!["a", "a", "b", "b"]),
+        );
+        assert_eq!(y2_null.nodes.len(), 1);
+        assert!(y2_null.empty_reason.is_none(), "{:?}", y2_null.empty_reason);
+        assert_eq!(y2_null.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A `stroke_dash` field under a resolved `StrokeDashScale` whose
+    /// column the category reader refuses (a `Timestamp`, which the Python
+    /// scale resolver already rejects before any builder runs) splits
+    /// nothing: the zip in `series_groups` reads no categorical values for
+    /// it, so the partition is color alone. A `Utf8` `d` column under the
+    /// same kind of scale does split.
+    #[test]
+    fn a_stroke_dash_field_the_category_reader_refuses_does_not_split_the_series() {
+        use crate::render::scale_resolve::StrokeDashScale;
+        use arrow::array::TimestampMillisecondArray;
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Ribbon).unwrap();
+
+        // Resolve the chart's other scales from a spec with NO `stroke_dash`
+        // binding (the Python resolver refuses a Timestamp `stroke_dash`
+        // column outright, so this scale is never reached that way), then
+        // attach a dash scale by hand.
+        let mut resolve_spec = ribbon_spec(true);
+        resolve_spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(arrow::array::StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+        ]).unwrap();
+        let (mut scales, _) = resolve_scales(&resolve_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_none(), "the resolver must not have built a dash scale over the unreadable column");
+        scales.stroke_dash = Some(StrokeDashScale { domain: vec!["0".into()], patterns: vec![vec![]] });
+
+        let mut draw_spec = resolve_spec.clone();
+        draw_spec.encoding.stroke_dash = Some(EncodingSpec { field: "d".into(), type_: None, ..Default::default() });
+        let ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let partition = super::series_groups(&ctx);
+        assert_eq!(partition.fields, vec!["g".to_string()], "an unreadable dash column must not be named as a field that split the series");
+
+        // A Utf8 `d` column under the same kind of scale does split.
+        let utf8_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("d", DataType::Utf8, false),
+        ]));
+        let utf8_batch = RecordBatch::try_new(utf8_schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(arrow::array::StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(arrow::array::StringArray::from(vec!["x", "x", "y", "y"])),
+        ]).unwrap();
+        let (mut utf8_scales, _) = resolve_scales(&resolve_spec, &utf8_batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        utf8_scales.stroke_dash = Some(StrokeDashScale { domain: vec!["x".into(), "y".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
+        let utf8_ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &utf8_scales, batch: &utf8_batch, mark_style: &mark_style };
+        let utf8_partition = super::series_groups(&utf8_ctx);
+        assert_eq!(utf8_partition.fields, vec!["g".to_string(), "d".to_string()]);
     }
 }

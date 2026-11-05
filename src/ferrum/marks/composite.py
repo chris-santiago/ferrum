@@ -26,7 +26,7 @@ from typing import Any, Optional, Sequence
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._core import secondary_key
-from ferrum._layer import MarkDesugarResult, _Layer
+from ferrum._layer import MarkDesugarResult, _Layer, catch_all_over
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum.color import palette as _named_palette_colors
@@ -806,9 +806,12 @@ def desugar_ribbon(
 ) -> MarkDesugarResult:
     """Primitive ribbon (shaded band) mark desugar — no transform.
 
-    Emits a single ribbon layer directly.  Unlike ``desugar_errorband``,
-    no aggregation transform is applied; the data must already carry the
-    lower and upper bound columns.
+    Lowers to a single, unlayered ``ribbon`` mark over the chart's own
+    ``x``, ``y`` and ``y2`` bindings, the way ``mark_area`` reaches Rust:
+    no bare-field layer rebuild, so every option those bindings carry
+    (title, scale, ``aggregate=``, ``bin=``) reaches the mark unchanged,
+    and every warning or refusal about it names no layer index -- unless
+    a caller places it under ``+``, where it is a layer like any other.
 
     ``y2_field`` is resolved from the chart's encoding state and passed in
     by ``Chart._resolve_pending`` (the special case for ``kind == "ribbon"``)
@@ -816,13 +819,13 @@ def desugar_ribbon(
 
     Data contract
     -------------
-    Input: DataFrame pre-computed with columns ``x_field``, ``y_field``
-    (lower bound), and ``y2_field`` (upper bound).  No transforms emitted.
+    Input: the chart's own rows, bound to ``x_field``, ``y_field`` (lower
+    bound), and ``y2_field`` (upper bound).  No transforms emitted.
 
-    Layers emitted
-    --------------
-    1. ``ribbon`` — ``x=x_field``, ``y=y_field``, ``y2=y2_field``,
-       ``opacity=opacity``, ``stroke="none"``, ``interpolate=interpolate``.
+    Mark emitted
+    ------------
+    ``ribbon`` — draws the chart's own ``x``/``y``/``y2`` bindings, with
+    ``opacity=opacity``, ``stroke="none"``, ``interpolate=interpolate``.
 
     Parameters
     ----------
@@ -838,7 +841,7 @@ def desugar_ribbon(
     interpolate : str, default "linear"
         Curve drawn through both ribbon boundaries, validated against the
         live ``ferrum._core.interpolate_accepted_values()`` vocabulary by
-        the caller (``Chart.mark_ribbon``) before this function ever runs. Forwarded to the emitted layer's mark style unvalidated
+        the caller (``Chart.mark_ribbon``) before this function ever runs. Forwarded to the emitted mark's style unvalidated
         here -- this function has no declaration-time gate of its own, so a
         caller reaching it directly (bypassing ``mark_ribbon``) gets an
         unrecognized value refused by the renderer instead.
@@ -846,8 +849,8 @@ def desugar_ribbon(
     Returns
     -------
     MarkDesugarResult
-        Layered mode with a single ribbon layer (``.layers`` set, no
-        transforms).
+        Single-mark mode: ``mark="ribbon"``, no layers, no remap -- the
+        chart keeps its own ``x``/``y``/``y2`` encoding untouched.
 
     Raises
     ------
@@ -857,7 +860,7 @@ def desugar_ribbon(
     Examples
     --------
     >>> result = desugar_ribbon("x", "lower", y2_field="upper")
-    >>> result.layers[0].mark
+    >>> result.mark
     'ribbon'
     """
     user_kw = _validate("ribbon", mark_kwargs)
@@ -867,15 +870,15 @@ def desugar_ribbon(
         raise ValueError(
             "mark_ribbon() requires y2 in encoding (e.g. .encode(x=, y=lower, y2=upper))"
         )
-    layers = [
-        _Layer(
-            name="ribbon",
-            mark="ribbon",
-            encoding={"x": x_field, "y": y_field, "y2": y2_field},
-            mark_kwargs={"opacity": opacity, "stroke": "none", "interpolate": interpolate},
-        ),
-    ]
-    return MarkDesugarResult(layers=_apply("ribbon", layers, user_kw))
+    from ferrum.marks.base import refuse_style_no_layer_draws
+
+    refuse_style_no_layer_draws("mark_ribbon", user_kw, ["ribbon"])
+    defaults = {"opacity": opacity, "stroke": "none", "interpolate": interpolate}
+    return MarkDesugarResult(
+        mark="ribbon",
+        mark_kwargs=catch_all_over(defaults, user_kw, frozenset()),
+        layer_name="ribbon",
+    )
 
 
 register_layer_names(

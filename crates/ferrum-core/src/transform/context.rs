@@ -519,7 +519,11 @@ impl std::fmt::Display for TransformWarning {
 /// [`TransformWarning::ParameterClamped`] and [`TransformWarning::IntervalUndefined`]
 /// each splice into their Display text after the group clause; empty for an
 /// unfaceted fit (`panel: None`), keeping that text byte-identical.
-fn panel_clause(panel: Option<&str>) -> String {
+/// `pub(crate)` so [`crate::render::scene_build`]'s per-layer draw site
+/// builds a [`crate::render::RenderWarning::SeriesDropped`] name's own
+/// facet clause the same way, rather than re-deriving the `" in facet
+/// panel ..."` text a second time.
+pub(crate) fn panel_clause(panel: Option<&str>) -> String {
     match panel {
         Some(p) => format!(" in facet panel {p}"),
         None => String::new(),

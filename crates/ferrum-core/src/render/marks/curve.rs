@@ -45,10 +45,12 @@
 //! Every routine here is pure f64 arithmetic with no randomness, so output is
 //! byte-deterministic.
 
+use arrow::record_batch::RecordBatch;
 use ferrum_scene::PathCmd;
 use pyo3::prelude::*;
 
 use crate::render::draw::EmptyReason;
+use crate::transform::context::describe_group_row;
 use crate::transform::vocabulary::Vocabulary;
 
 /// The `interpolate=` vocabulary (spec §6.1), on the shared [`Vocabulary`]
@@ -622,9 +624,9 @@ impl SeriesNoun {
 /// needs (`"mark_line() joins two or more points per series"`). `Some` only
 /// when nothing drew and at least one run was short; a run with no drawable
 /// vertex (null or unplaceable rows) is a per-row skip, not counted. A mark
-/// that draws any run stays silent about the ones it dropped. Shared by
-/// `line`, `area`, `ribbon` and `polygon`, so their gates name the same
-/// blank one way.
+/// that draws some runs and drops others reports the dropped ones too, as
+/// [`ShortRuns::finish`]'s `DroppedSeries` case. Shared by `line`, `area`,
+/// `ribbon` and `polygon`, so their gates name the same blank one way.
 ///
 /// [`MarkBuildResult::empty_reason`]: crate::render::draw::MarkBuildResult::empty_reason
 pub(crate) fn short_series_empty_reason(rule: &str, noun: SeriesNoun, short: usize, emitted: usize) -> Option<EmptyReason> {
@@ -636,6 +638,138 @@ pub(crate) fn short_series_empty_reason(rule: &str, noun: SeriesNoun, short: usi
         };
         EmptyReason(format!("{rule}, and {tail}"))
     })
+}
+
+impl SeriesNoun {
+    /// The word for one of this run's own placed vertices, by the EXACT
+    /// count it kept — never [`short_counts`](Self::short_counts)'s static
+    /// range, which only describes what COULD be short when every run was.
+    /// A series or band below its mark's two-vertex minimum always keeps
+    /// exactly one, so it is always singular; a ring below its three-vertex
+    /// minimum can keep one or two.
+    fn vertex_word(self, count: usize) -> &'static str {
+        match self {
+            Self::Series | Self::Band => "point",
+            Self::Polygon if count == 1 => "vertex",
+            Self::Polygon => "vertices",
+        }
+    }
+}
+
+/// The number word a dropped run's own vertex count spells. The only counts
+/// a mark's own minimum can leave below it are one and two (three and up
+/// already meets a ring's minimum, two already meets a series' or band's).
+fn count_word(count: usize) -> &'static str {
+    if count == 1 { "one" } else { "two" }
+}
+
+/// One run (series, band or ring) a mark's connectivity gate walked and
+/// found short: its 0-based ordinal among the mark's own groups, a
+/// representative row of the run (any row the gate walked for it —
+/// [`describe_group_row`] reads it for the run's name), and the
+/// placed-vertex count it kept, always below the mark's own minimum by
+/// construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShortRun {
+    ordinal: usize,
+    row: usize,
+    kept: usize,
+}
+
+/// One mark build's own tally of the runs its connectivity gate dropped,
+/// built with the mark's own [`short_series_empty_reason`] rule, its
+/// [`SeriesNoun`] and its total run count, [`note`](Self::note)d once per
+/// run as the gate walks it and [`finish`](Self::finish)ed once after every
+/// group has been visited.
+///
+/// The one owner, for `line`, `area`, `ribbon` and `polygon`, of naming a
+/// dropped run and of deciding whether nothing drew: each mark's own
+/// connectivity gate calls [`note`](Self::note) once per short run and
+/// [`finish`](Self::finish) once after every group has been visited, so
+/// the four builders cannot drift on either question — including the one
+/// [`note`] enforces for all of them, a run with no placed vertex at all
+/// (the per-row null/non-finite skip) is never noted, so it can never be
+/// counted as a connectivity drop by only some of the four.
+pub(crate) struct ShortRuns {
+    rule: &'static str,
+    noun: SeriesNoun,
+    total: usize,
+    runs: Vec<ShortRun>,
+}
+
+impl ShortRuns {
+    /// `rule` and `noun` are the mark's own connectivity statement (the
+    /// text [`short_series_empty_reason`] states), `total` the number of
+    /// groups the mark partitioned its rows into (for the ordinal
+    /// fallback's "of `total`").
+    pub(crate) fn new(rule: &'static str, noun: SeriesNoun, total: usize) -> Self {
+        Self { rule, noun, total, runs: Vec::new() }
+    }
+
+    /// Records group `ordinal` (0-based) as short: `rows` holds rows of the
+    /// run, its first being the representative row the name is read from
+    /// (line, area and ribbon pass the run's placed rows, polygon every
+    /// row of the ring), read only when `kept` is at least 1; `kept` is the
+    /// placed-vertex count the run actually kept, below the mark's own
+    /// minimum. A run with zero kept vertices had no placed vertex at all —
+    /// the documented per-row null/non-finite skip — and is not noted: it
+    /// was never a connectivity drop, so it counts toward neither the empty
+    /// reason nor a dropped-series name.
+    pub(crate) fn note(&mut self, ordinal: usize, rows: &[usize], kept: usize) {
+        if kept == 0 {
+            return;
+        }
+        if let Some(&row) = rows.first() {
+            self.runs.push(ShortRun { ordinal, row, kept });
+        }
+    }
+
+    /// `emitted` is the count of nodes the mark actually drew. `Some(..)`
+    /// in the first slot (an [`EmptyReason`]) when nothing drew and at
+    /// least one run was short — [`short_series_empty_reason`]'s own text,
+    /// unchanged. The second slot (a [`crate::render::draw::DroppedSeries`])
+    /// is `Some` whenever at least one run was short, WHETHER OR NOT
+    /// anything drew: the per-panel draw site cannot yet tell a panel
+    /// where this layer draws nothing at all from one where it draws
+    /// elsewhere in another panel, so it needs every short run's name
+    /// either way, to use if the layer turns out to draw somewhere. Each
+    /// run is named by [`describe_group_row`] over `naming_fields`
+    /// (deduplicated in order, so a column bound to two splitting inputs —
+    /// a caller's color and categorical `stroke_dash` on the same field,
+    /// color and `detail` on the same field, or a call-built ring's
+    /// categorical position and color — is still named once) at its own
+    /// representative row, else its ordinal position among `total` runs
+    /// under its own mark's noun, plus the vertex count it kept.
+    pub(crate) fn finish(
+        self,
+        emitted: usize,
+        batch: &RecordBatch,
+        naming_fields: &[String],
+    ) -> (Option<EmptyReason>, Option<crate::render::draw::DroppedSeries>) {
+        let Self { rule, noun, total, runs } = self;
+        if runs.is_empty() {
+            return (None, None);
+        }
+        let empty_reason = short_series_empty_reason(rule, noun, runs.len(), emitted);
+        let mut naming_fields_deduped: Vec<String> = Vec::with_capacity(naming_fields.len());
+        for field in naming_fields {
+            if !naming_fields_deduped.contains(field) {
+                naming_fields_deduped.push(field.clone());
+            }
+        }
+        let dropped_runs = runs
+            .into_iter()
+            .map(|run| {
+                let name = describe_group_row(batch, &naming_fields_deduped, run.row)
+                    .unwrap_or_else(|| format!("{} {} of {total}", noun.singular(), run.ordinal + 1));
+                crate::render::draw::DroppedRun {
+                    row: run.row,
+                    name: format!("{name} ({} {})", count_word(run.kept), noun.vertex_word(run.kept)),
+                }
+            })
+            .collect();
+        (empty_reason, Some(crate::render::draw::DroppedSeries { rule: rule.to_string(), runs: dropped_runs }))
+    }
 }
 
 /// What a traced path reveals about the axis it was ACTUALLY fitted against —
@@ -1328,5 +1462,103 @@ mod tests {
             "the WASM parity fixture drifted from the real monotone output — \
              update crates/ferrum-wasm/src/tessellate.rs to match"
         );
+    }
+
+    // ── ShortRuns (dropped-run tally) ──────────────────────────────────────
+
+    fn group_batch() -> RecordBatch {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["a", "b", "c"]))],
+        )
+        .unwrap()
+    }
+
+    /// Nothing drew and at least one run was short: `finish` returns
+    /// `short_series_empty_reason`'s own text, unchanged, AND the
+    /// `DroppedSeries` naming every short run, since the per-panel draw
+    /// site cannot yet tell "this layer draws nowhere" from "this layer
+    /// draws in another panel" — that choice is made once every panel has
+    /// had its say, not here.
+    #[test]
+    fn short_runs_finish_reports_the_empty_reason_when_nothing_drew() {
+        let batch = group_batch();
+        let mut runs = ShortRuns::new("mark_line() joins two or more points per series", SeriesNoun::Series, 1);
+        runs.note(0, &[1], 1);
+        let (reason, dropped) = runs.finish(0, &batch, &[]);
+        assert_eq!(
+            reason.map(|r| r.0),
+            Some("mark_line() joins two or more points per series, and its one series has one".to_string())
+        );
+        assert_eq!(dropped.unwrap().runs[0].name, "series 1 of 1 (one point)");
+    }
+
+    /// Something drew and a run was short: `finish` names it by the caller
+    /// column at its own representative row, with the parenthetical giving
+    /// the vertices it kept — singular for one, the mark-specific word
+    /// pluralized for two.
+    #[test]
+    fn short_runs_finish_names_a_dropped_run_by_its_naming_field() {
+        let batch = group_batch();
+        let cols = vec!["g".to_string()];
+
+        let mut series = ShortRuns::new("mark_line() joins two or more points per series", SeriesNoun::Series, 3);
+        series.note(1, &[1], 1);
+        let (reason, dropped) = series.finish(1, &batch, &cols);
+        assert!(reason.is_none());
+        let dropped = dropped.unwrap();
+        assert_eq!(dropped.runs.len(), 1);
+        assert_eq!(dropped.runs[0].row, 1);
+        assert_eq!(dropped.runs[0].name, "g=b (one point)");
+
+        let mut polygons = ShortRuns::new("a polygon joins three or more vertices", SeriesNoun::Polygon, 3);
+        polygons.note(2, &[2], 1);
+        assert_eq!(polygons.finish(1, &batch, &cols).1.unwrap().runs[0].name, "g=c (one vertex)");
+
+        let mut polygons = ShortRuns::new("a polygon joins three or more vertices", SeriesNoun::Polygon, 3);
+        polygons.note(2, &[2], 2);
+        assert_eq!(polygons.finish(1, &batch, &cols).1.unwrap().runs[0].name, "g=c (two vertices)");
+    }
+
+    /// A column bound to two splitting inputs (a caller's color and
+    /// categorical `stroke_dash` on the same field, color and `detail` on
+    /// the same field, or a call-built ring's categorical position and
+    /// color) reaches `finish` as the same field name twice in
+    /// `naming_fields`. It still names the dropped run by that field
+    /// exactly once, not once per input that happened to split on it.
+    #[test]
+    fn short_runs_finish_names_a_field_bound_to_two_inputs_once() {
+        let batch = group_batch();
+        let twice = vec!["g".to_string(), "g".to_string()];
+        let mut series = ShortRuns::new("mark_line() joins two or more points per series", SeriesNoun::Series, 3);
+        series.note(1, &[1], 1);
+        let dropped = series.finish(1, &batch, &twice).1.unwrap();
+        assert_eq!(dropped.runs[0].name, "g=b (one point)", "a field bound twice must be named once, not 'g=b, g=b'");
+    }
+
+    /// With no naming field at all, a dropped run falls back to its
+    /// 1-based ordinal position among every run the builder grouped.
+    #[test]
+    fn short_runs_finish_falls_back_to_its_ordinal_with_no_naming_field() {
+        let batch = group_batch();
+        let no_cols: Vec<String> = Vec::new();
+        let mut runs = ShortRuns::new("mark_line() joins two or more points per series", SeriesNoun::Series, 5);
+        runs.note(2, &[1], 1);
+        let dropped = runs.finish(1, &batch, &no_cols).1.unwrap();
+        assert_eq!(dropped.runs[0].name, "series 3 of 5 (one point)");
+    }
+
+    /// A run noted with zero placed vertices (the per-row null/non-finite
+    /// skip) is not counted: it contributes to neither the empty reason
+    /// nor a dropped-series name.
+    #[test]
+    fn short_runs_note_ignores_a_run_with_no_placed_vertex() {
+        let batch = group_batch();
+        let mut runs = ShortRuns::new("mark_line() joins two or more points per series", SeriesNoun::Series, 1);
+        runs.note(0, &[0], 0);
+        assert_eq!(runs.finish(0, &batch, &[]), (None, None));
     }
 }

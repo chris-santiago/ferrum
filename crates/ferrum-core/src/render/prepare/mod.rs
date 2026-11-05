@@ -3003,6 +3003,17 @@ pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::
     spec.layers.as_ref().and_then(|_| voiced_layer(li, &layer_entry(spec, li, mark), mark))
 }
 
+/// Whether a desugaring call, rather than the caller directly, built the
+/// layer carrying `entry`: `entry` is not `mark`'s own primitive default
+/// (`mark_{mark}`). [`voiced_layer`] reads this to decide whether a layer's
+/// index still locates it for the caller; [`crate::render::marks::polygon::naming_columns`]
+/// reads it to decide whether a dropped ring is named by the internal
+/// grouping id a call bound to `detail`, or by the categories and
+/// color a reader actually sees.
+pub(in crate::render) fn built_by_call(entry: &str, mark: crate::spec::mark::Mark) -> bool {
+    entry != format!("mark_{}", mark.as_str())
+}
+
 /// The index a layer-voiced message names a layer by, given its `index` in
 /// the numbering the message counts and its `entry`: `Some(index)` when the
 /// entry is its own mark's primitive (a layer the caller placed, whose index
@@ -3013,7 +3024,7 @@ pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::
 /// applies: [`public_layer`] on a layered spec, and the composite overlay on
 /// its group's member-order numbering.
 pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::spec::mark::Mark) -> Option<usize> {
-    (entry == format!("mark_{}", mark.as_str())).then_some(index)
+    (!built_by_call(entry, mark)).then_some(index)
 }
 
 /// Refuse a layer of a layered spec that names a column absent from that

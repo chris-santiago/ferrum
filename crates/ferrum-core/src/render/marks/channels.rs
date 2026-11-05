@@ -379,27 +379,41 @@ pub(crate) fn polar_channel_resolver<'a>(
 /// (color, detail) grouping alone.
 ///
 /// # Arguments
-/// - `color_values`: optional per-row color strings (loaded by the caller).
-/// - `detail_values`: optional per-row detail strings (loaded by the caller).
-/// - `splits`: per-row category strings, one column per further split.
+/// - `color`: the caller's own color field and its optional per-row color
+///   strings (loaded by the caller) — a binned color passes the caller's
+///   raw column field name with its bin keys, so a dropped series names
+///   the column the caller wrote, not its resolved bin edge.
+/// - `detail`: the caller's own `detail` field and its optional per-row
+///   detail strings.
+/// - `splits`: each further split's own caller field and its per-row
+///   category strings — a categorical `stroke_dash` field,
+///   [`grouping_series_values`]'s fields.
 /// - `has_color_scale`: whether a resolved color scale is present; gates the
 ///   color-only branch (matches `&ctx.scales.color` being `Some(_)`).
 /// - `n_rows`: total row count, used for the fallback all-rows group.
 ///
 /// # Returns
-/// `Vec<(Option<String>, Vec<usize>)>` — one entry per group. The `Option<String>`
-/// is the color legend key for that group (`None` in the detail-only and
-/// fallback cases); a subdivided group repeats its parent's key.
+/// A [`SeriesPartition`]: `groups` is one entry per group (the
+/// `Option<String>` is the color legend key for that group — `None` in the
+/// detail-only and fallback cases; a subdivided group repeats its parent's
+/// key), `fields` the caller fields of exactly the inputs this partition
+/// actually read: color-only with a scale gives color; detail-only gives
+/// detail; both give color then detail; color without a scale and the
+/// neither branch give neither; every split's field follows, in order.
+/// `fields` is [`crate::render::marks::curve::ShortRuns::finish`]'s
+/// `naming_fields` — reading it from the same match that decides the
+/// grouping means naming can never cite a field that did not actually
+/// split the series.
 pub(crate) fn build_color_detail_groups<'v>(
-    color_values: Option<&Vec<Option<String>>>,
-    detail_values: Option<&Vec<Option<String>>>,
-    splits: impl IntoIterator<Item = &'v Vec<Option<String>>>,
+    color: Option<(&'v str, &'v Vec<Option<String>>)>,
+    detail: Option<(&'v str, &'v Vec<Option<String>>)>,
+    splits: impl IntoIterator<Item = (&'v str, &'v Vec<Option<String>>)>,
     has_color_scale: bool,
     n_rows: usize,
-) -> Vec<(Option<String>, Vec<usize>)> {
-    let groups = match (color_values, detail_values, has_color_scale) {
+) -> SeriesPartition {
+    let (groups, mut fields) = match (color, detail, has_color_scale) {
         // Color only: one group per color category; key retained for legend.
-        (Some(cv), None, true) => {
+        (Some((cf, cv)), None, true) => {
             let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
             for (i, v) in cv.iter().enumerate() {
                 let key = v.clone();
@@ -408,11 +422,11 @@ pub(crate) fn build_color_detail_groups<'v>(
                     None => groups.push((key, vec![i])),
                 }
             }
-            groups
+            (groups, vec![cf.to_string()])
         }
         // Detail only: one group per detail value; key stripped so fill falls
         // to the mark-style default (no per-group color from the legend).
-        (None, Some(dv), _) => {
+        (None, Some((df, dv)), _) => {
             let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
             for (i, v) in dv.iter().enumerate() {
                 let key = v.clone();
@@ -421,10 +435,10 @@ pub(crate) fn build_color_detail_groups<'v>(
                     None => groups.push((key, vec![i])),
                 }
             }
-            groups.into_iter().map(|(_, rows)| (None, rows)).collect()
+            (groups.into_iter().map(|(_, rows)| (None, rows)).collect(), vec![df.to_string()])
         }
         // Both color and detail: one group per (color, detail) pair.
-        (Some(cv), Some(dv), _) => {
+        (Some((cf, cv)), Some((df, dv)), _) => {
             let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
             for i in 0..n_rows {
                 let composite = (cv[i].clone(), dv[i].clone());
@@ -437,12 +451,26 @@ pub(crate) fn build_color_detail_groups<'v>(
                     None => groups.push((cv[i].clone(), vec![i])),
                 }
             }
-            groups
+            (groups, vec![cf.to_string(), df.to_string()])
         }
         // No color, no detail (or color present but no scale): single group.
-        _ => vec![(None, (0..n_rows).collect())],
+        _ => (vec![(None, (0..n_rows).collect())], Vec::new()),
     };
-    splits.into_iter().fold(groups, |groups, values| subdivide(groups, values))
+    let splits: Vec<(&str, &Vec<Option<String>>)> = splits.into_iter().collect();
+    fields.extend(splits.iter().map(|(field, _)| field.to_string()));
+    let groups = splits.into_iter().fold(groups, |groups, (_, values)| subdivide(groups, values));
+    SeriesPartition { groups, fields }
+}
+
+/// [`build_color_detail_groups`]'s return: the series/ring partition every
+/// `vertex_frame` and `build` reads (`groups`), and the caller's own fields
+/// that partition actually split on (`fields`), read by
+/// [`crate::render::marks::curve::ShortRuns::finish`] to name a dropped
+/// run — one source for both, so a dropped series can never be named by a
+/// field that did not split it.
+pub(crate) struct SeriesPartition {
+    pub(crate) groups: Vec<(Option<String>, Vec<usize>)>,
+    pub(crate) fields: Vec<String>,
 }
 
 /// Subdivide each `(color_key, rows)` group by per-row category `values`
@@ -470,13 +498,18 @@ fn subdivide(
     out
 }
 
-/// Each row's value of every field a series mark's statistic grouped its
-/// series by beyond the channels the mark draws
-/// ([`GroupStyle::series`](crate::render::draw::GroupStyle)), one column per
-/// field, for [`build_color_detail_groups`]'s splits. A field the rows do
-/// not carry splits nothing.
-pub(crate) fn grouping_series_values(ctx: &DrawCtx) -> Vec<Vec<Option<String>>> {
-    ctx.mark_style.group.series.iter().filter_map(|field| col_as_ordinal_category_str(ctx.batch, field).ok()).collect()
+/// Each field a series mark's statistic grouped its series by beyond the
+/// channels the mark draws ([`GroupStyle::series`](crate::render::draw::GroupStyle)),
+/// paired with each row's value of that field, for
+/// [`build_color_detail_groups`]'s splits. A field the rows do not carry
+/// contributes neither an entry nor a split.
+pub(crate) fn grouping_series_values(ctx: &DrawCtx) -> Vec<(String, Vec<Option<String>>)> {
+    ctx.mark_style
+        .group
+        .series
+        .iter()
+        .filter_map(|field| col_as_ordinal_category_str(ctx.batch, field).ok().map(|values| (field.clone(), values)))
+        .collect()
 }
 
 /// The series a binned color (`Color(bin=...)`) splits a mark into: each
@@ -728,7 +761,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     #[test]
     fn groups_color_only_with_scale_partitions_by_color() {
         let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A"), sv("B")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, None, true, 4);
+        let groups = super::build_color_detail_groups(Some(("c", &cv)), None, Vec::new(), true, 4).groups;
         assert_eq!(groups.len(), 2, "two color keys → two groups");
         assert_eq!(groups[0].0, sv("A"));
         assert_eq!(groups[0].1, vec![0, 2]);
@@ -741,7 +774,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     #[test]
     fn groups_color_only_without_scale_is_single_group() {
         let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, None, false, 3);
+        let groups = super::build_color_detail_groups(Some(("c", &cv)), None, Vec::new(), false, 3).groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, None);
         assert_eq!(groups[0].1, vec![0, 1, 2]);
@@ -752,7 +785,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     #[test]
     fn groups_detail_only_strips_key_to_none() {
         let dv: Vec<Option<String>> = vec![sv("s0"), sv("s1"), sv("s0"), sv("s1")];
-        let groups = super::build_color_detail_groups(None, Some(&dv), None, false, 4);
+        let groups = super::build_color_detail_groups(None, Some(("d", &dv)), Vec::new(), false, 4).groups;
         assert_eq!(groups.len(), 2, "two detail values → two groups");
         // Keys are stripped to None in both groups.
         assert!(groups.iter().all(|(k, _)| k.is_none()), "detail-only keys must all be None");
@@ -770,7 +803,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         // 4 rows: (A,x), (A,y), (B,x), (B,y)
         let cv: Vec<Option<String>> = vec![sv("A"), sv("A"), sv("B"), sv("B")];
         let dv: Vec<Option<String>> = vec![sv("x"), sv("y"), sv("x"), sv("y")];
-        let groups = super::build_color_detail_groups(Some(&cv), Some(&dv), None, true, 4);
+        let groups = super::build_color_detail_groups(Some(("c", &cv)), Some(("d", &dv)), Vec::new(), true, 4).groups;
         assert_eq!(groups.len(), 4, "4 distinct (color, detail) pairs → 4 groups");
         // Color key is retained; each group has exactly one row.
         assert_eq!(groups[0], (sv("A"), vec![0]));
@@ -783,7 +816,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     /// no-color case).
     #[test]
     fn groups_no_color_no_detail_is_single_group() {
-        let groups = super::build_color_detail_groups(None, None, None, false, 5);
+        let groups = super::build_color_detail_groups(None, None, Vec::new(), false, 5).groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, None);
         assert_eq!(groups[0].1, vec![0, 1, 2, 3, 4]);
@@ -799,7 +832,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         // 4 rows, one color "A", two dash categories "solid"/"dashed" interleaved.
         let cv: Vec<Option<String>> = vec![sv("A"), sv("A"), sv("A"), sv("A")];
         let dv: Vec<Option<String>> = vec![sv("solid"), sv("dashed"), sv("solid"), sv("dashed")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, Some(&dv), true, 4);
+        let groups = super::build_color_detail_groups(Some(("c", &cv)), None, [("dash", &dv)], true, 4).groups;
         assert_eq!(groups.len(), 2, "one color key x two dash categories = 2 groups");
         assert_eq!(groups[0], (sv("A"), vec![0, 2]));
         assert_eq!(groups[1], (sv("A"), vec![1, 3]));
@@ -811,7 +844,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     #[test]
     fn groups_no_dash_values_is_byte_identical_to_pre_t12() {
         let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A"), sv("B")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, None, true, 4);
+        let groups = super::build_color_detail_groups(Some(("c", &cv)), None, Vec::new(), true, 4).groups;
         assert_eq!(groups.len(), 2, "two color keys → two groups, unaffected by absent dash_values");
         assert_eq!(groups[0], (sv("A"), vec![0, 2]));
         assert_eq!(groups[1], (sv("B"), vec![1, 3]));
@@ -823,10 +856,49 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     #[test]
     fn groups_dash_only_partitions_with_none_key() {
         let dv: Vec<Option<String>> = vec![sv("solid"), sv("dashed"), sv("solid")];
-        let groups = super::build_color_detail_groups(None, None, Some(&dv), false, 3);
+        let groups = super::build_color_detail_groups(None, None, [("dash", &dv)], false, 3).groups;
         assert_eq!(groups.len(), 2, "two dash categories → two groups");
         assert!(groups.iter().all(|(k, _)| k.is_none()));
         assert_eq!(groups[0].1, vec![0, 2]);
         assert_eq!(groups[1].1, vec![1]);
+    }
+
+    // ── SeriesPartition::fields (naming fields) ───────────────────────────────
+
+    /// Guard: color-only with a scale names the color field.
+    #[test]
+    fn fields_color_only_with_scale_names_the_color_field() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B")];
+        let fields = super::build_color_detail_groups(Some(("c", &cv)), None, Vec::new(), true, 2).fields;
+        assert_eq!(fields, vec!["c".to_string()]);
+    }
+
+    /// Guard: color present but no scale does not split the series, so it
+    /// names no field — a field never named unless it actually partitioned
+    /// a run.
+    #[test]
+    fn fields_color_without_a_scale_names_no_field() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B")];
+        let fields = super::build_color_detail_groups(Some(("c", &cv)), None, Vec::new(), false, 2).fields;
+        assert_eq!(fields, Vec::<String>::new());
+    }
+
+    /// Guard: detail-only names the detail field.
+    #[test]
+    fn fields_detail_only_names_the_detail_field() {
+        let dv: Vec<Option<String>> = vec![sv("x"), sv("y")];
+        let fields = super::build_color_detail_groups(None, Some(("d", &dv)), Vec::new(), false, 2).fields;
+        assert_eq!(fields, vec!["d".to_string()]);
+    }
+
+    /// Guard: color and detail together name color then detail, and
+    /// each split's field follows, in the order the splits were given.
+    #[test]
+    fn fields_color_and_detail_name_both_then_each_split() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B")];
+        let dv: Vec<Option<String>> = vec![sv("x"), sv("y")];
+        let dash: Vec<Option<String>> = vec![sv("solid"), sv("dashed")];
+        let fields = super::build_color_detail_groups(Some(("c", &cv)), Some(("d", &dv)), [("dash", &dash)], true, 2).fields;
+        assert_eq!(fields, vec!["c".to_string(), "d".to_string(), "dash".to_string()]);
     }
 }

@@ -1,3 +1,5 @@
+import warnings
+
 import polars as pl
 import pytest
 import ferrum as fe
@@ -15,9 +17,11 @@ def df():
 
 
 def test_ribbon_basic(df):
+    """A bare mark_ribbon lowers to one unlayered ribbon mark, as mark_area does."""
     chart = fe.Chart(df).mark_ribbon().encode(x="t", y="lo", y2="hi")
     spec = chart._build_spec()
-    assert len(spec.layers) == 1
+    assert spec.layers is None
+    assert spec.mark == "ribbon"
 
 
 def test_ribbon_missing_y2_raises(df):
@@ -81,8 +85,8 @@ def test_ribbon_cardinal_emits_curve_command(df):
 
 def test_ribbon_default_renders_identically_to_prefix_spec_without_interpolate(df):
     """Byte-stability: a genuinely pre-fix spec (no ``interpolate`` key at
-    all in the ribbon layer's ``mark_style``, reconstructed by stripping the
-    key from the post-fix JSON and re-parsing via ``ChartSpec.from_json``)
+    all in the flat ribbon mark's ``mark_style``, reconstructed by stripping
+    the key from the post-fix JSON and re-parsing via ``ChartSpec.from_json``)
     must render identically to the post-fix default.  This is the Python
     side of the same property Rust pins directly in
     ``ribbon_linear_output_is_byte_identical_to_pre_change``
@@ -95,7 +99,7 @@ def test_ribbon_default_renders_identically_to_prefix_spec_without_interpolate(d
     chart = fe.Chart(df).mark_ribbon().encode(x="t", y="lo", y2="hi")
     spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
     spec_dict = json.loads(spec.to_json())
-    layer_style = spec_dict["layers"][0]["mark_style"]
+    layer_style = spec_dict["mark_style"]
     assert "interpolate" in layer_style  # forwarding did add the key post-fix
     del layer_style["interpolate"]
     prefix_spec = ChartSpec.from_json(json.dumps(spec_dict))
@@ -118,3 +122,96 @@ def test_ribbon_unknown_interpolate_raises_value_error(df):
     so it needed its own gate rather than inheriting one."""
     with pytest.raises(ValueError, match="smooth"):
         fe.Chart(df).mark_ribbon(interpolate="smooth")
+
+
+# ---------------------------------------------------------------------------
+# A bare mark_ribbon() is unlayered: every message about it, and every
+# option its own x/y/y2 bindings carry, reaches it the way mark_area's do.
+# ---------------------------------------------------------------------------
+
+
+def test_a_bare_ribbons_other_messages_drop_the_layer_index_too(df):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fe.Chart(df).mark_ribbon().encode(x="t", y="lo", y2="hi", size="lo").to_svg()
+    messages = [str(w.message) for w in caught]
+    assert len(messages) == 1
+    assert messages[0].startswith("mark_ribbon: size 'lo' has no effect")
+
+    with pytest.raises(ValueError) as excinfo:
+        fe.Chart(df).mark_ribbon().encode(x="t", y="lo", y2="hi", color="nope").to_svg()
+    assert str(excinfo.value) == "unknown column 'nope' referenced by an encoding"
+
+
+def test_plus_mark_line_mark_ribbon_partial_ribbon_keeps_its_own_layer_index():
+    drawn = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "g": ["a", "a", "a"]})
+    partial = pl.DataFrame(
+        {"x": [1.0, 2.0, 1.0], "lo": [1.0, 2.0, 1.0], "hi": [3.0, 4.0, 3.0], "g": ["a", "a", "b"]}
+    )
+    line = fe.Chart(drawn).mark_line().encode(x="x", y="y", color="g")
+    ribbon = fe.Chart(partial).mark_ribbon().encode(x="x", y="lo", y2="hi", color="g")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        (line + ribbon).to_svg()
+    messages = [str(w.message) for w in caught]
+    expected = (
+        "layer 1: mark_ribbon: mark_ribbon() spans two or more points per band, "
+        "so it did not draw g=b (one point)"
+    )
+    assert messages == [expected]
+
+
+def test_ribbon_aggregate_renders_identically_to_the_pre_aggregated_frame():
+    """mark_ribbon's y/y2 honor aggregate=, as mark_area's do, since the
+    chart's own encoding reaches the mark unrebuilt."""
+    raw = pl.DataFrame(
+        {
+            "x": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            "lo": [0.0, 1.0, 1.0, 2.0, 2.0, 4.0],
+            "hi": [2.0, 3.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    pre_aggregated = raw.group_by("x", maintain_order=True).agg(
+        pl.col("lo").mean(), pl.col("hi").mean()
+    )
+    aggregated_svg = (
+        fe.Chart(raw)
+        .mark_ribbon()
+        .encode(x="x", y=fe.Y("lo", aggregate="mean", title="lo"), y2=fe.Y2("hi", aggregate="mean"))
+        .to_svg()
+    )
+    pre_aggregated_svg = (
+        fe.Chart(pre_aggregated)
+        .mark_ribbon()
+        .encode(x="x", y=fe.Y("lo", title="lo"), y2="hi")
+        .to_svg()
+    )
+    assert aggregated_svg == pre_aggregated_svg
+
+
+def test_ribbon_interactive_tooltip_carries_caller_titles_and_color():
+    """The interactive scene of a titled, colored ribbon carries the
+    caller's axis titles and a color entry, as mark_area's does.
+
+    Asserts on the tooltip's own structured field entries
+    (``{"name":"XT",...}``), not a bare substring search: the scene embeds
+    a WASM binary blob (base64) in which short needles like "XT"/"YT"/"g"
+    turn up by sheer coincidence, matching whether or not the real tooltip
+    carries them.
+    """
+    rows = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 1.0, 2.0],
+            "lo": [1.0, 2.0, 1.0, 2.0],
+            "hi": [2.0, 3.0, 2.0, 3.0],
+            "g": ["a", "a", "b", "b"],
+        }
+    )
+    chart = (
+        fe.Chart(rows)
+        .mark_ribbon()
+        .encode(x=fe.X("x", title="XT"), y=fe.Y("lo", title="YT"), y2="hi", color="g")
+    )
+    html = chart.interactive().to_html()
+    for needle in ('"name":"XT"', '"name":"YT"', '"name":"g"'):
+        assert needle in html, needle

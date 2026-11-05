@@ -32,7 +32,9 @@ def test_direct_label_endpoint_skips_null_group_values(recwarn):
     """#220 sibling defect: a null ``label_field`` value (e.g. an injected
     sentinel row) must not reach ``pl.col(label_field) == series``, which
     always evaluates to null in polars and warns "Comparisons with None
-    always result in null"."""
+    always result in null". The null group's single row is also the one
+    series too short to draw, so the render names it (``split=null (one
+    point)``)."""
     df = pl.DataFrame(
         {
             "x": [1, 2, 3, 1, 2, 3, 1],
@@ -46,4 +48,8 @@ def test_direct_label_endpoint_skips_null_group_values(recwarn):
     assert ">train<" in svg
     assert ">val<" in svg
     user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
-    assert not user_warnings, [str(w.message) for w in user_warnings]
+    expected = (
+        "layer 0: mark_line: mark_line() joins two or more points per series, "
+        "so it did not draw split=null (one point)"
+    )
+    assert [str(w.message) for w in user_warnings] == [expected]

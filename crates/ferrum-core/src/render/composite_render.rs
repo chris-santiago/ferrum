@@ -287,9 +287,10 @@ impl From<CompositeResolveError> for CompositeRenderError {
 /// before pushing — the composite reports the mistake once, not N times.
 ///
 /// Deliberately narrow: every OTHER warning variant this wave added
-/// (`Transform`, `GroupCardinalityDegenerate`, `MarkBuildEmpty`, the rolled-up
-/// `AnnotationSuppressedByBreak`/`AnnotationSpansBreakGap`,
-/// `UnknownColorScheme`) is derived from that leaf's own data or its own
+/// (`Transform`, `GroupCardinalityDegenerate`, `MarkBuildEmpty`,
+/// `SeriesDropped`, the rolled-up `AnnotationSuppressedByBreak`/
+/// `AnnotationSpansBreakGap`, `UnknownColorScheme`) is derived from that
+/// leaf's own data or its own
 /// literal encoding/scale resolution, so two leaves independently producing
 /// byte-identical warning content are two independent facts, not one
 /// declaration counted twice — they must keep fanning out

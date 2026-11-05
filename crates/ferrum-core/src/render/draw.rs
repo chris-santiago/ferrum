@@ -454,6 +454,27 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
     }
 }
 
+/// [`domain_left_out_counts`]'s return: its per-channel (or, for a
+/// statistic layer, per-axis) tallies ([`left_out`](Self::left_out), the
+/// [`DomainLeftOut`] report), plus — for a vertex-unit
+/// statistic layer only — the rows of every run the census tallies as hit
+/// and not drawn at all ([`runs_not_drawn`](Self::runs_not_drawn)), so the
+/// per-layer draw site can tell apart a run
+/// [`RenderWarning::DomainRowsLeftOut`](super::RenderWarning::DomainRowsLeftOut)
+/// already reports as not drawn from one
+/// [`RenderWarning::SeriesDropped`](super::RenderWarning::SeriesDropped)
+/// is the only report for, by row membership
+/// — the per-RUN exemption [`RenderWarning::SeriesDropped`]'s own doc
+/// states. The census and the vertex-unit builder share one partition
+/// (the same `VertexFrame` `groups`), so any row of a run identifies it to
+/// both. `runs_not_drawn` is empty for a primitive layer (no vertex-unit
+/// outcome exists there at all) and for a statistic layer with no
+/// [`VertexFrame`] (a histogram's bars, say).
+pub(crate) struct DomainCensus {
+    pub(crate) left_out: Vec<DomainLeftOut>,
+    pub(crate) runs_not_drawn: std::collections::BTreeSet<usize>,
+}
+
 /// Count, per positional placement [`dispatch_mark_placements`] names for
 /// this layer's mark, how many of `ctx.batch`'s rows an explicit domain
 /// leaves out — the draw-time half of
@@ -497,7 +518,7 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
 pub(crate) fn domain_left_out_counts(
     ctx: &DrawCtx,
     statistic: Option<&StatisticVoice>,
-) -> Result<Vec<DomainLeftOut>, RenderError> {
+) -> Result<DomainCensus, RenderError> {
     use std::collections::BTreeSet;
 
     let bindings = ctx.spec.encoding.bindings();
@@ -525,7 +546,7 @@ pub(crate) fn domain_left_out_counts(
                 cut: false,
             });
         }
-        return Ok(out);
+        return Ok(DomainCensus { left_out: out, runs_not_drawn: BTreeSet::new() });
     };
 
     // One statistic axis's left-out rows, merged over its primary and
@@ -553,7 +574,7 @@ pub(crate) fn domain_left_out_counts(
         });
     }
     if axes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DomainCensus { left_out: Vec::new(), runs_not_drawn: BTreeSet::new() });
     }
     let report = |axis: &AxisLeftOut, rows: usize, cut: bool| DomainLeftOut {
         channel: axis.axis.as_str().to_string(),
@@ -565,16 +586,24 @@ pub(crate) fn domain_left_out_counts(
     };
 
     let Some(frame) = dispatch_vertex_frame(&ctx.spec.mark, ctx) else {
-        return Ok(axes.iter().map(|axis| report(axis, axis.rows.len(), false)).collect());
+        let left_out = axes.iter().map(|axis| report(axis, axis.rows.len(), false)).collect();
+        return Ok(DomainCensus { left_out, runs_not_drawn: BTreeSet::new() });
     };
     // Per axis, `(not drawn, drawn cut)` marks.
     let mut tallies = vec![(0usize, 0usize); axes.len()];
+    // The rows of every group hit and not drawn at all, over every axis —
+    // `runs_not_drawn`, read once per group rather than per axis since a
+    // group's rows are the same regardless of which axis it hit.
+    let mut runs_not_drawn = BTreeSet::new();
     for group in &frame.groups {
         let hit: Vec<usize> = (0..axes.len()).filter(|&k| group.iter().any(|i| axes[k].rows.contains(i))).collect();
         if hit.is_empty() {
             continue;
         }
         let drawn = frame.draws(group);
+        if !drawn {
+            runs_not_drawn.extend(group.iter().copied());
+        }
         for k in hit {
             if drawn {
                 tallies[k].1 += 1;
@@ -583,16 +612,16 @@ pub(crate) fn domain_left_out_counts(
             }
         }
     }
-    let mut out = Vec::new();
+    let mut left_out = Vec::new();
     for (axis, (not_drawn, cut)) in axes.iter().zip(tallies) {
         if not_drawn > 0 {
-            out.push(report(axis, not_drawn, false));
+            left_out.push(report(axis, not_drawn, false));
         }
         if cut > 0 {
-            out.push(report(axis, cut, true));
+            left_out.push(report(axis, cut, true));
         }
     }
-    Ok(out)
+    Ok(DomainCensus { left_out, runs_not_drawn })
 }
 
 pub struct DrawCtx<'a> {
@@ -1577,6 +1606,23 @@ pub struct MarkBuildResult {
     /// `MarkBuildResult`'s emptiness becomes a `RenderWarning` — see
     /// `RenderWarning::MarkBuildEmpty`.
     pub empty_reason: Option<EmptyReason>,
+    /// The runs [`empty_reason`](Self::empty_reason)'s own gate dropped
+    /// below the mark's minimum: `Some` whenever at least one run was
+    /// short, whether or not anything else drew (`ShortRuns::finish`
+    /// fills both alongside `empty_reason`, since the per-panel draw site
+    /// cannot yet tell a panel where this layer draws nowhere from one
+    /// where it draws in another panel), naming each dropped run and the
+    /// rule they failed. Read ONLY at `scene_build`'s per-layer draw site:
+    /// a panel where the layer drew something folds it straight into that
+    /// layer's
+    /// [`RenderWarning::SeriesDropped`](super::RenderWarning::SeriesDropped);
+    /// a panel where it drew nothing holds it until every panel has had
+    /// its say, then either folds it in (the layer draws elsewhere) or
+    /// discards it in favor of `MarkBuildEmpty` (the layer draws
+    /// nowhere). Populated only by `line`, `area`, `ribbon` and
+    /// `polygon`'s own connectivity gate; `None` for every other mark and
+    /// for a build with no short run at all.
+    pub dropped_series: Option<DroppedSeries>,
     /// Whether `nodes` already sit in the panel's polar pixel space: a
     /// builder that lays its own geometry out around the polar center (arc
     /// wedges, polar bars, self-placed polar text labels) sets it through
@@ -1596,6 +1642,38 @@ pub struct MarkBuildResult {
 /// mark; each call site already knows the exact true sentence to write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmptyReason(pub String);
+
+/// [`MarkBuildResult::dropped_series`]'s payload: the rule text a mark's
+/// connectivity gate states (the same text [`EmptyReason`] carries when
+/// every run fails it) and every run that failed it, named by
+/// [`crate::render::marks::curve::ShortRuns::finish`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedSeries {
+    pub rule: String,
+    pub runs: Vec<DroppedRun>,
+}
+
+/// One dropped run `DroppedSeries` carries: `row` is the row
+/// [`domain_left_out_counts`]'s census (`DomainCensus::runs_not_drawn`)
+/// names a run by, so the per-layer draw site can filter out a run the
+/// explicit-domain census already reports as not drawn at all before
+/// naming the rest; `name` is the run's full label, already carrying its
+/// vertex count (and, once the draw site attaches it, its own facet-panel
+/// clause).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedRun {
+    pub row: usize,
+    pub name: String,
+}
+
+#[cfg(test)]
+impl DroppedSeries {
+    /// `runs`' own names, for a test asserting the sentence each run
+    /// contributes without needing its row too.
+    pub(crate) fn names(&self) -> Vec<&str> {
+        self.runs.iter().map(|r| r.name.as_str()).collect()
+    }
+}
 
 impl MarkBuildResult {
     /// The populated case, beside [`empty`](Self::empty) and
@@ -1629,6 +1707,11 @@ impl MarkBuildResult {
         self
     }
 
+    pub fn with_dropped_series(mut self, dropped: Option<DroppedSeries>) -> Self {
+        self.dropped_series = dropped;
+        self
+    }
+
     /// Marks `nodes` as already laid out in polar pixel space (see
     /// [`polar_placed`](Self::polar_placed)).
     pub fn placed_in_polar(mut self) -> Self {
@@ -1642,7 +1725,7 @@ impl MarkBuildResult {
     }
 
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, vertex_rows: None, empty_reason: None, polar_placed: false }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, vertex_rows: None, empty_reason: None, dropped_series: None, polar_placed: false }
     }
 
     /// Like [`empty`](Self::empty), but names why — for a builder that
@@ -3993,5 +4076,76 @@ mod tests {
             "mark_rect: font_size has no effect on this rect mark without both a text encoding and the heatmap \
              shape (one cell per x/y band pair, no x2 or y2 range); it was ignored"
         );
+    }
+
+    // ── DomainCensus (per-run domain exemption) ───────────────────────────
+
+    /// A statistic (vertex-unit) layer's census names the ROWS of every run
+    /// an explicit x domain cut below the mark's own minimum — here group
+    /// `c`'s one row, left out by an unclamped `[0, 3]` domain — in
+    /// `runs_not_drawn`, so the per-layer draw site can exempt exactly that
+    /// run's own name from `SeriesDropped`. Group `b` is present too, short
+    /// on its own (one in-domain row, never hit by the domain at all), and
+    /// its row stays OUT of `runs_not_drawn` — the census's set is runs the
+    /// domain cut, not every run that fails to draw. A primitive layer over
+    /// the identical rows gives an empty set: its tally counts rows, never
+    /// runs.
+    #[test]
+    fn census_names_the_rows_of_a_run_the_domain_left_out_entirely() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Group "a": x = 1, 2 (inside [0, 3], both placed). Group "b": x =
+        // 1.5 (inside [0, 3], one placed row — short on its own, not hit by
+        // the domain). Group "c": x = 100 (outside [0, 3], not placed — the
+        // domain's one left-out row).
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 1.5])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 2.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "c", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["a".into(), "b".into(), "c".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let statistic = StatisticVoice { entry: "mark_line".to_string() };
+        let census = domain_left_out_counts(&ctx, Some(&statistic)).unwrap();
+        assert_eq!(census.runs_not_drawn, std::collections::BTreeSet::from([2]), "row 3 (group b's own short run) must stay out of the domain's set");
+        assert_eq!(census.left_out.len(), 1);
+        assert_eq!(census.left_out[0].rows, 1);
+        assert!(!census.left_out[0].cut);
+
+        let primitive = domain_left_out_counts(&ctx, None).unwrap();
+        assert!(primitive.runs_not_drawn.is_empty(), "a primitive layer's tally is never group-aware");
     }
 }

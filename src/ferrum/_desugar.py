@@ -1706,13 +1706,12 @@ def _resolve_pending_as(
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named
     # keys, not a fixed winner -- then merge THAT onto `new._mark_kwargs`
-    # (which `_clone()` already inherited from `chart._mark_kwargs`) through
-    # `merge_style`, as `Chart.mark_function`'s direct path does: a chart
-    # that already carries its own mark kwargs (e.g.
-    # `.mark_line(stroke_width=7)` called before a dispatcher-routed desugar)
-    # keeps them unless this call sets the same key. Only touches
-    # `new._mark_kwargs` when there is something new to fold in, so output
-    # stays byte-identical when neither source has anything.
+    # through `merge_style`, as `Chart.mark_function`'s direct path does.
+    # `new._mark_kwargs` here holds only what was set on this chart after
+    # this composite call, since the call reset the replaced mark's own
+    # style (`Chart._set_composite_mark`), and `merge_style` keeps a `None`
+    # unset. Only touches `new._mark_kwargs` when there is something new to
+    # fold in, so output stays byte-identical when neither side has anything.
     merged_mark_kwargs = _merge_desugar_mark_kwargs(
         single_mark_kwargs, style_dict, single_caller_keys
     )

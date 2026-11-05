@@ -885,28 +885,28 @@ def test_dispatcher_path_honors_desugar_function_mark_kwargs_and_data():
     assert dispatched_svg == direct_svg
 
 
-def test_dispatcher_path_merges_onto_inherited_mark_kwargs_like_the_direct_path():
-    """Design-review cycle-2 S2: the bare parity test above builds from
-    ``fe.Chart(None)``, whose ``_mark_kwargs`` is ``{}``, so it cannot see
-    whether the dispatcher REPLACES the chart's inherited mark kwargs
-    (losing them) or MERGES onto them like the direct path does
-    (``{**new._mark_kwargs, **line_mark_kwargs}`` in
-    ``Chart.mark_function``). This chains a primitive mark's own style
-    kwarg (``stroke_width=7``) before the desugar on both sides, so a chart
-    that already carries ``_mark_kwargs`` must keep them alongside the
-    desugar's own ``clip=False`` escape on both paths."""
+def test_dispatcher_path_replaces_the_style_of_the_mark_before_it():
+    """``Chart._set_composite_mark`` resets a chart's own ``_mark_kwargs``
+    at call time when it replaces that chart's mark, the same way a
+    primitive mark call does; the dispatcher's single-mark branch only
+    merges onto what is left there. A primitive mark's own style kwarg
+    (``stroke_width=7``, set before the desugar runs) does not reach the
+    dispatched mark. Driven through the same adapter as the parity test
+    above, with ``mark_line(stroke_width=7)`` chained first on one side."""
     fn = lambda x: x**2  # noqa: E731
     domain = (0, 5)
     n = 50
 
-    direct_svg = (
-        fe.Chart(None)
-        .mark_line(stroke_width=7)
-        .mark_function(fn, domain=domain, n=n, clip=False)
-        .to_svg()
-    )
+    direct_svg = fe.Chart(None).mark_function(fn, domain=domain, n=n, clip=False).to_svg()
 
-    dispatched = (
+    dispatched_bare = fe.Chart(None)._set_composite_mark(
+        "function",
+        _function_desugar_via_dispatcher,
+        {"fn": fn, "domain": domain, "n": n, "clip": False},
+        placeholder="line",
+    ).to_svg()
+
+    dispatched_with_prior_style = (
         fe.Chart(None)
         .mark_line(stroke_width=7)
         ._set_composite_mark(
@@ -915,17 +915,15 @@ def test_dispatcher_path_merges_onto_inherited_mark_kwargs_like_the_direct_path(
             {"fn": fn, "domain": domain, "n": n, "clip": False},
             placeholder="line",
         )
+        .to_svg()
     )
-    dispatched_svg = dispatched.to_svg()
 
-    assert dispatched_svg == direct_svg
-    # And explicitly confirm neither side dropped stroke_width -- a chart
-    # that merged {} onto {} rather than {'stroke_width': 7} onto
-    # {'clip': False} would still be byte-identical on both sides while
-    # silently losing the inherited kwarg on both, which the line above
-    # alone cannot distinguish from a correct merge.
-    assert 'stroke-width="7"' in direct_svg
-    assert 'stroke-width="7"' in dispatched_svg
+    assert dispatched_with_prior_style == dispatched_bare
+    assert 'stroke-width="7"' not in dispatched_with_prior_style
+    # And confirm the dispatcher's own style reset still equals the direct
+    # path over a bare chart, so `clip=False` (the desugar's own escape)
+    # reaches it exactly as it does on the direct path.
+    assert dispatched_bare == direct_svg
 
 
 def test_dispatcher_prior_layer_refuses_result_data():

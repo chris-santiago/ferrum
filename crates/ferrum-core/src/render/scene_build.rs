@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::{layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
+use super::prepare::{facet_partition_label, layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -229,6 +229,19 @@ pub fn build_scene(
     // `build_panel_mark_batches`) and flushed once below, beside
     // `text_overrun_ledger`.
     let mut domain_left_out_ledger = DomainLeftOutLedger::default();
+
+    // One render-wide tally of the series a line/area/ribbon/polygon layer
+    // drew some of and dropped others, named per panel at the per-layer
+    // draw site (`build_panel_mark_batches`) and flushed once below, beside
+    // `domain_left_out_ledger`.
+    let mut series_dropped_ledger = SeriesDroppedLedger::default();
+
+    // One render-wide tally, per layer, of whether it drew in any panel at
+    // all, and of every panel where it drew nothing — resolved once below,
+    // after the whole panel loop, into either a fold onto
+    // `series_dropped_ledger` (the layer drew elsewhere) or its own
+    // `MarkBuildEmpty` per empty panel (the layer drew nowhere).
+    let mut layer_empty_ledger = LayerEmptyLedger::default();
 
     // Each layer's batch across the whole chart, before any facet filter: the
     // base data, or the named `data_source` output it reads. A panel's layer
@@ -530,7 +543,12 @@ pub fn build_scene(
             &chart_swarms,
             &scales,
             panel,
-            &mut PanelMarkOutputs { warnings, domain_left_out_ledger: &mut domain_left_out_ledger },
+            &mut PanelMarkOutputs {
+                warnings,
+                domain_left_out_ledger: &mut domain_left_out_ledger,
+                series_dropped_ledger: &mut series_dropped_ledger,
+                layer_empty_ledger: &mut layer_empty_ledger,
+            },
         )?;
 
         let plot_area = ferrum_scene::Rect {
@@ -785,6 +803,15 @@ pub fn build_scene(
     // One `DomainRowsLeftOut` per channel, field, voice and outcome, once
     // every layer in every panel has noted its own left-out rows.
     domain_left_out_ledger.flush(warnings);
+    // Resolve every layer's pending all-short panels, now that every panel
+    // has had its say: a layer that drew elsewhere folds them into
+    // `series_dropped_ledger`, one that drew nowhere gets its own
+    // `MarkBuildEmpty` per empty panel. Must run before that ledger's own
+    // flush, since it can still add to it.
+    layer_empty_ledger.resolve(&mut series_dropped_ledger, warnings);
+    // One `SeriesDropped` per layer, once every panel has noted its own
+    // dropped-series chunk.
+    series_dropped_ledger.flush(warnings);
 
     // `#120`(7) + N2: once at least one panel actually resolved its own
     // scales, the panel-real pass has already re-reported every
@@ -1842,13 +1869,31 @@ fn resolve_layer_styles(
         .collect()
 }
 
-/// The two render-wide outputs `build_panel_mark_batches` writes for every
-/// layer of one panel: the chart's warnings list and this render's
-/// explicit-domain-left-out tally. Both are write-only here and owned by
+/// `panel`'s own [`crate::transform::context::panel_clause`] text for one
+/// kept [`RenderWarning::SeriesDropped`] name, built the same way the
+/// transform warnings label a facet panel
+/// ([`facet_partition_label`]), read off `spec.facet` and the panel's own
+/// [`crate::layout::FacetKey`]s rather than a facet partition key, since
+/// this runs once per panel at the per-layer draw site, not once per
+/// transform's own facet partition. `None` for an unfaceted chart, so an
+/// unfaceted name carries no clause.
+fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLayout) -> Option<String> {
+    let facet = spec.facet.as_ref()?;
+    let col = panel.facet_key.as_ref()?;
+    let key: (String, Option<String>) = (col.value.clone(), panel.row_facet_key.as_ref().map(|r| r.value.clone()));
+    Some(crate::transform::context::panel_clause(Some(&facet_partition_label(facet, &key))))
+}
+
+/// The four render-wide outputs `build_panel_mark_batches` writes for every
+/// layer of one panel: the chart's warnings list, this render's
+/// explicit-domain-left-out tally, its dropped-series tally, and its
+/// per-layer drawn-or-not tally. All four are write-only here and owned by
 /// the caller across the whole panel loop.
 struct PanelMarkOutputs<'a> {
     warnings: &'a mut Vec<RenderWarning>,
     domain_left_out_ledger: &'a mut DomainLeftOutLedger,
+    series_dropped_ledger: &'a mut SeriesDroppedLedger,
+    layer_empty_ledger: &'a mut LayerEmptyLedger,
 }
 
 /// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
@@ -1869,7 +1914,7 @@ fn build_panel_mark_batches(
     panel: &crate::layout::PanelLayout,
     outputs: &mut PanelMarkOutputs,
 ) -> Result<Vec<MarkBatch>, RenderError> {
-    let PanelMarkOutputs { warnings, domain_left_out_ledger } = outputs;
+    let PanelMarkOutputs { warnings, domain_left_out_ledger, series_dropped_ledger, layer_empty_ledger } = outputs;
     let &PanelResolveCtx { spec, prep, theme, .. } = ctx;
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -2060,6 +2105,10 @@ fn build_panel_mark_batches(
         // drawing rather than about the chart's primary layer. That read is why
         // `LayerChart(bar, arc).interactive()` refused: the arc layer's own
         // `CoordPolar` never reached the builder that needed it.
+        // `entry`: this layer's own public entry (bound above), stamped the
+        // same way `coord` is, so a builder asking `ctx.spec.entry` —
+        // `polygon::naming_columns` — is answered about the layer it draws,
+        // never the chart's primary layer.
         // `conditionals`: only the ones this layer declared, so a line is
         // restyled by (and checks the branches of) its own `size` conditional
         // and never a sibling layer's.
@@ -2067,6 +2116,7 @@ fn build_panel_mark_batches(
             mark: layer.mark,
             encoding: layer_spec_encoding,
             coord: layer_coord,
+            entry: Some(entry.clone()),
             conditionals: spec.conditionals.iter().filter(|c| c.declared_by(li)).cloned().collect(),
             ..spec.clone()
         };
@@ -2136,22 +2186,77 @@ fn build_panel_mark_batches(
         // the render-wide ledger flushed once after the whole panel loop.
         let statistic_voice = reads_statistic_output(layer, &prep.transform_lineages)
             .then(|| draw::StatisticVoice { entry: entry.clone() });
-        for mut left_out in draw::domain_left_out_counts(&ctx, statistic_voice.as_ref()).map_err(name_layer)? {
+        let census = draw::domain_left_out_counts(&ctx, statistic_voice.as_ref()).map_err(name_layer)?;
+        for mut left_out in census.left_out {
             left_out.channel = user_facing_channel(&left_out.channel, layer_flipped).to_string();
             domain_left_out_ledger.note(left_out);
         }
 
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
+        let layer_drew_this_panel = !result.nodes.is_empty();
+        if layer_drew_this_panel {
+            layer_empty_ledger.note_drew(li);
+        }
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
         // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
         // exemption boundary (a builder that returns empty for a legitimate
         // reason leaves this `None` and is unaffected).
-        if let Some(reason) = result.empty_reason.take() {
-            warnings.push(RenderWarning::MarkBuildEmpty {
-                layer: li,
-                mark: layer.mark.as_str().to_string(),
-                reason: reason.0,
-            });
+        let empty_reason = result.empty_reason.take();
+        match result.dropped_series.take() {
+            // The `ShortRuns` connectivity-gate class (line/area/ribbon/
+            // polygon): every short run is named here, whether or not
+            // anything else drew this panel (`ShortRuns::finish`'s own
+            // doc). Each kept run carries its own facet-panel clause (a
+            // run is located where IT dropped, never under a clause
+            // shared with another run). A run the explicit-domain census
+            // just above already reports as not drawn at all
+            // (`runs_not_drawn`) is filtered out by row — it is already
+            // named by its own `DomainRowsLeftOut`; a short run beside it
+            // is still named. A panel where nothing drew is held until
+            // every panel has had its say (`layer_empty_ledger.resolve`,
+            // after the whole panel loop), since only then is it known
+            // whether this layer draws in another panel; a panel where
+            // something drew names the rest right away — the layer has
+            // already proven it draws, so there is nothing to defer.
+            Some(dropped) => {
+                let clause = series_dropped_panel_clause(spec, panel);
+                let names: Vec<String> = dropped
+                    .runs
+                    .into_iter()
+                    .filter(|run| !census.runs_not_drawn.contains(&run.row))
+                    .map(|run| match &clause {
+                        Some(clause) => format!("{}{}", run.name, clause),
+                        None => run.name,
+                    })
+                    .collect();
+                match empty_reason {
+                    Some(reason) => layer_empty_ledger.note_empty(PendingLayerEmpty {
+                        li,
+                        mark: layer.mark,
+                        reason: reason.0,
+                        public_layer: public_layer(spec, li, layer.mark),
+                        entry: entry.clone(),
+                        rule: dropped.rule,
+                        names,
+                    }),
+                    None if !names.is_empty() => {
+                        series_dropped_ledger.note(li, public_layer(spec, li, layer.mark), entry.clone(), layer.mark, dropped.rule, names);
+                    }
+                    None => {}
+                }
+            }
+            // Every other builder's emptiness: pushed immediately. There
+            // is no per-run name to potentially fold into another panel's
+            // report, so there is nothing to gain by deferring.
+            None => {
+                if let Some(reason) = empty_reason {
+                    warnings.push(RenderWarning::MarkBuildEmpty {
+                        layer: li,
+                        mark: layer.mark.as_str().to_string(),
+                        reason: reason.0,
+                    });
+                }
+            }
         }
 
         // For CoordPolar, transform all mark nodes from Cartesian pixel
@@ -3459,6 +3564,113 @@ impl DomainLeftOutLedger {
     /// count is non-empty.
     pub(super) fn flush(self, warnings: &mut Vec<RenderWarning>) {
         warnings.extend(self.entries.into_iter().filter(|e| e.rows > 0).map(RenderWarning::from));
+    }
+}
+
+/// Per layer across the whole panel loop, every panel's own dropped-series
+/// names — one [`RenderWarning::SeriesDropped`] per layer, never one per
+/// panel, mirroring [`DomainLeftOutLedger`]'s multiplicity. Unlike that
+/// ledger there is nothing to SUM here: each kept run is already named in
+/// full at its own draw site (its own facet clause attached, when it has
+/// one), so this only collects those names, in panel order, onto the
+/// layer's running report. Keyed by the layer's own internal index (`li`,
+/// [`build_panel_mark_batches`]' own loop variable), never by
+/// [`public_layer`]'s voiced index: `public_layer` is `None` for every
+/// layer a call built, so two distinct call-built layers sharing one
+/// `(entry, mark, rule)` under `+` would otherwise fold into one warning
+/// naming the same ring or series twice — `li` is unique per layer
+/// regardless of voice. In a composite, each leaf builds and flushes its
+/// own ledger — `SeriesDropped` fans out per leaf exactly as
+/// `MarkBuildEmpty` does, never merged across leaves.
+#[derive(Default)]
+pub(super) struct SeriesDroppedLedger {
+    entries: Vec<(usize, RenderWarning)>,
+}
+
+impl SeriesDroppedLedger {
+    /// Append `names` to the running [`RenderWarning::SeriesDropped`] for
+    /// layer `li`, creating it on first sight; `layer` is that layer's
+    /// voiced index ([`public_layer`]), carried only as the warning's own
+    /// display field, never as part of the key.
+    pub(super) fn note(&mut self, li: usize, layer: Option<usize>, entry: String, mark: crate::spec::mark::Mark, rule: String, names: Vec<String>) {
+        for (entry_li, w) in &mut self.entries {
+            if *entry_li == li {
+                if let RenderWarning::SeriesDropped { series, .. } = w {
+                    series.extend(names);
+                    return;
+                }
+            }
+        }
+        self.entries.push((li, RenderWarning::SeriesDropped { layer, entry, mark, rule, series: names }));
+    }
+
+    pub(super) fn flush(self, warnings: &mut Vec<RenderWarning>) {
+        warnings.extend(self.entries.into_iter().map(|(_, w)| w));
+    }
+}
+
+/// One run (series, band, ring) a mark's connectivity gate dropped in a
+/// panel where the layer drew NOTHING at all — held until every panel has
+/// had its say, since whether this becomes that panel's own
+/// `MarkBuildEmpty` or folds into the layer's running `SeriesDropped`
+/// depends on whether the SAME layer draws in ANOTHER panel, which cannot
+/// be known until the whole panel loop (for this leaf) has run.
+pub(super) struct PendingLayerEmpty {
+    pub(super) li: usize,
+    pub(super) mark: crate::spec::mark::Mark,
+    pub(super) reason: String,
+    pub(super) public_layer: Option<usize>,
+    pub(super) entry: String,
+    pub(super) rule: String,
+    pub(super) names: Vec<String>,
+}
+
+/// Per layer (`li`) across the whole panel loop: whether the layer drew
+/// any node in any panel, and every panel where it drew nothing instead.
+/// [`resolve`](Self::resolve) decides, once every panel has had its say,
+/// which outcome each pending panel gets: a layer that drew somewhere
+/// folds its empty panels' own dropped-run names into that layer's running
+/// [`SeriesDroppedLedger`] entry (each name already carrying its own
+/// facet-panel clause); a layer that drew nowhere emits one
+/// [`RenderWarning::MarkBuildEmpty`] per empty panel, one for each panel
+/// where it drew nothing.
+#[derive(Default)]
+pub(super) struct LayerEmptyLedger {
+    drew_any: std::collections::BTreeSet<usize>,
+    pending: Vec<PendingLayerEmpty>,
+}
+
+impl LayerEmptyLedger {
+    /// This panel's layer `li` drew at least one node.
+    pub(super) fn note_drew(&mut self, li: usize) {
+        self.drew_any.insert(li);
+    }
+
+    /// This panel's layer drew nothing: `pending`'s `reason` is the
+    /// panel-local `MarkBuildEmpty` text, read if this layer draws nowhere
+    /// else; its `names` is this panel's own dropped-run names (already
+    /// carrying their facet clause), read if it draws elsewhere.
+    pub(super) fn note_empty(&mut self, pending: PendingLayerEmpty) {
+        self.pending.push(pending);
+    }
+
+    /// Resolve every pending panel now that the whole panel loop (for this
+    /// leaf) has run.
+    pub(super) fn resolve(self, series_dropped_ledger: &mut SeriesDroppedLedger, warnings: &mut Vec<RenderWarning>) {
+        let Self { drew_any, pending } = self;
+        for p in pending {
+            if drew_any.contains(&p.li) {
+                if !p.names.is_empty() {
+                    series_dropped_ledger.note(p.li, p.public_layer, p.entry, p.mark, p.rule, p.names);
+                }
+            } else {
+                warnings.push(RenderWarning::MarkBuildEmpty {
+                    layer: p.li,
+                    mark: p.mark.as_str().to_string(),
+                    reason: p.reason,
+                });
+            }
+        }
     }
 }
 
@@ -10052,7 +10264,10 @@ mod tests {
     /// zero rows for any dataset with no IQR outliers — the ordinary case,
     /// not a corner case): this call site cannot tell "the transform found
     /// nothing to keep, correctly" apart from "the transform degraded" — see
-    /// the comment at the `continue` above.
+    /// the comment at the `continue` above. The zero-row layer adds no
+    /// warning of its own; the one warning this scene carries is layer 0's
+    /// own short series (its "b" group has only one point), unrelated to
+    /// the skip this test guards.
     #[test]
     fn zero_row_data_source_layer_stays_silent() {
         pyo3::Python::initialize();
@@ -10073,9 +10288,16 @@ mod tests {
             1,
             "only layer 0 renders"
         );
-        assert!(
-            warnings.is_empty(),
-            "a zero-row data_source layer must stay silent: {warnings:?}"
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::SeriesDropped {
+                layer: Some(0),
+                entry: "mark_line".to_string(),
+                mark: Mark::Line,
+                rule: "mark_line() joins two or more points per series".to_string(),
+                series: vec!["cat=b (one point)".to_string()],
+            }],
+            "the zero-row layer adds no warning of its own: the only warning is layer 0's own short series"
         );
     }
 
@@ -15395,6 +15617,294 @@ mod tests {
             &xy_span_batch(),
         );
         assert!(inert_warnings(&warnings).is_empty(), "{:?}", inert_warnings(&warnings));
+    }
+
+    /// A colored line that drops a short series in two different facet
+    /// panels gets ONE `SeriesDropped` warning for the layer, naming each
+    /// dropped series with its OWN panel clause so a reader can tell which
+    /// panel each came from — not one warning per panel, and not a single
+    /// clause that could be misread as covering both.
+    #[test]
+    fn a_line_short_in_two_facet_panels_warns_once_naming_each_panel() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p2", "p2", "p2"])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "a", "a", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "line",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+            "facet": {"field": "c", "mode": {"kind": "wrap", "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        let dropped: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::SeriesDropped { .. })).collect();
+        assert_eq!(dropped.len(), 1, "one warning for the layer, not one per panel: {warnings:?}");
+        assert_eq!(
+            dropped[0].to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point) in \
+             facet panel c=p1, g=c (one point) in facet panel c=p2"
+        );
+    }
+
+    /// Every kept run carries its own panel clause, so a mixed
+    /// list (two drops in one panel, one in another) names each
+    /// individually rather than leaving the earlier names of a chunk
+    /// without a clause of their own.
+    #[test]
+    fn a_mixed_list_of_drops_across_panels_clauses_every_run_individually() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2"])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "c", "a", "a", "d"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "line",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+            "facet": {"field": "c", "mode": {"kind": "wrap", "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        let dropped: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::SeriesDropped { .. })).collect();
+        assert_eq!(dropped.len(), 1, "one warning for the layer: {warnings:?}");
+        assert_eq!(
+            dropped[0].to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point) in \
+             facet panel c=p1, g=c (one point) in facet panel c=p1, g=d (one point) in facet panel c=p2"
+        );
+    }
+
+    /// A layer that draws in SOME facet panel but is all-short in ANOTHER
+    /// still gets one `SeriesDropped` for the layer, naming every short
+    /// series across every panel it visited — never a false
+    /// `MarkBuildEmpty` claiming the whole layer drew nothing, when it drew
+    /// fine in a different panel.
+    #[test]
+    fn a_layer_drawn_in_one_panel_and_all_short_in_another_names_every_series_with_no_mark_build_empty() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        // Panel p1: color group "a" draws (2 rows), "b" is short (1 row).
+        // Panel p2: color group "c" is the ONLY row — the layer draws
+        // nothing at all in p2.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p2"])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "line",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+            "facet": {"field": "c", "mode": {"kind": "wrap", "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        let empties: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::MarkBuildEmpty { .. })).collect();
+        assert!(
+            empties.is_empty(),
+            "layer 0 drew g=a in panel p1, so panel p2's all-short result must not read as the whole layer \
+             drawing nothing: {warnings:?}"
+        );
+        let dropped: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::SeriesDropped { .. })).collect();
+        assert_eq!(dropped.len(), 1, "one warning for the layer, not one per panel: {warnings:?}");
+        assert_eq!(
+            dropped[0].to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point) in \
+             facet panel c=p1, g=c (one point) in facet panel c=p2"
+        );
+    }
+
+    /// Two distinct call-built layers that share one `(entry, mark, rule)`
+    /// — a `mark_errorband`-style layer added to itself under `+`, say —
+    /// each drop their own band and each get their OWN `SeriesDropped`,
+    /// never merged into one warning naming the same band twice: layer
+    /// voice (`public_layer`, `None` for every call-built layer) is not a
+    /// stand-in for layer identity.
+    #[test]
+    fn two_call_built_layers_sharing_one_voice_each_get_their_own_warning() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let band_encoding = || Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let errorband_layer = || Layer {
+            mark: Mark::Line,
+            entry: Some("mark_errorband".to_string()),
+            encoding: band_encoding(),
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            mark: Mark::Line,
+            layers: Some(vec![errorband_layer(), errorband_layer()]),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let (_, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let dropped: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::SeriesDropped { .. })).collect();
+        assert_eq!(
+            dropped.len(),
+            2,
+            "each call-built layer drops its own band and must get its own warning, not one \
+             merged by voice: {warnings:?}"
+        );
+        for w in dropped {
+            assert_eq!(
+                w.to_string(),
+                "mark_errorband: mark_line() joins two or more points per series, so it did not draw g=b (one point)"
+            );
+        }
+    }
+
+    /// A row-and-column (grid-mode) facet's clause is
+    /// comma-separated internally (`"c=c1, r=r1"`), so joining two such
+    /// clauses with `", "` would be ambiguous; `series_dropped_panel_clause`
+    /// itself is pinned here directly, and the semicolon-join rule is
+    /// pinned on `RenderWarning::SeriesDropped`'s `Display` below.
+    #[test]
+    fn a_row_and_column_facet_panel_clause_names_both_dimensions() {
+        use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+        use crate::layout::panel::FacetKey;
+        use crate::layout::PanelLayout;
+        let spec = ChartSpec {
+            facet: Some(FacetSpec {
+                field: "c".into(),
+                row: Some("r".into()),
+                title: None,
+                row_title: None,
+                mode: FacetMode::Grid { nrows: 2, ncols: 2 },
+                spacing: None,
+                resolve: FacetResolve::default(),
+                sort: None,
+                row_sort: None,
+                repeat: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: Some(FacetKey { field: "c".into(), value: "c2".into() }),
+            row: 1,
+            col: 1,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: Some(FacetKey { field: "r".into(), value: "r2".into() }),
+        };
+        assert_eq!(series_dropped_panel_clause(&spec, &panel), Some(" in facet panel c=c2, r=r2".to_string()));
+
+        let unfaceted = ChartSpec::default();
+        assert_eq!(series_dropped_panel_clause(&unfaceted, &panel), None);
+    }
+
+    /// Through the full pipeline: a row-and-column (grid-mode)
+    /// facet with drops in two cells separates them with a semicolon, since
+    /// each cell's own clause already holds a comma (`"c=c1, r=r1"`) and a
+    /// plain `", "` join would read as one run-on list.
+    #[test]
+    fn a_grid_facet_with_drops_in_two_cells_semicolon_separates_them() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("r", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["c1", "c1", "c1", "c2", "c2", "c2"])),
+                Arc::new(StringArray::from(vec!["r1", "r1", "r1", "r2", "r2", "r2"])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "a", "a", "c"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "line",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+            "facet": {"field": "c", "row": "r", "mode": {"kind": "grid", "nrows": 2, "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        let dropped: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::SeriesDropped { .. })).collect();
+        assert_eq!(dropped.len(), 1, "one warning for the layer: {warnings:?}");
+        assert_eq!(
+            dropped[0].to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point) in \
+             facet panel c=c1, r=r1; g=c (one point) in facet panel c=c2, r=r2"
+        );
     }
 
     /// On a layered chart the warning names the layer and its entry, and a

@@ -637,6 +637,8 @@ def test_apply_metric_label_skips_null_color_group(recwarn):
     must not reach ``pl.col(color_col) == cls``, which always evaluates to
     null in polars and warns "Comparisons with None always result in
     null" -- the same guard ``_curve_metrics_by_group`` already applies.
+    The null group's single row is also the one series too short to draw,
+    so the render names it (``class=null (one point)``).
     """
     df = pl.concat(
         [
@@ -650,7 +652,11 @@ def test_apply_metric_label_skips_null_color_group(recwarn):
     svg = chart.to_svg()
     assert svg.count("AUC =") == 2
     user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
-    assert not user_warnings, [str(w.message) for w in user_warnings]
+    expected = (
+        "layer 0: mark_line: mark_line() joins two or more points per series, "
+        "so it did not draw class=null (one point)"
+    )
+    assert [str(w.message) for w in user_warnings] == [expected]
 
 
 def test_broadcast_metric_rejects_an_unknown_kind():

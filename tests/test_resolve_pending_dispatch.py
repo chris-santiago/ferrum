@@ -157,25 +157,16 @@ def _resolved_shape(chart: fm.Chart) -> dict:
 # against the dispatch-table implementation (T4.1).  Keyed by branch name.
 _BASELINE = {
     "ribbon": {
-        # T14 (batch E, F-L02-03): desugar_ribbon now forwards interpolate=
-        # into the emitted layer's mark_kwargs (previously discarded after
-        # validation), so the baseline mark_style gained an explicit
-        # "interpolate":"linear" key. The default renders byte-identically
-        # (see tests/marks/test_ribbon.py::test_ribbon_default_interpolate_is_byte_identical_to_pre_fix)
-        # since "linear" is also Rust's mark_style default. The emitted layer
-        # names the public entry that produced it ("entry":"mark_ribbon"),
-        # which Rust's line-width refusals voice; the render is unchanged.
-        "json": '{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"name":"ribbon","entry":"mark_ribbon"}]}',
+        # A bare mark_ribbon() lowers to one unlayered "ribbon" mark over the
+        # chart's own x/y/y2 bindings, the way mark_area reaches Rust: no
+        # bare-field layer rebuild, so mark_style carries interpolate= like
+        # every other primitive's single mark_kwargs, and the public entry
+        # ("entry":"mark_ribbon") that Rust's layer-voiced warnings read is
+        # the chart's own, not a layer's.
+        "json": '{"data":{"kind":"named","name":"default"},"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"entry":"mark_ribbon"}',
         "shape": {
-            "layers": [
-                {
-                    "name": "ribbon",
-                    "mark": "ribbon",
-                    "data_source": None,
-                    "enc_fields": {"x": "x", "y": "y_lo", "y2": "y_hi"},
-                }
-            ],
-            "mark": None,
+            "layers": None,
+            "mark": "ribbon",
             "dtypes": {"x": "Int64", "y_lo": "Float64", "y_hi": "Float64"},
         },
     },
@@ -229,7 +220,7 @@ def test_resolve_pending_branch_resolves_without_error(name: str) -> None:
 
 
 def test_ribbon_injects_y2_field() -> None:
-    """ribbon branch threads y2 into the desugar; the emitted layer carries y2."""
+    """ribbon branch threads y2 into the desugar; the chart's own encoding carries y2."""
     shape = _resolved_shape(_build("ribbon"))
     assert shape == _BASELINE["ribbon"]["shape"]
     assert _build("ribbon").to_json() == _BASELINE["ribbon"]["json"]

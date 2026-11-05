@@ -43,6 +43,11 @@ than keep their own copy.
 `<path>` of `M`/`H`/`V` commands rather than a `<polyline>` of points;
 `tests/test_displot_ecdf_hue.py` and `tests/test_log_axis_statistics.py`
 both read a `displot(kind="ecdf")` step line through it.
+
+`band_paths` reads the closed, filled `<path>` `mark_area` and `mark_ribbon`
+draw per series or band -- the one shape neither `polylines` nor
+`step_after_paths` covers -- so a test asserting "this many bands drew"
+does not need its own `fill-rule`-free path filter.
 """
 
 from __future__ import annotations
@@ -193,6 +198,32 @@ def step_after_paths(svg: str) -> list[tuple[str | None, list[tuple[float, float
         (attrs.get("stroke"), _step_after_corners(attrs["d"]))
         for attrs in svg_elements(svg, "path", lambda a: "d" in a and "H" in a["d"])
     ]
+
+
+def _is_band_path(attrs: dict) -> bool:
+    d = attrs.get("d")
+    fill = attrs.get("fill")
+    return (
+        d is not None
+        and d.rstrip().endswith("Z")
+        and fill is not None
+        and fill != "none"
+        and "fill-rule" not in attrs
+    )
+
+
+def band_paths(svg: str) -> list[tuple[str | None, str]]:
+    """Return `(fill, d)` for every closed, filled `<path>` `mark_area` or
+    `mark_ribbon` draws for one series or band in *svg*.
+
+    A band's `d` closes with `Z` and its `fill` is set and not `"none"`
+    (an area's or ribbon's own edge line, or a step line, is open and
+    `fill="none"`). A polygon's own ring paint carries
+    `fill-rule="evenodd"` (so two overlapping rings cut each other out);
+    an area or ribbon band never does, which is the one attribute that
+    tells the two shapes apart.
+    """
+    return [(attrs.get("fill"), attrs["d"]) for attrs in svg_elements(svg, "path", _is_band_path)]
 
 
 def rug_tick_x1_by_stroke(svg: str) -> dict[str, set[float]]:

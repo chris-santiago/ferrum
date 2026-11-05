@@ -252,6 +252,8 @@ def test_built_layers_are_registered(kind: str, fn, args: tuple, kwargs: dict) -
 
     result = fn(*args, **kwargs)
     built = {layer.name for layer in (result.layers or []) if layer.name is not None}
+    if result.layer_name is not None:
+        built.add(result.layer_name)
     unregistered = built - registered
     assert not unregistered, (
         f"{kind}: desugar builds layer(s) {sorted(unregistered)} not registered in "

@@ -2762,6 +2762,41 @@ pub enum RenderWarning {
         #[serde(default)]
         grouped: bool,
     },
+    /// A `line`/`area`/`ribbon`/`polygon` layer drew at least one series
+    /// (or ring) and dropped others below its mark's own minimum: WARN
+    /// DEGRADED, once per layer however many panels draw it. A layer where
+    /// every series is short instead keeps
+    /// [`Self::MarkBuildEmpty`](Self::MarkBuildEmpty)'s own text, and a
+    /// layer where every series draws stays silent. Voiced as
+    /// [`Self::MarkStyleInert`](Self::MarkStyleInert) is: `layer` is its
+    /// index when the caller placed it (`prepare::public_layer`), `entry`
+    /// the public call that built it; `mark` the mark, `rule` its own
+    /// connectivity statement (the text [`Self::MarkBuildEmpty`] would
+    /// carry if every series had been short). `series` is each dropped
+    /// run's own label — the group's caller-named value and the vertices it
+    /// kept (`"g=b (one point)"`). In a faceted chart, every dropped series
+    /// carries its own facet-panel clause (`"g=b (one point) in facet panel
+    /// c=p1"`, one panel included) — EVERY run is located where it
+    /// dropped, never left under a clause shared with a different run —
+    /// and the whole list joins with `"; "` instead of `", "` when any name
+    /// itself holds a comma (a two-field series name, or a row-and-column
+    /// facet's own `"c=c1, r=r1"` clause). Collected per layer across every
+    /// panel by `scene_build`'s `SeriesDroppedLedger`, flushed once after
+    /// the panel loop. A run an explicit domain's own census reports as not
+    /// drawn AT ALL (a statistic layer's mark the census tallies `cut:
+    /// false`, `render::draw::DomainCensus::runs_not_drawn`) is not
+    /// repeated here — only that run; a short run beside it is still
+    /// named, and a primitive layer's row-counted domain warning never
+    /// suppresses anything here. In a composite, each leaf reports its own
+    /// layers, exactly as [`Self::MarkBuildEmpty`] does — never merged
+    /// across leaves.
+    SeriesDropped {
+        layer: Option<usize>,
+        entry: String,
+        mark: crate::spec::mark::Mark,
+        rule: String,
+        series: Vec<String>,
+    },
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -3154,6 +3189,17 @@ impl std::fmt::Display for RenderWarning {
                      establishes the {channel} {owner} with, so it stays out of that {owner}; {draws}"
                 )
             }
+            RenderWarning::SeriesDropped { layer, entry, mark: _, rule, series } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                // Semicolons when a name itself holds a comma (a series
+                // named by two fields, or a panel of a row-and-column
+                // facet) — the plain `", "` list rule would otherwise run
+                // one name into the next's own comma-separated parts.
+                let sep = if series.iter().any(|s| s.contains(',')) { "; " } else { ", " };
+                write!(f, "{entry}: {rule}, so it did not draw {}", series.join(sep))
+            }
         }
     }
 }
@@ -3307,11 +3353,51 @@ mod tests {
                 channel: "x".into(),
                 placement: ExcludedLayerPlacement::OwnScale,
             },
+            RenderWarning::SeriesDropped {
+                layer: Some(1),
+                entry: "mark_line".into(),
+                mark: crate::spec::mark::Mark::Line,
+                rule: "mark_line() joins two or more points per series".into(),
+                series: vec!["g=b (one point)".into()],
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, w);
         }
+    }
+
+    /// `SeriesDropped`'s `Display` joins its series with `", "`
+    /// when none holds a comma, and `"; "` when any does — a two-field
+    /// series name (`"g=b, h=x"`) or a row-and-column facet's clause both
+    /// hold one.
+    #[test]
+    fn series_dropped_joins_with_a_semicolon_when_a_name_holds_a_comma() {
+        let plain = RenderWarning::SeriesDropped {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            rule: "mark_line() joins two or more points per series".into(),
+            series: vec!["g=b (one point)".into(), "g=c (one point)".into()],
+        };
+        assert_eq!(
+            plain.to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point), \
+             g=c (one point)"
+        );
+
+        let two_field = RenderWarning::SeriesDropped {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            rule: "mark_line() joins two or more points per series".into(),
+            series: vec!["g=b, h=x (one point)".into(), "g=c, h=y (one point)".into()],
+        };
+        assert_eq!(
+            two_field.to_string(),
+            "mark_line: mark_line() joins two or more points per series, so it did not draw g=b, h=x (one point); \
+             g=c, h=y (one point)"
+        );
     }
 
     /// The config surface a `ConfigSurfaceNotPresent` names crosses the wire,

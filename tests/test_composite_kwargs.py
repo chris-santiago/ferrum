@@ -246,20 +246,18 @@ class TestDesugarRibbon:
         result = desugar_ribbon("x", "y_lo", y2_field="y_hi", fill="#aabbcc")
         assert result is not None
 
-    def test_fill_applied_to_ribbon_layer(self, ribbon_df):
+    def test_fill_applied_to_ribbon_mark(self, ribbon_df):
         from ferrum.marks.composite import desugar_ribbon
 
         result = desugar_ribbon("x", "y_lo", y2_field="y_hi", fill="#aabbcc")
-        ribbon = result.layers[0]
-        assert ribbon.mark_kwargs.get("fill") == "#aabbcc"
+        assert result.mark_kwargs.get("fill") == "#aabbcc"
 
     def test_accepts_opacity_override(self, ribbon_df):
         """opacity is a named param on desugar_ribbon, but user can override via mark_kwargs too."""
         from ferrum.marks.composite import desugar_ribbon
 
         result = desugar_ribbon("x", "y_lo", y2_field="y_hi", opacity=0.8)
-        ribbon = result.layers[0]
-        assert ribbon.mark_kwargs.get("opacity") == 0.8
+        assert result.mark_kwargs.get("opacity") == 0.8
 
     def test_rejects_unknown_kwarg(self, ribbon_df):
         from ferrum.marks.composite import desugar_ribbon
