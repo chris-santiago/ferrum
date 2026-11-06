@@ -329,18 +329,16 @@ def _residuals_panel(
         return _overlay_metrics_corner(chart)
 
     if name == "qq":
-        # `sample` is the QQ transform's declared output column this panel
-        # reads back on the y channel; derived from the registry (spec §4.6 /
-        # M6a) so a Rust-side rename raises here.  The x channel names the
-        # panel's own input column, not a transform output, so it stays a
-        # plain literal.
-        _qq_cols = registry_output_columns("qq", ["sample"])
+        # mark_qq draws its own sample quantiles on y and refuses a
+        # field-bearing y= outright (a column name is not a provenance), so
+        # this panel styles the axis with a fieldless Y(title=...) rather
+        # than binding the QQ transform's own output column by name.
         return (
             ferrum.Chart(df)
             .mark_qq()
             .encode(
                 x=X("studentized_residual", title="Theoretical quantiles"),
-                y=Y(_qq_cols["sample"], title="Sample quantiles"),
+                y=Y(title="Sample quantiles"),
             )
             .properties(title=ferrum.Title("Normal Q–Q"))
         )

@@ -6,7 +6,12 @@ omitted and styles the cell binding (title, scheme, legend); one naming the
 transform's ``value`` output column styles it too. Any other ``color=``
 would be drawn nowhere, so it refuses with a ``ValueError`` naming
 ``mark_hex`` and the column received. The cell legend is titled with the
-aggregated column, or ``"Count"``, unless the caller's channel titles it.
+aggregated column, or ``"Count"``, unless the caller's channel titles it. A
+``color=`` carrying its own ``aggregate=`` equal to ``mark_hex``'s (or with
+``mark_hex``'s own ``aggregate=`` unset) is consumed as ``aggregate=``/``field=``;
+a differing one is refused instead of drawn nowhere -- both pinned in
+``tests/test_statistic_bin_aggregate_refusal.py``, alongside every other
+statistic mark's ``bin=``/``aggregate=`` refusal.
 """
 
 from __future__ import annotations

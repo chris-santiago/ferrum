@@ -3,11 +3,16 @@
 Three concerns:
 
 1. **Contract shape** -- `transform_registry(kind)` returns the documented
-   five-key dict (`methods`/`methods_needing_field`/`outputs`/
-   `secondary_outputs`/`params`) with the documented types, and an unknown
-   kind raises `ValueError` listing known kinds. `methods_needing_field`
-   joined the wire in wave 6B (`#137`/`#176`); it is `[]` for a kind whose
-   declared methods split no field requirement. The Rust side
+   six-key dict (`methods`/`methods_needing_field`/`outputs`/
+   `secondary_outputs`/`params`/`method_canonical`) with the documented
+   types, and an unknown kind raises `ValueError` listing known kinds.
+   `methods_needing_field` joined the wire in wave 6B (`#137`/`#176`); it is
+   `[]` for a kind whose declared methods split no field requirement.
+   `method_canonical` maps every spelling in `methods` to its canonical
+   spelling (e.g. hex's `"std"`/`"var"` both canonicalize to `"stdev"`/
+   `"variance"`), so a Python caller comparing two ops for equality reads
+   this map instead of declaring a second, Rust-shadowing alias table; it is
+   `{}` for a kind whose `methods` is `[]`. The Rust side
    (`crates/ferrum-core/src/transform/registry/`) owns the exhaustiveness
    proof against real `apply()` output for every kind; this file only proves
    the *Python-visible* binding contract.
@@ -56,11 +61,13 @@ _SRC = Path(__file__).parent.parent / "src" / "ferrum"
 # ---------------------------------------------------------------------------
 
 
-def test_returns_documented_five_key_shape():
+def test_returns_documented_six_key_shape():
     """spec §4.6 / #137: `methods_needing_field` is the fifth wire key,
     published for every kind (empty for a kind whose methods split no
     field-requirement, e.g. `smooth`; non-empty for raster/hex/aggregate/
-    join_aggregate)."""
+    join_aggregate). `method_canonical` is the sixth: it maps every
+    spelling in `methods` to its canonical spelling, so Python reads
+    Rust's own alias table rather than declaring one."""
     entry = _core.transform_registry("smooth")
     assert set(entry.keys()) == {
         "methods",
@@ -68,6 +75,7 @@ def test_returns_documented_five_key_shape():
         "outputs",
         "secondary_outputs",
         "params",
+        "method_canonical",
     }
     assert isinstance(entry["methods"], list)
     assert all(isinstance(m, str) for m in entry["methods"])
@@ -84,6 +92,33 @@ def test_returns_documented_five_key_shape():
     assert isinstance(entry["secondary_outputs"], list)
     assert isinstance(entry["params"], list)
     assert all(isinstance(p, str) for p in entry["params"])
+    assert isinstance(entry["method_canonical"], dict)
+    assert set(entry["method_canonical"].keys()) == set(entry["methods"])
+    for spelling, canonical in entry["method_canonical"].items():
+        assert isinstance(spelling, str)
+        assert isinstance(canonical, str)
+        assert canonical in entry["methods"]
+
+
+def test_method_canonical_is_empty_when_methods_is_empty():
+    """`contour` declares no `methods` (its levels take no aggregate-style
+    choice); `method_canonical` is `{}` too -- a real answer, not an
+    omission, the same contract `outputs`/`secondary_outputs` already keep."""
+    entry = _core.transform_registry("contour")
+    assert entry["methods"] == []
+    assert entry["method_canonical"] == {}
+
+
+def test_hex_method_canonical_declares_std_and_var_as_aliases():
+    """`hex`'s `method_canonical` is the live source for the `std`/`stdev`
+    and `var`/`variance` alias pairs mark_hex's color-aggregate fold reads
+    through `ferrum._registry.canonical_aggregate`."""
+    entry = _core.transform_registry("hex")
+    assert entry["method_canonical"]["std"] == "stdev"
+    assert entry["method_canonical"]["stdev"] == "stdev"
+    assert entry["method_canonical"]["var"] == "variance"
+    assert entry["method_canonical"]["variance"] == "variance"
+    assert entry["method_canonical"]["mean"] == "mean"
 
 
 def test_secondary_outputs_are_keyed_batches_of_typed_columns():
@@ -191,7 +226,7 @@ def test_registry_output_columns_raises_on_undeclared_column():
     placeholders were swapped or the wording collapsed to match the
     secondary helper's. `['ci_lower', 'ci_upper', 'x', 'y']` is `smooth`'s
     real declared output set, read directly off `transform_registry("smooth")`
-    (see `test_returns_documented_five_key_shape`'s use of the same kind),
+    (see `test_returns_documented_six_key_shape`'s use of the same kind),
     hand-pinned here rather than re-derived so this test cannot pass by
     sharing the same computation as the code it is checking."""
     from ferrum._registry import registry_output_columns

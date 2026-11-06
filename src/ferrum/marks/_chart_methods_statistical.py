@@ -1400,7 +1400,7 @@ class StatisticalMarksMixin:
         self,
         *,
         bin_size=None,
-        aggregate="count",
+        aggregate=None,
         field=None,
         scheme=None,
         cmap=None,
@@ -1419,10 +1419,13 @@ class StatisticalMarksMixin:
         bin_size : float or None, optional
             Hexagon radius in data units.  ``None`` (default) chooses a size
             automatically from the data range and chart dimensions.
-        aggregate : str, optional
+        aggregate : str or None, optional
             Aggregate function, validated against the live
-            ``transform_registry("hex")["methods"]`` vocabulary (spec §4.6);
-            default ``"count"``.
+            ``transform_registry("hex")["methods"]`` vocabulary (spec §4.6).
+            ``None`` (default, unset) counts the cells' rows, or takes the
+            op a chart-level ``color=``'s own ``aggregate=`` names -- an
+            equal explicit op is consumed the same way, and a differing one
+            is refused (see ``color=`` below).
         field : str or None, optional
             Column to aggregate; required for every aggregate in
             ``transform_registry("hex")["methods_needing_field"]``. An
@@ -1468,9 +1471,13 @@ class StatisticalMarksMixin:
         from ferrum.marks.heavy_stat import desugar_hex
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
-        # The vocabulary is refused at the call; the needs-field rule waits
-        # for resolution, since `.encode(color=...)` may still supply `field`.
-        validate_aggregate("hex", "mark_hex", aggregate)
+        # The vocabulary is refused at the call, for an explicit aggregate
+        # only -- None is unset, resolved later from a chart-level color's
+        # own aggregate= (`_prep_hex_field_from_color`), or left as the
+        # cells' row count; the needs-field rule also waits for resolution,
+        # since `.encode(color=...)` may still supply `field`.
+        if aggregate is not None:
+            validate_aggregate("hex", "mark_hex", aggregate)
         return self._set_composite_mark(
             "hex",
             desugar_hex,

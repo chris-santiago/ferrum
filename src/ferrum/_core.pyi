@@ -1496,6 +1496,7 @@ class _TransformRegistryEntry(TypedDict):
     outputs: list[tuple[str, str]]
     secondary_outputs: list[tuple[str, list[tuple[str, str]]]]
     params: list[str]
+    method_canonical: dict[str, str]
 
 def transform_registry(kind: str) -> _TransformRegistryEntry:
     """
@@ -1503,7 +1504,8 @@ def transform_registry(kind: str) -> _TransformRegistryEntry:
 
     Returns ``{"methods": [...], "methods_needing_field": [...],
     "outputs": [(name, dtype), ...],
-    "secondary_outputs": [(key, [(name, dtype), ...]), ...], "params": [...]}``
+    "secondary_outputs": [(key, [(name, dtype), ...]), ...], "params": [...],
+    "method_canonical": {spelling: canonical, ...}}``
     for a known transform kind (module name — see the module doc); raises
     ``ValueError`` listing every known kind otherwise.
 
@@ -1512,5 +1514,11 @@ def transform_registry(kind: str) -> _TransformRegistryEntry:
     ``letter_value``'s outliers and per-depth bands, ``linkage``'s dendrogram
     order/coords/segments. Keys are the ones used under default construction
     (no ``name=``); a spec ``name`` prefixes each as ``"{name}_{key}"``.
+
+    ``method_canonical`` maps every spelling in ``methods`` to its canonical
+    spelling (e.g. hex's ``"std"`` and ``"var"`` both map to ``"stdev"``/
+    ``"variance"``'s own canonical forms), so a caller comparing two ops for
+    equality reads this map instead of declaring a second alias table.
+    Present for every kind; empty when ``methods`` is empty.
     """
     ...

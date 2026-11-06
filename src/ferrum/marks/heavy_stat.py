@@ -1099,9 +1099,17 @@ def _hex_color_kwargs(aggregate: str, field: str | None, color: Any) -> dict:
     """``Color`` kwargs for the hex cells' binding, titled for the reader.
 
     The title is the aggregated column, or ``"Count"`` for an aggregate that
-    reads none. *color* is the caller's chart-level color naming the
-    aggregated column or the output column; its properties carry over onto
-    the binding and its own title wins.
+    reads none -- including a color's own ``aggregate="count"`` consumed
+    into *aggregate* by the resolution step, which reads no column either.
+    *color* is the caller's chart-level color naming the aggregated column
+    or the output column; its properties carry over onto the binding and
+    its own title wins. Its ``aggregate=`` is never copied here -- the
+    resolution step (``_prep_hex_field_from_color``) already consumed it
+    into the mark's own *aggregate*, or refused it, so copying it again
+    would re-aggregate the cells' already-aggregated output column.
+    ``bin=`` IS copied: a binned color draws a binned LEGEND scale over that
+    output column (never a row step -- a color-family bin never lowers to
+    one), which is unaffected by the aggregate fold.
     """
     from ferrum._registry import aggregate_needs_field
     from ferrum.encoding.base import ChannelBase
@@ -1109,7 +1117,7 @@ def _hex_color_kwargs(aggregate: str, field: str | None, color: Any) -> dict:
     reads_column = aggregate_needs_field("hex", aggregate)
     kwargs: dict = {"title": field if reads_column else "Count"}
     if isinstance(color, ChannelBase):
-        kwargs.update(color._kwargs)
+        kwargs.update({k: v for k, v in color._kwargs.items() if k != "aggregate"})
     return kwargs
 
 

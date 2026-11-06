@@ -32,6 +32,7 @@ from ferrum._desugar import (
     _scale_domain,
 )
 from ferrum._encode_lowering import (
+    _KERNEL_DENSITY_READS_RAW_ROWS,
     _refuse_bin_aggregate_on_channels,
     _refuse_histogram_bin_aggregate,
     _refuse_statistic_input,
@@ -527,7 +528,7 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
             "displot",
             drawn,
             ("x", "y"),
-            reason="the kernel density estimate reads raw rows",
+            reason=_KERNEL_DENSITY_READS_RAW_ROWS,
         )
     elif kind == "ecdf":
         _refuse_ecdf_bin_aggregate(drawn)

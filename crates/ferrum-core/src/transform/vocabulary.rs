@@ -51,6 +51,17 @@ pub(crate) trait Vocabulary: Copy + PartialEq + 'static {
         Self::all_where(|_| true)
     }
 
+    /// Every accepted spelling mapped to its canonical spelling
+    /// ([`Vocabulary::as_str`]), in [`Vocabulary::all`] order. How the
+    /// registry derives `method_canonical`.
+    fn canonical_map() -> Vec<(&'static str, &'static str)> {
+        Self::ALL
+            .iter()
+            .copied()
+            .flat_map(|v| v.spellings().iter().map(move |&s| (s, v.as_str())))
+            .collect()
+    }
+
     /// The `a|b|c` rendering of [`Vocabulary::all`] every refusal uses.
     fn accepted_values() -> String {
         Self::all().join("|")

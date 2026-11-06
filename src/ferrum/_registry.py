@@ -193,6 +193,20 @@ def aggregate_needs_field(kind: str, aggregate: str) -> bool:
     return aggregate in transform_registry(kind)["methods_needing_field"]
 
 
+def canonical_aggregate(kind: str, aggregate: str) -> str:
+    """*aggregate*'s canonical spelling for *kind*, per ``transform_registry(kind)["method_canonical"]``.
+
+    Rust is the one owner of which spellings are aliases of which op
+    (``hex``'s ``std``/``var`` are aliases of ``stdev``/``variance``); this
+    reads that published map rather than declaring a second one in Python.
+    *aggregate* must already be a value ``transform_registry(kind)["methods"]``
+    accepts -- callers validate with :func:`validate_aggregate` first.
+    """
+    from ferrum._core import transform_registry
+
+    return transform_registry(kind)["method_canonical"][aggregate]
+
+
 def validate_aggregate(
     kind: str, door: str, aggregate: object, *, param: str = "aggregate"
 ) -> None:

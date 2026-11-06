@@ -211,13 +211,15 @@ def test_every_consumed_secondary_column_is_a_real_registry_output(site):
     )
 
 
-def test_residuals_qq_panel_binds_its_y_channel_to_the_declared_qq_column():
+def test_residuals_qq_panel_titles_its_y_axis_without_binding_a_column():
     """Behavioural pin on the built panel, not on the source text.
 
-    The residuals Q-Q panel's y channel must be the `qq` transform's declared
-    `sample` output, and its x channel must NOT be a qq output (it names the
-    panel's own input column) -- so a reformat cannot break this and a
-    re-binding cannot slip past it.
+    `mark_qq` draws its own sample quantiles on y and refuses a
+    field-bearing y= outright, so the residuals Q-Q panel titles that axis
+    with a fieldless `Y(title=...)` rather than binding the `qq`
+    transform's declared `sample` output by name. Its x channel is not a
+    qq output either (it names the panel's own input column) -- so a
+    reformat cannot break this and a re-binding cannot slip past it.
     """
     from ferrum.plots import regression
 
@@ -231,7 +233,8 @@ def test_residuals_qq_panel_binds_its_y_channel_to_the_declared_qq_column():
     )
     panel = regression._residuals_panel(frame, "qq", kind="studentized")
 
-    y_field = panel._encoding["y"].field
-    assert y_field == "sample"
-    assert y_field in declared
+    y_ch = panel._encoding["y"]
+    assert y_ch.field is None
+    assert y_ch.option("title") == "Sample quantiles"
     assert panel._encoding["x"].field not in declared
+    assert panel.to_svg()

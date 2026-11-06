@@ -739,6 +739,28 @@ fn transform_registry_known_kind_returns_dict_shape() {
     });
 }
 
+/// `transform_registry("hex")["method_canonical"]` is a real Python dict a
+/// caller can index directly (not a list of pairs it would have to rebuild),
+/// and its aliases canonicalize the same way the `Hex` constructor does.
+#[test]
+fn transform_registry_exposes_method_canonical_as_a_lookup_dict() {
+    attach(|py| {
+        let dict = transform_registry(py, "hex").unwrap();
+        let dict = dict.bind(py);
+        let canonical = dict.get_item("method_canonical").unwrap().unwrap();
+        let canonical = canonical.downcast::<pyo3::types::PyDict>().unwrap_or_else(|_| {
+            panic!("method_canonical must be a Python dict, got {canonical:?}")
+        });
+        let get = |s: &str| -> String {
+            canonical.get_item(s).unwrap().unwrap_or_else(|| panic!("missing key '{s}'"))
+                .extract().unwrap()
+        };
+        assert_eq!(get("std"), "stdev");
+        assert_eq!(get("var"), "variance");
+        assert_eq!(get("count"), "count");
+    });
+}
+
 #[test]
 fn transform_registry_unknown_kind_raises_value_error_listing_known_kinds() {
     attach(|py| {
@@ -768,6 +790,10 @@ fn transform_registry_covers_every_kind() {
             assert!(
                 dict.get_item("methods_needing_field").unwrap().is_some(),
                 "{kind}: missing 'methods_needing_field' key"
+            );
+            assert!(
+                dict.get_item("method_canonical").unwrap().is_some(),
+                "{kind}: missing 'method_canonical' key"
             );
             assert!(dict.get_item("outputs").unwrap().is_some(), "{kind}: missing 'outputs' key");
             assert!(dict.get_item("params").unwrap().is_some(), "{kind}: missing 'params' key");
@@ -1853,6 +1879,75 @@ fn methods_drift_guard_covers_every_declared_vocabulary() {
         guarded.difference(&declared_nonempty).collect::<Vec<_>>(),
         declared_nonempty.difference(&guarded).collect::<Vec<_>>(),
     );
+}
+
+/// Every kind's `method_canonical` has exactly `methods`'s keys, in the same
+/// order, and every value it maps to is itself a declared method that maps
+/// to itself (canonical) — so a drifted key list or a value naming a spelling
+/// `methods` doesn't declare, or a value that isn't itself canonical, fails
+/// here rather than surfacing as a silent Python lookup miss.
+#[test]
+fn method_canonical_keys_match_methods_and_values_are_canonical() {
+    for kind in all_transform_kinds() {
+        let entry = entry_for_kind(kind).unwrap();
+        let keys: Vec<&str> = entry.method_canonical.iter().map(|&(k, _)| k).collect();
+        assert_eq!(
+            keys, entry.methods,
+            "{kind}: method_canonical's keys drifted from `methods`"
+        );
+        let by_spelling: std::collections::BTreeMap<&str, &str> =
+            entry.method_canonical.iter().copied().collect();
+        for &(spelling, canonical) in &entry.method_canonical {
+            assert!(
+                entry.methods.contains(&canonical),
+                "{kind}: method_canonical maps '{spelling}' to '{canonical}', which `methods` \
+                 does not declare"
+            );
+            assert_eq!(
+                by_spelling.get(canonical),
+                Some(&canonical),
+                "{kind}: '{canonical}' is not canonical — method_canonical maps it to {:?}",
+                by_spelling.get(canonical)
+            );
+        }
+    }
+}
+
+/// `hex`'s two declared aliases (`aggregate.rs`) canonicalize through the
+/// registry the same way they canonicalize at the `Hex` constructor
+/// (`hex_alias_matches_canonical_and_every_door_refuses_with_one_rendering`,
+/// `hex.rs`).
+#[test]
+fn hex_method_canonical_maps_aliases_to_their_canonical_spelling() {
+    let canonical: std::collections::BTreeMap<&str, &str> =
+        entry_for_kind("hex").unwrap().method_canonical.into_iter().collect();
+    assert_eq!(canonical.get("std"), Some(&"stdev"));
+    assert_eq!(canonical.get("var"), Some(&"variance"));
+    assert_eq!(canonical.get("stdev"), Some(&"stdev"));
+    assert_eq!(canonical.get("variance"), Some(&"variance"));
+}
+
+/// `Vocabulary::canonical_map`'s mapping agrees with parsing each spelling
+/// and reading the parsed variant's own canonical spelling, for every
+/// registry-backing vocabulary — the two routes a caller could take to the
+/// same answer must not diverge.
+#[test]
+fn canonical_map_agrees_with_parse_and_as_str_for_every_vocabulary() {
+    fn check<V: Vocabulary>() {
+        for &(spelling, canonical) in &V::canonical_map() {
+            let parsed = V::parse(spelling)
+                .unwrap_or_else(|| panic!("'{spelling}' failed to parse through Vocabulary"));
+            assert_eq!(
+                parsed.as_str(), canonical,
+                "canonical_map disagrees with parse(...).as_str() for '{spelling}'"
+            );
+        }
+    }
+    check::<AggFn>();
+    check::<HexAggregate>();
+    check::<RasterAggregate>();
+    check::<crate::transform::error_extent::ErrorMethod>();
+    check::<crate::transform::linkage::LinkageMethod>();
 }
 
 #[test]

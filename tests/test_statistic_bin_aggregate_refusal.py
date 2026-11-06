@@ -49,6 +49,8 @@ _XY_ROWS = pl.DataFrame(
 _XB_ROWS = _XY_ROWS.with_columns((pl.col("w") > 20.0).cast(pl.Int64).alias("b"))
 #: Grouped rows, for the histogram's normalized-stack cases.
 _GROUPED_HIST_ROWS = _HIST_ROWS.with_columns(g=(pl.col("v") > 10.0))
+#: A third numeric column, for mark_hex's color-aggregate fold cases.
+_XYZ_ROWS = _XY_ROWS.with_columns(z=(pl.col("v") * 3.0 - 1.0))
 
 
 def _digest(svg: str) -> str:
@@ -653,6 +655,195 @@ def _kde_cases() -> list[_Case]:
                         ),
                     )
                 )
+    return cases
+
+
+def _contour_cases() -> list[_Case]:
+    """mark_contour (fill=False and fill=True both) over x/y x bin/aggregate.
+
+    The 2-D kernel density estimate reads raw rows exactly as mark_density's
+    bivariate path does, so this shares that reason and both generic
+    remedies.
+    """
+    cases: list[_Case] = []
+    reason = "the kernel density estimate reads raw rows"
+    for fill in (False, True):
+        for channel, field, other, other_field in (("x", "v", "y", "w"), ("y", "w", "x", "v")):
+            for kwarg, value in (("bin", True), ("aggregate", "mean")):
+                remedy = (
+                    _generic_bin_remedy(field)
+                    if kwarg == "bin"
+                    else _generic_aggregate_remedy(field)
+                )
+
+                def build(
+                    fill=fill, channel=channel, field=field, other=other, other_field=other_field,
+                    kwarg=kwarg, value=value,
+                ):
+                    def run() -> None:
+                        ch = _axis_channel(channel, field, **{kwarg: value})
+                        encode = {channel: ch, other: other_field}
+                        fm.Chart(_XY_ROWS).mark_contour(fill=fill).encode(**encode).to_svg()
+
+                    return run
+
+                cases.append(
+                    (
+                        f"mark_contour_fill_{fill}_{channel}_{kwarg}",
+                        build(),
+                        _message(
+                            "mark_contour",
+                            _written(channel, _CLS[channel], field, kwarg, value),
+                            kwarg,
+                            reason,
+                            remedy,
+                        ),
+                    )
+                )
+    return cases
+
+
+_HEX_BIN_REMEDY = "Size the cells with mark_hex's bin_size=, or drop bin=."
+
+
+def _hex_cases() -> list[_Case]:
+    """mark_hex over x/y x bin (incl. bin=True, which hex never draws the 1-D
+    bins of) and aggregate.
+    """
+    cases: list[_Case] = []
+    reason = "the hexagons bin x and y by their own grid"
+    bin_values: list[Any] = [True, {"bin_count": 3}]
+    for channel, field, other, other_field in (("x", "v", "y", "w"), ("y", "w", "x", "v")):
+        for value in bin_values:
+
+            def build_bin(
+                channel=channel, field=field, other=other, other_field=other_field, value=value
+            ):
+                def run() -> None:
+                    ch = _axis_channel(channel, field, bin=value)
+                    encode = {channel: ch, other: other_field}
+                    fm.Chart(_XY_ROWS).mark_hex().encode(**encode).to_svg()
+
+                return run
+
+            cases.append(
+                (
+                    f"mark_hex_{channel}_bin_{type(value).__name__}",
+                    build_bin(),
+                    _message(
+                        "mark_hex",
+                        _written(channel, _CLS[channel], field, "bin", value),
+                        "bin",
+                        reason,
+                        _HEX_BIN_REMEDY,
+                    ),
+                )
+            )
+
+        def build_aggregate(channel=channel, field=field, other=other, other_field=other_field):
+            def run() -> None:
+                ch = _axis_channel(channel, field, aggregate="mean")
+                encode = {channel: ch, other: other_field}
+                fm.Chart(_XY_ROWS).mark_hex().encode(**encode).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"mark_hex_{channel}_aggregate",
+                build_aggregate(),
+                _message(
+                    "mark_hex",
+                    _written(channel, _CLS[channel], field, "aggregate", "mean"),
+                    "aggregate",
+                    reason,
+                    _generic_aggregate_remedy(field),
+                ),
+            )
+        )
+    return cases
+
+
+_RASTER_BIN_REMEDY = "Set the grid with mark_raster's resolution=, or drop bin=."
+
+
+def _raster_cases() -> list[_Case]:
+    """mark_raster over x/y x bin/aggregate."""
+    cases: list[_Case] = []
+    reason = "the raster bins x and y onto its own pixel grid"
+    for channel, field, other, other_field in (("x", "v", "y", "w"), ("y", "w", "x", "v")):
+        for kwarg, value in (("bin", True), ("aggregate", "mean")):
+            remedy = _RASTER_BIN_REMEDY if kwarg == "bin" else _generic_aggregate_remedy(field)
+
+            def build(
+                channel=channel, field=field, other=other, other_field=other_field,
+                kwarg=kwarg, value=value,
+            ):
+                def run() -> None:
+                    ch = _axis_channel(channel, field, **{kwarg: value})
+                    encode = {channel: ch, other: other_field}
+                    fm.Chart(_XY_ROWS).mark_raster().encode(**encode).to_svg()
+
+                return run
+
+            cases.append(
+                (
+                    f"mark_raster_{channel}_{kwarg}",
+                    build(),
+                    _message(
+                        "mark_raster",
+                        _written(channel, _CLS[channel], field, kwarg, value),
+                        kwarg,
+                        reason,
+                        remedy,
+                    ),
+                )
+            )
+    return cases
+
+
+def _qq_cases() -> list[_Case]:
+    """mark_qq over x (the raw sample, field-bearing) and y (its own computed
+    sample quantiles, fieldless) x bin/aggregate.
+    """
+    cases: list[_Case] = []
+    x_reason = "the Q-Q plot reads the raw sample"
+    for kwarg, value in (("bin", True), ("aggregate", "mean")):
+        remedy = _generic_bin_remedy("v") if kwarg == "bin" else _generic_aggregate_remedy("v")
+
+        def build_x(kwarg=kwarg, value=value):
+            def run() -> None:
+                fm.Chart(_HIST_ROWS).mark_qq().encode(x=X("v", **{kwarg: value})).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"mark_qq_x_{kwarg}",
+                build_x(),
+                _message("mark_qq", _written("x", "X", "v", kwarg, value), kwarg, x_reason, remedy),
+            )
+        )
+
+    y_reason = "the Q-Q plot draws its own sample quantiles on y"
+    for kwarg, value in (("bin", True), ("aggregate", "mean")):
+        remedy = "Drop bin=." if kwarg == "bin" else "Drop aggregate=."
+
+        def build_y(kwarg=kwarg, value=value):
+            def run() -> None:
+                fm.Chart(_HIST_ROWS).mark_qq().encode(x="v", y=Y(**{kwarg: value})).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"mark_qq_y_{kwarg}",
+                build_y(),
+                _message(
+                    "mark_qq", _written("y", "Y", None, kwarg, value), kwarg, y_reason, remedy
+                ),
+            )
+        )
     return cases
 
 
@@ -1450,6 +1641,76 @@ def _revoiced_figure_cases() -> list[_Case]:
             ),
         )
     )
+
+    # jointplot(kind="hex"): its x=/y= reach both the hex center and the
+    # matching marginal histogram. The marginal's own bin axis honors a
+    # redundant bin=True, but the hex center never draws the 1-D bin it
+    # would ask for, so the center's refusal is what speaks, naming
+    # jointplot's own joint_kws spelling of mark_hex's bin_size=.
+    for axis, channel, field, other, other_field in (
+        ("x", "x", "v", "y", "w"),
+        ("y", "y", "w", "x", "v"),
+    ):
+
+        def build(channel=channel, field=field, other=other, other_field=other_field):
+            def run() -> None:
+                ch = _axis_channel(channel, field, bin=True)
+                fm.jointplot(
+                    _XY_ROWS, kind="hex", **{channel: ch, other: other_field}
+                ).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"jointplot_hex_{axis}_bin_true_keyword",
+                build(),
+                _message(
+                    "jointplot",
+                    _written(channel, _CLS[channel], field, "bin", True),
+                    "bin",
+                    "the hexagons bin x and y by their own grid",
+                    "Size the cells with joint_kws={'bin_size': ...}, or drop bin=.",
+                ),
+            )
+        )
+
+    cases.append(
+        (
+            "jointplot_hex_x_bin_true_encode",
+            lambda: fm.jointplot(
+                _XY_ROWS, x="v", y="w", kind="hex", encode={"x": X("v", bin=True)}
+            ).to_svg(),
+            _message(
+                "jointplot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the hexagons bin x and y by their own grid",
+                "Size the cells with joint_kws={'bin_size': ...}, or drop bin=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "jointplot_hex_color_aggregate_mismatch",
+            lambda: fm.jointplot(
+                _XYZ_ROWS,
+                x="v",
+                y="w",
+                kind="hex",
+                joint_kws={"aggregate": "sum", "field": "z"},
+                encode={"color": fm.Color("z", aggregate="mean")},
+            ).to_svg(),
+            _message(
+                "jointplot",
+                _written("color", "Color", "z", "aggregate", "mean"),
+                "aggregate",
+                "the cells are colored by the statistic's own value",
+                "Aggregate the cells with joint_kws={'aggregate': 'mean', 'field': 'z'}, or "
+                "drop aggregate=.",
+            ),
+        )
+    )
     return cases
 
 
@@ -1503,6 +1764,10 @@ _ALL_CASES: list[_Case] = (
     + _smooth_cases()
     + _fit_cases()
     + _kde_cases()
+    + _contour_cases()
+    + _hex_cases()
+    + _raster_cases()
+    + _qq_cases()
     + _ecdf_cases()
     + _residplot_cases()
     + _mark_function_cases()
@@ -1552,6 +1817,9 @@ _docstring_drift = load_script(
 #: to the mark it actually forwards to.
 _KWS_FORWARDS_TO: dict[tuple[str, str], Callable[..., fm.Chart]] = {
     ("jointplot", "marginal_kws"): fm.Chart.mark_histogram,
+    # jointplot forwards joint_kws to the center mark verbatim; only the hex
+    # center's refusal (kind="hex") ever names a joint_kws key.
+    ("jointplot", "joint_kws"): fm.Chart.mark_hex,
 }
 
 #: A call token: an identifier immediately before ``(`` (pushed onto the
@@ -1661,6 +1929,12 @@ def test_a_figure_doors_refusal_never_misquotes_an_inner_call(
         "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
         "by its own rule, so bin= would be ignored. State the rule with "
         "joint_kws={'bins': ...}, or drop bin=.",
+        "jointplot(x=X('v', bin=True)) is not supported: the hexagons bin x and y by "
+        "their own grid, so bin= would be ignored. Size the cells with mark_hex's "
+        "bin_size=, or drop bin=.",
+        "pairplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
+        "by its own rule, so bin= would be ignored. State the rule with "
+        "joint_kws={'bins': ...}, or drop bin=.",
     ],
     ids=[
         "sibling_door_multiple",
@@ -1670,7 +1944,9 @@ def test_a_figure_doors_refusal_never_misquotes_an_inner_call(
         "misspelled_bins",
         "unmapped_marginal_kws_voice",
         "unowned_x_bins",
-        "unmapped_dict",
+        "undocumented_joint_kws_key",
+        "hex_center_knob_at_jointplot",
+        "joint_kws_at_pairplot",
     ],
 )
 def test_the_typeable_remedy_check_rejects_a_misquote(message: str) -> None:
@@ -1680,11 +1956,21 @@ def test_the_typeable_remedy_check_rejects_a_misquote(message: str) -> None:
 
 
 def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
-    """Positive control: the actual jointplot bin-rule message passes untouched."""
+    """Positive controls: the actual jointplot messages pass untouched."""
     _assert_the_remedy_is_typeable_at_the_voice(
         "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
         "by its own rule, so bin= would be ignored. State the rule with "
         "marginal_kws={'bins': ...}, or drop bin=."
+    )
+    _assert_the_remedy_is_typeable_at_the_voice(
+        "jointplot(x=X('v', bin=True)) is not supported: the hexagons bin x and y by "
+        "their own grid, so bin= would be ignored. Size the cells with "
+        "joint_kws={'bin_size': ...}, or drop bin=."
+    )
+    _assert_the_remedy_is_typeable_at_the_voice(
+        "jointplot(color=Color('z', aggregate='mean')) is not supported: the cells are "
+        "colored by the statistic's own value, so aggregate= would be ignored. Aggregate "
+        "the cells with joint_kws={'aggregate': 'mean', 'field': 'z'}, or drop aggregate=."
     )
 
 
@@ -1752,6 +2038,38 @@ def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
             "roc_chart(y=Y(aggregate='count')) is not supported: the histogram computes y "
             "itself, so aggregate= would be ignored. Drop aggregate=.",
         ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", bin=True), y="w").to_svg(),
+            "pairplot",
+            "pairplot(x=X('v', bin=True)) is not supported: the hexagons bin x and y by "
+            "their own grid, so bin= would be ignored. Drop bin=.",
+        ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x=X("v", bin=True), y="w").to_svg(),
+            "jointplot",
+            "jointplot(x=X('v', bin=True)) is not supported: the raster bins x and y onto "
+            "its own pixel grid, so bin= would be ignored. Drop bin=.",
+        ),
+        (
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_contour()
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            "jointplot",
+            "jointplot(color=Color('z', aggregate='mean')) is not supported: the levels are "
+            "colored by the statistic's own value, so aggregate= would be ignored. Drop "
+            "aggregate=.",
+        ),
+        (
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(aggregate="sum", field="z")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            "roc_chart",
+            "roc_chart(color=Color('z', aggregate='mean')) is not supported: the cells are "
+            "colored by the statistic's own value, so aggregate= would be ignored. Drop "
+            "aggregate=.",
+        ),
     ],
     ids=[
         "mark_histogram_density_count_as_pairplot",
@@ -1761,6 +2079,10 @@ def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
         "mark_smooth_x_bin_as_jointplot",
         "mark_smooth_x_bin_as_residplot",
         "mark_histogram_fill_count_as_roc_chart",
+        "mark_hex_x_bin_as_pairplot",
+        "mark_raster_x_bin_as_jointplot",
+        "mark_contour_color_aggregate_as_jointplot",
+        "mark_hex_color_mismatch_as_roc_chart",
     ],
 )
 def test_a_voice_without_the_knob_takes_the_knob_free_remedy(
@@ -1786,6 +2108,9 @@ _PICKLE_CONTRACT_DOORS = (
     "regplot",
     "lmplot",
     "roc_chart",
+    "mark_hex",
+    "mark_raster",
+    "mark_contour",
 )
 #: One refusal per door-spelled knob, built directly from the public API
 #: (no ``_encode_lowering`` import), each a case
@@ -1800,6 +2125,11 @@ _PICKLE_CONTRACT_REFUSALS: dict[str, Callable[[], Any]] = {
     .encode(y=Y(aggregate="count"))
     .to_svg(),
     "fit_x_bins": lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x=X("v", bin=True), y="w").to_svg(),
+    "hex_bin_size": lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", bin=True), y="w").to_svg(),
+    "hex_cells": lambda: fm.Chart(_XYZ_ROWS)
+    .mark_hex(aggregate="sum", field="z")
+    .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+    .to_svg(),
 }
 
 
@@ -1901,6 +2231,17 @@ _REVOICED_BUILDERS: dict[str, Callable[[pl.DataFrame], Any]] = {
     "lmplot_posthoc_x_bin": lambda rows: fm.lmplot(rows, x="v", y="w", scatter=False).encode(
         x=X("v", bin=True)
     ),
+    "jointplot_hex_x_bin_true": lambda rows: fm.jointplot(
+        rows, x=X("v", bin=True), y="w", kind="hex"
+    ),
+    "jointplot_hex_color_mismatch": lambda rows: fm.jointplot(
+        rows.with_columns(z=pl.col("w")),
+        x="v",
+        y="w",
+        kind="hex",
+        joint_kws={"aggregate": "sum", "field": "z"},
+        encode={"color": fm.Color("z", aggregate="mean")},
+    ),
 }
 
 
@@ -1912,6 +2253,61 @@ def test_a_re_voiced_refusal_reads_no_rows(builder_id: str, frame_id: str) -> No
     refuses with the exact same message a full frame does.
     """
     builder = _REVOICED_BUILDERS[builder_id]
+
+    def message_for(rows: pl.DataFrame) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            builder(rows).to_svg()
+        return str(excinfo.value)
+
+    assert message_for(_DEGENERATE_FRAMES[frame_id]) == message_for(_XY_ROWS)
+
+
+#: One builder per direct refusal of the four statistic marks (contour,
+#: hex, raster, qq): their x/y bin=/aggregate=, their color refusals, and
+#: mark_qq's field-bearing y, mirroring :data:`_REVOICED_BUILDERS` by
+#: reference: each a ``rows -> Chart`` callable, read only for its own
+#: x/y/color columns, never for the refusal itself. A color row derives
+#: ``z`` from ``w`` so every frame below (including the degenerate ones,
+#: which carry no ``z``) has one.
+_STATISTIC_MARK_BUILDERS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "mark_contour_x_bin": lambda rows: fm.Chart(rows).mark_contour().encode(
+        x=X("v", bin=True), y="w"
+    ),
+    "mark_contour_fill_y_aggregate": lambda rows: fm.Chart(rows).mark_contour(fill=True).encode(
+        x="v", y=Y("w", aggregate="mean")
+    ),
+    "mark_contour_color": lambda rows: fm.Chart(rows.with_columns(z=pl.col("w")))
+    .mark_contour()
+    .encode(x="v", y="w", color=fm.Color("z", aggregate="mean")),
+    "mark_hex_x_bin": lambda rows: fm.Chart(rows).mark_hex().encode(x=X("v", bin=True), y="w"),
+    "mark_hex_y_aggregate": lambda rows: fm.Chart(rows).mark_hex().encode(
+        x="v", y=Y("w", aggregate="mean")
+    ),
+    "mark_hex_color_mismatch": lambda rows: fm.Chart(rows.with_columns(z=pl.col("w")))
+    .mark_hex(aggregate="sum", field="z")
+    .encode(x="v", y="w", color=fm.Color("z", aggregate="mean")),
+    "mark_raster_x_bin": lambda rows: fm.Chart(rows).mark_raster().encode(
+        x=X("v", bin=True), y="w"
+    ),
+    "mark_raster_color": lambda rows: fm.Chart(rows.with_columns(z=pl.col("w")))
+    .mark_raster()
+    .encode(x="v", y="w", color=fm.Color("z", aggregate="mean")),
+    "mark_qq_x_bin": lambda rows: fm.Chart(rows).mark_qq().encode(x=X("v", bin=True)),
+    "mark_qq_y": lambda rows: fm.Chart(rows).mark_qq().encode(x="v", y="w"),
+    "mark_qq_fieldless_y_aggregate": lambda rows: fm.Chart(rows).mark_qq().encode(
+        x="v", y=Y(aggregate="mean")
+    ),
+}
+
+
+@pytest.mark.parametrize("builder_id", list(_STATISTIC_MARK_BUILDERS))
+@pytest.mark.parametrize("frame_id", list(_DEGENERATE_FRAMES))
+def test_a_statistic_mark_refusal_reads_no_rows(builder_id: str, frame_id: str) -> None:
+    """Every direct refusal of the four statistic marks is raised from the
+    encoding alone, never the rows: an empty, one-row, all-tied or null
+    frame refuses with the exact same message a full frame does.
+    """
+    builder = _STATISTIC_MARK_BUILDERS[builder_id]
 
     def message_for(rows: pl.DataFrame) -> str:
         with pytest.raises(ValueError) as excinfo:
@@ -2433,6 +2829,76 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             column="mean_v",
         ),
     ),
+    # mark_contour's x/y take the same generic per-row Bin/transform_aggregate
+    # remedies as mark_density's bivariate path (the same kernel-density
+    # reason, the same two generic remedies); mark_hex's own aggregate= is
+    # the hex-grid-specific bin_size= remedy below, but its x/y aggregate=
+    # (pre-aggregating rows before the hexagons bin them) takes the same
+    # generic transform_aggregate remedy too.
+    "per_row_bin_mark_contour_x": _RemedyRun(
+        refused=lambda: (
+            fm.Chart(_XY_ROWS).mark_contour().encode(x=X("v", bin=True), y="w").to_svg()
+        ),
+        names=_names_bin("v"),
+        remedied=lambda: (
+            fm.Chart(_XY_ROWS)
+            .transform(_per_row_bin("v"))
+            .mark_contour()
+            .encode(x="bin_start", y="w")
+        ),
+        sibling=lambda: (
+            fm.Chart(_prebinned(_XY_ROWS, "v")).mark_contour().encode(x="bin_start", y="w")
+        ),
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_XY_ROWS).mark_contour().encode(x="bin_start", y="w"),
+            error=ValueError,
+            column="bin_start",
+        ),
+    ),
+    "transform_aggregate_mark_contour_x": _RemedyRun(
+        refused=lambda: (
+            fm.Chart(_GROUPED_XY_ROWS)
+            .mark_contour()
+            .encode(x=X("v", aggregate="mean"), y="w")
+            .to_svg()
+        ),
+        names=_names_aggregate(),
+        remedied=lambda: (
+            fm.Chart(_GROUPED_XY_ROWS)
+            .transform(_per_group_mean())
+            .mark_contour()
+            .encode(x="mean_v", y="mean_w")
+        ),
+        sibling=lambda: (
+            fm.Chart(_PREAGGREGATED_ROWS).mark_contour().encode(x="mean_v", y="mean_w")
+        ),
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_contour().encode(x="mean_v", y="mean_w"),
+            error=ValueError,
+            column="mean_v",
+        ),
+    ),
+    "transform_aggregate_mark_hex_x": _RemedyRun(
+        refused=lambda: (
+            fm.Chart(_GROUPED_XY_ROWS)
+            .mark_hex()
+            .encode(x=X("v", aggregate="mean"), y="w")
+            .to_svg()
+        ),
+        names=_names_aggregate(),
+        remedied=lambda: (
+            fm.Chart(_GROUPED_XY_ROWS)
+            .transform(_per_group_mean())
+            .mark_hex()
+            .encode(x="mean_v", y="mean_w")
+        ),
+        sibling=lambda: fm.Chart(_PREAGGREGATED_ROWS).mark_hex().encode(x="mean_v", y="mean_w"),
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_hex().encode(x="mean_v", y="mean_w"),
+            error=ValueError,
+            column="mean_v",
+        ),
+    ),
     # Named-keyword remedies: the door's own spelling, run as written,
     # renders the same chart a different route already draws. displot's
     # bin rule and density flag are reached post-hoc, after displot's own
@@ -2458,6 +2924,48 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         remedied=lambda: fm.jointplot(_XY_ROWS, x="v", y="w", marginal_kws={"bins": 3}),
         sibling=lambda: fm.jointplot(_XY_ROWS, x="v", y="w", marginal_kws={"bin_count": 3}),
         without=_DifferentChart(lambda: fm.jointplot(_XY_ROWS, x="v", y="w")),
+    ),
+    # mark_hex's own grid knob: run through jointplot(kind="hex")'s
+    # joint_kws=, the one other door that reaches mark_hex's bin_size=, so
+    # the sibling crosses a real door boundary rather than repeating the
+    # same call.
+    "bin_size_mark_hex_x": _RemedyRun(
+        refused=lambda: (
+            fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", bin=True), y="w").to_svg()
+        ),
+        names=_HEX_BIN_REMEDY,
+        remedied=lambda: fm.Chart(_XY_ROWS).mark_hex(bin_size=5.0).encode(x="v", y="w"),
+        sibling=lambda: fm.jointplot(
+            _XY_ROWS, x="v", y="w", kind="hex", joint_kws={"bin_size": 5.0}
+        ).center,
+        without=_DifferentChart(lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y="w")),
+    ),
+    # mark_raster's own grid knob: no other door reaches it, so the sibling
+    # is resolution='s own alternate spelling (an explicit (nx, ny) tuple
+    # equal to the plain int), proving the remedy's keyword is typeable
+    # more than one way, not just repeating the same call.
+    "resolution_mark_raster_x": _RemedyRun(
+        refused=lambda: (
+            fm.Chart(_XY_ROWS).mark_raster().encode(x=X("v", bin=True), y="w").to_svg()
+        ),
+        names=_RASTER_BIN_REMEDY,
+        remedied=lambda: fm.Chart(_XY_ROWS).mark_raster(resolution=20).encode(x="v", y="w"),
+        sibling=lambda: fm.Chart(_XY_ROWS).mark_raster(resolution=(20, 20)).encode(x="v", y="w"),
+        without=_DifferentChart(lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x="v", y="w")),
+    ),
+    # jointplot's own spelling of mark_hex's grid knob, run on jointplot
+    # itself rather than crossing back to the mark door (the mirror of
+    # bin_size_mark_hex_x above).
+    "bin_size_jointplot_hex_x": _RemedyRun(
+        refused=lambda: fm.jointplot(_XY_ROWS, x=X("v", bin=True), y="w", kind="hex").to_svg(),
+        names="Size the cells with joint_kws={'bin_size': ...}, or drop bin=.",
+        remedied=lambda: fm.jointplot(
+            _XY_ROWS, x="v", y="w", kind="hex", joint_kws={"bin_size": 5.0}
+        ),
+        sibling=lambda: fm.jointplot(
+            _XY_ROWS, x="v", y="w", kind="hex", joint_kws={"bin_size": 5}
+        ),
+        without=_DifferentChart(lambda: fm.jointplot(_XY_ROWS, x="v", y="w", kind="hex")),
     ),
 }
 
@@ -2940,3 +3448,993 @@ def test_a_primitive_marks_own_bin_and_aggregate_lowering_is_unaffected():
         _digest(bin_less_aggregate)
         == "618b6f360bda0f5fd5b3ed5de5c712ee0da53db6572caeec4fea6b033f7660f6"
     )
+
+
+# ---------------------------------------------------------------------------
+# mark_hex's color-aggregate fold: a matching aggregate= (or an unset one) is
+# consumed; a different op is refused. mark_raster and mark_contour never
+# fold a color aggregate=, always refused.
+# ---------------------------------------------------------------------------
+
+
+def _hex_mean_target() -> str:
+    """``mark_hex``'s own ``aggregate='mean', field='z'`` call -- the render every
+    "consumed as mean" row below must match.
+    """
+    return (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0, aggregate="mean", field="z")
+        .encode(x="v", y="w")
+        .to_svg()
+    )
+
+
+def _hex_count_target() -> str:
+    """``mark_hex``'s own plain (unset, count) call -- the render every
+    "consumed as count" row below must match.
+    """
+    return fm.Chart(_XYZ_ROWS).mark_hex(bin_size=4.0).encode(x="v", y="w").to_svg()
+
+
+_HEX_MISMATCH_TEXT = (
+    "mark_hex(color=Color('z', aggregate='mean')) is not supported: the cells are "
+    "colored by the statistic's own value, so aggregate= would be ignored. Aggregate "
+    "the cells with mark_hex(aggregate='mean', field='z'), or drop aggregate=."
+)
+
+
+@pytest.mark.parametrize(
+    "build,expected",
+    [
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="count")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            _HEX_MISMATCH_TEXT,
+            id="explicit_count_differs",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0)
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            _hex_mean_target,
+            id="unset_consumed",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="mean")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            _hex_mean_target,
+            id="equal_mean_consumed",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="sum", field="z")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            _HEX_MISMATCH_TEXT,
+            id="different_op_refused",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="mean", field="z")
+            .encode(x="v", y="w", color=fm.Color(aggregate="sum"))
+            .to_svg(),
+            "mark_hex(color=Color(aggregate='sum')) is not supported: the cells are "
+            "colored by the statistic's own value, so aggregate= would be ignored. Drop "
+            "aggregate=.",
+            id="fieldless_sum_refused",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="mean", field="z")
+            .encode(x="v", y="w", color=fm.Color(aggregate="count"))
+            .to_svg(),
+            "mark_hex(color=Color(aggregate='count')) is not supported: the cells are "
+            "colored by the statistic's own value, so aggregate= would be ignored. Drop "
+            "aggregate=.",
+            id="fieldless_count_refused",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="mean", field="z")
+            .encode(x="v", y="w", color=fm.Color(aggregate="mean"))
+            .to_svg(),
+            _hex_mean_target,
+            id="fieldless_equal_mean",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0)
+            .encode(x="v", y="w", color=fm.Color(aggregate="count"))
+            .to_svg(),
+            _hex_count_target,
+            id="fieldless_unset_count",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, field="z")
+            .encode(x="v", y="w", color=fm.Color(aggregate="mean"))
+            .to_svg(),
+            _hex_mean_target,
+            id="fieldless_unset_mean_with_mark_field",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0)
+            .encode(x="v", y="w", color=fm.Color(aggregate="mean"))
+            .to_svg(),
+            "mark_hex: aggregate='mean' requires field=... (the column to aggregate); "
+            "pass field=... or use aggregate='count', which need no field.",
+            id="fieldless_unset_mean_needs_field",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0)
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="count"))
+            .to_svg(),
+            _hex_count_target,
+            id="named_count_consumed",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="mean", field="w")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+            .to_svg(),
+            "mark_hex: color='z' is drawn nowhere; the cells are colored by "
+            "aggregate='mean' of field='w'. Bind color= to the aggregated column, or "
+            "drop it.",
+            id="consumed_op_other_field_drawn_nowhere",
+        ),
+        pytest.param(
+            lambda: fm.jointplot(
+                _XYZ_ROWS,
+                x="v",
+                y="w",
+                kind="hex",
+                encode={"color": fm.Color("z", aggregate="mean")},
+            ).to_svg(),
+            lambda: fm.jointplot(
+                _XYZ_ROWS,
+                x="v",
+                y="w",
+                kind="hex",
+                joint_kws={"aggregate": "mean", "field": "z"},
+                encode={"color": fm.Color("z", aggregate="mean")},
+            ).to_svg(),
+            id="jointplot_unset_consumed",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0)
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="q1"))
+            .to_svg(),
+            "mark_hex: aggregate must be one of ['count', 'max', 'mean', 'median', 'min', "
+            "'std', 'stdev', 'sum', 'var', 'variance']; got 'q1'",
+            id="invalid_op_voiced_as_mark_hex",
+        ),
+        pytest.param(
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="std", field="z")
+            .encode(x="v", y="w", color=fm.Color("z", aggregate="stdev"))
+            .to_svg(),
+            lambda: fm.Chart(_XYZ_ROWS)
+            .mark_hex(bin_size=4.0, aggregate="std", field="z")
+            .encode(x="v", y="w")
+            .to_svg(),
+            id="std_stdev_alias_consumed",
+        ),
+    ],
+)
+def test_hex_color_aggregate_is_consumed_or_refused(
+    build: Callable[[], str], expected: str | Callable[[], str]
+):
+    """A color ``aggregate=`` equal to ``mark_hex``'s own (or with its own
+    ``aggregate=`` unset) is consumed -- byte-identical to the matching
+    direct call -- resolved before the color's field is read, so a
+    fieldless color's aggregate= folds or refuses too; a differing op is
+    refused naming ``mark_hex``'s own ``aggregate=``/``field=``.
+    """
+    if isinstance(expected, str):
+        with pytest.raises(ValueError) as excinfo:
+            build()
+        assert str(excinfo.value) == expected
+    else:
+        assert build() == expected()
+
+
+def test_hex_fold_fixture_tells_mean_sum_and_count_apart():
+    """At ``bin_size=4.0`` (more than one row per cell), ``mean``, ``sum``
+    and ``count`` render three different SVGs -- the fixture the fold
+    rows above compare against can actually discriminate the ops, unlike
+    ``mark_hex()``'s own default bin size, which puts one row in each cell
+    and renders every op byte-identically.
+    """
+    mean_svg = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0, aggregate="mean", field="z")
+        .encode(x="v", y="w")
+        .to_svg()
+    )
+    sum_svg = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0, aggregate="sum", field="z")
+        .encode(x="v", y="w")
+        .to_svg()
+    )
+    count_svg = fm.Chart(_XYZ_ROWS).mark_hex(bin_size=4.0).encode(x="v", y="w").to_svg()
+    assert mean_svg != sum_svg
+    assert mean_svg != count_svg
+    assert sum_svg != count_svg
+
+
+def test_mark_hex_aggregate_is_unset_by_default():
+    """``mark_hex(aggregate=)``'s default is ``None`` (unset), not
+    ``"count"``: the signature now states it, an explicit ``None`` renders
+    byte-identically to leaving it out, and the vocabulary is still
+    checked at the call for a real value.
+    """
+    assert inspect.signature(fm.Chart.mark_hex).parameters["aggregate"].default is None
+
+    bare = fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y="w").to_svg()
+    explicit_none = fm.Chart(_XY_ROWS).mark_hex(aggregate=None).encode(x="v", y="w").to_svg()
+    assert bare == explicit_none
+    assert _digest(bare) == "ae014e0549a642546e83a55663c996bcfb78548e077fde3171eb3a29e98dfab5"
+
+    with pytest.raises(ValueError, match=r"mark_hex: aggregate must be one of"):
+        fm.Chart(_XY_ROWS).mark_hex(aggregate="geomean").encode(x="v", y="w")
+
+
+def test_jointplot_hex_invalid_color_op_speaks_as_jointplot():
+    """An invalid color ``aggregate=`` consumed through jointplot's hex
+    center refuses in jointplot's own voice, not a bare ``mark_hex:``
+    naming a call jointplot's caller never wrote -- the same entry every
+    other re-voiced hex refusal in this file already speaks as.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        fm.jointplot(
+            _XYZ_ROWS, x="v", y="w", kind="hex", encode={"color": fm.Color("z", aggregate="q1")}
+        ).to_svg()
+    assert str(excinfo.value) == (
+        "jointplot: aggregate must be one of ['count', 'max', 'mean', 'median', 'min', "
+        "'std', 'stdev', 'sum', 'var', 'variance']; got 'q1'"
+    )
+
+
+def test_hex_color_binned_legend_is_unaffected_by_the_aggregate_fold():
+    """A binned color legend (no ``aggregate=`` of its own) still renders its
+    own stepped scale: the fold only ever touches a color's ``aggregate=``,
+    never its ``bin=``.
+    """
+    plain = (
+        fm.Chart(_XYZ_ROWS).mark_hex(aggregate="mean").encode(x="v", y="w", color="z").to_svg()
+    )
+    binned = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(aggregate="mean")
+        .encode(x="v", y="w", color=fm.Color("z", bin=True))
+        .to_svg()
+    )
+    assert binned != plain
+    # The binned legend draws the same whether the field is named directly
+    # or supplied by mark_hex's own aggregate=/field=.
+    via_field = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(aggregate="mean", field="z")
+        .encode(x="v", y="w", color=fm.Color("z", bin=True))
+        .to_svg()
+    )
+    assert binned == via_field
+
+
+def test_hex_fieldless_consumed_color_styles_the_cells():
+    """A fieldless consumed color's own channel properties (``title=``,
+    ``scheme=``) style the cells the same as a field-bearing consumed
+    color's do -- not only the ``aggregate=``/``field=`` fold itself.
+    """
+    default_title = (
+        fm.Chart(_XY_ROWS)
+        .mark_hex()
+        .encode(x="v", y="w", color=fm.Color(aggregate="count"))
+        .to_svg()
+    )
+    titled = (
+        fm.Chart(_XY_ROWS)
+        .mark_hex()
+        .encode(x="v", y="w", color=fm.Color(aggregate="count", title="Points"))
+        .to_svg()
+    )
+    assert titled != default_title
+    assert "Points" in titled
+    assert "Points" not in default_title
+
+    unscyled = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0, field="z")
+        .encode(x="v", y="w", color=fm.Color(aggregate="mean"))
+        .to_svg()
+    )
+    schemed = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0, field="z")
+        .encode(x="v", y="w", color=fm.Color(aggregate="mean", scheme="magma"))
+        .to_svg()
+    )
+    assert schemed != unscyled
+    assert "#000004" in schemed  # magma's first stop color
+    # A field-bearing consumed color's own scheme= draws the identical
+    # cells and legend -- the fieldless carryover is not a second,
+    # drifting mechanism.
+    via_field = (
+        fm.Chart(_XYZ_ROWS)
+        .mark_hex(bin_size=4.0)
+        .encode(x="v", y="w", color=fm.Color("z", aggregate="mean", scheme="magma"))
+        .to_svg()
+    )
+    assert schemed == via_field
+
+
+def test_mark_raster_and_mark_contour_refuse_a_color_aggregate():
+    """Neither mark colors its cells/levels from a chart-level ``color=``;
+    a color ``aggregate=`` is always refused, naming each mark's own knob,
+    or dropping the kwarg outright when the color names no field.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_XYZ_ROWS).mark_raster().encode(
+            x="v", y="w", color=fm.Color("z", aggregate="mean")
+        ).to_svg()
+    assert str(excinfo.value) == (
+        "mark_raster(color=Color('z', aggregate='mean')) is not supported: the cells are "
+        "colored by the statistic's own value, so aggregate= would be ignored. Aggregate "
+        "the cells with mark_raster(aggregate='mean', field='z'), or drop aggregate=."
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_XY_ROWS).mark_raster().encode(
+            x="v", y="w", color=fm.Color(aggregate="mean")
+        ).to_svg()
+    assert str(excinfo.value) == (
+        "mark_raster(color=Color(aggregate='mean')) is not supported: the cells are "
+        "colored by the statistic's own value, so aggregate= would be ignored. Drop "
+        "aggregate=."
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_XYZ_ROWS).mark_contour().encode(
+            x="v", y="w", color=fm.Color("z", aggregate="mean")
+        ).to_svg()
+    assert str(excinfo.value) == (
+        "mark_contour(color=Color('z', aggregate='mean')) is not supported: the levels are "
+        "colored by the statistic's own value, so aggregate= would be ignored. Set the "
+        "levels with mark_contour's thresholds=, or drop aggregate=."
+    )
+
+
+_AUTO_RASTER_ROWS = pl.DataFrame(
+    {
+        "x": [float(i % 5) for i in range(10)],
+        "y": [float(i % 3) for i in range(10)],
+        "c": [float(i) for i in range(10)],
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "encode_kwargs,expect_image,warning_match,compare_to_unthresholded",
+    [
+        pytest.param(
+            {"x": X("x:Q", bin=True), "y": "y:Q"},
+            False,
+            "may produce large output",
+            True,
+            id="x_bin",
+        ),
+        pytest.param(
+            {"x": "x:Q", "y": Y("y:Q", aggregate="mean")},
+            False,
+            None,
+            True,
+            id="y_aggregate",
+        ),
+        pytest.param(
+            {"x": X("x:Q", aggregate="mean"), "y": "y:Q"},
+            False,
+            None,
+            True,
+            id="x_aggregate",
+        ),
+        pytest.param(
+            {"x": "x:Q", "y": Y("y:Q", bin=True)},
+            False,
+            "may produce large output",
+            True,
+            id="y_bin",
+        ),
+        pytest.param(
+            {"x": X("x:Q", bin=True), "y": Y("y:Q", aggregate="mean")},
+            False,
+            None,
+            True,
+            id="bin_and_aggregate_together",
+        ),
+        pytest.param(
+            {"x": X("x:Q", bin=False), "y": "y:Q"},
+            True,
+            "substituted mark_raster",
+            False,
+            id="x_bin_false_still_substitutes",
+        ),
+        pytest.param(
+            {"x": X("x:Q", aggregate=None), "y": "y:Q"},
+            True,
+            "substituted mark_raster",
+            False,
+            id="x_aggregate_none_still_substitutes",
+        ),
+        pytest.param(
+            {"x": "x:Q", "y": "y:Q"},
+            True,
+            "substituted mark_raster",
+            False,
+            id="plain_control",
+        ),
+    ],
+)
+def test_auto_raster_never_substitutes_a_binned_or_aggregated_position(
+    encode_kwargs: dict, expect_image: bool, warning_match: str | None, compare_to_unthresholded: bool
+):
+    """A binned or aggregated x/y draws per row or per group, never a
+    position the raster can draw: auto-raster excludes it (silently for an
+    aggregate, with the large-output warning for a bin, like the missing/
+    non-quantitative gate) rather than substituting a raster that would
+    silently drop it, rendering byte-equal to the same chart with
+    auto-raster disabled outright. ``x_aggregate`` and ``y_bin`` pin the
+    other operand of each ``or`` the exclusion checks; ``bin_and_aggregate_together``
+    pins that the aggregate exclusion runs first and wins silently, with no
+    large-output warning, when both are present on different channels.
+    ``x_bin_false_still_substitutes`` and ``x_aggregate_none_still_substitutes``
+    pin that the unset spellings (``bin=False``, ``aggregate=None``) are not
+    treated as a binned/aggregated position -- they substitute exactly like
+    the plain quantitative control. The plain quantitative control is
+    unaffected by this exclusion: it still substitutes.
+    """
+    import warnings as _warnings
+
+    over_threshold_cfg = fm.RenderConfig(raster_threshold=0)
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        over_threshold = (
+            fm.Chart(_AUTO_RASTER_ROWS)
+            .mark_point()
+            .encode(**encode_kwargs)
+            .properties(render_config=over_threshold_cfg)
+            .to_svg()
+        )
+    messages = [str(w.message) for w in caught]
+    if warning_match is None:
+        assert not any("large output" in m or "substituted" in m for m in messages), messages
+    else:
+        assert any(warning_match in m for m in messages), messages
+
+    assert ("<image" in over_threshold) == expect_image
+    if compare_to_unthresholded:
+        unthresholded = (
+            fm.Chart(_AUTO_RASTER_ROWS)
+            .mark_point()
+            .encode(**encode_kwargs)
+            .properties(render_config=fm.RenderConfig(raster_threshold=None))
+            .to_svg()
+        )
+        assert over_threshold == unthresholded
+
+
+@pytest.mark.parametrize(
+    "encode_kwargs",
+    [
+        pytest.param({"color": fm.Color("c:Q", aggregate="sum")}, id="color_aggregate"),
+        pytest.param({"size": fm.Size("c:Q", aggregate="mean")}, id="size_aggregate"),
+        pytest.param({"opacity": fm.Opacity("c:Q", aggregate="mean")}, id="opacity_aggregate"),
+    ],
+)
+def test_auto_raster_never_substitutes_any_channels_own_aggregate(encode_kwargs: dict):
+    """A non-positional channel's own ``aggregate=`` (color, size, opacity)
+    excludes auto-raster and warns with the channel-specific text, naming
+    only the remedy that renders -- never ``.mark_raster()``, which refuses
+    a color aggregate= and fails raw on size/opacity.
+    """
+    import warnings as _warnings
+
+    channel = next(iter(encode_kwargs))
+    over_threshold_cfg = fm.RenderConfig(raster_threshold=0)
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        over_threshold = (
+            fm.Chart(_AUTO_RASTER_ROWS)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", **encode_kwargs)
+            .properties(render_config=over_threshold_cfg)
+            .to_svg()
+        )
+    messages = [str(w.message) for w in caught]
+    assert messages == [
+        f"Chart has 10 marks which may produce large output, and its {channel} "
+        "encoding carries its own aggregate=, so its marks are drawn per group -- "
+        "`.mark_raster()` cannot draw it either. Compute the aggregate with "
+        "`.transform(fm.transform_aggregate(...))` and bind the output column "
+        "with no aggregate= of its own, or set `raster=False` to suppress "
+        "this warning."
+    ]
+    assert "<image" not in over_threshold
+
+    unthresholded = (
+        fm.Chart(_AUTO_RASTER_ROWS)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", **encode_kwargs)
+        .properties(render_config=fm.RenderConfig(raster_threshold=None))
+        .to_svg()
+    )
+    assert over_threshold == unthresholded
+
+
+@pytest.mark.parametrize(
+    "channel,Channel",
+    [
+        pytest.param("color", fm.Color, id="color"),
+        pytest.param("size", fm.Size, id="size"),
+        pytest.param("opacity", fm.Opacity, id="opacity"),
+    ],
+)
+def test_warn_channel_aggregate_excluded_remedy_renders(channel: str, Channel: type):
+    """Both remedies ``_warn_channel_aggregate_excluded`` names actually
+    render: pre-aggregating with ``.transform(fm.transform_aggregate(...))``
+    and binding the output column with no ``aggregate=`` of its own (which
+    substitutes), and ``raster=False`` (which renders per element, with no
+    exclusion warning either way) -- for color, size and opacity alike.
+    """
+    import warnings as _warnings
+
+    chart = (
+        fm.Chart(_AUTO_RASTER_ROWS)
+        .mark_point()
+        .transform(fm.transform_aggregate({"field": "c", "fn": "mean", "as": "mean_c"}, groupby=["x", "y"]))
+        .encode(x="x:Q", y="y:Q", **{channel: Channel("mean_c:Q")})
+        .properties(render_config=fm.RenderConfig(raster_threshold=0))
+    )
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        svg = chart.to_svg()
+    assert "<image" in svg
+    assert not any("may produce large output" in str(w.message) for w in caught)
+
+    # raster=False on the EXCLUDED (still-aggregated) chart suppresses the
+    # exclusion warning and renders per element.
+    excluded_chart = (
+        fm.Chart(_AUTO_RASTER_ROWS)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", **{channel: Channel("c:Q", aggregate="mean")})
+        .properties(render_config=fm.RenderConfig(raster_threshold=0))
+    )
+    with _warnings.catch_warnings(record=True) as caught_suppressed:
+        _warnings.simplefilter("always")
+        excluded_chart.to_svg(raster=False)
+    assert caught_suppressed == []
+
+
+def test_warn_bin_excluded_names_only_remedies_that_render():
+    """The positional bin= exclusion's warning text is pinned exactly, and
+    each remedy it names actually renders: an aggregate= on the OPPOSING
+    positional channel (not the same channel -- a single channel's own
+    bin= and aggregate= together is refused at resolution, and
+    `.mark_raster()` refuses the same bin= too, so neither is named)."""
+    import warnings as _warnings
+
+    x_bin_cfg = fm.RenderConfig(raster_threshold=0)
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        fm.Chart(_AUTO_RASTER_ROWS).mark_point().encode(
+            x=X("x:Q", bin=True), y="y:Q"
+        ).properties(render_config=x_bin_cfg).to_svg()
+    messages = [str(w.message) for w in caught]
+    assert messages == [
+        "Chart has 10 marks which may produce large output, and its x or y "
+        "encoding carries a bin= with no aggregate=, so `.mark_raster()` "
+        "cannot draw it either. Put an aggregate= on the opposing "
+        "positional channel (e.g. `y=fm.Y('field', aggregate='mean')` "
+        "beside `x=fm.X('field', bin=True)`), or set `raster=False` to "
+        "suppress this warning."
+    ]
+
+    # Remedy 1: an aggregate= on the OPPOSING positional channel renders.
+    fm.Chart(_AUTO_RASTER_ROWS).mark_point().encode(
+        x=X("x:Q", bin=True), y=Y("y:Q", aggregate="mean")
+    ).properties(render_config=x_bin_cfg).to_svg()
+
+    # Remedy 2: raster=False renders with no warning at all.
+    with _warnings.catch_warnings(record=True) as caught_suppressed:
+        _warnings.simplefilter("always")
+        fm.Chart(_AUTO_RASTER_ROWS).mark_point().encode(
+            x=X("x:Q", bin=True), y="y:Q"
+        ).to_svg(raster=False)
+    assert caught_suppressed == []
+
+    # The remedy the warning does NOT name (the same channel's own bin=
+    # and aggregate=) is refused, confirming it would be dishonest to
+    # suggest.
+    with pytest.raises(ValueError, match="cannot be both the bin position and the aggregated value"):
+        fm.Chart(_AUTO_RASTER_ROWS).mark_point().encode(
+            x=X("x:Q", bin=True, aggregate="mean"), y="y:Q"
+        ).properties(render_config=x_bin_cfg).to_svg()
+
+    # `.mark_raster()` itself still refuses the same bin=, confirming that
+    # remedy would be dishonest too.
+    with pytest.raises(ValueError, match="Set the grid with mark_raster's resolution="):
+        fm.Chart(_AUTO_RASTER_ROWS).mark_raster().encode(x=X("x:Q", bin=True), y="y:Q").to_svg()
+
+
+@pytest.mark.parametrize("mark", ["mark_hex", "mark_raster", "mark_contour"])
+def test_a_wrong_type_color_bin_is_the_existing_channel_validation_error(mark: str):
+    """A color ``bin=`` of the wrong type is refused by the channel itself,
+    at construction -- before mark_hex/mark_raster/mark_contour (whose own
+    refusals never touch a color's ``bin=``) ever see it, reached through
+    each mark's own chain.
+    """
+    with pytest.raises(ValueError, match=r"Color\(bin=123\) is not a bin"):
+        getattr(fm.Chart(_XYZ_ROWS), mark)().encode(
+            x="v", y="w", color=fm.Color("z", bin=123)
+        ).to_svg()
+
+
+@pytest.mark.parametrize(
+    "mark,reason,remedy",
+    [
+        pytest.param(
+            "mark_density",
+            "the kernel density estimate reads raw rows",
+            "Bin the field per row with .transform(fm.Bin('v', per_row=True)) and bind its "
+            "'bin_start' column, or drop bin=.",
+            id="mark_density",
+        ),
+        pytest.param(
+            "mark_contour",
+            "the kernel density estimate reads raw rows",
+            "Bin the field per row with .transform(fm.Bin('v', per_row=True)) and bind its "
+            "'bin_start' column, or drop bin=.",
+            id="mark_contour",
+        ),
+        pytest.param(
+            "mark_hex",
+            "the hexagons bin x and y by their own grid",
+            "Size the cells with mark_hex's bin_size=, or drop bin=.",
+            id="mark_hex",
+        ),
+        pytest.param(
+            "mark_raster",
+            "the raster bins x and y onto its own pixel grid",
+            "Set the grid with mark_raster's resolution=, or drop bin=.",
+            id="mark_raster",
+        ),
+        pytest.param(
+            "mark_qq",
+            "the Q-Q plot reads the raw sample",
+            "Bin the field per row with .transform(fm.Bin('v', per_row=True)) and bind its "
+            "'bin_start' column, or drop bin=.",
+            id="mark_qq",
+        ),
+    ],
+)
+def test_a_wrong_type_positional_bin_takes_each_marks_statistic_refusal(
+    mark: str, reason: str, remedy: str
+):
+    """A positional ``X``/``Y`` has no construction-time ``bin=`` type check
+    (unlike a color-family channel): ``X('v', bin='foo')`` constructs fine
+    and reaches each statistic mark's own x/y refusal, exactly as it does
+    on ``mark_density``.
+    """
+    encode_kwargs = {"x": X("v", bin="foo")}
+    if mark != "mark_qq":
+        encode_kwargs["y"] = "w"
+    with pytest.raises(ValueError) as excinfo:
+        getattr(fm.Chart(_XY_ROWS), mark)().encode(**encode_kwargs).to_svg()
+    assert str(excinfo.value) == (
+        f"{mark}(x=X('v', bin='foo')) is not supported: {reason}, so bin= would be "
+        f"ignored. {remedy}"
+    )
+
+
+#: A frame with a caller's own ``sample`` column -- the QQ transform's own
+#: output column shares that name by coincidence, not by provenance, so a
+#: column named ``"sample"`` is refused exactly like any other field.
+_QQ_SAMPLE_ROWS = _HIST_ROWS.with_columns(sample=pl.col("v") * 2.0)
+
+
+@pytest.mark.parametrize(
+    "rows,y",
+    [
+        pytest.param(_HIST_ROWS, "w", id="w"),
+        pytest.param(_QQ_SAMPLE_ROWS, "sample", id="sample_column"),
+        pytest.param(_QQ_SAMPLE_ROWS, Y("sample", title="Sample quantiles"), id="sample_titled"),
+        pytest.param(_QQ_SAMPLE_ROWS, Y("sample", bin=True), id="sample_bin"),
+        pytest.param(_QQ_SAMPLE_ROWS, Y("sample", aggregate="mean"), id="sample_aggregate"),
+    ],
+)
+def test_mark_qq_refuses_a_field_bearing_y(rows: pl.DataFrame, y: Any):
+    """``mark_qq`` draws its own sample quantiles on y, ignoring whatever
+    ``y=`` binds, so a field-bearing one is refused like ``displot``'s
+    ``kind='ecdf'`` -- the same message shape, mark_qq's own voice and
+    knob -- with no exemption: a column named ``"sample"`` (the caller's
+    own, or named via ``bin=``/``aggregate=``, checked after the field
+    itself) is refused exactly like any other field, since a column name
+    is not a provenance.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(rows).mark_qq().encode(x="v", y=y).to_svg()
+    bound = y.field if isinstance(y, Y) else y
+    assert str(excinfo.value) == (
+        f"mark_qq(y={bound!r}) is not supported -- mark_qq draws the sample quantiles of "
+        "x= on y, so a second variable has nowhere to go. Drop y=, or style the axis with "
+        "fm.Y(title=...) and no field."
+    )
+
+
+def test_mark_qq_fieldless_y_title_styles_the_axis():
+    """A fieldless ``Y(title=...)`` is the door ``mark_qq``'s field-bearing-y
+    refusal names: it renders, carries the title into the SVG, and differs
+    from the untitled chart.
+    """
+    titled = (
+        fm.Chart(_HIST_ROWS).mark_qq().encode(x="v", y=Y(title="Sample quantiles")).to_svg()
+    )
+    plain = fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg()
+    assert titled != plain
+    assert "Sample quantiles" in titled
+
+
+@pytest.mark.parametrize(
+    "with_kwarg,without",
+    [
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_contour().encode(x=X("v", bin=None), y="w").to_svg(),
+            lambda: fm.Chart(_XY_ROWS).mark_contour().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: (
+                fm.Chart(_XY_ROWS)
+                .mark_contour()
+                .encode(x=X("v", aggregate=None), y="w")
+                .to_svg()
+            ),
+            lambda: fm.Chart(_XY_ROWS).mark_contour().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", bin=False), y="w").to_svg(),
+            lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: (
+                fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", aggregate=None), y="w").to_svg()
+            ),
+            lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x=X("v", bin=None), y="w").to_svg(),
+            lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: (
+                fm.Chart(_XY_ROWS)
+                .mark_raster()
+                .encode(x=X("v", aggregate=None), y="w")
+                .to_svg()
+            ),
+            lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x="v", y="w").to_svg(),
+        ),
+        (
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x=X("v", bin=False)).to_svg(),
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg(),
+        ),
+        (
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x=X("v", aggregate=None)).to_svg(),
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg(),
+        ),
+        (
+            lambda: (
+                fm.Chart(_HIST_ROWS).mark_qq().encode(x="v", y=Y(bin=None)).to_svg()
+            ),
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg(),
+        ),
+        (
+            lambda: (
+                fm.Chart(_HIST_ROWS).mark_qq().encode(x="v", y=Y(aggregate=None)).to_svg()
+            ),
+            lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg(),
+        ),
+    ],
+    ids=[
+        "contour_x_bin_none",
+        "contour_x_aggregate_none",
+        "hex_x_bin_false",
+        "hex_x_aggregate_none",
+        "raster_x_bin_none",
+        "raster_x_aggregate_none",
+        "qq_x_bin_false",
+        "qq_x_aggregate_none",
+        "qq_y_bin_none",
+        "qq_y_aggregate_none",
+    ],
+)
+def test_bin_or_aggregate_unset_values_render_byte_identically_to_leaving_them_out(
+    with_kwarg: Callable[[], str], without: Callable[[], str]
+):
+    """``bin=None``, ``bin=False`` and ``aggregate=None`` ask for nothing, so
+    the statistic renders exactly as it would with neither kwarg at all --
+    the refusals above never even see them (:func:`~ferrum.encoding.base._unset_statistic`).
+    """
+    assert with_kwarg() == without()
+
+
+#: Two rows per ``v``, so an aggregated ``y``/``y2`` (``min``/``max`` over
+#: each group) differs from the raw ``w`` a group key would otherwise
+#: read verbatim (a single row per ``v`` makes ``min(w) == max(w) == w``,
+#: which cannot discriminate aggregation from the plain render).
+_RIBBON_TWO_PER_V_ROWS = pl.DataFrame(
+    {"v": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0], "w": [1.0, 3.0, 2.0, 6.0, 1.0, 5.0]}
+)
+
+
+def test_mark_ribbon_honors_bin_and_aggregate_never_refused():
+    """``mark_ribbon`` lowers as one unlayered mark, like ``mark_area`` --
+    it computes no statistic of its own, so a channel ``bin=``/``aggregate=``
+    is honored exactly as a plain mark's is, never refused. Each half first
+    renders without raising, then is compared against a plain ribbon
+    carrying that SAME render's own axis title, so only the band's
+    geometry -- never the title text -- can make the two differ.
+    """
+    aggregated = (
+        fm.Chart(_RIBBON_TWO_PER_V_ROWS)
+        .mark_ribbon()
+        .encode(x="v", y=Y("w", aggregate="min"), y2=Y("w", aggregate="max"))
+        .to_svg()
+    )
+    plain_same_title = (
+        fm.Chart(_RIBBON_TWO_PER_V_ROWS)
+        .mark_ribbon()
+        .encode(x="v", y=Y("w", title=y_axis_title(aggregated)), y2="w")
+        .to_svg()
+    )
+    assert aggregated != plain_same_title
+
+    binned = (
+        fm.Chart(_RIBBON_TWO_PER_V_ROWS)
+        .mark_ribbon()
+        .encode(x=X("v", bin=True), y="w", y2="w")
+        .to_svg()
+    )
+    plain_same_x_title = (
+        fm.Chart(_RIBBON_TWO_PER_V_ROWS)
+        .mark_ribbon()
+        .encode(x=X("v", title=x_axis_title(binned)), y="w", y2="w")
+        .to_svg()
+    )
+    assert binned != plain_same_x_title
+
+
+@pytest.mark.parametrize(
+    "build_plain,build_with_kwarg",
+    [
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_boxplot().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_boxplot().encode(x="cat", y=Y("v", bin=True)),
+            id="boxplot-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_boxplot().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_boxplot().encode(x="cat", y=Y("v", aggregate="mean")),
+            id="boxplot-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_boxen().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_boxen().encode(x="cat", y=Y("v", bin=True)),
+            id="boxen-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_boxen().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_boxen().encode(x="cat", y=Y("v", aggregate="mean")),
+            id="boxen-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_violin().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_violin().encode(x="cat", y=Y("v", bin=True)),
+            id="violin-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_violin().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_violin().encode(x="cat", y=Y("v", aggregate="mean")),
+            id="violin-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_errorbar().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_errorbar().encode(x="cat", y=Y("v", bin=True)),
+            id="errorbar-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_errorbar().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_errorbar().encode(x="cat", y=Y("v", aggregate="mean")),
+            id="errorbar-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_swarm().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_swarm().encode(x="cat", y=Y("v", bin=True)),
+            id="swarm-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_swarm().encode(x="cat", y="v"),
+            lambda rows: fm.Chart(rows).mark_swarm().encode(x="cat", y=Y("v", aggregate="mean")),
+            id="swarm-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_errorband().encode(x="v", y="w"),
+            lambda rows: fm.Chart(rows).mark_errorband().encode(x="v", y=Y("w", bin=True)),
+            id="errorband-y_bin",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_errorband().encode(x="v", y="w"),
+            lambda rows: fm.Chart(rows)
+            .mark_errorband()
+            .encode(x="v", y=Y("w", aggregate="mean")),
+            id="errorband-y_aggregate",
+        ),
+        pytest.param(
+            lambda rows: fm.Chart(rows).mark_errorband().encode(x="v", y="w"),
+            lambda rows: fm.Chart(rows).mark_errorband().encode(x=X("v", bin=True), y="w"),
+            id="errorband-x_bin",
+        ),
+    ],
+)
+def test_categorical_composites_bin_and_aggregate_stay_silently_ignored(
+    build_plain: Callable[[pl.DataFrame], fm.Chart], build_with_kwarg: Callable[[pl.DataFrame], fm.Chart]
+):
+    """boxplot, boxen, violin, errorbar, swarm and errorband share no prep
+    with contour/hex/raster/qq's x/y refusals, so a channel ``bin=``/
+    ``aggregate=`` on one of them stays silently ignored, byte-identical
+    to the same chart without it.
+    """
+    rows = _XY_ROWS.with_columns(cat=pl.lit("a"))
+    assert build_plain(rows).to_svg() == build_with_kwarg(rows).to_svg()
+
+
+@pytest.mark.parametrize(
+    "name,build",
+    [
+        (
+            "contour_fill_false",
+            lambda: fm.Chart(_XY_ROWS).mark_contour(fill=False).encode(x="v", y="w").to_svg(),
+        ),
+        (
+            "contour_fill_true",
+            lambda: fm.Chart(_XY_ROWS).mark_contour(fill=True).encode(x="v", y="w").to_svg(),
+        ),
+        ("hex", lambda: fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y="w").to_svg()),
+        ("raster", lambda: fm.Chart(_XY_ROWS).mark_raster().encode(x="v", y="w").to_svg()),
+        ("qq", lambda: fm.Chart(_HIST_ROWS).mark_qq().encode(x="v").to_svg()),
+    ],
+)
+def test_every_mark_without_the_new_kwargs_renders_unchanged(
+    name: str, build: Callable[[], str]
+):
+    """None of the four marks' plain renders (no ``bin=``/``aggregate=`` at
+    all) moved a byte: each is pinned by its own digest below.
+    """
+    digests = {
+        "contour_fill_false": "051c99e0a602a1ad450a10ec8dd98273b29f279dde51bbb762e57bfb8b92a04b",
+        "contour_fill_true": "be0c088a81956d6b76a03f7e7d5928e10f9e49485a0483695288c8f8be070e76",
+        "hex": "ae014e0549a642546e83a55663c996bcfb78548e077fde3171eb3a29e98dfab5",
+        "raster": "4c653a0f4debd75b93a15bc960155b802c9235b16000168b8086f217da32148e",
+        "qq": "f512624b5ced12463225b5cc0cb3519c42285058bd29b091f7256ad9fdec1a59",
+    }
+    assert _digest(build()) == digests[name]

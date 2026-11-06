@@ -41,6 +41,8 @@ from __future__ import annotations
 import inspect
 import warnings
 from dataclasses import dataclass, field, replace
+from functools import partial
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from ferrum._layer import (
@@ -53,15 +55,19 @@ from ferrum._layer import (
     titled_encoding,
 )
 from ferrum._encode_lowering import (
+    _KERNEL_DENSITY_READS_RAW_ROWS,
+    _cell_aggregate_remedy,
     _composite_groupby,
+    _own_knob_remedy,
     _over,
     _rebind_positional,
     _refuse_bin_aggregate_fit,
     _refuse_bin_aggregate_on_channels,
+    _refuse_color_aggregate,
     _refuse_histogram_bin_aggregate,
 )
 from ferrum._layer_transforms import _with_statistics_marker
-from ferrum.encoding.base import ChannelBase, drawn_title
+from ferrum.encoding.base import ChannelBase, _unset_statistic, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, with_grouping
 from ferrum._entry import EntryRefusal, voiced_as
@@ -976,43 +982,102 @@ def _prep_grouping(ctx: _ResolveContext) -> None:
 
 
 def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
-    """hex: a chart-level color names the aggregated column, or is refused.
+    """hex: a chart-level color's matching aggregate= is consumed, its field names the aggregated column, or it is refused.
 
-    The cells are always colored by Hex's per-cell aggregate. A color naming
-    the column an aggregate reads supplies ``field`` when none was given. That
-    color, or one naming Hex's output column itself, styles the cell color
-    binding with its channel properties (title, scheme, legend), its scheme
-    becoming the cells' ``cmap`` (refused beside a different ``cmap=``). Any
-    other color would be drawn nowhere, so it is refused. Every refusal is
-    voiced as the public entry the caller invoked.
+    The cells are always colored by Hex's per-cell aggregate, resolved
+    here before the color's field is ever read, so a FIELDLESS color's
+    aggregate= is folded or refused too, never silently dropped.
+    ``mark_hex(aggregate=)``'s own default is ``None`` (unset): a color
+    carrying the SAME ``aggregate=`` -- or one unset to ``None`` -- folds
+    into it, the resolved op written to the mark whether or not the color
+    has a field; equality is checked through
+    :func:`~ferrum._registry.canonical_aggregate`, which reads Rust's own
+    ``transform_registry("hex")["method_canonical"]`` map, so ``"std"`` and
+    ``"stdev"`` agree without Python declaring a second alias table. A
+    color's own aggregate= is validated against ``mark_hex``'s own
+    vocabulary gate (:func:`~ferrum._registry.validate_aggregate`, voiced
+    as the entry the caller actually invoked -- ``jointplot`` through its
+    hex center, ``mark_hex`` directly -- the same gate an explicit
+    ``mark_hex(aggregate=...)`` passes) before it is folded or compared, so
+    an unknown op is refused there, in the caller's own voice, rather than
+    failing raw in the ``Hex`` transform or naming a call the caller never
+    wrote. A color naming a DIFFERENT aggregate is refused, naming the
+    mark's own ``aggregate=``/``field=`` knob (or the voicing figure's own
+    spelling, through the door vocabulary table). A color that was
+    consumed -- fieldless or field-bearing alike -- or carries no
+    aggregate= of its own but names a field, styles the cell color binding
+    with its channel properties (title, scheme, legend), its scheme
+    becoming the cells' ``cmap`` (refused beside a different ``cmap=``);
+    one with neither an aggregate= nor a field is left unstyled -- any
+    ``title=``/``scheme=`` it carries is not applied either. A field-bearing
+    color is drawn when it names the column the resolved op reads, names
+    Hex's ``value`` output, or was consumed with an op that reads no column
+    (``count``); any other color is drawn nowhere. Every refusal is voiced
+    as the public entry the caller invoked.
     """
-    from ferrum._registry import aggregate_needs_field, registry_output_columns
+    from ferrum._registry import (
+        aggregate_needs_field,
+        canonical_aggregate,
+        registry_output_columns,
+        validate_aggregate,
+    )
 
-    color_field = ctx._color_field()
-    if not color_field:
+    color = ctx.chart._encoding.get("color")
+    entry = ctx.chart._pending_stat_mark.entry or "mark_hex"
+    if color is None:
+        if ctx.transform_kwargs.get("aggregate") is None:
+            ctx.transform_kwargs = {**ctx.transform_kwargs, "aggregate": "count"}
         return
+    color_field = color.field if isinstance(color, ChannelBase) else color
     kwargs = ctx.transform_kwargs
-    aggregate = kwargs.get("aggregate", "count")
-    reads_column = aggregate_needs_field("hex", aggregate)
-    if reads_column and kwargs.get("field") is None:
-        kwargs = {**kwargs, "field": color_field}
-    names_aggregate = reads_column and color_field == kwargs.get("field")
-    if not names_aggregate and color_field != registry_output_columns("hex", ["value"])["value"]:
-        of_field = f" of field={kwargs.get('field')!r}" if reads_column else ""
-        entry = ctx.chart._pending_stat_mark.entry or "mark_hex"
-        raise ValueError(
-            f"{entry}: color={color_field!r} is drawn nowhere; the cells are colored by "
-            f"aggregate={aggregate!r}{of_field}. Bind color= to the aggregated column, "
-            "or drop it."
+    own_aggregate = kwargs.get("aggregate")
+    color_aggregate = color._kwargs.get("aggregate") if isinstance(color, ChannelBase) else None
+    color_consumed = not _unset_statistic("aggregate", color_aggregate)
+    if color_consumed:
+        validate_aggregate("hex", entry, color_aggregate)
+        if own_aggregate is not None and canonical_aggregate(
+            "hex", own_aggregate
+        ) != canonical_aggregate("hex", color_aggregate):
+            _refuse_color_aggregate(
+                "mark_hex",
+                color,
+                drawn="cells",
+                remedy=partial(
+                    _cell_aggregate_remedy,
+                    cells=attrgetter("hex_cells"),
+                    op=color_aggregate,
+                    field=color_field if isinstance(color_field, str) else None,
+                ),
+            )
+        aggregate = color_aggregate
+    else:
+        aggregate = own_aggregate if own_aggregate is not None else "count"
+    kwargs = {**kwargs, "aggregate": aggregate}
+    if not color_field and not color_consumed:
+        ctx.transform_kwargs = kwargs
+        return
+    if color_field:
+        reads_column = aggregate_needs_field("hex", aggregate)
+        if reads_column and kwargs.get("field") is None:
+            kwargs = {**kwargs, "field": color_field}
+        names_aggregate = (reads_column and color_field == kwargs.get("field")) or (
+            color_consumed and not reads_column
         )
+        if not names_aggregate and color_field != registry_output_columns("hex", ["value"])["value"]:
+            of_field = f" of field={kwargs.get('field')!r}" if reads_column else ""
+            raise ValueError(
+                f"{entry}: color={color_field!r} is drawn nowhere; the cells are colored by "
+                f"aggregate={aggregate!r}{of_field}. Bind color= to the aggregated column, "
+                "or drop it."
+            )
     # The polygon cells sample their own `cmap`, so a scheme on the caller's
-    # color reaches them through it and the legend agrees with the cells.
-    color = ctx.chart._encoding["color"]
+    # color reaches them through it and the legend agrees with the cells --
+    # for a field-bearing color, or a fieldless one whose aggregate= was
+    # consumed (its other properties style the cells the same way).
     scheme = color.option("scheme") if isinstance(color, ChannelBase) else None
     if scheme is not None:
         cmap = kwargs.get("cmap")
         if cmap is not None and cmap != scheme:
-            entry = ctx.chart._pending_stat_mark.entry or "mark_hex"
             raise ValueError(
                 f"{entry}: cmap={cmap!r} and color=fm.Color(..., scheme={scheme!r}) both "
                 "set the cell colormap; pass only one."
@@ -1207,7 +1272,7 @@ def _prep_refuse_density_statistics(ctx: _ResolveContext) -> None:
         "mark_density",
         ctx.chart._encoding,
         ("x", "y"),
-        reason="the kernel density estimate reads raw rows",
+        reason=_KERNEL_DENSITY_READS_RAW_ROWS,
     )
 
 
@@ -1288,6 +1353,145 @@ def _prep_refuse_ecdf_statistics(ctx: _ResolveContext) -> None:
     _refuse_ecdf_bin_aggregate(encoding)
 
 
+def _prep_refuse_contour_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= the 2-D kernel density estimate reads raw, and a color aggregate=.
+
+    mark_contour's levels are already colored by the density's own value
+    (or left uncolored under a groupby split), so a chart-level color
+    aggregate= would be silently ignored; refused naming the voicing
+    door's own ``thresholds=`` spelling, the knob that actually controls
+    which values the levels draw (:data:`~ferrum._encode_lowering._DOOR_VOCABULARY`'s
+    ``contour_thresholds``), knob-free on a door with none.
+    """
+    _refuse_bin_aggregate_on_channels(
+        "mark_contour", ctx.chart._encoding, ("x", "y"), reason=_KERNEL_DENSITY_READS_RAW_ROWS
+    )
+    color = ctx.chart._encoding.get("color")
+    if isinstance(color, ChannelBase) and not _unset_statistic(
+        "aggregate", color._kwargs.get("aggregate")
+    ):
+        _refuse_color_aggregate(
+            "mark_contour",
+            color,
+            drawn="levels",
+            remedy=partial(
+                _own_knob_remedy,
+                knob=attrgetter("contour_thresholds"),
+                verb="Set the levels with",
+                kwarg="aggregate",
+            ),
+        )
+
+
+def _prep_refuse_hex_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= the hexagons bin onto their own grid.
+
+    ``bin=`` names the voicing door's own ``bin_size=`` spelling
+    (:data:`~ferrum._encode_lowering._DOOR_VOCABULARY`'s ``hex_bin_size``),
+    knob-free on a door with none. The color channel's aggregate= is
+    handled separately, by :func:`_prep_hex_field_from_color` (it may fold
+    into the mark's own aggregate rather than always refusing).
+    """
+    _refuse_bin_aggregate_on_channels(
+        "mark_hex",
+        ctx.chart._encoding,
+        ("x", "y"),
+        reason="the hexagons bin x and y by their own grid",
+        bin_remedy=partial(
+            _own_knob_remedy, knob=attrgetter("hex_bin_size"), verb="Size the cells with", kwarg="bin"
+        ),
+    )
+
+
+def _prep_refuse_raster_statistics(ctx: _ResolveContext) -> None:
+    """Refuse an x/y bin=/aggregate= the raster bins onto its own pixel grid, and a color aggregate=.
+
+    ``bin=`` names the voicing door's own ``resolution=`` spelling
+    (:data:`~ferrum._encode_lowering._DOOR_VOCABULARY`'s
+    ``raster_resolution``), knob-free on a door with none. The cells are
+    already colored by the raster's own per-pixel aggregate, so a
+    chart-level color aggregate= would be silently ignored; refused
+    naming the door's own ``raster_cells`` call template, or dropping the
+    kwarg when the color names no field to aggregate.
+    """
+    _refuse_bin_aggregate_on_channels(
+        "mark_raster",
+        ctx.chart._encoding,
+        ("x", "y"),
+        reason="the raster bins x and y onto its own pixel grid",
+        bin_remedy=partial(
+            _own_knob_remedy,
+            knob=attrgetter("raster_resolution"),
+            verb="Set the grid with",
+            kwarg="bin",
+        ),
+    )
+    color = ctx.chart._encoding.get("color")
+    if isinstance(color, ChannelBase) and not _unset_statistic(
+        "aggregate", color._kwargs.get("aggregate")
+    ):
+        from ferrum.encoding._aliases import _channel_field
+
+        agg = color._kwargs["aggregate"]
+        field = _channel_field(color)
+        _refuse_color_aggregate(
+            "mark_raster",
+            color,
+            drawn="cells",
+            remedy=partial(
+                _cell_aggregate_remedy,
+                cells=attrgetter("raster_cells"),
+                op=agg,
+                field=field,
+            ),
+        )
+
+
+def _reject_qq_field_y(entry: str, y: Any) -> None:
+    """Refuse a ``mark_qq()`` call whose ``y=`` names a field, exactly as :func:`ferrum.plots.distribution._reject_ecdf_field_y` does for ``displot(kind="ecdf")``.
+
+    ``mark_qq`` draws the sample quantiles of ``x=`` on y, ignoring
+    whatever ``y=`` binds -- the same misdirection the ECDF's computed
+    axis refuses, with no exemption: a column name is not a provenance, so
+    a caller's own column happening to be named ``"sample"`` is refused
+    exactly like any other. A fieldless ``fm.Y(title=..., scale=...)`` is
+    not refused: :func:`~ferrum.plots._helpers._field_name` reads ``None``
+    off it, the public door for styling the axis with no field.
+    """
+    from ferrum.plots._helpers import _field_name
+
+    if y is None:
+        return
+    bound = _field_name(y)
+    if bound is None:
+        return
+    raise ValueError(
+        f"{entry}(y={bound!r}) is not supported -- mark_qq draws the sample quantiles of "
+        "x= on y, so a second variable has nowhere to go. Drop y=, or style the axis with "
+        "fm.Y(title=...) and no field."
+    )
+
+
+def _prep_refuse_qq_statistics(ctx: _ResolveContext) -> None:
+    """Refuse a field-bearing y=, and an x/y bin=/aggregate= the Q-Q plot cannot fold in.
+
+    x is the raw sample the QQ transform reads; y is the statistic's own
+    axis (the sample quantiles it computes), so a fieldless y's bin=/
+    aggregate= has nothing to bind and is refused, same as a field-bearing
+    y is refused outright (:func:`_reject_qq_field_y`, checked first: once
+    refused there is nothing left on y to check for bin=/aggregate=).
+    """
+    encoding = ctx.chart._encoding
+    entry = ctx.chart._pending_stat_mark.entry or "mark_qq"
+    _reject_qq_field_y(entry, encoding.get("y"))
+    _refuse_bin_aggregate_on_channels(
+        "mark_qq", encoding, ("x",), reason="the Q-Q plot reads the raw sample"
+    )
+    _refuse_bin_aggregate_on_channels(
+        "mark_qq", encoding, ("y",), reason="the Q-Q plot draws its own sample quantiles on y"
+    )
+
+
 # Each kind's ordered list of pre-desugar prep steps.  Order within each list
 # matches the original control flow exactly.  (A post-desugar Float64-cast
 # step used to live here for boxen/boxplot/violin/swarm — see the module
@@ -1345,7 +1549,9 @@ _PENDING_PREP: dict[str, _KindPrep] = {
         pre=(_prep_groupby_from_color, _prep_axis_titles, _prep_refuse_density_statistics)
     ),
     "histogram": _KindPrep(pre=(_prep_groupby_from_color, _prep_refuse_histogram_statistics)),
-    "hex": _KindPrep(pre=(_prep_hex_field_from_color, _prep_axis_titles)),
+    "hex": _KindPrep(
+        pre=(_prep_hex_field_from_color, _prep_axis_titles, _prep_refuse_hex_statistics)
+    ),
     "smooth": _KindPrep(
         pre=(
             _prep_smooth_force_name,
@@ -1354,14 +1560,14 @@ _PENDING_PREP: dict[str, _KindPrep] = {
             _prep_refuse_smooth_statistics,
         )
     ),
-    "qq": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
+    "qq": _KindPrep(pre=(_prep_grouping, _prep_axis_titles, _prep_refuse_qq_statistics)),
     "ecdf": _KindPrep(
         pre=(_prep_ecdf_groupby, _prep_ecdf_count_column, _prep_refuse_ecdf_statistics)
     ),
-    "raster": _KindPrep(pre=(_prep_axis_titles,)),
+    "raster": _KindPrep(pre=(_prep_axis_titles, _prep_refuse_raster_statistics)),
     "calibration": _KindPrep(pre=(_prep_axis_titles,)),
     "cv_scores": _KindPrep(pre=(_prep_axis_titles,)),
-    "contour": _KindPrep(pre=(_prep_grouping, _prep_axis_titles)),
+    "contour": _KindPrep(pre=(_prep_grouping, _prep_axis_titles, _prep_refuse_contour_statistics)),
     "discrimination_threshold": _KindPrep(pre=(_prep_discrimination_threshold_sentinels,)),
 }
 

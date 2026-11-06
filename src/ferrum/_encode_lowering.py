@@ -682,6 +682,16 @@ class _DoorVocabulary:
     channel_stack: str | None = "stack=True"
     chains_transform: bool = True
     styles_dropped_axis: bool = True
+    #: mark_hex's own cell-sizing knob, and its cell-aggregate call template
+    #: (a ``str.format`` template over ``op``/``field``, the codebase's
+    #: message-template idiom -- see ``_NO_LEGEND_MESSAGE``).
+    hex_bin_size: str | None = None
+    hex_cells: str | None = None
+    #: mark_raster's own pixel-grid knob, and its cell-aggregate call template.
+    raster_resolution: str | None = None
+    raster_cells: str | None = None
+    #: mark_contour's own level-count knob.
+    contour_thresholds: str | None = None
 
 
 #: The row for every call absent from :data:`_DOOR_VOCABULARY`: a mark
@@ -706,7 +716,10 @@ _CHART_CALL_VOCABULARY = _DoorVocabulary()
 #: rules out ``styles_dropped_axis``: a fieldless ``fm.Y(title=...)`` that
 #: drops the top marginal's field also drops the right marginal's own
 #: binned-axis field, which that marginal needs, so jointplot's value-axis
-#: remedy can only drop the channel outright, never restyle it.
+#: remedy can only drop the channel outright, never restyle it. jointplot's
+#: ``hex_bin_size``/``hex_cells`` reach ``kind='hex'``'s center through
+#: ``joint_kws=``, which ``_jointplot_build`` forwards to ``mark_hex``
+#: verbatim, so those two spellings run exactly as written.
 _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
     "mark_histogram": _DoorVocabulary(
         bin_rule="mark_histogram's bins=, bin_count= or bin_width=",
@@ -732,11 +745,22 @@ _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
         channel_stack=None,
         chains_transform=False,
         styles_dropped_axis=False,
+        hex_bin_size="joint_kws={'bin_size': ...}",
+        hex_cells="joint_kws={{'aggregate': {op!r}, 'field': {field!r}}}",
     ),
     "pairplot": _DoorVocabulary(chains_transform=False),
     "mark_smooth": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
     "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
     "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+    "mark_hex": _DoorVocabulary(
+        hex_bin_size="mark_hex's bin_size=",
+        hex_cells="mark_hex(aggregate={op!r}, field={field!r})",
+    ),
+    "mark_raster": _DoorVocabulary(
+        raster_resolution="mark_raster's resolution=",
+        raster_cells="mark_raster(aggregate={op!r}, field={field!r})",
+    ),
+    "mark_contour": _DoorVocabulary(contour_thresholds="mark_contour's thresholds="),
 }
 
 
@@ -816,6 +840,38 @@ def _refuse_bin_or_aggregate(
 
     written = _written_channel(channel, ch, kwarg)
     raise EntryRefusal(_StatisticRefusalText(written, kwarg, reason, remedy), entry)
+
+
+#: The one reason every kernel-density-reading statistic mark
+#: (mark_density, mark_contour, displot(kind="kde")) refuses an x/y
+#: bin=/aggregate= with: each estimates over raw rows, never a bin or
+#: aggregate of them.
+_KERNEL_DENSITY_READS_RAW_ROWS = "the kernel density estimate reads raw rows"
+
+
+def _refuse_color_aggregate(
+    entry: str, color: ChannelBase, *, drawn: str, remedy: str | _DoorText
+) -> None:
+    """Refuse *color*'s ``aggregate=``: the statistic's own value already colors *drawn*.
+
+    Shared by mark_hex (when its color's aggregate differs from the mark's
+    own), mark_raster and mark_contour: none of the three read a chart-level
+    color as a value to aggregate -- the cells/levels are already colored by
+    the statistic's own per-cell/per-level value, so a second aggregate= on
+    color is refused rather than silently computed and dropped. *remedy*
+    resolves per voice through :data:`_DOOR_VOCABULARY` (``hex_cells``,
+    ``raster_cells``, ``contour_thresholds``), since the three have no
+    shared spelling for it and a figure re-voicing the refusal (jointplot's
+    ``joint_kws=``) spells it differently again.
+    """
+    _refuse_bin_or_aggregate(
+        entry,
+        "color",
+        color,
+        "aggregate",
+        reason=f"the {drawn} are colored by the statistic's own value",
+        remedy=remedy,
+    )
 
 
 def _chained_remedy(door: _DoorVocabulary, *, remedy: str, kwarg: str) -> str:
@@ -977,6 +1033,42 @@ def _fit_x_bin_remedy(door: _DoorVocabulary, *, fallback: _DoorText) -> str:
     if door.fit_x_bins is None:
         return fallback(door)
     return f"Bin the predictor with {door.fit_x_bins}, the fit's own binning, or drop bin=."
+
+
+def _own_knob_remedy(
+    door: _DoorVocabulary, *, knob: Callable[[_DoorVocabulary], str | None], verb: str, kwarg: str
+) -> str:
+    """The remedy naming *door*'s own *knob* (an ``operator.attrgetter`` of one row field), when it has one.
+
+    Falls back to dropping *kwarg*= when *door* spells no such knob --
+    hex's ``bin_size=``, raster's ``resolution=`` and contour's
+    ``thresholds=`` each reach only the doors :data:`_DOOR_VOCABULARY`
+    gives a row for; every other voice takes this fallback.
+    """
+    spelling = knob(door)
+    if spelling is None:
+        return f"Drop {kwarg}=."
+    return f"{verb} {spelling}, or drop {kwarg}=."
+
+
+def _cell_aggregate_remedy(
+    door: _DoorVocabulary,
+    *,
+    cells: Callable[[_DoorVocabulary], str | None],
+    op: str,
+    field: str | None,
+) -> str:
+    """The remedy naming *door*'s own cell-aggregate call (*cells*, a ``str.format`` template), when it applies.
+
+    *field* is the color's own field, ``None`` when it names none: a
+    fieldless color has no column to aggregate, so the remedy is only to
+    drop ``aggregate=`` (spec §3.3's fieldless rule), the same fallback a
+    door with no *cells* spelling of its own takes.
+    """
+    template = cells(door)
+    if field is None or template is None:
+        return "Drop aggregate=."
+    return f"Aggregate the cells with {template.format(op=op, field=field)}, or drop aggregate=."
 
 
 def _value_mode_spellings(door: _DoorVocabulary, mode: _ValueMode) -> tuple[str | None, str | None]:

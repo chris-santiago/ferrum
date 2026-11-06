@@ -167,6 +167,23 @@
 //! kind with a `methods` vocabulary, empty sets included, by
 //! `methods_needing_field_matches_each_doors_field_refusals` (`tests.rs`).
 //!
+//! **`method_canonical` convention.** Every spelling `methods` declares,
+//! mapped to its canonical spelling — the alias normalization every
+//! [`vocabulary::Vocabulary`] implementor already carries in `spellings()`,
+//! read once here instead of re-derived (or hand-copied) by each consumer,
+//! e.g. `hex`'s `std`/`var` aliases canonicalizing to `stdev`/`variance`. A
+//! `Vocabulary`-backed kind (`bin`/`aggregate`/`join_aggregate`/
+//! `data_aggregate`'s `AggFn`, `hex`/`raster`'s declared subsets,
+//! `error_extent`, `linkage`) derives it with
+//! [`vocabulary::Vocabulary::canonical_map`]; a kind whose `methods` is a
+//! plain `pub(crate) const` spelling list with no aliases (`kde`, `smooth`,
+//! `qq`, `pivot`, `data_window`, `density_data`, `regression_data`,
+//! `impute`, `top_k`, `data_stack`) maps each spelling to itself; a kind
+//! with no `methods` publishes an empty map. Always exactly `methods`'s
+//! keys, never hand-listed separately. Proved by
+//! `method_canonical_keys_match_methods_and_values_are_canonical`
+//! (`tests.rs`).
+//!
 //! **`params`** is the spec struct's real WIRE-accepted field set — the set
 //! `params_match_spec_struct_serde_fields` (`tests.rs`) proves by mining
 //! serde's own `deny_unknown_fields` rejection, not a reading of the Rust
@@ -221,9 +238,21 @@ pub(crate) struct TransformRegistryEntry {
     /// vocabulary, never hand-listed; empty only where the door accepts every
     /// method field-less, which the registry guard proves by probing.
     pub methods_needing_field: Vec<&'static str>,
+    /// Every spelling in `methods` mapped to its canonical spelling (see the
+    /// module doc's `method_canonical` convention). Always exactly
+    /// `methods`'s keys; empty where `methods` is.
+    pub method_canonical: Vec<(&'static str, &'static str)>,
     pub outputs: Vec<(&'static str, DataType)>,
     pub secondary_outputs: Vec<SecondaryOutput>,
     pub params: Vec<&'static str>,
+}
+
+/// `method_canonical` for a kind whose `methods` is a plain spelling list
+/// with no aliases: every spelling maps to itself. Mirrors
+/// [`vocabulary::Vocabulary::canonical_map`]'s shape for the kinds that
+/// don't implement that trait.
+fn identity_canonical(spellings: &[&'static str]) -> Vec<(&'static str, &'static str)> {
+    spellings.iter().map(|&s| (s, s)).collect()
 }
 
 /// The fit-family primary output schema shared by `Smooth` (`output="fitted"`,
@@ -336,6 +365,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "bin" => TransformRegistryEntry {
             methods: AggFn::all(),
             methods_needing_field: AggFn::all(),
+            method_canonical: AggFn::canonical_map(),
             outputs: vec![
                 ("bin_start", DataType::Float64),
                 ("bin_end", DataType::Float64),
@@ -371,6 +401,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "kde" => TransformRegistryEntry {
             methods: crate::transform::kde::KERNELS.to_vec(),
             methods_needing_field: crate::transform::kde::KERNELS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::kde::KERNELS),
             outputs: vec![("value", DataType::Float64), ("density", DataType::Float64)],
             secondary_outputs: vec![],
             params: vec![
@@ -385,6 +416,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "smooth" => TransformRegistryEntry {
             methods: crate::transform::smooth::METHODS.to_vec(),
             methods_needing_field: vec![],
+            method_canonical: identity_canonical(crate::transform::smooth::METHODS),
             outputs: fit_outputs(),
             secondary_outputs: vec![],
             params: vec![
@@ -400,6 +432,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             // `count()` is the one row-counting shorthand (`AggregateOp`
             // accepts it with field `""`); every other fn needs a column.
             methods_needing_field: AggFn::all_where(|f| !f.counts_rows_without_field()),
+            method_canonical: AggFn::canonical_map(),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["ops", "groupby", "name"],
@@ -423,6 +456,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "error_extent" => TransformRegistryEntry {
             methods: crate::transform::error_extent::ErrorMethod::all(),
             methods_needing_field: crate::transform::error_extent::ErrorMethod::all(),
+            method_canonical: crate::transform::error_extent::ErrorMethod::canonical_map(),
             outputs: vec![
                 ("mean", DataType::Float64),
                 ("lower", DataType::Float64),
@@ -496,6 +530,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "qq" => TransformRegistryEntry {
             methods: crate::transform::qq::DISTRIBUTIONS.to_vec(),
             methods_needing_field: crate::transform::qq::DISTRIBUTIONS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::qq::DISTRIBUTIONS),
             outputs: vec![("theoretical", DataType::Float64), ("sample", DataType::Float64)],
             // Holds for the default `emit_line=true`; `emit_line=false`
             // publishes no secondary batch at all.
@@ -514,6 +549,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "linkage" => TransformRegistryEntry {
             methods: crate::transform::linkage::LinkageMethod::all(),
             methods_needing_field: vec![],
+            method_canonical: crate::transform::linkage::LinkageMethod::canonical_map(),
             outputs: crate::transform::linkage::LINKAGE_COLUMNS.to_vec(),
             // The first key re-publishes the primary batch under a stable
             // name; the other three are the dendrogram geometry.
@@ -523,6 +559,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "raster" => TransformRegistryEntry {
             methods: RasterAggregate::all(),
             methods_needing_field: RasterAggregate::all_where(RasterAggregate::needs_field),
+            method_canonical: RasterAggregate::canonical_map(),
             outputs: vec![
                 ("x_min", DataType::Float64),
                 ("x_max", DataType::Float64),
@@ -543,6 +580,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "hex" => TransformRegistryEntry {
             methods: HexAggregate::all(),
             methods_needing_field: HexAggregate::all_where(HexAggregate::needs_field),
+            method_canonical: HexAggregate::canonical_map(),
             outputs: vec![
                 ("hex_x", DataType::Float64),
                 ("hex_y", DataType::Float64),
@@ -652,6 +690,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "pivot" => TransformRegistryEntry {
             methods: crate::transform::pivot::OPS.to_vec(),
             methods_needing_field: crate::transform::pivot::OPS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::pivot::OPS),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "value", "groupby", "limit", "op", "name"],
@@ -661,6 +700,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "join_aggregate" => TransformRegistryEntry {
             methods: AggFn::all(),
             methods_needing_field: AggFn::all(),
+            method_canonical: AggFn::canonical_map(),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["aggregates", "groupby", "name"],
@@ -668,6 +708,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "data_window" => TransformRegistryEntry {
             methods: crate::transform::data_window::OPS.to_vec(),
             methods_needing_field: crate::transform::data_window::ops_needing_field(),
+            method_canonical: identity_canonical(crate::transform::data_window::OPS),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["ops", "sort", "groupby", "frame", "ignore_peers", "name"],
@@ -687,6 +728,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "density_data" => TransformRegistryEntry {
             methods: crate::transform::kde::KERNELS.to_vec(),
             methods_needing_field: crate::transform::kde::KERNELS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::kde::KERNELS),
             outputs: vec![("value", DataType::Float64), ("density", DataType::Float64)],
             secondary_outputs: vec![],
             params: vec![
@@ -697,6 +739,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "regression_data" => TransformRegistryEntry {
             methods: crate::transform::regression_data::METHODS.to_vec(),
             methods_needing_field: vec![],
+            method_canonical: identity_canonical(crate::transform::regression_data::METHODS),
             outputs: vec![("x", DataType::Float64), ("y", DataType::Float64)],
             secondary_outputs: vec![],
             params: vec!["x", "y", "method", "order", "groupby", "as_", "name"],
@@ -710,6 +753,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "impute" => TransformRegistryEntry {
             methods: crate::transform::impute::METHODS.to_vec(),
             methods_needing_field: crate::transform::impute::METHODS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::impute::METHODS),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "method", "value", "groupby", "key", "keyvals", "name"],
@@ -729,6 +773,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "top_k" => TransformRegistryEntry {
             methods: crate::transform::top_k::OPS.to_vec(),
             methods_needing_field: crate::transform::top_k::OPS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::top_k::OPS),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["n", "field", "op", "sort", "groupby", "name"],
@@ -736,6 +781,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "data_stack" => TransformRegistryEntry {
             methods: crate::transform::data_stack::OFFSETS.to_vec(),
             methods_needing_field: crate::transform::data_stack::OFFSETS.to_vec(),
+            method_canonical: identity_canonical(crate::transform::data_stack::OFFSETS),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "groupby", "sort", "as_", "offset", "name"],
@@ -757,6 +803,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "data_aggregate" => TransformRegistryEntry {
             methods: AggFn::all(),
             methods_needing_field: AggFn::all(),
+            method_canonical: AggFn::canonical_map(),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["aggregates", "groupby", "name"],
@@ -790,7 +837,7 @@ fn dtype_label(dt: &DataType) -> String {
 
 /// `ferrum._core.transform_registry(kind)` — spec §4.6, batch-D task 1.
 /// Returns `{"methods": [...], "methods_needing_field": [...],
-/// "outputs": [(name, dtype), ...],
+/// "method_canonical": {spelling: canonical, ...}, "outputs": [(name, dtype), ...],
 /// "secondary_outputs": [(key, [(name, dtype), ...]), ...], "params": [...]}`
 /// for a known transform kind (module name — see the module doc); raises
 /// `ValueError` listing every known kind otherwise.
@@ -807,6 +854,11 @@ pub fn transform_registry(py: Python<'_>, kind: &str) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("methods", entry.methods)?;
     dict.set_item("methods_needing_field", entry.methods_needing_field)?;
+    let method_canonical = PyDict::new(py);
+    for (spelling, canonical) in entry.method_canonical {
+        method_canonical.set_item(spelling, canonical)?;
+    }
+    dict.set_item("method_canonical", method_canonical)?;
     let outputs: Vec<(&'static str, String)> = entry
         .outputs
         .iter()

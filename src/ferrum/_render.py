@@ -19,7 +19,7 @@ from ferrum._render_prepare import (
     _collect_label_maps,
     _resolve_category_coords_in_annotations,
 )
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding.base import ChannelBase, _unset_statistic
 
 if TYPE_CHECKING:
     pass
@@ -127,6 +127,58 @@ def _warn_large_chart(mark_count: int) -> None:
     )
 
 
+def _warn_bin_excluded(mark_count: int) -> None:
+    """Emit the guidance warning for the positional bin= exclusion.
+
+    Unlike ``_warn_large_chart``, this warning must not recommend
+    ``.mark_raster()``: a chart excluded here because its x or y carries a
+    bin= with no aggregate= would have that same bin= refused by
+    ``mark_raster`` itself (its own positional-bin rule -- "Set the grid
+    with mark_raster's resolution=, or drop bin=."), so naming it here
+    would point at a remedy that does not run. A single channel cannot
+    carry both a bin= and an aggregate= either -- that is refused at
+    resolution ("one channel cannot be both the bin position and the
+    aggregated value") -- so the only aggregate= pairing that actually
+    renders puts it on the OPPOSING positional channel (``x=X(..., bin=True)``
+    beside ``y=Y(..., aggregate=...)``, or the reverse), which this warning
+    names; the ``raster=False`` suppression every exclusion keeps is the
+    other.
+    """
+    warnings.warn(
+        f"Chart has {mark_count:,} marks which may produce large output, and "
+        f"its x or y encoding carries a bin= with no aggregate=, so "
+        f"`.mark_raster()` cannot draw it either. Put an aggregate= on the "
+        f"opposing positional channel (e.g. `y=fm.Y('field', aggregate='mean')` "
+        f"beside `x=fm.X('field', bin=True)`), or set `raster=False` to "
+        f"suppress this warning.",
+        UserWarning,
+        stacklevel=5,
+    )
+
+
+def _warn_channel_aggregate_excluded(mark_count: int, channels: list[str]) -> None:
+    """Emit the guidance warning for a non-positional channel's own aggregate= exclusion.
+
+    Unlike ``_warn_large_chart``, never recommends ``.mark_raster()``: a
+    color aggregate= is refused by its own color rule, and a size/opacity
+    aggregate= fails raw (``mark_raster`` reads neither channel). Names the
+    channel(s) and the remedy that actually renders instead.
+    """
+    names = " and ".join(channels)
+    plural = len(channels) > 1
+    warnings.warn(
+        f"Chart has {mark_count:,} marks which may produce large output, and "
+        f"its {names} encoding{'s' if plural else ''} {'carry' if plural else 'carries'} "
+        f"its own aggregate=, so its marks are drawn per group -- "
+        f"`.mark_raster()` cannot draw it either. Compute the aggregate with "
+        f"`.transform(fm.transform_aggregate(...))` and bind the output "
+        f"column with no aggregate= of its own, or set `raster=False` to "
+        f"suppress this warning.",
+        UserWarning,
+        stacklevel=5,
+    )
+
+
 def _warn_categorical_color_excluded(
     mark_count: int, color_field: str | None, kind: "_ColorTypeKind"
 ) -> None:
@@ -213,13 +265,40 @@ class _RenderMixin:
           channel exists to show. A quantitative ``color`` encoding is
           *not* excluded -- see below.
         - Both ``x`` and ``y`` quantitative encodings are not present.
+        - Either ``x`` or ``y`` carries its own ``aggregate=``: its marks
+          are drawn per group, not per row, and the group count is one
+          axis's own distinct values -- fewer marks than rows, the same
+          reason a composite/statistical mark is excluded above. This
+          exclusion is permanent and silent.
+        - Any OTHER bound channel -- ``color``, ``size``, ``opacity``, or
+          any other encoding -- carries its own ``aggregate=`` while ``x``
+          and ``y`` stay raw: its marks are still drawn per group (a
+          quantitative color's own ``aggregate=`` excludes here instead of
+          being silently replaced by the substitution's own
+          ``aggregate="mean"`` below), but with ``x``/``y`` unaggregated the
+          group count is bounded only by their own distinct pairs, which
+          can still reach the row count. This exclusion warns
+          (:func:`_warn_channel_aggregate_excluded`) rather than staying
+          silent, naming only the remedy that actually renders --
+          ``.mark_raster()`` would refuse a color aggregate= and fail raw
+          on size/opacity, so it is never named. Checked over every channel
+          in ``_encoding`` through :func:`_unset_statistic`.
+        - Either ``x`` or ``y`` carries a ``bin=`` with no positional
+          ``aggregate=``: its marks are still drawn per row, but a raster
+          cannot draw a binned position, so this renders per element with
+          a dedicated guidance warning (:func:`_warn_bin_excluded`) that
+          names only remedies that actually run for that chart -- an
+          ``aggregate=`` on the OPPOSING positional channel, or
+          ``raster=False`` -- never ``.mark_raster()`` (refused by its own
+          positional-bin rule) and never a single channel's own ``bin=``
+          and ``aggregate=`` together (refused at resolution).
 
         When the chart is over-threshold but ineligible, a guidance warning
-        is emitted. For the categorical-color exclusion specifically, the
-        warning names the exclusion, its reason, and the manual
-        ``mark_raster(aggregate=..., field=...)`` workaround (F-L14-04);
-        every other ineligibility reason gets the generic
-        ``.mark_raster()``/``raster=False`` guidance.
+        is emitted. For the categorical-color exclusion and the positional
+        bin= exclusion, the warning names the exclusion, its reason, and
+        the remedy that actually runs (F-L14-04); every other ineligibility
+        reason gets the generic ``.mark_raster()``/``raster=False``
+        guidance.
 
         Quantitative color
         -------------------
@@ -236,14 +315,18 @@ class _RenderMixin:
         quantitative annotations.
 
         An over-threshold chart with a **quantitative** ``color`` encoding
-        *does* get auto-rastered: the substitution uses
-        ``aggregate="mean"``, ``field=<the color field>``, and the color
-        channel's own ``scheme=`` when it declared one (else
-        ``RenderConfig.raster_scheme``) -- so the color information the
-        chart was built to show survives rasterisation as a per-pixel mean,
-        instead of being silently dropped. This keeps the "same chart spec
-        works at every data size" guarantee true for quantitative-color
-        scatters, not just colorless ones.
+        that carries no ``aggregate=`` of its own *does* get auto-rastered:
+        the substitution uses ``aggregate="mean"``, ``field=<the color
+        field>``, and the color channel's own ``scheme=`` when it declared
+        one (else ``RenderConfig.raster_scheme``) -- so the color
+        information the chart was built to show survives rasterisation as
+        a per-pixel mean, instead of being silently dropped. This keeps
+        the "same chart spec works at every data size" guarantee true for
+        quantitative-color scatters, not just colorless ones. A color that
+        declares its own ``aggregate=`` (``fm.Color("c", aggregate="sum")``)
+        is excluded by the per-channel aggregate gate above instead: the
+        chart already asked for a specific per-group op, so substituting
+        ``"mean"`` for it would silently change what the chart draws.
 
         An explicit ``RenderConfig(raster_aggregate=..., raster_field=...)``
         wins wholesale over this color-driven default: the user asked for a
@@ -325,6 +408,52 @@ class _RenderMixin:
 
         if not _is_quantitative(x_enc) or not _is_quantitative(y_enc):
             _warn_large_chart(mark_count)
+            return self
+
+        # An x/y aggregate= draws per group, not per row, and the group
+        # count is one axis's distinct values -- fewer marks than rows, the
+        # same reason a composite or statistical mark is excluded above:
+        # a raster built from it would silently draw the raw rows the
+        # mark's own statistic refuses to. Excluded permanently, with no
+        # warning.
+        if not _unset_statistic(
+            "aggregate", x_enc._kwargs.get("aggregate")
+        ) or not _unset_statistic("aggregate", y_enc._kwargs.get("aggregate")):
+            return self
+
+        # A non-positional channel's own aggregate= (color, size, opacity,
+        # etc.) also draws per group, so substituting it would silently
+        # drop the requested op the same way (a quantitative color's own
+        # `aggregate="sum"` would otherwise be replaced by the
+        # substitution's own `aggregate="mean"` below) -- but x and y stay
+        # raw here, so the group count is bounded by their OWN distinct
+        # pairs, which can still reach the row count (every row its own
+        # group). This exclusion therefore keeps a guidance warning, like
+        # the missing/non-quantitative gates above, but names only the
+        # remedy that actually renders (`.mark_raster()` refuses a color
+        # aggregate= and fails raw on size/opacity), not the generic
+        # large-chart advice.
+        agg_channels = [
+            key
+            for key, enc in self._encoding.items()
+            if isinstance(enc, ChannelBase)
+            and not _unset_statistic("aggregate", enc._kwargs.get("aggregate"))
+        ]
+        if agg_channels:
+            _warn_channel_aggregate_excluded(mark_count, agg_channels)
+            return self
+
+        # An x/y bin= still draws per row, so it is not excluded the way an
+        # aggregate is, but the raster cannot draw a binned position either
+        # -- warn, as the missing/non-quantitative gates above do, rather
+        # than silently substitute a raster that drops the bin. The warning
+        # is gate-specific (not the generic one): a manual `mark_raster()`
+        # refuses this same bin= too, so recommending it would name a
+        # remedy that does not run.
+        if not _unset_statistic("bin", x_enc._kwargs.get("bin")) or not _unset_statistic(
+            "bin", y_enc._kwargs.get("bin")
+        ):
+            _warn_bin_excluded(mark_count)
             return self
 
         # Error mode -- raise instead of substituting.
