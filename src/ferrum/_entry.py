@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Protocol, TypeVar, runtime_checkable
 
 
 class EntryRefusal(ValueError):
@@ -23,7 +24,11 @@ class EntryRefusal(ValueError):
 
     *entry* must name a call; an empty one refuses. The text for another
     voice comes from *message_for* alone, a template or a re-call of the one
-    pure validator that refused, never from re-running the door.
+    pure validator that refused, never from re-running the door. When
+    *message_for* also declares :class:`_VoiceSpelledText` (its wording, not
+    only the call name, changes per voice -- a bin=/aggregate= refusal
+    naming a door's own keyword), the text for a voice it declares comes
+    from calling it directly, pickled or not.
     """
 
     def __init__(self, message_for: Callable[[str], str], entry: str) -> None:
@@ -41,16 +46,17 @@ class EntryRefusal(ValueError):
 
     def prefixed(self, prefix: str) -> "EntryRefusal":
         """The same refusal, of the same type, with *prefix* ahead of its text in every voice."""
-        message_for = self.message_for
-        return type(self)(lambda entry: f"{prefix}{message_for(entry)}", self.entry)
+        return type(self)(_PrefixedText(prefix, self.message_for), self.entry)
 
     def __reduce__(self) -> tuple[Any, ...]:
         # ``message_for`` is usually a closure, which pickle refuses, and
         # BaseException's default rebuilds from ``args`` (the text alone),
         # which ``__init__`` cannot take. Rebuild from the frozen text
-        # instead: the text with a slot wherever the voice goes, so the copy
-        # keeps its type, message and entry, and re-voices like the original.
-        # Subclasses take ``(message_for, entry)``, as ``spoken_as`` relies on.
+        # instead: the text with a slot wherever the voice goes, plus the
+        # whole text for each voice whose door spells it differently, so
+        # the copy keeps its type, message and entry, and re-voices like
+        # the original. Subclasses take ``(message_for, entry)``, as
+        # ``spoken_as`` relies on.
         #
         # A refusal can echo raw, un-escaped user input (a color value, a
         # kwarg name), so the base slot is not guaranteed absent from this
@@ -62,9 +68,15 @@ class EntryRefusal(ValueError):
         own_text = self.message_for(self.entry)
         while slot in own_text:
             slot += _VOICE_SLOT
+        voices = (
+            self.message_for.voices
+            if isinstance(self.message_for, _VoiceSpelledText)
+            else frozenset()
+        )
+        spelled = {voice: self.message_for(voice) for voice in sorted(voices)}
         return (
             type(self),
-            (_VoiceTemplate(self.message_for(slot), slot), self.entry),
+            (_VoiceTemplate(self.message_for(slot), slot, spelled), self.entry),
             state or None,
         )
 
@@ -78,15 +90,74 @@ class EntryRefusal(ValueError):
 _VOICE_SLOT = "\ue000voice\ue000"
 
 
-class _VoiceTemplate:
-    """A refusal's frozen text for any voice, the picklable form of its ``message_for``."""
+@runtime_checkable
+class _VoiceSpelledText(Protocol):
+    """A refusal text whose wording, not only its voice slot, changes with the voice.
 
-    def __init__(self, text: str, slot: str) -> None:
+    ``EntryRefusal.__reduce__`` freezes a refusal's text into a slot
+    template by calling ``message_for`` with a placeholder voice
+    (:data:`_VOICE_SLOT`); that rests on the premise that the voice appears
+    only as a literal substring of otherwise-fixed text. A message whose
+    wording itself depends on the door it is read with (a bin=/aggregate=
+    refusal naming that door's own keyword) breaks that premise, so it
+    declares every voice its wording actually differs for, letting
+    ``__reduce__`` freeze the whole text per voice instead of relying on
+    the slot substitution. Structural: a message type satisfies this by
+    shape alone, with no import from this module required.
+    """
+
+    @property
+    def voices(self) -> frozenset[str]: ...
+
+    def __call__(self, voice: str) -> str: ...
+
+
+class _VoiceTemplate:
+    """A refusal's frozen text for any voice, the picklable form of its ``message_for``.
+
+    *spelled* holds the whole text of every voice *text*'s slot template
+    cannot reproduce (:class:`_VoiceSpelledText`'s declared ``voices``,
+    read once at pickle/copy time); ``__call__`` reads it before falling
+    back to the slot substitution, and ``voices`` re-declares it so a
+    second copy of this clone keeps the same voices.
+    """
+
+    def __init__(self, text: str, slot: str, spelled: dict[str, str] | None = None) -> None:
         self.text = text
         self.slot = slot
+        self.spelled = spelled or {}
 
     def __call__(self, entry: str) -> str:
+        if entry in self.spelled:
+            return self.spelled[entry]
         return self.text.replace(self.slot, entry)
+
+    @property
+    def voices(self) -> frozenset[str]:
+        return frozenset(self.spelled)
+
+
+@dataclass(frozen=True)
+class _PrefixedText:
+    """A refusal text with *prefix* ahead of *inner*'s own text, in every voice.
+
+    The picklable form :meth:`EntryRefusal.prefixed` builds, replacing a
+    closure lambda: a plain lambda wrapper would hide *inner*'s declared
+    ``voices`` from ``__reduce__``, so this forwards them instead when
+    *inner* is itself :class:`_VoiceSpelledText`.
+    """
+
+    prefix: str
+    inner: Callable[[str], str]
+
+    def __call__(self, voice: str) -> str:
+        return self.prefix + self.inner(voice)
+
+    @property
+    def voices(self) -> frozenset[str]:
+        if isinstance(self.inner, _VoiceSpelledText):
+            return self.inner.voices
+        return frozenset()
 
 
 def stamp_entry(chart: Any, entry: str) -> Any:

@@ -53,7 +53,6 @@ from ferrum._layer import (
     titled_encoding,
 )
 from ferrum._encode_lowering import (
-    SMOOTH_X_BIN_REMEDY,
     _composite_groupby,
     _over,
     _rebind_positional,
@@ -71,6 +70,7 @@ from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws, resolve_lay
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ferrum._encode_lowering import _ShareMode
     from ferrum.chart import Chart
 
 
@@ -1144,9 +1144,9 @@ def _prep_smooth_force_name(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "name": "smooth"}
 
 
-def _histogram_share(ctx: _ResolveContext, value_axis: str) -> tuple[str, str] | None:
-    """The spelling and remedy of the normalized-stack mode mark_histogram's value
-    axis draws, or ``None`` when its fieldless count draws a plain count.
+def _histogram_share(ctx: _ResolveContext, value_axis: str) -> "_ShareMode | None":
+    """The normalized-stack mode mark_histogram's value axis draws, or
+    ``None`` when its fieldless count draws a plain count.
 
     Reads the mode the drawn position actually resolves to, not one
     keyword alone: ``multiple=``'s own position
@@ -1158,6 +1158,9 @@ def _histogram_share(ctx: _ResolveContext, value_axis: str) -> tuple[str, str] |
     a normalizing ``Stack`` and keeps its own spelling regardless. An
     unknown ``multiple=`` draws no mode at all: ``None`` here, so the
     desugar's own vocabulary check refuses it in ``mark_histogram``'s voice.
+    This returns only the fact of which mode is drawn; the door spells it
+    (:func:`~ferrum._encode_lowering._value_mode_reason`/
+    :func:`~ferrum._encode_lowering._value_mode_remedy`).
     """
     from ferrum.marks._multiple import MULTIPLE_MODES, multiple_semantics
     from ferrum.position import Stack
@@ -1166,21 +1169,18 @@ def _histogram_share(ctx: _ResolveContext, value_axis: str) -> tuple[str, str] |
     if multiple not in MULTIPLE_MODES:
         return None
     if multiple == "fill":
-        return "multiple='fill'", "Drop aggregate=, or draw the count with multiple='stack'."
+        return "fill"
     own = multiple_semantics(multiple).position
     position = own if own is not None else ctx.chart._position
     if own is None and isinstance(position, Stack) and position.offset == "normalize":
-        return (
-            "position=fm.Stack(offset='normalize')",
-            "Drop aggregate=, or draw the count with position=fm.Stack().",
-        )
+        return "normalized_position"
     value_ch = ctx.chart._encoding.get(value_axis)
     if (
         position is None
         and isinstance(value_ch, ChannelBase)
         and value_ch.option("stack") == "normalize"
     ):
-        return "stack='normalize'", "Drop aggregate=, or draw the count with stack=True."
+        return "normalized_stack"
     return None
 
 
@@ -1192,19 +1192,12 @@ def _prep_refuse_histogram_statistics(ctx: _ResolveContext) -> None:
     horizontal = ctx.transform_kwargs.get("orientation", "vertical") == "horizontal"
     value_axis = "x" if horizontal else "y"
     density = bool(ctx.transform_kwargs.get("density", False))
-    share_spelling, share_remedy = _histogram_share(ctx, value_axis) or (None, None)
     _refuse_histogram_bin_aggregate(
         "mark_histogram",
         ctx.chart._encoding,
         horizontal=horizontal,
         density=density,
-        share_spelling=share_spelling,
-        share_remedy=share_remedy,
-        bin_rule_remedy=(
-            "State the rule with mark_histogram's bins=, bin_count= or bin_width=, or drop bin=."
-        ),
-        density_spelling="density=True",
-        density_remedy="Drop aggregate=, or draw the count with density=False.",
+        share=_histogram_share(ctx, value_axis),
     )
 
 
@@ -1228,7 +1221,7 @@ def _prep_refuse_smooth_statistics(ctx: _ResolveContext) -> None:
     _refuse_bin_aggregate_fit(
         "mark_smooth",
         ctx.chart._encoding,
-        x_bin_remedy=SMOOTH_X_BIN_REMEDY,
+        x_bins_knob=True,
     )
 
 

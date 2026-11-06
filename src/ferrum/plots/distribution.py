@@ -507,27 +507,20 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
     checked alike. As the matching mark's own refusal reads it
     (:func:`~ferrum._encode_lowering._refuse_histogram_bin_aggregate` for
     ``"hist"``, :func:`~ferrum._encode_lowering._refuse_bin_aggregate_on_channels`
-    for ``"kde"``, :func:`_refuse_ecdf_bin_aggregate` for ``"ecdf"``), with
-    displot's own remedies. ``kind='rug'`` draws every row through the
-    plain lowering, which consumes a channel's ``bin=``/``aggregate=`` as
-    any primitive mark does, so it is not checked here.
+    for ``"kde"``, :func:`_refuse_ecdf_bin_aggregate` for ``"ecdf"``), which
+    resolves displot's own remedies itself (``_DOOR_VOCABULARY``, keyed by
+    the voice the refusal speaks as) -- nothing door-specific is passed in
+    here. ``kind='rug'`` draws every row through the plain lowering, which
+    consumes a channel's ``bin=``/``aggregate=`` as any primitive mark
+    does, so it is not checked here.
     """
     if kind == "hist":
-        share_spelling, share_remedy = (
-            ("multiple='fill'", "Drop aggregate=, or draw the count with multiple='stack'.")
-            if multiple == "fill"
-            else (None, None)
-        )
         _refuse_histogram_bin_aggregate(
             "displot",
             drawn,
             horizontal=False,
             density=(stat == "density"),
-            share_spelling=share_spelling,
-            share_remedy=share_remedy,
-            bin_rule_remedy="State the rule with displot's bins=, or drop bin=.",
-            density_spelling="stat='density'",
-            density_remedy="Drop aggregate=, or draw the count with stat='count'.",
+            share="fill" if multiple == "fill" else None,
         )
     elif kind == "kde":
         _refuse_bin_aggregate_on_channels(

@@ -2,23 +2,31 @@
 
 ``mark_histogram``, ``mark_density``, ``mark_smooth`` (and
 ``mark_point().mark_smooth()``), ``mark_function`` with no parent data
-layer, ``displot``'s hist/kde/ecdf kinds, ``residplot`` and
-``regplot``/``lmplot`` each build a statistic over x/y columns it reads
-raw, unfolded, or computes itself; a channel ``bin=``/``aggregate=`` the
-statistic never reads would otherwise be dropped silently when the
-channel is re-pointed at the statistic's output, through a keyword, an
-``encode=`` entry or a shorthand string alike. Every refusal is raised as
-an :class:`~ferrum._entry.EntryRefusal`, so it speaks as the public call
-the caller made, never the inner mark or its own parameters, and names a
-remedy that renders. The honored rows render byte-identically to a
+layer, ``displot``'s hist/kde/ecdf kinds, ``jointplot``'s and
+``pairplot``'s own marks, ``residplot`` and ``regplot``/``lmplot`` each
+build a statistic over x/y columns it reads raw, unfolded, or computes
+itself; a channel ``bin=``/``aggregate=`` the statistic never reads would
+otherwise be dropped silently when the channel is re-pointed at the
+statistic's output, through a keyword, an ``encode=`` entry or a shorthand
+string alike. Every refusal is raised as an
+:class:`~ferrum._entry.EntryRefusal`, so it speaks as the public call the
+caller made, never the inner mark or its own parameters, and names a
+remedy that renders -- in the voicing call's own spelling when that knob
+has one (``displot``'s ``bins=``, ``jointplot``'s ``marginal_kws=``), the
+knob-free remedy otherwise. The honored rows render byte-identically to a
 sibling route without the option, or to a committed digest of the same
 chart.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import inspect
+import pickle
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import polars as pl
@@ -26,6 +34,7 @@ import pytest
 
 import ferrum as fm
 from ferrum.encoding import X, Y
+from tests._script_loader import load_script
 from tests._svg_extents import axis_tick_labels, x_axis_title, y_axis_title
 from tests._svg_rects import data_bar_rects, polylines, step_after_paths
 
@@ -157,26 +166,31 @@ def _histogram_cases(door: str) -> list[_Case]:
     """mark_histogram/displot(kind='hist') over orientation x its full cell set.
 
     ``encode`` is built once, keyed by the real channel name (``"x"``,
-    ``"y"``, ``"color"``), so the same dict drives both doors:
-    ``Chart.mark_histogram(...).encode(**encode)`` and
-    ``fm.displot(rows, kind="hist", **encode, **mark_kwargs)``. displot has
+    ``"y"``, ``"color"``), so the same dict drives three doors:
+    ``Chart.mark_histogram(...).encode(**encode)``,
+    ``fm.displot(rows, kind="hist", **encode, **mark_kwargs)`` and
+    ``fm.displot(rows, x="v", kind="hist", **mark_kwargs).encode(**encode)``
+    (``door="displot_posthoc"``, voiced as ``displot`` like the keyword
+    door, reached once the pending histogram mark resolves at render time
+    -- the same backstop the ECDF/kde post-hoc doors exercise). displot has
     no orientation of its own (vertical only) and no normalized-stack
     spelling beyond its own ``multiple='fill'`` (``position=``/channel
     ``stack=`` are ``mark_histogram``-only keywords).
     """
     cases: list[_Case] = []
+    voice = "mark_histogram" if door == "mark_histogram" else "displot"
     orientations = ("vertical", "horizontal") if door == "mark_histogram" else ("vertical",)
     bin_remedy = {
         "mark_histogram": "State the rule with mark_histogram's bins=, bin_count= or bin_width=, or drop bin=.",
         "displot": "State the rule with displot's bins=, or drop bin=.",
-    }[door]
+    }[voice]
     density_spelling, density_remedy = {
         "mark_histogram": (
             "density=True",
             "Drop aggregate=, or draw the count with density=False.",
         ),
         "displot": ("stat='density'", "Drop aggregate=, or draw the count with stat='count'."),
-    }[door]
+    }[voice]
     share_remedy = "Drop aggregate=, or draw the count with multiple='stack'."
 
     for orientation in orientations:
@@ -203,8 +217,10 @@ def _histogram_cases(door: str) -> list[_Case]:
                     fm.Chart(rows).mark_histogram(orientation=orientation, **mark_kwargs).encode(
                         **encode
                     ).to_svg()
-                else:
+                elif door == "displot":
                     fm.displot(rows, kind="hist", **encode, **mark_kwargs)
+                else:
+                    fm.displot(rows, x="v", kind="hist", **mark_kwargs).encode(**encode).to_svg()
 
             return run
 
@@ -228,7 +244,7 @@ def _histogram_cases(door: str) -> list[_Case]:
                     f"{door}_{cell_id}{suffix}",
                     build(mark_kwargs, encode, grouped=grouped, needs_w=needs_w),
                     _message(
-                        door,
+                        voice,
                         _written(refused_axis, refused_cls, field, kwarg, value),
                         kwarg,
                         reason,
@@ -338,7 +354,9 @@ def _histogram_cases(door: str) -> list[_Case]:
         # Fieldless count under multiple='fill' (both doors).
         case(
             "count_under_fill",
-            {"multiple": "fill"} if door == "displot" else {"multiple": "fill", "groupby": ["g"]},
+            {"multiple": "fill"}
+            if door != "mark_histogram"
+            else {"multiple": "fill", "groupby": ["g"]},
             {
                 bin_axis: "v",
                 "color": "g",
@@ -530,14 +548,63 @@ def _fit_cases() -> list[_Case]:
                             ),
                         )
                     )
+
+    # Post-hoc twins (scatter=False, method='lm'): the same remedies as the
+    # keyword lm cells, reached through a `.encode()` written after the call.
+    for door in ("lmplot", "regplot"):
+        call = fm.lmplot if door == "lmplot" else fm.regplot
+        for channel, field, reason in (
+            ("x", "v", "the fit reads the raw predictor"),
+            ("y", "w", "the fit reads the raw response"),
+        ):
+            for kwarg, value in (("bin", True), ("aggregate", "mean")):
+                remedy = (
+                    "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
+                    if channel == "x" and kwarg == "bin"
+                    else (
+                        _generic_bin_remedy(field)
+                        if kwarg == "bin"
+                        else _generic_aggregate_remedy(field)
+                    )
+                )
+
+                def build(call=call, channel=channel, field=field, kwarg=kwarg, value=value):
+                    def run() -> None:
+                        ch = (
+                            X(field, **{kwarg: value})
+                            if channel == "x"
+                            else Y(field, **{kwarg: value})
+                        )
+                        call(_XY_ROWS, x="v", y="w", method="lm", scatter=False).encode(
+                            **{channel: ch}
+                        ).to_svg()
+
+                    return run
+
+                cases.append(
+                    (
+                        f"{door}_posthoc_lm_{channel}_{kwarg}",
+                        build(),
+                        _message(
+                            door,
+                            _written(channel, _CLS[channel], field, kwarg, value),
+                            kwarg,
+                            reason,
+                            remedy,
+                        ),
+                    )
+                )
     return cases
 
 
 def _kde_cases() -> list[_Case]:
-    """mark_density (univariate x, bivariate y) and displot(kind='kde') over x/y x bin/aggregate."""
+    """mark_density (univariate x, bivariate y), displot(kind='kde') keyword and post-hoc,
+    over x/y x bin/aggregate.
+    """
     cases: list[_Case] = []
     reason = "the kernel density estimate reads raw rows"
-    for door in ("mark_density", "displot"):
+    for door in ("mark_density", "displot", "displot_posthoc"):
+        voice = "mark_density" if door == "mark_density" else "displot"
         for channel, field, other, other_field in (("x", "v", "y", None), ("y", "w", "x", "v")):
             for kwarg, value in (("bin", True), ("aggregate", "mean")):
                 remedy = (
@@ -566,8 +633,10 @@ def _kde_cases() -> list[_Case]:
                             encode[other] = other_field
                         if door == "mark_density":
                             fm.Chart(_XY_ROWS).mark_density().encode(**encode).to_svg()
-                        else:
+                        elif door == "displot":
                             fm.displot(_XY_ROWS, kind="kde", **encode)
+                        else:
+                            fm.displot(_XY_ROWS, kind="kde", x="v").encode(**encode).to_svg()
 
                     return run
 
@@ -576,7 +645,7 @@ def _kde_cases() -> list[_Case]:
                         f"{door}_kde_{channel}_{kwarg}",
                         build(),
                         _message(
-                            door,
+                            voice,
                             _written(channel, _CLS[channel], field, kwarg, value),
                             kwarg,
                             reason,
@@ -663,29 +732,61 @@ def _ecdf_cases() -> list[_Case]:
         )
     )
 
-    # Post-hoc rows: the same four refusals, reaching through a `.encode()`
+    # Post-hoc rows: the same refusals, reaching through a `.encode()`
     # written after the call, when the pending mark resolves -- the
     # resolve-time backstop (`_prep_refuse_ecdf_statistics`) that covers
-    # the door the call-time pre-check cannot reach.
-    cases.append(
-        (
-            "ecdf_x_bin_posthoc",
-            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf").encode(x=X("v", bin=True)).to_svg(),
-            _message(
-                "displot",
-                _written("x", "X", "v", "bin", True),
-                "bin",
-                "the ECDF counts the raw values of x",
-                _generic_bin_remedy("v"),
-            ),
+    # the door the call-time pre-check cannot reach. x's full bin-value
+    # product gets a twin, same as the call-time cells above.
+    for value in x_bin_values:
+
+        def build(value=value):
+            def run() -> None:
+                fm.displot(_HIST_ROWS, x="v", kind="ecdf").encode(x=X("v", bin=value)).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"ecdf_x_bin_{type(value).__name__}_posthoc",
+                build(),
+                _message(
+                    "displot",
+                    _written("x", "X", "v", "bin", value),
+                    "bin",
+                    "the ECDF counts the raw values of x",
+                    _generic_bin_remedy("v"),
+                ),
+            )
         )
-    )
+    for value in y_bin_values:
+
+        def build(value=value):
+            def run() -> None:
+                fm.displot(_HIST_ROWS, x="v", kind="ecdf").encode(y=Y(bin=value)).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"ecdf_y_bin_{type(value).__name__}_posthoc",
+                build(),
+                _message(
+                    "displot",
+                    _written("y", "Y", None, "bin", value),
+                    "bin",
+                    "the ECDF draws its cumulative count on y",
+                    "Drop bin=.",
+                ),
+            )
+        )
     cases.append(
         (
             "ecdf_x_aggregate_posthoc",
-            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf")
-            .encode(x=X("v", aggregate="mean"))
-            .to_svg(),
+            lambda: (
+                fm.displot(_HIST_ROWS, x="v", kind="ecdf")
+                .encode(x=X("v", aggregate="mean"))
+                .to_svg()
+            ),
             _message(
                 "displot",
                 _written("x", "X", "v", "aggregate", "mean"),
@@ -708,9 +809,9 @@ def _ecdf_cases() -> list[_Case]:
     cases.append(
         (
             "ecdf_y_aggregate_posthoc",
-            lambda: fm.displot(_HIST_ROWS, x="v", kind="ecdf")
-            .encode(y=Y(aggregate="mean"))
-            .to_svg(),
+            lambda: (
+                fm.displot(_HIST_ROWS, x="v", kind="ecdf").encode(y=Y(aggregate="mean")).to_svg()
+            ),
             _message(
                 "displot",
                 _written("y", "Y", None, "aggregate", "mean"),
@@ -964,9 +1065,441 @@ def _spelling_cases() -> list[_Case]:
     return cases
 
 
+#: Rows with a string hue column, for jointplot's/pairplot's share-mode
+#: (normalized-stack) cases: the right marginal's/diagonal's own grouping
+#: needs a real categorical field, not a plain float.
+_XY_HUE_ROWS = _XY_ROWS.with_columns(g=pl.Series(["a", "b"] * 10))
+
+
+def _revoiced_figure_cases() -> list[_Case]:
+    """A re-voiced refusal's remedy, named in the voicing figure's own spelling.
+
+    displot's and regplot's/lmplot's own keyword/``encode=``/post-hoc doors,
+    and mark_density's/displot(kind='kde')'s post-hoc door, already resolve
+    their own vocabulary through the generators above (:func:`_histogram_cases`,
+    :func:`_kde_cases`). The cases here are the ones no generator's cell set
+    covers: jointplot and pairplot, neither of which pre-checks at call time,
+    so every one of their refusals -- keyword, ``encode=``, or a sub-panel
+    (marginal/center/diagonal) ``encode=`` fans out to -- resolves through
+    the same resolve-time refusal the generators exercise for their own doors.
+    """
+    cases: list[_Case] = []
+
+    # jointplot: the marginal histogram's bin rule, reached as a keyword and
+    # through encode= alike (jointplot has no pre-check of its own, so both
+    # doors resolve through the same resolve-time refusal).
+    for label, build_kwargs in (
+        ("keyword", {"x": X("v", bin={"bin_count": 3}), "y": "w"}),
+        ("encode", {"x": "v", "y": "w", "encode": {"x": X("v", bin={"bin_count": 3})}}),
+    ):
+
+        def build(build_kwargs=build_kwargs):
+            def run() -> None:
+                fm.jointplot(_XY_ROWS, **build_kwargs).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"jointplot_hist_bin_rule_{label}",
+                build(),
+                _message(
+                    "jointplot",
+                    _written("x", "X", "v", "bin", {"bin_count": 3}),
+                    "bin",
+                    "the histogram bins x by its own rule",
+                    "State the rule with marginal_kws={'bins': ...}, or drop bin=.",
+                ),
+            )
+        )
+
+    # jointplot: the top marginal's own binned axis, aggregate=.
+    cases.append(
+        (
+            "jointplot_hist_x_aggregate",
+            lambda: fm.jointplot(_XY_ROWS, x=X("v", aggregate="mean"), y="w").to_svg(),
+            _message(
+                "jointplot",
+                _written("x", "X", "v", "aggregate", "mean"),
+                "aggregate",
+                "the histogram bins x rather than aggregating it",
+                "Drop aggregate=.",
+            ),
+        )
+    )
+
+    # jointplot: the right marginal's value axis, field-bearing bin=/aggregate=.
+    # jointplot's own encode= also reaches the right marginal's binned axis
+    # (bound to the same "y" channel), so the drop clause cannot offer "style
+    # the axis with a fieldless channel" the way every other door's does --
+    # that alternative needs a field there too.
+    cases.append(
+        (
+            "jointplot_hist_y_aggregate",
+            lambda: fm.jointplot(_XY_ROWS, x="v", y="w", encode={"y": Y("w", aggregate="mean")}).to_svg(),
+            _message(
+                "jointplot",
+                _written("y", "Y", "w", "aggregate", "mean"),
+                "aggregate",
+                "the histogram computes y itself",
+                "Draw the aggregate per bin with a bar mark, fm.Chart(data).mark_bar().encode("
+                "x=fm.X('v', bin=True), y=fm.Y('w', aggregate='mean')), or drop y=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "jointplot_hist_y_bin",
+            lambda: fm.jointplot(_XY_ROWS, x="v", y="w", encode={"y": Y("w", bin=True)}).to_svg(),
+            _message(
+                "jointplot",
+                _written("y", "Y", "w", "bin", True),
+                "bin",
+                "the histogram computes y itself",
+                "Count rows over both fields with fm.Chart(data).mark_hex().encode(x='v', "
+                "y='w'), or drop y=.",
+            ),
+        )
+    )
+
+    # jointplot: the top marginal's fieldless count under each value mode,
+    # spelled through marginal_kws= (density) or marginal_kws=/the channel's
+    # own stack= (the three share modes) -- every one falls back to "Drop
+    # aggregate=.", since encode= reaching the top marginal's value axis
+    # also reaches the right marginal's own binned axis (bound to the same
+    # "y" channel), which refuses any aggregate unconditionally. See
+    # :func:`test_jointplot_names_no_count_remedy_since_encode_reaches_its_binned_marginal`.
+    for label, jointplot_kwargs, reason in (
+        (
+            "density",
+            {"marginal_kws": {"density": True}},
+            "with marginal_kws={'density': True} the histogram draws density on y, not a count",
+        ),
+        (
+            "fill",
+            {"hue": "g", "marginal_kws": {"multiple": "fill"}},
+            "with marginal_kws={'multiple': 'fill'} the histogram draws each bin's share of "
+            "its stack on y, not a count",
+        ),
+        (
+            "position_normalize",
+            {"hue": "g", "marginal_kws": {"position": fm.Stack(offset="normalize")}},
+            "with marginal_kws={'position': fm.Stack(offset='normalize')} the histogram draws "
+            "each bin's share of its stack on y, not a count",
+        ),
+        (
+            "stack_normalize",
+            {"hue": "g"},
+            "with stack='normalize' the histogram draws each bin's share of its stack on y, "
+            "not a count",
+        ),
+    ):
+        y = (
+            Y(aggregate="count", stack="normalize")
+            if label == "stack_normalize"
+            else Y(aggregate="count")
+        )
+
+        def build(jointplot_kwargs=jointplot_kwargs, y=y):
+            def run() -> None:
+                fm.jointplot(
+                    _XY_HUE_ROWS, x="v", y="w", **jointplot_kwargs, encode={"y": y}
+                ).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"jointplot_hist_count_under_{label}",
+                build(),
+                _message(
+                    "jointplot",
+                    _written("y", "Y", None, "aggregate", "count"),
+                    "aggregate",
+                    reason,
+                    "Drop aggregate=.",
+                ),
+            )
+        )
+
+    # jointplot: the center panel's own kernel density estimate, and its
+    # kde marginal, both fall back to the knob-free remedy (no .transform()
+    # on JointChart).
+    cases.append(
+        (
+            "jointplot_kde_marginal_x_bin",
+            lambda: fm.jointplot(
+                _XY_ROWS, x="v", y="w", marginal_kind="kde", encode={"x": X("v", bin=True)}
+            ).to_svg(),
+            _message(
+                "jointplot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the kernel density estimate reads raw rows",
+                "Drop bin=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "jointplot_kde_center_x_bin",
+            lambda: fm.jointplot(
+                _XY_ROWS, x="v", y="w", kind="kde", encode={"x": X("v", bin=True)}
+            ).to_svg(),
+            _message(
+                "jointplot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the kernel density estimate reads raw rows",
+                "Drop bin=.",
+            ),
+        )
+    )
+
+    # jointplot(kind="reg"): the fit's x bin= has no jointplot door of its
+    # own (unlike mark_smooth/regplot/lmplot's x_bins=), so it falls back to
+    # the knob-free remedy rather than naming a keyword jointplot lacks.
+    cases.append(
+        (
+            "jointplot_reg_x_bin",
+            lambda: fm.jointplot(
+                _XY_ROWS, x="v", y="w", kind="reg", encode={"x": X("v", bin=True)}
+            ).to_svg(),
+            _message(
+                "jointplot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the fit reads the raw predictor",
+                "Drop bin=.",
+            ),
+        )
+    )
+
+    # pairplot: neither the fit's nor the kde's own knob has a pairplot
+    # door (bare bin=True refuses on both, unlike the histogram's own bin
+    # axis, which honors it as a redundancy), so each falls back to the
+    # knob-free remedy. The diagonal is suppressed (diag_kind=None) so only
+    # the off-diagonal panel's own mark refuses.
+    for kind, reason in (
+        ("reg", "the fit reads the raw predictor"),
+        ("kde", "the kernel density estimate reads raw rows"),
+    ):
+
+        def build(kind=kind):
+            def run() -> None:
+                fm.pairplot(
+                    _XY_ROWS,
+                    kind=kind,
+                    diag_kind=None,
+                    vars=["v", "w"],
+                    encode={"x": X("v", bin=True)},
+                ).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"pairplot_{kind}_x_bin",
+                build(),
+                _message(
+                    "pairplot", _written("x", "X", "v", "bin", True), "bin", reason, "Drop bin=."
+                ),
+            )
+        )
+
+    cases.append(
+        (
+            "pairplot_hist_bin_rule",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="hist",
+                diag_kind=None,
+                vars=["v", "w"],
+                encode={"x": X("v", bin={"bin_count": 3})},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("x", "X", "v", "bin", {"bin_count": 3}),
+                "bin",
+                "the histogram bins x by its own rule",
+                "Drop bin=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "pairplot_hist_x_aggregate",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="hist",
+                diag_kind=None,
+                vars=["v", "w"],
+                encode={"x": X("v", aggregate="mean")},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("x", "X", "v", "aggregate", "mean"),
+                "aggregate",
+                "the histogram bins x rather than aggregating it",
+                "Drop aggregate=.",
+            ),
+        )
+    )
+
+    # pairplot: the value axis, field-bearing bin=/aggregate= -- unlike
+    # jointplot, pairplot's encode= reaches only the one off-diagonal
+    # template, so the drop clause's "style with a fieldless channel"
+    # alternative still renders here; byte-identical to the knob-free rows.
+    cases.append(
+        (
+            "pairplot_hist_y_aggregate",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="hist",
+                diag_kind=None,
+                vars=["v", "w"],
+                encode={"y": Y("w", aggregate="mean")},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("y", "Y", "w", "aggregate", "mean"),
+                "aggregate",
+                "the histogram computes y itself",
+                "Draw the aggregate per bin with a bar mark, fm.Chart(data).mark_bar().encode("
+                "x=fm.X('v', bin=True), y=fm.Y('w', aggregate='mean')), or drop y= (style the "
+                "axis with fm.Y(title=...) and no field).",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "pairplot_hist_y_bin",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="hist",
+                diag_kind=None,
+                vars=["v", "w"],
+                encode={"y": Y("w", bin=True)},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("y", "Y", "w", "bin", True),
+                "bin",
+                "the histogram computes y itself",
+                "Count rows over both fields with fm.Chart(data).mark_hex().encode(x='v', "
+                "y='w'), or drop y= (style the axis with fm.Y(title=...) and no field).",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "pairplot_hist_count_under_stack_normalize",
+            lambda: fm.pairplot(
+                _XY_HUE_ROWS,
+                kind="hist",
+                diag_kind=None,
+                vars=["v", "w"],
+                hue="g",
+                encode={"y": Y(aggregate="count", stack="normalize")},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("y", "Y", None, "aggregate", "count"),
+                "aggregate",
+                "with stack='normalize' the histogram draws each bin's share of its stack on y, "
+                "not a count",
+                "Drop aggregate=, or draw the count with stack=True.",
+            ),
+        )
+    )
+
+    # pairplot's diagonal: off-diagonal kind="scatter" lowers bin= in place
+    # without refusing (a primitive mark honors it), so these isolate the
+    # diagonal's own kde (the "auto" default)/hist refusal.
+    cases.append(
+        (
+            "pairplot_diag_kde_x_bin",
+            lambda: fm.pairplot(
+                _XY_ROWS, kind="scatter", vars=["v", "w"], encode={"x": X("v", bin=True)}
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("x", "X", "v", "bin", True),
+                "bin",
+                "the kernel density estimate reads raw rows",
+                "Drop bin=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "pairplot_diag_hist_bin_rule",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="scatter",
+                diag_kind="hist",
+                vars=["v", "w"],
+                encode={"x": X("v", bin={"bin_count": 3})},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("x", "X", "v", "bin", {"bin_count": 3}),
+                "bin",
+                "the histogram bins x by its own rule",
+                "Drop bin=.",
+            ),
+        )
+    )
+    return cases
+
+
+@pytest.mark.parametrize(
+    "keep_kwargs,without_kwargs,y_count_stack",
+    [
+        pytest.param(
+            {"marginal_kws": {"density": False}},
+            {"marginal_kws": {"density": True}},
+            False,
+            id="density",
+        ),
+        pytest.param(
+            {"hue": "g", "marginal_kws": {"multiple": "stack"}},
+            {"hue": "g", "marginal_kws": {"multiple": "fill"}},
+            False,
+            id="fill",
+        ),
+        pytest.param(
+            {"hue": "g", "marginal_kws": {"position": fm.Stack()}},
+            {"hue": "g", "marginal_kws": {"position": fm.Stack(offset="normalize")}},
+            False,
+            id="position_normalize",
+        ),
+        pytest.param({"hue": "g"}, {"hue": "g"}, True, id="stack_normalize"),
+    ],
+)
+def test_jointplot_names_no_count_remedy_since_encode_reaches_its_binned_marginal(
+    keep_kwargs: dict, without_kwargs: dict, y_count_stack: bool
+) -> None:
+    """jointplot's ``encode=`` fans to both marginals (``ferrum._overrides``), so a
+    fieldless count on the top marginal's value axis is also the right marginal's
+    own binned-axis aggregate, which refuses any aggregate unconditionally. Every
+    "keep the count" spelling that works at mark_histogram/displot therefore
+    fails at jointplot too -- with the bin-axis reason, not the value-axis one --
+    which is why its own remedy never names one (just "Drop aggregate="). Without
+    the ``y=`` binding at all, the same call renders.
+    """
+    y = Y(aggregate="count", stack=True) if y_count_stack else Y(aggregate="count")
+    with pytest.raises(ValueError) as excinfo:
+        fm.jointplot(_XY_HUE_ROWS, x="v", y="w", **keep_kwargs, encode={"y": y}).to_svg()
+    assert "the histogram bins y rather than aggregating it" in str(excinfo.value)
+
+    fm.jointplot(_XY_HUE_ROWS, x="v", y="w", **without_kwargs).to_svg()
+
+
 _ALL_CASES: list[_Case] = (
     _histogram_cases("mark_histogram")
     + _histogram_cases("displot")
+    + _histogram_cases("displot_posthoc")
     + _smooth_cases()
     + _fit_cases()
     + _kde_cases()
@@ -974,6 +1507,7 @@ _ALL_CASES: list[_Case] = (
     + _residplot_cases()
     + _mark_function_cases()
     + _spelling_cases()
+    + _revoiced_figure_cases()
 )
 
 
@@ -994,9 +1528,93 @@ def test_a_statistic_refuses_with_the_full_message(
 # mark's name, an inner parameter the caller cannot write, or a fieldless
 # channel's dropped field -- checked over every such case, not a curated
 # subset.
-_FIGURE_VOICES = frozenset({"displot", "residplot", "lmplot", "regplot"})
+_FIGURE_VOICES = frozenset({"displot", "residplot", "lmplot", "regplot", "jointplot", "pairplot"})
 _FORBIDDEN_IN_A_FIGURE_MESSAGE = ("mark_histogram", "mark_density", "mark_smooth", "None,")
 _FIGURE_CASES = [case for case in _ALL_CASES if case[2].split("(", 1)[0] in _FIGURE_VOICES]
+
+#: ``scripts/audit_docstring_drift.py``'s ``_doc_params``, the independent
+#: oracle for what a ``*_kws=`` dict a figure forwards verbatim accepts:
+#: the NumPy ``Parameters`` names of the mark it forwards to, parsed from
+#: its own docstring (``mark_histogram``'s own knobs are ``**kwargs``, so
+#: its docstring is the only record of what ``marginal_kws`` accepts).
+#: Loaded once, as a module (not a package import: ``scripts/`` is a
+#: directory of plain scripts, not an installed package).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_docstring_drift = load_script(
+    "audit_docstring_drift", _REPO_ROOT / "scripts" / "audit_docstring_drift.py"
+)
+
+#: Which mark a figure's ``*_kws=`` dict forwards to, keyed by
+#: ``(voice, kws_name)``: only the histogram refusal names ``marginal_kws``
+#: keys. A door-vocabulary row that starts naming a ``*_kws=`` dict this
+#: table has no entry for fails the membership assertion below --
+#: deliberately, since the only way to pass is to add the row here, next
+#: to the mark it actually forwards to.
+_KWS_FORWARDS_TO: dict[tuple[str, str], Callable[..., fm.Chart]] = {
+    ("jointplot", "marginal_kws"): fm.Chart.mark_histogram,
+}
+
+#: A call token: an identifier immediately before ``(`` (pushed onto the
+#: enclosing-call stack), a bare ``(`` (prose or an unnamed call, pushed as
+#: ``""``), a closing ``)`` (popped), or a bare ``name=`` kwarg token.
+_CALL_TOKEN = re.compile(r"([A-Za-z_]\w*)?\(|\)|\b([a-z_]\w*)=")
+#: A ``*_kws={...}`` spelling and its dict body.
+_KWS_DICT = re.compile(r"\b([a-z_]+_kws)=\{([^}]*)\}")
+#: A ``'key':`` entry inside a dict body.
+_DICT_KEY = re.compile(r"'([a-z_]+)':")
+
+
+def _assert_the_remedy_is_typeable_at_the_voice(message: str) -> None:
+    """Every keyword, ``*_kws=`` key and chained method *message*'s reason/remedy
+    half names is real at the voicing figure -- checked against independent
+    oracles (signatures, channel-honored kwargs, the forwarded mark's own
+    documented ``Parameters``, the figure's return annotation), never the
+    production door-vocabulary table itself, so a wrong table entry fails
+    here instead of agreeing with itself. The written channel half (before
+    ``") is not supported: "``) is the caller's own and is not checked.
+    """
+    voice = message.split("(", 1)[0]
+    fn = getattr(fm, voice, None)
+    if fn is None:
+        return
+    figure_params = set(inspect.signature(fn).parameters)
+    channel_kwargs = X._honored_kwargs | Y._honored_kwargs
+    channel_names = {X._channel_name, Y._channel_name}
+    _, _, rest = message.partition(") is not supported: ")
+
+    stack: list[str] = []
+    for match in _CALL_TOKEN.finditer(rest):
+        call_name, kwarg = match.groups()
+        if match.group(0) == ")":
+            if stack:
+                stack.pop()
+            continue
+        if kwarg is None:
+            stack.append(call_name or "")
+            continue
+        inner = stack[-1] if stack else ""
+        if inner == "Bin":
+            allowed = set(inspect.signature(fm.Bin).parameters)
+        elif inner == "Stack":
+            allowed = set(inspect.signature(fm.Stack).parameters)
+        elif inner in ("X", "Y"):
+            allowed = channel_kwargs
+        elif inner == "encode":
+            allowed = channel_names
+        else:
+            allowed = figure_params | channel_kwargs | channel_names
+        assert kwarg in allowed, (voice, kwarg, message)
+
+    for kws_name, dict_body in _KWS_DICT.findall(rest):
+        assert (voice, kws_name) in _KWS_FORWARDS_TO, (voice, kws_name, message)
+        target = _KWS_FORWARDS_TO[(voice, kws_name)]
+        documented = _docstring_drift._doc_params(inspect.getdoc(target)) or []
+        for key in _DICT_KEY.findall(dict_body):
+            assert key in documented, (voice, kws_name, key, message)
+
+    if ".transform(" in rest:
+        return_type = inspect.signature(fn, eval_str=True).return_annotation
+        assert hasattr(return_type, "transform"), (voice, message)
 
 
 @pytest.mark.parametrize(
@@ -1014,6 +1632,293 @@ def test_a_figure_doors_refusal_never_misquotes_an_inner_call(
         assert word not in message, (word, message)
     if message.startswith("displot("):
         assert "density=True" not in message, message
+    _assert_the_remedy_is_typeable_at_the_voice(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "jointplot(x=X('v', bin=True)) is not supported: the histogram bins x by its own "
+        "rule, so bin= would be ignored. Drop aggregate=, or draw the count with "
+        "multiple='stack'.",
+        "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
+        "by its own rule, so bin= would be ignored. State the rule with mark_histogram's "
+        "bins=, bin_count= or bin_width=, or drop bin=.",
+        "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
+        "by its own rule, so bin= would be ignored. State the rule with "
+        "marginal_kws={'binz': ...}, or drop bin=.",
+        "pairplot(x=X('v', bin=True)) is not supported: the fit reads the raw predictor, "
+        "so bin= would be ignored. Bin the field per row with "
+        ".transform(fm.Bin('v', per_row=True)) and bind its 'bin_start' column, or drop bin=.",
+        "displot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x by "
+        "its own rule, so bin= would be ignored. State the rule with displot's binwidth=, "
+        "or drop bin=.",
+        "regplot(x=X('v', bin=True)) is not supported: the fit reads the raw predictor, so "
+        "bin= would be ignored. State the rule with marginal_kws={'bins': ...}, or drop bin=.",
+        "jointplot(x=X('v', bin=True)) is not supported: the fit reads the raw predictor, "
+        "so bin= would be ignored. Bin the predictor with x_bins=<number of bins>, the "
+        "fit's own binning, or drop bin=.",
+        "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
+        "by its own rule, so bin= would be ignored. State the rule with "
+        "joint_kws={'bins': ...}, or drop bin=.",
+    ],
+    ids=[
+        "sibling_door_multiple",
+        "sibling_door_bins",
+        "unmapped_marginal_kws_key",
+        "untypeable_transform",
+        "misspelled_bins",
+        "unmapped_marginal_kws_voice",
+        "unowned_x_bins",
+        "unmapped_dict",
+    ],
+)
+def test_the_typeable_remedy_check_rejects_a_misquote(message: str) -> None:
+    """Every synthetic misquote above raises; a real figure message does not."""
+    with pytest.raises(AssertionError):
+        _assert_the_remedy_is_typeable_at_the_voice(message)
+
+
+def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
+    """Positive control: the actual jointplot bin-rule message passes untouched."""
+    _assert_the_remedy_is_typeable_at_the_voice(
+        "jointplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins x "
+        "by its own rule, so bin= would be ignored. State the rule with "
+        "marginal_kws={'bins': ...}, or drop bin=."
+    )
+
+
+@pytest.mark.parametrize(
+    "refused,voice,expected",
+    [
+        (
+            lambda: fm.Chart(_HIST_ROWS)
+            .mark_histogram(density=True)
+            .encode(x="v", y=Y(aggregate="count"))
+            .to_svg(),
+            "pairplot",
+            "pairplot(y=Y(aggregate='count')) is not supported: the histogram computes y "
+            "itself, so aggregate= would be ignored. Drop aggregate=.",
+        ),
+        (
+            lambda: fm.Chart(_HIST_ROWS)
+            .mark_histogram(density=True)
+            .encode(x="v", y=Y(aggregate="count"))
+            .to_svg(),
+            "roc_chart",
+            "roc_chart(y=Y(aggregate='count')) is not supported: the histogram computes y "
+            "itself, so aggregate= would be ignored. Drop aggregate=.",
+        ),
+        (
+            lambda: fm.Chart(_HIST_ROWS)
+            .mark_histogram()
+            .encode(x=X("v", bin={"bin_count": 3}))
+            .to_svg(),
+            "pairplot",
+            "pairplot(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins "
+            "x by its own rule, so bin= would be ignored. Drop bin=.",
+        ),
+        (
+            lambda: fm.Chart(_HIST_ROWS)
+            .mark_histogram()
+            .encode(x=X("v", bin={"bin_count": 3}))
+            .to_svg(),
+            "roc_chart",
+            "roc_chart(x=X('v', bin={'bin_count': 3})) is not supported: the histogram bins "
+            "x by its own rule, so bin= would be ignored. Bin the field per row with "
+            ".transform(fm.Bin('v', per_row=True)) and bind its 'bin_start' column, or drop "
+            "bin=.",
+        ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x=X("v", bin=True), y="w").to_svg(),
+            "jointplot",
+            "jointplot(x=X('v', bin=True)) is not supported: the fit reads the raw "
+            "predictor, so bin= would be ignored. Drop bin=.",
+        ),
+        (
+            lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x=X("v", bin=True), y="w").to_svg(),
+            "residplot",
+            "residplot(x=X('v', bin=True)) is not supported: the fit reads the raw "
+            "predictor, so bin= would be ignored. Bin the field per row with "
+            ".transform(fm.Bin('v', per_row=True)) and bind its 'bin_start' column, or drop "
+            "bin=.",
+        ),
+        (
+            lambda: fm.Chart(_GROUPED_HIST_ROWS)
+            .mark_histogram(multiple="fill", groupby=["g"])
+            .encode(x="v", color="g", y=Y(aggregate="count"))
+            .to_svg(),
+            "roc_chart",
+            "roc_chart(y=Y(aggregate='count')) is not supported: the histogram computes y "
+            "itself, so aggregate= would be ignored. Drop aggregate=.",
+        ),
+    ],
+    ids=[
+        "mark_histogram_density_count_as_pairplot",
+        "mark_histogram_density_count_as_roc_chart",
+        "mark_histogram_bin_rule_as_pairplot",
+        "mark_histogram_bin_rule_as_roc_chart",
+        "mark_smooth_x_bin_as_jointplot",
+        "mark_smooth_x_bin_as_residplot",
+        "mark_histogram_fill_count_as_roc_chart",
+    ],
+)
+def test_a_voice_without_the_knob_takes_the_knob_free_remedy(
+    refused: Callable[[], Any], voice: str, expected: str
+) -> None:
+    """A voice whose row lacks the knob (pairplot, jointplot) or is absent from the
+    table entirely (roc_chart) re-voices with the row's own ``None`` fallback --
+    the knob-free remedy, never a sibling door's spelling.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        refused()
+    assert str(excinfo.value.spoken_as(voice)) == expected
+
+
+#: Every door this family's refusals re-voice into, plus a voice absent
+#: from the table (``roc_chart``), for the pickle/copy contract below.
+_PICKLE_CONTRACT_DOORS = (
+    "mark_histogram",
+    "displot",
+    "jointplot",
+    "pairplot",
+    "mark_smooth",
+    "regplot",
+    "lmplot",
+    "roc_chart",
+)
+#: One refusal per door-spelled knob, built directly from the public API
+#: (no ``_encode_lowering`` import), each a case
+#: ``EntryRefusal.__reduce__``'s slot-substitution premise does not hold
+#: for: the wording itself, not only the voice, differs per door.
+_PICKLE_CONTRACT_REFUSALS: dict[str, Callable[[], Any]] = {
+    "bin_rule": lambda: fm.Chart(_HIST_ROWS)
+    .mark_histogram()
+    .encode(x=X("v", bin={"bin_count": 3}))
+    .to_svg(),
+    "density_posthoc": lambda: fm.displot(_HIST_ROWS, x="v", kind="hist", stat="density")
+    .encode(y=Y(aggregate="count"))
+    .to_svg(),
+    "fit_x_bins": lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x=X("v", bin=True), y="w").to_svg(),
+}
+
+
+def _refused(builder: Callable[[], Any]) -> Any:
+    with pytest.raises(ValueError) as excinfo:
+        builder()
+    return excinfo.value
+
+
+def _pickle_copy(value: Any) -> Any:
+    # Round-trips an EntryRefusal this same test process just raised --
+    # never data from an external or untrusted source -- the same
+    # in-process pickle/unpickle `tests/test_public_entry_voice.py:765`
+    # exercises for the "a render in a process pool sends its refusal back
+    # pickled" contract.
+    return pickle.loads(pickle.dumps(value))
+
+
+@pytest.mark.parametrize(
+    "copy_fn",
+    [_pickle_copy, copy.copy, copy.deepcopy],
+    ids=["pickle", "copy", "deepcopy"],
+)
+@pytest.mark.parametrize(
+    "refusal_id",
+    [*_PICKLE_CONTRACT_REFUSALS, "prefixed"],
+)
+def test_a_door_spelled_refusal_survives_pickle_and_copy(
+    refusal_id: str, copy_fn: Callable[[Any], Any]
+) -> None:
+    """A door-spelled refusal keeps its exact text through pickle/copy/deepcopy,
+    and a copy of that copy does too: ``EntryRefusal.__reduce__``'s own
+    slot-substitution premise (the voice appears only as a call-name
+    substring) does not hold for this family, since the wording itself
+    differs per door, so the clone must freeze each declared door's whole
+    text rather than rebuild it from one template. The tails re-voiced
+    across every door are asserted NOT all equal, proving this test can
+    tell door spellings apart -- a defect that collapsed every re-voicing
+    to one fallback text would otherwise still pass trivially.
+    """
+    if refusal_id == "prefixed":
+        original = _refused(_PICKLE_CONTRACT_REFUSALS["bin_rule"]).prefixed("compare={'m2': ...}: ")
+    else:
+        original = _refused(_PICKLE_CONTRACT_REFUSALS[refusal_id])
+
+    clone = copy_fn(original)
+    clone_of_clone = copy_fn(clone)
+
+    tails = set()
+    for door in _PICKLE_CONTRACT_DOORS:
+        original_text = str(original.spoken_as(door))
+        assert str(clone.spoken_as(door)) == original_text
+        assert str(clone_of_clone.spoken_as(door)) == original_text
+        tails.add(original_text.partition(") is not supported: ")[2])
+    assert len(tails) > 1, "every door produced the same tail; cannot distinguish spellings"
+
+
+#: Degenerate x/y frames, built the same way as the fit's own degenerate
+#: cases (``tests/test_log_axis_statistics.py``): empty, a single row,
+#: every row sharing one x value, and a null in each column.
+_DEGENERATE_FRAMES: dict[str, pl.DataFrame] = {
+    "empty": pl.DataFrame({"v": pl.Series([], dtype=pl.Float64), "w": pl.Series([], dtype=pl.Float64)}),
+    "one_row": pl.DataFrame({"v": [5.0], "w": [5.0]}),
+    "all_tied": pl.DataFrame({"v": [5.0, 5.0, 5.0, 5.0], "w": [1.0, 2.0, 3.0, 4.0]}),
+    "nulls": pl.DataFrame({"v": [1.0, None, 3.0], "w": [1.0, 2.0, None]}),
+}
+
+#: One re-voicing builder per door/route this family covers, each over a
+#: ``rows`` frame it reads only for its own x/y columns -- never, in any
+#: of them, for the refusal itself.
+_REVOICED_BUILDERS: dict[str, Callable[[pl.DataFrame], Any]] = {
+    "displot_posthoc_bin_rule": lambda rows: fm.displot(rows, x="v", kind="hist").encode(
+        x=X("v", bin={"bin_count": 3})
+    ),
+    "displot_posthoc_stat_density": lambda rows: fm.displot(
+        rows, x="v", kind="hist", stat="density"
+    ).encode(y=Y(aggregate="count")),
+    "displot_posthoc_kde_x_bin": lambda rows: fm.displot(rows, x="v", kind="kde").encode(
+        x=X("v", bin=True)
+    ),
+    "jointplot_bin_rule_keyword": lambda rows: fm.jointplot(
+        rows, x=X("v", bin={"bin_count": 3}), y="w"
+    ),
+    "jointplot_density": lambda rows: fm.jointplot(
+        rows, x="v", y="w", marginal_kws={"density": True}, encode={"y": Y(aggregate="count")}
+    ),
+    "jointplot_reg_x_bin": lambda rows: fm.jointplot(
+        rows, x="v", y="w", kind="reg", encode={"x": X("v", bin=True)}
+    ),
+    "pairplot_hist_bin_rule": lambda rows: fm.pairplot(
+        rows, kind="hist", diag_kind=None, vars=["v", "w"], encode={"x": X("v", bin={"bin_count": 3})}
+    ),
+    "pairplot_reg_x_bin": lambda rows: fm.pairplot(
+        rows, kind="reg", diag_kind=None, vars=["v", "w"], encode={"x": X("v", bin=True)}
+    ),
+    "regplot_posthoc_x_bin": lambda rows: fm.regplot(rows, x="v", y="w", scatter=False).encode(
+        x=X("v", bin=True)
+    ),
+    "lmplot_posthoc_x_bin": lambda rows: fm.lmplot(rows, x="v", y="w", scatter=False).encode(
+        x=X("v", bin=True)
+    ),
+}
+
+
+@pytest.mark.parametrize("builder_id", list(_REVOICED_BUILDERS))
+@pytest.mark.parametrize("frame_id", list(_DEGENERATE_FRAMES))
+def test_a_re_voiced_refusal_reads_no_rows(builder_id: str, frame_id: str) -> None:
+    """Every re-voiced refusal in this family is raised from the encoding
+    alone, never the rows: an empty, one-row, all-tied or null frame
+    refuses with the exact same message a full frame does.
+    """
+    builder = _REVOICED_BUILDERS[builder_id]
+
+    def message_for(rows: pl.DataFrame) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            builder(rows).to_svg()
+        return str(excinfo.value)
+
+    assert message_for(_DEGENERATE_FRAMES[frame_id]) == message_for(_XY_ROWS)
 
 
 def test_ecdf_refuses_a_field_bearing_y_reached_only_through_encode():
@@ -1139,24 +2044,51 @@ def _per_group_mean() -> dict:
 
 
 @dataclass(frozen=True)
+class _MissingColumn:
+    """A generic ``.transform(...)`` remedy's own step left out.
+
+    *build* is the remedied call with that step removed: it fails because
+    *column*, the fresh output the step would have bound, is never
+    computed.
+    """
+
+    build: Callable[[], fm.Chart]
+    error: type[Exception]
+    column: str
+
+
+@dataclass(frozen=True)
+class _DifferentChart:
+    """A named-keyword remedy's own keyword left out.
+
+    There is no output column to leave uncomputed -- the keyword switches
+    the voicing figure's own setting, not a transform step -- so *build*,
+    the same call without that keyword, renders a DIFFERENT chart instead
+    of failing.
+    """
+
+    build: Callable[[], fm.Chart]
+
+
+@dataclass(frozen=True)
 class _RemedyRun:
     """One remedy, run on the door whose refusal names it.
 
     *refused* raises the refusal, whose message must carry *names*.
     *remedied* is the same door with the remedy applied as the message
-    writes it, and *sibling* is the same door over a frame polars
-    computed the same way. *without* is the remedied call with the
-    remedy's own step left out; it fails because column *missing* is
-    never computed.
+    writes it, and *sibling* is the same door drawing the same thing a
+    different way. *without* is the required negative control, proving
+    the remedy's own step actually matters: :class:`_MissingColumn` for a
+    generic remedy (the step left out fails, naming the column it would
+    have bound) or :class:`_DifferentChart` for a named-keyword remedy
+    (the keyword left out renders, but not what *remedied* renders).
     """
 
     refused: Callable[[], Any]
     names: str
     remedied: Callable[[], fm.Chart]
     sibling: Callable[[], fm.Chart]
-    without: Callable[[], fm.Chart]
-    without_error: type[Exception]
-    missing: str
+    without: _MissingColumn | _DifferentChart
 
 
 _COLUMN_NOT_FOUND = pl.exceptions.ColumnNotFoundError
@@ -1174,9 +2106,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: fm.regplot(
             _prebinned(_NONSEPARABLE_ROWS, "v"), x="bin_start", y="b", method="logistic"
         ),
-        without=lambda: fm.regplot(_NONSEPARABLE_ROWS, x="bin_start", y="b", method="logistic"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.regplot(_NONSEPARABLE_ROWS, x="bin_start", y="b", method="logistic"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_regplot_robust_x": _RemedyRun(
         refused=lambda: fm.regplot(_XY_ROWS, x=X("v", bin=True), y="w", method="robust"),
@@ -1187,9 +2121,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: fm.regplot(
             _prebinned(_XY_ROWS, "v"), x="bin_start", y="w", method="robust"
         ),
-        without=lambda: fm.regplot(_XY_ROWS, x="bin_start", y="w", method="robust"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.regplot(_XY_ROWS, x="bin_start", y="w", method="robust"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_lmplot_lm_y": _RemedyRun(
         refused=lambda: fm.lmplot(_XY_ROWS, x="v", y=Y("w", bin=True), method="lm"),
@@ -1198,9 +2134,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_row_bin("w")
         ),
         sibling=lambda: fm.lmplot(_prebinned(_XY_ROWS, "w"), x="v", y="bin_start", method="lm"),
-        without=lambda: fm.lmplot(_XY_ROWS, x="v", y="bin_start", method="lm"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.lmplot(_XY_ROWS, x="v", y="bin_start", method="lm"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_mark_density_x": _RemedyRun(
         refused=lambda: fm.Chart(_XY_ROWS).mark_density().encode(x=X("v", bin=True)).to_svg(),
@@ -1209,9 +2147,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             fm.Chart(_XY_ROWS).transform(_per_row_bin("v")).mark_density().encode(x="bin_start")
         ),
         sibling=lambda: fm.Chart(_prebinned(_XY_ROWS, "v")).mark_density().encode(x="bin_start"),
-        without=lambda: fm.Chart(_XY_ROWS).mark_density().encode(x="bin_start"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_XY_ROWS).mark_density().encode(x="bin_start"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_mark_density_bivariate_y": _RemedyRun(
         refused=lambda: (
@@ -1227,9 +2167,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: (
             fm.Chart(_prebinned(_XY_ROWS, "w")).mark_density().encode(x="v", y="bin_start")
         ),
-        without=lambda: fm.Chart(_XY_ROWS).mark_density().encode(x="v", y="bin_start"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_XY_ROWS).mark_density().encode(x="v", y="bin_start"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_displot_kde_x": _RemedyRun(
         refused=lambda: fm.displot(_XY_ROWS, x=X("v", bin=True), kind="kde"),
@@ -1238,9 +2180,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_row_bin("v")
         ),
         sibling=lambda: fm.displot(_prebinned(_XY_ROWS, "v"), x="bin_start", kind="kde"),
-        without=lambda: fm.displot(_XY_ROWS, x="bin_start", kind="kde"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.displot(_XY_ROWS, x="bin_start", kind="kde"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_displot_ecdf_x": _RemedyRun(
         refused=lambda: fm.displot(_XY_ROWS, x=X("v", bin=True), kind="ecdf"),
@@ -1249,9 +2193,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_row_bin("v")
         ),
         sibling=lambda: fm.displot(_prebinned(_XY_ROWS, "v"), x="bin_start", kind="ecdf"),
-        without=lambda: fm.displot(_XY_ROWS, x="bin_start", kind="ecdf"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.displot(_XY_ROWS, x="bin_start", kind="ecdf"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_mark_smooth_y": _RemedyRun(
         refused=lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y=Y("w", bin=True)).to_svg(),
@@ -1265,9 +2211,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: (
             fm.Chart(_prebinned(_XY_ROWS, "w")).mark_smooth().encode(x="v", y="bin_start")
         ),
-        without=lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y="bin_start"),
-        without_error=ValueError,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y="bin_start"),
+            error=ValueError,
+            column="bin_start",
+        ),
     ),
     # residplot's remedy carries dropna=False: its default drops nulls over
     # x/y in the input frame, before the remedy's column exists.
@@ -1278,9 +2226,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_row_bin("v")
         ),
         sibling=lambda: fm.residplot(_prebinned(_XY_ROWS, "v"), x="bin_start", y="w", dropna=False),
-        without=lambda: fm.residplot(_XY_ROWS, x="bin_start", y="w").transform(_per_row_bin("v")),
-        without_error=_COLUMN_NOT_FOUND,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.residplot(_XY_ROWS, x="bin_start", y="w").transform(_per_row_bin("v")),
+            error=_COLUMN_NOT_FOUND,
+            column="bin_start",
+        ),
     ),
     "per_row_bin_residplot_y": _RemedyRun(
         refused=lambda: fm.residplot(_XY_ROWS, x="v", y=Y("w", bin=True)),
@@ -1289,9 +2239,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_row_bin("w")
         ),
         sibling=lambda: fm.residplot(_prebinned(_XY_ROWS, "w"), x="v", y="bin_start", dropna=False),
-        without=lambda: fm.residplot(_XY_ROWS, x="v", y="bin_start").transform(_per_row_bin("w")),
-        without_error=_COLUMN_NOT_FOUND,
-        missing="bin_start",
+        without=_MissingColumn(
+            build=lambda: fm.residplot(_XY_ROWS, x="v", y="bin_start").transform(_per_row_bin("w")),
+            error=_COLUMN_NOT_FOUND,
+            column="bin_start",
+        ),
     ),
     # transform_aggregate: aggregate ahead of the statistic, bind the output.
     "transform_aggregate_mark_histogram_binned_x": _RemedyRun(
@@ -1306,9 +2258,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             .encode(x="mean_v")
         ),
         sibling=lambda: fm.Chart(_PREAGGREGATED_ROWS).mark_histogram().encode(x="mean_v"),
-        without=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_histogram().encode(x="mean_v"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_histogram().encode(x="mean_v"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_mark_density_x": _RemedyRun(
         refused=lambda: (
@@ -1322,9 +2276,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             .encode(x="mean_v")
         ),
         sibling=lambda: fm.Chart(_PREAGGREGATED_ROWS).mark_density().encode(x="mean_v"),
-        without=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_density().encode(x="mean_v"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.Chart(_GROUPED_XY_ROWS).mark_density().encode(x="mean_v"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_displot_kde_x": _RemedyRun(
         refused=lambda: fm.displot(_GROUPED_XY_ROWS, x=X("v", aggregate="mean"), kind="kde"),
@@ -1333,9 +2289,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_group_mean()
         ),
         sibling=lambda: fm.displot(_PREAGGREGATED_ROWS, x="mean_v", kind="kde"),
-        without=lambda: fm.displot(_GROUPED_XY_ROWS, x="mean_v", kind="kde"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.displot(_GROUPED_XY_ROWS, x="mean_v", kind="kde"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     # The ECDF counts across every row of its partition, so the groups the
     # aggregate wrote do not split its line: one step line, two under a hue.
@@ -1346,9 +2304,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_group_mean()
         ),
         sibling=lambda: fm.displot(_PREAGGREGATED_ROWS, x="mean_v", kind="ecdf"),
-        without=lambda: fm.displot(_GROUPED_XY_ROWS, x="mean_v", kind="ecdf"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.displot(_GROUPED_XY_ROWS, x="mean_v", kind="ecdf"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_displot_ecdf_x_hue": _RemedyRun(
         refused=lambda: fm.displot(
@@ -1359,9 +2319,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_group_and_hue_mean()
         ),
         sibling=lambda: fm.displot(_PREAGGREGATED_HUE_ROWS, x="mean_v", kind="ecdf", hue="h"),
-        without=lambda: fm.displot(_GROUPED_HUE_ROWS, x="mean_v", kind="ecdf", hue="h"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.displot(_GROUPED_HUE_ROWS, x="mean_v", kind="ecdf", hue="h"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_mark_smooth_x": _RemedyRun(
         refused=lambda: (
@@ -1380,11 +2342,13 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: (
             fm.Chart(_PREAGGREGATED_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
         ),
-        without=lambda: (
-            fm.Chart(_GROUPED_XY_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
+        without=_MissingColumn(
+            build=lambda: (
+                fm.Chart(_GROUPED_XY_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
+            ),
+            error=ValueError,
+            column="mean_v",
         ),
-        without_error=ValueError,
-        missing="mean_v",
     ),
     "transform_aggregate_mark_smooth_y": _RemedyRun(
         refused=lambda: (
@@ -1403,11 +2367,13 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         sibling=lambda: (
             fm.Chart(_PREAGGREGATED_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
         ),
-        without=lambda: (
-            fm.Chart(_GROUPED_XY_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
+        without=_MissingColumn(
+            build=lambda: (
+                fm.Chart(_GROUPED_XY_ROWS).mark_smooth(method="lm").encode(x="mean_v", y="mean_w")
+            ),
+            error=ValueError,
+            column="mean_v",
         ),
-        without_error=ValueError,
-        missing="mean_v",
     ),
     "transform_aggregate_lmplot_lm_x": _RemedyRun(
         refused=lambda: fm.lmplot(_GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w", method="lm"),
@@ -1416,9 +2382,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _per_group_mean()
         ),
         sibling=lambda: fm.lmplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="lm"),
-        without=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_regplot_robust_y": _RemedyRun(
         refused=lambda: fm.regplot(
@@ -1429,9 +2397,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"
         ).transform(_per_group_mean()),
         sibling=lambda: fm.regplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="robust"),
-        without=lambda: fm.regplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"),
-        without_error=ValueError,
-        missing="mean_v",
+        without=_MissingColumn(
+            build=lambda: fm.regplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"),
+            error=ValueError,
+            column="mean_v",
+        ),
     ),
     "transform_aggregate_residplot_x": _RemedyRun(
         refused=lambda: fm.residplot(_GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w"),
@@ -1440,11 +2410,13 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _GROUPED_XY_ROWS, x="mean_v", y="mean_w", dropna=False
         ).transform(_per_group_mean()),
         sibling=lambda: fm.residplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", dropna=False),
-        without=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
-            _per_group_mean()
+        without=_MissingColumn(
+            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
+                _per_group_mean()
+            ),
+            error=_COLUMN_NOT_FOUND,
+            column="mean_v",
         ),
-        without_error=_COLUMN_NOT_FOUND,
-        missing="mean_v",
     ),
     "transform_aggregate_residplot_y": _RemedyRun(
         refused=lambda: fm.residplot(_GROUPED_XY_ROWS, x="v", y=Y("w", aggregate="mean")),
@@ -1453,11 +2425,39 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             _GROUPED_XY_ROWS, x="mean_v", y="mean_w", dropna=False
         ).transform(_per_group_mean()),
         sibling=lambda: fm.residplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", dropna=False),
-        without=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
-            _per_group_mean()
+        without=_MissingColumn(
+            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
+                _per_group_mean()
+            ),
+            error=_COLUMN_NOT_FOUND,
+            column="mean_v",
         ),
-        without_error=_COLUMN_NOT_FOUND,
-        missing="mean_v",
+    ),
+    # Named-keyword remedies: the door's own spelling, run as written,
+    # renders the same chart a different route already draws. displot's
+    # bin rule and density flag are reached post-hoc, after displot's own
+    # call-time pre-check has already returned; jointplot's density flag
+    # has no pre-check at all, since jointplot builds its marginal
+    # histogram directly.
+    "bins_displot_posthoc_x": _RemedyRun(
+        refused=lambda: (
+            fm.displot(_HIST_ROWS, x="v", kind="hist")
+            .encode(x=X("v", bin={"bin_count": 3}))
+            .to_svg()
+        ),
+        names="State the rule with displot's bins=, or drop bin=.",
+        remedied=lambda: fm.displot(_HIST_ROWS, x="v", kind="hist", bins=3),
+        sibling=lambda: fm.Chart(_HIST_ROWS).mark_histogram(bins=3).encode(x="v"),
+        without=_DifferentChart(lambda: fm.displot(_HIST_ROWS, x="v", kind="hist")),
+    ),
+    "bins_jointplot_marginal_kws_x": _RemedyRun(
+        refused=lambda: fm.jointplot(
+            _XY_ROWS, x=X("v", bin={"bin_count": 3}), y="w"
+        ).to_svg(),
+        names="State the rule with marginal_kws={'bins': ...}, or drop bin=.",
+        remedied=lambda: fm.jointplot(_XY_ROWS, x="v", y="w", marginal_kws={"bins": 3}),
+        sibling=lambda: fm.jointplot(_XY_ROWS, x="v", y="w", marginal_kws={"bin_count": 3}),
+        without=_DifferentChart(lambda: fm.jointplot(_XY_ROWS, x="v", y="w")),
     ),
 }
 
@@ -1467,15 +2467,21 @@ def test_a_named_remedy_on_its_own_door_matches_the_door_over_a_precomputed_fram
     run: _RemedyRun,
 ) -> None:
     """The remedy the refusal names, run on that door, draws byte-identically to
-    the same door over rows polars binned or aggregated the same way; left out,
-    the column it binds is never computed and the call fails.
+    the same door drawing the same thing a different way; its own negative
+    control proves the remedy's step actually mattered -- a generic
+    remedy's column is never computed without it, a named-keyword remedy's
+    kwarg left out renders a different chart.
     """
     with pytest.raises(ValueError) as excinfo:
         run.refused()
     assert run.names in str(excinfo.value)
-    assert run.remedied().to_svg() == run.sibling().to_svg()
-    with pytest.raises(run.without_error, match=rf"{run.missing}['\"]? not found"):
-        run.without().to_svg()
+    remedied_svg = run.remedied().to_svg()
+    assert remedied_svg == run.sibling().to_svg()
+    if isinstance(run.without, _MissingColumn):
+        with pytest.raises(run.without.error, match=rf"{run.without.column}['\"]? not found"):
+            run.without.build().to_svg()
+    else:
+        assert run.without.build().to_svg() != remedied_svg
 
 
 @pytest.mark.parametrize(
@@ -1599,6 +2605,21 @@ def _displot_door(**kwargs: Any) -> fm.Chart:
     return fm.displot(rows, x="v", kind="hist", **kwargs)
 
 
+def _displot_posthoc_door(**kwargs: Any) -> fm.Chart:
+    """*kwargs*' own ``y=`` moved to a ``.encode()`` written after the call returns."""
+    y = kwargs.pop("y", None)
+    rows = _GROUPED_HIST_ROWS if "hue" in kwargs else _HIST_ROWS
+    chart = fm.displot(rows, x="v", kind="hist", **kwargs)
+    return chart.encode(y=y) if y is not None else chart
+
+
+def _pairplot_door(**kwargs: Any) -> fm.Chart:
+    y = kwargs.pop("y")
+    return fm.pairplot(
+        _XY_HUE_ROWS, vars=["v", "w"], hue="g", kind="hist", diag_kind=None, encode={"y": y}
+    )
+
+
 _COUNT_REMEDIES: dict[str, _CountRemedy] = {
     "mark_histogram_density_false": _CountRemedy(
         door=_histogram_door,
@@ -1634,6 +2655,26 @@ _COUNT_REMEDIES: dict[str, _CountRemedy] = {
         door=_histogram_door,
         refused_kwargs={"groupby": ["g"], "y": Y(aggregate="count", stack="normalize")},
         remedy_kwargs={"groupby": ["g"]},
+        names="draw the count with stack=True.",
+        count=Y(aggregate="count", stack=True),
+        plain=Y(stack=True),
+    ),
+    "displot_posthoc_stat_count": _CountRemedy(
+        door=_displot_posthoc_door,
+        refused_kwargs={"stat": "density"},
+        remedy_kwargs={"stat": "count"},
+        names="draw the count with stat='count'.",
+    ),
+    "displot_posthoc_multiple_stack": _CountRemedy(
+        door=_displot_posthoc_door,
+        refused_kwargs={"multiple": "fill", "hue": "g"},
+        remedy_kwargs={"multiple": "stack", "hue": "g"},
+        names="draw the count with multiple='stack'.",
+    ),
+    "pairplot_stack_true": _CountRemedy(
+        door=_pairplot_door,
+        refused_kwargs={"y": Y(aggregate="count", stack="normalize")},
+        remedy_kwargs={},
         names="draw the count with stack=True.",
         count=Y(aggregate="count", stack=True),
         plain=Y(stack=True),

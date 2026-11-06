@@ -11,7 +11,8 @@ through the one implementation here so the two cannot drift apart (spec §6.6).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from ferrum.encoding.base import (
     ChannelBase,
@@ -648,33 +649,189 @@ def _written_channel(channel: str, ch: ChannelBase, kwarg: str) -> str:
     return f"{channel}={type(ch).__name__}({kwarg}={quoted})"
 
 
+#: The normalized-stack mode a histogram's value axis draws instead of a
+#: plain count: ``multiple='fill'``, the chart's own normalizing
+#: ``position=``, or the value channel's own ``stack='normalize'``
+#: shorthand (:func:`ferrum._desugar._histogram_share`).
+_ShareMode = Literal["fill", "normalized_position", "normalized_stack"]
+
+#: Every mode a histogram's value axis can draw instead of a plain
+#: fieldless count: density, or one of the :data:`_ShareMode` three.
+_ValueMode = Literal["density", "fill", "normalized_position", "normalized_stack"]
+
+
+@dataclass(frozen=True)
+class _DoorVocabulary:
+    """How one public call spells each knob a bin=/aggregate= refusal's reason or remedy can name.
+
+    A spelling field is the keyword(s) as that call's own caller types
+    them; ``None`` means the call has no spelling of that knob that
+    renders, so the refusal naming it falls back to a knob-free remedy
+    instead. One row per door, read by :func:`_door_vocabulary`, the only
+    lookup and the only fallback this family's refusals use.
+    """
+
+    bin_rule: str | None = None
+    fit_x_bins: str | None = None
+    density_on: str | None = None
+    density_off: str | None = None
+    multiple_fill: str | None = None
+    multiple_stack: str | None = None
+    position_normalize: str | None = None
+    position_stack: str | None = None
+    channel_stack: str | None = "stack=True"
+    chains_transform: bool = True
+    styles_dropped_axis: bool = True
+
+
+#: The row for every call absent from :data:`_DOOR_VOCABULARY`: a mark
+#: method, or a figure returning a ``Chart``, that owns none of the
+#: door-spelled knobs, takes ``.transform(...)`` on its result, and keeps
+#: a channel's own ``stack=`` shorthand.
+_CHART_CALL_VOCABULARY = _DoorVocabulary()
+
+#: Each re-voicable bin=/aggregate= knob's own spelling, one row per door,
+#: keyed by the voice a refusal ends up speaking as -- the same voice
+#: :class:`~ferrum._entry.EntryRefusal`'s message callable receives, so a
+#: refusal raised deep inside a figure's own mark call and re-voiced into
+#: the figure (:func:`ferrum._entry.voiced_as`) resolves the SAME row the
+#: figure's own direct check would. A voice absent from this table reads
+#: :data:`_CHART_CALL_VOCABULARY` (:func:`_door_vocabulary`).
+#:
+#: jointplot's row has no density/multiple/position *off* spelling: its
+#: ``encode=`` fans out to both marginal panels (``ferrum._overrides``), so
+#: a fieldless count on the top marginal's value axis is the right
+#: marginal's own binned-axis aggregate -- no spelling of "keep drawing a
+#: count" renders there, only dropping ``aggregate=`` does. The same fan-out
+#: rules out ``styles_dropped_axis``: a fieldless ``fm.Y(title=...)`` that
+#: drops the top marginal's field also drops the right marginal's own
+#: binned-axis field, which that marginal needs, so jointplot's value-axis
+#: remedy can only drop the channel outright, never restyle it.
+_DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
+    "mark_histogram": _DoorVocabulary(
+        bin_rule="mark_histogram's bins=, bin_count= or bin_width=",
+        density_on="density=True",
+        density_off="density=False",
+        multiple_fill="multiple='fill'",
+        multiple_stack="multiple='stack'",
+        position_normalize="position=fm.Stack(offset='normalize')",
+        position_stack="position=fm.Stack()",
+    ),
+    "displot": _DoorVocabulary(
+        bin_rule="displot's bins=",
+        density_on="stat='density'",
+        density_off="stat='count'",
+        multiple_fill="multiple='fill'",
+        multiple_stack="multiple='stack'",
+    ),
+    "jointplot": _DoorVocabulary(
+        bin_rule="marginal_kws={'bins': ...}",
+        density_on="marginal_kws={'density': True}",
+        multiple_fill="marginal_kws={'multiple': 'fill'}",
+        position_normalize="marginal_kws={'position': fm.Stack(offset='normalize')}",
+        channel_stack=None,
+        chains_transform=False,
+        styles_dropped_axis=False,
+    ),
+    "pairplot": _DoorVocabulary(chains_transform=False),
+    "mark_smooth": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+}
+
+
+def _door_vocabulary(voice: str) -> _DoorVocabulary:
+    """*voice*'s own row, or :data:`_CHART_CALL_VOCABULARY` when it has none."""
+    return _DOOR_VOCABULARY.get(voice, _CHART_CALL_VOCABULARY)
+
+
+#: A refusal's reason or remedy half, when its wording depends on which
+#: door the refusal ends up speaking as. Every builder is a named
+#: module-level function whose first parameter is the row; its raise-time
+#: arguments (the axis, the value channel, a fallback) are bound with
+#: :func:`functools.partial`, never an inline lambda, so each one is its
+#: own named, testable unit.
+_DoorText = Callable[["_DoorVocabulary"], str]
+
+
+@dataclass(frozen=True)
+class _StatisticRefusalText:
+    """A bin=/aggregate= refusal's message, resolved against one door per voice.
+
+    ``__call__`` reads the voice's row once (:func:`_door_vocabulary`) and
+    resolves *reason* and *remedy* against that SAME row, so a knob whose
+    wording depends on the door never has its reason and remedy drift out
+    of sync. Declares ``voices`` (every voice :data:`_DOOR_VOCABULARY`
+    spells), the structural ``_VoiceSpelledText`` protocol
+    :class:`~ferrum._entry.EntryRefusal` reads to freeze each one's whole
+    text across a pickle or copy (no import from ``ferrum._entry`` needed:
+    the protocol is structural). *reason*/*remedy* may be a plain string
+    (the statistic alone, never a call -- a literal call name would
+    misquote whichever call the caller actually made) or a :data:`_DoorText`
+    builder, for a knob whose own spelling differs per door.
+    """
+
+    written: str
+    kwarg: str
+    reason: str | _DoorText
+    remedy: str | _DoorText
+
+    def __call__(self, voice: str) -> str:
+        door = _door_vocabulary(voice)
+        reason = self.reason(door) if callable(self.reason) else self.reason
+        remedy = self.remedy(door) if callable(self.remedy) else self.remedy
+        return (
+            f"{voice}({self.written}) is not supported: {reason}, so {self.kwarg}= "
+            f"would be ignored. {remedy}"
+        )
+
+    @property
+    def voices(self) -> frozenset[str]:
+        return frozenset(_DOOR_VOCABULARY)
+
+
 def _refuse_bin_or_aggregate(
-    entry: str, channel: str, ch: ChannelBase, kwarg: str, *, reason: str, remedy: str
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    kwarg: str,
+    *,
+    reason: str | _DoorText,
+    remedy: str | _DoorText,
 ) -> None:
     """Refuse *channel*'s *kwarg* (``"bin"``/``"aggregate"``) a statistic's door cannot honor.
 
     Raised as :class:`~ferrum._entry.EntryRefusal`, spoken as *entry* and
     re-voiceable by a figure door that calls further in
-    (:func:`ferrum._entry.voiced_as`). *reason* names the statistic alone,
-    never a call: a re-voiced refusal keeps the same reason text under
-    every voice, so a reason naming a call would misquote whichever call
-    the caller actually made. *remedy* is a call that renders, the one a
-    door choosing it has itself confirmed works -- the same shape
+    (:func:`ferrum._entry.voiced_as`). *reason*/*remedy* become one
+    :class:`_StatisticRefusalText`, which resolves them together against
+    the voice the refusal ends up speaking as -- including after a
+    re-voicing moves it from the voice it was raised with to the caller's
+    own. *remedy* is a call that renders, the one a door choosing it has
+    itself confirmed works -- the same shape
     :func:`ferrum.plots.distribution._refuse_interval_args_on_non_aggregating_kind`
     and the channel-level ``_NO_BIN_MESSAGE`` (:mod:`ferrum.encoding.base`) use.
     """
     from ferrum._entry import EntryRefusal
 
     written = _written_channel(channel, ch, kwarg)
-    raise EntryRefusal(
-        lambda voice: (
-            f"{voice}({written}) is not supported: {reason}, so {kwarg}= would be ignored. {remedy}"
-        ),
-        entry,
-    )
+    raise EntryRefusal(_StatisticRefusalText(written, kwarg, reason, remedy), entry)
 
 
-def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> str:
+def _chained_remedy(door: _DoorVocabulary, *, remedy: str, kwarg: str) -> str:
+    """*remedy* when *door*'s result takes ``.transform(...)``, else dropping *kwarg*=.
+
+    jointplot (``JointChart``) and pairplot (``RepeatChart``) have neither
+    ``.transform`` nor ``.encode`` on their own result, so the generic
+    ``.transform(...)``-chaining remedy every other door's result can run
+    is untypeable there; dropping the kwarg is the only remedy that renders.
+    """
+    if door.chains_transform:
+        return remedy
+    return f"Drop {kwarg}=."
+
+
+def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
     """The remedy for a ``bin=`` a statistic does not fold in.
 
     A field-bearing channel is binned ahead of time, PER ROW
@@ -685,67 +842,78 @@ def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> s
     field to bin, so the only remedy is to drop it. *call_kwargs*, when
     given, names an extra keyword the remedy's own call needs to render
     (``residplot``'s ``dropna=False``, since its default drops the rows
-    the remedy's ``.transform()`` step would otherwise read).
+    the remedy's ``.transform()`` step would otherwise read). The text is
+    chained onto ``.transform(...)`` only on a door whose result has one
+    (:func:`_chained_remedy`); a door with none drops the kwarg instead,
+    even though this helper's own text always chains.
     """
     from ferrum.encoding._aliases import _channel_field
 
     field = _channel_field(ch)
     if not field:
-        return "Drop bin=."
-    from ferrum._registry import registry_output_columns
+        text = "Drop bin=."
+    else:
+        from ferrum._registry import registry_output_columns
 
-    bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
-    with_clause = f" with {call_kwargs}" if call_kwargs else ""
-    return (
-        f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
-        f"and bind its {bin_start!r} column{with_clause}, or drop bin=."
-    )
+        bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
+        with_clause = f" with {call_kwargs}" if call_kwargs else ""
+        text = (
+            f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
+            f"and bind its {bin_start!r} column{with_clause}, or drop bin=."
+        )
+    return partial(_chained_remedy, remedy=text, kwarg="bin")
 
 
-def _generic_aggregate_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> str:
+def _generic_aggregate_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
     """The remedy for an ``aggregate=`` a statistic does not fold in.
 
-    See :func:`_generic_bin_remedy` for *call_kwargs*.
+    See :func:`_generic_bin_remedy` for *call_kwargs* and the
+    ``.transform(...)``-chaining door capability.
     """
     from ferrum.encoding._aliases import _channel_field
 
     if not _channel_field(ch):
-        return "Drop aggregate=."
-    with_clause = f" with {call_kwargs}" if call_kwargs else ""
-    return (
-        "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
-        f"output column{with_clause}, or drop aggregate=."
-    )
+        text = "Drop aggregate=."
+    else:
+        with_clause = f" with {call_kwargs}" if call_kwargs else ""
+        text = (
+            "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
+            f"output column{with_clause}, or drop aggregate=."
+        )
+    return partial(_chained_remedy, remedy=text, kwarg="aggregate")
 
 
-def _histogram_value_axis_remedy(
-    kwarg: str, value_ch: ChannelBase, value_axis: str, bin_ch: Any, bin_axis: str
-) -> str:
-    """The remedy for a ``bin=``/``aggregate=`` on the histogram's value axis.
+def _value_axis_drop_clause(door: _DoorVocabulary, value_axis: str) -> str:
+    """How *door* drops the value-axis channel, instead of running the other alternative's call.
 
-    The value axis never binds a caller's column -- it draws the Bin's
-    own count or density -- so the generic per-row-``Bin``/
-    ``transform_aggregate`` remedy would bind that column there and
-    silently draw the counts under its name instead. A field-bearing
-    channel's remedy computes what the caller asked for over both
-    fields (a per-bin aggregate with a bar mark, a two-field count with
-    ``mark_hex``) or drops the binding and styles the axis instead. With no
-    field bound on the binned axis there is nothing to bin either, so the
-    remedy binds one there as well as dropping the value-axis field. A
-    fieldless channel's remedy is only to drop the kwarg.
+    Every door can simply drop the channel; a door whose own machinery
+    lets the caller restyle the dropped axis with a fieldless channel
+    (``fm.Y(title=...)``) names that too (``styles_dropped_axis``).
+    jointplot cannot: its ``encode=`` also reaches the right marginal,
+    whose own binned axis needs the field a fieldless channel would drop.
     """
-    from ferrum.encoding._aliases import _channel_field
+    if not door.styles_dropped_axis:
+        return f"drop {value_axis}="
+    va = value_axis.upper()
+    return f"drop {value_axis}= (style the axis with fm.{va}(title=...) and no field)"
 
-    field = _channel_field(value_ch)
-    if not field:
-        return "Drop bin=." if kwarg == "bin" else "Drop aggregate=."
-    va, ba = value_axis.upper(), bin_axis.upper()
-    drop_clause = f"drop {value_axis}= (style the axis with fm.{va}(title=...) and no field)"
-    bin_field = _channel_field(bin_ch)
+
+def _value_axis_remedy(
+    door: _DoorVocabulary,
+    *,
+    kwarg: str,
+    field: str,
+    value_axis: str,
+    bin_field: str | None,
+    bin_axis: str,
+    op: str | None,
+) -> str:
+    """The door-resolved body of :func:`_histogram_value_axis_remedy`'s field-bearing case."""
+    drop_clause = _value_axis_drop_clause(door, value_axis)
     if not bin_field:
         return f"Bind the field to bin on {bin_axis}= and {drop_clause}."
+    ba, va = bin_axis.upper(), value_axis.upper()
     if kwarg == "aggregate":
-        op = value_ch._kwargs["aggregate"]
         return (
             f"Draw the aggregate per bin with a bar mark, fm.Chart(data).mark_bar().encode("
             f"{bin_axis}=fm.{ba}({bin_field!r}, bin=True), {value_axis}=fm.{va}({field!r}, "
@@ -757,14 +925,107 @@ def _histogram_value_axis_remedy(
     )
 
 
+def _histogram_value_axis_remedy(
+    kwarg: str, value_ch: ChannelBase, value_axis: str, bin_ch: Any, bin_axis: str
+) -> str | _DoorText:
+    """The remedy for a ``bin=``/``aggregate=`` on the histogram's value axis.
+
+    The value axis never binds a caller's column -- it draws the Bin's
+    own count or density -- so the generic per-row-``Bin``/
+    ``transform_aggregate`` remedy would bind that column there and
+    silently draw the counts under its name instead. A field-bearing
+    channel's remedy computes what the caller asked for over both
+    fields (a per-bin aggregate with a bar mark, a two-field count with
+    ``mark_hex``) or drops the binding and, on a door whose own machinery
+    supports it, styles the axis instead (:func:`_value_axis_remedy`).
+    With no field bound on the binned axis there is nothing to bin either,
+    so the remedy binds one there as well as dropping the value-axis
+    field. A fieldless channel's remedy is only to drop the kwarg.
+    """
+    from ferrum.encoding._aliases import _channel_field
+
+    field = _channel_field(value_ch)
+    if not field:
+        return "Drop bin=." if kwarg == "bin" else "Drop aggregate=."
+    op = value_ch._kwargs["aggregate"] if kwarg == "aggregate" else None
+    bin_field = _channel_field(bin_ch)
+    return partial(
+        _value_axis_remedy,
+        kwarg=kwarg,
+        field=field,
+        value_axis=value_axis,
+        bin_field=bin_field,
+        bin_axis=bin_axis,
+        op=op,
+    )
+
+
+def _bin_rule_remedy(door: _DoorVocabulary, *, fallback: _DoorText) -> str:
+    """The remedy for a channel ``bin=`` that states a rule the histogram's own Bin already applies.
+
+    Names *door*'s own binning parameters (``bin_rule``) when it has one;
+    a door with none falls back, since the knob it would otherwise name
+    is not one that door's caller can type.
+    """
+    if door.bin_rule is None:
+        return fallback(door)
+    return f"State the rule with {door.bin_rule}, or drop bin=."
+
+
+def _fit_x_bin_remedy(door: _DoorVocabulary, *, fallback: _DoorText) -> str:
+    """The remedy naming the fit's own predictor-binning knob (``fit_x_bins``), when *door* has one."""
+    if door.fit_x_bins is None:
+        return fallback(door)
+    return f"Bin the predictor with {door.fit_x_bins}, the fit's own binning, or drop bin=."
+
+
+def _value_mode_spellings(door: _DoorVocabulary, mode: _ValueMode) -> tuple[str | None, str | None]:
+    """How *door* turns value *mode* on, and how it draws a plain count instead."""
+    if mode == "density":
+        return door.density_on, door.density_off
+    if mode == "fill":
+        return door.multiple_fill, door.multiple_stack
+    if mode == "normalized_position":
+        return door.position_normalize, door.position_stack
+    # normalized_stack: the caller's own channel kwarg, the same spelling on every door.
+    return "stack='normalize'", door.channel_stack
+
+
+def _value_mode_reason(door: _DoorVocabulary, *, mode: _ValueMode, value_axis: str) -> str:
+    """Why a fieldless ``aggregate="count"`` is refused under value *mode*, in *door*'s own spelling.
+
+    A door with no *on* spelling of *mode* falls back to the same reason
+    the value axis's other refusals use, since the knob it would
+    otherwise name is not one that door's caller can type.
+    """
+    on, _ = _value_mode_spellings(door, mode)
+    if on is None:
+        return f"the histogram computes {value_axis} itself"
+    draws = "density" if mode == "density" else "each bin's share of its stack"
+    return f"with {on} the histogram draws {draws} on {value_axis}, not a count"
+
+
+def _value_mode_remedy(door: _DoorVocabulary, *, mode: _ValueMode) -> str:
+    """The remedy paired with :func:`_value_mode_reason`, in *door*'s own spelling.
+
+    A door with no *off* spelling of *mode* (jointplot, whose ``encode=``
+    reaching the right marginal leaves no count setting that renders)
+    drops ``aggregate=`` outright.
+    """
+    _, off = _value_mode_spellings(door, mode)
+    if off is None:
+        return "Drop aggregate=."
+    return f"Drop aggregate=, or draw the count with {off}."
+
+
 def _refuse_statistic_input(
     entry: str,
     channel: str,
     ch: ChannelBase,
     *,
     reason: str,
-    bin_remedy: str | None = None,
-    aggregate_remedy: str | None = None,
+    bin_remedy: str | _DoorText | None = None,
+    aggregate_remedy: str | _DoorText | None = None,
 ) -> None:
     """Refuse *channel*'s ``bin=``, then its ``aggregate=``, when *ch* carries either.
 
@@ -772,7 +1033,9 @@ def _refuse_statistic_input(
     *channel*'s raw rows, not a bin or aggregate of them. *bin_remedy*/
     *aggregate_remedy* default to the generic, field-aware remedy
     (:func:`_generic_bin_remedy`/:func:`_generic_aggregate_remedy`); a door
-    whose own vocabulary gives a better remedy passes its own text.
+    whose own vocabulary gives a better remedy passes its own text, or a
+    :data:`_DoorText` builder when the right text depends on which door
+    ends up speaking the refusal.
     """
     if not _unset_statistic("bin", ch._kwargs.get("bin")):
         _refuse_bin_or_aggregate(
@@ -802,8 +1065,8 @@ def _refuse_bin_aggregate_on_channels(
     channels: tuple[str, ...],
     *,
     reason: str,
-    bin_remedy: str | None = None,
-    aggregate_remedy: str | None = None,
+    bin_remedy: str | _DoorText | None = None,
+    aggregate_remedy: str | _DoorText | None = None,
 ) -> None:
     """Refuse a ``bin=``/``aggregate=`` on any of *channels* a statistic cannot honor.
 
@@ -830,30 +1093,30 @@ def _refuse_histogram_bin_aggregate(
     *,
     horizontal: bool,
     density: bool,
-    share_spelling: str | None,
-    share_remedy: str | None,
-    bin_rule_remedy: str,
-    density_spelling: str,
-    density_remedy: str,
+    share: _ShareMode | None,
 ) -> None:
     """Refuse a bin=/aggregate= the histogram's own ``Bin`` cannot honor.
 
     The binned axis bins through the mark's own ``bins=``/``bin_count=``/
     ``bin_width=``/``extent=``/``nice=``, so a channel ``bin=`` that states
     a rule of its own is a second, conflicting instruction -- refused,
-    with *bin_rule_remedy* naming the door's own binning parameters
-    instead. ``bin=True`` is a harmless redundancy (asking for exactly
-    what the mark already does) and stays honored; an ``aggregate=`` on
-    that axis folds into nothing and is always refused. The value axis
-    reads no caller column at all -- it draws the Bin's own count or
-    density -- so a field-bearing ``bin=``/``aggregate=`` there is
-    refused with :func:`_histogram_value_axis_remedy`. A fieldless
-    ``aggregate="count"`` matches what the value axis draws and stays
-    honored, except under ``density`` (*density_spelling* names how the
-    door spells it, *density_remedy* draws the count instead) and under
-    a normalized stack (*share_spelling*/*share_remedy*, ``None`` when
-    the drawn position does not normalize); every other aggregate on
-    that axis is refused with :func:`_histogram_value_axis_remedy`.
+    naming the door's own binning parameters instead (:func:`_bin_rule_remedy`,
+    resolved by the voice the refusal ends up speaking as, never *entry*
+    alone: a direct ``mark_histogram`` call keeps its own spelling, and a
+    refusal re-voiced into ``displot``/``jointplot`` picks up theirs).
+    ``bin=True`` is a harmless redundancy (asking for exactly what the mark
+    already does) and stays honored; an ``aggregate=`` on that axis folds
+    into nothing and is always refused. The value axis reads no caller
+    column at all -- it draws the Bin's own count or density -- so a
+    field-bearing ``bin=``/``aggregate=`` there is refused with
+    :func:`_histogram_value_axis_remedy`. A fieldless ``aggregate="count"``
+    matches what the value axis draws and stays honored, except under one
+    value mode -- ``density`` (checked before any *share* mode) or the
+    normalized-stack *share* mode -- whose reason and remedy both come
+    from the same door, through
+    :func:`_value_mode_reason`/:func:`_value_mode_remedy`;
+    every other aggregate on that axis is refused with
+    :func:`_histogram_value_axis_remedy`.
     """
     bin_axis, value_axis = ("y", "x") if horizontal else ("x", "y")
 
@@ -867,7 +1130,7 @@ def _refuse_histogram_bin_aggregate(
                 bin_ch,
                 "bin",
                 reason=f"the histogram bins {bin_axis} by its own rule",
-                remedy=bin_rule_remedy,
+                remedy=partial(_bin_rule_remedy, fallback=_generic_bin_remedy(bin_ch)),
             )
         if not _unset_statistic("aggregate", bin_ch._kwargs.get("aggregate")):
             _refuse_bin_or_aggregate(
@@ -895,29 +1158,15 @@ def _refuse_histogram_bin_aggregate(
         agg_value = value_ch._kwargs.get("aggregate")
         if not _unset_statistic("aggregate", agg_value):
             fieldless_count = not _channel_field(value_ch) and agg_value == "count"
-            if fieldless_count and density:
+            mode: _ValueMode | None = "density" if density else share
+            if fieldless_count and mode is not None:
                 _refuse_bin_or_aggregate(
                     entry,
                     value_axis,
                     value_ch,
                     "aggregate",
-                    reason=(
-                        f"with {density_spelling} the histogram draws density on "
-                        f"{value_axis}, not a count"
-                    ),
-                    remedy=density_remedy,
-                )
-            elif fieldless_count and share_spelling is not None:
-                _refuse_bin_or_aggregate(
-                    entry,
-                    value_axis,
-                    value_ch,
-                    "aggregate",
-                    reason=(
-                        f"with {share_spelling} the histogram draws each bin's share of "
-                        f"its stack on {value_axis}, not a count"
-                    ),
-                    remedy=share_remedy,
+                    reason=partial(_value_mode_reason, mode=mode, value_axis=value_axis),
+                    remedy=partial(_value_mode_remedy, mode=mode),
                 )
             elif not fieldless_count:
                 _refuse_bin_or_aggregate(
@@ -932,24 +1181,21 @@ def _refuse_histogram_bin_aggregate(
                 )
 
 
-#: The x-channel ``bin=`` remedy on a route whose fit bins before it
-#: dispatches on method (``mark_smooth``, and ``lmplot``/``regplot`` on a
-#: ``Smooth``-routed method): names the fit's own ``x_bins=`` knob. One
-#: constant so the two doors that use it cannot drift apart.
-SMOOTH_X_BIN_REMEDY = (
-    "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
-)
-
-
 def _refuse_bin_aggregate_fit(
-    entry: str, encoding: dict, *, x_bin_remedy: str | None = None
+    entry: str, encoding: dict, *, x_bins_knob: bool = False
 ) -> None:
     """Refuse an x bin=/aggregate= a fit reads raw, and a y one it folds in nowhere.
 
-    x is the predictor; a caller supplies *x_bin_remedy* naming the fit's
-    own pre-aggregation knob on a route that has one (``x_bins=``), and
-    leaves it unset (the generic, field-aware remedy) on a route that does
-    not. x's aggregate= always takes the generic remedy: no route
+    x is the predictor; *x_bins_knob* is True on a call whose fit bins the
+    predictor through its own pre-aggregation knob before it dispatches on
+    method (every ``mark_smooth``-routed method) -- the x bin='s remedy
+    then names that knob (:func:`_fit_x_bin_remedy`, resolved by the voice
+    the refusal ends up speaking as), falling back to the generic,
+    field-aware remedy on a door with no such knob of its own
+    (``jointplot``, ``pairplot``). False (the dedicated fit methods
+    ``logistic``/``glm``/``robust``, whose transforms take no binning
+    parameter at all) always takes the generic remedy, regardless of
+    voice. x's aggregate= always takes the generic remedy: no route
     aggregates the predictor itself (``x_estimator=`` aggregates the
     RESPONSE within each x bin, never x), so naming it would send the
     caller to a knob that does something else. y is the response the fit
@@ -958,8 +1204,11 @@ def _refuse_bin_aggregate_fit(
     """
     x_ch = encoding.get("x")
     if isinstance(x_ch, ChannelBase):
+        bin_remedy = (
+            partial(_fit_x_bin_remedy, fallback=_generic_bin_remedy(x_ch)) if x_bins_knob else None
+        )
         _refuse_statistic_input(
-            entry, "x", x_ch, reason="the fit reads the raw predictor", bin_remedy=x_bin_remedy
+            entry, "x", x_ch, reason="the fit reads the raw predictor", bin_remedy=bin_remedy
         )
     y_ch = encoding.get("y")
     if isinstance(y_ch, ChannelBase):

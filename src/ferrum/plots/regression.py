@@ -37,7 +37,6 @@ from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
 from ferrum._encode_lowering import (
     COMPOSITE_GROUPING_CHANNELS,
-    SMOOTH_X_BIN_REMEDY,
     _generic_aggregate_remedy,
     _generic_bin_remedy,
     _rebind_positional,
@@ -926,9 +925,10 @@ def _lmplot_impl(
     # the methods that build Smooth (it bins before any method dispatch);
     # the dedicated methods have no such knob (refused above), so their x
     # bin= falls back to the generic, field-aware remedy.
-    x_bin_remedy = SMOOTH_X_BIN_REMEDY if method in _SMOOTH_ROUTED_METHODS else None
     _refuse_bin_aggregate_fit(
-        entry, _drawn_positional_channels({"x": x, "y": y}, encode), x_bin_remedy=x_bin_remedy
+        entry,
+        _drawn_positional_channels({"x": x, "y": y}, encode),
+        x_bins_knob=method in _SMOOTH_ROUTED_METHODS,
     )
 
     data = to_polars(data)
