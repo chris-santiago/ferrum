@@ -56,7 +56,10 @@ from ferrum._layer_transforms import (
 )
 from ferrum._configure_mixin import ConfigureMixin
 from ferrum.marks._chart_methods_diagnostic import DiagnosticMarksMixin
-from ferrum.marks._chart_methods_statistical import StatisticalMarksMixin
+from ferrum.marks._chart_methods_statistical import (
+    StatisticalMarksMixin,
+    _refuse_primitive_mark_on_layered_chart,
+)
 from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_build import SpecBuildMixin, _encoding_field_and_type
@@ -1386,6 +1389,11 @@ class Chart(
     # ---- Marks (primitives) ----
 
     def _set_mark(self, name: str, **kwargs: Any) -> "Chart":
+        # A layered chart has no mark of its own for this call to replace;
+        # refused here, before `position=`/kwargs are read, in the same
+        # place `_refuse_fitted_mark_after_pending_composite` runs first for
+        # a fitted mark called after a pending composite.
+        _refuse_primitive_mark_on_layered_chart(f"mark_{name}", self._layers)
         # Phase 9c -- pull `position=` out of kwargs and validate eligibility
         # before constructing the MarkBase (which would reject unknown kwargs).
         position = kwargs.pop("position", None)

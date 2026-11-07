@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
 from ferrum._encode_lowering import _refuse_bin_aggregate_on_channels
-from ferrum._layer import _PendingMark, merge_style
+from ferrum._layer import _Layer, _PendingMark, layer_mark, merge_style
 from ferrum._validate import coerce_bool, validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import _FIGURE_ONLY_KINDS, ORIENT_CHOICES
@@ -150,6 +150,38 @@ def _refuse_fitted_mark_after_pending_composite(entry: str, pending: _PendingMar
         f"{entry}() cannot follow {pending_method}(){source} on one chart: a chart holds "
         f"one composite mark, and {entry}() keeps every layer already drawn. Layer them "
         f"with +: chart.{pending_method}() + chart.{entry}(...)"
+    )
+
+
+def _refuse_primitive_mark_on_layered_chart(entry: str, layers: Sequence[_Layer] | None) -> None:
+    """Refuse *entry* (``mark_point``/``mark_bar``/...) on a chart already drawn from layers.
+
+    A chart holds either one mark of its own or a list of layers, never
+    both meaningfully at once: a layered chart's ``_mark`` only mirrors
+    layer 0, so a primitive call that "replaces" it would leave every
+    layer's own mark still drawing the render unchanged, with no visible
+    effect -- the silent drop the library's refuse-malformed rule forbids.
+    There is no earlier single mark for this call to replace, so it refuses
+    instead, before any of its own kwargs or ``position=`` are read.
+
+    Each layer is named by its own ``name`` where it has one -- the same
+    key a figure's ``mark={'<layer>': {...}}`` targets, so the refusal's
+    list and its restyle remedy agree on what to call each layer -- or by
+    the mark it draws otherwise (:func:`ferrum._layer.layer_mark`: a layer
+    with no mark of its own draws as a point, the same wire default every
+    other reader of an unmarked layer already uses).
+    """
+    if not layers:
+        return
+    names = ", ".join(layer.name or layer_mark(layer.mark) for layer in layers)
+    count = len(layers)
+    noun = "layer" if count == 1 else "layers"
+    raise ValueError(
+        f"{entry}() cannot replace the marks of a chart drawn from {count} {noun} "
+        f"({names}): a mark call replaces a chart's one mark, and a layered chart "
+        "has none of its own. Set the mark on a chart before layering it "
+        f"(fm.Chart(...).{entry}() + ...), or restyle a layer by name "
+        "(a figure's mark={'<layer>': {...}})."
     )
 
 
