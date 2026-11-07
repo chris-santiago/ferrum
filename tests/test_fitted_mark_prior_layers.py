@@ -543,16 +543,32 @@ def test_a_chained_point_mark_replaces_the_displot_statistic(displot_kind_df, ki
     assert chained == plain
 
 
-@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])
-def test_a_chained_point_mark_with_no_y_refuses_like_the_plain_chart(displot_kind_df, kind):
-    """With no ``y=`` bound, the replaced mark refuses exactly as the plain
-    chart does: the composite's own ``y`` (a count, a density, a
-    cumulative count) does not survive the replacement."""
+@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf", "rug"])
+@pytest.mark.parametrize(
+    "replace,mark_name",
+    [
+        pytest.param(lambda c: c.mark_point(), "point", id="point"),
+        pytest.param(lambda c: c.mark_line(stroke_width=4), "line", id="line"),
+    ],
+)
+def test_a_chained_primitive_mark_with_no_y_refuses_like_the_plain_chart(
+    displot_kind_df, kind, replace, mark_name
+):
+    """With no ``y=`` bound, the replacing primitive refuses exactly as the
+    plain chart does: the composite's own ``y`` (a count, a density, a
+    cumulative count, a rug's own unit axis) does not survive the
+    replacement. The replacing call speaks in its own voice, naming the
+    channel it left unbound and the remedy, not the composite's."""
     with pytest.raises(ValueError) as chained:
-        fm.displot(displot_kind_df, x="x", kind=kind).mark_point().to_svg()
+        replace(fm.displot(displot_kind_df, x="x", kind=kind)).to_svg()
     with pytest.raises(ValueError) as plain:
-        fm.Chart(displot_kind_df).mark_point().encode(x="x").to_svg()
+        replace(fm.Chart(displot_kind_df).encode(x="x")).to_svg()
     assert str(chained.value) == str(plain.value)
+    assert str(chained.value) == (
+        f"mark_{mark_name} needs both positional channels, but nothing binds 'y'. "
+        "Encode 'y' on the chart to draw it, or draw from 'x' alone "
+        "with mark_tick() or mark_rule()."
+    )
 
 
 @pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])

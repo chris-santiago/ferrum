@@ -4640,51 +4640,68 @@ fn arc_theta_only_resolves_via_dummy_radius_scale() {
 }
 
 /// The theta channel is mandatory, unlike radius: an arc spec that binds only
-/// the *non*-theta axis (radius, without the theta-mapped channel) must keep
-/// erroring with `EncodingTypeMismatch`, not silently resolve via the
-/// single-axis exemption. Guards against a gate that keys on "exactly one of
-/// x/y is present" without checking *which* one — that would let
-/// `mark_arc().encode(radius=...)` (theta unset) through to
-/// `render/marks/arc.rs`, which returns an empty mark for a `None` theta
-/// field, turning today's loud `EncodingTypeMismatch` into a silently blank
-/// chart.
+/// the *non*-theta axis must be refused naming the channel the caller
+/// actually left unbound — `theta`, not an `x`/`y` token — with a remedy
+/// that runs: encoding `theta`, not the Cartesian "draw from the other axis
+/// with mark_tick()/mark_rule()" remedy, which cannot draw a pie. Guards
+/// against a gate that keys on "exactly one of x/y is present" without
+/// checking *which* one — that would let `mark_arc().encode(radius=...)`
+/// (theta unset) through to `render/marks/arc.rs`, which returns an empty
+/// mark for a `None` theta field, turning a loud refusal into a silently
+/// blank chart. Both theta axes name the same `theta` token, since
+/// `ChannelNaming` maps whichever one the coord declares.
 #[test]
-fn arc_missing_theta_still_errors() {
+fn arc_missing_theta_is_refused_naming_theta() {
+    use crate::render::PositionalNeed;
     use crate::spec::coord::CoordKind;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::{PolarDirection, PolarThetaChannel};
 
-    // theta="x", but only "y" (radius) is bound — the theta channel itself is missing.
-    let spec = ChartSpec {
-        mark: Mark::Arc,
-        encoding: Encoding {
-            x: None,
-            y: Some(EncodingSpec {
-                field: "y".into(),
-                type_: Some(DataType::Quantitative),
-                ..Default::default()
+    for theta in [PolarThetaChannel::X, PolarThetaChannel::Y] {
+        let radius = EncodingSpec { field: "radius".into(), type_: Some(DataType::Quantitative), ..Default::default() };
+        // theta is unset; radius (the other axis) is bound — the theta
+        // channel itself is the one missing.
+        let encoding = match theta {
+            PolarThetaChannel::X => Encoding { x: None, y: Some(radius), ..Default::default() },
+            PolarThetaChannel::Y => Encoding { x: Some(radius), y: None, ..Default::default() },
+        };
+        let spec = ChartSpec {
+            mark: Mark::Arc,
+            encoding,
+            coord: Some(CoordKind::Polar {
+                theta,
+                start_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
             }),
             ..Default::default()
-        },
-        coord: Some(CoordKind::Polar {
-            theta: PolarThetaChannel::X,
-            start_angle: 0.0,
-            direction: PolarDirection::Clockwise,
-            inner_radius: 0.0,
-            outer_radius: None,
-            pad_angle: 0.0,
-        }),
-        ..Default::default()
-    };
-    let batch = make_batch_q_q_n();
-    let theme = ThemeInputs::default();
+        };
+        let batch = make_batch_q_q_n();
+        let theme = ThemeInputs::default();
 
-    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
-        .expect_err("arc with a missing theta channel must still error, not resolve via the single-axis exemption");
-    match err {
-        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "x"),
-        other => panic!("expected EncodingTypeMismatch{{channel: \"x\", ..}}, got {other:?}"),
+        let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).expect_err(
+            "arc with a missing theta channel must still error, not resolve via the single-axis exemption",
+        );
+        match &err {
+            RenderError::InLayer { layer: None, source, .. } => match &**source {
+                RenderError::PositionalChannelUnbound { mark: Mark::Arc, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*need, PositionalNeed::Theta, "theta={theta:?}");
+                    assert_eq!(unbound.len(), 1, "theta={theta:?}");
+                    assert!(sibling_bound.is_empty(), "theta={theta:?}");
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            },
+            other => panic!("expected InLayer, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "mark_arc needs a 'theta' channel, but nothing binds 'theta'. Encode 'theta' on the \
+             chart to draw it.",
+            "theta={theta:?}"
+        );
     }
 }
 
@@ -4818,10 +4835,13 @@ fn arc_both_x_and_y_bound_under_non_polar_coord_refuses() {
 
 // --- R3: user-facing channel names under CoordFlip ------------------------
 
-/// A bare (non-Tick/Rule/Arc) mark missing its y encoding, unflipped, must
-/// name the resolved channel `'y'` (byte-identical to today).
+/// A bare (non-Tick/Rule/Arc) mark missing its y encoding, unflipped, is
+/// refused in the mark's own voice, naming the unbound channel and the
+/// single-axis remedy — not the wire-type text a hand-built `EncodingSpec`
+/// mismatch would read.
 #[test]
 fn missing_y_encoding_names_y_when_not_flipped() {
+    use crate::render::{ChannelNaming, PositionalNeed};
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -4838,9 +4858,26 @@ fn missing_y_encoding_names_y_when_not_flipped() {
     let theme = ThemeInputs::default();
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
         .expect_err("missing y encoding on a non-single-axis mark must error");
+    match &err {
+        RenderError::InLayer { layer: None, entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point", "a chart with no entry speaks as its own mark");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, naming } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["y"]);
+                    assert!(sibling_bound.is_empty());
+                    assert_eq!(*naming, ChannelNaming::Cartesian { flipped: false });
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer, got {other:?}"),
+    }
     assert_eq!(
         format!("{err}"),
-        "encoding 'y' expected EncodingSpec, got None"
+        "mark_point needs both positional channels, but nothing binds 'y'. Encode 'y' on the \
+         chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
     );
 }
 
@@ -4852,6 +4889,7 @@ fn missing_y_encoding_names_y_when_not_flipped() {
 /// user themselves left unset, not the internal post-flip `'y'` token.
 #[test]
 fn missing_encoding_names_users_channel_under_flip() {
+    use crate::render::{ChannelNaming, PositionalNeed};
     use crate::spec::coord::CoordKind;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
@@ -4874,18 +4912,803 @@ fn missing_encoding_names_users_channel_under_flip() {
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
         .expect_err("missing (post-flip) y encoding must still error");
     match &err {
-        RenderError::EncodingTypeMismatch { channel, coord_flipped, .. } => {
-            // The resolved/internal token stays "y" — never un-flipped in the
-            // struct field, only in the rendered Display text.
-            assert_eq!(*channel, "y");
-            assert!(*coord_flipped);
+        RenderError::InLayer { layer: None, entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, naming } => {
+                    // The resolved/internal token stays "y" — never un-flipped
+                    // in the struct field, only in the rendered Display text.
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["y"]);
+                    assert!(sibling_bound.is_empty());
+                    assert_eq!(*naming, ChannelNaming::Cartesian { flipped: true });
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
         }
-        other => panic!("expected EncodingTypeMismatch, got {other:?}"),
+        other => panic!("expected InLayer, got {other:?}"),
     }
     assert_eq!(
         format!("{err}"),
-        "encoding 'x' expected EncodingSpec, got None",
+        "mark_point needs both positional channels, but nothing binds 'x'. Encode 'x' on the \
+         chart to draw it, or draw from 'y' alone with mark_tick() or mark_rule().",
         "message must name the user's own unset channel ('x'), not the resolved post-flip token ('y')"
+    );
+}
+
+// --- A missing positional channel is refused in the mark's voice ---------
+
+/// A flat spec's own mark, missing one channel, is refused in ITS OWN voice
+/// (`mark_<mark>`), not just `mark_point`'s — every painting mark reaches
+/// the same chokepoint.
+#[test]
+fn flat_mark_missing_one_channel_names_its_own_mark_voice() {
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    for mark in [Mark::Line, Mark::Area, Mark::Bar, Mark::Text, Mark::Rect] {
+        let spec = ChartSpec {
+            mark,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let batch = make_batch_q_q_n();
+        let theme = ThemeInputs::default();
+        let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+            .expect_err("missing y encoding on a non-single-axis mark must error");
+        assert_eq!(
+            format!("{err}"),
+            format!(
+                "mark_{} needs both positional channels, but nothing binds 'y'. Encode 'y' on \
+                 the chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule().",
+                mark.as_str()
+            ),
+            "mark {mark:?}"
+        );
+    }
+}
+
+/// A flat spec's own mark with NO positional encoding at all names both
+/// channels and offers both remedies, rather than naming only the first one
+/// checked.
+#[test]
+fn flat_mark_missing_both_channels_names_both() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec = ChartSpec { mark: Mark::Point, ..Default::default() };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a mark with no positional encoding at all must error");
+    match &err {
+        RenderError::InLayer { layer: None, entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["x", "y"]);
+                    assert!(sibling_bound.is_empty());
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "mark_point needs both positional channels, but nothing binds 'x' or 'y'. Encode 'x' \
+         and 'y' on the chart to draw them, or draw from one axis alone with mark_tick() or \
+         mark_rule()."
+    );
+}
+
+/// A layer that draws and needs both channels, beside a sibling (a rug) that
+/// tolerates one, is refused in its OWN layer-voiced text when nothing in
+/// the whole spec binds the channel it lacks — not `LayerMissingPositionalChannel`,
+/// which is reserved for a channel a SIBLING actually binds (the next test).
+#[test]
+fn layered_point_beside_single_axis_sibling_with_nothing_bound_names_unbound_channel() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{"x":{"field":"x"}}},{"mark":"tick","encoding":{}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a drawing layer missing a channel nothing binds must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["y"]);
+                    assert!(sibling_bound.is_empty());
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'y'. Encode 'y' \
+         on the chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
+    );
+}
+
+/// `CoordFlip` composes with layer-wrapping: a layer's own missing channel,
+/// unbound everywhere, still names the channel the USER left unset,
+/// un-flipped through `prepare::user_facing_channel` — the same correction
+/// `missing_encoding_names_users_channel_under_flip` proves for a flat
+/// chart, proven here for a layer-voiced refusal beside a single-axis
+/// sibling.
+#[test]
+fn layered_missing_channel_names_users_channel_under_flip() {
+    use crate::render::{ChannelNaming, PositionalNeed};
+    use crate::spec::mark::Mark;
+
+    // Layer 0 writes only `y=` (never `x=`); post-flip that lands the field
+    // in the RESOLVED x slot and leaves the resolved y slot unset — the
+    // same fixture shape `missing_encoding_names_users_channel_under_flip`
+    // uses, here beside a single-axis-tolerant sibling instead of standing
+    // alone.
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","coord":{"kind":"flip"},"layers":[{"mark":"point","encoding":{"y":{"field":"x"}}},{"mark":"tick","encoding":{}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a flipped layer missing a channel nothing binds must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, naming } => {
+                    // The resolved/internal token stays "y" — never
+                    // un-flipped in the struct field, only in the rendered
+                    // Display text.
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["y"]);
+                    assert!(sibling_bound.is_empty());
+                    assert_eq!(*naming, ChannelNaming::Cartesian { flipped: true });
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'x'. Encode 'x' \
+         on the chart to draw it, or draw from 'y' alone with mark_tick() or mark_rule().",
+        "message must name the user's own unset channel ('x'), not the resolved post-flip token ('y')"
+    );
+}
+
+/// The sibling of the test above: when a LATER layer actually binds the
+/// channel an earlier drawing layer lacks, the axis resolves and the
+/// refusal names it as `sibling_bound` — one `PositionalChannelUnbound`
+/// variant carries both the unbound and sibling-bound facts, and this
+/// caller-placed text names the sibling binding it resolves through.
+#[test]
+fn layered_point_beside_a_layer_that_binds_the_missing_channel_names_the_sibling_binding() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{"x":{"field":"x"}}},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a drawing layer that cannot reach a sibling-bound channel must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert!(unbound.is_empty());
+                    assert_eq!(sibling_bound.as_slice(), ["y"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but no 'y' encoding reaches it — \
+         a sibling layer binds 'y', which resolves the axis but leaves mark_point with nothing \
+         to plot. Encode 'y' on this layer, or on the chart, to draw it."
+    );
+}
+
+/// Two visible `Tick` layers, nothing bound anywhere, are refused by
+/// `validate_drawing_layers_can_plot`'s own per-layer loop (a tick needs
+/// ONE channel, and even that is unreached when nothing at all is bound),
+/// named in layer 0's own voice; the generic positional check's residual
+/// arm never sees this spec, since every painting layer's own reachability
+/// is settled first.
+#[test]
+fn a_layered_single_axis_mark_with_nothing_bound_needs_one_channel() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"tick","encoding":{}},{"mark":"tick","encoding":{}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("two tick layers with nothing bound anywhere must still error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_tick");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Tick);
+                    assert_eq!(*need, PositionalNeed::EitherAxis);
+                    assert_eq!(unbound.as_slice(), ["x", "y"]);
+                    assert!(sibling_bound.is_empty());
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_tick needs one positional channel, but nothing binds 'x' or 'y'. Encode \
+         'x' or 'y' on the chart to draw it."
+    );
+}
+
+/// The residual case the generic positional check's own match on `(x_enc,
+/// y_enc)` still answers: NO layer paints at all (both invisible), so
+/// `validate_drawing_layers_can_plot`'s per-layer loop skips every layer
+/// (`layer_paints` is false for each) and never objects, yet neither
+/// channel is bound anywhere. Named by LAYER ZERO's own mark and effective
+/// coord — never the layered spec's `mark` slot, a placeholder Python fills
+/// — with no layer index, since this is a chart-wide fact, not one
+/// particular layer's.
+#[test]
+fn the_generic_arm_names_layer_zero_when_no_layer_paints_and_nothing_is_bound() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let invisible = |mark: &str| {
+        format!(r#"{{"mark":"{mark}","encoding":{{}},"mark_style":{{"opacity":0.0}}}}"#)
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let two_invisible_points: ChartSpec = serde_json::from_str(&format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","layers":[{},{}]}}"#,
+        invisible("point"),
+        invisible("point")
+    ))
+    .expect("valid spec");
+    let err = resolve_scales(&two_invisible_points, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("two invisible point layers with nothing bound anywhere must still error");
+    match &err {
+        RenderError::InLayer { layer: None, entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["x", "y"]);
+                    assert!(sibling_bound.is_empty());
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "mark_point needs both positional channels, but nothing binds 'x' or 'y'. Encode 'x' \
+         and 'y' on the chart to draw them, or draw from one axis alone with mark_tick() or \
+         mark_rule()."
+    );
+
+    // An invisible TICK as layer 0 names what a tick needs instead of the
+    // generic two-channel text above.
+    let two_invisible_ticks: ChartSpec = serde_json::from_str(&format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","layers":[{},{}]}}"#,
+        invisible("tick"),
+        invisible("tick")
+    ))
+    .expect("valid spec");
+    let err = resolve_scales(&two_invisible_ticks, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("two invisible tick layers with nothing bound anywhere must still error");
+    assert_eq!(
+        format!("{err}"),
+        "mark_tick needs one positional channel, but nothing binds 'x' or 'y'. Encode 'x' or \
+         'y' on the chart to draw it."
+    );
+}
+
+/// `ChartSpec.entry`, when the chart carries one, is the voice a flat
+/// chart's refusal speaks as — not the `mark_{mark}` fallback every other
+/// test here exercises. `prepare::layer_entry` reads `spec.entry` before
+/// falling back, for a flat spec exactly as it does for a layer.
+#[test]
+fn flat_mark_with_a_chart_entry_speaks_as_that_entry() {
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let spec = ChartSpec {
+        mark: Mark::Point,
+        entry: Some("displot".into()),
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("missing y encoding must still error when the chart carries its own entry");
+    assert_eq!(
+        format!("{err}"),
+        "displot needs both positional channels, but nothing binds 'y'. Encode 'y' on the \
+         chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
+    );
+}
+
+/// `Tick`/`Rule` need only one positional channel, not both: with nothing
+/// bound anywhere, the refusal states that (not "needs both positional
+/// channels", which neither mark does) and offers the remedy that runs
+/// (encode either channel), not the call the caller already made
+/// (`mark_tick()`/`mark_rule()`). Holds under `CoordFlip` too — with nothing
+/// bound on either side, there is nothing to un-flip.
+#[test]
+fn a_single_axis_mark_with_nothing_bound_needs_one_channel() {
+    use crate::render::PositionalNeed;
+    use crate::spec::coord::CoordKind;
+    use crate::spec::mark::Mark;
+
+    for mark in [Mark::Tick, Mark::Rule] {
+        for coord in [None, Some(CoordKind::Flip)] {
+            let spec = ChartSpec { mark, coord: coord.clone(), ..Default::default() };
+            let batch = make_batch_q_q_n();
+            let theme = ThemeInputs::default();
+            let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+                .expect_err("a single-axis mark with nothing bound must still error");
+            match &err {
+                RenderError::InLayer { layer: None, source, .. } => match &**source {
+                    RenderError::PositionalChannelUnbound { mark: refused, need, unbound, sibling_bound, .. } => {
+                        assert_eq!(*refused, mark, "mark={mark:?} coord={coord:?}");
+                        assert_eq!(*need, PositionalNeed::EitherAxis, "mark={mark:?} coord={coord:?}");
+                        assert_eq!(unbound.as_slice(), ["x", "y"], "mark={mark:?} coord={coord:?}");
+                        assert!(sibling_bound.is_empty(), "mark={mark:?} coord={coord:?}");
+                    }
+                    other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+                },
+                other => panic!("expected InLayer, got {other:?}"),
+            }
+            assert_eq!(
+                format!("{err}"),
+                format!(
+                    "mark_{} needs one positional channel, but nothing binds 'x' or 'y'. \
+                     Encode 'x' or 'y' on the chart to draw it.",
+                    mark.as_str()
+                ),
+                "mark={mark:?} coord={coord:?}"
+            );
+        }
+    }
+}
+
+/// A flat polar mark names `theta`/`radius`, never `x`/`y`, and a mark that
+/// needs both positional channels (`Point`, unlike `Arc`/`Text`) still needs
+/// `radius` even once `theta` is bound. A polar `Tick` with nothing bound
+/// names `theta`/`radius` too, since naming is a property of the COORD, not
+/// of what a particular mark needs.
+#[test]
+fn a_polar_mark_names_the_polar_channels_it_lacks() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    let polar = || {
+        Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        })
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    // theta bound, radius (a Point's second channel, unlike Arc/Text) is not.
+    let theta_only = ChartSpec {
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
+            y: None,
+            ..Default::default()
+        },
+        coord: polar(),
+        ..Default::default()
+    };
+    let err = resolve_scales(&theta_only, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a polar point with only theta bound must still error");
+    assert_eq!(
+        format!("{err}"),
+        "mark_point needs both positional channels, but nothing binds 'radius'. Encode \
+         'radius' on the chart to draw it, or draw from 'theta' alone with mark_tick() or \
+         mark_rule()."
+    );
+
+    // Nothing bound at all.
+    let nothing_bound = ChartSpec { mark: Mark::Point, coord: polar(), ..Default::default() };
+    let err = resolve_scales(&nothing_bound, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a polar point with nothing bound must still error");
+    assert_eq!(
+        format!("{err}"),
+        "mark_point needs both positional channels, but nothing binds 'theta' or 'radius'. \
+         Encode 'theta' and 'radius' on the chart to draw them, or draw from one axis alone \
+         with mark_tick() or mark_rule()."
+    );
+
+    // A polar tick with nothing bound: EitherAxis, named in polar vocabulary.
+    let polar_tick = ChartSpec { mark: Mark::Tick, coord: polar(), ..Default::default() };
+    let err = resolve_scales(&polar_tick, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a polar tick with nothing bound must still error");
+    assert_eq!(
+        format!("{err}"),
+        "mark_tick needs one positional channel, but nothing binds 'theta' or 'radius'. \
+         Encode 'theta' or 'radius' on the chart to draw it."
+    );
+}
+
+/// `mark_single_axis_eligible`'s answers, re-expressed through
+/// `positional_need`, must match the literal table the OLD implementation
+/// stated directly — an independent reference, not a second call into
+/// `positional_need`, so a refactor that silently changed an answer would
+/// fail this test even though it still "agrees with itself".
+#[test]
+fn mark_single_axis_eligible_matches_the_need_table() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    fn reference(mark: Mark, coord: Option<&CoordKind>, has_x: bool, has_y: bool) -> bool {
+        match mark {
+            Mark::Tick | Mark::Rule => true,
+            Mark::Arc | Mark::Text => match coord {
+                Some(CoordKind::Polar { theta, .. }) => match theta {
+                    PolarThetaChannel::X => has_x,
+                    PolarThetaChannel::Y => has_y,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn polar(theta: PolarThetaChannel) -> CoordKind {
+        CoordKind::Polar {
+            theta,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }
+    }
+
+    let coords: [Option<CoordKind>; 4] = [
+        None,
+        Some(CoordKind::Flip),
+        Some(polar(PolarThetaChannel::X)),
+        Some(polar(PolarThetaChannel::Y)),
+    ];
+    let marks = [
+        Mark::Point, Mark::Line, Mark::Bar, Mark::Area, Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
+        Mark::Polygon, Mark::Image, Mark::Ribbon, Mark::Segment, Mark::Arc, Mark::Label, Mark::Geoshape,
+    ];
+    for mark in marks {
+        for coord in &coords {
+            for has_x in [false, true] {
+                for has_y in [false, true] {
+                    assert_eq!(
+                        mark_single_axis_eligible(mark, coord.as_ref(), has_x, has_y),
+                        reference(mark, coord.as_ref(), has_x, has_y),
+                        "mark={mark:?} coord={coord:?} has_x={has_x} has_y={has_y}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A layer unreachable on BOTH channels, each bound by a (the same) sibling
+/// layer, names both — the two-item `sibling_bound` list the collecting
+/// builder (not a raise-on-first-miss one) makes possible.
+#[test]
+fn a_layer_missing_both_channels_a_sibling_binds_names_both() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{}},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a layer missing both channels a sibling binds must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert!(unbound.is_empty());
+                    assert_eq!(sibling_bound.as_slice(), ["x", "y"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but no 'x' or 'y' encoding \
+         reaches it — a sibling layer binds 'x' and 'y', which resolves the axes but leaves \
+         mark_point with nothing to plot. Encode 'x' and 'y' on this layer, or on the chart, \
+         to draw it."
+    );
+}
+
+/// A layer missing one channel nothing binds anywhere AND one channel a
+/// sibling binds names both, in one sentence, rather than naming only the
+/// sibling-bound one and dropping the unbound one (the bug a collecting
+/// builder, not a raise-on-first-miss one, fixes).
+#[test]
+fn a_layer_missing_an_unbound_and_a_sibling_bound_channel_names_both() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{}},{"mark":"tick","encoding":{"y":{"field":"w"}}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a layer missing an unbound channel and a sibling-bound channel must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["x"]);
+                    assert_eq!(sibling_bound.as_slice(), ["y"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'x', and no \
+         'y' encoding reaches it — a sibling layer binds 'y', which resolves the axis but \
+         leaves mark_point with nothing to plot. Encode 'x' and 'y' on this layer, or on the \
+         chart, to draw it."
+    );
+}
+
+/// A layer unreachable on both axes, with NOTHING anywhere binding either
+/// one (no sibling to blame), names both as `unbound` — the layered mirror
+/// of `flat_mark_missing_both_channels_names_both`, and the test the
+/// collecting builder must not regress to raising at the first miss to
+/// pass.
+#[test]
+fn a_layer_unreachable_on_both_axes_names_both() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{}},{"mark":"tick","encoding":{}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a layer unreachable on both axes, nothing bound anywhere, must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert_eq!(unbound.as_slice(), ["x", "y"]);
+                    assert!(sibling_bound.is_empty());
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'x' or 'y'. \
+         Encode 'x' and 'y' on the chart to draw them, or draw from one axis alone with \
+         mark_tick() or mark_rule()."
+    );
+}
+
+/// A `Tick` layer that reaches NEITHER positional channel beside a sibling
+/// that binds both must be refused, not rendered with zero tick marks and
+/// no warning (the silent drop `mark_single_axis_eligible`'s per-layer
+/// use of the layer's OWN `draws_x`/`draws_y` exists to stop: a tick is
+/// always single-axis-TYPE-eligible, but that does not mean it reached
+/// either channel).
+#[test]
+fn a_single_axis_layer_reaching_no_channel_a_sibling_binds_is_refused() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"tick","encoding":{}},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).expect_err(
+        "a tick layer reaching neither channel beside a sibling that binds both must error, \
+         not render with zero tick marks and no warning",
+    );
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_tick");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Tick);
+                    assert_eq!(*need, PositionalNeed::EitherAxis);
+                    assert!(unbound.is_empty());
+                    assert_eq!(sibling_bound.as_slice(), ["x", "y"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_tick needs one positional channel, but no 'x' or 'y' encoding reaches \
+         it — a sibling layer binds 'x' and 'y', which resolves the axes but leaves mark_tick \
+         with nothing to plot. Encode 'x' or 'y' on this layer, or on the chart, to draw it."
+    );
+}
+
+/// A polar `Arc` layer that cannot reach theta, beside a sibling `Text`
+/// layer that binds it, is refused naming `theta` — not an `x`/`y` token —
+/// through the same sibling-binds sentence every other mark gets.
+#[test]
+fn a_polar_layer_without_theta_names_the_sibling_theta() {
+    use crate::render::PositionalNeed;
+    use crate::spec::coord::CoordKind;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    let radius = EncodingSpec { field: "radius".into(), type_: Some(DataType::Quantitative), ..Default::default() };
+    let theta = EncodingSpec { field: "theta".into(), type_: Some(DataType::Quantitative), ..Default::default() };
+    let spec = ChartSpec {
+        mark: Mark::Point,
+        coord: Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }),
+        layers: Some(vec![
+            layer_with(Mark::Arc, Encoding { y: Some(radius), ..Default::default() }),
+            layer_with(Mark::Text, Encoding { x: Some(theta), ..Default::default() }),
+        ]),
+        ..Default::default()
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a polar arc layer without theta, beside a sibling that binds it, must error");
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_arc");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Arc);
+                    assert_eq!(*need, PositionalNeed::Theta);
+                    assert!(unbound.is_empty());
+                    assert_eq!(sibling_bound.as_slice(), ["x"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_arc needs a 'theta' channel, but no 'theta' encoding reaches it — a \
+         sibling layer binds 'theta', which resolves the axis but leaves mark_arc with nothing \
+         to plot. Encode 'theta' on this layer, or on the chart, to draw it."
+    );
+}
+
+/// A layer a figure built (its `entry` names the figure's own call) speaks
+/// as that call, with no layer index, when it cannot reach a sibling-bound
+/// channel — not the old `LayerMissingPositionalChannel`'s own
+/// `"layer {i}: mark_{mark}"` prefix, which ignored a figure-built layer's
+/// entry entirely.
+#[test]
+fn a_figure_built_layer_is_refused_in_its_figure_voice() {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","layers":[{"mark":"point","encoding":{"x":{"field":"x"}},"entry":"catplot"},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}}}]}"#,
+    )
+    .expect("valid spec");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a figure-built layer that cannot reach a sibling-bound channel must error");
+    match &err {
+        RenderError::InLayer { layer: None, entry, source } => {
+            assert_eq!(entry.as_str(), "catplot");
+            match &**source {
+                RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, .. } => {
+                    assert_eq!(*mark, Mark::Point);
+                    assert_eq!(*need, PositionalNeed::Both);
+                    assert!(unbound.is_empty());
+                    assert_eq!(sibling_bound.as_slice(), ["y"]);
+                }
+                other => panic!("expected PositionalChannelUnbound, got {other:?}"),
+            }
+        }
+        other => panic!("expected InLayer with no index, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "catplot needs both positional channels, but no 'y' encoding reaches it — a sibling \
+         layer binds 'y', which resolves the axis but leaves catplot with nothing to plot. \
+         Encode 'y' on this layer, or on the chart, to draw it."
     );
 }
 
@@ -7204,10 +8027,23 @@ fn a_visible_point_layer_in_the_same_shape_does_disqualify() {
 
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
         .expect_err("a point layer that actually paints needs a real x axis, so this must error");
-    match err {
-        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "x"),
-        other => panic!("expected EncodingTypeMismatch{{channel: \"x\", ..}}, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &err,
+            RenderError::InLayer { layer: Some(0), source, .. }
+                if matches!(
+                    &**source,
+                    RenderError::PositionalChannelUnbound { mark: Mark::Point, unbound, .. }
+                        if unbound.as_slice() == ["x"]
+                )
+        ),
+        "expected PositionalChannelUnbound{{mark: Point, unbound: [\"x\"], ..}}, got {err:?}"
+    );
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'x'. Encode 'x' \
+         on the chart to draw it, or draw from 'y' alone with mark_tick() or mark_rule()."
+    );
 }
 
 /// **The case the predicate turns on.** One eligible mark must not exempt the
@@ -7239,10 +8075,23 @@ fn a_mixed_eligible_and_ineligible_layer_set_refuses() {
         "a point layer beside a tick, with no y bound anywhere, must refuse rather than \
          drop the points onto a fabricated axis",
     );
-    match err {
-        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
-        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &err,
+            RenderError::InLayer { layer: Some(1), source, .. }
+                if matches!(
+                    &**source,
+                    RenderError::PositionalChannelUnbound { mark: Mark::Point, unbound, .. }
+                        if unbound.as_slice() == ["y"]
+                )
+        ),
+        "expected PositionalChannelUnbound{{mark: Point, unbound: [\"y\"], ..}} on layer 1, got {err:?}"
+    );
+    assert_eq!(
+        format!("{err}"),
+        "layer 1: mark_point needs both positional channels, but nothing binds 'y'. Encode 'y' \
+         on the chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
+    );
 }
 
 /// The same refusal with no eligible mark anywhere in the set — the baseline the
@@ -7263,10 +8112,23 @@ fn layered_points_without_any_y_binding_still_error() {
 
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
         .expect_err("no eligible mark and no y binding anywhere must still error");
-    match err {
-        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
-        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &err,
+            RenderError::InLayer { layer: Some(0), source, .. }
+                if matches!(
+                    &**source,
+                    RenderError::PositionalChannelUnbound { mark: Mark::Point, unbound, .. }
+                        if unbound.as_slice() == ["y"]
+                )
+        ),
+        "expected PositionalChannelUnbound{{mark: Point, unbound: [\"y\"], ..}} on layer 0, got {err:?}"
+    );
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'y'. Encode 'y' \
+         on the chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
+    );
 }
 
 /// The fallback's X arm, symmetric with
@@ -7444,11 +8306,16 @@ fn drawing_layer_that_cannot_reach_a_fallback_sourced_channel_is_refused() {
         "a point layer with no reachable y must refuse, not render zero marks on the \
          line layer's axis",
     );
-    match err {
-        RenderError::LayerMissingPositionalChannel { layer, mark, channel, .. } => {
-            assert_eq!((layer, mark, channel), (0, "point", "y"));
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            assert!(matches!(
+                &**source,
+                RenderError::PositionalChannelUnbound { mark: Mark::Point, sibling_bound, .. }
+                    if sibling_bound.as_slice() == ["y"]
+            ));
         }
-        other => panic!("expected LayerMissingPositionalChannel, got {other:?}"),
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
     }
 }
 
@@ -7512,11 +8379,16 @@ fn drawing_layer_that_cannot_reach_a_fallback_sourced_x_is_refused() {
 
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
         .expect_err("a point layer with no reachable x must refuse");
-    match err {
-        RenderError::LayerMissingPositionalChannel { layer, mark, channel, .. } => {
-            assert_eq!((layer, mark, channel), (0, "point", "x"));
+    match &err {
+        RenderError::InLayer { layer: Some(0), entry, source } => {
+            assert_eq!(entry.as_str(), "mark_point");
+            assert!(matches!(
+                &**source,
+                RenderError::PositionalChannelUnbound { mark: Mark::Point, sibling_bound, .. }
+                    if sibling_bound.as_slice() == ["x"]
+            ));
         }
-        other => panic!("expected LayerMissingPositionalChannel, got {other:?}"),
+        other => panic!("expected InLayer around layer 0, got {other:?}"),
     }
 }
 
@@ -7578,12 +8450,12 @@ fn an_invisible_layer_is_never_refused_for_a_missing_channel() {
     assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
 }
 
-/// "Nothing binds this channel" keeps its own channel-level error. The per-layer
-/// rule runs after the generic resolution, so it can only ever fire on the
-/// narrower case the fallback created — it never takes over a refusal that
-/// already had a correct diagnosis.
+/// "Nothing binds this channel" is refused in the FIRST drawing layer's own
+/// voice rather than the generic path's channel-level error — the per-layer
+/// rule runs BEFORE the generic resolution, so it decides every painting
+/// mark's reachability before either lane can answer.
 #[test]
-fn a_channel_bound_nowhere_still_raises_the_channel_level_error() {
+fn a_channel_bound_nowhere_is_refused_in_the_first_drawing_layers_voice() {
     use crate::spec::mark::Mark;
 
     let spec = layered_x_only_spec(
@@ -7597,11 +8469,24 @@ fn a_channel_bound_nowhere_still_raises_the_channel_level_error() {
     let theme = ThemeInputs::default();
 
     let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
-        .expect_err("no y anywhere must stay the channel-level refusal");
-    match err {
-        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
-        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
-    }
+        .expect_err("no y anywhere must stay refused");
+    assert!(
+        matches!(
+            &err,
+            RenderError::InLayer { layer: Some(0), source, .. }
+                if matches!(
+                    &**source,
+                    RenderError::PositionalChannelUnbound { mark: Mark::Point, unbound, .. }
+                        if unbound.as_slice() == ["y"]
+                )
+        ),
+        "expected PositionalChannelUnbound{{mark: Point, unbound: [\"y\"], ..}} on layer 0, got {err:?}"
+    );
+    assert_eq!(
+        format!("{err}"),
+        "layer 0: mark_point needs both positional channels, but nothing binds 'y'. Encode 'y' \
+         on the chart to draw it, or draw from 'x' alone with mark_tick() or mark_rule()."
+    );
 }
 
 // --- A chart-level channel reaches a layer only on the chart's data, from the authored encoding ---
@@ -7648,10 +8533,19 @@ fn resolve_against(
     .map(|_| ())
 }
 
-fn assert_point_layer_refused(result: Result<(), RenderError>, channel: &str) {
+fn assert_point_layer_refused(result: Result<(), RenderError>, channel: &'static str) {
+    use crate::spec::mark::Mark;
     match result {
-        Err(RenderError::LayerMissingPositionalChannel { layer, mark, channel: refused, .. }) => {
-            assert_eq!((layer, mark, refused), (1, "point", channel));
+        Err(RenderError::InLayer { layer: Some(1), entry, source }) => {
+            assert_eq!(entry.as_str(), "mark_point");
+            assert!(
+                matches!(
+                    *source,
+                    RenderError::PositionalChannelUnbound { mark: Mark::Point, ref sibling_bound, .. }
+                        if sibling_bound.as_slice() == [channel]
+                ),
+                "expected layer 1 refused for a sibling-bound missing {channel}, got {source:?}"
+            );
         }
         other => panic!("expected layer 1 refused for a missing {channel}, got {other:?}"),
     }
@@ -8546,12 +9440,14 @@ fn a_geoshape_layer_needs_no_position_channel() {
             r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"a"}},"y":{{"field":"b"}}}},"layers":[{{"mark":"point","encoding":{{"x":{{"field":"a"}},"y":{{"field":"b"}}}}}},{{"mark":"{mark}","encoding":{{}},"data_source":"shapes"}}]}}"#
         )
     };
+    let both_bound = BoundAxes { x: true, y: true };
     let geoshape: ChartSpec = serde_json::from_str(&json("geoshape")).expect("valid spec");
-    assert!(validate_drawing_layers_can_plot(&geoshape, &geoshape.encoding).is_ok());
+    assert!(validate_drawing_layers_can_plot(&geoshape, &geoshape.encoding, both_bound, both_bound).is_ok());
     let point: ChartSpec = serde_json::from_str(&json("point")).expect("valid spec");
     assert!(matches!(
-        validate_drawing_layers_can_plot(&point, &point.encoding),
-        Err(RenderError::LayerMissingPositionalChannel { layer: 1, .. })
+        validate_drawing_layers_can_plot(&point, &point.encoding, both_bound, both_bound),
+        Err(RenderError::InLayer { layer: Some(1), source, .. })
+            if matches!(*source, RenderError::PositionalChannelUnbound { ref sibling_bound, .. } if !sibling_bound.is_empty())
     ));
 }
 

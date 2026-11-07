@@ -93,7 +93,10 @@ use super::composite::{
 };
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
-use super::scale_resolve::{Channel, ColorScale, ConfiguredAuxiliary, LeafScaleContext, MemberChannels, OverlayAuxiliary, OverlayMembership};
+use super::scale_resolve::{
+    refuse_unreached_overlay_member, Channel, ColorScale, ConfiguredAuxiliary, LeafScaleContext, MemberChannels,
+    OverlayAuxiliary, OverlayMembership,
+};
 use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::axis::AlignAxis;
@@ -536,6 +539,19 @@ pub(crate) fn render_composite_scene(
             None => source,
         },
     };
+    // Before any leaf is prepared: the same reachability question
+    // `scale_resolve::validate_drawing_layers_can_plot` asks of a
+    // merged-flat chart's layers, asked here of a static all-leaf `Overlay`
+    // group's own members, so a bare `fm.layer(...)` / `LayerChart` refuses
+    // exactly as `chart + chart` / `.interactive()` do. Pass one's own
+    // per-leaf validator (just below) sees only each member's own bindings
+    // (`OverlayAuxiliary::unresolved`'s placeholder context carries no group
+    // facts yet), so without this pre-pass a member whose channel a SIBLING
+    // MEMBER binds would be told "nothing binds" it instead of the
+    // truthful sibling-binds refusal.
+    if let Some((i, err)) = overlay_unreached_channel_refusal(leaves, &overlay_groups_aux) {
+        return Err(leaf_refusal(i, err));
+    }
     // `#172`(1): a non-leader overlay member whose own coord declares a
     // panel-scoped property refuses before any layout runs, the same
     // question `scene_build::unplaceable_layer_coord` asks of a merged-flat
@@ -1239,6 +1255,26 @@ fn overlay_layer_indices(groups: &[Option<usize>]) -> Vec<Option<usize>> {
             None => (groups.get(i + 1) == Some(&Some(i))).then_some(0),
         })
         .collect()
+}
+
+/// Before any leaf is prepared, asks of each static all-leaf `Overlay`
+/// group's own members (`overlay_groups_aux`, [`overlay_auxiliary_groups`])
+/// the reachability question [`refuse_unreached_overlay_member`] answers:
+/// can every painting mark reach the positional channels it needs, given
+/// what every OTHER member in the SAME group binds. Shaped like
+/// [`overlay_panel_scoped_coord_refusal`] beside it — one pre-pass per
+/// group-wide fact a static overlay's own pass-one leaf validator cannot see
+/// on its own. Maps a member's refusal at position `m` within its group to
+/// leaf `group.members.start + m`, the leaf index `leaf_refusal` numbers.
+fn overlay_unreached_channel_refusal(
+    leaves: &[CompositeLeafInput<'_>],
+    overlay_groups_aux: &[OverlayGroupPlan],
+) -> Option<(usize, RenderError)> {
+    overlay_groups_aux.iter().find_map(|group| {
+        let members: Vec<&ChartSpec> = leaves[group.members.clone()].iter().map(|leaf| leaf.spec).collect();
+        let (position, err) = refuse_unreached_overlay_member(&members).err()?;
+        Some((group.members.start + position, err))
+    })
 }
 
 /// `#172`(1): the first leaf that is a non-leader member of an all-leaf
@@ -7771,6 +7807,236 @@ mod tests {
         assert!(
             !msg.contains("mark_point"),
             "the synthetic entry must never leak into the figure voice: {msg}"
+        );
+    }
+
+    /// Before any leaf is prepared, a static all-leaf `Overlay` group
+    /// reads every member's own bindings, so a member whose channel a
+    /// SIBLING MEMBER binds is refused the way `chart + chart` /
+    /// `.interactive()` already refuse the identical pair, rather than its
+    /// own pass-one leaf validator — which sees only its own bindings —
+    /// answering "nothing binds" a channel that does in fact resolve.
+    #[test]
+    fn overlay_member_whose_channel_a_sibling_member_binds_is_refused_like_plus() {
+        let px = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pxy = scatter_spec();
+        let tree = overlay_tree(px.clone(), pxy.clone());
+        let h0 = LeafHold { spec: px, ..hold() };
+        let h1 = LeafHold { spec: pxy, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("a member whose y a sibling member binds must refuse, not say nothing binds it");
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #0: layer 0: mark_point needs both \
+             positional channels, but no 'y' encoding reaches it — a sibling layer binds 'y', \
+             which resolves the axis but leaves mark_point with nothing to plot. Encode 'y' on \
+             this layer, or on the chart, to draw it."
+        );
+    }
+
+    /// The control the test above must not regress: when NO member binds
+    /// the channel either, the static route keeps its (already truthful)
+    /// "nothing binds" text — unchanged by the group-wide reachability
+    /// pre-pass, since there is genuinely no sibling to name.
+    #[test]
+    fn overlay_member_with_a_channel_no_member_binds_names_it_unbound() {
+        let px = || ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tree = overlay_tree(px(), px());
+        let h0 = LeafHold { spec: px(), ..hold() };
+        let h1 = LeafHold { spec: px(), ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+            .expect_err("two x-only members with no y bound anywhere must still refuse");
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #0: layer 0: mark_point needs both \
+             positional channels, but nothing binds 'y'. Encode 'y' on the chart to draw it, \
+             or draw from 'x' alone with mark_tick() or mark_rule()."
+        );
+    }
+
+    /// A layered member's OWN per-layer reachability is unaffected by the
+    /// group-wide pre-pass in the two ways it can differ: row 1 (unchanged
+    /// control) is a member whose layer 0 already reaches `y` through its
+    /// OWN sibling layer, with no help from the group at all; row 2 (fixed)
+    /// is a member whose OWN layers bind no `y` anywhere, so only the
+    /// OTHER member's binding can name the sibling — which the pre-group
+    /// pass (not member 0's own per-layer loop) is what makes visible.
+    #[test]
+    fn overlay_layered_member_reaching_a_channel_only_a_sibling_binds_is_refused() {
+        let px_layer = crate::spec::layer::Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pxy_layer =
+            crate::spec::layer::Layer { mark: Mark::Point, encoding: scatter_spec().encoding, ..Default::default() };
+
+        // Row 1: member 0 reaches y through its OWN second layer.
+        let member0_own_sibling =
+            ChartSpec { mark: Mark::Point, layers: Some(vec![px_layer.clone(), pxy_layer]), ..Default::default() };
+        let tree = overlay_tree(member0_own_sibling.clone(), scatter_spec());
+        let h0 = LeafHold { spec: member0_own_sibling, ..hold() };
+        let h1 = LeafHold { spec: scatter_spec(), ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect_err(
+            "member 0's own layer 0 still cannot reach y itself, even though a sibling LAYER \
+             within the same member binds it",
+        );
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #0: layer 0: mark_point needs both \
+             positional channels, but no 'y' encoding reaches it — a sibling layer binds 'y', \
+             which resolves the axis but leaves mark_point with nothing to plot. Encode 'y' on \
+             this layer, or on the chart, to draw it."
+        );
+
+        // Row 2: member 0's own layers bind no y at all; only the OTHER
+        // member does.
+        let member0_no_y =
+            ChartSpec { mark: Mark::Point, layers: Some(vec![px_layer.clone(), px_layer]), ..Default::default() };
+        let tree = overlay_tree(member0_no_y.clone(), scatter_spec());
+        let h0 = LeafHold { spec: member0_no_y, ..hold() };
+        let h1 = LeafHold { spec: scatter_spec(), ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect_err(
+            "member 0's layers bind no y anywhere; only a SIBLING MEMBER does, so this must \
+             name the sibling binding, not say nothing binds it",
+        );
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #0: layer 0: mark_point needs both \
+             positional channels, but no 'y' encoding reaches it — a sibling layer binds 'y', \
+             which resolves the axis but leaves mark_point with nothing to plot. Encode 'y' on \
+             this layer, or on the chart, to draw it."
+        );
+    }
+
+    /// Regression for the group-wide pre-pass reading a member's already
+    /// FLIPPED view back into `validate_drawing_layers_can_plot`'s
+    /// `chart_encoding` argument instead of the member's own authored
+    /// encoding: a layer's own encoding is still authored at the point it is
+    /// merged, so the merge must start from an equally authored chart
+    /// encoding and let the layer's own `coord_flipped` check apply the one
+    /// flip the merged result gets. Starting from the already-flipped view
+    /// instead double-flips whatever a layer inherits from the chart —
+    /// `mark_tick().encode(x=...)` flipped, with a second `mark_line`
+    /// layer supplying `y`, must keep rendering the way `chart + chart`
+    /// already does for the same pair.
+    #[test]
+    fn overlay_flipped_layered_member_inheriting_one_channel_from_the_chart_renders() {
+        let tick_layer0 = crate::spec::layer::Layer { mark: Mark::Tick, ..Default::default() };
+        let line_layer1 = crate::spec::layer::Layer {
+            mark: Mark::Line,
+            encoding: Encoding { y: Some(EncodingSpec { field: "y".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let flipped_member = ChartSpec {
+            mark: Mark::Tick,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+            layers: Some(vec![tick_layer0, line_layer1]),
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            ..Default::default()
+        };
+        let point = scatter_spec();
+        let tree = overlay_tree(flipped_member.clone(), point.clone());
+        let h0 = LeafHold { spec: flipped_member, ..hold() };
+        let h1 = LeafHold { spec: point, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect(
+            "a CoordFlip member's chart-level x binding must merge with its own second layer's \
+             y binding without being double-flipped",
+        );
+    }
+
+    /// A FLAT (unlayered) member never reads `chart_encoding` at all —
+    /// `validate_drawing_layers_can_plot` delegates straight to
+    /// `validate_flat_mark_can_plot` when `spec.layers` is `None` — so a
+    /// flipped flat member missing the channel a SIBLING MEMBER binds must
+    /// still name the sibling, not "nothing binds", regardless of which
+    /// encoding the layered branch above reads.
+    #[test]
+    fn overlay_flipped_flat_member_missing_a_channel_a_sibling_binds_names_the_sibling() {
+        let flipped_flat = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            ..Default::default()
+        };
+        let point = scatter_spec();
+        let tree = overlay_tree(flipped_flat.clone(), point.clone());
+        let h0 = LeafHold { spec: flipped_flat, ..hold() };
+        let h1 = LeafHold { spec: point, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect_err(
+            "member 0's own x binding resolves into the y slot under CoordFlip, leaving the x \
+             slot unreached; member 1 binds it, so this must name the sibling binding",
+        );
+        assert_eq!(
+            err.to_string(),
+            "failed to render composite leaf leaf #0: layer 0: mark_point needs both \
+             positional channels, but no 'y' encoding reaches it — a sibling layer binds 'y', \
+             which resolves the axis but leaves mark_point with nothing to plot. Encode 'y' on \
+             this layer, or on the chart, to draw it."
+        );
+    }
+
+    /// A non-leader member that both declares a panel-scoped coord AND
+    /// cannot reach a sibling-bound channel refuses on the channel first —
+    /// the new pre-pass runs before `overlay_panel_scoped_coord_refusal`,
+    /// matching the merged route, where prepare's scale resolution refuses
+    /// before `build_scene`'s coord gate.
+    #[test]
+    fn overlay_unreached_channel_refuses_before_the_panel_scoped_coord_gate() {
+        let mut member1 = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        member1.coord = Some(crate::spec::coord::CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        let tree = overlay_tree(scatter_spec(), member1.clone());
+        let h0 = hold();
+        let h1 = LeafHold { spec: member1, ..hold() };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).expect_err(
+            "a member that both declares a panel-scoped coord and cannot reach a sibling-bound \
+             channel must refuse on the channel first, as the merged route does",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no 'y' encoding reaches it"),
+            "the unreached-channel refusal must fire before the panel-scoped coord gate: {msg}"
+        );
+        assert!(
+            !msg.contains("CoordFixed"),
+            "the coord refusal must not fire once the channel refusal already has: {msg}"
         );
     }
 

@@ -284,6 +284,70 @@ pub enum ScaleDomainSurface {
     AxisConfig,
 }
 
+/// What a painting mark needs to draw, the fact
+/// [`scale_resolve::positional_need`](crate::render::scale_resolve::positional_need)
+/// derives per mark and coord, and [`RenderError::PositionalChannelUnbound`]
+/// voices: most marks need both positional channels; `Tick`/`Rule` need
+/// either one; `Arc`/`Text` under a `CoordPolar` need only the theta channel
+/// (the radius channel is optional and never named).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PositionalNeed {
+    Both,
+    EitherAxis,
+    Theta,
+}
+
+/// How [`RenderError::PositionalChannelUnbound`] names a RESOLVED positional
+/// channel token (`"x"`/`"y"`) in its `Display`: under a Cartesian coord
+/// (including `CoordFlip`), the resolved token is un-flipped back to what the
+/// user wrote, through [`prepare::user_facing_channel`]; under `CoordPolar`,
+/// the coord's own theta channel is named `"theta"` and the other `"radius"`
+/// — the vocabulary the caller actually wrote (`theta=`/`radius=`), since
+/// Python lowers those to the `x`/`y` encoding slots this token names.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ChannelNaming {
+    Cartesian { flipped: bool },
+    Polar { theta: &'static str },
+}
+
+impl ChannelNaming {
+    pub(crate) fn of(coord: Option<&crate::spec::coord::CoordKind>) -> Self {
+        match coord {
+            Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => Self::Polar {
+                theta: match theta {
+                    ferrum_scene::PolarThetaChannel::X => "x",
+                    ferrum_scene::PolarThetaChannel::Y => "y",
+                },
+            },
+            _ => Self::Cartesian { flipped: crate::spec::coord::flips_positional_channels(coord) },
+        }
+    }
+
+    pub(crate) fn name(self, token: &'static str) -> &'static str {
+        match self {
+            Self::Cartesian { flipped } => prepare::user_facing_channel(token, flipped),
+            Self::Polar { theta } => if token == theta { "theta" } else { "radius" },
+        }
+    }
+
+    /// The two RESOLVED tokens, in the order that naming each through
+    /// [`Self::name`] produces canonical DISPLAY order — `x` before `y`
+    /// under Cartesian, `theta` before `radius` under Polar — regardless of
+    /// `CoordFlip`: under a flip, the resolved `y` slot is the user's `x`,
+    /// so it is the resolved token listed first. A multi-channel message
+    /// (naming two channels in one sentence) iterates this order rather
+    /// than the fixed resolved `["x", "y"]` order, so the DISPLAYED names
+    /// read in the order the caller actually wrote them, not the order the
+    /// resolved slots happen to sit in.
+    fn display_order(self) -> [&'static str; 2] {
+        match self {
+            Self::Cartesian { flipped: false } => ["x", "y"],
+            Self::Cartesian { flipped: true } => ["y", "x"],
+            Self::Polar { theta } => [theta, if theta == "x" { "y" } else { "x" }],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
@@ -570,9 +634,10 @@ pub enum RenderError {
     ///   that share one constructor (`marks::arc::requires_polar_coord`), so
     ///   the wording can never drift between them —
     ///   `scale_resolve::resolve_scales_with_leaf_context` raises it first,
-    ///   ahead of the generic `EncodingTypeMismatch` fallthrough (`mark_arc`
-    ///   without `.coord(fm.CoordPolar(...))` used to surface `encoding 'y'
-    ///   expected EncodingSpec, got None`, which names the wrong problem),
+    ///   ahead of the generic positional-channel fallthrough (absent this
+    ///   guard, `mark_arc` without `.coord(fm.CoordPolar(...))` would
+    ///   surface `encoding 'y' expected EncodingSpec, got None`, which names
+    ///   the wrong problem),
     ///   and `marks::arc::build`'s own non-Polar arm raises it again as a
     ///   path-independent backstop — a merged-flat `LayerChart` layer (e.g.
     ///   `LayerChart(bar, arc).interactive()`, or
@@ -768,44 +833,67 @@ pub enum RenderError {
         remedy: Option<MissingColumnRemedy>,
         independent_y: bool,
     },
-    /// A layer whose mark DRAWS and needs both positional channels has no
-    /// binding for one of them — neither on its own encoding nor on the chart
-    /// encoding it inherits (wave 4 T6).
+    /// A painting mark — a layer of a layered spec, or a flat spec's own
+    /// mark — cannot reach a positional channel its own need
+    /// ([`PositionalNeed`]) demands. One variant answers two distinct facts
+    /// about why: `unbound` names a channel NOTHING in the spec binds — the
+    /// chokepoint's generic positional check has no other channel to name,
+    /// so a bare `Display` of that fact alone (without this variant) would
+    /// be the wire-type text `encoding 'y' expected EncodingSpec, got
+    /// None`, which names the wrong problem the same way
+    /// [`Self::MarkRequiresCoord`]'s doc comment describes for `mark_arc`;
+    /// `sibling_bound` names a channel that DOES resolve — a sibling layer,
+    /// an overlay member or the chart binds it — but not anywhere this mark
+    /// can reach it (the case `scale_resolve::positional_binding`'s layer
+    /// fallback created: an axis can resolve from a LATER layer while an
+    /// earlier drawing layer still has no field to plot on it, which left
+    /// unrefused would be a typed refusal silently becoming an empty render,
+    /// the same class [`Self::LayerUnknownColumn`] exists to stop, arriving
+    /// by a different road). A mark can be unreachable on both channels at
+    /// once, by either reason or a mix of both — `unbound` and
+    /// `sibling_bound` are not mutually exclusive across the pair, and every
+    /// channel this mark cannot reach appears in exactly one of them.
     ///
-    /// The sibling of [`Self::EncodingTypeMismatch`], one level down. That one
-    /// says "nothing in this spec binds this channel"; this one says "the
-    /// channel IS bound, but not anywhere this layer can reach". The
-    /// distinction became reachable when `scale_resolve::positional_binding`
-    /// started sourcing an unbound axis from a later layer: the axis resolves,
-    /// so the generic path stops erroring, but a sibling layer that needed a
-    /// FIELD (not just a scale) has nothing to plot and its mark builder
-    /// returns an empty batch — the same `.ok()`-swallowing silent drop
-    /// [`Self::LayerUnknownColumn`] was written to stop, arriving by a
-    /// different road.
+    /// [`scale_resolve::unreached_refusal`] is the one place that decides
+    /// the split, for a layered spec's own layers, a flat spec's own mark,
+    /// and the generic positional check's residual case (reached only when
+    /// no layer paints at all — every painting mark already cleared the
+    /// validator above).
     ///
-    /// Inheritance is deliberately judged against the chart encoding only, NOT
-    /// against `positional_binding`'s fallback. That is exactly what separates
-    /// the two orderings of the same pair: in `mark_line(x=,y=) +
-    /// mark_point(x=)` the line is layer 0, so the merge puts its `y` FIELD
-    /// into the chart encoding and the point inherits a real column to plot
-    /// (measured: 3 circles, unchanged). In `mark_point(x=) +
-    /// mark_line(x=,y=)` the fallback resolves a y SCALE from the line layer
-    /// but no `y` field ever reaches the chart encoding, so the point has
-    /// nothing — measured pre-guard as a render with 0 circles and no warning.
+    /// `mark` is the mark that needs it. `need` is what that mark needs
+    /// ([`PositionalNeed`]) — most marks need both positional channels,
+    /// `Tick`/`Rule` need either one, and `Arc`/`Text` under `CoordPolar`
+    /// need only the theta channel — so the `Display` text states what the
+    /// mark actually needs and offers a remedy that runs, rather than one
+    /// sentence written for every mark regardless of what it draws. `naming`
+    /// ([`ChannelNaming`]) says how to name a resolved token: un-flipped
+    /// Cartesian `x`/`y`, or `theta`/`radius` under `CoordPolar`.
     ///
-    /// Whether the fallback SHOULD also make the field inheritable (which
-    /// would render both orderings as 3 circles) is an open rendering-semantics
-    /// question, deliberately not decided here; refusing is the conservative
-    /// answer and leaves that door open behind a message that names the layer.
+    /// Every producer wraps this in [`Self::InLayer`], so a flat chart
+    /// speaks as `ChartSpec.entry` when set, else `mark_{mark}`, and a layer
+    /// speaks as its own entry, the chart's, or `mark_{mark}`, named by its
+    /// index — `in_layer_context(public_layer(...), &layer_entry(...))`,
+    /// same as [`Self::LayerCoordUnplaceable`] ([`prepare::layer_entry`]
+    /// falls back the same way whether or not `spec.layers` is set). The
+    /// generic positional check's residual construction is the one
+    /// exception: it names no real layer, so it reads layer 0's own entry
+    /// through [`prepare::layer_entry`] (which falls back to the chart's
+    /// `entry`, then `mark_{mark}`) and wraps with
+    /// `in_layer_context(None, ...)` rather than asking `public_layer` to
+    /// guess an index. Reaching
+    /// `Display` bare only happens for a hand-built or test-constructed
+    /// value — see the fallback arm on [`Self::fmt_as`].
     ///
-    /// `channel` is the RESOLVED (post-`CoordFlip`) token; `coord_flipped` (R3)
-    /// is the `Display`-time un-flip back to what the user wrote, set at the one
-    /// construction site (`scale_resolve::validate_drawing_layers_can_plot`).
-    LayerMissingPositionalChannel {
-        layer: usize,
-        mark: &'static str,
-        channel: &'static str,
-        coord_flipped: bool,
+    /// `unbound`/`sibling_bound` carry RESOLVED (post-`CoordFlip`) tokens, in
+    /// canonical `x`-before-`y` order; `naming` is the `Display`-time naming
+    /// for them, set at each construction site from the entity's own
+    /// effective coord.
+    PositionalChannelUnbound {
+        mark: crate::spec::mark::Mark,
+        need: PositionalNeed,
+        unbound: Vec<&'static str>,
+        sibling_bound: Vec<&'static str>,
+        naming: ChannelNaming,
     },
     /// An explicit color-range entry (an encoding's `scale.range=[...]`, a
     /// `Gradient([...])`'s stops, a discretizing `bucket_colors`, or a
@@ -1271,12 +1359,14 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // as `EncodingTypeMismatch` and friends above, so this boundary must
         // leave it alone rather than overwrite it.
         | RenderError::LayerUnknownColumn { .. }
-        // Wave 4 T6: same discipline as `LayerUnknownColumn` directly above —
-        // carries `coord_flipped`, set at its own single construction site
-        // (`scale_resolve::validate_drawing_layers_can_plot`, which derives it
-        // from `spec.coord` exactly as the `EncodingTypeMismatch` beside it
-        // does), so this boundary must leave it alone rather than overwrite it.
-        | RenderError::LayerMissingPositionalChannel { .. }
+        // Carries `naming` ([`ChannelNaming`]), set at each of this
+        // variant's construction sites (`scale_resolve::unreached_refusal`,
+        // called for a layer, a flat spec's own mark, and the generic
+        // positional check's residual case) from that entity's own
+        // effective coord via `ChannelNaming::of` — the naming already
+        // states whether and how to un-flip, so this boundary has nothing
+        // to correct.
+        | RenderError::PositionalChannelUnbound { .. }
         // Carries `coord_flipped`. The `Scale`-surface construction
         // (`scale_resolve::positional::validate_explicit_continuous_shape`)
         // is constructed `false` and corrected to the real flip flag by the
@@ -1284,8 +1374,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // (`scale_resolve::positional::build_axis_scale`'s `map_err` around
         // its `build_from_scale_spec` call, the one place every error this
         // returns is a `scale=` dict's own refusal) — same discipline as
-        // `LayerUnknownColumn`/`LayerMissingPositionalChannel` above, so this
-        // boundary must leave it alone rather than overwrite it. The sibling
+        // `LayerUnknownColumn` above, so this boundary must leave it alone
+        // rather than overwrite it. The sibling
         // `AxisConfig`-surface construction inside `apply_axis_domain_config`
         // (the config-path backstop) resolves `false` directly and is never
         // corrected, like the chart-level `TimeFormatOnNonTemporalScale`
@@ -1571,6 +1661,11 @@ impl std::fmt::Display for RenderError {
             // `prepare::voiced_layer` gives an entry it never saw.
             Self::LayerCoordUnplaceable { mark, .. } =>
                 self.fmt_as(&format!("mark_{}", mark.as_str()), f),
+            // Every producer wraps this in `InLayer` too, for the same
+            // reason and with the same neutral default — see the field doc
+            // on `Self::PositionalChannelUnbound`.
+            Self::PositionalChannelUnbound { mark, .. } =>
+                self.fmt_as(&format!("mark_{}", mark.as_str()), f),
             Self::LayerAxisColumnUnplaceable { layer, detail } => {
                 let LayerAxisColumnDetail { channel, field, dtype } = &**detail;
                 write!(
@@ -1638,16 +1733,6 @@ impl std::fmt::Display for RenderError {
                          chart with fm.LayerChart(base, other, resolve={{\"y\": \"independent\"}})"
                     ),
                 }
-            }
-            Self::LayerMissingPositionalChannel { layer, mark, channel, coord_flipped } => {
-                let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                write!(
-                    f,
-                    "layer {layer}: mark_{mark} needs both positional channels, but no \
-                     '{channel}' encoding reaches it — a sibling layer binds '{channel}', \
-                     which resolves the axis but leaves mark_{mark} with nothing to plot. \
-                     Encode '{channel}' on this layer, or on the chart, to draw it."
-                )
             }
             Self::ColorRangeParseFailure { entry } => write!(
                 f,
@@ -1848,6 +1933,100 @@ fn mark_size_not_drawn_reason(mark: crate::spec::mark::Mark, value: f64) -> Stri
     reason
 }
 
+/// The `Display` text [`RenderError::PositionalChannelUnbound`] writes,
+/// voiced as `entry`: one sentence built from what the mark needs (`need`),
+/// which resolved channels it cannot reach at all (`unbound`), and which it
+/// cannot reach despite a sibling binding them (`sibling_bound`) — every
+/// channel this mark cannot reach appears in exactly one of the two lists.
+/// `naming` renders each RESOLVED token (un-flipped Cartesian, or
+/// `theta`/`radius` under `CoordPolar`). Canonical `x`-before-`y` order is
+/// kept throughout, so a caller always reads `'x' ... 'y'`, never the
+/// reverse.
+fn positional_channel_unbound_text(
+    entry: &str,
+    need: PositionalNeed,
+    unbound: &[&'static str],
+    sibling_bound: &[&'static str],
+    naming: ChannelNaming,
+) -> String {
+    // The RESOLVED-token order that produces DISPLAY order (x-before-y,
+    // theta-before-radius) once named — never the fixed resolved `["x",
+    // "y"]` order, which would read backwards under `CoordFlip`.
+    let canonical = naming.display_order();
+    let name = |token: &'static str| naming.name(token);
+    let quoted_joined = |tokens: &[&'static str], sep: &str| -> String {
+        canonical
+            .iter()
+            .filter(|t| tokens.contains(t))
+            .map(|t| format!("'{}'", name(t)))
+            .collect::<Vec<_>>()
+            .join(sep)
+    };
+    let need_clause = match need {
+        PositionalNeed::Both => "needs both positional channels",
+        PositionalNeed::EitherAxis => "needs one positional channel",
+        PositionalNeed::Theta => "needs a 'theta' channel",
+    };
+    // The remedy's own conjunction: every unreached channel the caller must
+    // encode to clear this refusal, regardless of which list it came from.
+    let need_joiner = match need {
+        PositionalNeed::Both => " and ",
+        PositionalNeed::EitherAxis => " or ",
+        PositionalNeed::Theta => "",
+    };
+    let unreached: Vec<&'static str> = canonical
+        .into_iter()
+        .filter(|t| unbound.contains(t) || sibling_bound.contains(t))
+        .collect();
+    let remedy_list = unreached.iter().map(|t| format!("'{}'", name(t))).collect::<Vec<_>>().join(need_joiner);
+
+    if sibling_bound.is_empty() {
+        // The one case with a special single-axis alternative — only when
+        // the mark needs BOTH channels and exactly one is unbound does
+        // "draw from the other alone with mark_tick()/mark_rule()" apply.
+        if need == PositionalNeed::Both && unbound.len() == 1 {
+            let missing = unbound[0];
+            let other = if missing == "x" { "y" } else { "x" };
+            let (m, o) = (name(missing), name(other));
+            return format!(
+                "{entry} {need_clause}, but nothing binds '{m}'. Encode '{m}' on the chart to \
+                 draw it, or draw from '{o}' alone with mark_tick() or mark_rule()."
+            );
+        }
+        let nothing_binds = quoted_joined(unbound, " or ");
+        let verb = if need == PositionalNeed::Both && unbound.len() > 1 { "them" } else { "it" };
+        let tail = if need == PositionalNeed::Both && unbound.len() > 1 {
+            ", or draw from one axis alone with mark_tick() or mark_rule()."
+        } else {
+            "."
+        };
+        format!(
+            "{entry} {need_clause}, but nothing binds {nothing_binds}. Encode {remedy_list} on \
+             the chart to draw {verb}{tail}"
+        )
+    } else {
+        let sibling_or = quoted_joined(sibling_bound, " or ");
+        let sibling_and = quoted_joined(sibling_bound, " and ");
+        let axis_word = if sibling_bound.len() > 1 { "the axes" } else { "the axis" };
+        if unbound.is_empty() {
+            format!(
+                "{entry} {need_clause}, but no {sibling_or} encoding reaches it — a sibling \
+                 layer binds {sibling_and}, which resolves {axis_word} but leaves {entry} with \
+                 nothing to plot. Encode {remedy_list} on this layer, or on the chart, to draw \
+                 it."
+            )
+        } else {
+            let nothing_binds = quoted_joined(unbound, " or ");
+            format!(
+                "{entry} {need_clause}, but nothing binds {nothing_binds}, and no {sibling_or} \
+                 encoding reaches it — a sibling layer binds {sibling_and}, which resolves \
+                 {axis_word} but leaves {entry} with nothing to plot. Encode {remedy_list} on \
+                 this layer, or on the chart, to draw it."
+            )
+        }
+    }
+}
+
 impl RenderError {
     /// Write this refusal voiced as `entry`, the public call the caller
     /// invoked. A refusal whose sentence is built around the call names it in
@@ -1907,6 +2086,9 @@ impl RenderError {
                 ),
             },
             Self::MarkRequiresCoord { required, .. } => write!(f, "{entry} requires a {required} coord"),
+            Self::PositionalChannelUnbound { need, unbound, sibling_bound, naming, .. } => {
+                f.write_str(&positional_channel_unbound_text(entry, *need, unbound, sibling_bound, *naming))
+            }
             // One frame, two reasons (see `LayerCoordUnplaceableReason`): the
             // "cannot be placed on one of them" spine and the closing
             // instruction are shared verbatim, so a caller cannot tell which

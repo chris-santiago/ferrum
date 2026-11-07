@@ -164,8 +164,14 @@ def test_layered_points_without_any_y_binding_still_refuse() -> None:
     left = fm.Chart(data).mark_point().encode(x="v")
     right = fm.Chart(data).mark_point().encode(x="v")
 
-    with pytest.raises(ValueError, match=r"encoding 'y' expected EncodingSpec"):
+    with pytest.raises(ValueError) as exc_info:
         (left + right).to_svg()
+
+    assert str(exc_info.value) == (
+        "layer 0: mark_point needs both positional channels, but nothing binds 'y'. "
+        "Encode 'y' on the chart to draw it, or draw from 'x' alone "
+        "with mark_tick() or mark_rule()."
+    )
 
 
 def _circle_count(svg: str) -> int:
@@ -184,8 +190,14 @@ def test_one_eligible_mark_does_not_exempt_the_mark_beside_it(mark: str) -> None
     data = pl.DataFrame({"v": _VALUES})
     primary = getattr(fm.Chart(data), f"mark_{mark}")().encode(x="v")
 
-    with pytest.raises(ValueError, match=r"encoding 'y' expected EncodingSpec"):
+    with pytest.raises(ValueError) as exc_info:
         (primary + _rug_chart()).to_svg()
+
+    assert str(exc_info.value) == (
+        f"layer 0: mark_{mark} needs both positional channels, but nothing binds 'y'. "
+        "Encode 'y' on the chart to draw it, or draw from 'x' alone "
+        "with mark_tick() or mark_rule()."
+    )
 
 
 def test_the_refused_shape_would_otherwise_have_dropped_its_marks() -> None:

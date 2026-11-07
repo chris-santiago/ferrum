@@ -67,7 +67,11 @@ def test_flipped_missing_y_encoding_names_user_written_channel():
     with pytest.raises(ValueError) as exc_info:
         chart.to_svg()
 
-    assert str(exc_info.value) == "encoding 'y' expected EncodingSpec, got None"
+    assert str(exc_info.value) == (
+        "mark_point needs both positional channels, but nothing binds 'y'. "
+        "Encode 'y' on the chart to draw it, or draw from 'x' alone "
+        "with mark_tick() or mark_rule()."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +107,11 @@ def test_unflipped_missing_y_encoding_message_unaffected_by_r3_fix():
     with pytest.raises(ValueError) as exc_info:
         chart.to_svg()
 
-    assert str(exc_info.value) == "encoding 'y' expected EncodingSpec, got None"
+    assert str(exc_info.value) == (
+        "mark_point needs both positional channels, but nothing binds 'y'. "
+        "Encode 'y' on the chart to draw it, or draw from 'x' alone "
+        "with mark_tick() or mark_rule()."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +192,9 @@ def test_unflipped_band_dict_padding_names_literal_channel():
     'x' without CoordFlip in the picture -- the un-flip only changes
     flipped-chart text."""
     df = pl.DataFrame({"cat": ["a", "b"], "val": [1.0, 2.0]})
-    chart = fm.Chart(df).mark_bar().encode(x=fm.X("cat", scale={"type": "band", "padding": 5}), y="val")
+    chart = (
+        fm.Chart(df).mark_bar().encode(x=fm.X("cat", scale={"type": "band", "padding": 5}), y="val")
+    )
 
     with pytest.raises(ValueError) as exc_info:
         chart.to_svg()

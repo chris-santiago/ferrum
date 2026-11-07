@@ -2465,18 +2465,50 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     Ok((layer_scales.y, warnings))
 }
 
-/// Whether ONE mark can render with only one positional channel encoded.
+/// What a painting mark needs to draw, derived once per (mark, coord) pair
+/// and read by both [`mark_single_axis_eligible`] (is one channel enough)
+/// and [`unreached_refusal`] (which channels does the refusal name): the one
+/// table [`RenderError::PositionalChannelUnbound`]'s per-mark text and this
+/// eligibility question both read, so a new mark is a compile error here
+/// until its need is stated, and the two can never drift apart.
 ///
-/// Tick: x-only = x-rug, y-only = y-rug.
-/// Rule: y-only = horizontal span, x-only = vertical span.
-/// Arc (pie/donut/coxcomb/sunburst under CoordPolar): the coord's *theta*
-/// channel is mandatory but the *radius* channel is optional — an absent
-/// radius means "full radius", not a missing encoding. Only the coord's theta
-/// axis may be the sole positional channel here; a missing theta channel, or a
-/// non-polar coord, is not single-axis-eligible.
-/// Text under CoordPolar, the same: a label binding theta and no radius sits
-/// at its angle on a ring (`marks::text::polar_label_placement`), so its
-/// absent radius is a placement, not a missing encoding.
+/// Exhaustive over [`crate::spec::mark::Mark`], no wildcard, like
+/// [`crate::spec::mark::Mark::draws_position_channels`]: `Tick`/`Rule` need
+/// either positional channel; `Arc`/`Text` need only the coord's theta
+/// channel under `CoordPolar` (the radius channel is optional — an absent
+/// radius means "full radius", not a missing encoding) and both channels
+/// under any other coord; `Geoshape` draws no position channel at all;
+/// every other mark needs both.
+fn positional_need(
+    mark: crate::spec::mark::Mark,
+    coord: Option<&crate::spec::coord::CoordKind>,
+) -> Option<crate::render::PositionalNeed> {
+    use crate::render::PositionalNeed;
+    use crate::spec::mark::Mark;
+    match mark {
+        Mark::Tick | Mark::Rule => Some(PositionalNeed::EitherAxis),
+        Mark::Arc | Mark::Text => {
+            if matches!(coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+                Some(PositionalNeed::Theta)
+            } else {
+                Some(PositionalNeed::Both)
+            }
+        }
+        Mark::Geoshape => None,
+        Mark::Point | Mark::Line | Mark::Bar | Mark::Area | Mark::Rect | Mark::Polygon
+        | Mark::Image | Mark::Ribbon | Mark::Segment | Mark::Label => Some(PositionalNeed::Both),
+    }
+}
+
+/// Whether ONE mark can render with only one positional channel encoded,
+/// re-expressed through [`positional_need`] so eligibility and the refusal
+/// text can never disagree: `EitherAxis` is always eligible (tick: x-only =
+/// x-rug, y-only = y-rug; rule: y-only = horizontal span, x-only = vertical
+/// span), `Theta` is eligible exactly when the coord's theta channel is
+/// bound (text under `CoordPolar`, the same: a label binding theta and no
+/// radius sits at its angle on a ring,
+/// `marks::text::polar_label_placement`), and `Both` (or no need at all,
+/// `Geoshape`) is never single-axis-eligible.
 ///
 /// `has_x`/`has_y` are the spec-wide bindings from [`positional_binding`], not
 /// `spec.encoding`'s own slots, so a layered arc finds its theta channel
@@ -2492,16 +2524,20 @@ fn mark_single_axis_eligible(
     has_x: bool,
     has_y: bool,
 ) -> bool {
-    match mark {
-        crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule => true,
-        crate::spec::mark::Mark::Arc | crate::spec::mark::Mark::Text => match coord {
+    use crate::render::PositionalNeed;
+    match positional_need(mark, coord) {
+        Some(PositionalNeed::EitherAxis) => true,
+        Some(PositionalNeed::Theta) => match coord {
             Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => match theta {
                 ferrum_scene::PolarThetaChannel::X => has_x,
                 ferrum_scene::PolarThetaChannel::Y => has_y,
             },
+            // Structurally unreachable: `positional_need` answers `Theta`
+            // only when `coord` is already `Some(Polar { .. })`. Kept total
+            // (no panic) rather than re-deriving that guarantee here.
             _ => false,
         },
-        _ => false,
+        Some(PositionalNeed::Both) | None => false,
     }
 }
 
@@ -2620,8 +2656,8 @@ impl PositionalChannel {
 /// merged onto the chart's (`scene_build::resolve_panel_scales`, and `prepare`'s
 /// provisional pass over `layers[0]`). When layer 0 leaves an axis unbound but a
 /// later layer binds it, that axis still has to resolve a real domain: without
-/// the fallback the only outcomes are the `EncodingTypeMismatch` refusal below,
-/// or — for a spec that reached single-axis mode on the strength of a root mark
+/// the fallback the only outcomes are the generic positional-channel refusal
+/// below, or — for a spec that reached single-axis mode on the strength of a root mark
 /// its layers contradict — a fabricated unit scale that squashes the drawing
 /// layer's data into a sliver of the panel.
 ///
@@ -2629,11 +2665,12 @@ impl PositionalChannel {
 /// already spans every layer's data once a channel is bound, so the fallback
 /// only supplies the binding to start from. The change is bounded to specs whose
 /// merged chart+layer-0 encoding leaves a positional channel unbound — a
-/// chart-level or layer-0 binding always wins — which pre-change meant exactly
-/// two outcomes: the synthesized dummy scale, or `EncodingTypeMismatch`. Specs
-/// that resolve through the generic two-axis path are untouched. Specs that
-/// resolved through the single-axis exemption with an axis unbound DO move, by
-/// design: that is the defect being fixed.
+/// chart-level or layer-0 binding always wins — so without this fallback the
+/// only two outcomes would be the synthesized dummy scale, or the generic
+/// positional-channel refusal. Specs that resolve through the generic
+/// two-axis path are untouched. Specs that resolved through the single-axis
+/// exemption with an axis unbound DO move, by design: that is the defect
+/// being fixed.
 ///
 /// **What the fallback does NOT buy.** A resolved axis, not a plottable field.
 /// A sibling layer that draws and needs the channel still has to reach a binding
@@ -2714,29 +2751,101 @@ fn positional_binding<'a>(
     (None, None)
 }
 
-/// Refuse a layer that draws, needs both positional channels, and can reach
-/// neither its own nor the chart's binding for one of them.
+/// Whether a positional channel is bound, for each of `x` and `y`. Private to
+/// `scale_resolve`: the plumbing type [`unreached_refusal`] and its callers
+/// pass between themselves, never exposed past this module —
+/// [`refuse_unreached_overlay_member`] is `pub(in crate::render)`, not the
+/// axes it is asked about.
+#[derive(Debug, Clone, Copy, Default)]
+struct BoundAxes {
+    x: bool,
+    y: bool,
+}
+
+/// The one builder behind every [`RenderError::PositionalChannelUnbound`]:
+/// what `mark` needs ([`positional_need`]), which of those channels `reach`
+/// does not supply, and — for each one — whether `bound` supplies it anyway
+/// (from elsewhere: a sibling layer, an overlay member, or the chart).
+/// `None` when `mark` needs nothing (`Geoshape`) or needs nothing it cannot
+/// reach.
+///
+/// **Unreached channels**, derived from `need`: `Both` gives each of `x`/`y`
+/// not in `reach`; `EitherAxis` gives both when `reach` has neither (one
+/// channel is already enough, so a mark reaching either is satisfied);
+/// `Theta` gives the coord's own theta channel when `reach` does not have
+/// it (the radius channel is never named — an absent radius is a placement,
+/// not a missing encoding). Each unreached channel then goes to
+/// `sibling_bound` when `bound` has it, else to `unbound` — the split
+/// [`RenderError::PositionalChannelUnbound`]'s fields read directly, in
+/// canonical `x`-before-`y` order.
+fn unreached_refusal(
+    mark: crate::spec::mark::Mark,
+    coord: Option<&crate::spec::coord::CoordKind>,
+    reach: BoundAxes,
+    bound: BoundAxes,
+) -> Option<RenderError> {
+    use crate::render::PositionalNeed;
+    let need = positional_need(mark, coord)?;
+    let naming = crate::render::ChannelNaming::of(coord);
+    let unreached: Vec<&'static str> = match need {
+        PositionalNeed::Both => {
+            let mut v = Vec::new();
+            if !reach.x {
+                v.push(PositionalChannel::X.name());
+            }
+            if !reach.y {
+                v.push(PositionalChannel::Y.name());
+            }
+            v
+        }
+        PositionalNeed::EitherAxis => {
+            if reach.x || reach.y {
+                Vec::new()
+            } else {
+                vec![PositionalChannel::X.name(), PositionalChannel::Y.name()]
+            }
+        }
+        PositionalNeed::Theta => {
+            let (theta_token, theta_reached) = match coord {
+                Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => match theta {
+                    ferrum_scene::PolarThetaChannel::X => ("x", reach.x),
+                    ferrum_scene::PolarThetaChannel::Y => ("y", reach.y),
+                },
+                // Structurally unreachable: `positional_need` answers `Theta`
+                // only under `CoordPolar`. Kept total rather than panicking.
+                _ => ("x", true),
+            };
+            if theta_reached { Vec::new() } else { vec![theta_token] }
+        }
+    };
+    if unreached.is_empty() {
+        return None;
+    }
+    let mut unbound = Vec::new();
+    let mut sibling_bound = Vec::new();
+    for channel in unreached {
+        let is_bound = match channel {
+            "x" => bound.x,
+            _ => bound.y,
+        };
+        if is_bound { sibling_bound.push(channel) } else { unbound.push(channel) };
+    }
+    Some(RenderError::PositionalChannelUnbound { mark, need, unbound, sibling_bound, naming })
+}
+
+/// Refuse a painting mark — a layer of a layered spec, or a flat spec's own
+/// mark — that needs a positional channel it cannot reach.
 ///
 /// The third consumer of the same two predicates [`single_axis_eligible`] is
 /// built from, and the completion of the rule it states. That one asks the
 /// question spec-wide, to decide whether a dummy scale may be synthesized; this
-/// asks it per layer, to decide whether each drawing mark actually has what it
+/// asks it per painting mark, to decide whether each one actually has what it
 /// needs. Both defer to [`layer_paints`] for "does this mark draw" and
-/// [`mark_single_axis_eligible`] for "is one channel enough for it".
+/// [`positional_need`] (through [`unreached_refusal`]) for "what does it
+/// need, and does it have enough".
 ///
-/// **Why a per-layer question exists at all.** Before [`positional_binding`]'s
-/// fallback, "some layer needs a channel nothing provides" and "nothing in this
-/// spec binds this channel" were the same condition, and the generic path's
-/// `EncodingTypeMismatch` answered both. The fallback separated them: an axis
-/// can now resolve from a LATER layer while an earlier drawing layer still has
-/// no field to plot on it. Its mark builder then reads a column that is not
-/// there and returns an empty batch — a typed refusal silently becoming an
-/// empty render, which is the class
-/// [`RenderError::LayerUnknownColumn`](crate::render::RenderError::LayerUnknownColumn)
-/// exists to stop, arriving by a different road.
-///
-/// **What counts as "available", and why not the fallback.** What the layer
-/// draws: its completed encoding ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding) over the
+/// **What counts as "available", and why not the fallback.** For a layer:
+/// its completed encoding ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding) over the
 /// authored `chart_encoding`), the one its mark builder draws, in the layer's
 /// coordinate space. A layer with a `data_source` inherits no chart
 /// positional channel, so a chart-level binding never makes one of its axes
@@ -2749,12 +2858,31 @@ fn positional_binding<'a>(
 /// mark_point(x=)` puts the line's `y` field into the chart encoding (it is
 /// layer 0), so the point inherits a real column and keeps drawing its three
 /// circles. `mark_point(x=) + mark_line(x=,y=)` never puts a `y` field anywhere
-/// the point can see, and is refused.
+/// the point can see, and is refused. For a flat spec's own mark: `spec.encoding`
+/// directly — there is no sibling to inherit from (see
+/// [`validate_flat_mark_can_plot`]).
 ///
-/// Runs AFTER the generic path's own `x`/`y` resolution, so the two refusals
-/// stay in their own lanes: "nothing binds this channel" keeps raising the
-/// channel-level `EncodingTypeMismatch` it always did, and this layer-level
-/// refusal fires only for the narrower case the fallback newly created.
+/// **Runs BEFORE the generic path's own `x`/`y` resolution** — ahead of both
+/// the single-axis branch and the unconditional two-axis check at the call
+/// site, settling every painting mark's own reachability in one place
+/// before any axis is synthesized or resolved, so neither lane ever sees
+/// the raw wire-type text. The chokepoint's own generic positional
+/// check still exists as the residual backstop for the one case this
+/// cannot itself decide — no layer paints at all, so there is no mark
+/// for this validator to ask, yet the chokepoint's two-axis path still
+/// needs an answer.
+///
+/// `own` and `bound` are both [`BoundAxes`]: `own` is passed through to
+/// [`validate_flat_mark_can_plot`] unchanged when `spec` has no `layers` (a
+/// flat mark's own reach); `bound` is what [`unreached_refusal`] treats as
+/// bound "elsewhere" when deciding `unbound` vs. `sibling_bound`, for every
+/// layer and the flat-spec delegate alike. The ordinary caller
+/// ([`resolve_scales_with_leaf_context`]) passes `own == bound ==
+/// (has_x, has_y)`: one spec has one set of spec-wide bindings. A static
+/// `LayerChart`/`fm.layer` overlay member ([`refuse_unreached_overlay_member`])
+/// passes its OWN member's bindings as `own` and the GROUP-wide union as
+/// `bound`, so a member is told the truth about a sibling MEMBER's binding,
+/// not just a sibling LAYER's.
 ///
 /// `independent_y` layers need no exemption here: their `y` is bound on their
 /// own encoding by construction (that is how their slot resolves), so they
@@ -2763,18 +2891,19 @@ fn positional_binding<'a>(
 /// **Eligibility is asked of the channels the layer draws.** Unlike
 /// [`single_axis_eligible`], which asks with the spec-wide bindings whether a
 /// synthesized scale may stand in for an absent axis, this asks
-/// [`mark_single_axis_eligible`] with the layer's own drawn `x`/`y`: a polar
+/// [`unreached_refusal`] with the layer's own drawn `x`/`y`: a polar
 /// `Arc` or `Text` layer may go without its radius channel, but only when its
 /// theta channel reaches it. A sibling binding theta resolves the axis, not a
 /// field this layer can plot, so a polar layer no theta reaches is refused
-/// instead of drawing nothing. Called from the single-axis arm as well as the
-/// generic one, since a theta-only polar chart resolves through the former.
+/// instead of drawing nothing.
 fn validate_drawing_layers_can_plot(
     spec: &ChartSpec,
     chart_encoding: &crate::spec::encoding::Encoding,
+    own: BoundAxes,
+    bound: BoundAxes,
 ) -> Result<(), RenderError> {
     let Some(layers) = spec.layers.as_deref() else {
-        return Ok(());
+        return validate_flat_mark_can_plot(spec, own, bound);
     };
     for (index, layer) in layers.iter().enumerate() {
         if !layer_paints(layer) {
@@ -2789,10 +2918,6 @@ fn validate_drawing_layers_can_plot(
         // written to do without.
         let coord = layer.effective_coord(spec.coord.as_ref());
         let coord_flipped = crate::spec::coord::flips_positional_channels(coord);
-        // A mark that draws no position channel (a geoshape) needs neither.
-        if !layer.mark.draws_position_channels() {
-            continue;
-        }
         // What the layer draws: its completed encoding
         // ([`Layer::completed_encoding`](crate::spec::layer::Layer::completed_encoding)), the one its mark builder draws,
         // moved into the resolved channels' space by the layer's own coord.
@@ -2800,24 +2925,99 @@ fn validate_drawing_layers_can_plot(
         if coord_flipped {
             drawn.flip_positional();
         }
-        let (draws_x, draws_y) = (drawn.x.is_some(), drawn.y.is_some());
-        for channel in [PositionalChannel::X, PositionalChannel::Y] {
-            if channel.select(&drawn).0.is_some() {
-                continue;
-            }
-            // One channel is enough for this mark, so the axis it cannot reach
-            // is one its own builder is written to do without — asked of the
-            // channels THIS layer draws, so a polar arc or text that no theta
-            // reaches is refused rather than drawn empty.
-            if mark_single_axis_eligible(layer.mark, coord, draws_x, draws_y) {
-                continue;
-            }
-            return Err(RenderError::LayerMissingPositionalChannel {
-                layer: index,
-                mark: layer.mark.as_str(),
-                channel: channel.name(),
-                coord_flipped,
-            });
+        let reach = BoundAxes { x: drawn.x.is_some(), y: drawn.y.is_some() };
+        if let Some(err) = unreached_refusal(layer.mark, coord, reach, bound) {
+            return Err(err.in_layer_context(
+                crate::render::prepare::public_layer(spec, index, layer.mark),
+                &crate::render::prepare::layer_entry(spec, index, layer.mark),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The flat-spec half of [`validate_drawing_layers_can_plot`]: a spec with no
+/// `layers` has one thing that draws — its own mark — reaching `own`, voiced
+/// through [`RenderError::InLayer`] the same way a layer's is —
+/// `prepare::layer_entry`/`public_layer` already fall back through
+/// `spec.entry` to `mark_{mark}` when `spec.layers` is `None`, so a flat
+/// chart speaks as the call that built it, or as its own mark when nothing
+/// named it.
+fn validate_flat_mark_can_plot(spec: &ChartSpec, own: BoundAxes, bound: BoundAxes) -> Result<(), RenderError> {
+    match unreached_refusal(spec.mark, spec.coord.as_ref(), own, bound) {
+        Some(err) => Err(err.in_layer_context(
+            crate::render::prepare::public_layer(spec, 0, spec.mark),
+            &crate::render::prepare::layer_entry(spec, 0, spec.mark),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Before any leaf of a static all-leaf `Overlay` group (`fm.layer(...)` /
+/// `LayerChart`) is prepared, the same reachability question
+/// [`validate_drawing_layers_can_plot`] asks of a merged-flat chart's layers,
+/// asked of the group's own members: `members`, in member order. Returns the
+/// first member's refusal, paired with its position in `members`, for
+/// [`composite_render::overlay_unreached_channel_refusal`](crate::render::composite_render::overlay_unreached_channel_refusal)
+/// to place on the right leaf — a flat member's refusal is `InLayer{layer:
+/// None, ..}`, which the composite's own `leaf_refusal` numbers by member
+/// position; a layered member's own layers keep their member-local index,
+/// since their `InLayer` already carries one.
+///
+/// **The view each member is read through.** Pass one (before this runs)
+/// never applies Python's chart-level `CoordFlip` swap to a composite
+/// member standalone — that swap is baked into a NORMAL chart's
+/// `spec.encoding` before Rust ever resolves it, but a static member here is
+/// read straight from the composite's own authored tree. So each member's
+/// CHART-LEVEL `encoding` is flipped here, by the member's own chart
+/// `coord`, to reproduce the same shape `validate_drawing_layers_can_plot`
+/// already expects (borrowed when the coord doesn't flip — no clone on the
+/// common case). A member's own LAYERS are untouched: they already
+/// normalize by their own effective coord inside
+/// `validate_drawing_layers_can_plot`'s per-layer loop, the same as a
+/// normal chart's layers do.
+///
+/// **The two `BoundAxes`.** Each member's own `own` is
+/// [`positional_binding`]'s answer over its view — the same fallback a
+/// normal chart's `has_x`/`has_y` uses, so a member that is itself layered
+/// (e.g. `px + pxy`) reads its own layers' fallback too. The group's `bound`
+/// is the OR of every member's `own`: a channel any member binds is bound
+/// "elsewhere" for every other member, which is the one fact a static
+/// overlay's own pass-one leaf validator cannot see (it runs before any
+/// group fact exists).
+pub(in crate::render) fn refuse_unreached_overlay_member(
+    members: &[&ChartSpec],
+) -> Result<(), (usize, RenderError)> {
+    let views: Vec<(Cow<'_, ChartSpec>, BoundAxes)> = members
+        .iter()
+        .map(|member| {
+            let view: Cow<'_, ChartSpec> = if crate::spec::coord::flips_positional_channels(member.coord.as_ref()) {
+                let mut flipped: ChartSpec = (**member).clone();
+                flipped.encoding.flip_positional();
+                Cow::Owned(flipped)
+            } else {
+                Cow::Borrowed(*member)
+            };
+            let (x, _) = positional_binding(&view, PositionalChannel::X);
+            let (y, _) = positional_binding(&view, PositionalChannel::Y);
+            let own = BoundAxes { x: x.is_some(), y: y.is_some() };
+            (view, own)
+        })
+        .collect();
+    let group = views.iter().fold(BoundAxes::default(), |acc, (_, own)| BoundAxes {
+        x: acc.x || own.x,
+        y: acc.y || own.y,
+    });
+    for (position, (view, own)) in views.iter().enumerate() {
+        // The AUTHORED chart encoding, never `view.encoding`: a layer's own
+        // encoding is still authored at this point (only the per-layer
+        // `coord_flipped` check below flips it), so `completed_encoding`
+        // must merge it against an equally-authored chart encoding and let
+        // ONE flip resolve the merged result. Merging against the
+        // already-flipped `view.encoding` double-flips whatever a layer
+        // inherits from the chart, landing it in the wrong slot.
+        if let Err(err) = validate_drawing_layers_can_plot(view, &members[position].encoding, *own, group) {
+            return Err((position, err));
         }
     }
     Ok(())
@@ -2917,11 +3117,11 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
 
     // Arc's geometry (wedge angle + radius) only means anything under
     // CoordPolar (spec §6.4, batch E). Refuse HERE, before the single-axis
-    // eligibility check below falls through to the generic x/y
-    // `EncodingTypeMismatch` — that generic error names a missing 'y'
-    // encoding, which is the wrong diagnosis for "no CoordPolar at all"
-    // (proven at scale_resolve/tests.rs, pre-fix: `mark_arc` under the
-    // default coord surfaced "encoding 'y' expected EncodingSpec, got
+    // eligibility check below falls through to the generic x/y positional
+    // check — that generic check names a missing 'y' encoding, which is the
+    // wrong diagnosis for "no CoordPolar at all" (proven at
+    // scale_resolve/tests.rs: absent this guard, `mark_arc` under the
+    // default coord surfaces "encoding 'y' expected EncodingSpec, got
     // None"). This is the single scale-resolution chokepoint every STANDALONE
     // and composite-leaf render path shares, so raising it here covers all of
     // them ahead of the generic error. It does NOT cover a merged-flat layer
@@ -2965,19 +3165,29 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let has_x = x_enc.is_some();
     let has_y = y_enc.is_some();
 
+    // Settle every painting mark's own channel reachability here, before
+    // any axis is synthesized or resolved — ahead of both the
+    // single-axis branch below and the unconditional two-axis check further
+    // down, so neither lane can reach the generic path's residual check
+    // (which answers only the one case this cannot: no layer paints at all).
+    // One spec has one set of spec-wide bindings, so `own == bound`; a
+    // static composite member asks with its own and the group's instead
+    // (`refuse_unreached_overlay_member`).
+    let spec_wide = BoundAxes { x: has_x, y: has_y };
+    validate_drawing_layers_can_plot(spec, chart_encoding, spec_wide, spec_wide)?;
+
     // Tick, Rule, Arc and polar Text marks support single-axis mode: only x or only y is
     // bound anywhere in the spec, and the mark builder can proceed using just
-    // the present channel. An ineligible spec falls through to the
-    // unconditional x/y check below, which errors as before. Synthesize a dummy
-    // unit scale for the absent axis so the mark builder can access the present
-    // scale without scale_resolve erroring. See [`single_axis_eligible`] for
-    // which marks the question is asked of and why.
+    // the present channel. The validator above already refused a painting
+    // mark that needs both channels and cannot reach one of them; every
+    // other spec reaches this check too, including an ordinary two-channel
+    // mark with both channels bound, so `single_axis_eligible` below is
+    // what actually decides whether either axis may go missing.
+    // Synthesize a dummy unit scale for the absent axis so the mark builder
+    // can access the present scale without scale_resolve erroring. See
+    // [`single_axis_eligible`] for which marks the question is asked of
+    // and why.
     if single_axis_eligible(spec, has_x, has_y) {
-        if x_enc.is_some() != y_enc.is_some() {
-            // The synthesized axis serves the layers that do without it; each
-            // drawing layer still has to reach the channel it cannot.
-            validate_drawing_layers_can_plot(spec, chart_encoding)?;
-        }
         match (x_enc, y_enc) {
             (Some(x_enc), None) => {
                 // The aux (color/size/...) scales resolve BEFORE the
@@ -3019,8 +3229,9 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 ), warnings));
             }
             // Both bound (nothing to synthesize) or neither (nothing to
-            // resolve): fall through to the generic path, which resolves both
-            // axes or raises `EncodingTypeMismatch` exactly as before.
+            // resolve): fall through to the generic path, which resolves
+            // both axes or raises `PositionalChannelUnbound` for the
+            // residual case neither lane above could answer.
             _ => {}
         }
     }
@@ -3032,40 +3243,53 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // pre-flip chart-level `spec.encoding` overlaid by post-flip layer encoding
     // via `Encoding::overlay_from`, which only replaces a channel when the
     // overlay side is `Some` — so a channel absent from BOTH the layer (post-
-    // flip) and the chart level (pre-flip) stays `None` post-merge. With
-    // [`positional_binding`]'s fallback in front of it, this
-    // `EncodingTypeMismatch` branch fires only when NO layer binds the channel
-    // either, i.e. nothing in the whole spec ever named it. Since the channel
-    // was unbound everywhere, `x` vs. `y` in the message is moot (there was
-    // never a user-written channel to name either way) — but that is the ONLY
-    // reason `coord_flipped` derived from `spec.coord` is safe to apply
-    // uniformly here; it is not because `spec.encoding` is always literally the
-    // post-flip encoding. `spec.coord` itself is untouched by the swap either
-    // way, so this derivation needs no new parameter.
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    // flip) and the chart level (pre-flip) stays `None` post-merge.
+    //
     // Phase 8b: paired-channel endpoints (x2/y2) extend the primary axis domain
     // when set, so e.g. ribbons whose y2 lies above y don't render past the
     // resolved range and produce non-finite pixels downstream. Each axis takes
     // its span endpoint from the same encoding its primary binding came from
     // (`positional_binding`, resolved above).
-    let x_enc = x_enc.ok_or(RenderError::EncodingTypeMismatch {
-        channel: PositionalChannel::X.name(),
-        expected: "EncodingSpec",
-        got: "None".into(),
-        coord_flipped,
-    })?;
-    let y_enc = y_enc.ok_or(RenderError::EncodingTypeMismatch {
-        channel: PositionalChannel::Y.name(),
-        expected: "EncodingSpec",
-        got: "None".into(),
-        coord_flipped,
-    })?;
-    // Both axes resolve, but a resolved AXIS is not a plottable field: when the
-    // binding for one came from `positional_binding`'s layer fallback, a sibling
-    // layer that draws may still have nothing to plot on it. Asked here, after
-    // the channel-level check above, so each refusal keeps its own lane — see
-    // `validate_drawing_layers_can_plot`.
-    validate_drawing_layers_can_plot(spec, chart_encoding)?;
+    //
+    // With [`positional_binding`]'s fallback in front of it AND
+    // [`validate_drawing_layers_can_plot`] having already run above, reaching
+    // this branch at all means no layer paints: a painting mark that cannot
+    // reach whichever channel is still `None` here was already refused above,
+    // and the single-axis branch takes the one-bound-axis return whenever a
+    // present painting mark tolerates single-axis mode. Named by LAYER 0's
+    // own mark and effective coord (the chart's own mark and coord when
+    // flat) — never the layered spec's `mark` slot, which is a placeholder
+    // Python fills, not evidence of what any layer draws — and voiced with no
+    // layer index (a chart-wide fact, not one particular layer's), through
+    // `layer_entry`'s own fallback (its layer's entry, the chart's, or
+    // `mark_{mark}`).
+    let (x_enc, y_enc) = match (x_enc, y_enc) {
+        (Some(x_enc), Some(y_enc)) => (x_enc, y_enc),
+        (_, _) => {
+            let (mark, coord) = match spec.layers.as_deref().and_then(|layers| layers.first()) {
+                Some(layer0) => (layer0.mark, layer0.effective_coord(spec.coord.as_ref())),
+                None => (spec.mark, spec.coord.as_ref()),
+            };
+            let unreachable_both = BoundAxes { x: false, y: false };
+            let err = unreached_refusal(mark, coord, unreachable_both, unreachable_both).unwrap_or_else(|| {
+                // `positional_need` answers `None` only for `Geoshape`, so
+                // this fallback is reached only for an invisible `Geoshape`
+                // layer 0 beside other unbound layers — the branch is
+                // reached only because an axis failed to resolve, so
+                // something must still be named: the generic `Both` shape,
+                // naming both channels unbound.
+                RenderError::PositionalChannelUnbound {
+                    mark,
+                    need: crate::render::PositionalNeed::Both,
+                    unbound: vec![PositionalChannel::X.name(), PositionalChannel::Y.name()],
+                    sibling_bound: Vec::new(),
+                    naming: crate::render::ChannelNaming::of(coord),
+                }
+            });
+            let entry = crate::render::prepare::layer_entry(spec, 0, mark);
+            return Err(err.in_layer_context(None, &entry));
+        }
+    };
 
     // Data-aware sort (channel shorthand `"-y"`, sort-field objects) needs both
     // positional field names so an ordinal axis can aggregate the opposite

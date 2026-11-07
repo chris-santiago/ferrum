@@ -2279,8 +2279,8 @@ pub(crate) mod tests {
             }
         }
 
-        /// A polar text layer that no theta reaches refuses with the
-        /// positional remedy instead of drawing nothing, though a sibling arc
+        /// A polar text layer that no theta reaches refuses naming the
+        /// `theta` channel instead of drawing nothing, though a sibling arc
         /// binds theta: here the text reads its own statistic's rows, which
         /// inherit no positional channel.
         #[test]
@@ -2288,7 +2288,13 @@ pub(crate) mod tests {
             let mut json = summed_wire();
             json["layers"][1]["encoding"] = json!({"text": {"field": "g"}});
             let err = svg(&spec(json, 0.0)).unwrap_err().to_string();
-            assert!(err.contains("layer 1: mark_text needs both positional channels"), "{err}");
+            assert!(
+                err.contains(
+                    "layer 1: mark_text needs a 'theta' channel, but no 'theta' encoding \
+                     reaches it"
+                ),
+                "{err}"
+            );
         }
 
         /// With theta on y, a stacked label's `stack` sits on the channel
