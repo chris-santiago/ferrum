@@ -34,8 +34,9 @@ from ferrum._desugar import (
 from ferrum._encode_lowering import (
     _KERNEL_DENSITY_READS_RAW_ROWS,
     _refuse_bin_aggregate_on_channels,
+    _refuse_ecdf_bin_aggregate,
+    _refuse_ecdf_field_y,
     _refuse_histogram_bin_aggregate,
-    _refuse_statistic_input,
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
@@ -50,7 +51,7 @@ from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_s
 from ferrum.marks.base import resolve_method_bool
 from ferrum.marks.statistical import _resolve_ecdf
 from ferrum.encoding import Y
-from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
+from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.plots._helpers import (
     _checked_figure_size,
     _drawn_bindings,
@@ -457,48 +458,6 @@ def _reject_displot_without_x(*, kind: str, x: Any, y: Any, kde: bool, rug: bool
         )
 
 
-def _reject_ecdf_field_y(*, kind: str, y: Any) -> None:
-    """Refuse a ``kind="ecdf"`` call whose ``y=`` names a field.
-
-    ``kind="ecdf"`` draws the cumulative count of the variable ``x=`` names
-    on ``y``, so a second variable has nowhere to go. Re-pointing a field-
-    bearing ``y=`` at the window's count column would silently mislabel the
-    count axis with the caller's field name -- a worse outcome than
-    refusing outright. A fieldless ``fm.Y(title=..., scale=..., axis=...,
-    format=...)`` is the documented way to style the count axis, and is not
-    refused here: :func:`_field_name` reads ``None`` off it.
-    """
-    if kind != "ecdf" or y is None:
-        return
-    bound = _field_name(y)
-    if bound is None:
-        return
-    raise ValueError(
-        f"displot(kind='ecdf', y={bound!r}) is not supported -- kind='ecdf' draws "
-        "the cumulative count of the variable x= names on y, so a second variable "
-        "has nowhere to go. Drop y=, or style the count axis with "
-        "fm.Y(title=..., scale=...) and no field."
-    )
-
-
-def _refuse_ecdf_bin_aggregate(drawn: dict) -> None:
-    """Refuse an x/y bin=/aggregate= the ECDF's rolling count cannot honor.
-
-    Shared by :func:`_refuse_displot_bin_aggregate`'s call-time ``"ecdf"``
-    arm and :func:`ferrum._desugar._prep_refuse_ecdf_statistics`'s
-    resolve-time backstop for the post-hoc ``.encode()`` door, so the two
-    checks cannot drift apart.
-    """
-    x_ch = drawn.get("x")
-    if isinstance(x_ch, ChannelBase):
-        _refuse_statistic_input("displot", "x", x_ch, reason="the ECDF counts the raw values of x")
-    y_ch = drawn.get("y")
-    if isinstance(y_ch, ChannelBase):
-        _refuse_statistic_input(
-            "displot", "y", y_ch, reason="the ECDF draws its cumulative count on y"
-        )
-
-
 def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple: str) -> None:
     """Refuse a bin=/aggregate= the statistic displot's ``kind=`` builds cannot honor.
 
@@ -508,7 +467,8 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
     checked alike. As the matching mark's own refusal reads it
     (:func:`~ferrum._encode_lowering._refuse_histogram_bin_aggregate` for
     ``"hist"``, :func:`~ferrum._encode_lowering._refuse_bin_aggregate_on_channels`
-    for ``"kde"``, :func:`_refuse_ecdf_bin_aggregate` for ``"ecdf"``), which
+    for ``"kde"``, :func:`~ferrum._encode_lowering._refuse_ecdf_bin_aggregate`
+    for ``"ecdf"``), which
     resolves displot's own remedies itself (``_DOOR_VOCABULARY``, keyed by
     the voice the refusal speaks as) -- nothing door-specific is passed in
     here. ``kind='rug'`` draws every row through the plain lowering, which
@@ -800,7 +760,8 @@ def displot(
     # keywords: a bin=/aggregate= reaching through `encode=`, or as a
     # shorthand string, is checked the same way as one written as a keyword.
     drawn = _drawn_bindings({"x": x, "y": y}, encode)
-    _reject_ecdf_field_y(kind=kind, y=drawn.get("y"))
+    if kind == "ecdf":
+        _refuse_ecdf_field_y(drawn.get("y"))
     _refuse_displot_bin_aggregate(
         kind=kind,
         drawn=_drawn_positional_channels({"x": x, "y": y}, encode),

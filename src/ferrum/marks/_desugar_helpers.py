@@ -19,7 +19,7 @@ import polars as pl
 from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group, _render_metric
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from ferrum.encoding.base import ChannelBase
 
@@ -314,6 +314,32 @@ def _utf8_col(name: str) -> pl.Expr:
     per-filter variant.
     """
     return pl.col(name).cast(pl.Utf8)
+
+
+def _unique_col_name(existing_cols: Iterable[str], base: str) -> str:
+    """Return *base*, or ``f"{base}_{n}"`` for the smallest ``n >= 1`` absent
+    from *existing_cols*.
+
+    Used where a synthetic single-purpose column must not silently collide
+    with (and overwrite) a same-named user column -- e.g. the ecdf
+    composite's rolling-count column (``_desugar.py``'s
+    ``_prep_ecdf_count_column``) and ``jointplot``'s box-marginal
+    synthetic category column (``plots/matrix.py``). Mirrors the
+    collision-avoidance intent of ``Chart.__add__``'s ``__rhs_`` renaming
+    (``chart.py``), adapted to a single-frame, single-name check; the
+    ``__add__`` rename is not itself expressed in terms of this helper
+    because it must find one shared suffix that is simultaneously
+    collision-free across *several* renamed columns, not a single name.
+    """
+    existing = set(existing_cols)
+    if base not in existing:
+        return base
+    n = 1
+    candidate = f"{base}_{n}"
+    while candidate in existing:
+        n += 1
+        candidate = f"{base}_{n}"
+    return candidate
 
 
 #: Shared by :func:`_normalize_names` (Python-side) and :func:`_normalized_col`

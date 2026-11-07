@@ -1273,6 +1273,73 @@ def _refuse_histogram_bin_aggregate(
                 )
 
 
+def _refuse_field_on_computed_y(call: str, y: Any, *, computes: str, axis: str) -> None:
+    """Refuse a field-bearing ``y=`` where the statistic computes y itself.
+
+    Shared by :func:`_refuse_ecdf_field_y` (itself the one ecdf voicing,
+    called from both of ``displot(kind="ecdf")``'s doors) and by
+    ``mark_qq``'s prep, so each draws its own computed value on y (a
+    rolling count, sample quantiles) and a second, caller-named variable
+    has nowhere to go. *call* is the voicing door's own text through
+    ``"y="`` (``"displot(kind='ecdf', "``, ``"mark_qq("``); *computes*
+    states what that door draws; *axis* names its fieldless styling door.
+    A plain string names its own column. Anything else is read through its
+    ``.field`` attribute when it has one (``None`` there is genuinely
+    fieldless, the documented way to style the axis instead); anything
+    with no ``.field`` attribute at all is stringified and refused by that
+    string, so a caller mistake like ``y=5`` is named rather than silently
+    treated as fieldless -- unlike :func:`_channel_field`, whose
+    fieldless-is-``None`` contract covers that same shape and would make
+    this refusal skip ``y=5`` entirely.
+    """
+    if y is None:
+        return
+    bound = y.field if hasattr(y, "field") else str(y)
+    if bound is None:
+        return
+    raise ValueError(
+        f"{call}y={bound!r}) is not supported -- {computes} on y, so a second "
+        f"variable has nowhere to go. Drop y=, or style {axis} and no field."
+    )
+
+
+def _refuse_ecdf_field_y(y: Any) -> None:
+    """Refuse a field-bearing ``y=`` on ``displot(kind="ecdf")``, call-time or post-hoc.
+
+    The one ecdf voicing of :func:`_refuse_field_on_computed_y`: both of
+    displot's ecdf doors (the call-time check, under its own
+    ``kind == "ecdf"`` guard, and the post-hoc ``.encode()`` backstop,
+    :func:`ferrum._desugar._prep_refuse_ecdf_statistics`) call this
+    instead of passing the call/computes/axis text themselves, so the two
+    doors' words cannot drift apart -- the same guarantee
+    :func:`_refuse_ecdf_bin_aggregate` already gives this pair of callers.
+    """
+    _refuse_field_on_computed_y(
+        "displot(kind='ecdf', ",
+        y,
+        computes="kind='ecdf' draws the cumulative count of the variable x= names",
+        axis="the count axis with fm.Y(title=..., scale=...)",
+    )
+
+
+def _refuse_ecdf_bin_aggregate(drawn: dict) -> None:
+    """Refuse an x/y bin=/aggregate= the ECDF's rolling count cannot honor.
+
+    Shared by ``displot``'s own call-time check and the resolve-time
+    backstop for the post-hoc ``.encode()`` door
+    (:func:`ferrum._desugar._prep_refuse_ecdf_statistics`), so the two
+    checks cannot drift apart.
+    """
+    x_ch = drawn.get("x")
+    if isinstance(x_ch, ChannelBase):
+        _refuse_statistic_input("displot", "x", x_ch, reason="the ECDF counts the raw values of x")
+    y_ch = drawn.get("y")
+    if isinstance(y_ch, ChannelBase):
+        _refuse_statistic_input(
+            "displot", "y", y_ch, reason="the ECDF draws its cumulative count on y"
+        )
+
+
 def _refuse_bin_aggregate_fit(
     entry: str, encoding: dict, *, x_bins_knob: bool = False
 ) -> None:

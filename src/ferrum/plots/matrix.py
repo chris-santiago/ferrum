@@ -55,7 +55,7 @@ from ferrum._validate import (
     validate_color_value,
 )
 from ferrum._warn import user_stacklevel
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._desugar_helpers import _unique_col_name, nominal_color_channel
 from ferrum.marks.base import _is_paint_sentinel
 from ferrum.plots._helpers import (
     _checked_figsize,
@@ -64,7 +64,6 @@ from ferrum.plots._helpers import (
     _figure_entry,
     _finalize_chart,
     _merge_layers,
-    _unique_col_name,
 )
 
 

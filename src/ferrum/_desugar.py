@@ -64,12 +64,15 @@ from ferrum._encode_lowering import (
     _refuse_bin_aggregate_fit,
     _refuse_bin_aggregate_on_channels,
     _refuse_color_aggregate,
+    _refuse_ecdf_bin_aggregate,
+    _refuse_ecdf_field_y,
+    _refuse_field_on_computed_y,
     _refuse_histogram_bin_aggregate,
 )
 from ferrum._layer_transforms import _with_statistics_marker
 from ferrum.encoding.base import ChannelBase, _unset_statistic, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
-from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, with_grouping
+from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, _unique_col_name, with_grouping
 from ferrum._entry import EntryRefusal, voiced_as
 from ferrum._warn import user_stacklevel
 from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws, resolve_layer_style
@@ -1325,7 +1328,6 @@ def _prep_ecdf_count_column(ctx: _ResolveContext) -> None:
     avoidance actually lands on (``desugar_ecdf``'s own ``remap_titles``).
     """
     from ferrum._coerce import to_polars
-    from ferrum.plots._helpers import _unique_col_name
 
     ctx.transform_kwargs = {
         **ctx.transform_kwargs,
@@ -1337,19 +1339,19 @@ def _prep_refuse_ecdf_statistics(ctx: _ResolveContext) -> None:
     """Refuse an x/y bin=/aggregate=, or a field-bearing y=, after any later ``.encode()``.
 
     Backstop for the post-hoc ``.encode()`` door: ``displot``'s own
-    call-time pre-check (``_refuse_ecdf_bin_aggregate``, ``_reject_ecdf_field_y``)
-    runs before anything is built; this prep re-runs the identical checks
-    over the chart's fully resolved encoding, so a ``.encode()`` written
-    after the call is refused the same way. The ``"ecdf"`` composite kind
-    has no public ``mark_ecdf`` door -- ``displot`` is its only caller --
-    so this prep is coupled to displot's own checks by construction,
-    imported locally (both modules are already fully loaded by the time a
-    pending mark resolves).
+    call-time pre-check (:func:`~ferrum._encode_lowering._refuse_ecdf_bin_aggregate`,
+    :func:`~ferrum._encode_lowering._refuse_ecdf_field_y`) runs before
+    anything is built; this prep re-runs the identical checks over the
+    chart's fully resolved encoding, so a ``.encode()`` written after the
+    call is refused the same way, by the same two functions, as the
+    call-time door. The ``"ecdf"`` composite kind has no public
+    ``mark_ecdf`` door -- ``displot`` is its only caller -- so this prep is
+    coupled to displot's own checks by construction, and this module's own
+    kind check (``displot(kind="ecdf")`` dispatches here) is why the
+    field-on-y check needs none of its own.
     """
-    from ferrum.plots.distribution import _refuse_ecdf_bin_aggregate, _reject_ecdf_field_y
-
     encoding = ctx.chart._encoding
-    _reject_ecdf_field_y(kind="ecdf", y=encoding.get("y"))
+    _refuse_ecdf_field_y(encoding.get("y"))
     _refuse_ecdf_bin_aggregate(encoding)
 
 
@@ -1447,43 +1449,26 @@ def _prep_refuse_raster_statistics(ctx: _ResolveContext) -> None:
         )
 
 
-def _reject_qq_field_y(entry: str, y: Any) -> None:
-    """Refuse a ``mark_qq()`` call whose ``y=`` names a field, exactly as :func:`ferrum.plots.distribution._reject_ecdf_field_y` does for ``displot(kind="ecdf")``.
-
-    ``mark_qq`` draws the sample quantiles of ``x=`` on y, ignoring
-    whatever ``y=`` binds -- the same misdirection the ECDF's computed
-    axis refuses, with no exemption: a column name is not a provenance, so
-    a caller's own column happening to be named ``"sample"`` is refused
-    exactly like any other. A fieldless ``fm.Y(title=..., scale=...)`` is
-    not refused: :func:`~ferrum.plots._helpers._field_name` reads ``None``
-    off it, the public door for styling the axis with no field.
-    """
-    from ferrum.plots._helpers import _field_name
-
-    if y is None:
-        return
-    bound = _field_name(y)
-    if bound is None:
-        return
-    raise ValueError(
-        f"{entry}(y={bound!r}) is not supported -- mark_qq draws the sample quantiles of "
-        "x= on y, so a second variable has nowhere to go. Drop y=, or style the axis with "
-        "fm.Y(title=...) and no field."
-    )
-
-
 def _prep_refuse_qq_statistics(ctx: _ResolveContext) -> None:
     """Refuse a field-bearing y=, and an x/y bin=/aggregate= the Q-Q plot cannot fold in.
 
     x is the raw sample the QQ transform reads; y is the statistic's own
     axis (the sample quantiles it computes), so a fieldless y's bin=/
     aggregate= has nothing to bind and is refused, same as a field-bearing
-    y is refused outright (:func:`_reject_qq_field_y`, checked first: once
-    refused there is nothing left on y to check for bin=/aggregate=).
+    y is refused outright
+    (:func:`~ferrum._encode_lowering._refuse_field_on_computed_y`, the same
+    rule ``displot(kind="ecdf")`` applies to its own computed y, checked
+    first: once refused there is nothing left on y to check for
+    bin=/aggregate=).
     """
     encoding = ctx.chart._encoding
     entry = ctx.chart._pending_stat_mark.entry or "mark_qq"
-    _reject_qq_field_y(entry, encoding.get("y"))
+    _refuse_field_on_computed_y(
+        f"{entry}(",
+        encoding.get("y"),
+        computes="mark_qq draws the sample quantiles of x=",
+        axis="the axis with fm.Y(title=...)",
+    )
     _refuse_bin_aggregate_on_channels(
         "mark_qq", encoding, ("x",), reason="the Q-Q plot reads the raw sample"
     )
