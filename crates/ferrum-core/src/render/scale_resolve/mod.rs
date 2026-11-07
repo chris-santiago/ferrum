@@ -169,17 +169,20 @@ macro_rules! dispatch_all {
 }
 
 /// Dispatch a method call to the continuous `ScaleKind` variants
-/// (Linear, Time, Log, Symlog, Pow). Ordinal is excluded — callers must
-/// handle it separately.
+/// (Linear, Time, Log, Symlog, Pow), wrapped in `Some`. `Ordinal` answers
+/// `None` — its own typed "no answer," the same one every caller already
+/// returns for a continuous-only query — rather than a guard-then-panic arm.
+/// The match stays exhaustive, so a new `ScaleKind` variant forces a decision
+/// here instead of silently falling through to a panic.
 macro_rules! dispatch_continuous {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
         match $self {
-            ScaleKind::Linear(s) => s.$method($($arg),*),
-            ScaleKind::Time(s) => s.$method($($arg),*),
-            ScaleKind::Log(s) => s.$method($($arg),*),
-            ScaleKind::Symlog(s) => s.$method($($arg),*),
-            ScaleKind::Pow(s) => s.$method($($arg),*),
-            ScaleKind::Ordinal(_) => unreachable!(),
+            ScaleKind::Linear(s) => Some(s.$method($($arg),*)),
+            ScaleKind::Time(s) => Some(s.$method($($arg),*)),
+            ScaleKind::Log(s) => Some(s.$method($($arg),*)),
+            ScaleKind::Symlog(s) => Some(s.$method($($arg),*)),
+            ScaleKind::Pow(s) => Some(s.$method($($arg),*)),
+            ScaleKind::Ordinal(_) => None,
         }
     };
 }
@@ -191,7 +194,6 @@ impl ScaleKind {
     /// adjustments such as Jitter can push values past the original domain;
     /// the underlying scale returns `NaN` rather than `None` in that case).
     pub fn to_pixel_f64(&self, x: f64) -> Option<f64> {
-        if matches!(self, Self::Ordinal(_)) { return None; }
         // A `Log` scale maps only the values on its domain's side of zero;
         // the other side is left out of the channel —
         // not clamped to a range end, not mapped to `NaN` and then dropped
@@ -214,7 +216,7 @@ impl ScaleKind {
         if let Self::Log(s) = self {
             if !s.on_side(x) { return None; }
         }
-        let p = dispatch_continuous!(self, scale_internal, x);
+        let p = dispatch_continuous!(self, scale_internal, x)?;
         if p.is_finite() { Some(p) } else { None }
     }
 
@@ -269,7 +271,6 @@ impl ScaleKind {
     /// `Ordinal` scales have no continuous mapping to extrapolate, so this
     /// still returns `None` for them, exactly as `to_pixel_f64` does.
     pub fn to_pixel_f64_extrapolated(&self, x: f64) -> Option<f64> {
-        if matches!(self, Self::Ordinal(_)) { return None; }
         // Same off-side gate as `to_pixel_f64` above — a value past the
         // domain extrapolates, but a value on the wrong side of zero is
         // still mathematically unrepresentable for a `Log` scale, not
@@ -278,7 +279,7 @@ impl ScaleKind {
         if let Self::Log(s) = self {
             if !s.on_side(x) { return None; }
         }
-        let p = dispatch_continuous!(self, scale_internal_extrapolated, x);
+        let p = dispatch_continuous!(self, scale_internal_extrapolated, x)?;
         if p.is_finite() { Some(p) } else { None }
     }
 
@@ -367,10 +368,9 @@ impl ScaleKind {
     /// misalign anything. Ordinal (and any non-continuous) scales return an
     /// empty vec, matching the engine's empty `minor_ticks_internal()`.
     pub(crate) fn minor_tick_fractions(&self) -> Vec<f64> {
-        if matches!(self, Self::Ordinal(_)) {
+        let Some(minors) = dispatch_continuous!(self, minor_ticks_internal) else {
             return Vec::new();
-        }
-        let minors = dispatch_continuous!(self, minor_ticks_internal);
+        };
         let positions: Vec<f64> = minors.into_iter().map(|t| t.position).collect();
         // Minors carry no label, so a single out-of-domain minor can be dropped
         // individually without misaligning anything (`DropOne`). Majors must stay
@@ -381,13 +381,7 @@ impl ScaleKind {
     /// Return the data-space domain `(lo, hi)` for continuous scales.
     /// Returns `None` for ordinal scales (no numeric domain).
     pub(crate) fn data_domain(&self) -> Option<(f64, f64)> {
-        match self {
-            ScaleKind::Ordinal(_) => None,
-            _ => {
-                let [lo, hi] = dispatch_continuous!(self, domain_pair);
-                Some((lo, hi))
-            }
-        }
+        dispatch_continuous!(self, domain_pair).map(|[lo, hi]| (lo, hi))
     }
 
     /// The pixel a bar or area on this value axis grows from.
@@ -456,15 +450,13 @@ impl ScaleKind {
     }
 
     /// Replace this scale's data-space domain, keeping its pixel range and
-    /// kind. `None`-returning for the same reason [`data_domain`](Self::data_domain)
-    /// does: an ordinal scale has no numeric domain to set, and the one caller
+    /// kind. Always returns `()`; a no-op for the same reason
+    /// [`data_domain`](Self::data_domain) answers `None`: an ordinal scale has
+    /// no numeric domain to set, and the one caller
     /// (`positional::apply_axis_domain_config`) refuses that case loudly
     /// before reaching here rather than silently no-op-ing.
     pub(in crate::render) fn set_data_domain(&mut self, lo: f64, hi: f64) {
-        if matches!(self, ScaleKind::Ordinal(_)) {
-            return;
-        }
-        dispatch_continuous!(self, set_domain_pair, [lo, hi]);
+        let _ = dispatch_continuous!(self, set_domain_pair, [lo, hi]);
     }
 
     /// Round `(lo, hi)` outward to "nice" values, using THIS scale kind's own
@@ -484,20 +476,9 @@ impl ScaleKind {
     /// the one caller ([`positional::apply_axis_domain_config`](super::positional::apply_axis_domain_config))
     /// never reaches this on an ordinal axis regardless (it refuses first).
     pub(in crate::render) fn niced_domain(&self, lo: f64, hi: f64) -> (f64, f64) {
-        if matches!(self, ScaleKind::Ordinal(_)) {
-            return (lo, hi);
-        }
         let mut seeded = self.clone();
         seeded.set_data_domain(lo, hi);
-        let [nlo, nhi] = match seeded {
-            ScaleKind::Linear(s) => s.nice_domain_pair(),
-            ScaleKind::Time(s) => s.nice_domain_pair(),
-            ScaleKind::Log(s) => s.nice_domain_pair(),
-            ScaleKind::Symlog(s) => s.nice_domain_pair(),
-            ScaleKind::Pow(s) => s.nice_domain_pair(),
-            ScaleKind::Ordinal(_) => unreachable!("returned above"),
-        };
-        (nlo, nhi)
+        dispatch_continuous!(seeded, nice_domain_pair).map_or((lo, hi), |[nlo, nhi]| (nlo, nhi))
     }
 
     /// Pixel-range used when constructing this scale (lo, hi).
@@ -610,13 +591,12 @@ impl ScaleKind {
     /// provisional `[0,1]`-range scale's `pixel_range`) tells layout how much to
     /// inset the panel range before interpolating these fractions.
     pub(crate) fn tick_fractions(&self, count_hint: usize) -> Vec<f64> {
-        if matches!(self, Self::Ordinal(_)) {
-            return Vec::new();
-        }
         // Project the SAME tick values that `tick_labels`/`ticks_internal`
         // produce — one fraction per value, in the same order — so the carrier
         // stays index-aligned with `tick_labels`.
-        let values = dispatch_continuous!(self, ticks_internal, count_hint);
+        let Some(values) = dispatch_continuous!(self, ticks_internal, count_hint) else {
+            return Vec::new();
+        };
         self.project_values_to_fractions(&values, NonFinite::RejectAll, true)
     }
 
@@ -626,10 +606,7 @@ impl ScaleKind {
     /// Used by `prepare.rs` to apply the per-axis `tick_min_step` / `tick_extra`
     /// adjustments in data space (B5 unit 2).
     pub(crate) fn tick_values_raw(&self, count_hint: usize) -> Option<Vec<f64>> {
-        if matches!(self, Self::Ordinal(_)) {
-            return None;
-        }
-        Some(dispatch_continuous!(self, ticks_internal, count_hint))
+        dispatch_continuous!(self, ticks_internal, count_hint)
     }
 
     /// Which of `values` (tick values, in the same order `tick_labels`/
@@ -677,12 +654,12 @@ impl ScaleKind {
     /// Continuous-axis scale-projection support for explicit tick values
     /// (`configure_axis(tick_values=[...])`). Projects each supplied data value
     /// to a domain fraction `t ∈ [0, 1]` over this scale's resolved range, in
-    /// input order. Returns an empty vec for ordinal scales (explicit numeric
-    /// tick values are meaningless on a categorical axis).
+    /// input order. Empty for ordinal scales (explicit numeric tick values are
+    /// meaningless on a categorical axis): `project_values_to_fractions` reads
+    /// the dispatch's own `None` for `Ordinal` as a non-finite projection on
+    /// every value, which the `RejectAll` policy below collapses to the
+    /// empty vec.
     pub(crate) fn value_fractions(&self, values: &[f64]) -> Vec<f64> {
-        if matches!(self, Self::Ordinal(_)) {
-            return Vec::new();
-        }
         self.project_values_to_fractions(values, NonFinite::RejectAll, false)
     }
 
@@ -691,23 +668,30 @@ impl ScaleKind {
     /// to: [`LogScale::place_tick_internal`] for `Log`, closing the gap
     /// between `breaks_log`'s domain-end admission tolerance and `scale`'s
     /// own strict bounds check; every other kind's own `scale_internal`,
-    /// byte-identical to the caller-value path.
-    fn tick_position_internal(&self, v: f64) -> f64 {
+    /// byte-identical to the caller-value path. `None` for `Ordinal` (no
+    /// numeric tick position to place), read by
+    /// [`project_values_to_fractions`](Self::project_values_to_fractions) as a
+    /// non-finite projection under its [`NonFinite`] policy.
+    fn tick_position_internal(&self, v: f64) -> Option<f64> {
         match self {
-            ScaleKind::Log(s) => s.place_tick_internal(v),
-            ScaleKind::Linear(s) => s.scale_internal(v),
-            ScaleKind::Time(s) => s.scale_internal(v),
-            ScaleKind::Symlog(s) => s.scale_internal(v),
-            ScaleKind::Pow(s) => s.scale_internal(v),
-            ScaleKind::Ordinal(_) => unreachable!(),
+            ScaleKind::Log(s) => Some(s.place_tick_internal(v)),
+            ScaleKind::Linear(s) => Some(s.scale_internal(v)),
+            ScaleKind::Time(s) => Some(s.scale_internal(v)),
+            ScaleKind::Symlog(s) => Some(s.scale_internal(v)),
+            ScaleKind::Pow(s) => Some(s.scale_internal(v)),
+            ScaleKind::Ordinal(_) => None,
         }
     }
 
     /// Project data values to domain fractions `(scale(v) - r0) / (r1 - r0)`,
     /// shared by [`tick_fractions`](Self::tick_fractions),
     /// [`value_fractions`](Self::value_fractions), and
-    /// [`minor_tick_fractions`](Self::minor_tick_fractions). Callers must rule
-    /// out ordinal scales first.
+    /// [`minor_tick_fractions`](Self::minor_tick_fractions). An `Ordinal`
+    /// scale answers every per-value placement with `None` (both
+    /// [`tick_position_internal`](Self::tick_position_internal) and the
+    /// `scale_internal` dispatch below), which is read as a non-finite
+    /// projection, so `values` collapses to the empty vec under either
+    /// [`NonFinite`] policy — callers need not rule Ordinal out first.
     ///
     /// A zero-span (degenerate domain: all-equal / single distinct / all-null
     /// column) always yields an **empty** vec regardless of policy.
@@ -724,7 +708,8 @@ impl ScaleKind {
     /// in by the generated-tick tolerance.
     ///
     /// Non-finite projections (a value the scale maps to `NaN`/`±inf`, e.g.
-    /// out-of-domain on an unclamped scale) are handled per [`NonFinite`]:
+    /// out-of-domain on an unclamped scale, or an `Ordinal` scale's `None`
+    /// placement) are handled per [`NonFinite`]:
     ///
     /// * [`NonFinite::RejectAll`] — labeled major / explicit ticks. The result
     ///   must stay **index-aligned** with `tick_labels`, so a single non-finite
@@ -756,7 +741,7 @@ impl ScaleKind {
             .iter()
             .map(|&v| {
                 let px = if generated { self.tick_position_internal(v) } else { dispatch_continuous!(self, scale_internal, v) };
-                (px - r0) / span
+                px.map_or(f64::NAN, |px| (px - r0) / span)
             });
         match non_finite {
             NonFinite::DropOne => fractions.filter(|f| f.is_finite()).collect(),

@@ -4204,30 +4204,29 @@ fn dummy_unit_scale_descending_produces_hi_lo_range() {
     );
 }
 
-// ── SPEC-09 regression: categorical early-return in minor_tick_fractions ──────
+// ── SPEC-09 regression: Ordinal answers minor_tick_fractions through dispatch_continuous!'s None ──
 
 /// Regression: guards SPEC-09's deletion of the categorical per-struct
 /// `minor_ticks_internal` methods (OrdinalScale, CategoricalColorScale, etc.).
 ///
-/// The safety of those deletions rests entirely on the early-return at the top
-/// of `ScaleKind::minor_tick_fractions` (scale_resolve/mod.rs ~L199):
-///
-///   if matches!(self, Self::Ordinal(_)) { return Vec::new(); }
-///
-/// If that guard is ever removed while the per-struct methods remain absent,
-/// the `dispatch_continuous!` macro would hit `ScaleKind::Ordinal(_) =>
-/// unreachable!()` and panic at runtime. This test catches that regression by
+/// The safety of those deletions rests on `dispatch_continuous!` (scale_resolve/
+/// mod.rs's own macro) answering `None` for `ScaleKind::Ordinal` rather than
+/// dispatching to a per-struct method that does not exist. `ScaleKind::
+/// minor_tick_fractions` consumes that `None` with `let Some(minors) =
+/// dispatch_continuous!(..) else { return Vec::new() }` — no arm on either
+/// side of that call can panic, so a missed per-struct method stays an empty
+/// vec, never a production panic. This test catches a regression there by
 /// exercising the real `minor_tick_fractions` entry point directly.
 ///
 /// Two assertions:
-/// 1. Ordinal → empty vec (the early-return fires before `dispatch_continuous!`).
+/// 1. Ordinal → empty vec (the `None` answer resolves to `Vec::new()`).
 /// 2. Linear → non-empty vec (the live `dispatch_continuous!` path still works).
 #[test]
 fn ordinal_scalekind_yields_empty_minor_fractions_via_early_return() {
     use crate::scale::linear::LinearScale;
     use crate::scale::ordinal::OrdinalScale;
 
-    // --- 1. Ordinal: early-return must produce an empty vec, not a panic. ---
+    // --- 1. Ordinal: dispatch_continuous!'s None must yield an empty vec, not a panic. ---
     let ordinal = ScaleKind::Ordinal(OrdinalScale::new_internal(
         vec!["a".into(), "b".into(), "c".into()],
         vec![0.0, 100.0],
@@ -4236,8 +4235,8 @@ fn ordinal_scalekind_yields_empty_minor_fractions_via_early_return() {
     let ordinal_minors = ordinal.minor_tick_fractions();
     assert!(
         ordinal_minors.is_empty(),
-        "ScaleKind::Ordinal must yield empty minor_tick_fractions via the early-return \
-         guard (SPEC-09 deletion invariant), got: {ordinal_minors:?}"
+        "ScaleKind::Ordinal must yield empty minor_tick_fractions via dispatch_continuous!'s \
+         None (SPEC-09 deletion invariant), got: {ordinal_minors:?}"
     );
 
     // --- 2. Linear: dispatch_continuous! path must still produce minors. ---
@@ -8882,4 +8881,132 @@ fn a_generated_ticks_place_matches_its_label_count_across_every_continuous_kind_
             }
         }
     }
+}
+
+// ── An ordinal scale answers every continuous-only query without panicking ──
+
+/// Every continuous-only query that reads through `dispatch_continuous!` — the
+/// pixel mappings, the tick/value-fraction projections, the domain readers,
+/// and the private tick-placement/fraction-projection internals they share —
+/// answers an `Ordinal` scale with its own typed "no answer" (`None`, an
+/// empty vec, `(lo, hi)`, or a no-op), whatever the input: an empty slice, a
+/// single value, or `NaN`/`±inf`. A continuous kind's own answer to the same
+/// inputs is unaffected (sanity-checked here against `Linear`; the full
+/// suite covers Time/Log/Symlog/Pow byte-for-byte).
+#[test]
+fn an_ordinal_scale_answers_every_continuous_query_without_panicking() {
+    use crate::scale::linear::LinearScale;
+    use crate::scale::ordinal::OrdinalScale;
+
+    let ordinal = ScaleKind::Ordinal(OrdinalScale::new_internal(
+        vec!["a".into(), "b".into(), "c".into()],
+        vec![0.0, 100.0],
+        DiscreteLayout::band(0.1, 0.0, DEFAULT_ALIGN),
+    ));
+
+    // Public pixel mappings.
+    assert_eq!(ordinal.to_pixel_f64(1.0), None, "to_pixel_f64 must answer None for Ordinal");
+    assert_eq!(
+        ordinal.to_pixel_f64_extrapolated(1.0),
+        None,
+        "to_pixel_f64_extrapolated must answer None for Ordinal"
+    );
+
+    // Tick/value-fraction projections.
+    assert!(ordinal.minor_tick_fractions().is_empty(), "minor_tick_fractions must answer empty for Ordinal");
+    assert!(ordinal.tick_fractions(5).is_empty(), "tick_fractions must answer empty for Ordinal");
+    assert!(ordinal.value_fractions(&[1.0, 2.0, 3.0]).is_empty(), "value_fractions must answer empty for Ordinal");
+    assert!(ordinal.value_fractions(&[]).is_empty(), "value_fractions must answer empty for an empty slice on Ordinal");
+    assert!(ordinal.value_fractions(&[5.0]).is_empty(), "value_fractions must answer empty for a one-value slice on Ordinal");
+    assert!(
+        ordinal.value_fractions(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY]).is_empty(),
+        "value_fractions must answer empty for NaN/±inf values on Ordinal"
+    );
+
+    // Domain readers.
+    assert_eq!(ordinal.data_domain(), None, "data_domain must answer None for Ordinal");
+    assert_eq!(ordinal.tick_values_raw(5), None, "tick_values_raw must answer None for Ordinal");
+
+    // `set_data_domain` is a no-op; `niced_domain` answers its input unchanged.
+    // Comparing the whole scale's `Debug` form (not just `pixel_range`, which
+    // `set_data_domain` never touches on any kind) is what makes this
+    // assertion able to fail: a `set_data_domain` that mutated the Ordinal
+    // scale's domain or layout would change this string.
+    let before = format!("{ordinal:?}");
+    let mut no_op = ordinal.clone();
+    no_op.set_data_domain(10.0, 20.0);
+    assert_eq!(format!("{no_op:?}"), before, "set_data_domain must no-op on an Ordinal scale");
+    assert_eq!(
+        ordinal.niced_domain(3.0, 7.0),
+        (3.0, 7.0),
+        "niced_domain must answer its own input unchanged for Ordinal"
+    );
+
+    // The private internals every one of the above reads through: no arm
+    // panics, whatever the input, on either the generated-tick placement
+    // (`generated=true`, `tick_fractions`'s/`minor_tick_fractions`'s path) or
+    // the caller-value placement (`generated=false`, `value_fractions`'s
+    // path), an Ordinal scale reaching a continuous-only query.
+    assert_eq!(
+        ordinal.tick_position_internal(1.0),
+        None,
+        "tick_position_internal must answer None for Ordinal, not unreachable!()"
+    );
+    for generated in [true, false] {
+        assert!(
+            ordinal.project_values_to_fractions(&[1.0, 2.0, 3.0], NonFinite::RejectAll, generated).is_empty(),
+            "project_values_to_fractions must answer empty for Ordinal under generated={generated} (RejectAll)"
+        );
+        assert!(
+            ordinal.project_values_to_fractions(&[5.0], NonFinite::DropOne, generated).is_empty(),
+            "project_values_to_fractions must answer empty for a one-value slice on Ordinal under generated={generated} (DropOne)"
+        );
+        assert!(
+            ordinal.project_values_to_fractions(&[], NonFinite::RejectAll, generated).is_empty(),
+            "project_values_to_fractions must answer empty for an empty slice on Ordinal under generated={generated}"
+        );
+        assert!(
+            ordinal
+                .project_values_to_fractions(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY], NonFinite::RejectAll, generated)
+                .is_empty(),
+            "project_values_to_fractions must answer empty for NaN/±inf values on Ordinal under generated={generated}"
+        );
+    }
+
+    // A continuous kind's own answer is unaffected, including on an empty
+    // slice or ±inf values: Ordinal's typed answers are additive, and every
+    // continuous kind keeps its own `NonFinite` policy.
+    let linear = ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false));
+    assert_eq!(linear.to_pixel_f64(5.0), Some(50.0), "Linear's to_pixel_f64 must be unaffected");
+    assert_eq!(linear.tick_position_internal(5.0), Some(50.0), "Linear's tick_position_internal must still answer Some");
+    assert_eq!(
+        linear.project_values_to_fractions(&[5.0, f64::NAN], NonFinite::RejectAll, true),
+        Vec::<f64>::new(),
+        "RejectAll must still collapse to empty when a continuous projection is non-finite"
+    );
+    assert_eq!(
+        linear.project_values_to_fractions(&[5.0, f64::NAN], NonFinite::DropOne, true),
+        vec![0.5],
+        "DropOne must still drop only the non-finite entry for a continuous kind, keeping the finite projection"
+    );
+    assert_eq!(
+        linear.project_values_to_fractions(&[], NonFinite::RejectAll, true),
+        Vec::<f64>::new(),
+        "an empty slice must answer empty under RejectAll for a continuous kind"
+    );
+    assert_eq!(
+        linear.project_values_to_fractions(&[], NonFinite::DropOne, true),
+        Vec::<f64>::new(),
+        "an empty slice must answer empty under DropOne for a continuous kind"
+    );
+    assert_eq!(
+        linear.project_values_to_fractions(&[f64::INFINITY, f64::NEG_INFINITY], NonFinite::RejectAll, true),
+        Vec::<f64>::new(),
+        "±inf values must collapse to empty under RejectAll for a continuous kind"
+    );
+    assert_eq!(
+        linear.project_values_to_fractions(&[5.0, f64::INFINITY, f64::NEG_INFINITY], NonFinite::DropOne, true),
+        vec![0.5],
+        "±inf values must be dropped individually under DropOne for a continuous kind, keeping the one finite projection"
+    );
 }
