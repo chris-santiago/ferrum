@@ -6,10 +6,15 @@ output column during desugar (``_apply_remap``, ``src/ferrum/_desugar.py``).
 The remapped channel keeps every option the caller wrote on it (``title=``,
 ``Axis(title=)``, ``format=``, ``format_type=``, an explicit ``scale=``);
 only the now-resolved ``bin=``/``aggregate=`` kwargs are dropped and the
-type is forced to quantitative. A channel the caller never bound gets a
-fresh quantitative channel, stamped with the original field name as its
-title only when the remap changed the field and no explicit title was
-given.
+type is forced to quantitative -- unless the caller declared a categorical
+type (``N``/``O``) on an axis the statistic reads as numbers, which is
+refused before the remap ever runs (the categorical-input rule every such
+statistic shares; see ``TestHistogramKeepsCallerOptions``'s own type test,
+and ``tests/test_statistic_bin_aggregate_refusal.py`` for the full grid of
+sites and types, including a declared ``T``). A channel the caller never
+bound gets a fresh quantitative channel, stamped with the original field
+name as its title only when the remap changed the field and no explicit
+title was given.
 
 Every test here either exercises the public mark API end to end (so a
 rendering-pipeline regression would show up too), or calls ``_apply_remap``
@@ -27,6 +32,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._desugar import _apply_remap
+from ferrum._entry import EntryRefusal
 from ferrum.encoding import X, X2, Y, Y2
 from ferrum.repeat import Repeat
 
@@ -131,10 +137,26 @@ class TestHistogramKeepsCallerOptions:
         after = fm.Chart(hist_df).mark_histogram().encode(x=fm.X("measurement", title="Value"))
         assert before._resolve_pending()._encoding["x"] == after._resolve_pending()._encoding["x"]
 
-    def test_source_type_is_forced_quantitative(self, hist_df):
+    def test_a_declared_categorical_type_is_refused_not_forced_quantitative(self, hist_df):
+        """``N``/``O`` on the binned axis never reaches the remap at all.
+
+        The histogram bins x as numbers, so a declared category there is
+        refused in mark_histogram's own voice before any resolving runs,
+        rather than being silently forced to ``Q`` the way an unset,
+        explicit ``Q`` or declared ``T`` type is (the grid of sites
+        ``tests/test_statistic_bin_aggregate_refusal.py`` pins). The
+        remedy keeps the declared type in its shorthand, so ``'O'`` keeps
+        its order.
+        """
         chart = fm.Chart(hist_df).mark_histogram().encode(x=fm.X("measurement", type="O"))
-        resolved = chart._resolve_pending()
-        assert resolved._encoding["x"].option("type") == "Q"
+        with pytest.raises(EntryRefusal) as excinfo:
+            chart._resolve_pending()
+        assert str(excinfo.value) == (
+            "mark_histogram(x=X('measurement', type='O')) is not supported: the "
+            "histogram bins x as numbers and draws a bar per bin, so type='O' would "
+            "draw one bar per row instead of one per category. To count each "
+            "category, use mark_bar().encode(x='measurement:O', y='count()')."
+        )
 
     def test_unbound_y_gets_a_fresh_quantitative_channel(self, hist_df):
         chart = fm.Chart(hist_df).mark_histogram().encode(x="measurement")

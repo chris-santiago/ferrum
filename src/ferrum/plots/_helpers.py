@@ -13,15 +13,16 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 import polars as pl
 
 from ferrum._compose import figure_recorded
-from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby
+from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby, _written_channel
 from ferrum._entry import EntryRefusal, _voiced, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
 from ferrum._layer import merge_style, set_style
 from ferrum.color import to_hex
 from ferrum.encoding import X
-from ferrum.encoding._resolve import channel_for_value
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding._aliases import _channel_field
+from ferrum.encoding._resolve import channel_for_column, channel_for_value
+from ferrum.encoding.base import ChannelBase, _unset_statistic
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
 
@@ -310,6 +311,51 @@ def _title_legend(chart: "Chart", channel: str, title: str) -> "Chart":
     return new
 
 
+def _grouping_hue(entry: str, hue: Any) -> "ChannelBase | None":
+    """Read a figure's ``hue=`` keyword as the column its statistic groups by.
+
+    The one parse of a figure's ``hue=``, read at the figure's own door:
+    ``None`` stays ``None``; otherwise *hue* is read through
+    :func:`~ferrum.encoding._resolve.channel_for_column` (a genuine
+    shorthand hue, ``"g:N"``, parses as ``encode()`` reads it; a column
+    name the grammar cannot read, ``"Weight (kg)"``, binds as written; a
+    non-binding value raises the parse's own ``TypeError`` naming
+    ``{entry}(hue=...)``), then typed Nominal unless it already declares
+    a type (:func:`~ferrum.marks._desugar_helpers.nominal_color_channel`).
+
+    A channel carrying an ``aggregate=`` is refused: ``hue=`` names the
+    column the chart groups its rows by, not a value to compute, so an
+    aggregate there would group the rows by a computed value instead of
+    the column itself (``hue="mean(k)"`` would draw one legend entry per
+    *value* of ``mean(k)``, not one per group).
+
+    Raises
+    ------
+    TypeError
+        If *hue* is none of ``None``, a string, a channel object or a
+        ``Repeat`` placeholder.
+    ValueError
+        If the parsed channel carries an ``aggregate=``.
+    """
+    if hue is None:
+        return None
+    channel = channel_for_column("color", hue, declare=f"{entry}(hue=...)")
+    agg = channel._kwargs.get("aggregate")
+    if not _unset_statistic("aggregate", agg):
+        written = _written_channel("hue", channel, "aggregate")
+        field = _channel_field(channel)
+        remedy = f"Drop the aggregate (hue={field!r})." if field else "Pass the column to group by as hue=."
+        raise EntryRefusal(
+            lambda voice, written=written, agg=agg, remedy=remedy: (
+                f"{voice}({written}) is not supported: hue= names the column the "
+                f"chart groups its rows by, so aggregate={agg!r} would group them "
+                f"by a computed value instead. {remedy}"
+            ),
+            entry,
+        )
+    return nominal_color_channel(channel)
+
+
 class _ColorArgument(NamedTuple):
     """How a two-way ``color=`` argument resolved.
 
@@ -342,10 +388,22 @@ def _column_or_literal_color(
     color typo.
 
     The column branch types the channel Nominal via ``nominal_color_channel``
-    (an already-constructed channel object passes through untouched): a
-    ``color=`` that drives a transform's ``groupby=`` is a discriminator by
-    construction, so a numeric group column must not infer a Continuous scale
-    -- and its consumer layers all share one color scale.
+    (an already-constructed channel object passes through untouched, and so
+    does a declared type): a ``color=`` that drives a transform's
+    ``groupby=`` is a discriminator by construction, so a numeric group
+    column must not infer a Continuous scale -- and its consumer layers all
+    share one color scale.
+
+    A string that does not itself match a column is tried once more,
+    through :func:`~ferrum.encoding._resolve.channel_for_column`: ``"g:N"``
+    names column ``"g"`` the same way ``encode()`` reads it, and a name the
+    shorthand grammar cannot read (``"Weight (kg)"``) is read as that exact
+    column. Either way it groups only when the parsed channel carries no
+    ``aggregate=`` -- ``"mean(k)"`` and ``"distinct(g)"`` name neither a
+    grouping column nor a paintable color, so they fall through to the
+    literal-color parse below (and from there to this function's own
+    ambiguous-value refusal) instead of silently grouping by a computed
+    value.
 
     The literal branch normalizes through ``to_hex`` so the value handed to a
     mark's ``fill=``/``stroke=`` is the same hex every other ferrum color
@@ -357,6 +415,15 @@ def _column_or_literal_color(
     field = _field_name(color)
     if field is not None and field in set(columns):
         return _ColorArgument(field, nominal_color_channel(color), None)
+
+    if isinstance(color, str):
+        parsed = channel_for_column("color", color, declare=f"{func_name}(color=...)")
+        if (
+            parsed.field is not None
+            and parsed.field in set(columns)
+            and _unset_statistic("aggregate", parsed._kwargs.get("aggregate"))
+        ):
+            return _ColorArgument(parsed.field, nominal_color_channel(parsed), None)
 
     try:
         paint = to_hex(color)

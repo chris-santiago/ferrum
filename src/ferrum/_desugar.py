@@ -55,14 +55,20 @@ from ferrum._layer import (
     titled_encoding,
 )
 from ferrum._encode_lowering import (
+    _ECDF_CATEGORICAL_READS,
+    _FIT_CATEGORICAL_READS,
+    _KDE_CATEGORICAL_READS,
     _KERNEL_DENSITY_READS_RAW_ROWS,
+    _categorical_reads,
     _cell_aggregate_remedy,
     _composite_groupby,
+    _histogram_categorical_reads,
     _own_knob_remedy,
     _over,
     _rebind_positional,
     _refuse_bin_aggregate_fit,
     _refuse_bin_aggregate_on_channels,
+    _refuse_categorical_input,
     _refuse_color_aggregate,
     _refuse_ecdf_bin_aggregate,
     _refuse_ecdf_field_y,
@@ -1253,12 +1259,14 @@ def _histogram_share(ctx: _ResolveContext, value_axis: str) -> "_ShareMode | Non
 
 
 def _prep_refuse_histogram_statistics(ctx: _ResolveContext) -> None:
-    """Refuse an x/y bin=/aggregate= mark_histogram's own Bin cannot honor.
+    """Refuse an x/y bin=/aggregate= mark_histogram's own Bin cannot honor,
+    and a declared categorical type on the binned axis.
 
     See :func:`ferrum._encode_lowering._refuse_histogram_bin_aggregate`.
     """
     horizontal = ctx.transform_kwargs.get("orientation", "vertical") == "horizontal"
     value_axis = "x" if horizontal else "y"
+    bin_axis = "y" if horizontal else "x"
     density = bool(ctx.transform_kwargs.get("density", False))
     _refuse_histogram_bin_aggregate(
         "mark_histogram",
@@ -1267,20 +1275,32 @@ def _prep_refuse_histogram_statistics(ctx: _ResolveContext) -> None:
         density=density,
         share=_histogram_share(ctx, value_axis),
     )
+    _refuse_categorical_input(
+        "mark_histogram",
+        ctx.chart._encoding,
+        (bin_axis,),
+        reads=_histogram_categorical_reads(value_axis),
+    )
 
 
 def _prep_refuse_density_statistics(ctx: _ResolveContext) -> None:
-    """Refuse an x/y bin=/aggregate= mark_density estimates over, not folds in."""
+    """Refuse an x/y bin=/aggregate= mark_density estimates over, not folds in,
+    and a declared categorical type on either axis.
+    """
     _refuse_bin_aggregate_on_channels(
         "mark_density",
         ctx.chart._encoding,
         ("x", "y"),
         reason=_KERNEL_DENSITY_READS_RAW_ROWS,
     )
+    _refuse_categorical_input(
+        "mark_density", ctx.chart._encoding, ("x", "y"), reads=_KDE_CATEGORICAL_READS
+    )
 
 
 def _prep_refuse_smooth_statistics(ctx: _ResolveContext) -> None:
-    """Refuse an x/y bin=/aggregate= mark_smooth's fit cannot fold in.
+    """Refuse an x/y bin=/aggregate= mark_smooth's fit cannot fold in, and a
+    declared categorical type on either axis.
 
     Every ``mark_smooth`` method builds its ``Smooth`` transform first and
     dispatches on method after, so x's own ``x_bins=`` binning knob works
@@ -1290,6 +1310,9 @@ def _prep_refuse_smooth_statistics(ctx: _ResolveContext) -> None:
         "mark_smooth",
         ctx.chart._encoding,
         x_bins_knob=True,
+    )
+    _refuse_categorical_input(
+        "mark_smooth", ctx.chart._encoding, ("x", "y"), reads=_FIT_CATEGORICAL_READS
     )
 
 
@@ -1353,6 +1376,7 @@ def _prep_refuse_ecdf_statistics(ctx: _ResolveContext) -> None:
     encoding = ctx.chart._encoding
     _refuse_ecdf_field_y(encoding.get("y"))
     _refuse_ecdf_bin_aggregate(encoding)
+    _refuse_categorical_input("displot", encoding, ("x",), reads=_ECDF_CATEGORICAL_READS)
 
 
 def _prep_refuse_contour_statistics(ctx: _ResolveContext) -> None:
@@ -1367,6 +1391,9 @@ def _prep_refuse_contour_statistics(ctx: _ResolveContext) -> None:
     """
     _refuse_bin_aggregate_on_channels(
         "mark_contour", ctx.chart._encoding, ("x", "y"), reason=_KERNEL_DENSITY_READS_RAW_ROWS
+    )
+    _refuse_categorical_input(
+        "mark_contour", ctx.chart._encoding, ("x", "y"), reads=_KDE_CATEGORICAL_READS
     )
     color = ctx.chart._encoding.get("color")
     if isinstance(color, ChannelBase) and not _unset_statistic(
@@ -1403,6 +1430,12 @@ def _prep_refuse_hex_statistics(ctx: _ResolveContext) -> None:
             _own_knob_remedy, knob=attrgetter("hex_bin_size"), verb="Size the cells with", kwarg="bin"
         ),
     )
+    _refuse_categorical_input(
+        "mark_hex",
+        ctx.chart._encoding,
+        ("x", "y"),
+        reads=_categorical_reads("the hexagons bin {channel} by their own grid"),
+    )
 
 
 def _prep_refuse_raster_statistics(ctx: _ResolveContext) -> None:
@@ -1427,6 +1460,12 @@ def _prep_refuse_raster_statistics(ctx: _ResolveContext) -> None:
             verb="Set the grid with",
             kwarg="bin",
         ),
+    )
+    _refuse_categorical_input(
+        "mark_raster",
+        ctx.chart._encoding,
+        ("x", "y"),
+        reads=_categorical_reads("the raster bins {channel} onto its own pixel grid"),
     )
     color = ctx.chart._encoding.get("color")
     if isinstance(color, ChannelBase) and not _unset_statistic(
@@ -1474,6 +1513,12 @@ def _prep_refuse_qq_statistics(ctx: _ResolveContext) -> None:
     )
     _refuse_bin_aggregate_on_channels(
         "mark_qq", encoding, ("y",), reason="the Q-Q plot draws its own sample quantiles on y"
+    )
+    _refuse_categorical_input(
+        "mark_qq",
+        encoding,
+        ("x",),
+        reads=_categorical_reads("the Q-Q plot reads {channel} as the raw sample"),
     )
 
 

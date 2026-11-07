@@ -814,6 +814,32 @@ class _StatisticRefusalText:
         return frozenset(_DOOR_VOCABULARY)
 
 
+@dataclass(frozen=True)
+class _CategoricalRefusalText:
+    """A categorical-input refusal's message, resolved against one door per voice.
+
+    Mirrors :class:`_StatisticRefusalText` by reference: ``__call__`` reads
+    the voice's own row (:func:`_door_vocabulary`) and resolves *clause*
+    against it when *clause* is a :data:`_DoorText` builder, so a refusal
+    raised inside a figure's own mark call (a jointplot marginal, a
+    pairplot diagonal) speaks that figure's own remedy once re-voiced
+    (:func:`ferrum._entry.voiced_as`). Declares ``voices``, the structural
+    ``_VoiceSpelledText`` protocol :class:`~ferrum._entry.EntryRefusal`
+    reads to freeze each voice's text across a pickle or copy.
+    """
+
+    written: str
+    clause: str | _DoorText
+
+    def __call__(self, voice: str) -> str:
+        clause = self.clause(_door_vocabulary(voice)) if callable(self.clause) else self.clause
+        return f"{voice}({self.written}) is not supported: {clause}"
+
+    @property
+    def voices(self) -> frozenset[str]:
+        return frozenset(_DOOR_VOCABULARY)
+
+
 def _refuse_bin_or_aggregate(
     entry: str,
     channel: str,
@@ -1062,8 +1088,8 @@ def _cell_aggregate_remedy(
 
     *field* is the color's own field, ``None`` when it names none: a
     fieldless color has no column to aggregate, so the remedy is only to
-    drop ``aggregate=`` (spec §3.3's fieldless rule), the same fallback a
-    door with no *cells* spelling of its own takes.
+    drop ``aggregate=``, the same fallback a door with no *cells* spelling
+    of its own takes.
     """
     template = cells(door)
     if field is None or template is None:
@@ -1177,6 +1203,150 @@ def _refuse_bin_aggregate_on_channels(
                 bin_remedy=bin_remedy,
                 aggregate_remedy=aggregate_remedy,
             )
+
+
+def _categorical_reads(
+    reason_template: str, *, placed: str = "the rows"
+) -> Callable[[str, str, str], str]:
+    """Build a :func:`_refuse_categorical_input` *reads* clause from one *reason_template*.
+
+    *reason_template* names, with a ``{channel}`` placeholder, how the
+    statistic reads that channel as numbers; *placed* is what a declared
+    categorical type would turn its output into. Every caller whose remedy
+    is "drop the type and restate the bare field" shares this one ending; a
+    statistic with a different remedy (:func:`_histogram_categorical_reads`'s
+    own count-by-category rewrite) builds its own *reads* instead.
+    """
+
+    def reads(channel: str, field: str, type_: str) -> str:
+        reason = reason_template.format(channel=channel)
+        return (
+            f"{reason}, so type={type_!r} would place {placed} as categories. "
+            f"Drop the type ({channel}={field!r})."
+        )
+
+    return reads
+
+
+#: The categorical-input *reads* clause every fit-drawing statistic shares
+#: (``lmplot``/``regplot``, ``mark_smooth``, ``residplot``'s predictor):
+#: each reads its positional channel as numbers and draws a curve along a
+#: continuous axis.
+_FIT_CATEGORICAL_READS = _categorical_reads(
+    "the fit reads {channel} as numbers and draws its curve along a continuous axis",
+    placed="the fitted values",
+)
+
+#: Shared by mark_density, mark_contour and displot(kind="kde"): all three
+#: estimate a kernel density over raw rows, never a bin or category.
+_KDE_CATEGORICAL_READS = _categorical_reads("the kernel density estimate reads {channel} as numbers")
+
+#: Shared by the ecdf prep backstop and displot's own call-time check.
+_ECDF_CATEGORICAL_READS = _categorical_reads("the ECDF counts the raw values of {channel}")
+
+
+def _residual_axis_categorical_reads(channel: str, field: str, type_: str) -> str:
+    """The *reads* clause for residplot's residual (y) axis, which refuses ``T`` too.
+
+    The residual axis draws signed differences around zero, never times, so
+    a declared ``T`` is refused the same way a declared ``N``/``O`` is,
+    with the placement word naming what the declared type would turn the
+    residuals into.
+    """
+    placement = "timestamps" if type_ == "T" else "categories"
+    return (
+        f"the residual axis draws numbers around 0, so type={type_!r} would place "
+        f"the residuals as {placement}. Drop the type ({channel}={field!r})."
+    )
+
+
+def _category_count_clause(
+    door: _DoorVocabulary, *, channel: str, field: str, type_: str, value_axis: str
+) -> str:
+    """The histogram's own category-count clause, chained where *door*'s result can.
+
+    A door whose result takes ``.encode(...)`` (:func:`_chained_remedy`'s
+    same ``chains_transform`` gate) is told the ``mark_bar()`` rewrite an
+    Altair user would otherwise write by hand, keeping the declared *type_*
+    in the shorthand so a declared ``'O'`` keeps its order. jointplot and
+    pairplot have no such call on their own result, so they end in the
+    family's fit ending instead (:func:`_categorical_reads`'s "Drop the
+    type" clause).
+    """
+    reason = (
+        f"the histogram bins {channel} as numbers and draws a bar per bin, so "
+        f"type={type_!r} would draw one bar per row instead of one per category. "
+    )
+    if door.chains_transform:
+        shorthand = f"{field}:{type_}"
+        return reason + (
+            f"To count each category, use mark_bar().encode({channel}={shorthand!r}, "
+            f"{value_axis}='count()')."
+        )
+    return reason + f"Drop the type ({channel}={field!r})."
+
+
+def _histogram_categorical_reads(value_axis: str) -> Callable[[str, str, str], _DoorText]:
+    """The *reads* clause for a histogram's own binned axis.
+
+    *value_axis* is the channel the histogram draws its count or density
+    on -- always the axis opposite the one this check runs against -- bound
+    into :func:`_category_count_clause`, a named module-level
+    :data:`_DoorText` builder so each door resolves its own ending.
+    """
+
+    def reads(channel: str, field: str, type_: str) -> _DoorText:
+        return partial(
+            _category_count_clause, channel=channel, field=field, type_=type_, value_axis=value_axis
+        )
+
+    return reads
+
+
+def _refuse_categorical_input(
+    entry: str,
+    encoding: dict,
+    channels: tuple[str, ...],
+    *,
+    reads: Callable[[str, str, str], str | _DoorText],
+    disallowed: tuple[str, ...] = ("N", "O"),
+) -> None:
+    """Refuse a channel of *channels* whose declared type a statistic cannot place.
+
+    A channel in *channels* bound to a :class:`ChannelBase` whose own
+    ``type=`` is one of *disallowed* (``"N"``/``"O"`` by default -- the
+    categorical types every numeric-reading statistic refuses; residplot's
+    y also disallows ``"T"``, since the residual axis is never a time axis)
+    is refused as an :class:`~ferrum._entry.EntryRefusal`, re-voiceable like
+    every refusal in this family. *reads* builds the clause for one
+    offending *channel* (its field and declared type) -- a plain string, or
+    a :data:`_DoorText` builder for a statistic whose remedy's own spelling
+    differs per door (:func:`_histogram_categorical_reads`) -- resolved
+    through :class:`_CategoricalRefusalText` so each statistic's own
+    wording, and each voice's own ending, stays itself. A channel bound
+    bare (a plain field name or ``None``), or one with no field of its own
+    (a fieldless value-axis channel, or a Repeat placeholder), declares no
+    *input column* and is left to the statistic's own missing-field
+    refusal or to value-axis styling; so is a channel whose declared type
+    is not in *disallowed* (``Q``, and ``T`` where allowed, are honored,
+    not refused).
+    """
+    from ferrum._entry import EntryRefusal
+    from ferrum.encoding._aliases import _channel_field
+
+    for channel in channels:
+        ch = encoding.get(channel)
+        if not isinstance(ch, ChannelBase):
+            continue
+        type_ = ch.option("type")
+        if type_ not in disallowed:
+            continue
+        field = _channel_field(ch)
+        if not field:
+            continue
+        written = f"{channel}={type(ch).__name__}({field!r}, type={type_!r})"
+        clause = reads(channel, field, type_)
+        raise EntryRefusal(_CategoricalRefusalText(written, clause), entry)
 
 
 def _refuse_histogram_bin_aggregate(

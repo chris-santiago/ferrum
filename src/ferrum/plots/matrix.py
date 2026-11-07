@@ -63,6 +63,7 @@ from ferrum.plots._helpers import (
     _field_name,
     _figure_entry,
     _finalize_chart,
+    _grouping_hue,
     _merge_layers,
 )
 
@@ -285,6 +286,9 @@ def pairplot(
         all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
         data = data.drop_nulls(subset=all_vars)
     height, aspect = _checked_figure_size("pairplot", height=height, aspect=aspect)
+    # Read once, here, at pairplot's own door (see displot's twin comment
+    # in distribution.py).
+    hue = _grouping_hue("pairplot", hue)
 
     return _pairplot_build(
         data,
@@ -368,7 +372,16 @@ def _pairplot_build(
     if markers is not None and isinstance(markers, list) and hue is not None and kind == "scatter":
         from ferrum.encoding import Shape as _Shape
 
-        enc["shape"] = _Shape(hue, scale={"type": "ordinal", "range": markers})
+        # `hue` is a parsed CHANNEL here (`_grouping_hue`), never a bare
+        # field name, so `Shape`'s own `field` -- which takes a string --
+        # reads this channel's `.field`. `_grouping_hue` always types its
+        # result (nominal when the caller declared none), so `hue`'s own
+        # type is carried onto the Shape here on every call, not only
+        # when the caller happened to declare one.
+        shape_kwargs: dict = {"scale": {"type": "ordinal", "range": markers}}
+        if hue.option("type") is not None:
+            shape_kwargs["type_"] = hue.option("type")
+        enc["shape"] = _Shape(hue.field, **shape_kwargs)
     enc.update(encode_kwargs)
     off = off.encode(**enc)
 
@@ -1612,6 +1625,9 @@ def jointplot(
     validate_choice("jointplot", "kind", kind, _VALID_CENTER_KINDS)
     validate_choice("jointplot", "marginal_kind", marginal_kind, _VALID_MARGINAL_KINDS)
     height, _ = _checked_figure_size("jointplot", height=height)
+    # Read once, here, at jointplot's own door (see displot's twin comment
+    # in distribution.py).
+    hue = _grouping_hue("jointplot", hue)
 
     return _jointplot_build(
         data,

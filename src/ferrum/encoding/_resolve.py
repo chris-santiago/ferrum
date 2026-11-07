@@ -68,3 +68,56 @@ def channel_for_value(name: str, value: Any, *, declare: str) -> ChannelBase:
         f"{declare} expects str, {cls.__name__} instance, or Repeat placeholder; "
         f"got {type(value).__name__}"
     )
+
+
+def _is_column_shorthand(value: str) -> bool:
+    """Whether *value* is genuine encoding shorthand, not a column's own literal name.
+
+    ``parse_shorthand`` matches a string like ``"f(h)"`` structurally (an
+    aggregate prefix and a field), but ``"f"`` is not a real aggregate --
+    the column is named ``"f(h)"``, not an unknown-function error waiting
+    to happen. A string parses as shorthand here only when
+    ``parse_shorthand`` succeeds AND, when it reads an aggregate prefix,
+    that prefix is a member of the aggregate vocabulary Rust publishes
+    (:func:`ferrum._registry.accepts_aggregate`). A string
+    ``parse_shorthand`` cannot read at all (unbalanced parens, a
+    non-shorthand ``":"``) is not shorthand either.
+    """
+    from ferrum._registry import accepts_aggregate
+
+    try:
+        _, _, agg = parse_shorthand(value)
+    except ValueError:
+        return False
+    return agg is None or accepts_aggregate("aggregate", agg)
+
+
+def channel_for_column(name: str, value: Any, *, declare: str) -> ChannelBase:
+    """Return the channel object naming the column *value* for channel *name*.
+
+    The reading for a keyword that names a column of the caller's data --
+    a figure's ``hue=``, ``Chart.facet``'s ``field=``/``row=``/``col=``,
+    ``residplot``'s ``color=`` once a literal color has been ruled out --
+    as opposed to :func:`channel_for_value`'s strict ``encode()`` grammar.
+    A non-string *value* (a channel object, a ``Repeat`` placeholder, or
+    anything :func:`channel_for_value` would refuse) reads exactly as
+    :func:`channel_for_value` reads it. A string that IS encoding
+    shorthand (:func:`_is_column_shorthand`) reads the same way too, so
+    ``"g:N"`` and ``"mean(k)"`` mean what they mean on ``encode()``. A
+    string that is not shorthand -- the grammar cannot read it
+    (``"Weight (kg)"``), or its prefix names no real aggregate
+    (``"f(h)"``) -- is the column it names, bound exactly as
+    ``channel_class(name)(value)`` binds it (the same literal-string
+    reading :class:`~ferrum.encoding.base.ChannelBase` already falls back
+    to for a non-shorthand ``":"``).
+
+    Raises
+    ------
+    ValueError
+        If *name* is not an encoding channel.
+    TypeError
+        If *value* is not a string, a channel object or a ``Repeat`` placeholder.
+    """
+    if isinstance(value, str) and not _is_column_shorthand(value):
+        return channel_class(name)(value)
+    return channel_for_value(name, value, declare=declare)

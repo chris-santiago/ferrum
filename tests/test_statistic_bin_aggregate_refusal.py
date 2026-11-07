@@ -2070,6 +2070,13 @@ def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
             "colored by the statistic's own value, so aggregate= would be ignored. Drop "
             "aggregate=.",
         ),
+        (
+            lambda: fm.Chart(_HIST_ROWS).mark_histogram().encode(x=X("v", type="N")).to_svg(),
+            "pairplot",
+            "pairplot(x=X('v', type='N')) is not supported: the histogram bins x as numbers "
+            "and draws a bar per bin, so type='N' would draw one bar per row instead of one "
+            "per category. Drop the type (x='v').",
+        ),
     ],
     ids=[
         "mark_histogram_density_count_as_pairplot",
@@ -2083,6 +2090,7 @@ def test_the_typeable_remedy_check_accepts_a_real_jointplot_message() -> None:
         "mark_raster_x_bin_as_jointplot",
         "mark_contour_color_aggregate_as_jointplot",
         "mark_hex_color_mismatch_as_roc_chart",
+        "mark_histogram_categorical_type_as_pairplot",
     ],
 )
 def test_a_voice_without_the_knob_takes_the_knob_free_remedy(
@@ -2129,6 +2137,10 @@ _PICKLE_CONTRACT_REFUSALS: dict[str, Callable[[], Any]] = {
     "hex_cells": lambda: fm.Chart(_XYZ_ROWS)
     .mark_hex(aggregate="sum", field="z")
     .encode(x="v", y="w", color=fm.Color("z", aggregate="mean"))
+    .to_svg(),
+    "categorical_histogram": lambda: fm.Chart(_HIST_ROWS)
+    .mark_histogram()
+    .encode(x=X("v", type="N"))
     .to_svg(),
 }
 
@@ -4438,3 +4450,420 @@ def test_every_mark_without_the_new_kwargs_renders_unchanged(
         "qq": "f512624b5ced12463225b5cc0cb3519c42285058bd29b091f7256ad9fdec1a59",
     }
     assert _digest(build()) == digests[name]
+
+
+# ---------------------------------------------------------------------------
+# A declared categorical type (N/O) on an axis a statistic reads as numbers.
+#
+# Every statistic that already refuses a bin=/aggregate= it cannot honor
+# (above) also refuses a declared `N`/`O` on the same axes, with its own
+# template -- the same rule Chart.encode's shorthand parser applies: a
+# declared type is a real instruction, not a hint runtime dtype can
+# override, and a statistic that reads a channel as numbers cannot place a
+# category on it. Each expected message below is written independently of
+# the implementation, from the statistic's own reason and the shared
+# "Drop the type (...)" ending, so a wrong field, a wrong type code, or a
+# changed reason would fail the comparison.
+# ---------------------------------------------------------------------------
+
+
+def _fit_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the fit reads {channel} as numbers and draws its curve along a continuous "
+        f"axis, so type={type_!r} would place the fitted values as categories. "
+        f"Drop the type ({channel}={field!r})."
+    )
+
+
+def _kde_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the kernel density estimate reads {channel} as numbers, so type={type_!r} "
+        f"would place the rows as categories. Drop the type ({channel}={field!r})."
+    )
+
+
+def _hex_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the hexagons bin {channel} by their own grid, so type={type_!r} would "
+        f"place the rows as categories. Drop the type ({channel}={field!r})."
+    )
+
+
+def _raster_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the raster bins {channel} onto its own pixel grid, so type={type_!r} "
+        f"would place the rows as categories. Drop the type ({channel}={field!r})."
+    )
+
+
+def _qq_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the Q-Q plot reads {channel} as the raw sample, so type={type_!r} would "
+        f"place the rows as categories. Drop the type ({channel}={field!r})."
+    )
+
+
+def _ecdf_categorical_text(channel: str, field: str, type_: str) -> str:
+    return (
+        f"the ECDF counts the raw values of {channel}, so type={type_!r} would "
+        f"place the rows as categories. Drop the type ({channel}={field!r})."
+    )
+
+
+def _histogram_categorical_text(channel: str, field: str, type_: str, value_axis: str) -> str:
+    return (
+        f"the histogram bins {channel} as numbers and draws a bar per bin, so "
+        f"type={type_!r} would draw one bar per row instead of one per category. To "
+        f"count each category, use mark_bar().encode({channel}={field + ':' + type_!r}, "
+        f"{value_axis}='count()')."
+    )
+
+
+def _categorical_message(voice: str, channel: str, cls: str, field: str, type_: str, body: str) -> str:
+    return f"{voice}({channel}={cls}({field!r}, type={type_!r})) is not supported: {body}"
+
+
+@dataclass(frozen=True)
+class _CategoricalSite:
+    """One statistic's own axis and reads clause for the categorical-type grid."""
+
+    build: Callable[[str], fm.Chart]
+    voice: str
+    channel: str
+    cls: str
+    field: str
+    body: Callable[[str, str, str], str]
+
+
+_CATEGORICAL_SITES: dict[str, _CategoricalSite] = {
+    "histogram_x": _CategoricalSite(
+        lambda t: fm.Chart(_HIST_ROWS).mark_histogram().encode(x=f"v{t}"),
+        "mark_histogram",
+        "x",
+        "X",
+        "v",
+        lambda ch, f, t: _histogram_categorical_text(ch, f, t, "y"),
+    ),
+    "histogram_horizontal_y": _CategoricalSite(
+        lambda t: fm.Chart(_HIST_ROWS).mark_histogram(orientation="horizontal").encode(y=f"v{t}"),
+        "mark_histogram",
+        "y",
+        "Y",
+        "v",
+        lambda ch, f, t: _histogram_categorical_text(ch, f, t, "x"),
+    ),
+    "density_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_density().encode(x=f"v{t}"),
+        "mark_density",
+        "x",
+        "X",
+        "v",
+        _kde_categorical_text,
+    ),
+    "density_bivariate_y": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_density().encode(x="v", y=f"w{t}"),
+        "mark_density",
+        "y",
+        "Y",
+        "w",
+        _kde_categorical_text,
+    ),
+    "contour_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_contour().encode(x=f"v{t}", y="w"),
+        "mark_contour",
+        "x",
+        "X",
+        "v",
+        _kde_categorical_text,
+    ),
+    "contour_y": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_contour().encode(x="v", y=f"w{t}"),
+        "mark_contour",
+        "y",
+        "Y",
+        "w",
+        _kde_categorical_text,
+    ),
+    "hex_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_hex().encode(x=f"v{t}", y="w"),
+        "mark_hex",
+        "x",
+        "X",
+        "v",
+        _hex_categorical_text,
+    ),
+    "hex_y": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_hex().encode(x="v", y=f"w{t}"),
+        "mark_hex",
+        "y",
+        "Y",
+        "w",
+        _hex_categorical_text,
+    ),
+    "raster_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_raster().encode(x=f"v{t}", y="w"),
+        "mark_raster",
+        "x",
+        "X",
+        "v",
+        _raster_categorical_text,
+    ),
+    "raster_y": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_raster().encode(x="v", y=f"w{t}"),
+        "mark_raster",
+        "y",
+        "Y",
+        "w",
+        _raster_categorical_text,
+    ),
+    "qq_x": _CategoricalSite(
+        lambda t: fm.Chart(_HIST_ROWS).mark_qq().encode(x=f"v{t}"),
+        "mark_qq",
+        "x",
+        "X",
+        "v",
+        _qq_categorical_text,
+    ),
+    "smooth_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_smooth().encode(x=f"v{t}", y="w"),
+        "mark_smooth",
+        "x",
+        "X",
+        "v",
+        _fit_categorical_text,
+    ),
+    "smooth_y": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y=f"w{t}"),
+        "mark_smooth",
+        "y",
+        "Y",
+        "w",
+        _fit_categorical_text,
+    ),
+    "point_then_smooth_x": _CategoricalSite(
+        lambda t: fm.Chart(_XY_ROWS).mark_point().mark_smooth().encode(x=f"v{t}", y="w"),
+        "mark_smooth",
+        "x",
+        "X",
+        "v",
+        _fit_categorical_text,
+    ),
+    "displot_hist_x": _CategoricalSite(
+        lambda t: fm.displot(_HIST_ROWS, x=f"v{t}", kind="hist"),
+        "displot",
+        "x",
+        "X",
+        "v",
+        lambda ch, f, t: _histogram_categorical_text(ch, f, t, "y"),
+    ),
+    "displot_kde_x": _CategoricalSite(
+        lambda t: fm.displot(_XY_ROWS, x=f"v{t}", y="w", kind="kde"),
+        "displot",
+        "x",
+        "X",
+        "v",
+        _kde_categorical_text,
+    ),
+    "displot_kde_y": _CategoricalSite(
+        lambda t: fm.displot(_XY_ROWS, x="v", y=f"w{t}", kind="kde"),
+        "displot",
+        "y",
+        "Y",
+        "w",
+        _kde_categorical_text,
+    ),
+    "displot_ecdf_x": _CategoricalSite(
+        lambda t: fm.displot(_HIST_ROWS, x=f"v{t}", kind="ecdf"),
+        "displot",
+        "x",
+        "X",
+        "v",
+        _ecdf_categorical_text,
+    ),
+}
+
+
+@pytest.mark.parametrize("site_id", list(_CATEGORICAL_SITES), ids=list(_CATEGORICAL_SITES))
+@pytest.mark.parametrize("type_", ["N", "O"])
+def test_a_categorical_type_on_a_statistics_input_axis_is_refused(site_id: str, type_: str):
+    """Every statistic that reads an axis as numbers refuses a declared
+    ``N``/``O`` there, with the same message the implementation builds
+    independently reconstructed here.
+    """
+    site = _CATEGORICAL_SITES[site_id]
+    with pytest.raises(ValueError) as excinfo:
+        site.build(f":{type_}").to_svg()
+    assert str(excinfo.value) == _categorical_message(
+        site.voice, site.channel, site.cls, site.field, type_, site.body(site.channel, site.field, type_)
+    )
+
+
+@pytest.mark.parametrize("site_id", list(_CATEGORICAL_SITES), ids=list(_CATEGORICAL_SITES))
+@pytest.mark.parametrize("type_", ["", ":Q"])
+def test_a_quantitative_or_unset_type_is_honored_on_every_categorical_check_site(
+    site_id: str, type_: str
+):
+    """A negative control for every site above: no type at all, or an
+    explicit ``:Q``, renders byte-identical to the bare field -- neither is
+    refused, because both are the continuous reading every one of these
+    statistics already draws.
+    """
+    site = _CATEGORICAL_SITES[site_id]
+    bare = site.build("").to_svg()
+    assert site.build(type_).to_svg() == bare
+
+
+#: Every _CATEGORICAL_SITES entry whose statistic redraws this axis from
+#: its own numeric output (a Bin's column, a KDE grid, a fit's curve),
+#: so a declared T never reaches the render -- every site except the two
+#: whose axis is the caller's raw column, drawn directly: `point_then_smooth_x`'s
+#: overlaid point mark, and `displot_ecdf_x`'s x, which `_desugar.py` never
+#: re-points onto a statistic's output column. Those two keep the declared T
+#: and are pinned by the test below this one, not here.
+_REDRAWN_AXIS_SITES = [
+    site_id for site_id in _CATEGORICAL_SITES if site_id not in ("point_then_smooth_x", "displot_ecdf_x")
+]
+
+
+@pytest.mark.parametrize("site_id", _REDRAWN_AXIS_SITES, ids=_REDRAWN_AXIS_SITES)
+def test_a_declared_temporal_type_is_not_applied_on_a_redrawn_statistic_axis(site_id: str):
+    """``T`` is not a categorical type either, but every site here redraws
+    this axis from its own numeric output, so the declared type never
+    reaches the render: the chart renders exactly as the bare field does.
+    """
+    site = _CATEGORICAL_SITES[site_id]
+    bare = site.build("").to_svg()
+    assert site.build(":T").to_svg() == bare
+
+
+def test_a_declared_temporal_type_is_applied_where_the_axis_is_drawn_directly():
+    """The two sites excluded above: a declared T changes the render here,
+    since the channel that draws the axis is the caller's raw column, not
+    a statistic's redrawn output -- the same rule a drawn scatter layer
+    (regplot/lmplot, see ``tests/test_regression_keyword_reading.py``) and
+    residplot's x follow.
+    """
+    point_then_smooth = _CATEGORICAL_SITES["point_then_smooth_x"]
+    assert point_then_smooth.build(":T").to_svg() != point_then_smooth.build("").to_svg()
+
+    ecdf = _CATEGORICAL_SITES["displot_ecdf_x"]
+    assert ecdf.build(":T").to_svg() != ecdf.build("").to_svg()
+
+
+def test_a_categorical_composite_is_unaffected_by_the_categorical_input_rule():
+    """boxplot, boxen, violin, errorbar, swarm and errorband share no prep
+    with the statistics above, so a declared categorical type on their own
+    category axis -- which is what those marks need it to be -- is drawn,
+    never refused by this rule, and each render is pinned by its own
+    digest below, computed on the baseline tree.
+    """
+    rows = _XY_ROWS.with_columns(cat=pl.lit("a"))
+    digests = {
+        "boxplot": "5f60ffae53d7c230179e3949a64d5634b58d12dfe6c490b8e1c7091619058c77",
+        "boxen": "32b2d92d580bfe1fefd4dd67ffa6119822c7c1491ecf0eb0d3bdb2a39efed056",
+        "violin": "7af02e47dec63752ac6b1f6307b599a2c97b2907838d3c7b97438efe4e5650e1",
+        "errorbar": "0f03b9b9bd8af0fc456ef855c4380348aedf760116c083f87b8afcdecdb65724",
+        "swarm": "72f68c4c690be0c64fa0c9ff171755d95df375692130bb3a2371e5730f58667a",
+        "errorband": "32b135792eb9da94d17fdbd6e2263e21a35943c5936d34c7fdd79e316e09d193",
+    }
+    builds: dict[str, Callable[[], fm.Chart]] = {
+        "boxplot": lambda: fm.Chart(rows).mark_boxplot().encode(x="cat:N", y="v"),
+        "boxen": lambda: fm.Chart(rows).mark_boxen().encode(x="cat:N", y="v"),
+        "violin": lambda: fm.Chart(rows).mark_violin().encode(x="cat:N", y="v"),
+        "errorbar": lambda: fm.Chart(rows).mark_errorbar().encode(x="cat:N", y="v"),
+        "swarm": lambda: fm.Chart(rows).mark_swarm().encode(x="cat:N", y="v"),
+        "errorband": lambda: fm.Chart(rows).mark_errorband().encode(x="cat:N", y="v"),
+    }
+    for name, build in builds.items():
+        assert _digest(build().to_svg()) == digests[name], name
+
+
+def test_a_fieldless_typed_channel_is_left_to_the_statistics_own_rules():
+    """A typed channel with no field of its own never names an input
+    column, so the categorical-input rule leaves it alone entirely: a
+    computed axis styled with a fieldless type renders as the baseline
+    does, and a required axis bound fieldless falls through to the
+    statistic's own missing-field refusal, never a categorical one that
+    would misname the field ``None``.
+    """
+    density_svg = fm.Chart(_XY_ROWS).mark_density().encode(x="v", y=fm.Y(type="N")).to_svg()
+    assert _digest(density_svg) == "45cd0e4ebcfcfa76ea4910c081e3abdf571f0271e335cc5b638fcc7c739ae6f9"
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y=fm.Y(type="N")).to_svg()
+    assert str(excinfo.value) == "mark_smooth() requires .encode(x=..., y=...)"
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_HIST_ROWS).mark_histogram().encode(x=X(type="N")).to_svg()
+    assert str(excinfo.value) == "mark_histogram() requires .encode(x=...) to specify the histogram field"
+
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(_HIST_ROWS).mark_qq().encode(x=X(type="N")).to_svg()
+    assert str(excinfo.value) == "mark_qq() requires .encode(x=...) to specify the sample field"
+
+
+@pytest.mark.parametrize("kind", ["scatter", "kde", "hist", "hex", "reg"])
+def test_a_marginal_histograms_categorical_refusal_ends_in_drop_the_type(kind: str):
+    """jointplot's marginal histogram re-voices the same categorical refusal
+    mark_histogram raises directly, but jointplot's ``JointChart`` result
+    has no ``.encode()``/``mark_bar()`` to chain, so it ends in the fit
+    family's "Drop the type" ending instead of the count-by-category
+    rewrite -- for every center ``kind=``, since the marginal that refuses
+    is the same ``marginal_kind="hist"`` default regardless of the center.
+    """
+    rows = pl.DataFrame({"v": [float(i) for i in range(1, 21)], "w": [float(i) * 2.0 + 1.0 for i in range(1, 21)]})
+    with pytest.raises(ValueError) as excinfo:
+        fm.jointplot(rows, x="v:N", y="w", kind=kind).to_svg()
+    assert str(excinfo.value) == (
+        "jointplot(x=X('v', type='N')) is not supported: the histogram bins x as "
+        "numbers and draws a bar per bin, so type='N' would draw one bar per row "
+        "instead of one per category. Drop the type (x='v')."
+    )
+
+
+def test_a_pairplot_diagonal_categorical_refusal_ends_in_drop_the_type():
+    """pairplot's diagonal shares the same ``chains_transform=False`` row,
+    on both its default histogram diagonal and a kde diagonal.
+    """
+    rows = pl.DataFrame({"v": [float(i) for i in range(1, 21)], "w": [float(i) * 2.0 + 1.0 for i in range(1, 21)]})
+    with pytest.raises(ValueError) as excinfo:
+        fm.pairplot(rows, vars=["v:N", "w"], diag_kind="hist").to_svg()
+    assert str(excinfo.value) == (
+        "pairplot(x=X('v', type='N')) is not supported: the histogram bins x as "
+        "numbers and draws a bar per bin, so type='N' would draw one bar per row "
+        "instead of one per category. Drop the type (x='v')."
+    )
+    with pytest.raises(ValueError) as excinfo:
+        fm.pairplot(rows, vars=["v:N", "w"], diag_kind="kde").to_svg()
+    assert str(excinfo.value) == (
+        "pairplot(x=X('v', type='N')) is not supported: the kernel density estimate "
+        "reads x as numbers, so type='N' would place the rows as categories. Drop "
+        "the type (x='v')."
+    )
+
+
+#: One real categorical refusal per figure voice, each triggered by an
+#: actual call rather than a hand-typed message: the typeable-remedy
+#: check is only meaningful against the text the code itself raises.
+_TYPEABLE_REMEDY_BUILDERS: dict[str, Callable[[], Any]] = {
+    "jointplot_hist": lambda: fm.jointplot(_XY_ROWS, x="v:N", y="w").to_svg(),
+    "pairplot_kde": lambda: fm.pairplot(_XY_ROWS, vars=["v:O", "w"], diag_kind="kde").to_svg(),
+    "displot_hist": lambda: fm.displot(_HIST_ROWS, x="v:O", kind="hist").to_svg(),
+    "regplot_fit": lambda: fm.regplot(_XY_ROWS, x=X("v", type="N"), y="w").to_svg(),
+    "lmplot_fit": lambda: fm.lmplot(_XY_ROWS, x="v", y=Y("w", type="O")).to_svg(),
+    "residplot_fit": lambda: fm.residplot(_XY_ROWS, x=X("v", type="N"), y="w").to_svg(),
+}
+
+
+@pytest.mark.parametrize("builder_id", list(_TYPEABLE_REMEDY_BUILDERS))
+def test_a_figure_voiced_categorical_refusal_names_a_typeable_remedy(builder_id: str) -> None:
+    """Every figure-voiced categorical refusal passes the same
+    typeable-remedy check the bin=/aggregate= family's own messages do --
+    including jointplot's own "Drop the type" ending, which names no
+    kwarg or chained call at all. Each message comes from the real call
+    that raises it, not a hand-typed string the production text could
+    silently drift away from.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _TYPEABLE_REMEDY_BUILDERS[builder_id]()
+    _assert_the_remedy_is_typeable_at_the_voice(str(excinfo.value))

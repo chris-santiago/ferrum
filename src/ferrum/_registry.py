@@ -193,6 +193,21 @@ def aggregate_needs_field(kind: str, aggregate: str) -> bool:
     return aggregate in transform_registry(kind)["methods_needing_field"]
 
 
+def accepts_aggregate(kind: str, aggregate: str) -> bool:
+    """Return whether *aggregate* is a member of *kind*'s published vocabulary.
+
+    Read by :func:`ferrum.encoding._resolve.channel_for_column` with
+    ``kind="aggregate"`` to tell a genuine aggregate shorthand prefix
+    (``"mean(k)"``) from a string that merely looks like one
+    (``"f(h)"``, whose ``"f"`` names no aggregate): ``transform_registry
+    ("aggregate")["methods"]`` is the same vocabulary ``AggregateOp``
+    validates against, so no list is duplicated in Python.
+    """
+    from ferrum._core import transform_registry
+
+    return aggregate in transform_registry(kind)["methods"]
+
+
 def canonical_aggregate(kind: str, aggregate: str) -> str:
     """*aggregate*'s canonical spelling for *kind*, per ``transform_registry(kind)["method_canonical"]``.
 

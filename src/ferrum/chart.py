@@ -109,7 +109,7 @@ from ferrum._facet import (
 )
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
 from ferrum.encoding._aliases import alias_source
-from ferrum.encoding._resolve import channel_class, channel_for_value
+from ferrum.encoding._resolve import channel_class, channel_for_column, channel_for_value
 from ferrum.encoding._aliases import layered_chart_detail
 from ferrum.selection import ConditionalSpec
 
@@ -1069,6 +1069,29 @@ def _coalesce_facet_rhs_columns(chart: "Chart") -> "Chart":
         df = df.with_columns(expr.alias(facet_col))
     chart._data = df
     return chart
+
+
+def _parsed_facet_arg(name: str, value: Any, *, declare: str) -> Optional[ChannelBase]:
+    """Parse one of :meth:`Chart.facet`'s ``field=``/``row=``/``col=`` arguments the column-keyword way.
+
+    *value* is read through :func:`~ferrum.encoding._resolve.channel_for_column`:
+    shorthand (``"g:N"``) parses as ``encode(facet=...)``/``encode(facet_col=...)``/
+    ``encode(facet_row=...)`` parses it, a channel object works directly,
+    and a column name the shorthand grammar cannot read (``"grp (k)"``)
+    binds that exact column -- leniently, unlike ``encode()``'s own
+    strict channels, which refuse such a string. A value that is none of
+    str/channel/``Repeat`` raises the parse's own ``TypeError`` naming
+    *declare*. ``None`` when *value* is ``None``. Returning the parsed
+    CHANNEL, not a fixed tuple of the options it happens to carry, is
+    what lets :meth:`Chart.facet` read every option ``encode(facet...)``
+    honors (title, sort, a ``Facet``'s own ``columns=``) from one place,
+    wherever its own keyword for that option is left unset -- the same
+    precedence ``encode(facet_col=...)`` applies to a channel's own
+    options.
+    """
+    if value is None:
+        return None
+    return channel_for_column(name, value, declare=declare)
 
 
 def _infer_type_from_data(field: str | None, data: Any) -> str | None:
@@ -2289,7 +2312,7 @@ class Chart(
                     declare=declare,
                 )
                 if wire != name:
-                    # name is an alias source (only "fill" today -- the
+                    # name is an alias source (only "fill" -- the
                     # refusal registry already excludes "stroke"):
                     # checked below once this channel's own field lands
                     # in new._encoding[name].
@@ -2959,10 +2982,10 @@ class Chart(
 
     def facet(
         self,
-        field: Optional[str] = None,
+        field: Any = None,
         *,
-        row: Optional[str] = None,
-        col: Optional[str] = None,
+        row: Any = None,
+        col: Any = None,
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
         title: Optional[str] = None,
@@ -2981,25 +3004,41 @@ class Chart(
 
         Parameters
         ----------
-        field : str, optional
-            Column name used for wrap-mode faceting.  Mutually exclusive with
-            using both ``row`` and ``col`` together. A prior facet declaration
-            (from an earlier ``.facet()`` or ``encode(facet...)`` call) is
-            merged, not discarded: a field this call does not restate
-            (``title``, ``ncols``, ``nrows``, the ``share_scale()`` resolution)
-            survives, and ``field=`` replaces an existing **grid** facet with
-            a wrap on this field (its ``row_title``, which has no home in
-            wrap mode, is dropped).
-        row : str, optional
-            Column name for the row dimension (grid mode).  When used alone,
-            behaves as wrap mode on the row axis, UNLESS it merges onto a
-            prior facet with a different, column-role dimension (a column
-            wrap, or a grid), in which case it promotes to/updates a grid
-            (row=this field, col=the prior's), keeping the prior's field on
-            its own axis.
-        col : str, optional
-            Column name for the column dimension (wrap or grid mode). Used
-            alone, the same merge rule applies with the roles reversed.
+        field : str or encoding, optional
+            Column name used for wrap-mode faceting, read the
+            column-keyword way (the same reading a figure's ``hue=``
+            gets): shorthand (``"g:N"``) parses as ``encode(facet=...)``
+            parses it, a non-shorthand string (``"Weight (kg)"``) is the
+            column it names rather than raising ``encode()``'s parse
+            error, and a ``fm.Facet(...)`` object works directly. A value
+            that is none of str/``Facet``/``Repeat`` placeholder raises
+            the parse's own ``TypeError``. Where this call passes no
+            ``title=``/``sort=``, the channel's own are used, and a
+            ``fm.Facet(..., columns=N)`` sets the wrap count (``ncols``)
+            when this call passes no ``ncols=``. Mutually exclusive with
+            using both ``row`` and ``col`` together. A prior
+            facet declaration (from an earlier ``.facet()`` or
+            ``encode(facet...)`` call) is merged, not discarded: a field
+            this call does not restate (``title``, ``ncols``, ``nrows``,
+            the ``share_scale()`` resolution) survives, and ``field=``
+            replaces an existing **grid** facet with a wrap on this field
+            (its ``row_title``, which has no home in wrap mode, is
+            dropped).
+        row : str or encoding, optional
+            Column name for the row dimension (grid mode), read as
+            ``encode(facet_row=...)`` reads its channel (shorthand or a
+            ``fm.FacetRow(...)`` object; see ``field`` above for the
+            title/sort fallback and the parse's own ``TypeError``).  When
+            used alone, behaves as wrap mode on the row axis, UNLESS it
+            merges onto a prior facet with a different, column-role
+            dimension (a column wrap, or a grid), in which case it promotes
+            to/updates a grid (row=this field, col=the prior's), keeping
+            the prior's field on its own axis.
+        col : str or encoding, optional
+            Column name for the column dimension (wrap or grid mode), read
+            as ``encode(facet_col=...)`` reads its channel (shorthand or a
+            ``fm.FacetCol(...)`` object; see ``field`` above). Used alone,
+            the same merge rule applies with the roles reversed.
         ncols : int or None, optional
             Maximum number of columns in wrap mode.  ``None`` lets the renderer
             choose.
@@ -3049,6 +3088,9 @@ class Chart(
             single-dimension declaration (``field=``, ``col=`` alone, or
             ``row=`` alone), or if ``sort=``/``row_sort=`` is a malformed
             sort-field object.
+        TypeError
+            If ``field``/``row``/``col`` is none of a string, the matching
+            encoding object, or a ``Repeat`` placeholder.
 
         Examples
         --------
@@ -3089,53 +3131,58 @@ class Chart(
         nrows = coerce_positive_int("Chart.facet(nrows=...)", nrows)
         new = self._clone()
         existing = self._facet
-        if field is not None:
+
+        field_ch = _parsed_facet_arg("facet", field, declare="Chart.facet(field=...)")
+        row_ch = _parsed_facet_arg("facet_row", row, declare="Chart.facet(row=...)")
+        col_ch = _parsed_facet_arg("facet_col", col, declare="Chart.facet(col=...)")
+
+        if field_ch is not None:
             _refuse_row_title_on_wrap("field=")
             new._facet = _Facet.merged_with(
                 existing,
-                declare=f"Chart.facet(field={field!r})",
+                declare=f"Chart.facet(field={field_ch.field!r})",
                 kind=FacetDeclaration.FACET_FIELD,
-                field=field,
-                title=title,
-                sort=sort,
-                ncols=ncols,
+                field=field_ch.field,
+                title=title if title is not None else field_ch.option("title"),
+                sort=sort if sort is not None else field_ch.option("sort"),
+                ncols=ncols if ncols is not None else field_ch.option("columns"),
                 nrows=nrows,
             )
-        elif row is not None and col is not None:
+        elif row_ch is not None and col_ch is not None:
             new._facet = _Facet.merged_with(
                 existing,
-                declare=f"Chart.facet(row={row!r}, col={col!r})",
+                declare=f"Chart.facet(row={row_ch.field!r}, col={col_ch.field!r})",
                 kind=FacetDeclaration.GRID,
-                row=row,
-                col=col,
-                title=title,
-                row_title=row_title,
-                sort=sort,
-                row_sort=row_sort,
+                row=row_ch.field,
+                col=col_ch.field,
+                title=title if title is not None else col_ch.option("title"),
+                row_title=row_title if row_title is not None else row_ch.option("title"),
+                sort=sort if sort is not None else col_ch.option("sort"),
+                row_sort=row_sort if row_sort is not None else row_ch.option("sort"),
                 ncols=ncols,
                 nrows=nrows,
             )
-        elif col is not None:
+        elif col_ch is not None:
             _refuse_row_title_on_wrap("col= alone")
             new._facet = _Facet.merged_with(
                 existing,
-                declare=f"Chart.facet(col={col!r})",
+                declare=f"Chart.facet(col={col_ch.field!r})",
                 kind=FacetDeclaration.COL,
-                col=col,
-                title=title,
-                sort=sort,
+                col=col_ch.field,
+                title=title if title is not None else col_ch.option("title"),
+                sort=sort if sort is not None else col_ch.option("sort"),
                 ncols=ncols,
                 nrows=nrows,
             )
-        elif row is not None:
+        elif row_ch is not None:
             _refuse_row_title_on_wrap("row= alone")
             new._facet = _Facet.merged_with(
                 existing,
-                declare=f"Chart.facet(row={row!r})",
+                declare=f"Chart.facet(row={row_ch.field!r})",
                 kind=FacetDeclaration.ROW,
-                row=row,
-                row_title=title,
-                row_sort=sort,
+                row=row_ch.field,
+                row_title=title if title is not None else row_ch.option("title"),
+                row_sort=sort if sort is not None else row_ch.option("sort"),
                 ncols=ncols,
                 nrows=nrows,
             )

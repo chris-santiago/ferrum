@@ -39,6 +39,7 @@ def _request() -> regression._FitRequest:
         y_title="y",
         grouping=(),
         grouping_bindings={},
+        keyword_bindings={},
         ci=0.95,
         line_kwargs={},
         x_bins=None,

@@ -37,19 +37,23 @@ from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
 from ferrum._encode_lowering import (
     COMPOSITE_GROUPING_CHANNELS,
+    _FIT_CATEGORICAL_READS,
     _generic_aggregate_remedy,
     _generic_bin_remedy,
     _rebind_positional,
     _refuse_bin_aggregate_fit,
+    _refuse_categorical_input,
     _refuse_statistic_input,
+    _residual_axis_categorical_reads,
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
+from ferrum.encoding._resolve import channel_for_value
 from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
-from ferrum.marks._desugar_helpers import nominal_color_channel, with_grouping
+from ferrum.marks._desugar_helpers import with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
@@ -59,10 +63,10 @@ from ferrum.plots._helpers import (
     _drawn_bindings,
     _drawn_positional_channels,
     _encode_grouping,
-    _field_name,
     _figure_entry,
     _finalize_chart,
     _grid_panels,
+    _grouping_hue,
     _inject_cook_outliers,
     _inject_metrics_corner,
     _log_scaled_x,
@@ -488,30 +492,30 @@ def _prediction_error_chart_from_source(
     )
 
 
-def _required_field_name(value: Any, *, entry: str, param: str) -> str:
-    """``_field_name`` for a figure parameter that has no meaning without a column.
+def _required_channel(value: Any, *, entry: str, param: str) -> ChannelBase:
+    """Parse ``x=``/``y=`` for a figure parameter that has no meaning without a column.
 
-    ``_field_name`` returns ``str | None`` because the ``hue=``-shaped
-    parameters it was written for are optional. ``lmplot``'s ``x``/``y`` are
-    not, and the difference is load-bearing rather than cosmetic: their names
-    are what the fit layers title the axes with, and those layers are bound to
-    the TRANSFORM's output columns, so a ``None`` reaching
-    :func:`_fit_chart_from_named_transform`'s ``x_title``/``y_title`` -- both
-    declared ``str``, neither enforced -- silently retitles the value axis
-    ``ci_lower``, the confidence band's lower bound. That is #199 exactly,
-    restored by a type hole rather than by a code path.
+    *value* is read exactly as ``encode()`` reads a channel value
+    (:func:`~ferrum.encoding._resolve.channel_for_value`): a shorthand
+    string (``"bill:Q"``) is parsed into the channel it spells, an
+    already-built encoding object passes through untouched, and a value
+    that is none of str/channel/``Repeat`` placeholder raises the parse's
+    own ``TypeError`` naming *entry* and *param*. ``None`` refuses BEFORE
+    the parse (``channel_for_value`` has no "unset" reading of its own):
+    ``x``/``y`` are not optional, and their column names are what the fit
+    layers title the axes with -- those layers are bound to the
+    TRANSFORM's own output columns, so a missing name would retitle the
+    value axis with one of those instead.
 
-    Narrowing here, once, at the entry that owns the refusal, is what makes
-    the ``str`` annotations downstream true by construction instead of by
-    argument. It is also what lets an ENCODING OBJECT be accepted rather than
-    leaking a binding-layer error: ``lmplot``'s seven ``mark_smooth``-routed
-    methods already rendered ``x=fm.X("bill")`` correctly (``.encode()``
-    takes a channel object), while the three that construct their transform
-    directly raised the raw PyO3 ``argument 'x': 'X' object is not an
-    instance of 'str'``, and ``residplot`` raised polars' ``cannot turn
-    'X' into selector`` from its ``drop_nulls``. The column NAME is what
-    every one of those consumers wants; the channel itself still goes to
-    ``.encode()``, so a caller's ``title=``/``scale=`` survives.
+    Parsing into a CHANNEL, not just a field name, is what lets a
+    caller's ``title=``/``scale=``/declared type survive onto the fit
+    layers and the scatter alike, and what makes ``x="bill:Q"`` mean the
+    same thing here that it means on ``Chart.encode``. Both regression
+    entries (``_lmplot_impl`` and ``residplot``) call this once, at the
+    top, and every consumer of ``x``/``y`` after that -- the refusals, the
+    jitter column, the scatter's encoding, the fit request, the axis
+    titles -- reads the one parsed channel it returns, never the raw
+    keyword.
 
     *entry* is the public function the caller invoked and *param* the
     parameter being narrowed, so the refusal names what they wrote.
@@ -520,13 +524,12 @@ def _required_field_name(value: Any, *, entry: str, param: str) -> str:
     refusals already read (``truncate=False``, ``x_bins=`` on a dedicated
     method).
     """
-    name = _field_name(value)
-    if name is None:
+    if value is None:
         raise ValueError(
             f"{entry}({param}=None): {param} names the column to fit and has no "
             f"default. Pass a column name, or an encoding object wrapping one."
         )
-    return name
+    return channel_for_value(param, value, declare=f"{entry}({param}=...)")
 
 
 def _fit_chart_from_named_transform(
@@ -586,11 +589,11 @@ def _fit_chart_from_named_transform(
     they are bound to the transform's output columns and the renderer titles
     each axis from layer 0 (see ``build_fit_layers``). Required, not
     defaulted, and genuinely ``str``: ``lmplot`` resolves both once, over
-    :func:`_required_field_name`, which refuses a ``None``
-    in ``lmplot``'s own voice, so no call site can hand this parameter the
-    ``str | None`` that would retitle the value axis ``ci_lower`` again
-    (#199). When ``scatter=False`` leaves the fit alone there is no sibling
-    layer to fall back on.
+    :func:`_required_channel`, which refuses a ``None`` in ``lmplot``'s own
+    voice, so no call site can hand this parameter a missing title that
+    would retitle the value axis with one of the transform's own output
+    columns instead. When ``scatter=False`` leaves the fit alone there is
+    no sibling layer to fall back on.
     """
     chart = Chart(data)._with_statistics(transform)
     chart._layers = [
@@ -627,15 +630,24 @@ class _FitRequest:
     channel, else the column name. ``grouping`` is the fields the fit
     groups by (the composite grouping of the hue and every grouping
     channel the caller binds), and ``grouping_bindings`` the bindings of
-    those channels, which the fit chart binds itself so each per-group
-    curve draws its group's color. ``has_scatter`` says whether a scatter
-    layer will be composed beside the fit, which decides the smooth path's
-    layer shape. ``x_range_pad``, when set (``truncate=False``), asks the
-    transform to extend the fit past its own on-side data extent by this
-    fraction, in whatever space the fit uses (data units on a linear x,
-    log units on a demanded log x): the transform derives the range
-    itself, from its own whole-batch extent, so this function passes only
-    the pad fraction, never a range it computed.
+    those channels, which the fit chart binds itself when it is composed
+    beside a scatter, so each per-group curve draws its group's color.
+    ``keyword_bindings`` is the call's whole keyword encoding without
+    ``x``/``y`` (the hue's resolved color, every grouping channel, and
+    every other ``**encode_kwargs`` binding) -- what the fit chart binds
+    instead, through ``Chart.encode``, when it draws with no scatter
+    beside it, the same door ``encode=`` reaches it through, so an unknown
+    channel refuses and a binding the fit cannot draw warns rather than
+    vanishing. ``has_scatter`` says whether a scatter layer will be
+    composed beside the fit, which decides the smooth path's layer shape
+    and which of the two binding dicts the fit itself binds
+    (:func:`_with_fit_bindings`). ``x_range_pad``, when set
+    (``truncate=False``), asks the transform to extend the fit past its
+    own on-side data extent by this fraction, in whatever space the fit
+    uses (data units on a linear x, log units on a demanded log x): the
+    transform derives the range itself, from its own whole-batch extent,
+    so this function passes only the pad fraction, never a range it
+    computed.
     """
 
     entry: str
@@ -648,6 +660,7 @@ class _FitRequest:
     y_title: str
     grouping: tuple[str, ...]
     grouping_bindings: dict
+    keyword_bindings: dict
     ci: float | None
     line_kwargs: dict
     x_bins: Any
@@ -707,7 +720,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         fit = Chart(req.data).mark_smooth(
             **smooth_kwargs, layer_kwargs={"line": lkw} if lkw else None
         )
-        return fit.encode(x=req.x, y=req.y, **req.grouping_bindings)
+        return fit.encode(x=req.x, y=req.y, **req.keyword_bindings)
     # A scatter layer will be composed beside this fit, so the fit's
     # transform must be a NAMED fan-out its own layers read through
     # `data_source=` -- never a chain-advancing transform, which would
@@ -747,17 +760,24 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         y_title=req.y_title,
         metrics=req.metrics,
     )
-    return _with_grouping_bindings(fit, req)
+    return _with_fit_bindings(fit, req)
 
 
-def _with_grouping_bindings(fit: Chart, req: _FitRequest) -> Chart:
-    """*fit* binding the grouping channels its statistic groups by.
+def _with_fit_bindings(fit: Chart, req: _FitRequest) -> Chart:
+    """*fit* binding the channels it draws alone with, or groups by beside a scatter.
 
-    Composed beside the scatter, the fit draws only its own bindings, so it
-    binds the hue and every grouping channel itself, each curve and band
-    drawing its group's color.
+    Composed beside a scatter, the fit draws only the hue and every
+    grouping channel its statistic groups by (:attr:`_FitRequest.grouping_bindings`),
+    so sibling isolation holds: the caller's other keyword bindings (size,
+    opacity, tooltip, ...) stay the scatter's own. With no scatter, the fit
+    chart IS the whole chart, so it binds every keyword binding the call
+    carried (:attr:`_FitRequest.keyword_bindings`) through ``Chart.encode``,
+    exactly as ``encode=`` would reach it: an unknown channel refuses, and
+    a binding the fit's statistic does not draw warns rather than
+    vanishing without a word.
     """
-    return fit.encode(**req.grouping_bindings) if req.grouping_bindings else fit
+    bindings = req.grouping_bindings if req.has_scatter else req.keyword_bindings
+    return fit.encode(**bindings) if bindings else fit
 
 
 def _grouped(req: _FitRequest) -> dict:
@@ -770,7 +790,9 @@ def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
 
     Each transform was built with the request's grouping as its ``groupby``
     (:func:`_grouped`), so it fits one curve per group, and the chart binds
-    the grouping channels so each curve and band draws its group's color.
+    the channels :func:`_with_fit_bindings` decides, so each curve and band
+    draws its group's color (or, with no scatter beside it, every keyword
+    binding the call carried).
     """
     fit = _fit_chart_from_named_transform(
         req.data,
@@ -785,7 +807,7 @@ def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
         # False for logistic/glm: `lmplot` never sets `metrics` for them.
         metrics=req.metrics,
     )
-    return _with_grouping_bindings(fit, req)
+    return _with_fit_bindings(fit, req)
 
 
 def _build_logistic_fit(method: str, req: _FitRequest) -> Chart:
@@ -915,6 +937,15 @@ def _lmplot_impl(
             "sqrt, gam) or leave x_bins=None (the default)."
         )
 
+    # x/y and hue are parsed once, here, before any consumer: every one
+    # below (the refusals, the jitter column, the scatter's encoding, the
+    # fit request, the axis titles) reads the one parsed channel, never
+    # the raw keyword, so a shorthand string, a declared type and a
+    # channel's own options mean the same thing in all of them.
+    x_ch = _required_channel(x, entry=entry, param="x")
+    y_ch = _required_channel(y, entry=entry, param="y")
+    hue = _grouping_hue(entry, hue)
+
     # Every method fits x as the raw predictor and y as the raw response;
     # neither folds in a bin= or aggregate= the caller bound on either
     # channel (through a keyword, `encode=`, or a shorthand string), so a
@@ -923,28 +954,29 @@ def _lmplot_impl(
     # the methods that build Smooth (it bins before any method dispatch);
     # the dedicated methods have no such knob (refused above), so their x
     # bin= falls back to the generic, field-aware remedy.
+    drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
     _refuse_bin_aggregate_fit(
         entry,
-        _drawn_positional_channels({"x": x, "y": y}, encode),
+        drawn,
         x_bins_knob=method in _SMOOTH_ROUTED_METHODS,
     )
+    # A declared categorical type on either channel is refused the same
+    # way: the fit reads both as numbers, so a `N`/`O` would place the
+    # fitted curve's values as categories instead of positions on a
+    # continuous axis. `Q` and `T` are honored -- a declared `T` draws a
+    # time axis only with a scatter drawn; with `scatter=False` the fit
+    # redraws the axis from its own curve, so the declared `T` is not
+    # applied there.
+    _refuse_categorical_input(entry, drawn, ("x", "y"), reads=_FIT_CATEGORICAL_READS)
 
     data = to_polars(data)
-
-    # The fit's column names, resolved ONCE and non-optionally. Every consumer
-    # below -- the fit layers' axis titles, `desugar_smooth`'s field
-    # arguments, the jitter column lookup -- needs a real column
-    # name, and each used to re-derive it through `_field_name`, whose
-    # `str | None` return no call site checked (#199's type hole).
-    x_field = _required_field_name(x, entry=entry, param="x")
-    y_field = _required_field_name(y, entry=entry, param="y")
+    x_field, y_field = x_ch.field, y_ch.field
 
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
 
-    # Schwabish SB-followup (2026-05-12): the corner-metrics overlay is
-    # supplied by the Smooth/Robust Rust transform via
-    # ``inject_metrics=True`` (threaded through ``mark_smooth
+    # The corner-metrics overlay is supplied by the Smooth/Robust Rust
+    # transform via ``inject_metrics=True`` (threaded through ``mark_smooth
     # (show_metrics=True)`` for smooth-routed methods, and directly on
     # ``Robust(...)`` below for ``method="robust"``), so R²/RMSE/MAE is
     # computed once in Rust and surfaced as ``_metrics_text`` /
@@ -998,13 +1030,11 @@ def _lmplot_impl(
     # untouched (a non-numeric x is left alone too: the renderer refuses it in
     # its own terms rather than failing here on a cast).
     #
-    # Until this batch the defect was visible on 3 of the 4 ci/show_metrics
-    # combinations and hidden on the 4th only because the scatter layer was
-    # reading the fit's own (Float64) grid there -- the corruption F-L10-02
-    # closes. DELETE CONDITION: when `apply_jitter` coerces the column it
-    # writes, the way the transform engine already coerces its inputs
-    # (`numeric_util::coerce_to_float64`, batch D M1). `catplot(native_scale=
-    # True)` carries the same workaround for the same renderer behavior.
+    # This widening step can be deleted once `apply_jitter` coerces the
+    # column it writes itself, the way the transform engine already
+    # coerces its other inputs (`numeric_util::coerce_to_float64`).
+    # `catplot(native_scale=True)` carries the same workaround for the
+    # same renderer behavior.
     if scatter and x_jitter is not None:
         jitter_frame = to_polars(data)
         jitter_column = x_field
@@ -1014,8 +1044,9 @@ def _lmplot_impl(
 
     # Shared encoding.
     #
-    # `hue` is typed Nominal once here and reused on every layer below. It is
-    # a group discriminator: it drives Smooth's `groupby=`, so one fit and one
+    # `hue` is already the parsed, Nominal-unless-typed channel
+    # `_grouping_hue` returned above, reused on every layer below. It is a
+    # group discriminator: it drives Smooth's `groupby=`, so one fit and one
     # CI band are produced per level. Left to infer, a numeric hue column read
     # as Continuous collapsed all of those back into a single rendered fit and
     # a single band -- a materially wrong statistical chart, drawn silently.
@@ -1023,20 +1054,25 @@ def _lmplot_impl(
     # because it shares one color scale with the fit layers in the same layered
     # chart; typing only the fit half would ask that one scale to be Continuous
     # and Nominal at once. See `nominal_color_channel` for the rule.
-    hue_ch = nominal_color_channel(hue)
 
     # `logx` is part of the x channel every layer is built with, not a
     # post-hoc fixup applied to finished charts: resolving it once here means
     # the scatter, the `mark_smooth`-routed fit and the dedicated-transform
-    # fit all take the same channel object. (It used to be two
-    # implementations at the bottom of this function, chosen on whether the
-    # fit chart happened to have `_layers` yet.)
-    x_enc = _log_scaled_x(entry, x, x_field, param="logx") if logx else x
+    # fit all take the same channel object.
+    x_enc = _log_scaled_x(entry, x_ch, x_field, param="logx") if logx else x_ch
 
-    enc: dict = {"x": x_enc, "y": y}
+    enc: dict = {"x": x_enc, "y": y_ch}
     if hue is not None:
-        enc["color"] = hue_ch
+        enc["color"] = hue
     enc.update(encode_kwargs)
+    # Every keyword binding but x/y: the hue's color, every grouping
+    # channel, and every other `**encode_kwargs` entry. With no scatter
+    # drawn, the fit chart binds this whole dict itself, through
+    # `Chart.encode`, the same door `encode=` reaches it through
+    # (`_with_fit_bindings`): a misspelled flag refuses there instead of
+    # rendering a plain fit, and a binding the fit's statistic does not
+    # draw warns rather than vanishing without a word.
+    keyword_bindings = {channel: value for channel, value in enc.items() if channel not in ("x", "y")}
 
     # Every fit method groups by the hue and by every grouping channel the
     # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
@@ -1075,12 +1111,11 @@ def _lmplot_impl(
         scatter_layer = s
 
     # ---- Fit layer (per method) ----------------------------------------
-    # Every `_FIT_BUILDERS` entry forwards `lkw` at CONSTRUCTION, to the fit line
-    # alone. It used to be rewritten onto the finished chart's `_layers` for
-    # the `mark_smooth`-routed methods instead, which dropped it silently
-    # whenever those layers were not materialized yet -- the `scatter=False`
-    # branch, whose chart still carries a pending stat mark until render
-    # (#199).
+    # Every `_FIT_BUILDERS` entry forwards `lkw` at CONSTRUCTION, to the fit
+    # line alone, rather than rewriting it onto the finished chart's
+    # `_layers`: with `scatter=False`, the chart still carries a pending
+    # stat mark until render, so a post-hoc rewrite onto `_layers` would
+    # silently drop it on that branch.
     lkw = _style_kws(entry, "line_kws", "line", line_kws)
 
     fit = _build_fit(
@@ -1089,15 +1124,16 @@ def _lmplot_impl(
             entry=entry,
             data=data,
             x=x_enc,
-            y=y,
+            y=y_ch,
             x_field=x_field,
             y_field=y_field,
             # A suppressed title keeps the column name: the caller's channel,
             # bound at the chart level, already draws no axis title.
-            x_title=drawn_title(x) or x_field,
-            y_title=drawn_title(y) or y_field,
+            x_title=drawn_title(x_ch) or x_field,
+            y_title=drawn_title(y_ch) or y_field,
             grouping=grouping,
             grouping_bindings=grouping_bindings,
+            keyword_bindings=keyword_bindings,
             ci=ci_frac,
             line_kwargs=lkw,
             x_bins=x_bins,
@@ -1140,8 +1176,8 @@ def _lmplot_impl(
 def lmplot(
     data: Any,
     *,
-    x: str,
-    y: str,
+    x: Any,
+    y: Any,
     hue: Any = None,
     col: Any = None,
     row: Any = None,
@@ -1189,21 +1225,43 @@ def lmplot(
     ----------
     data : DataFrame-like
         Input data accepted by ``Chart(data)``.
-    x : str
-        Column name for the horizontal (predictor) axis (required).
-    y : str
-        Column name for the vertical (response) axis (required).
+    x : str or encoding
+        Column name for the horizontal (predictor) axis (required), read
+        exactly as ``encode()`` reads a channel value: shorthand
+        (``"bill:Q"``) and an encoding object both work. A declared
+        ``N``/``O`` is refused -- the fit reads x as a number and draws
+        its curve along a continuous axis. A declared ``T`` draws a time
+        axis only with ``scatter=True`` (the default): the scatter's own
+        channel establishes the axis, with the fit still computed on its
+        raw numbers. With ``scatter=False`` the fit redraws the axis from
+        its own curve, so the declared ``T`` is not applied and the chart
+        renders as the bare field does.
+    y : str or encoding
+        Column name for the vertical (response) axis (required), read the
+        same way as ``x=`` (shorthand or an encoding object), with the
+        same ``N``/``O`` refusal and ``T`` handling.
     hue : str or encoding, optional
-        Column name to map to color. For every ``method``, the fit is refit
-        per hue level via its transform's ``groupby``, so each level gets its
-        own fit line and CI band in that level's scatter color. Any other
+        Column name to map to color, read the way a column-naming keyword
+        is read: shorthand (``"k:Q"``) parses as ``encode()`` reads it, and
+        a column name the shorthand grammar cannot read (``"Weight (kg)"``)
+        binds that exact column. A declared type is kept (``hue="k:Q"``
+        draws the same as ``hue=fm.Color("k", type="Q")``), and an
+        undeclared one is typed Nominal, a grouping discriminator rather
+        than an inferred Continuous scale. An aggregate (``hue="mean(k)"``)
+        is refused: ``hue=`` names the column the fit groups by, not a
+        value to compute. For every ``method``, the fit is refit per hue
+        level via its transform's ``groupby``, so each level gets its own
+        fit line and CI band in that level's scatter color. Any other
         grouping channel the caller binds (``color=``/``fill=``/``stroke=``,
         ``detail``, ``shape`` or ``stroke_dash``, as a keyword or through
         ``encode=``) groups the fit the same way.
-    col : str, optional
-        Column name for faceting across columns.
-    row : str, optional
-        Column name for faceting across rows.
+    col : str or encoding, optional
+        Column name for faceting across columns, read as
+        ``Chart.facet(col=...)`` reads it (shorthand or a
+        ``fm.FacetCol(...)`` object).
+    row : str or encoding, optional
+        Column name for faceting across rows, read the same way as
+        ``col=``.
     method : str, default "lm"
         Fitting method. THE list of accepted values -- every other entry
         below refers here rather than repeating it, and
@@ -1331,7 +1389,13 @@ def lmplot(
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
-        Additional keyword arguments forwarded to ``Chart.encode()``.
+        Additional keyword arguments bound on the scatter when one is
+        drawn (``scatter=True``, the default); with ``scatter=False``
+        there is no scatter to bind them on, so they bind on the fit chart
+        itself instead, through ``Chart.encode()`` -- an unknown channel
+        (a misspelled flag) refuses the same way it would on the scatter,
+        and a binding the fit's statistic does not draw warns rather than
+        silently vanishing.
 
     Returns
     -------
@@ -1343,6 +1407,9 @@ def lmplot(
     ------
     ValueError
         If ``method`` is not one of the supported values.
+    ValueError
+        If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``/``O``:
+        see ``x``/``y`` above.
     ValueError
         If ``method="sqrt"`` on a demanded log x (``logx=True``, or a
         channel ``scale=fm.LogScale()``) -- a sqrt predictor transform and
@@ -1451,8 +1518,8 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
 def residplot(
     data: Any,
     *,
-    x: str,
-    y: str,
+    x: Any,
+    y: Any,
     lowess: bool = False,
     order: int = 1,
     robust: bool = False,
@@ -1480,23 +1547,28 @@ def residplot(
     ----------
     data : DataFrame-like
         Input data accepted by ``Chart(data)``.
-    x : str
-        Column name for the horizontal axis (predictor; required). An
-        encoding object (``fm.X("col", scale=..., axis=..., format=...,
-        title=...)``) is also accepted, and every option it carries reaches
-        the point layer's own x binding, the same re-pointing rule
-        ``displot``'s histogram and ECDF kinds use. A demanded log x
+    x : str or encoding
+        Column name for the horizontal axis (predictor; required), read
+        exactly as ``encode()`` reads a channel value: shorthand
+        (``"bill:Q"``) and an encoding object (``fm.X("col", scale=...,
+        axis=..., format=..., title=...)``) both work, and every option a
+        channel carries reaches the point layer's own x binding, the same
+        re-pointing rule ``displot``'s histogram and ECDF kinds use. A
+        declared ``N``/``O`` is refused -- the residual fit reads x as its
+        numeric predictor -- and a declared ``T`` draws a time axis, with
+        the fit computed on its raw numbers. A demanded log x
         (``scale=fm.LogScale()``) fits the underlying regression in log x,
         not data x.
-    y : str
-        Column name used to compute residuals (response; required). An
-        encoding object is accepted the same way as ``x=``, and its options
-        reach the residual axis; its default title is ``"<y> residual"``
-        rather than the field itself. A log scale on the RESIDUAL axis
-        (through any door -- a channel ``scale=``, ``encode=`` or
-        ``.override(y_scale_type="log")``) is refused rather than warning
-        every row off the side: residuals are signed differences around
-        0, which a ``LogScale`` cannot place.
+    y : str or encoding
+        Column name the residuals are computed from (response; required),
+        read the same way as ``x=``, and its options reach the residual axis;
+        its default title is ``"<y> residual"`` rather than the field
+        itself. A declared ``N``, ``O`` or ``T`` is refused: the residual
+        axis draws signed differences around zero, never a category or a
+        time. A log scale on the RESIDUAL axis (through any door -- a
+        channel ``scale=``, ``encode=`` or ``.override(y_scale_type="log")``)
+        is refused rather than warning every row off the side: residuals
+        are signed differences around 0, which a ``LogScale`` cannot place.
     lowess : bool, default False
         Overlay a lowess smoother on the residuals using
         ``Smooth(method="loess")``.
@@ -1539,11 +1611,17 @@ def residplot(
         column of ``data`` groups the residuals -- they are refit per
         group, coloured by that column, and a ``lowess=True`` overlay
         draws one curve per group -- so a column literally named ``"red"``
-        groups rather than paints. Otherwise the value is parsed as a
-        color (CSS name, hex, ``rgb()``/``rgba()``, or an RGB tuple) and
-        painted onto the residual points as a constant ``fill``; combined
-        with ``label=``, that same color is also the legend swatch. A
-        value that is neither raises ``ValueError`` naming both readings.
+        groups rather than paints. A string that parses as shorthand
+        naming a column (``"g:N"`` when the data has a column ``"g"``,
+        not a column literally named ``"g:N"``) groups by that parsed
+        column too, with its declared type kept. An aggregate shorthand
+        (``"mean(g)"``) is neither a column nor a parseable color, so it
+        is refused the same way any other unmatched string is. Otherwise
+        the value is parsed as a color (CSS name, hex, ``rgb()``/
+        ``rgba()``, or an RGB tuple) and painted onto the residual points
+        as a constant ``fill``; combined with ``label=``, that same color
+        is also the legend swatch. A value that is neither raises
+        ``ValueError`` naming both readings.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -1588,6 +1666,9 @@ def residplot(
         ``.transform(...)`` and bind its output column (the remedy call
         needs ``dropna=False``, since the default drops rows before any
         ``.transform()`` step runs), or drop the kwarg.
+    ValueError
+        If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``,
+        ``O`` or ``T``: see ``x``/``y`` above.
 
     Examples
     --------
@@ -1614,15 +1695,21 @@ def residplot(
     # line below, and `x=None` leaked the same message for `NoneType`; behind
     # that, the titles would have announced the repr of a channel object
     # (`title=x`, below), which is #199's defect wearing a different value.
-    x_field = _required_field_name(x, entry="residplot", param="x")
-    y_field = _required_field_name(y, entry="residplot", param="y")
+    # Parsed once into the channel each is, the way `encode()` reads a
+    # channel value: a shorthand string ("bill:Q") is read as the channel
+    # it spells, so `x_field`/`y_field` and the re-point below never see
+    # the raw, un-split shorthand.
+    x_ch = _required_channel(x, entry="residplot", param="x")
+    y_ch = _required_channel(y, entry="residplot", param="y")
+    x_field = x_ch.field
+    y_field = y_ch.field
     # The residual transform reads x/y as the raw predictor/response; a
     # bin= or aggregate= on either (through a keyword, `encode=`, or a
     # shorthand string) would be dropped silently once the channel is
     # rebound to the residual output. dropna=True drops nulls over the
     # input frame before any transform runs, so the generic remedy's own
     # .transform() step needs dropna=False to see the column it binds.
-    drawn = _drawn_positional_channels({"x": x, "y": y}, encode)
+    drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
     for channel in ("x", "y"):
         ch = drawn.get(channel)
         if isinstance(ch, ChannelBase):
@@ -1634,6 +1721,19 @@ def residplot(
                 bin_remedy=_generic_bin_remedy(ch, call_kwargs="dropna=False"),
                 aggregate_remedy=_generic_aggregate_remedy(ch, call_kwargs="dropna=False"),
             )
+    # A declared categorical type is refused on both axes: the residual
+    # fit reads x as its predictor, the same as regplot's fit, and the
+    # residual axis itself draws signed differences around zero, which is
+    # never a category OR a time -- so y refuses a declared T too, unlike
+    # x, which keeps a declared T as a time axis below.
+    _refuse_categorical_input("residplot", drawn, ("x",), reads=_FIT_CATEGORICAL_READS)
+    _refuse_categorical_input(
+        "residplot",
+        drawn,
+        ("y",),
+        reads=_residual_axis_categorical_reads,
+        disallowed=("N", "O", "T"),
+    )
     if dropna:
         data = data.drop_nulls(subset=[x_field, y_field])
 
@@ -1784,19 +1884,27 @@ def residplot(
     # on x= or y= names its axis instead, and an empty one (title=None or "")
     # suppresses it, as on a plain chart's axis. The overlay layers below share
     # these two names.
-    declared_x, declared_y = declared_title(x), declared_title(y)
+    declared_x, declared_y = declared_title(x_ch), declared_title(y_ch)
     x_title = x_field if declared_x is None else declared_x
     residual_title = f"{y_field} residual" if declared_y is None else declared_y
-    # The caller's own x/y binding (a channel object or a bare field name)
-    # re-pointed at the residual batch's columns through the same
-    # re-pointing rule `kind="hist"` runs at resolve time, so a `scale=`,
-    # `axis=` or `format=` the caller wrote on either channel survives. The
-    # y side's default title is this function's own "<y> residual", not the
-    # field itself, which is the one difference from the bare re-point: an
-    # explicit title (including a suppressing `None`) still wins either way.
+    # The caller's own x/y channel re-pointed at the residual batch's
+    # columns through the same re-pointing rule `kind="hist"` runs at
+    # resolve time, so a `scale=`, `axis=` or `format=` the caller wrote on
+    # either channel survives. The y side's default title is this
+    # function's own "<y> residual", not the field itself, which is the
+    # one difference from the bare re-point: an explicit title (including
+    # a suppressing `None`) still wins either way.
+    rebound_x = _rebind_positional(_resid_x, x_ch, X)
+    if x_ch.option("type") == "T":
+        # `_rebind_positional` forces `type="Q"` on every re-point (its
+        # other callers lower a `bin=`/`aggregate=`, never a declared axis
+        # type); a predictor declared temporal still fits on its raw
+        # numbers, so its declared `T` is restored here, the way
+        # `regplot`'s own `X('v', type='T')` already draws it.
+        rebound_x = rebound_x._with_options(type="T")
     enc: dict = {
-        "x": _rebind_positional(_resid_x, x, X),
-        "y": _rebind_positional("residual", y, Y, title=residual_title),
+        "x": rebound_x,
+        "y": _rebind_positional("residual", y_ch, Y, title=residual_title),
     }
     if color is not None:
         enc["color"] = color
@@ -1920,8 +2028,8 @@ def residplot(
 def regplot(
     data: Any,
     *,
-    x: str,
-    y: str,
+    x: Any,
+    y: Any,
     hue: Any = None,
     method: str = "lm",
     ci: Any = 95,
@@ -1957,16 +2065,22 @@ def regplot(
     ----------
     data : DataFrame-like
         Input data accepted by ``Chart(data)``.
-    x : str
-        Column name for the horizontal (predictor) axis (required).
-    y : str
-        Column name for the vertical (response) axis (required).
+    x : str or encoding
+        Column name for the horizontal (predictor) axis (required),
+        forwarded to ``lmplot`` -- see ``lmplot``'s ``x`` parameter: read
+        exactly as ``encode()`` reads a channel value, with the same
+        categorical refusal and temporal handling.
+    y : str or encoding
+        Column name for the vertical (response) axis (required),
+        forwarded the same way as ``x=`` -- see ``lmplot``'s ``y``
+        parameter.
     hue : str or encoding, optional
         Column name to map to color, forwarded to ``lmplot`` -- see
         ``lmplot``'s ``hue`` parameter: every method fits one line and band
         per hue level, as it does per level of any grouping channel
         (``color=``/``fill=``/``stroke=``, ``detail``, ``shape``,
-        ``stroke_dash``, or their ``encode=`` dict equivalents).
+        ``stroke_dash``, or their ``encode=`` dict equivalents). A declared
+        type is kept, exactly as ``lmplot``'s ``hue`` parameter describes.
     method : str, default "lm"
         Fitting method forwarded to ``lmplot`` -- see ``lmplot``'s ``method``
         parameter for the full accepted set.
@@ -2027,7 +2141,10 @@ def regplot(
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
-        Additional keyword arguments forwarded to ``Chart.encode()``.
+        Additional keyword arguments, forwarded to ``lmplot`` -- see
+        ``lmplot``'s ``**encode_kwargs``: bound on the scatter when
+        ``scatter=True``, or on the fit chart itself through
+        ``Chart.encode()`` when ``scatter=False``.
 
     Returns
     -------
@@ -2041,6 +2158,9 @@ def regplot(
         use ``lmplot`` instead.
     ValueError
         If ``method`` is not one of the supported values.
+    ValueError
+        If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``/``O``
+        -- forwarded from ``lmplot``, see its ``x``/``y`` parameters.
     ValueError
         If ``method="sqrt"`` on a demanded log x -- forwarded from
         ``lmplot``, see its ``method`` parameter.

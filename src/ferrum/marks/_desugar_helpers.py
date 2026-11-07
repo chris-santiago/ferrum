@@ -73,7 +73,9 @@ SHAP_BEESWARM_COLOR_FIELD = "Feature value"
 
 
 def nominal_color_channel(
-    field: "str | ChannelBase | None", *, sort: "Sequence[str] | None" = None
+    field: "str | ChannelBase | None",
+    *,
+    sort: "Sequence[str] | None" = None,
 ) -> "ChannelBase | None":
     """Bind *field* to the color channel typed Nominal.
 
@@ -109,18 +111,36 @@ def nominal_color_channel(
     a single unpaired ``point`` mark, which keeps dtype inference so a
     numeric ``hue=`` still renders a gradient (seaborn parity).
 
-    An already-constructed channel object passes through untouched only when
-    it already declares a type: that is the caller stating the type
-    explicitly (``fm.Color("grp", type_="quantitative")``), and this helper
-    does not overrule it. An already-constructed channel object that
-    declares *no* type (``fm.Color("grp")``) is exactly as untyped as a bare
-    field-name string -- object-ness alone was never the caller stating a
-    type, and infers a Continuous scale from runtime dtype the same way a
-    bare string would -- so it is rebuilt with ``type_="nominal"`` too
-    (``field.option("type") is None`` is the complete untyped predicate:
-    ``ChannelBase.__init__`` normalizes both the ``type_=`` kwarg and the
-    ``"col:N"`` shorthand into that one key, so this test covers every
-    untyped spelling). ``None`` passes through as ``None``.
+    *field* is a RESOLVED column name here, never parsed: every internal
+    caller (a composite-mark desugar's own ``color_field``/``groupby``, a
+    diagnostic mark's discriminator, the literal ``"model"`` a compare
+    source carries) hands this a column it already has, so a bare string
+    binds exactly as written -- ``Color("temp (C)", type_="nominal")`` for
+    a column literally so named, the same name the shorthand grammar's own
+    error recommends wrapping in a channel for. A figure's ``hue=``
+    keyword is read at the figure's OWN door instead
+    (:func:`~ferrum.plots._helpers._grouping_hue`), through
+    ``channel_for_column`` -- so a genuine shorthand hue (``"g:N"``) parses
+    there and only the parsed channel reaches this helper.
+
+    A value passes through untyped only when it already declares a type:
+    an already-constructed channel object with its own ``type_=``
+    (``fm.Color("grp", type_="quantitative")``) wins. A bare string is
+    never typed here (there is no shorthand left to read it from, by the
+    rule above), so it always takes the Nominal default below. A channel
+    object that declares *no* type (``fm.Color("grp")``) is untyped --
+    object-ness alone was never the caller stating a type, and infers a
+    Continuous scale from runtime dtype the same way a bare string would
+    -- so it is rebuilt with ``type_="nominal"`` (``field.option("type")
+    is None`` is the complete untyped predicate: ``ChannelBase.__init__``
+    normalizes the ``type_=`` kwarg and the ``"col:N"`` shorthand into
+    that one key, so this test covers every untyped spelling). ``None``
+    passes through as ``None``. Any other value -- a ``Repeat``
+    placeholder, or anything :func:`~ferrum.encoding._resolve.channel_for_value`
+    refuses -- reads through that function with a generic ``"color=..."``
+    declare text: every remaining caller here is internal, so a
+    non-binding value is already a programming error, not a caller
+    mistake that needs its own voice.
 
     Left untyped, a plain string field name infers its scale type from the
     column's runtime dtype: a numeric dtype (e.g. an integer class/model-id
@@ -178,19 +198,22 @@ def nominal_color_channel(
     """
     if field is None:
         return None
-    if not isinstance(field, str):
-        options: dict = {}
-        if field.option("type") is None:
-            options["type"] = "nominal"
-        if sort is not None:
-            options["sort"] = list(sort)
-        return field._with_options(**options) if options else field
-    from ferrum.encoding import Color
+    if isinstance(field, str):
+        from ferrum.encoding import Color
 
-    kwargs: dict = {"type_": "nominal"}
+        kwargs: dict = {"type_": "nominal"}
+        if sort is not None:
+            kwargs["sort"] = sort
+        return Color(field, **kwargs)
+    from ferrum.encoding._resolve import channel_for_value
+
+    channel = channel_for_value("color", field, declare="color=...")
+    options: dict = {}
+    if channel.option("type") is None:
+        options["type"] = "nominal"
     if sort is not None:
-        kwargs["sort"] = sort
-    return Color(field, **kwargs)
+        options["sort"] = list(sort)
+    return channel._with_options(**options) if options else channel
 
 
 def titled_positional_channel(

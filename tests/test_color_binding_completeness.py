@@ -313,16 +313,26 @@ ALLOWED: dict[tuple[str, str], str] = {
     #    consumer" is load-bearing.
     (
         "src/ferrum/plots/distribution.py",
-        "hue if kind == 'scatter' else nominal_color_channel(hue)",
+        "hue if kind == 'scatter' else nominal_color_channel(_grouping_hue('relplot', hue))",
     ): "relplot(kind='scatter') is a single unpaired point mark, so a numeric "
     "hue keeps rendering a gradient (seaborn parity); kind='line' groups rows "
-    "into one polyline per level and is typed.",
+    "into one polyline per level and is typed, read at relplot's own door "
+    "(_grouping_hue) rather than nominal_color_channel alone.",
     (
         "src/ferrum/marks/diagnostic/_regression.py",
         "color_field",
     ): "desugar_residuals and desugar_prediction_error both bind color_field on a "
     "`point` layer only; their sibling layers (rule / ribbon / identity line) "
     "carry no color encoding, so the point mark is the sole consumer.",
+    (
+        "src/ferrum/plots/regression.py",
+        "hue",
+    ): "_lmplot_impl's own `hue` local is already the typed channel "
+    "`_grouping_hue`/`nominal_color_channel` built at the top of the function "
+    "(Nominal unless the caller declared a type), reused unchanged on this "
+    "shared-encoding dict for the scatter, fit and CI-band layers alike -- a "
+    "re-binding of an already-typed object, not a fresh untyped field reaching "
+    "the color channel.",
     # -- Not an encoding binding: the scan's three syntactic shapes also match
     #    a few dicts and kwargs that are not encodings at all.
     (

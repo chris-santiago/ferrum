@@ -32,8 +32,12 @@ from ferrum._desugar import (
     _scale_domain,
 )
 from ferrum._encode_lowering import (
+    _ECDF_CATEGORICAL_READS,
+    _KDE_CATEGORICAL_READS,
     _KERNEL_DENSITY_READS_RAW_ROWS,
+    _histogram_categorical_reads,
     _refuse_bin_aggregate_on_channels,
+    _refuse_categorical_input,
     _refuse_ecdf_bin_aggregate,
     _refuse_ecdf_field_y,
     _refuse_histogram_bin_aggregate,
@@ -59,6 +63,7 @@ from ferrum.plots._helpers import (
     _field_name,
     _figure_entry,
     _finalize_chart,
+    _grouping_hue,
     _log_scaled_x,
 )
 
@@ -459,7 +464,8 @@ def _reject_displot_without_x(*, kind: str, x: Any, y: Any, kde: bool, rug: bool
 
 
 def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple: str) -> None:
-    """Refuse a bin=/aggregate= the statistic displot's ``kind=`` builds cannot honor.
+    """Refuse a bin=/aggregate= the statistic displot's ``kind=`` builds cannot honor,
+    and a declared categorical type on an axis that statistic reads as numbers.
 
     *drawn* is the x/y channel objects the chart actually draws once
     ``encode=`` applies (:func:`~ferrum.plots._helpers._drawn_positional_channels`),
@@ -471,9 +477,13 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
     for ``"ecdf"``), which
     resolves displot's own remedies itself (``_DOOR_VOCABULARY``, keyed by
     the voice the refusal speaks as) -- nothing door-specific is passed in
-    here. ``kind='rug'`` draws every row through the plain lowering, which
-    consumes a channel's ``bin=``/``aggregate=`` as any primitive mark
-    does, so it is not checked here.
+    here. The categorical-input check beside each one
+    (:func:`~ferrum._encode_lowering._refuse_categorical_input`) is this
+    call-time door's half of the same rule the resolve-time preps apply as
+    a backstop for a later ``.encode()``. ``kind='rug'`` draws every row
+    through the plain lowering, which consumes a channel's
+    ``bin=``/``aggregate=`` as any primitive mark does, so it is not
+    checked here.
     """
     if kind == "hist":
         _refuse_histogram_bin_aggregate(
@@ -483,6 +493,7 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
             density=(stat == "density"),
             share="fill" if multiple == "fill" else None,
         )
+        _refuse_categorical_input("displot", drawn, ("x",), reads=_histogram_categorical_reads("y"))
     elif kind == "kde":
         _refuse_bin_aggregate_on_channels(
             "displot",
@@ -490,8 +501,10 @@ def _refuse_displot_bin_aggregate(*, kind: str, drawn: dict, stat: str, multiple
             ("x", "y"),
             reason=_KERNEL_DENSITY_READS_RAW_ROWS,
         )
+        _refuse_categorical_input("displot", drawn, ("x", "y"), reads=_KDE_CATEGORICAL_READS)
     elif kind == "ecdf":
         _refuse_ecdf_bin_aggregate(drawn)
+        _refuse_categorical_input("displot", drawn, ("x",), reads=_ECDF_CATEGORICAL_READS)
 
 
 def _warn_inert_bins(*, kind: str, bins: Any) -> None:
@@ -769,6 +782,12 @@ def displot(
         multiple=multiple,
     )
     height, aspect = _checked_figure_size("displot", height=height, aspect=aspect)
+    # Read once, here, at displot's own door: a shorthand hue parses as
+    # encode() reads it, a column name the grammar cannot read binds as
+    # written, and an aggregate is refused -- every consumer below
+    # (the color binding, the groupby=/Dodge(by=) readers) reads the same
+    # parsed channel.
+    hue = _grouping_hue("displot", hue)
 
     return _displot_build(
         data,
@@ -1958,6 +1977,8 @@ def catplot(
         _refuse_interval_args_on_non_aggregating_kind(kind, ci, n_boot)
         ci_level = None
     height, aspect = _checked_figure_size("catplot", height=height, aspect=aspect)
+    # Read once, here, at catplot's own door (see displot's twin comment).
+    hue = _grouping_hue("catplot", hue)
 
     return _catplot_build(
         data,
@@ -2647,10 +2668,18 @@ def _relplot_build(
         # The one surviving point-mark carve-out in plots/: kind="scatter" is
         # a single unpaired `point` mark (no sibling layer, no shared color
         # resolve), so a numeric hue may legitimately read as a gradient --
-        # seaborn does the same. kind="line" groups rows into one polyline per
-        # level, so an inferred Continuous scale collapses every group into a
-        # single line; that one is typed. See `nominal_color_channel`.
-        enc["color"] = hue if kind == "scatter" else nominal_color_channel(hue)
+        # seaborn does the same, and this keeps hue the plain `encode()`
+        # binding it already is, refusals included. kind="line" groups rows
+        # into one polyline per level, so an inferred Continuous scale
+        # collapses every group into a single line; that one is read at
+        # relplot's own door (`_grouping_hue`, a shorthand type kept, an
+        # aggregate refused) and typed Nominal, same as every other figure's
+        # grouping hue. `_grouping_hue`'s own result is already typed, so
+        # the `nominal_color_channel` wrap below is a no-op here -- kept
+        # for the same reason every other hue-binding site in this module
+        # routes through it: one declared-typed call the AST completeness
+        # guard (`tests/test_color_binding_completeness.py`) can see.
+        enc["color"] = hue if kind == "scatter" else nominal_color_channel(_grouping_hue("relplot", hue))
     if size is not None:
         enc["size"] = size
     if style is not None:
