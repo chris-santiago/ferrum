@@ -455,6 +455,17 @@ def _emit_format(value: Any, out: dict) -> None:
         out["format_type"] = format_type
 
 
+#: ``format_type``'s two accepted spellings: the canonical
+#: snake_case name and ``formatType``, the Vega-Lite-compat camelCase
+#: alias. Both serialize to the wire key ``format_type`` via
+#: :func:`_emit_format_type` below. The one place this pair is spelled
+#: out for cross-module reuse -- ``ferrum._compose``'s post-build
+#: push-down and ``ferrum._desugar``'s construction-time axis-presentation
+#: propagation both read a positional channel's ``format_type`` under
+#: either spelling and import this rather than each declaring the pair.
+_FORMAT_TYPE_ALIASES = ("format_type", "formatType")
+
+
 def _emit_format_type(value: Any, out: dict) -> None:
     # Both the camelCase "formatType" (Vega-Lite compat) and snake_case
     # "format_type" honored keys serialize to the snake_case EncodingSpec field.

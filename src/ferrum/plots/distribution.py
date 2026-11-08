@@ -28,7 +28,7 @@ from ferrum._coerce import to_polars
 from ferrum._core import validate_bin_rule
 from ferrum._desugar import (
     _explicit_positional_scale,
-    _propagate_layer_scale,
+    _propagate_layer_axis,
     _scale_domain,
 )
 from ferrum._encode_lowering import (
@@ -1527,7 +1527,7 @@ def _catplot_summary_layers(
     category channel it simply rides ``cat_channel`` in, like every other
     option the caller stated; on the VALUE channel -- whose layer bindings are
     fresh ``Y(<summary column>)`` objects -- ``chart_encoding`` is propagated
-    onto both layers through the shared ``_propagate_layer_scale`` (the same
+    onto both layers through the shared ``_propagate_layer_axis`` (the same
     mechanism the composite-mark desugars and ``lmplot``'s fit layers use), so
     ``y=fm.Y("tip", scale={"domain": [0, 120]})`` governs the axis exactly as
     it does for ``kind="box"``. The one combination refused rather than
@@ -1617,14 +1617,15 @@ def _catplot_summary_layers(
     )
     layers = [whisker, estimator] if kind == "point" else [estimator, whisker]
     # The value channel is bound to a bare Summary output column, which is
-    # exactly the shape `_propagate_layer_scale` exists to repair: without it
-    # a caller's explicit positional `scale=` is silently dropped, as it was
+    # exactly the shape `_propagate_layer_axis` exists to repair: without it
+    # a caller's explicit positional `scale=` (and its `format=`/
+    # `format_type=`/`axis=` presentation) is silently dropped, as it was
     # for every composite desugar before GH #45. (The category channel needs
     # no repair -- it IS the caller's channel -- and the propagation is a
-    # no-op for a layer channel that already carries a domain.) Returns each
-    # layer unchanged when no positional channel carries an explicit scale,
+    # no-op for a layer channel that already carries its own.) Returns each
+    # layer unchanged when no positional channel carries any of these,
     # so the ordinary call is a no-op rather than a branch.
-    return transform, [_propagate_layer_scale(chart_encoding, layer) for layer in layers]
+    return transform, [_propagate_layer_axis(chart_encoding, layer) for layer in layers]
 
 
 def _reject_domainless_value_scale(kind: str, chart_encoding: dict) -> None:

@@ -243,8 +243,9 @@ def test_violin_shared_extent_produces_shared_value_range():
 #          ``mark_violin(inner="quartile").encode(x=.., y=..,
 #          stroke_opacity="col")`` produces ``tick`` layers whose encoding
 #          has no ``stroke_opacity`` key at all -- ``_desugar.py`` only
-#          propagates the chart-level x/y positional *scale* onto composite
-#          sub-layers (``_propagate_layer_scale``), not RENDERER_HONORED
+#          propagates the chart-level x/y positional *scale* (and axis
+#          presentation) onto composite sub-layers (``_propagate_layer_axis``),
+#          not RENDERER_HONORED
 #          style channels such as ``stroke_opacity``. There is nothing for
 #          ``tick.rs``'s now-correct per-row ``stroke_opacity`` consumer
 #          (T11r cycle 3) to read for this mark, so there is no "quartile

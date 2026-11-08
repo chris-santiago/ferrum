@@ -66,8 +66,8 @@ confirmed end-to-end below by
 
 Several tests below still route the value channel's scale through an
 explicit ``scale={"domain": [...]}`` (propagated into the composite-mark's
-remapped channel via the existing chart-level scale-propagation path,
-``_desugar.py::_propagate_positional_scale`` — a supported mechanism, not a
+remapped channel via the existing chart-level scale/axis-propagation path,
+``_desugar.py::_propagate_positional_axis`` — a supported mechanism, not a
 private-API workaround). Now that the widening gap above is closed, these
 explicit-domain variants are no longer load-bearing for correctness, but
 they remain useful as widening-independent geometry checks: they pin the
@@ -177,7 +177,7 @@ def test_horizontal_stacked_histogram_renders_and_stacks_along_x():
 
     This variant pins the value_axis wiring + tiling geometry via an
     explicit value-axis scale domain (propagated via
-    ``_propagate_positional_scale``), isolated from
+    ``_propagate_positional_axis``), isolated from
     ``axis_batch_for_x``'s auto-domain inference (see module docstring).
     ``test_horizontal_stacked_histogram_auto_domain_tiles_along_x`` below
     covers the auto-domain, end-to-end case.

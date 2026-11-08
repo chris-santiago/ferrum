@@ -7,6 +7,7 @@ from typing import Any
 
 from ferrum import Bin, Kde, Smooth
 from ferrum._core import transform_registry
+from ferrum._encode_lowering import _missing_xy_channels, _unbound_input_refusal
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns
@@ -828,7 +829,12 @@ def _resolve_density(x_field, y_field, **kwargs):
     field = y_field if orientation == "horizontal" else x_field
     if field is None:
         ch = "y" if orientation == "horizontal" else "x"
-        raise ValueError(f"mark_density() requires .encode({ch}=...) to specify the density field")
+        raise _unbound_input_refusal(
+            "mark_density",
+            (ch,),
+            "the kernel density estimate reads",
+            own=f"mark_density() requires .encode({ch}=...) to specify the density field",
+        )
     # Reconstruct a chart_encoding hint so density's bivariate path can route
     # through desugar_contour(fill=True) when both x AND y are encoded.
     chart_encoding: dict = {}
@@ -850,8 +856,11 @@ def _resolve_histogram(x_field, y_field, **kwargs):
     field = y_field if orientation == "horizontal" else x_field
     if field is None:
         ch = "y" if orientation == "horizontal" else "x"
-        raise ValueError(
-            f"mark_histogram() requires .encode({ch}=...) to specify the histogram field"
+        raise _unbound_input_refusal(
+            "mark_histogram",
+            (ch,),
+            "the histogram bins",
+            own=f"mark_histogram() requires .encode({ch}=...) to specify the histogram field",
         )
     return desugar_histogram(field, **kwargs)
 
@@ -861,21 +870,37 @@ def _resolve_ecdf(x_field, y_field, **kwargs):
 
     A fieldless x is refused here, in displot's voice, because this is the
     one point every door reaches (the x= keyword, encode= and a post-hoc
-    .encode()), once the encoding is known.
+    .encode()), once the encoding is known. Built on
+    :func:`~ferrum._encode_lowering._unbound_input_refusal`, the figure-
+    voiced resolver sentence it shares with every other statistic resolver
+    that needs a bound column; ``own`` restates displot's own
+    ``kind='ecdf'`` spelling, which the generic sentence -- built for a
+    bare voice -- does not carry on its own.
     """
     if x_field is None:
-        raise ValueError(
-            "displot(kind='ecdf') needs x bound to a column -- the ECDF counts the raw "
-            "values of the variable x names, and this x binding names none. Bind x to a "
-            "column: x='<column>', or fm.X('<column>', ...) to keep the channel's options."
+        raise _unbound_input_refusal(
+            "displot",
+            ("x",),
+            "the ECDF counts the raw values of",
+            own=(
+                "displot(kind='ecdf') needs x bound to a column -- the ECDF counts the raw "
+                "values of the variable x names, and this x binding names none. Bind x to a "
+                "column: x='<column>', or fm.X('<column>', ...) to keep the channel's options."
+            ),
         )
     return desugar_ecdf(x_field, y_field, **kwargs)
 
 
 def _resolve_smooth(x_field, y_field, **kwargs):
     """Resolve a deferred ``mark_smooth()`` call once the encoding is known."""
-    if x_field is None or y_field is None:
-        raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_smooth",
+            missing,
+            "the fit reads",
+            own="mark_smooth() requires .encode(x=..., y=...)",
+        )
     return desugar_smooth(x_field, y_field, **kwargs)
 
 

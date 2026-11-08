@@ -213,10 +213,19 @@ ALLOWED: dict[tuple[str, str], str] = {
     (
         "src/ferrum/plots/regression.py",
         "residplot",
-    ): "_refuse_statistic_input runs over both x and y earlier in this same "
-    "function, before either rebind: the residual fit reads the raw "
-    "predictor and response, so a bin=/aggregate= on either channel is "
+    ): "_refuse_residplot_bin_aggregate runs over both x and y earlier in "
+    "this same function, before either rebind: the residual fit reads the "
+    "raw predictor and response, so a bin=/aggregate= on either channel is "
     "refused there first.",
+    (
+        "src/ferrum/_compose.py",
+        "apply_post_build_positional",
+    ): "Every rebind here runs only once its channel's binding has already "
+    "cleared the record's own statistic_refusal (a bin=/aggregate= on any "
+    "written channel, checked first, whatever its field) and, when the "
+    "binding names the called field, the categorical-input rule and the "
+    "unreadable-option check -- the same ordering regplot/lmplot/residplot's "
+    "own call-time doors run before their own rebinds.",
 }
 
 

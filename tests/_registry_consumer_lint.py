@@ -753,14 +753,13 @@ _RESIDPLOT_X = (
     "emits (`smooth.rs:667`, `robust.rs:365`), which declares its own literal "
     '`x` column uncoupled from `FIT_OUTPUT_COLUMNS` -- the `output="fitted"` '
     "schema `transform_registry('smooth'|'robust')` actually declares "
-    "(`registry/mod.rs:165-167` scopes that constant to fitted mode). Round 4 "
-    "converted this site against `FIT_OUTPUT_COLUMNS` because both schemas "
-    "happen to list `x`; that lookup would stay silently green if the residuals "
-    "batch's own `x` were ever renamed independently, and would raise here on an "
-    "unrelated `FIT_OUTPUT_COLUMNS` rename that never touched this code path -- "
-    "a lookup against the wrong schema is worse than no lookup. Reverted to a "
-    "bare literal (round 5). The registry declares no residuals-mode schema at "
-    "all, so this class stays invisible to the outer bound above by "
+    "(`registry/mod.rs:165-167` scopes that constant to fitted mode). Checking "
+    "this site against `FIT_OUTPUT_COLUMNS` would stay silently green if the "
+    "residuals batch's own `x` were ever renamed independently, and would raise "
+    "here on an unrelated `FIT_OUTPUT_COLUMNS` rename that never touched this "
+    "code path -- a lookup against the wrong schema is worse than no lookup, so "
+    "this site stays a bare literal. The registry declares no residuals-mode "
+    "schema at all, so this class stays invisible to the outer bound above by "
     "construction; declaring one is the batch-close follow-up, not this task."
 )
 
@@ -886,7 +885,7 @@ DISPOSITIONED: dict[tuple[str, str, str], str] = {
     ),
     ("src/ferrum/plots/matrix.py", "_heatmap_build", "value"): _UNPIVOT_VALUE,
     ("src/ferrum/plots/matrix.py", "_clustermap_build", "value"): _UNPIVOT_VALUE,
-    # --- residuals batch, wrong-schema mispin reverted (round 5) -----------
+    # --- a column reference checked against the wrong registry schema -----
     ("src/ferrum/plots/regression.py", "residplot", "x"): _RESIDPLOT_X,
     ("src/ferrum/marks/statistical.py", "desugar_ecdf", "count"): (
         "desugar_ecdf's rolling-count `DataWindow` op declares its own output "
@@ -948,6 +947,7 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
     {
         "Series",  # pl.Series("y", ...)
         "_channel_class_for",  # internal channel-name -> class lookup, not a column read
+        "_eager_post_build_channel",  # _eager_post_build_channel(out, "x"/"y", called_field=, drawn_column=...) -- the CHANNEL SLOT positional (same shape as _refuse_statistic_input), drawn_column/called_field the figure's own hardcoded literals
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column
         "_extract_ordinal_domain",  # internal helper, positional field name
         "_histogram_categorical_reads",  # _histogram_categorical_reads("x"/"y") -- the OPPOSITE axis's channel name for the remedy text, never a transform's output column read

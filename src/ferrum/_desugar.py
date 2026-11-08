@@ -76,7 +76,7 @@ from ferrum._encode_lowering import (
     _refuse_histogram_bin_aggregate,
 )
 from ferrum._layer_transforms import _with_statistics_marker
-from ferrum.encoding.base import ChannelBase, _unset_statistic, drawn_title
+from ferrum.encoding.base import _FORMAT_TYPE_ALIASES, ChannelBase, _unset_statistic, drawn_title
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, _unique_col_name, with_grouping
 from ferrum._entry import EntryRefusal, voiced_as
@@ -567,17 +567,83 @@ def _merge_positional_channel_scale(layer_value: Any, chart_scale: Any, axis: st
     return layer_value._with_options(scale=merged_scale)
 
 
-def _propagate_positional_scale(chart_encoding: dict, layer_encoding: dict) -> dict:
-    """Merge chart-level explicit x/y scales into *layer_encoding*.
+#: The axis presentation a statistic's layer carries from the chart-level
+#: positional channel when its own sets none, alongside scale: the tick
+#: ``format=``, its ``format_type=`` and the ``axis=`` config object. Title
+#: travels separately (:func:`_prep_axis_titles`), already threaded into the
+#: desugar at construction.
+_AXIS_PRESENTATION_OPTIONS = ("format", "format_type", "axis")
+
+
+def _merge_positional_channel_axis(layer_value: Any, chart_channel: Any, axis: str) -> Any:
+    """Return a replacement value for one layer channel with *chart_channel*'s
+    scale and axis presentation propagated in, or ``None`` when
+    *layer_value* should be left untouched.
+
+    The scale half is :func:`_merge_positional_channel_scale`'s own rule,
+    unchanged. The presentation half (:data:`_AXIS_PRESENTATION_OPTIONS`)
+    attaches wholesale wherever the layer's own channel -- after any scale
+    merge -- sets none, so a desugar that states its own (a diagnostic's
+    percent format) still wins. ``axis=`` is read by presence
+    (``"axis" in chart_channel._kwargs``), not by ``option("axis") is not
+    None``: an explicit ``axis=None`` hides the axis, a real value
+    distinct from never having written ``axis=`` at all, which
+    ``option()`` alone cannot tell apart. ``format=``/
+    ``format_type=`` keep the ``is not None`` reading -- ``None`` there is
+    always unset, with no "explicit None" meaning of its own.
+    """
+    chart_scale = _explicit_positional_scale(chart_channel)
+    presentation: dict[str, Any] = {}
+    if isinstance(chart_channel, ChannelBase):
+        for name in _AXIS_PRESENTATION_OPTIONS:
+            if name == "axis":
+                if "axis" in chart_channel._kwargs:
+                    presentation["axis"] = chart_channel.option("axis")
+                continue
+            value = chart_channel.option(name)
+            if value is not None:
+                presentation[name] = value
+    if isinstance(chart_channel, ChannelBase) and "format_type" not in presentation:
+        for alias in _FORMAT_TYPE_ALIASES:
+            format_type = chart_channel.option(alias)
+            if format_type is not None:
+                presentation["format_type"] = format_type
+                break
+    if chart_scale is None and not presentation:
+        return None
+    merged = (
+        _merge_positional_channel_scale(layer_value, chart_scale, axis)
+        if chart_scale is not None
+        else None
+    )
+    if not presentation:
+        return merged
+    working = merged if merged is not None else layer_value
+    if isinstance(working, str):
+        from ferrum.encoding import _channel_class_for
+
+        working = _channel_class_for(axis)(working)
+    if not isinstance(working, ChannelBase):
+        return merged
+    extra = {name: value for name, value in presentation.items() if working.option(name) is None}
+    if not extra:
+        return merged
+    return working._with_options(**extra)
+
+
+def _propagate_positional_axis(chart_encoding: dict, layer_encoding: dict) -> dict:
+    """Merge the chart-level x/y channel's explicit scale and axis presentation into *layer_encoding*.
 
     Composite-mark desugars rebuild each layer's encoding from scratch,
     carrying only field names/titles (see module docstring), which silently
     drops any explicit ``scale=`` the user set on the chart-level positional
-    channel (GH #45 prerequisite; design spec §6). x2/y2 companions share
-    their axis's scale through the layer's primary x/y channel and never
-    carry their own scale (``SECONDARY_EXTENT`` honors no ``scale`` kwarg,
-    and the Rust axis-scale resolver only ever consults the primary channel's
-    ``EncodingSpec.scale``), so only ``x``/``y`` are propagation targets.
+    channel (GH #45 prerequisite; design spec §6), and the same for its
+    ``format=``, ``format_type=`` and ``axis=``, since none of the desugars
+    state their own. x2/y2 companions share their axis's scale and
+    presentation through the layer's primary x/y channel and never carry
+    their own (``SECONDARY_EXTENT`` honors neither kwarg, and the Rust axis
+    resolver only ever consults the primary channel's ``EncodingSpec``), so
+    only ``x``/``y`` are propagation targets.
 
     Returns *layer_encoding* unchanged (same object) when no channel
     qualifies, so callers can skip rebuilding the owning ``_Layer``.
@@ -586,10 +652,7 @@ def _propagate_positional_scale(chart_encoding: dict, layer_encoding: dict) -> d
     for axis in ("x", "y"):
         if axis not in layer_encoding:
             continue
-        chart_scale = _explicit_positional_scale(chart_encoding.get(axis))
-        if chart_scale is None:
-            continue
-        merged = _merge_positional_channel_scale(layer_encoding[axis], chart_scale, axis)
+        merged = _merge_positional_channel_axis(layer_encoding[axis], chart_encoding.get(axis), axis)
         if merged is not None:
             updates[axis] = merged
     if not updates:
@@ -597,9 +660,9 @@ def _propagate_positional_scale(chart_encoding: dict, layer_encoding: dict) -> d
     return {**layer_encoding, **updates}
 
 
-def _propagate_layer_scale(chart_encoding: dict, layer: _Layer) -> _Layer:
-    """Return *layer* with the chart-level x/y scale propagated onto its encoding."""
-    new_encoding = _propagate_positional_scale(chart_encoding, layer.encoding)
+def _propagate_layer_axis(chart_encoding: dict, layer: _Layer) -> _Layer:
+    """Return *layer* with the chart-level x/y scale and axis presentation propagated onto its encoding."""
+    new_encoding = _propagate_positional_axis(chart_encoding, layer.encoding)
     if new_encoding is layer.encoding:
         return layer
     return replace(layer, encoding=new_encoding)
@@ -1863,7 +1926,7 @@ def _resolve_pending_as(
         # Scale-through-desugar propagation (design spec §6, GH #45
         # prerequisite): reattach any chart-level explicit x/y scale the
         # desugar's fresh per-layer encodings would otherwise drop.
-        emitted = [_propagate_layer_scale(chart._encoding, lyr) for lyr in emitted]
+        emitted = [_propagate_layer_axis(chart._encoding, lyr) for lyr in emitted]
         titles = chart._pending_stat_mark.legend_titles
         if titles:
             emitted = [
@@ -1911,7 +1974,7 @@ def _resolve_pending_as(
         smooth_enc = {k: v for k, v in chart._encoding.items() if k not in ("x2", "y2")}
         if remap:
             _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
-        smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
+        smooth_enc = _propagate_positional_axis(chart._encoding, smooth_enc)
         smooth_enc = titled_encoding(smooth_enc, chart._pending_stat_mark.legend_titles)
         # Style applies to the composite's emitted smooth layer only; the prior
         # scatter layer keeps its own mark_kwargs. Which side wins on a shared
@@ -1952,6 +2015,6 @@ def _resolve_pending_as(
         new._position = result.position
     if remap:
         _apply_remap(new._encoding, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
-    new._encoding = _propagate_positional_scale(chart._encoding, new._encoding)
+    new._encoding = _propagate_positional_axis(chart._encoding, new._encoding)
     new._encoding = titled_encoding(new._encoding, chart._pending_stat_mark.legend_titles)
     return new

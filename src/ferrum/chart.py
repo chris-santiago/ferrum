@@ -20,6 +20,7 @@ from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
 from ferrum._layer import _POSITIONAL_WIRE, _Layer, _PendingMark, inherited_positional_taken
 from ferrum._compose import (
+    apply_post_build_positional,
     attach_to_rows,
     carried_by,
     chart_frames,
@@ -1259,6 +1260,12 @@ class Chart(
         "_frame_selectors",  # tuple of _OperandFrame — each registered frame's
         # marker, renames and columns in _data when the registry holds several
         # frames; () otherwise.
+        "_post_build_positional",  # _PostBuildPositional or None — a regression
+        # figure's (regplot/lmplot/residplot) contract for an x/y binding its
+        # caller writes after the figure was built, applied by
+        # Chart._resolve_pending (ferrum._compose.apply_post_build_positional);
+        # None on every other chart, and reset to None on a `+` result as
+        # _composite_source is.
     )
 
     def __init__(
@@ -1313,6 +1320,7 @@ class Chart(
         self._composite_source = None
         self._frames: tuple = ()
         self._frame_selectors: tuple = ()
+        self._post_build_positional = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -1375,7 +1383,15 @@ class Chart(
         statistics built before that grouping was known: a chart of one
         operand under its own grouping bindings, a composition's operands
         under the composition's (:func:`ferrum._compose.regrouped`).
+
+        A regression figure's x/y binding carries its own, separate
+        record (``_post_build_positional``): applied first
+        (:func:`ferrum._compose.apply_post_build_positional`), before the
+        pending mark above resolves, so a figure's statistic refusal and
+        re-point run before any `_PENDING_PREP` step reads the (possibly
+        rewritten) encoding.
         """
+        self = apply_post_build_positional(self)
         resolved = _resolve_pending_impl(self)
         if resolved is not self and not self._operands:
             resolved._composite_source = composite_source(self, resolved)
@@ -1440,6 +1456,12 @@ class Chart(
         # replaced.
         new._pending_stat_mark = None
         new._composite_source = None
+        # A replaced mark's figure, if any, does not own this chart's x/y
+        # going forward: its post-build record would otherwise refuse or
+        # re-point a later `.encode()` in the replaced figure's voice, for
+        # a mark this call already replaced (`_composite_source`/
+        # `_composite_kind`'s own reason, just above and below).
+        new._post_build_positional = None
         # _composite_kind is the other half of that same composite state
         # (_set_composite_mark sets both together); left stale it would
         # still read the replaced composite's name, e.g. _apply_auto_raster
@@ -1491,6 +1513,10 @@ class Chart(
             new._data = data_transform(to_polars(new._data))
         new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
         new._composite_source = None
+        # As in _set_mark: a composite mark call replaces what this chart's
+        # x/y meant to whatever figure built it, so that figure's post-build
+        # record does not apply to the mark this call is queuing.
+        new._post_build_positional = None
         new._position = position
         new._composite_kind = name
         if prior_mark is None:
@@ -1537,6 +1563,15 @@ class Chart(
             new._pending_stat_mark = replace(new._pending_stat_mark, entry=entry)
         if not new._layers and new._pending_stat_mark is None:
             new._entry = entry
+        return new
+
+    def _with_post_build_positional(self, record: Any) -> "Chart":
+        # A clone carrying *record* (a `ferrum._compose._PostBuildPositional`),
+        # a regression figure's contract for an x/y binding its caller
+        # writes after the build -- read by `_resolve_pending`, the one
+        # place every door reaches (render, `to_spec`, `+`, `.layer`).
+        new = self._clone()
+        new._post_build_positional = record
         return new
 
     def mark_point(self, **kwargs) -> "Chart":
@@ -2775,6 +2810,10 @@ class Chart(
         new = lhs._clone()
         # The composition's statistics are its operands'.
         new._composite_source = None
+        # The composition binding is the result's own, not a regression
+        # figure's: a later binding on it is read as any other chart-level
+        # binding is, not through this record.
+        new._post_build_positional = None
         # Read before resolution, so a pending composite's written x/y are kept
         # and a composed left passes its own record on.
         new._written_positional = _written_bindings(lhs_in)

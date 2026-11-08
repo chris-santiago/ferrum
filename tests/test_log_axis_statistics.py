@@ -4111,12 +4111,19 @@ def test_method_sqrt_is_refused_through_the_channel_scale_door_too():
 def test_residplot_refuses_a_log_y_through_the_encode_door():
     """`residplot(x=, y=, encode={"y": fm.Y(<same field>, scale=
     fm.LogScale())})` -- the `encode=` door, naming the same field the
-    keyword already bound -- refuses the same way the keyword and
-    `.override()` doors already do."""
+    keyword already bound -- is refused before this call's own Rust
+    refusal ever runs: `encode=` lands on the chart the same way a later
+    `.encode()` does, so residplot's own post-build record catches it
+    first, naming `fm.SymlogScale()` rather than the call door (which
+    would refuse the same scale too)."""
     df = _residplot_log_y_df()
     with pytest.raises(ValueError) as excinfo:
         fm.residplot(df, x="x", y="y", encode={"y": fm.Y("y", scale=fm.LogScale())}).to_svg()
-    assert str(excinfo.value) == _RESIDPLOT_LOG_Y_MESSAGE
+    assert str(excinfo.value) == (
+        "residplot(y=Y('y', scale=LogScale(...))) after the call is not supported: "
+        "residplot draws y from the y= it was called with, so scale= would be "
+        "ignored. Use fm.SymlogScale(), or drop scale=."
+    )
 
 
 def test_residplot_refuses_a_log_y_as_the_second_plus_operand():

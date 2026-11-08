@@ -26,6 +26,7 @@ from typing import Any, Optional, Sequence
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._core import secondary_key
+from ferrum._encode_lowering import _missing_xy_channels, _unbound_input_refusal
 from ferrum._layer import MarkDesugarResult, _Layer, catch_all_over
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns, registry_secondary_columns
@@ -272,8 +273,14 @@ def desugar_boxplot(
     # layer) rather than adding a second mechanism (F-L03-10).
     outliers = outliers and whisker_mult != "min-max"
     user_kw = _validate("boxplot", mark_kwargs)
-    if x_field is None or y_field is None:
-        raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_boxplot",
+            missing,
+            "the boxplot reads",
+            own="mark_boxplot() requires .encode(x=..., y=...)",
+        )
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
     cat_title = _y_title if horizontal else _x_title
@@ -539,8 +546,14 @@ def desugar_errorbar(
     """
     method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
     user_kw = _validate("errorbar", mark_kwargs)
-    if x_field is None or y_field is None:
-        raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_errorbar",
+            missing,
+            "the errorbar reads",
+            own="mark_errorbar() requires .encode(x=..., y=...)",
+        )
     # Errorbar always uses x_field as the categorical grouping axis.
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
@@ -717,8 +730,14 @@ def desugar_errorband(
     """
     method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
     user_kw = _validate("errorband", mark_kwargs)
-    if x_field is None or y_field is None:
-        raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_errorband",
+            missing,
+            "the errorband reads",
+            own="mark_errorband() requires .encode(x=..., y=...)",
+        )
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
     groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field], grouping)
@@ -864,8 +883,14 @@ def desugar_ribbon(
     'ribbon'
     """
     user_kw = _validate("ribbon", mark_kwargs)
-    if x_field is None or y_field is None:
-        raise ValueError("mark_ribbon() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_ribbon",
+            missing,
+            "the ribbon reads",
+            own="mark_ribbon() requires .encode(x=..., y=...)",
+        )
     if y2_field is None:
         raise ValueError(
             "mark_ribbon() requires y2 in encoding (e.g. .encode(x=, y=lower, y2=upper))"
@@ -1261,8 +1286,14 @@ def desugar_boxen(
     """
     user_kw = _validate("boxen", mark_kwargs)
     palette_colors = _resolve_boxen_palette(palette)
-    if x_field is None or y_field is None:
-        raise ValueError("mark_boxen() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_boxen",
+            missing,
+            "the boxen reads",
+            own="mark_boxen() requires .encode(x=..., y=...)",
+        )
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
     group = color_field if color_field else cat

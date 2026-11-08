@@ -18,6 +18,7 @@ from ferrum import (
     Violin,
 )
 from ferrum._core import secondary_key, transform_registry
+from ferrum._encode_lowering import _missing_xy_channels, _unbound_input_refusal
 from ferrum._layer import MarkDesugarResult, _Layer, is_unset
 from ferrum._overrides import register_layer_names
 from ferrum._registry import (
@@ -146,8 +147,14 @@ def desugar_contour(
     >>> result_grouped.layers[0].mark
     'segment'
     """
-    if x_field is None or y_field is None:
-        raise ValueError("mark_contour() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_contour",
+            missing,
+            "the kernel density estimate reads",
+            own="mark_contour() requires .encode(x=..., y=...)",
+        )
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
     # downstream layer can route through data_source="contour".
@@ -432,8 +439,14 @@ def desugar_violin(
     >>> len(result.layers)
     1
     """
-    if x_field is None or y_field is None:
-        raise ValueError("mark_violin() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_violin",
+            missing,
+            "the violin reads",
+            own="mark_violin() requires .encode(x=..., y=...)",
+        )
     if inner is None:
         inner = "none"
     validate_choice("mark_violin", "inner", inner, ("box", "quartile", "point", "none"))
@@ -912,8 +925,14 @@ def desugar_raster(
     >>> result.layers[0].mark
     'image'
     """
-    if x_field is None or y_field is None:
-        raise ValueError("mark_raster() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_raster",
+            missing,
+            "the raster bins",
+            own="mark_raster() requires .encode(x=..., y=...)",
+        )
 
     # Unset, a count or density raster colors through symlog: most cells hold
     # few rows and a few hold many, so a linear scale washes the sparse cells
@@ -1059,8 +1078,14 @@ def desugar_hex(
     >>> result.layers[0].mark
     'polygon'
     """
-    if x_field is None or y_field is None:
-        raise ValueError("mark_hex() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_hex",
+            missing,
+            "the hexagons read",
+            own="mark_hex() requires .encode(x=..., y=...)",
+        )
     require_aggregate_field("hex", "mark_hex", aggregate, field)
     from ferrum.encoding import Color, X, Y
 
@@ -1242,8 +1267,14 @@ def desugar_swarm(
     >>> result.layers[0].mark
     'point'
     """
-    if x_field is None or y_field is None:
-        raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
+    missing = _missing_xy_channels(x_field, y_field)
+    if missing:
+        raise _unbound_input_refusal(
+            "mark_swarm",
+            missing,
+            "the swarm reads",
+            own="mark_swarm() requires .encode(x=..., y=...)",
+        )
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
     # Resolve the categorical axis sort and declared type.  When vertical, x is

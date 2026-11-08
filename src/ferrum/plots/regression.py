@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -33,17 +34,17 @@ from ferrum import (
     Smooth,
 )
 from ferrum._coerce import to_polars
+from ferrum._compose import _PostBuildChannel, _PostBuildPositional
 from ferrum._core import transform_registry, x_estimator_accepted_values
-from ferrum._desugar import _propagate_layer_scale
+from ferrum._desugar import _propagate_layer_axis
 from ferrum._encode_lowering import (
     COMPOSITE_GROUPING_CHANNELS,
     _FIT_CATEGORICAL_READS,
-    _generic_aggregate_remedy,
-    _generic_bin_remedy,
     _rebind_positional,
     _refuse_bin_aggregate_fit,
     _refuse_categorical_input,
-    _refuse_statistic_input,
+    _refuse_residplot_bin_aggregate,
+    _refuse_unreadable_positional_options,
     _residual_axis_categorical_reads,
 )
 from ferrum._layer import _Layer
@@ -574,16 +575,17 @@ def _fit_chart_from_named_transform(
     ``chart_x``/``chart_y`` are the chart-level x/y channels the caller would
     have encoded. The layers below read the transform's own output columns, so
     an explicit ``scale=`` on either (``lmplot(logx=True)``, or a caller's
-    ``y=fm.Y(..., scale=...)``) has to be propagated onto them, so the band,
-    line and metrics carry the same scale the scatter does -- the step
-    ``_resolve_pending_impl`` performs automatically for a chart built
+    ``y=fm.Y(..., scale=...)``), and its ``format=``/``format_type=``/``axis=``
+    presentation, has to be propagated onto them, so the band, line and
+    metrics carry the same scale and presentation the scatter does -- the
+    step ``_resolve_pending_impl`` performs automatically for a chart built
     through the desugar path. Doing it here, at construction,
     is what keeps ``logx`` ONE mechanism: the alternative was a second
     implementation in ``lmplot``, re-running the propagation by hand for
     charts this function had left in a state the desugar pipeline never
     blessed, and a third for whatever chart-level feature came next.
-    ``_propagate_layer_scale`` returns each layer unchanged when the channel
-    carries no explicit scale, so the ordinary case is a no-op rather than a
+    ``_propagate_layer_axis`` returns each layer unchanged when the channel
+    carries none of these, so the ordinary case is a no-op rather than a
     branch.
 
     ``x_title``/``y_title`` are the names the caller's axes show (their
@@ -598,8 +600,9 @@ def _fit_chart_from_named_transform(
     no sibling layer to fall back on.
     """
     chart = Chart(data)._with_statistics(transform)
+    chart._encoding = {"x": chart_x, "y": chart_y}
     chart._layers = [
-        _propagate_layer_scale({"x": chart_x, "y": chart_y}, layer)
+        _propagate_layer_axis({"x": chart_x, "y": chart_y}, layer)
         for layer in build_fit_layers(
             kind,
             data_source=kind,
@@ -875,6 +878,231 @@ def _build_fit(method: str, req: _FitRequest) -> Chart:
             "ferrum.plots.regression._FIT_BUILDERS"
         )
     return builder(method, req)
+
+
+# ---------------------------------------------------------------------------
+# Post-build positional record: an x/y binding written after the figure's
+# own call reads or refuses it, in the figure's own voice -- see
+# ferrum._compose._PostBuildPositional, applied by Chart._resolve_pending.
+# ---------------------------------------------------------------------------
+
+
+def _eager_post_build_channel(
+    out: Chart,
+    channel: str,
+    *,
+    called_field: str,
+    drawn_column: str,
+    default_title: str | None = None,
+    honors_fieldless: bool = False,
+    categorical_reads: Callable[[str, str, str], Any] = _FIT_CATEGORICAL_READS,
+    categorical_disallowed: tuple[str, ...] = ("N", "O"),
+    unreadable: tuple[str, ...] = (),
+    check_unreadable: Callable[[str, str, ChannelBase], None] | None = None,
+    scale_remedy: Callable[[str], str] | None = None,
+    type_remedy: Callable[[str], str] | None = None,
+    always_honors_drawn_column: bool = False,
+    restore_declared_type: str | None = None,
+) -> _PostBuildChannel:
+    """Build a regression figure's ``_PostBuildChannel`` for *channel*.
+
+    The default shape -- a declared ``N``/``O`` refused by the
+    categorical-input rule, a declared type that differs from the call's
+    own refused naming the call door, and a field-less binding refused
+    rather than honored -- fits regplot/lmplot's x and y and residplot's
+    x alike: every one of the three reads *channel* as an input, never a
+    computed axis, and *unreadable* defaults empty: a post-build
+    ``scale=``/``format=`` pushes down onto the already-built layers the
+    same way ``format_type=``/``axis=`` already do, through
+    :func:`~ferrum._compose._push_down_positional_options`, rather than
+    being refused. residplot's y passes
+    ``honors_fieldless=True`` (it computes, rather than reads, its
+    column), ``unreadable=("scale", "format")`` (the response column it
+    would read is not the residual the figure draws) and overrides
+    *categorical_reads*/*categorical_disallowed*/*check_unreadable* for
+    its own log-scale remedy -- *scale_remedy* is unused with a custom
+    *check_unreadable* of the caller's own, which builds its own ending
+    if it wants one. *type_remedy* overrides the default declared-type
+    ending for a form whose call door drops a declared ``T`` too
+    (``scatter=False``, no sibling layer drawn).
+    *always_honors_drawn_column*/*restore_declared_type* pass straight
+    through to :class:`~ferrum._compose._PostBuildChannel` (residplot's
+    own use, documented there).
+    """
+    own = out._encoding.get(channel)
+    call_type = own.option("type") if isinstance(own, ChannelBase) else None
+    if check_unreadable is None:
+        check_unreadable = partial(
+            _refuse_unreadable_positional_options, unreadable=unreadable, scale_remedy=scale_remedy
+        )
+    return _PostBuildChannel(
+        own=own,
+        called_field=called_field,
+        drawn_column=drawn_column,
+        default_title=default_title,
+        honors_fieldless=honors_fieldless,
+        categorical_reads=categorical_reads,
+        categorical_disallowed=categorical_disallowed,
+        check_unreadable=check_unreadable,
+        unreadable=unreadable,
+        call_type=call_type,
+        type_remedy=type_remedy,
+        always_honors_drawn_column=always_honors_drawn_column,
+        restore_declared_type=restore_declared_type,
+    )
+
+
+def _lmplot_type_remedy_without_scatter(voice: str) -> str:
+    """Build the declared-``T`` ending for a ``scatter=False`` form, which has no call-time alternative either.
+
+    ``scatter=False`` redraws the axis from the fit's own curve rather
+    than a drawn scatter point, so the call door drops a declared ``T``
+    the same way (``_lmplot_impl``'s own comment, next to
+    :func:`_refuse_categorical_input`'s call): naming "pass it in the
+    call" as this refusal's remedy would send the caller to a door that
+    also fails.
+    """
+    return "Drop type=: with no scatter drawn, a declared type is never applied."
+
+
+def _lmplot_post_build_positional(
+    out: Chart, *, entry: str, method: str, x_field: str, y_field: str, has_scatter: bool
+) -> _PostBuildPositional:
+    """regplot/lmplot's ``_PostBuildPositional`` record, attached to *out* before it is returned.
+
+    Built the same way on every form, pending smooth-routed included: a
+    pending form's field-bearing x/y is left alone by
+    :func:`~ferrum._compose.apply_post_build_positional`'s own live check
+    of ``out._pending_stat_mark``, not by a differently-shaped record here
+    -- the chart that check reads is the one ``Chart._resolve_pending``
+    applies the record against, after ``_finalize_chart``'s own ``mark=``
+    may already have resolved a pending smooth into an eager one, which a
+    record shaped at this call could not see coming.
+    ``statistic_refusal`` refuses a bin=/aggregate= the fit reads raw or
+    folds in nowhere (:func:`~ferrum._encode_lowering._refuse_bin_aggregate_fit`),
+    naming ``x_bins=`` as x's bin remedy on a ``mark_smooth``-routed
+    method, the same knob the call-time check names, on every form too --
+    the pending prep's own resolve-time refusal would say the same thing
+    moments later, so running this one first keeps one wording. With
+    ``has_scatter=False`` both channels pass
+    :func:`_lmplot_type_remedy_without_scatter` as their declared-``T``
+    ending.
+    """
+    type_remedy = None if has_scatter else _lmplot_type_remedy_without_scatter
+    return _PostBuildPositional(
+        entry=entry,
+        channels={
+            "x": _eager_post_build_channel(
+                out, "x", called_field=x_field, drawn_column=x_field, type_remedy=type_remedy
+            ),
+            "y": _eager_post_build_channel(
+                out, "y", called_field=y_field, drawn_column=y_field, type_remedy=type_remedy
+            ),
+        },
+        statistic_refusal=partial(_refuse_bin_aggregate_fit, entry, x_bins_knob=method in _SMOOTH_ROUTED_METHODS),
+    )
+
+
+def _residplot_y_scale_remedy(ch: ChannelBase) -> Callable[[str], str] | None:
+    """Residplot's y scale remedy: ``None`` (the default ending), unless *ch* declares a log scale.
+
+    A domain or ``format=`` names the call door as the working remedy
+    (``residplot(y=fm.Y('w', ...))``); a log scale never does, because the
+    call door refuses it too (residplot's own Rust refusal, wherever the
+    resolved y scale is log), so naming it as a remedy would send the
+    caller to a door that also fails.
+    """
+    scale = ch.option("scale")
+    if scale is None:
+        return None
+    from ferrum.encoding._scale import _scale_to_dict
+
+    if _scale_to_dict(scale).get("type") == "log":
+        return lambda voice: "Use fm.SymlogScale(), or drop scale=."
+    return None
+
+
+def _refuse_residplot_y_unreadable(entry: str, channel: str, ch: ChannelBase) -> None:
+    """Residplot's y unreadable-option check: ``scale=``/``format=`` always, with its own scale remedy.
+
+    Unlike every other channel in this family, residplot's y keeps
+    refusing a post-build ``scale=``/``format=``: the response column
+    the call named is not the residual the figure draws, so there is
+    nothing on the chart for either option to describe any more.
+    """
+    _refuse_unreadable_positional_options(
+        entry, channel, ch, unreadable=("scale", "format"), scale_remedy=_residplot_y_scale_remedy(ch)
+    )
+
+
+def _residplot_post_build_positional(
+    out: Chart,
+    *,
+    x_field: str,
+    y_field: str,
+    residual_title: str,
+    resid_x: str,
+    x_declared_type: str | None,
+) -> _PostBuildPositional:
+    """Residplot's ``_PostBuildPositional`` record, attached to *out* before it is returned.
+
+    x is an input the fit reads, built like regplot/lmplot's own
+    (:func:`_eager_post_build_channel`, re-pointed onto its drawn column
+    *resid_x* -- residplot's one source for that column name, read at the
+    call site rather than repeated here -- with no *default_title*: the
+    re-point's own fallback -- the post-build binding's own field, which
+    equals *x_field* by the time this channel is re-pointed at all --
+    already matches residplot's call-time rebind, which passes none
+    either). *x_declared_type* restores a call-time declared ``T`` after
+    the re-point forces it back to ``"Q"`` (:attr:`~ferrum._compose._PostBuildChannel.restore_declared_type`),
+    the same restoration residplot's own call-time rebind runs
+    (``regression.py``, near the ``_resid_x`` re-point below): needed
+    because flat residplot draws x straight from the chart's own
+    encoding, with no layer of its own to keep the declared type safe
+    from a later ``.encode()`` the way a layered figure's own layer does.
+
+    y is the residual axis residplot computes: a field-less binding
+    styles it (``honors_fieldless=True``) rather than being refused, a
+    declared type also disallows ``T`` (the residual axis is never a
+    time axis either, refused on a field-less binding the same way as a
+    field-bearing one -- :func:`~ferrum._encode_lowering._refuse_fieldless_categorical_type`),
+    and its scale=/format= unreadable check uses residplot's own remedy
+    (:func:`_refuse_residplot_y_unreadable`).
+
+    Both channels pass ``always_honors_drawn_column=True``: a caller
+    whose predictor happens to share residplot's own x column's name
+    (``residplot(df, x="x", y="y")``), or whose response shares the
+    residual column's (``y="residual"``), is naming the column the
+    figure already draws -- read as the figure's own drawn-column
+    binding is, never refused as a rewrite of the called field.
+    """
+    return _PostBuildPositional(
+        entry="residplot",
+        channels={
+            "x": _eager_post_build_channel(
+                out,
+                "x",
+                called_field=x_field,
+                drawn_column=resid_x,
+                always_honors_drawn_column=True,
+                restore_declared_type=x_declared_type,
+            ),
+            "y": _eager_post_build_channel(
+                out,
+                "y",
+                called_field=y_field,
+                drawn_column="residual",
+                default_title=residual_title,
+                honors_fieldless=True,
+                categorical_reads=_residual_axis_categorical_reads,
+                categorical_disallowed=("N", "O", "T"),
+                unreadable=("scale", "format"),
+                check_unreadable=_refuse_residplot_y_unreadable,
+                always_honors_drawn_column=True,
+            ),
+        },
+        statistic_refusal=_refuse_residplot_bin_aggregate,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1390,16 @@ def _lmplot_impl(
             out = out.facet(col=col)
         else:
             out = out.facet(row=row)
+
+    # An x/y binding the caller writes after this call -- `encode=` below
+    # included, which lands on `out._encoding` the same way a later
+    # `.encode()` does -- reads or refuses this call's own x=/y=, in
+    # `entry`'s voice, applied by `Chart._resolve_pending`.
+    out = out._with_post_build_positional(
+        _lmplot_post_build_positional(
+            out, entry=entry, method=method, x_field=x_field, y_field=y_field, has_scatter=scatter_layer is not None
+        )
+    )
 
     return _finalize_chart(
         out,
@@ -1712,17 +1950,7 @@ def residplot(
     # input frame before any transform runs, so the generic remedy's own
     # .transform() step needs dropna=False to see the column it binds.
     drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
-    for channel in ("x", "y"):
-        ch = drawn.get(channel)
-        if isinstance(ch, ChannelBase):
-            _refuse_statistic_input(
-                "residplot",
-                channel,
-                ch,
-                reason="the residual fit reads the raw predictor and response",
-                bin_remedy=_generic_bin_remedy(ch, call_kwargs="dropna=False"),
-                aggregate_remedy=_generic_aggregate_remedy(ch, call_kwargs="dropna=False"),
-            )
+    _refuse_residplot_bin_aggregate(drawn)
     # A declared categorical type is refused on both axes: the residual
     # fit reads x as its predictor, the same as regplot's fit, and the
     # residual axis itself draws signed differences around zero, which is
@@ -1933,15 +2161,24 @@ def residplot(
             _Layer(
                 name="point",
                 mark="point",
-                # Binds every `encode=` binding as its own, the same
-                # overlay the chart's own encoding gets (`_finalize_chart`
-                # applies `encode=` to the chart, not to this layer): the
-                # point layer is this figure's primary mark, so it draws
-                # what `encode=` binds and its tooltip lists it, instead
-                # of losing it to the per-layer own-fields-shadow rule.
-                # `_drawn_bindings` keeps a `None` entry from unbinding a
-                # keyword's own channel, the same rule the chart draws by.
-                encoding=_drawn_bindings(enc, encode),
+                # Binds every `encode=` binding but x/y as its own, the
+                # same overlay the chart's own encoding gets
+                # (`_finalize_chart` applies `encode=` to the chart, not
+                # to this layer): the point layer is this figure's
+                # primary mark, so it draws what `encode=` binds and its
+                # tooltip lists it, instead of losing it to the per-layer
+                # own-fields-shadow rule. `_drawn_bindings` keeps a
+                # `None` entry from unbinding a keyword's own channel,
+                # the same rule the chart draws by. x/y are excluded: this
+                # layer's own `enc["x"]`/`enc["y"]` already point at the
+                # residual batch's columns, while `encode=`'s x/y reach
+                # the chart level, where the post-build record re-points
+                # them the same way a later `.encode()` does -- merging
+                # `encode=`'s raw field here would re-bind this layer to
+                # a column the residual batch never emits.
+                encoding=_drawn_bindings(
+                    enc, {k: v for k, v in (encode or {}).items() if k not in ("x", "y")}
+                ),
                 mark_kwargs=point_kwargs or None,
             )
         ]
@@ -2014,6 +2251,20 @@ def residplot(
             )
         chart._layers = internal_layers
         chart._mark = None
+
+    # An x/y binding the caller writes after this call -- `encode=` below
+    # included -- reads or refuses this call's own x=/y=, in residplot's
+    # voice, applied by `Chart._resolve_pending`.
+    chart = chart._with_post_build_positional(
+        _residplot_post_build_positional(
+            chart,
+            x_field=x_field,
+            y_field=y_field,
+            residual_title=residual_title,
+            resid_x=_resid_x,
+            x_declared_type=x_ch.option("type"),
+        )
+    )
 
     return _finalize_chart(
         chart,

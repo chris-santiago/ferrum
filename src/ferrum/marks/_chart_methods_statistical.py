@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
-from ferrum._encode_lowering import _refuse_bin_aggregate_on_channels
+from ferrum._encode_lowering import _refuse_bin_aggregate_on_channels, _unbound_input_refusal
 from ferrum._layer import _Layer, _PendingMark, layer_mark, merge_style
 from ferrum._validate import coerce_bool, validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
@@ -1244,7 +1244,12 @@ class StatisticalMarksMixin:
         def _resolve_qq(x_field, y_field, **kw):
             # QQ is single-column: use x_field as the sample field. y_field ignored.
             if x_field is None:
-                raise ValueError("mark_qq() requires .encode(x=...) to specify the sample field")
+                raise _unbound_input_refusal(
+                    "mark_qq",
+                    ("x",),
+                    "the Q-Q plot reads",
+                    own="mark_qq() requires .encode(x=...) to specify the sample field",
+                )
             return desugar_qq(x_field, **kw)
 
         # Expose desugar_qq's signature for the transform/style kwarg split in

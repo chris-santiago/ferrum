@@ -620,14 +620,14 @@ def _rebind_positional(
 def _quoted_statistic_value(value: Any) -> str:
     """The repr a refusal quotes *value* (a ``bin=``/``aggregate=`` kwarg) with.
 
-    A plain literal (``bool``, ``str``, ``int``, ``float``, ``dict``,
-    ``list``, ``tuple``) quotes as its own ``repr``, matching what the
-    caller typed (``bin={'bin_count': 3}``). A pre-built object (a
-    ``fm.Bin(...)``) quotes by its class name alone, the same spelling
-    :func:`_bin_declaration` already gives a pre-built ``Bin``
-    (``"bin=Bin(...)"``), never its raw field-by-field repr.
+    A plain literal (``None``, ``bool``, ``str``, ``int``, ``float``,
+    ``dict``, ``list``, ``tuple``) quotes as its own ``repr``, matching
+    what the caller typed (``bin={'bin_count': 3}``, ``axis=None``). A
+    pre-built object (a ``fm.Bin(...)``) quotes by its class name alone,
+    the same spelling :func:`_bin_declaration` already gives a pre-built
+    ``Bin`` (``"bin=Bin(...)"``), never its raw field-by-field repr.
     """
-    if isinstance(value, (bool, str, int, float, dict, list, tuple)):
+    if value is None or isinstance(value, (bool, str, int, float, dict, list, tuple)):
         return repr(value)
     return f"{type(value).__name__}(...)"
 
@@ -866,6 +866,316 @@ def _refuse_bin_or_aggregate(
 
     written = _written_channel(channel, ch, kwarg)
     raise EntryRefusal(_StatisticRefusalText(written, kwarg, reason, remedy), entry)
+
+
+def _unreadable_option_is_plausible(option: str, value: Any) -> bool:
+    """Whether *value* has *option*'s documented wire shape well enough to
+    be worth refusing as unreadable.
+
+    A value with the wrong Python type for *option* (``format=5``,
+    ``scale=5``) is left alone instead: the channel's own render-time
+    validation raises the same ``TypeError``/``ValueError`` it already
+    raises on a plain chart (``format=`` and ``scale=`` validate only at
+    the Rust wire boundary by design -- see
+    :func:`ferrum.format_presets.resolve_format_or_raw`'s own docstring --
+    so refusing a wrong-type value as "unreadable" here would name a
+    remedy that fails for an unrelated reason: the value was never valid
+    in the first place).
+    """
+    if option == "format":
+        return isinstance(value, str)
+    if option == "scale":
+        return isinstance(value, dict) or hasattr(value, "_to_scale_spec_dict")
+    return True
+
+
+def _refuse_unreadable_option(
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    option: str,
+    *,
+    remedy: Callable[[str], str] | None = None,
+) -> None:
+    """Refuse *channel*'s *option* after a regression figure's call door reads it a different way.
+
+    A post-build ``.encode()`` on a regression figure (regplot/lmplot/
+    residplot) lands on the chart's own encoding, after the figure's own
+    call already parsed ``channel``'s binding; a ``scale=``/``format=``
+    written there for residplot's y would describe the response column
+    the call named, not the residual the figure draws, and a declared
+    type that differs from the one the call parsed would reinterpret the
+    same column two ways. Raised as :class:`~ferrum._entry.EntryRefusal`,
+    re-voiceable like every refusal in this family: every voice's default
+    ending names that voice's own call as the remedy that renders
+    (``regplot(x=fm.X('v', scale=...))``). *remedy*, when given,
+    overrides that ending for an option a figure's call door either
+    refuses too (residplot's y, under a log scale) or never applies
+    either way (a declared ``T`` with no sibling layer drawn), so the
+    refusal never points at a remedy that would also fail.
+    """
+    from ferrum._entry import EntryRefusal
+
+    field = ch.field
+    cls_name = type(ch).__name__
+    value = ch.option(option)
+    written = f"{channel}={cls_name}({field!r}, {option}={_quoted_statistic_value(value)})"
+
+    def default_remedy(voice: str) -> str:
+        return (
+            f"Drop {option}=, or pass it in the call: "
+            f"{voice}({channel}=fm.{cls_name}({field!r}, {option}=...))."
+        )
+
+    build_remedy = remedy or default_remedy
+
+    def text(voice: str) -> str:
+        return (
+            f"{voice}({written}) after the call is not supported: {voice} draws {channel} "
+            f"from the {channel}= it was called with, so {option}= would be ignored. "
+            f"{build_remedy(voice)}"
+        )
+
+    raise EntryRefusal(text, entry)
+
+
+def _refuse_unreadable_positional_options(
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    *,
+    unreadable: tuple[str, ...] = (),
+    scale_remedy: Callable[[str], str] | None = None,
+) -> None:
+    """Refuse each of *unreadable* the figure's call door reads a different way (empty for most channels).
+
+    Checked in *unreadable* order, so a channel carrying more than one
+    stops at the first; a value with the wrong shape for its option is
+    left alone (:func:`_unreadable_option_is_plausible`). *scale_remedy*
+    overrides the default ending for ``scale=`` alone (residplot's y,
+    under a log scale). A declared ``N``/``O`` is the categorical-input
+    rule's own, checked by the caller before this runs, and a declared
+    type that differs from the one the call parsed is the caller's own
+    check too (:func:`ferrum._compose.apply_post_build_positional`'s own
+    comparison against :attr:`~ferrum._compose._PostBuildChannel.call_type`).
+    ``title=``, ``axis=``, ``format_type=`` and (on every channel but
+    residplot's y) ``scale=``/``format=`` are not checked here -- they
+    reach the figure's layers through
+    :func:`ferrum._compose._push_down_positional_options`.
+    """
+    for option in unreadable:
+        value = ch.option(option)
+        if value is None or not _unreadable_option_is_plausible(option, value):
+            continue
+        _refuse_unreadable_option(
+            entry, channel, ch, option, remedy=scale_remedy if option == "scale" else None
+        )
+
+
+def _refuse_fieldless_positional(
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    *,
+    called_field: str,
+    unreadable: tuple[str, ...] = (),
+    call_type: str | None = None,
+    pending: bool = False,
+) -> None:
+    """Refuse a field-less post-build channel replacing a regression figure's input binding.
+
+    ``Chart.encode`` replaces a channel's binding with the value passed, so
+    a field-less ``fm.X(title=...)`` written after the call unbinds the
+    column the figure's fit reads -- refused naming the called field, so
+    the caller restates it (:func:`ferrum._encode_lowering._rebind_positional`
+    re-points a field-bearing binding instead; this is the sibling door
+    for one that carries none). A figure whose binding computes rather than
+    reads a column (residplot's residual y) re-points a field-less binding
+    onto it instead of refusing -- see the record's own ``honors_fieldless``.
+
+    An option the restated binding still could not read (one of
+    *unreadable*, or a declared type that differs from *call_type*) is
+    dropped from the restated call and named separately, so the remedy
+    this refusal names is one that actually renders rather than failing
+    that check in turn. Both default empty/``None``, so most channels
+    restate every option the caller wrote: ``scale=``/``format=`` push
+    down once restated, the same as a field-bearing binding's. *pending*
+    says what a dropped declared ``T`` does restated on a genuinely
+    pending smooth-routed form (``unreadable`` always empty there, so the
+    only option this ever blocks is a declared type): with no scatter
+    drawn, a declared type is never applied there either, the same fact
+    the dedicated no-scatter forms' own remedy states, in the caller's
+    terms rather than naming the pending mechanism. A declared ``N``/``O``
+    restated on that same pending form is refused again, by the pending
+    preparation's own categorical rule, so it keeps the ordinary "would be
+    refused too" ending.
+    """
+    from ferrum._entry import EntryRefusal
+
+    cls_name = type(ch).__name__
+    blocked = {
+        option
+        for option in unreadable
+        if ch.option(option) is not None and _unreadable_option_is_plausible(option, ch.option(option))
+    }
+    declared_type = ch.option("type")
+    if declared_type is not None and declared_type != (call_type or "Q"):
+        blocked.add("type")
+    kwargs_repr = ", ".join(f"{k}={_quoted_statistic_value(v)}" for k, v in ch._kwargs.items())
+    written = f"{cls_name}({kwargs_repr})" if kwargs_repr else f"{cls_name}()"
+    restatable = {k: v for k, v in ch._kwargs.items() if k not in blocked}
+    restatable_repr = ", ".join(f"{k}={_quoted_statistic_value(v)}" for k, v in restatable.items())
+    restated = f"{called_field!r}, {restatable_repr}" if restatable_repr else f"{called_field!r}"
+
+    def text(voice: str) -> str:
+        base = (
+            f"{voice}({channel}={written}) after the call is not supported: a channel with "
+            f"no field replaces {channel}={called_field!r}, which the fit reads. "
+        )
+        if blocked:
+            names = ", ".join(f"{k}=" for k in sorted(blocked))
+            ending = (
+                "with no scatter drawn, a declared type is never applied"
+                if pending and declared_type == "T"
+                else f"restating with {names} would be refused too"
+            )
+            return base + (
+                f"Restate the column, dropping {names} ({ending}): "
+                f".encode({channel}=fm.{cls_name}({restated}))."
+            )
+        return base + f"Restate the column: .encode({channel}=fm.{cls_name}({restated}))."
+
+    raise EntryRefusal(text, entry)
+
+
+def _refuse_fieldless_categorical_type(
+    entry: str,
+    channel: str,
+    ch: ChannelBase,
+    *,
+    reads: Callable[[str, str, str], str],
+    subject: str,
+) -> None:
+    """Refuse a field-less post-build channel that declares a type a computed axis cannot place.
+
+    A computed axis a figure styles rather than reads (residplot's
+    residual y) is never categorical, and residplot's also never
+    temporal: a field-less binding that declares one anyway
+    (``fm.Y(type='N')``) is refused the same way a field-bearing one is
+    (:func:`_refuse_categorical_input`, which skips a field-less channel
+    by design, leaving it to this sibling), naming *subject* -- the
+    column the axis actually draws -- since the binding itself names no
+    field to quote.
+    """
+    from ferrum._entry import EntryRefusal
+
+    type_ = ch.option("type")
+    written = f"{channel}={type(ch).__name__}(type={type_!r})"
+    clause = reads(channel, subject, type_)
+    raise EntryRefusal(_CategoricalRefusalText(written, clause), entry)
+
+
+def _missing_xy_channels(x_field: str | None, y_field: str | None) -> tuple[str, ...]:
+    """``("x", "y")``'s members left with no field, in that order.
+
+    Shared by every bivariate resolver's unbound-input check (``mark_contour``,
+    ``mark_violin``, ``mark_raster``, ``mark_hex``, ``mark_swarm``,
+    ``mark_boxplot``, ``mark_errorbar``, ``mark_errorband``, ``mark_ribbon``,
+    ``mark_boxen``, ``mark_smooth``), so the channel order
+    :func:`_unbound_input_refusal` names cannot drift between them.
+    """
+    return tuple(ch for ch, field in (("x", x_field), ("y", y_field)) if field is None)
+
+
+def _channel_names_clause(channels: tuple[str, ...]) -> str:
+    """"the variable x names" for one channel, "the variables x and y name" for more.
+
+    The one reading of a resolver's *channels* as the idiom every member
+    of this refusal family shares: a channel "names" the variable (column)
+    it is bound to.
+    """
+    from ferrum.encoding._aliases import _prose_list
+
+    names = _prose_list(list(channels))
+    if len(channels) == 1:
+        return f"the variable {names} names"
+    return f"the variables {names} name"
+
+
+def _binding_names_none_clause(channels: tuple[str, ...]) -> str:
+    """"this x binding names none" for one channel, "these x and y bindings name none" for more."""
+    from ferrum.encoding._aliases import _prose_list
+
+    names = _prose_list(list(channels))
+    if len(channels) == 1:
+        return f"this {names} binding names none"
+    return f"these {names} bindings name none"
+
+
+@dataclass(frozen=True)
+class _UnboundInputRefusalText:
+    """An unbound-input refusal's message: *mark*'s own text under its own voice, the generic sentence under any other.
+
+    Mirrors :class:`_StatisticRefusalText`/:class:`_CategoricalRefusalText`
+    by reference: resolved per voice so a figure that calls in speaks the
+    generic sentence, built from *channels* and *reads_action* (the
+    statistic's own clause up to, but not including, the channel
+    reference -- ``"the kernel density estimate reads"``, ``"the ECDF
+    counts the raw values of"``), while *mark*'s own voice keeps *own*
+    unchanged. Declares ``voices``, the structural ``_VoiceSpelledText``
+    protocol :class:`~ferrum._entry.EntryRefusal` reads to freeze the
+    mark's own text across a pickle or copy, so a copied or unpickled
+    refusal still speaks *mark*'s own wording under *mark*'s own voice.
+    """
+
+    mark: str
+    channels: tuple[str, ...]
+    reads_action: str
+    own: str | None
+
+    def __call__(self, voice: str) -> str:
+        if self.own is not None and voice == self.mark:
+            return self.own
+        from ferrum.encoding._aliases import _prose_list
+
+        names = _prose_list(list(self.channels))
+        names_clause = _channel_names_clause(self.channels)
+        binding_clause = _binding_names_none_clause(self.channels)
+        binds = ", ".join(f"{ch}='<column>'" for ch in self.channels)
+        keep = " or ".join(f"fm.{ch.upper()}('<column>', ...)" for ch in self.channels)
+        return (
+            f"{voice} needs {names} bound to a column -- {self.reads_action} {names_clause}, "
+            f"and {binding_clause}. Bind {names} to a column: {binds}, or {keep} to keep the "
+            "channel's options."
+        )
+
+    @property
+    def voices(self) -> frozenset[str]:
+        return frozenset({self.mark}) if self.own is not None else frozenset()
+
+
+def _unbound_input_refusal(
+    mark: str, channels: tuple[str, ...], reads_action: str, *, own: str | None = None
+) -> "EntryRefusal":
+    """*mark*'s own "needs a column bound" refusal, re-voiceable by a figure that calls in.
+
+    *channels* names every channel the call left with no field (one,
+    almost always -- two only when a bivariate mark's call binds neither).
+    *reads_action* states, for the figure-voiced ending, how *mark*'s
+    statistic reads the unbound channel(s), up to but not including the
+    channel reference itself (the ECDF resolver's own clause,
+    ``"the ECDF counts the raw values of"``, kept byte-identical by
+    passing it here). *own* is *mark*'s own, unchanged wording
+    (``"mark_density() requires .encode(x=...) to specify the density
+    field"``); every voice but *mark* itself speaks the generic sentence
+    built from *channels* and *reads_action* instead -- *mark* does too
+    when *own* is left unset, which a mark with no own spelling beyond the
+    generic sentence (none ship yet; every current caller passes its own
+    unchanged text) can rely on instead of restating it here.
+    """
+    from ferrum._entry import EntryRefusal
+
+    return EntryRefusal(_UnboundInputRefusalText(mark, tuple(channels), reads_action, own), mark)
 
 
 #: The one reason every kernel-density-reading statistic mark
@@ -1542,6 +1852,27 @@ def _refuse_bin_aggregate_fit(
     y_ch = encoding.get("y")
     if isinstance(y_ch, ChannelBase):
         _refuse_statistic_input(entry, "y", y_ch, reason="the fit reads the raw response")
+
+
+def _refuse_residplot_bin_aggregate(encoding: dict) -> None:
+    """Refuse an x/y bin=/aggregate= residplot's residual fit reads raw.
+
+    Shared by residplot's own call-time check and the post-build record
+    (``Chart._resolve_pending``), so the two doors cannot drift apart.
+    residplot has no sibling spelling (unlike regplot/lmplot), so the
+    refusal always speaks as ``"residplot"``.
+    """
+    for channel in ("x", "y"):
+        ch = encoding.get(channel)
+        if isinstance(ch, ChannelBase):
+            _refuse_statistic_input(
+                "residplot",
+                channel,
+                ch,
+                reason="the residual fit reads the raw predictor and response",
+                bin_remedy=_generic_bin_remedy(ch, call_kwargs="dropna=False"),
+                aggregate_remedy=_generic_aggregate_remedy(ch, call_kwargs="dropna=False"),
+            )
 
 
 def _count_axes(encoding: dict, agg_axes: list[str]) -> list[str]:

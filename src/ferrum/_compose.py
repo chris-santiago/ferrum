@@ -39,6 +39,11 @@ from ferrum._encode_lowering import (
     _expand_grouping,
     _grouping_bindings,
     _over,
+    _rebind_positional,
+    _refuse_categorical_input,
+    _refuse_fieldless_categorical_type,
+    _refuse_fieldless_positional,
+    _refuse_unreadable_option,
     _statistic_plan,
 )
 from ferrum._layer import _Layer
@@ -53,7 +58,7 @@ from ferrum._layer_transforms import (
     _transforms_to_json_list_named,
     _with_statistics_marker,
 )
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding.base import _FORMAT_TYPE_ALIASES, ChannelBase
 
 #: The key an operand's rows are published under, after its own steps and the
 #: composition steps that reach it: the rows a layer attached to the chart
@@ -176,6 +181,315 @@ def _with_grouping_bindings(chart: Any, own: dict) -> Any:
         **own,
     }
     return new
+
+
+@dataclass(frozen=True)
+class _PostBuildChannel:
+    """One x/y channel's contract for a binding a regression figure's caller writes after the call.
+
+    *own* is the channel object the figure itself bound at build time,
+    compared by identity against the chart's live encoding, never by
+    equality, so only a binding the caller actually wrote later is read.
+    *called_field* is the field the caller named this channel with at the
+    call; *drawn_column* is the column the figure's layers actually draw
+    (the same field for regplot/lmplot, residplot's own batch column for
+    residplot). *default_title* is the title
+    :func:`~ferrum._encode_lowering._rebind_positional` falls back to when
+    the caller's re-pointed binding carries none of its own.
+    *honors_fieldless* is ``True`` only for a channel the figure computes
+    rather than reads (residplot's residual y): a field-less binding
+    styles that axis instead of being refused. *categorical_reads*/
+    *categorical_disallowed* are
+    :func:`~ferrum._encode_lowering._refuse_categorical_input`'s own
+    arguments for this channel, and also gate a field-less
+    *honors_fieldless* binding's own declared type (there is no field for
+    :func:`_refuse_categorical_input` itself to check). *check_unreadable*
+    refuses whichever of *unreadable*'s options the figure's call door
+    reads a different way (empty, honoring every one, for every channel
+    but residplot's y, since the response column the call named is not
+    the residual the figure draws): a post-build ``scale=``/``format=``/
+    ``format_type=``/``axis=`` on the called field pushes down onto the
+    figure's own layers instead, :func:`_push_down_positional_options`,
+    the later write always replacing whatever the layer already carries.
+    *call_type* is the
+    type the call's own binding declared (``None`` reads as ``"Q"``, the
+    positional default); a later binding that declares a *different*
+    type is refused rather than silently read or silently dropped
+    (``apply_post_build_positional``'s own comparison), with *type_remedy*
+    overriding the default ending the same way *scale_remedy* (passed
+    straight through to *check_unreadable*) overrides it for ``scale=``.
+
+    *always_honors_drawn_column* is ``True`` only where a binding naming
+    the figure's drawn column is a second, legitimate way to spell the
+    same column the call named, not a later override of it (residplot's
+    predictor, when the caller's own column happens to share its name
+    with residplot's internal one): such a binding is read, never
+    refused, even though its field also equals *called_field*.
+    *restore_declared_type* is the type the call-time binding declared
+    (only ever ``"T"``) when :func:`~ferrum._encode_lowering._rebind_positional`
+    would otherwise force it back to ``"Q"``; ``None`` leaves the forced
+    type alone. Needed only where the chart's own encoding is read
+    directly at render time with no intervening layer of its own already
+    carrying the declared type forward (flat residplot); harmless
+    elsewhere, since a layered figure's own layer keeps its type
+    regardless of what this record writes onto the chart's encoding. By
+    the time this applies, a differing declared type has already been
+    refused above, so the type this restores is always the one the
+    binding itself declared, or the call's own.
+    """
+
+    own: ChannelBase
+    called_field: str
+    drawn_column: str
+    default_title: str | None
+    honors_fieldless: bool
+    categorical_reads: Callable[[str, str, str], Any]
+    categorical_disallowed: tuple[str, ...]
+    check_unreadable: Callable[[str, str, ChannelBase], None]
+    unreadable: tuple[str, ...] = ()
+    call_type: str | None = None
+    type_remedy: Callable[[str], str] | None = None
+    always_honors_drawn_column: bool = False
+    restore_declared_type: str | None = None
+
+
+@dataclass(frozen=True)
+class _PostBuildPositional:
+    """A regression figure's contract for an x/y binding its caller writes after the figure was built.
+
+    *entry* is the public call the caller made (``regplot``, ``lmplot``,
+    ``residplot``), the voice every refusal speaks as. *channels* holds
+    each positional channel's own :class:`_PostBuildChannel`.
+    *statistic_refusal* refuses a ``bin=``/``aggregate=`` on any written
+    channel regardless of its field: the call-time check is field-agnostic,
+    so this backstop is too, on every form including a pending
+    smooth-routed one, so the one check a caller's bare bin=/aggregate=
+    trips is always this one, never a later, differently-worded refusal
+    from the pending statistic's own resolve-time prep.
+
+    Read by :func:`apply_post_build_positional`, which
+    ``Chart._resolve_pending`` runs first, before any pending composite
+    mark resolves.
+    """
+
+    entry: str
+    channels: dict[str, _PostBuildChannel]
+    statistic_refusal: Callable[[dict[str, ChannelBase]], None]
+
+
+def apply_post_build_positional(chart: Any) -> Any:
+    """*chart*, its x/y bindings written after a regression figure's build read or refused.
+
+    A binding equal by identity to the figure's own (:attr:`_PostBuildChannel.own`)
+    was never rewritten and is left alone. Of the rest: any field's
+    ``bin=``/``aggregate=`` is refused first, by
+    :attr:`_PostBuildPositional.statistic_refusal`, on every form -- a
+    pending smooth-routed form's own resolve-time prep would refuse the
+    same thing moments later, so running it here first keeps the text one
+    caller's bare ``bin=``/``aggregate=`` always gets, not whichever of
+    two differently-worded refusals happens to run first. Then, per
+    channel: a binding naming the figure's drawn column is read as-is
+    when :attr:`_PostBuildChannel.always_honors_drawn_column` says so,
+    even where that column and the called field are spelled the same; a
+    binding on the field the caller originally named (and *not* pending --
+    a pending form's own resolve-time prep reads this directly) refuses a
+    declared ``N``/``O`` (the categorical-input rule), then a declared
+    type that differs from the call's own
+    (:attr:`~_PostBuildChannel.call_type`), then whichever of
+    :attr:`~_PostBuildChannel.unreadable` the call door reads a different
+    way, then re-points onto the figure's drawn column
+    (:func:`~ferrum._encode_lowering._rebind_positional`), restoring a
+    call-time declared type :func:`_rebind_positional` would otherwise
+    force away (:attr:`_PostBuildChannel.restore_declared_type` -- safe
+    by now, since a *differing* declared type was already refused above);
+    a field-less binding either refuses a declared ``N``/``O``/``T`` a
+    computed axis cannot place, then styles that axis the same way, or is
+    refused naming the column to restate; any other field (another
+    variable) is left to render as it already does. Every channel this
+    pass re-points -- never one left alone -- then pushes its own
+    ``scale=``/``format=``/``format_type=``/``axis=`` down onto the
+    figure's own layers (:func:`_push_down_positional_options`), the
+    later write always replacing whatever a layer already carries for
+    that option.
+
+    The returned chart's own record points each re-pointed channel's
+    :attr:`~_PostBuildChannel.own` at the binding this pass just wrote,
+    not the pre-render one: ``Chart._resolve_pending`` runs this function
+    more than once reaching one render, and the identity check at the top
+    (``binding is spec.own``) must recognize a channel this same pass
+    already settled on a later run, rather than reading its own output
+    (forced to ``type="Q"`` by :func:`_rebind_positional`, regardless of
+    *call_type*) as a fresh caller write that conflicts with the call's
+    own declared type.
+
+    Returns *chart* unchanged when it carries no record, or the record's
+    channels are all untouched.
+    """
+    record: _PostBuildPositional | None = chart._post_build_positional
+    if record is None:
+        return chart
+    written: dict[str, ChannelBase] = {}
+    for channel, spec in record.channels.items():
+        binding = chart._encoding.get(channel)
+        if binding is None or binding is spec.own:
+            continue
+        written[channel] = binding
+    if not written:
+        return chart
+    from ferrum._entry import voiced_as
+
+    pending = chart._pending_stat_mark is not None
+    deferred_to_pending_prep = False
+    with voiced_as(record.entry):
+        record.statistic_refusal(written)
+        updates: dict[str, ChannelBase] = {}
+        for channel, binding in written.items():
+            spec = record.channels[channel]
+            field = binding.field
+            if field is None:
+                if spec.honors_fieldless:
+                    declared_type = binding.option("type")
+                    if declared_type in spec.categorical_disallowed:
+                        _refuse_fieldless_categorical_type(
+                            record.entry,
+                            channel,
+                            binding,
+                            reads=spec.categorical_reads,
+                            subject=spec.drawn_column,
+                        )
+                    updates[channel] = _rebind_positional(
+                        spec.drawn_column, binding, type(binding), title=spec.default_title
+                    )
+                else:
+                    _refuse_fieldless_positional(
+                        record.entry,
+                        channel,
+                        binding,
+                        called_field=spec.called_field,
+                        unreadable=spec.unreadable,
+                        call_type=spec.call_type,
+                        pending=pending,
+                    )
+            elif spec.always_honors_drawn_column and field == spec.drawn_column:
+                continue
+            elif field == spec.called_field:
+                if pending:
+                    # A pending smooth-routed form: its own resolve-time
+                    # prep, about to run right after this returns, reads
+                    # this binding from the final encoding directly, so
+                    # there is nothing more to do here. Once that prep
+                    # runs it will have read and settled this binding for
+                    # good, so the record that deferred to it is cleared
+                    # below rather than kept to be read again, wrongly, as
+                    # an eager form's on a later call reached by the same
+                    # chart (`Chart._resolve_pending` runs more than once
+                    # per render) or a mark= override applied before this
+                    # call (whose own prep never ran at all).
+                    deferred_to_pending_prep = True
+                    continue
+                _refuse_categorical_input(
+                    record.entry,
+                    {channel: binding},
+                    (channel,),
+                    reads=spec.categorical_reads,
+                    disallowed=spec.categorical_disallowed,
+                )
+                declared_type = binding.option("type")
+                if declared_type is not None and declared_type != (spec.call_type or "Q"):
+                    _refuse_unreadable_option(record.entry, channel, binding, "type", remedy=spec.type_remedy)
+                spec.check_unreadable(record.entry, channel, binding)
+                rebound = _rebind_positional(
+                    spec.drawn_column, binding, type(binding), title=spec.default_title
+                )
+                if spec.restore_declared_type is not None:
+                    rebound = rebound._with_options(type=spec.restore_declared_type)
+                updates[channel] = rebound
+            # else: another variable -- left alone.
+    if not updates and not deferred_to_pending_prep:
+        return chart
+    new = chart._clone()
+    new._encoding = {**chart._encoding, **updates}
+    if deferred_to_pending_prep:
+        new._post_build_positional = None
+    elif updates:
+        from dataclasses import replace
+
+        new._post_build_positional = replace(
+            record,
+            channels={
+                channel: (replace(spec, own=updates[channel]) if channel in updates else spec)
+                for channel, spec in record.channels.items()
+            },
+        )
+    if updates and new._layers:
+        new._layers = [_push_down_positional_options(updates, layer) for layer in new._layers]
+    return new
+
+
+#: The axis-presentation options a post-build write pushes onto the
+#: figure's own layers once a channel is re-pointed, the later write
+#: always replacing whatever a layer's own channel already carries for
+#: that option. ``title=`` is not here: it already reaches a layer's
+#: rendered axis through a separate mechanism (the chart-level encoding's
+#: own title, read directly), never through a layer's own channel object.
+_PUSHDOWN_OPTIONS = ("scale", "format", "axis")
+
+
+def _push_down_positional_channel(layer_value: Any, pushed: ChannelBase) -> Any:
+    """*layer_value* with *pushed*'s own :data:`_PUSHDOWN_OPTIONS` overlaid, replacing whatever it already carries.
+
+    The later write always wins here, unlike
+    :func:`ferrum._desugar._merge_positional_channel_axis` (a layered
+    statistic's own construction-time propagation, where a layer that
+    states its own presentation keeps it): *pushed* is the caller's own
+    re-pointed binding, read after the figure's call already built
+    *layer_value*, so it is the newer of the two. Returns ``None`` when
+    *layer_value* carries no positional channel to overlay onto, or
+    *pushed* sets none of :data:`_PUSHDOWN_OPTIONS` (nor either
+    :data:`_FORMAT_TYPE_ALIASES` spelling), so a caller can tell "nothing
+    to change" from "changed". When *pushed* carries a ``format_type``
+    under either spelling, both of *layer_value*'s own spellings are
+    dropped before the canonical one is written -- keeping whichever one
+    *layer_value* already carried would leave two keys serializing the
+    same wire field, with the later write's own `_SPEC_DICT_ORDER`
+    position deciding winner instead of this function.
+    """
+    if not isinstance(layer_value, ChannelBase):
+        return None
+    extra = {name: pushed.option(name) for name in _PUSHDOWN_OPTIONS if pushed.option(name) is not None}
+    for alias in _FORMAT_TYPE_ALIASES:
+        format_type = pushed.option(alias)
+        if format_type is not None:
+            extra["format_type"] = format_type
+            break
+    if not extra:
+        return None
+    if "format_type" in extra:
+        kept = {k: v for k, v in layer_value._kwargs.items() if k not in _FORMAT_TYPE_ALIASES}
+        return type(layer_value)(layer_value.field, **{**kept, **extra})
+    return layer_value._with_options(**extra)
+
+
+def _push_down_positional_options(pushed: dict[str, ChannelBase], layer: _Layer) -> _Layer:
+    """*layer*, each of *pushed*'s channels' own axis presentation overlaid onto the matching axis.
+
+    Only the channels in *pushed* -- the ones :func:`apply_post_build_positional`
+    actually re-pointed this call -- reach *layer*; a binding on another
+    variable, which that function leaves out of *pushed*, never does,
+    whatever else the same ``.encode()`` call writes.
+    """
+    from dataclasses import replace
+
+    new_encoding = dict(layer.encoding)
+    changed = False
+    for axis, value in pushed.items():
+        merged = _push_down_positional_channel(new_encoding.get(axis), value)
+        if merged is not None:
+            new_encoding[axis] = merged
+            changed = True
+    if not changed:
+        return layer
+    return replace(layer, encoding=new_encoding)
 
 
 def figure_recorded(chart: Any, call: Callable[[dict], Any]) -> Any:
