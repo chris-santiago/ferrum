@@ -60,7 +60,14 @@ pub(crate) enum TransformWarning {
     /// `"fewer than 2 usable points"`, `"zero x variance"`). `panel` names
     /// the facet panel this fit ran in ([`facet_partition_label`]'s text),
     /// `None` for an unfaceted chart (byte-identical text) — see
-    /// `run_transforms_with_facet`'s per-partition stamping.
+    /// `run_transforms_with_facet`'s per-partition stamping. `step` is the
+    /// pipeline step that raised this warning
+    /// ([`TransformContext::step`]), read by
+    /// `render::scene_build::group_owned_by_its_fit` to tell a layer whose
+    /// own rows descend from this exact step from one that merely shares
+    /// the group's name — [`NullKeyScope::Groupby::step`]'s own identity,
+    /// widened to this variant. `#[serde(default)]` for the wire form a
+    /// render written before this field existed still carries.
     ///
     /// [`facet_partition_label`]: crate::render::prepare::facet_partition_label
     DegenerateFit {
@@ -69,6 +76,8 @@ pub(crate) enum TransformWarning {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<String>,
+        #[serde(default)]
+        step: StepInstance,
     },
     /// A caller-requested parameter was silently clamped to a value the data
     /// (or the transform's own bounds) could actually support — e.g.
@@ -181,6 +190,37 @@ pub(crate) enum TransformWarning {
         /// (byte-identical text). See [`Self::DegenerateFit`]'s `panel` doc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<String>,
+        /// The pipeline step that raised this warning. See
+        /// [`Self::DegenerateFit`]'s `step` doc.
+        #[serde(default)]
+        step: StepInstance,
+    },
+    /// An interval statistic (`Summary`, `ErrorExtent`) could not form its
+    /// bound for one or more groups because each held exactly one usable
+    /// value — a sample of one has no spread to summarize, unlike
+    /// [`Self::IntervalUndefined`]'s fits, whose line still draws while
+    /// only the band is lost. Raised once per call, after the group loop,
+    /// through [`TransformContext::report_extent_undefined`], the interval
+    /// statistics' analog of [`TransformContext::degrade_group_or_refuse`].
+    /// A group with no usable value at all is unaffected by this variant.
+    ExtentUndefined {
+        /// The transform's Python-facing name (`"Summary"`, `"ErrorExtent"`).
+        transform: String,
+        /// The interval's own label: `"ci={level}"` for a bootstrap
+        /// confidence interval, else `"stderr"`, `"stdev"` or `"iqr"`.
+        interval: String,
+        /// Every undefined group's own label
+        /// ([`describe_group_keys`]), in group order; empty for an
+        /// ungrouped call whose one implicit group held one value.
+        groups: Vec<String>,
+        /// The facet panel this call ran in, `None` for an unfaceted chart
+        /// (byte-identical text). See [`Self::DegenerateFit`]'s `panel` doc.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<String>,
+        /// The pipeline step that raised this warning. See
+        /// [`Self::DegenerateFit`]'s `step` doc.
+        #[serde(default)]
+        step: StepInstance,
     },
 }
 
@@ -426,7 +466,7 @@ impl std::fmt::Display for TransformWarning {
     /// `RenderWarning`'s own Display contract exactly.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransformWarning::DegenerateFit { transform, group, reason, panel } => {
+            TransformWarning::DegenerateFit { transform, group, reason, panel, step: _ } => {
                 let in_panel = panel_clause(panel.as_deref());
                 match group {
                     Some(g) => write!(
@@ -496,7 +536,7 @@ impl std::fmt::Display for TransformWarning {
                      {pronoun} dropped; fill or filter the nulls in '{field}'"
                 )
             }
-            TransformWarning::IntervalUndefined { transform, group, ci, reason, panel } => {
+            TransformWarning::IntervalUndefined { transform, group, ci, reason, panel, step: _ } => {
                 let in_panel = panel_clause(panel.as_deref());
                 match group {
                     Some(g) => write!(
@@ -511,14 +551,57 @@ impl std::fmt::Display for TransformWarning {
                     ),
                 }
             }
+            TransformWarning::ExtentUndefined { transform, interval, groups, panel, step: _ } => {
+                let in_panel = panel_clause(panel.as_deref());
+                match groups.as_slice() {
+                    [] => write!(
+                        f,
+                        "{transform}: the data{in_panel} holds one observation, so its {interval} \
+                         interval is undefined and is not drawn"
+                    ),
+                    [only] => write!(
+                        f,
+                        "{transform}: group {only}{in_panel} holds one observation, so its \
+                         {interval} interval is undefined and is not drawn"
+                    ),
+                    several => {
+                        let sep = if several.iter().any(|g| g.contains(',')) { "; " } else { ", " };
+                        write!(
+                            f,
+                            "{transform}: groups {}{in_panel} each hold one observation, so their \
+                             {interval} intervals are undefined and are not drawn",
+                            and_prefixed_list(several, "", sep)
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
+/// Join `items` for a shared-cause warning's name list: the first item
+/// carries no prefix beyond `prefix` itself (the sentence template already
+/// supplies any lead-in text before the list), every later item does, and
+/// the last is set off by `", and "`/`"; and "` (per `sep`). Shared by
+/// [`crate::render::RenderWarning::GroupsWithNoPosition`]'s own
+/// `and_of_list`/`and_panel_list` (`render::mod`) and
+/// [`TransformWarning::ExtentUndefined`]'s groups list here, so the three
+/// cannot drift grammatically from one another.
+pub(crate) fn and_prefixed_list(items: &[String], prefix: &str, sep: &str) -> String {
+    let mut iter = items.iter();
+    let Some(first) = iter.next() else { return String::new() };
+    let rest: Vec<&String> = iter.collect();
+    let Some((last, middle)) = rest.split_last() else { return first.clone() };
+    let mut parts = vec![first.clone()];
+    parts.extend(middle.iter().map(|g| format!("{prefix}{g}")));
+    format!("{}{sep}and {prefix}{last}", parts.join(sep))
+}
+
 /// The " in facet panel f=F2" clause [`TransformWarning::DegenerateFit`],
-/// [`TransformWarning::ParameterClamped`] and [`TransformWarning::IntervalUndefined`]
-/// each splice into their Display text after the group clause; empty for an
-/// unfaceted fit (`panel: None`), keeping that text byte-identical.
+/// [`TransformWarning::ParameterClamped`], [`TransformWarning::IntervalUndefined`]
+/// and [`TransformWarning::ExtentUndefined`] each splice into their Display
+/// text after the group clause; empty for an unfaceted fit (`panel: None`),
+/// keeping that text byte-identical.
 /// `pub(crate)` so [`crate::render::scene_build`]'s per-layer draw site
 /// builds a [`crate::render::RenderWarning::SeriesDropped`] name's own
 /// facet clause the same way, rather than re-deriving the `" in facet
@@ -815,6 +898,7 @@ impl TransformContext {
             group: Some(group.to_string()),
             reason: failure.reason,
             panel: None,
+            step: self.step.clone(),
         });
         Ok(())
     }
@@ -823,6 +907,26 @@ impl TransformContext {
     /// the current step, and what the step gives in that case.
     pub(crate) fn record_all_null(&self, outcome: AllNullOutcome) {
         self.all_null_partitions.borrow_mut().push(AllNullPartition { step: self.step.clone(), outcome });
+    }
+
+    /// One call's own [`TransformWarning::ExtentUndefined`], the interval
+    /// statistics' (`Summary`, `ErrorExtent`) analog of
+    /// [`Self::degrade_group_or_refuse`]: raised once, after the group
+    /// loop, naming every group whose interval could not be formed because
+    /// it held exactly one usable value. `groups` are already-formatted
+    /// labels ([`describe_group_keys`]), empty for an ungrouped call whose
+    /// one implicit group was the one that held a single value — the
+    /// caller decides whether to call this at all, since an empty `groups`
+    /// list on a GROUPED call (nothing undefined) is indistinguishable from
+    /// the ungrouped case here.
+    pub(crate) fn report_extent_undefined(&self, transform: &str, interval: &str, groups: Vec<String>) {
+        self.warn(TransformWarning::ExtentUndefined {
+            transform: transform.to_string(),
+            interval: interval.to_string(),
+            groups,
+            panel: None,
+            step: self.step.clone(),
+        });
     }
 }
 
@@ -853,12 +957,14 @@ mod tests {
                 group: Some("g=a".into()),
                 reason: "fewer than 2 usable points".into(),
                 panel: None,
+                step: StepInstance::default(),
             },
             TransformWarning::DegenerateFit {
                 transform: "Smooth".into(),
                 group: None,
                 reason: "zero x variance".into(),
                 panel: Some("f=F2".into()),
+                step: StepInstance::Chain(vec![0]),
             },
             TransformWarning::ParameterClamped {
                 transform: "Smooth".into(),
@@ -922,6 +1028,7 @@ mod tests {
                          the band needs at least 3"
                     .into(),
                 panel: None,
+                step: StepInstance::default(),
             },
             TransformWarning::IntervalUndefined {
                 transform: "Smooth".into(),
@@ -929,6 +1036,21 @@ mod tests {
                 ci: 0.95,
                 reason: "undefined at 3 of 50 grid points".into(),
                 panel: Some("f=F2, r=R1".into()),
+                step: StepInstance::Chain(vec![0]),
+            },
+            TransformWarning::ExtentUndefined {
+                transform: "Summary".into(),
+                interval: "ci=0.95".into(),
+                groups: vec!["cat=a".into(), "cat=b".into()],
+                panel: Some("f=F2".into()),
+                step: StepInstance::Chain(vec![0]),
+            },
+            TransformWarning::ExtentUndefined {
+                transform: "ErrorExtent".into(),
+                interval: "stdev".into(),
+                groups: Vec::new(),
+                panel: None,
+                step: StepInstance::default(),
             },
         ]
     }
@@ -949,8 +1071,10 @@ mod tests {
     /// name leaking into the text — mirrors `RenderWarning`'s own assertion.
     #[test]
     fn transform_warning_display_never_leaks_variant_names() {
-        let leak_tokens =
-            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull", "NullKeyRowsDropped", "NullKeyScope", "IntervalUndefined"];
+        let leak_tokens = [
+            "DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull",
+            "NullKeyRowsDropped", "NullKeyScope", "IntervalUndefined", "ExtentUndefined",
+        ];
         for w in all_variants() {
             let text = w.to_string();
             for token in leak_tokens {
@@ -969,6 +1093,7 @@ mod tests {
             group: Some("g=a".into()),
             reason: "fewer than 2 usable points".into(),
             panel: None,
+            step: StepInstance::default(),
         };
         assert!(with_group.to_string().contains("g=a"));
 
@@ -977,8 +1102,94 @@ mod tests {
             group: None,
             reason: "fewer than 2 usable points".into(),
             panel: None,
+            step: StepInstance::default(),
         };
         assert!(!without_group.to_string().contains("group"));
+    }
+
+    /// `ExtentUndefined`'s own three shapes: one group, several (joined by
+    /// the shared list grammar, switching to `"; "` when a name holds a
+    /// comma), and ungrouped (`groups` empty) — each singular/plural and
+    /// with/without a facet-panel clause.
+    #[test]
+    fn extent_undefined_reads_one_group_several_groups_and_ungrouped() {
+        let one = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: vec!["cat=a".into()],
+            panel: None,
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            one.to_string(),
+            "Summary: group cat=a holds one observation, so its ci=0.95 interval is undefined \
+             and is not drawn"
+        );
+
+        let several = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: vec!["cat=a".into(), "cat=b".into(), "cat=c".into()],
+            panel: None,
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            several.to_string(),
+            "Summary: groups cat=a, cat=b, and cat=c each hold one observation, so their \
+             ci=0.95 intervals are undefined and are not drawn"
+        );
+
+        let ungrouped = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: Vec::new(),
+            panel: None,
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            ungrouped.to_string(),
+            "Summary: the data holds one observation, so its ci=0.95 interval is undefined and \
+             is not drawn"
+        );
+
+        let faceted_one = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: vec!["cat=a".into()],
+            panel: Some("f=p".into()),
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            faceted_one.to_string(),
+            "Summary: group cat=a in facet panel f=p holds one observation, so its ci=0.95 \
+             interval is undefined and is not drawn"
+        );
+
+        let faceted_ungrouped = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: Vec::new(),
+            panel: Some("f=p".into()),
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            faceted_ungrouped.to_string(),
+            "Summary: the data in facet panel f=p holds one observation, so its ci=0.95 \
+             interval is undefined and is not drawn"
+        );
+
+        let hued = TransformWarning::ExtentUndefined {
+            transform: "Summary".into(),
+            interval: "ci=0.95".into(),
+            groups: vec!["cat=a, h=m".into(), "cat=b, h=f".into()],
+            panel: None,
+            step: StepInstance::default(),
+        };
+        assert_eq!(
+            hued.to_string(),
+            "Summary: groups cat=a, h=m; and cat=b, h=f each hold one observation, so their \
+             ci=0.95 intervals are undefined and are not drawn"
+        );
     }
 
     /// Wave-1 close remediation (S1 finding): `FallbackApplied`'s `Some(g)`
@@ -1018,6 +1229,7 @@ mod tests {
             group: None,
             reason: "zero x variance".into(),
             panel: None,
+            step: StepInstance::default(),
         });
         assert_eq!(
             ctx.warnings.borrow().len(),
@@ -1038,6 +1250,7 @@ mod tests {
             group: None,
             reason: "zero x variance".into(),
             panel: None,
+            step: StepInstance::default(),
         });
         assert_eq!(a.warnings.borrow().len(), 1);
         assert_eq!(b.warnings.borrow().len(), 0, "independent contexts must not share a sink");

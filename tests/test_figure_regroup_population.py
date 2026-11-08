@@ -199,8 +199,15 @@ def _figure_data(name: str) -> Any:
     module docstring); this is plain fixture setup, not a door being
     swept, so it reads through the same public call the sweep itself
     uses rather than inventing a second way to resolve a chart.
+    ``chart_frames(...)[0]`` is the host operand's own frame -- a
+    composed chart's ``._data`` is the composition's internal, diagonally
+    concatenated combination of every operand's rows (kept for shared-scale
+    resolution, never read by a real render), so reading it here would
+    hand a fresh chart rows no caller's own data ever produces.
     """
-    return _FIGURE_BUILDS[name]().layer()._data
+    from ferrum._compose import chart_frames
+
+    return chart_frames(_FIGURE_BUILDS[name]().layer())[0]
 
 
 # ── Population discovery (mirrors tests/test_public_entry_voice.py) ────────
@@ -394,7 +401,12 @@ def _render_door(build: Callable[[], Any], door: str, name: str) -> str:
     declared_type = _AXIS_TYPE_OVERRIDES.get(name)
     x_channel = fm.X(x, type=declared_type) if declared_type else fm.X(x)
     y_channel = fm.Y(y, type=declared_type) if declared_type else fm.Y(y)
-    pt = fm.Chart(resolved._data).mark_point().encode(x=x_channel, y=y_channel)
+    # `chart_frames(resolved)[0]` is the host operand's own frame, never
+    # the composition's internal, diagonally concatenated combination of
+    # every operand's rows (see `_figure_data`'s own docstring above).
+    from ferrum._compose import chart_frames
+
+    pt = fm.Chart(chart_frames(resolved)[0]).mark_point().encode(x=x_channel, y=y_channel)
     # The `+` doors compose a fresh, unresolved build(): `+` resolves both
     # of its operands itself (chart.py's __add__), so this is the public
     # route end to end, not a second pre-resolved chart feeding `+`.

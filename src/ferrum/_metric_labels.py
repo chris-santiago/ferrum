@@ -587,11 +587,10 @@ def _apply_metric_label(
 
     if color_col is not None and color_col in df.columns:
         # Null group values are skipped (#220), mirroring
-        # _curve_metrics_by_group's guard above: an iso-line overlay (e.g.
-        # pr_chart(iso_lines=True)) concats rows whose color column is
-        # null, and `pl.col(color_col) == None` always evaluates to null
-        # in polars -- filtering it out here avoids a UserWarning for every
-        # unique-color loop iteration.
+        # _curve_metrics_by_group's guard above: a null color value would
+        # otherwise form its own loop iteration, and `pl.col(color_col) ==
+        # None` always evaluates to null in polars, matching no row and
+        # warning once per such iteration for nothing.
         unique_colors = sorted(
             (v for v in df[color_col].unique().to_list() if v is not None), key=str
         )

@@ -12,6 +12,16 @@ from ferrum.marks._mark_kwargs import (
     validate_user_mark_kwargs as _validate,
 )
 
+#: Style for a residuals chart's Cook's-distance outlier overlay -- shared by
+#: this module's own ``cook_threshold`` branch and ``residuals_chart``'s
+#: ``fm.Layer(data=...)`` attachment, so the two never drift.
+COOK_OUTLIER_STYLE: dict[str, Any] = {
+    "fill": "#e15759",  # tableau red
+    "stroke": "#000000",
+    "stroke_width": 1.0,
+    "size": 80.0,
+}
+
 
 def desugar_residuals(
     x_field: str | None,
@@ -68,12 +78,7 @@ def desugar_residuals(
                     "x": "_cook_outlier_x",
                     "y": "_cook_outlier_y",
                 },
-                mark_kwargs={
-                    "fill": "#e15759",  # tableau red
-                    "stroke": "#000000",
-                    "stroke_width": 1.0,
-                    "size": 80.0,
-                },
+                mark_kwargs=dict(COOK_OUTLIER_STYLE),
             )
         )
     return MarkDesugarResult(layers=_apply("residuals", layers, user_kw))

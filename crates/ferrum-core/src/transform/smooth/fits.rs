@@ -637,6 +637,7 @@ pub(super) fn report_gam_outcome(ctx: &TransformContext, group: Option<&str>, ou
                      smoothing parameter for a gam fit"
                 .into(),
             panel: None,
+            step: ctx.step.clone(),
         }),
         GamFitOutcome::Fit { requested, applied } if requested != applied => {
             // #162's named case: `k` is clamped down to the number of

@@ -816,6 +816,15 @@ DISPOSITIONED: dict[tuple[str, str, str], str] = {
     ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "y"): (
         "See the desugar_decision_boundary x entry above."
     ),
+    ("src/ferrum/plots/ranking.py", "_decision_boundary_chart_from_source", "x"): (
+        "The scatter overlay's own frame (x/y/z, the training points' two "
+        "features and the true class mapped onto the grid's z domain) is "
+        "Python-built from the model source, with no transform in its chain; "
+        "x/y collide with smooth's declared output of the same name."
+    ),
+    ("src/ferrum/plots/ranking.py", "_decision_boundary_chart_from_source", "y"): (
+        "See the _decision_boundary_chart_from_source x entry above."
+    ),
     ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "x2"): (
         "See the desugar_decision_boundary x entry above -- the same Python-built "
         "grid's far cell bound."

@@ -214,6 +214,7 @@ fn fit(
                     ci: level,
                     reason,
                     panel: None,
+                    step: ctx.step.clone(),
                 });
             }
             (lo, hi)

@@ -5,7 +5,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::context::TransformContext;
+use crate::transform::context::{describe_group_keys, TransformContext};
 use crate::transform::group_key::{
     group_partition_multi, groupby_field_nullable, materialize_groupby_col,
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
@@ -111,6 +111,12 @@ pub(crate) fn apply_with_context(
     let mut means: Vec<f64> = Vec::with_capacity(partition.groups.len());
     let mut lowers: Vec<f64> = Vec::with_capacity(partition.groups.len());
     let mut uppers: Vec<f64> = Vec::with_capacity(partition.groups.len());
+    // A group that holds exactly one usable value has no spread to form an
+    // extent from — reported once, after the loop, as one ExtentUndefined
+    // naming every such group (empty here for the ungrouped case, named
+    // below). A group with no usable value at all is untouched.
+    let mut undefined_any = false;
+    let mut undefined_groups: Vec<String> = Vec::new();
 
     for (key, rows) in &partition.groups {
         group_keys_out.push(key.clone());
@@ -127,10 +133,19 @@ pub(crate) fn apply_with_context(
                 Some(v)
             })
             .collect();
+        if vals.len() == 1 {
+            undefined_any = true;
+            if !spec.groupby.is_empty() {
+                undefined_groups.push(describe_group_keys(&spec.groupby, key));
+            }
+        }
         let (m, lo, hi) = compute_extent(&vals, spec);
         means.push(m);
         lowers.push(lo);
         uppers.push(hi);
+    }
+    if undefined_any {
+        ctx.report_extent_undefined("ErrorExtent", &interval_label(spec), undefined_groups);
     }
 
     // Build output schema: groupby cols + mean + lower + upper.
@@ -154,6 +169,18 @@ pub(crate) fn apply_with_context(
 
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_error_extent: {e}")))
+}
+
+/// This call's own interval label, for [`TransformContext::report_extent_undefined`]:
+/// `"ci=0.95"` for the bootstrap interval (its level is fixed, not a
+/// `spec` field), else the error method's own name.
+fn interval_label(spec: &ErrorExtentSpec) -> String {
+    match spec.method {
+        ErrorMethod::Ci => "ci=0.95".to_string(),
+        ErrorMethod::Stderr => "stderr".to_string(),
+        ErrorMethod::Stdev => "stdev".to_string(),
+        ErrorMethod::Iqr => "iqr".to_string(),
+    }
 }
 
 fn compute_extent(vals: &[f64], spec: &ErrorExtentSpec) -> (f64, f64, f64) {
@@ -349,6 +376,7 @@ impl PyErrorExtent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::context::TransformWarning;
     use arrow::array::{Float64Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -687,6 +715,45 @@ mod tests {
             (2.0, 20.0),
             "each group's mean stays with its own key after the reorder"
         );
+    }
+
+    /// A group with exactly one usable value raises one `ExtentUndefined`
+    /// naming it, with the interval labeled by the method in use (the
+    /// bootstrap CI's own level is fixed at `ci=0.95`, since
+    /// `ErrorExtentSpec` carries no `ci` field); the two-value sibling
+    /// group is unaffected.
+    #[test]
+    fn a_single_observation_group_reports_its_undefined_interval() {
+        pyo3::Python::initialize();
+        for (method, interval) in [
+            (ErrorMethod::Ci, "ci=0.95"),
+            (ErrorMethod::Stderr, "stderr"),
+            (ErrorMethod::Stdev, "stdev"),
+            (ErrorMethod::Iqr, "iqr"),
+        ] {
+            let b = batch_value_group(vec![7.0, 1.0, 2.0], vec!["a", "b", "b"]);
+            let spec = ErrorExtentSpec {
+                field: "v".into(),
+                groupby: vec!["group".into()],
+                method,
+                seed: 0,
+                n_boot: 1000,
+                name: None,
+            };
+            let ctx = TransformContext::default();
+            apply_with_context(&spec, &b, &ctx).unwrap();
+            let warnings = ctx.warnings.borrow();
+            assert_eq!(warnings.len(), 1, "{method:?}: got {warnings:?}");
+            assert!(
+                matches!(
+                    &warnings[0],
+                    TransformWarning::ExtentUndefined { transform, interval: got, groups, .. }
+                        if transform == "ErrorExtent" && got == interval && groups == &vec!["group=a".to_string()]
+                ),
+                "{method:?}: {:?}",
+                warnings[0]
+            );
+        }
     }
 
     /// Grouping by a column named like one of this transform's fixed outputs

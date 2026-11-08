@@ -31,33 +31,39 @@ if TYPE_CHECKING:
     from ferrum.composition import ConcatChart
 
 
-def _inject_cook_outliers(
+def _cook_outlier_rows(
     df: pl.DataFrame,
     *,
     kind: str = "studentized",
     threshold: float | str = "auto",
     x_col: str = "y_pred",
 ) -> pl.DataFrame:
-    """Inject ``_cook_outlier_x`` / ``_cook_outlier_y`` columns.
+    """Return only the rows whose ``cooks_distance`` exceeds ``threshold``.
 
-    For each row whose ``cooks_distance`` exceeds ``threshold``, the
-    outlier-coordinate columns hold the ``(x_col, y_col)`` pair; all
-    other rows are null so the residual mark's outlier-overlay layer
-    skips them. ``x_col`` defaults to ``"y_pred"`` (the residuals-vs-
-    fitted view); passing ``"leverage"`` produces an outlier overlay
-    keyed on the leverage panel's x axis.
+    The returned frame carries just ``x_col`` and the residual column
+    (``y_col``), the two columns the outlier overlay draws, so it can be
+    attached as its own ``fm.Layer(data=...)`` -- no null padding, no
+    shared-frame row filtering. ``x_col`` defaults to ``"y_pred"`` (the
+    residuals-vs-fitted view); passing ``"leverage"`` keys the overlay on
+    the leverage panel's x axis. With no outlier the frame has zero rows,
+    which a zero-row ``fm.Layer`` draws and warns nothing for.
 
     ``threshold`` accepts:
     - a float — use that value directly.
     - ``"auto"`` — use the conventional ``4 / n`` rule (Hair et al.).
     """
+    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     if df.height == 0 or "cooks_distance" not in df.columns:
-        return df
+        # No column to compare against a threshold is "no outlier found",
+        # never "every row is one" -- `.clear()` keeps the two-column
+        # schema the caller's `fm.Layer(data=...)` expects, at zero rows.
+        if x_col in df.columns and y_col in df.columns:
+            return df.select([x_col, y_col]).clear()
+        return df.clear()
     if threshold == "auto":
         thr = 4.0 / df.height
     else:
         thr = float(threshold)
-    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     # Polars treats NaN > anything as True (NaN sorts after Infinity), so
     # the comparison must be guarded with `is_not_nan()` to keep non-linear
     # estimators (whose cooks_distance is NaN for every row) from
@@ -67,10 +73,7 @@ def _inject_cook_outliers(
         & pl.col("cooks_distance").is_not_null()
         & (pl.col("cooks_distance") > thr)
     )
-    return df.with_columns(
-        pl.when(is_outlier).then(pl.col(x_col)).otherwise(None).alias("_cook_outlier_x"),
-        pl.when(is_outlier).then(pl.col(y_col)).otherwise(None).alias("_cook_outlier_y"),
-    )
+    return df.filter(is_outlier).select([x_col, y_col])
 
 
 def _r2_score(y_true: pl.Series, y_pred: pl.Series) -> float:

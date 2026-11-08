@@ -563,6 +563,48 @@ def test_decision_boundary_chart_scatter_overlay_proba_mode():
     assert "<svg" in chart.to_svg()
 
 
+def test_decision_boundary_scatter_reads_its_own_rows():
+    """The scatter layer reads its own ``x``/``y``/``z`` frame, not a
+    null-padded merge with the grid's rows: a ``tooltip=`` naming the
+    shared column reads each point's own class, never the grid's null
+    padding, and the interactive scene's auto-tooltip fields for the
+    scatter layer are its own column names, not ``scatter_x``/``scatter_y``/
+    ``scatter_z``."""
+    import json
+    import re
+
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.decision_boundary_chart(
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
+        features=(0, 1),
+        grid_resolution=20,
+        scatter=True,
+        encode={"tooltip": "z"},
+    )
+    svg = chart.to_svg()
+    titles = set(re.findall(r"<title>(.*?)</title>", svg))
+    assert titles == {"z: 0", "z: 1"}
+    assert not any("null" in title for title in titles)
+
+    auto_tooltip_chart = ferrum.decision_boundary_chart(
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
+        features=(0, 1),
+        grid_resolution=20,
+        scatter=True,
+    )
+    spec, _data, _viewport, _theme, _cfg = auto_tooltip_chart._render_inputs(_auto_tooltips=True)
+    layers = json.loads(spec.to_json())["layers"]
+    scatter_layer = next(layer for layer in layers if layer.get("name") == "scatter")
+    tooltip_field_names = [f["field"] for f in scatter_layer["encoding"]["tooltip_fields"]]
+    assert tooltip_field_names == ["x", "y", "z"]
+    assert not any(name.startswith("scatter_") for name in tooltip_field_names)
+
+
 def test_decision_boundary_rejects_three_features():
     """features=(0, 1, 2) must raise; the path needs exactly 2 axes."""
     model = load_fixture("binary_logistic")

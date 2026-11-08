@@ -2551,7 +2551,8 @@ fn stamp_facet_panel(
     let panel = match warning {
         TransformWarning::DegenerateFit { panel, .. }
         | TransformWarning::ParameterClamped { panel, .. }
-        | TransformWarning::IntervalUndefined { panel, .. } => panel,
+        | TransformWarning::IntervalUndefined { panel, .. }
+        | TransformWarning::ExtentUndefined { panel, .. } => panel,
         _ => return,
     };
     if panel.is_none() {
@@ -3247,8 +3248,19 @@ fn python_channel(wire: &'static str) -> &'static str {
 /// refused elsewhere ([`validate_layer_columns`]/[`layer_final_rows`]), not
 /// silently answered by this predicate.
 pub(in crate::render) fn reads_statistic_output(layer: &LayerPrepared, lineages: &OutputLineages) -> bool {
+    layer_output_lineage(layer, lineages).is_some_and(OutputLineage::is_statistic)
+}
+
+/// `layer`'s own [`OutputLineage`]: the lineage published under its
+/// effective data key ([`reads_statistic_output`]'s doc has the resolution
+/// rule). `None` when `layer` names a key nothing published (refused
+/// elsewhere, not silently answered here).
+pub(in crate::render) fn layer_output_lineage<'a>(
+    layer: &LayerPrepared,
+    lineages: &'a OutputLineages,
+) -> Option<&'a OutputLineage> {
     let key = layer.data_source.as_deref().unwrap_or(FINAL_OUTPUT_KEY);
-    lineages.get(key).is_some_and(OutputLineage::is_statistic)
+    lineages.get(key)
 }
 
 /// Every batch a chart's pipeline saw: its SOURCE schema, taken before any

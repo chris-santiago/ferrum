@@ -20,6 +20,12 @@ from ferrum.marks._mark_kwargs import (
 if TYPE_CHECKING:
     from ferrum.encoding.base import ChannelBase
 
+#: Style for a PR chart's F-score iso-curve overlay -- shared by this
+#: module's own ``iso_lines`` branch and ``pr_chart``'s ``fm.Layer(data=...)``
+#: attachment, so the two never drift.
+PR_ISO_LINE_STYLE: dict[str, Any] = {"stroke": "#AAAAAA", "stroke_dash": [4, 4], "opacity": 0.6}
+PR_ISO_LABEL_STYLE: dict[str, Any] = {"align": "left", "font_size": 9.0}
+
 # --- 10b: classification curves --------------------------------------
 
 
@@ -169,12 +175,7 @@ def desugar_pr(
                     "x": "_iso_recall",
                     "y": "_iso_precision",
                 },
-                mark_kwargs={
-                    "detail": "_iso_f",
-                    "stroke": "#AAAAAA",
-                    "stroke_dash": [4, 4],
-                    "opacity": 0.6,
-                },
+                mark_kwargs={"detail": "_iso_f", **PR_ISO_LINE_STYLE},
             )
         )
         layers.append(
@@ -186,7 +187,7 @@ def desugar_pr(
                     "y": "_iso_label_y",
                     "text": "_iso_label",
                 },
-                mark_kwargs={"align": "left", "font_size": 9.0},
+                mark_kwargs=dict(PR_ISO_LABEL_STYLE),
             )
         )
     if annotate_ap:

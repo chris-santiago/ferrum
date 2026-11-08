@@ -197,6 +197,7 @@ fn apply_one_group(
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
             panel: None,
+            step: ctx.step.clone(),
         });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
@@ -221,6 +222,7 @@ fn apply_one_group(
             group: group.map(str::to_string),
             reason: "zero x variance".into(),
             panel: None,
+            step: ctx.step.clone(),
         });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
@@ -420,6 +422,7 @@ fn apply_one_group(
             ci: level,
             reason,
             panel: None,
+            step: ctx.step.clone(),
         });
     }
 

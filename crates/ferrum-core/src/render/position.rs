@@ -2611,6 +2611,7 @@ mod tests {
             written_groupby: Vec::new(),
             source: batch_xyg().schema(),
             log_input: HashMap::new(),
+            steps: Vec::new(),
         };
         let lineages = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), lineage)]);
         let theme = crate::layout::ThemeInputs::default();

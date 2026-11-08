@@ -15,7 +15,8 @@ _rank1d_chart_from_dataframe, _rank2d_chart_from_dataframe,
 _resolve_pc_features, _apply_pc_rescale,
 _parallel_coords_chart_from_dataframe,
 _decision_boundary_chart_from_source, _resolve_decision_boundary_features,
-_build_decision_boundary_grid, _build_decision_boundary_unified.
+_build_decision_boundary_grid, _build_decision_boundary_grid_frame,
+_build_decision_boundary_scatter_frame.
 """
 
 from __future__ import annotations
@@ -1050,19 +1051,19 @@ def _decision_boundary_chart_from_source(
     ``proba=True``). The grid is fed to ``mark_decision_boundary``
     (rect-based).
 
-    When ``scatter=True`` and ``y`` is available, the training scatter
-    is composed as a true overlay layer (not horizontal concat) by
-    constructing a single unified DataFrame: grid rows hold
-    ``x/x2/y/y2/z`` with the scatter coordinates null, and scatter rows
-    hold ``scatter_x/scatter_y/scatter_z`` (= true class label mapped to
-    the same numeric domain as ``z``) with the grid columns null. Both
-    layers share the same DataFrame identity (avoiding unnecessary
-    null-pad merge) so ``Chart.__add__`` layers them and both color
-    encodings resolve
-    against the same continuous color scale -- matching boundary and
-    point colors means the cell-color directly says "predicted class /
-    probability" while the point's color says "true class", so a
-    misclassified point pops against its neighborhood.
+    When ``scatter=True`` and ``y`` is available, the training scatter is
+    composed as a true overlay layer through ``fm.Layer(data=...)``: the
+    grid frame (``x/x2/y/y2/z``) and the scatter frame (``x/y/z``, the
+    training points' two features and the true class label mapped to the
+    same numeric domain as the grid's ``z``) are each built from their own
+    rows, with no shared DataFrame and no null padding between them. The
+    scatter layer reads its own frame as its own operand (``Chart.layer``'s
+    ``data=`` door), so neither layer's rows carry the other's columns.
+    Both layers bind the ``color`` channel, so they still resolve one
+    shared continuous color scale over the union of what each draws:
+    matching boundary and point colors means the cell-color directly says
+    "predicted class / probability" while the point's color says "true
+    class", so a misclassified point pops against its neighborhood.
 
     Non-numeric class labels (e.g. string labels) are mapped to a
     zero-based class-index float via the model's ``classes_`` attribute
@@ -1083,63 +1084,27 @@ def _decision_boundary_chart_from_source(
         grid_resolution,
         proba=proba,
     )
-
-    if not (scatter and source.y is not None):
-        # Pure-boundary path: no overlay, no padding columns, no row mixing.
-        grid_df = pl.DataFrame(
-            {
-                "x": [v - grid_info.dx / 2 for v in grid_info.flat_x],
-                "x2": [v + grid_info.dx / 2 for v in grid_info.flat_x],
-                "y": [v - grid_info.dy / 2 for v in grid_info.flat_y],
-                "y2": [v + grid_info.dy / 2 for v in grid_info.flat_y],
-                "z": [float(v) for v in grid_info.z],
-            }
-        )
-        # Non-proba: cast class indices to String for categorical color scale.
-        if not proba:
-            grid_df = grid_df.with_columns(
-                pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
-            )
-        # `proba` is not forwarded to mark_decision_boundary: its effect
-        # (which grid `z` column got computed) already happened above, in
-        # `_build_decision_boundary_grid`; the mark itself treats `proba`
-        # as informational and warns if it is passed directly.
-        chart = _title_legend(
-            ferrum.Chart(grid_df).mark_decision_boundary(), "color", grid_info.z_title
-        )
-        chart = chart.properties(title=ferrum.Title("Decision Boundary"))
-        return _finalize_chart(
-            chart,
-            entry="decision_boundary_chart",
-            mark=mark,
-            encode=encode,
-            properties=properties,
-            layers=layers,
-            theme=theme,
-        )
-
-    from ferrum._layer import _Layer
-
-    unified = _build_decision_boundary_unified(source, grid_info)
-    # Non-proba: cast class indices to String for categorical color scale.
-    if not proba:
-        unified = unified.with_columns(
-            pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
-            pl.col("scatter_z").cast(pl.Int64).cast(pl.Utf8).alias("scatter_z"),
-        )
-    # `proba` is not forwarded to mark_decision_boundary here either -- see
-    # the pure-boundary path above for why.
+    grid_df = _build_decision_boundary_grid_frame(grid_info, proba=proba)
+    # `proba` is not forwarded to mark_decision_boundary: its effect (which
+    # grid `z` column got computed) already happened above, in
+    # `_build_decision_boundary_grid`; the mark itself treats `proba` as
+    # informational and warns if it is passed directly.
     chart = _title_legend(
-        ferrum.Chart(unified).mark_decision_boundary(), "color", grid_info.z_title
+        ferrum.Chart(grid_df).mark_decision_boundary(), "color", grid_info.z_title
     )
-    chart = chart.layer(
-        _Layer(
-            mark="point",
-            encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
-            mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
-            name="scatter",
+
+    if scatter and source.y is not None:
+        scatter_frame = _build_decision_boundary_scatter_frame(source, grid_info, proba=proba)
+        chart = chart.layer(
+            ferrum.Layer(
+                data=scatter_frame,
+                mark="point",
+                name="scatter",
+                encoding={"x": "x", "y": "y", "color": "z"},
+                mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
+            )
         )
-    )
+
     chart = chart.properties(title=ferrum.Title("Decision Boundary"))
     return _finalize_chart(
         chart,
@@ -1231,23 +1196,42 @@ def _build_decision_boundary_grid(
     )
 
 
-def _build_decision_boundary_unified(source: Any, g: _DecisionBoundaryGrid) -> pl.DataFrame:
-    """Build the layered grid+scatter DataFrame for the overlay path.
+def _build_decision_boundary_grid_frame(g: _DecisionBoundaryGrid, *, proba: bool) -> pl.DataFrame:
+    """Build the grid cell frame (``x/x2/y/y2/z``) the heatmap mark reads.
 
-    Maps ``y`` labels to the same numeric domain as ``z``. For
-    ``proba=False`` ``z`` is the predicted class index (integer-cast
-    prediction); ``scatter_z`` is the true class index in the same
-    encoding so matching colors = correct prediction. For ``proba=True``
-    ``z`` is ``P(class=1) in [0, 1]`` and the true label is 0 or 1.
-    Prefers the model's ``classes_`` attribute when present; falls back
-    to lex sort.
+    Shared by the pure-boundary path and the scatter-overlay path, so
+    both draw the same cell geometry from the same construction. ``z`` is
+    the model's prediction per cell: ``P(class=1)`` when ``proba=True``,
+    else the predicted class index, cast to ``Utf8`` here so the color
+    channel resolves a categorical (not continuous) scale.
+    """
+    grid_df = pl.DataFrame(
+        {
+            "x": [v - g.dx / 2 for v in g.flat_x],
+            "x2": [v + g.dx / 2 for v in g.flat_x],
+            "y": [v - g.dy / 2 for v in g.flat_y],
+            "y2": [v + g.dy / 2 for v in g.flat_y],
+            "z": [float(v) for v in g.z],
+        }
+    )
+    if not proba:
+        grid_df = grid_df.with_columns(pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"))
+    return grid_df
 
-    Grid rows hold ``x/x2/y/y2/z`` (scatter columns null); scatter rows
-    hold ``scatter_x/scatter_y/scatter_z`` (grid columns null). mark_rect
-    skips null x/x2/y/y2 cells and mark_point skips null
-    scatter_x/scatter_y, so each layer renders only its intended rows.
-    The shared ``z`` color scale resolves coherently because both ``z``
-    and ``scatter_z`` live on the same numeric domain.
+
+def _build_decision_boundary_scatter_frame(
+    source: Any, g: _DecisionBoundaryGrid, *, proba: bool
+) -> pl.DataFrame:
+    """Build the training-point frame (``x/y/z``) the scatter overlay reads.
+
+    Named for the roles it shares with the grid frame -- ``x``/``y`` are
+    the training points' own two features, and ``z`` is the true class
+    label mapped onto the grid's own ``z`` domain, so matching colors mean
+    a correct prediction. Maps ``y`` labels to a zero-based class index
+    via the model's ``classes_`` attribute when present, else lexicographic
+    order, and casts to ``Utf8`` under ``proba=False`` exactly as the grid
+    frame's ``z`` is, so both layers' color channels resolve the same kind
+    of scale.
     """
     import numpy as np
 
@@ -1262,33 +1246,15 @@ def _build_decision_boundary_unified(source: Any, g: _DecisionBoundaryGrid) -> p
         dtype=np.float64,
     )
 
-    flat_x, flat_y = g.flat_x, g.flat_y
-    dx, dy, z = g.dx, g.dy, g.z
-    x_col, y_col = g.x_col, g.y_col
-    n_grid = len(flat_x)
-    n_scatter = len(x_col)
-    nulls_grid = [None] * n_grid
-    nulls_scatter = [None] * n_scatter
-
-    return pl.DataFrame(
+    scatter_frame = pl.DataFrame(
         {
-            "x": [v - dx / 2 for v in flat_x] + nulls_scatter,
-            "x2": [v + dx / 2 for v in flat_x] + nulls_scatter,
-            "y": [v - dy / 2 for v in flat_y] + nulls_scatter,
-            "y2": [v + dy / 2 for v in flat_y] + nulls_scatter,
-            "z": [float(v) for v in z] + nulls_scatter,
-            "scatter_x": nulls_grid + [float(v) for v in x_col],
-            "scatter_y": nulls_grid + [float(v) for v in y_col],
-            "scatter_z": nulls_grid + [float(v) for v in scatter_z],
-        },
-        schema={
-            "x": pl.Float64,
-            "x2": pl.Float64,
-            "y": pl.Float64,
-            "y2": pl.Float64,
-            "z": pl.Float64,
-            "scatter_x": pl.Float64,
-            "scatter_y": pl.Float64,
-            "scatter_z": pl.Float64,
-        },
+            "x": [float(v) for v in g.x_col],
+            "y": [float(v) for v in g.y_col],
+            "z": [float(v) for v in scatter_z],
+        }
     )
+    if not proba:
+        scatter_frame = scatter_frame.with_columns(
+            pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z")
+        )
+    return scatter_frame

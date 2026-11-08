@@ -336,6 +336,17 @@ _SKIP_ENTRIES: list[SkipEntry] = [
         "spelling for back-compat; adjudicated shape drift, not unified "
         "with cook_threshold= (batch G decision doc, G5).",
     ),
+    SkipEntry(
+        ROCVisualizer,
+        "diagnostic",
+        _roc_chart_from_source,
+        "diagnostic= names the entry a refusal should open with "
+        "('roc_chart' for the figure function, 'ROCVisualizer' for this "
+        "visualizer); ROCVisualizer._build_chart passes its own name "
+        "internally, the same way it already threads diagnostic='ROCVisualizer' "
+        "into ModelSource.roc_curve in _materialize, so a caller building "
+        "this visualizer never needs or should set it themselves.",
+    ),
 ]
 
 

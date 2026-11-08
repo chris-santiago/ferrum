@@ -14,6 +14,7 @@ use ferrum_scene::{
 };
 
 use super::color::{parse_color, with_opacity, Color};
+use super::marks::channels::SeriesPartition;
 use super::marks::curve::Interpolate;
 use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind};
 use super::RenderError;
@@ -155,11 +156,19 @@ impl DrawCtx<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlacementRead {
     /// An `Ordinal` scale's own reading: `col_as_ordinal_category_str` then
-    /// [`ScaleKind::to_pixel_str`]. A null category is excluded before the
-    /// placement check runs (`col_as_ordinal_category_str` keeps it `None`,
-    /// unlike the null-band sentinel the positional reader every builder
-    /// draws with maps it to), not counted as left out.
+    /// [`ScaleKind::to_pixel_str`]. A null category reads as the drawn
+    /// position every banded builder's own positional reader
+    /// (`col_as_positional_category_str`) places it at: drawn, in the
+    /// scale's null band, whenever the scale places one (FA-9) — absent
+    /// only when it does not.
     Category,
+    /// Polygon's own string axis read (`col_as_str`, never
+    /// `col_as_positional_category_str`): a null category is never placed,
+    /// whether or not the scale has a null band, because `build` never
+    /// looks one up for this read. Named apart from [`Self::Category`] so
+    /// the absent read's null-band exception applies only where a builder
+    /// actually takes it.
+    CategoryNullSkipped,
     /// A continuous scale read directly, never through [`DrawCtx::to_pixel`]:
     /// `col_as_f64` then [`ScaleKind::to_pixel_f64`]. Every builder but
     /// `line`/`area`/`ribbon` reads this way, so `clip=false` never changes
@@ -310,6 +319,43 @@ pub(crate) fn dispatch_mark_placements<'a>(mark: &Mark, ctx: &'a DrawCtx<'a>) ->
     }
 }
 
+/// The exhaustive per-mark dispatch to each builder's own partition of its
+/// rows into one mark (a connected series/ring) or one legend category
+/// (a per-row mark's own categorical channels) per group, beside
+/// [`dispatch_mark_placements`] and [`dispatch_vertex_frame`]: `line`,
+/// `area` and `ribbon` return their own [`series_groups`](super::marks::line::series_groups)
+/// (each mark's own module), `polygon` its ring partition
+/// ([`polygon::detail_groups`](super::marks::polygon::detail_groups)) named
+/// by [`polygon::naming_columns`](super::marks::polygon::naming_columns),
+/// every per-row mark [`channels::per_row_mark_groups`](super::marks::channels::per_row_mark_groups),
+/// and `Arc`/`Geoshape` one group of every row — they place nothing by a
+/// positional scale ([`dispatch_mark_placements`]'s own doc), so there is
+/// no positional category to split by. Read by
+/// [`groups_with_no_position`] so a null-blocked legend category, ring or
+/// series is named by exactly the fields the real draw groups it by.
+pub(crate) fn dispatch_mark_groups(mark: &Mark, ctx: &DrawCtx) -> SeriesPartition {
+    use super::marks::channels::per_row_mark_groups;
+    match mark {
+        Mark::Line => super::marks::line::series_groups(ctx),
+        Mark::Area => super::marks::area::series_groups(ctx),
+        Mark::Ribbon => super::marks::ribbon::series_groups(ctx),
+        Mark::Polygon => SeriesPartition {
+            groups: super::marks::polygon::detail_groups(ctx).into_iter().map(|rows| (None, rows)).collect(),
+            fields: super::marks::polygon::naming_columns(ctx),
+        },
+        Mark::Rule
+        | Mark::Segment
+        | Mark::Point
+        | Mark::Bar
+        | Mark::Text
+        | Mark::Tick
+        | Mark::Rect
+        | Mark::Image
+        | Mark::Label => per_row_mark_groups(ctx),
+        Mark::Arc | Mark::Geoshape => SeriesPartition { groups: vec![(None, (0..ctx.batch.num_rows()).collect())], fields: Vec::new() },
+    }
+}
+
 /// One positional channel's rows this layer's mark draws but whose explicit
 /// domain leaves out — [`domain_left_out_counts`]'s per-channel (or, for a
 /// statistic layer, per-axis) tally, and the payload of one
@@ -410,7 +456,7 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
         PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
     };
     match placement.read {
-        PlacementRead::Category => {
+        PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
             let mut columns = Vec::with_capacity(placement.columns.len());
             for col in &placement.columns {
                 match col_as_ordinal_category_str(ctx.batch, col) {
@@ -448,6 +494,81 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
                                 && (if clip_aware { ctx.to_pixel(scale, x) } else { scale.to_pixel_f64(x) }).is_none()
                         })
                     })
+                })
+                .collect())
+        }
+    }
+}
+
+/// [`placement_left_out_rows`]'s own read with its present test negated,
+/// per column and per scale — never the present, finite value an
+/// explicit domain excludes or a log scale's off side holds, which that
+/// function already owns. `Strict`/`ClipAware`: a row counts here when
+/// every column is null, or present but not
+/// [`ScaleKind::admits_for_pixel`]-admitted at the scale
+/// [`placement.channel`](Placement::channel) picks — exactly the scale
+/// `placement_left_out_rows` picks too. On a `Log` scale that admits
+/// everything but `NaN`, so `+inf`/`-inf` are present-and-admitted,
+/// classified instead by the domain census (on-side) or the log tally
+/// (off-side); every other kind admits only finite values, so null,
+/// `NaN`, `+inf` and `-inf` are all absent there. `Category`: a row
+/// counts when every column's category is null AND the axis has no null
+/// band for it (`scale.to_pixel_str(NULL_CATEGORY)` is `None`) — a null
+/// category the axis places (FA-9's own rule; every banded builder's
+/// `col_as_positional_category_str` read maps a null into that band) is
+/// drawn, not absent. `CategoryNullSkipped` (polygon's own string read):
+/// a row counts when every column's category is null, with no null-band
+/// exception — that read never places one regardless of the axis.
+///
+/// The three reads classify a value at exactly one of "present and
+/// admitted" (drawn), "present and excluded"
+/// ([`placement_left_out_rows`]) and "absent" (this one), on every scale
+/// kind and placement read. `Err(RenderError::UnsupportedDtype)` on any
+/// column counts no row absent for this placement, mirroring
+/// [`placement_left_out_rows`]'s own dtype short-circuit (the builder's
+/// identical read fails the identical way); any other error propagates.
+fn placement_absent_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
+    let scale = match placement.channel {
+        PositionalChannel::X | PositionalChannel::X2 => &ctx.scales.x,
+        PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
+    };
+    match placement.read {
+        PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
+            // A null-band lookup is only meaningful for `Category`'s own
+            // builders (`col_as_positional_category_str`'s own rule);
+            // `CategoryNullSkipped` never places a null row at all, so
+            // its own band — occupied or not — never rescues one.
+            if placement.read == PlacementRead::Category
+                && scale.to_pixel_str(super::arrow_cast::NULL_CATEGORY).is_some()
+            {
+                return Ok(Default::default());
+            }
+            let mut columns = Vec::with_capacity(placement.columns.len());
+            for col in &placement.columns {
+                match col_as_ordinal_category_str(ctx.batch, col) {
+                    Ok(v) => columns.push(v),
+                    Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
+                    Err(e) => return Err(e),
+                }
+            }
+            let n = columns.iter().map(Vec::len).max().unwrap_or(0);
+            Ok((0..n)
+                .filter(|&i| columns.iter().all(|col| col.get(i).and_then(|o| o.as_deref()).is_none()))
+                .collect())
+        }
+        PlacementRead::Strict | PlacementRead::ClipAware => {
+            let mut columns = Vec::with_capacity(placement.columns.len());
+            for col in &placement.columns {
+                match col_as_f64(ctx.batch, col) {
+                    Ok(v) => columns.push(v),
+                    Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
+                    Err(e) => return Err(e),
+                }
+            }
+            let n = columns.iter().map(Vec::len).max().unwrap_or(0);
+            Ok((0..n)
+                .filter(|&i| {
+                    columns.iter().all(|col| col.get(i).copied().flatten().is_none_or(|v| !scale.admits_for_pixel(v)))
                 })
                 .collect())
         }
@@ -541,7 +662,7 @@ pub(crate) fn domain_left_out_counts(
                 channel: placement.channel.as_str().to_string(),
                 field: Some(enc.field.clone()),
                 rows: rows.len(),
-                categorical: placement.read == PlacementRead::Category,
+                categorical: matches!(placement.read, PlacementRead::Category | PlacementRead::CategoryNullSkipped),
                 entry: None,
                 cut: false,
             });
@@ -569,7 +690,7 @@ pub(crate) fn domain_left_out_counts(
         axes.push(AxisLeftOut {
             axis,
             field: crate::layout::axis::resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone())),
-            categorical: first.read == PlacementRead::Category,
+            categorical: matches!(first.read, PlacementRead::Category | PlacementRead::CategoryNullSkipped),
             rows,
         });
     }
@@ -622,6 +743,107 @@ pub(crate) fn domain_left_out_counts(
         }
     }
     Ok(DomainCensus { left_out, runs_not_drawn })
+}
+
+/// One group [`dispatch_mark_groups`] names (a legend category, a
+/// connected mark's own series or ring, or — for a partition with no
+/// naming fields — the layer's whole set of rows in this panel) found
+/// [`groups_with_no_position`]'s own way: every row of the group is
+/// unplaced, each by some placement absent on it — the mark draws no
+/// mark at all for the group. `name` is [`crate::transform::context::describe_group_row`]'s
+/// own read of the group's representative row over
+/// [`dispatch_mark_groups`]'s own naming fields — `None` for a partition
+/// with no fields, where the group is this panel's whole layer. `channels`
+/// are this mark's own positional tokens (`dispatch_mark_placements`'s own
+/// order, pre-un-flip): every one absent on every row of the group when
+/// there is at least one (the strongest true statement), else every one
+/// absent on some row of the group (each row is blocked by one of them).
+#[derive(Debug, PartialEq)]
+pub(crate) struct GroupWithNoPosition {
+    pub(crate) name: Option<String>,
+    pub(crate) channels: Vec<String>,
+    /// The group's own rows in this panel's batch, read by
+    /// [`crate::render::scene_build::group_owned_by_its_fit`] to judge
+    /// ownership row by row rather than by comparing this name against a
+    /// fit warning's own group name, which the two can format differently
+    /// when the mark's own partition groups by different fields than the
+    /// statistic's.
+    pub(crate) rows: Vec<usize>,
+}
+
+/// Every group [`dispatch_mark_groups`] names whose every row is
+/// unplaced: some positional placement [`dispatch_mark_placements`] lists
+/// is [`placement_absent_rows`]'s own absent read for it, the same
+/// predicate a builder's own draw drops the row by (a `VertexFrame`'s
+/// `placed[i]`: every placed channel maps). Different rows of one group
+/// may be blocked by different placements — a row with a null `x` beside
+/// one with a null `y` both fail to draw, so the group draws nothing
+/// though no single channel is null on both — and the group is still
+/// named: it is the row-by-row rule the builders themselves apply, not an
+/// intersection over channels. A group some but not all of whose rows are
+/// unplaced is not returned — [`crate::render::RenderWarning::GroupsWithNoPosition`]'s
+/// documented silence for a group that still draws. The cause is always a
+/// null or non-finite value, never a present one an explicit domain or a
+/// log scale's off side already reports under
+/// [`RenderWarning::DomainRowsLeftOut`](super::RenderWarning::DomainRowsLeftOut)/
+/// [`RenderWarning::LogScaleRowsLeftOut`](super::RenderWarning::LogScaleRowsLeftOut)
+/// ([`placement_absent_rows`]'s own doc states why the two reads never
+/// double-count a row). `Arc`/`Geoshape` place nothing
+/// ([`dispatch_mark_placements`] returns no placement for either), so
+/// this is always empty for them.
+///
+/// Returns before building [`dispatch_mark_groups`]' partition at all when
+/// no row of the batch is unplaced by any placement — the common case on a
+/// layer with no nulls, where the partition's own cost (every row's
+/// category key, for a mark with a wide legend) would otherwise be paid on
+/// every panel of every render for no report.
+///
+/// Read once per panel at the per-layer draw site
+/// (`scene_build::build_panel_mark_batches`), which also checks whether an
+/// existing statistic warning already explains the absence before noting
+/// the result, and attaches this panel's own facet clause to `name` before
+/// folding it into the render-wide ledger flushed once per layer.
+pub(crate) fn groups_with_no_position(ctx: &DrawCtx) -> Result<Vec<GroupWithNoPosition>, RenderError> {
+    use std::collections::BTreeSet;
+
+    let placements = dispatch_mark_placements(&ctx.spec.mark, ctx);
+    if placements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut absents = Vec::with_capacity(placements.len());
+    let mut unplaced: BTreeSet<usize> = BTreeSet::new();
+    for placement in &placements {
+        let rows = placement_absent_rows(ctx, placement)?;
+        unplaced.extend(rows.iter().copied());
+        absents.push((placement.channel.as_str().to_string(), rows));
+    }
+    if unplaced.is_empty() {
+        return Ok(Vec::new());
+    }
+    let SeriesPartition { groups, fields } = dispatch_mark_groups(&ctx.spec.mark, ctx);
+    let mut out = Vec::new();
+    for (_, rows) in &groups {
+        if rows.is_empty() || !rows.iter().all(|r| unplaced.contains(r)) {
+            continue;
+        }
+        let null_on_every_row: Vec<String> = absents
+            .iter()
+            .filter(|(_, absent)| rows.iter().all(|r| absent.contains(r)))
+            .map(|(channel, _)| channel.clone())
+            .collect();
+        let channels = if null_on_every_row.is_empty() {
+            absents
+                .iter()
+                .filter(|(_, absent)| rows.iter().any(|r| absent.contains(r)))
+                .map(|(channel, _)| channel.clone())
+                .collect()
+        } else {
+            null_on_every_row
+        };
+        let name = crate::transform::context::describe_group_row(ctx.batch, &fields, rows[0]);
+        out.push(GroupWithNoPosition { name, channels, rows: rows.clone() });
+    }
+    Ok(out)
 }
 
 pub struct DrawCtx<'a> {
@@ -4148,4 +4370,576 @@ mod tests {
         let primitive = domain_left_out_counts(&ctx, None).unwrap();
         assert!(primitive.runs_not_drawn.is_empty(), "a primitive layer's tally is never group-aware");
     }
+
+    // Every `Mark` variant's `GroupsWithNoPosition` coverage through
+    // `dispatch_mark_groups` and `groups_with_no_position`.
+
+    /// The exhaustive sweep every `Mark` variant gets through
+    /// [`dispatch_mark_groups`] and [`groups_with_no_position`]: a batch of
+    /// two groups, one with every positional column finite ("a") and one
+    /// with every positional column null ("c"). Every mark whose own
+    /// `dispatch_mark_placements` reads at least one column under this
+    /// fixture finds exactly group "c", named with its own `channels`
+    /// matching `dispatch_mark_placements`' own channel list for that mark,
+    /// in order — the connected marks (`line`/`area`/`ribbon`) through their
+    /// own `series_groups`, `polygon` through its ring partition, `image`
+    /// through its own url-tile path (a bound `url=` column), and every
+    /// other per-row mark through `channels::per_row_mark_groups`.
+    /// `arc`/`geoshape` place nothing ([`dispatch_mark_placements`]'s own
+    /// doc) and are never named — asserted empty rather than skipped, so a
+    /// mark whose placements come back empty under this fixture by mistake
+    /// is caught instead of silently passing.
+    #[test]
+    fn dispatch_mark_groups_finds_the_null_blocked_group_for_every_mark() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("x2", DataType::Float64, true),
+            Field::new("y2", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Rows 0, 1: group "a", every positional column finite. Rows 2, 3:
+        // group "c", every positional column null.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            Arc::new(Float64Array::from(vec![Some(1.5), Some(2.5), None, None])),
+            Arc::new(Float64Array::from(vec![Some(2.0), Some(3.0), None, None])),
+            Arc::new(StringArray::from(vec!["a", "a", "c", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["a".into(), "c".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let x = || Some(EncodingSpec { field: "x".into(), ..Default::default() });
+        let y = || Some(EncodingSpec { field: "y".into(), ..Default::default() });
+        let x2 = || Some(EncodingSpec { field: "x2".into(), ..Default::default() });
+        let y2 = || Some(EncodingSpec { field: "y2".into(), ..Default::default() });
+        let color = || Some(EncodingSpec { field: "g".into(), ..Default::default() });
+
+        // Every mark this fixture can drive to a non-empty placement list:
+        // the encoding it needs to read at least one placement, and a
+        // `detail` field for `polygon` alone, whose ring partition groups by
+        // `detail`, never `color` (`polygon::naming_columns`'s doc: a bare
+        // `fm.Layer(mark="polygon")` names its rings by `detail` alone).
+        let cases: Vec<(Mark, Encoding, Option<String>)> = vec![
+            (Mark::Line, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Area, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Ribbon, Encoding { x: x(), y: y(), y2: y2(), color: color(), ..Default::default() }, None),
+            (Mark::Polygon, Encoding { x: x(), y: y(), ..Default::default() }, Some("g".to_string())),
+            (Mark::Point, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Bar, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Text, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Tick, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+            (Mark::Rule, Encoding { x: x(), y: y(), x2: x2(), y2: y2(), color: color(), ..Default::default() }, None),
+            (Mark::Segment, Encoding { x: x(), y: y(), x2: x2(), y2: y2(), color: color(), ..Default::default() }, None),
+            (Mark::Rect, Encoding { x: x(), y: y(), x2: x2(), y2: y2(), color: color(), ..Default::default() }, None),
+            (Mark::Label, Encoding { x: x(), y: y(), color: color(), ..Default::default() }, None),
+        ];
+        for (mark, encoding, detail) in cases {
+            let spec = ChartSpec { mark, encoding, ..Default::default() };
+            let mut mark_style = resolve_mark_style(None, &theme, &mark).unwrap();
+            mark_style.group.detail = detail;
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let expected_channels: Vec<String> =
+                dispatch_mark_placements(&mark, &ctx).iter().map(|p| p.channel.as_str().to_string()).collect();
+            let found = groups_with_no_position(&ctx).unwrap();
+            assert_eq!(
+                found,
+                vec![GroupWithNoPosition { name: Some("g=c".to_string()), channels: expected_channels, rows: vec![2, 3] }],
+                "{mark:?}"
+            );
+        }
+
+        // `arc`/`geoshape` place nothing by a positional scale and are never
+        // named, under any encoding.
+        for mark in [Mark::Arc, Mark::Geoshape] {
+            let spec = ChartSpec { mark, encoding: Encoding { x: x(), y: y(), color: color(), ..Default::default() }, ..Default::default() };
+            let mark_style = resolve_mark_style(None, &theme, &mark).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            assert_eq!(groups_with_no_position(&ctx).unwrap(), Vec::new(), "{mark:?}: never named");
+        }
+
+        // `image`'s own url-tile path (a bound `url=` column) places x and
+        // y per row like any other per-row mark; this fixture's own "url"
+        // column need not exist, since `url_tile_field` only reads the
+        // encoding's bound field name, never the column's own values.
+        let image_encoding = Encoding {
+            x: x(),
+            y: y(),
+            color: color(),
+            url: Some(EncodingSpec { field: "url".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let spec = ChartSpec { mark: Mark::Image, encoding: image_encoding, ..Default::default() };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let expected_channels: Vec<String> =
+            dispatch_mark_placements(&Mark::Image, &ctx).iter().map(|p| p.channel.as_str().to_string()).collect();
+        assert_eq!(
+            groups_with_no_position(&ctx).unwrap(),
+            vec![GroupWithNoPosition { name: Some("g=c".to_string()), channels: expected_channels, rows: vec![2, 3] }],
+            "image's url-tile path"
+        );
+    }
+
+    /// A group whose rows are each blocked by a DIFFERENT placement — one
+    /// row null on `x`, another null on `y` — is still found: the row-by-row
+    /// rule (every row unplaced, not one channel null on every row) is the
+    /// builders' own drop rule, not an intersection over channels. Its
+    /// `channels` names every placement absent on SOME row, since none is
+    /// absent on every row here.
+    #[test]
+    fn a_group_whose_rows_miss_different_channels_is_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Group "c": row 0 is null on x (y present); row 1 is null on y (x
+        // present). Neither channel is null on every row, yet both rows are
+        // unplaced, so the group draws nothing and is named by both.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![None, Some(4.0)])),
+            Arc::new(Float64Array::from(vec![Some(3.0), None])),
+            Arc::new(StringArray::from(vec!["c", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["c".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            groups_with_no_position(&ctx).unwrap(),
+            vec![GroupWithNoPosition { name: Some("g=c".to_string()), channels: vec!["x".to_string(), "y".to_string()], rows: vec![0, 1] }]
+        );
+    }
+
+    /// A layer with no absent row at all reports nothing: the union of
+    /// every placement's absent rows is empty, so no group is named. This
+    /// pins the empty result only; it holds whether or not
+    /// [`groups_with_no_position`] returns before building
+    /// `dispatch_mark_groups`' full partition, so it is not itself a
+    /// performance check — that property (the cost the perf regression
+    /// this closes was paid on) is measured separately, by timing.
+    #[test]
+    fn a_layer_with_no_absent_row_reports_nothing() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["a".into(), "b".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(groups_with_no_position(&ctx).unwrap(), Vec::new());
+    }
+
+    /// A group some but not all of whose rows are null stays silent — the
+    /// documented per-row skip, never a second report beside whatever the
+    /// mark itself draws for its present rows.
+    #[test]
+    fn a_group_with_a_partial_null_is_not_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Group "c" has one null row and one drawn row: it still draws, so
+        // it is never named.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), None])),
+            Arc::new(Float64Array::from(vec![Some(1.0), None])),
+            Arc::new(StringArray::from(vec!["c", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["c".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(groups_with_no_position(&ctx).unwrap(), Vec::new());
+    }
+
+    /// A group cut by an explicit domain, one all off-side on a log scale,
+    /// and one at -inf/+inf on a log axis, are never found here — the
+    /// census and the log tally each own exactly these rows, and
+    /// `admits_for_pixel`'s Log rule (`!is_nan()`) admits an infinity as
+    /// present, so the absent read never double-reports them.
+    #[test]
+    fn a_group_excluded_by_domain_or_log_side_is_not_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::scale::log::LogScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Group "d": x = 100 (outside the [0, 3] x domain, present and
+        // finite). Group "e": y = -1 (off the log y scale's positive side,
+        // present and finite). Group "f": y = -inf; group "h": y = +inf —
+        // both present by `admits_for_pixel`'s Log rule (`!is_nan()`), so
+        // neither is ever absent here; the census and the log tally own
+        // them instead, each row named exactly once.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![Some(100.0), Some(1.0), Some(1.0), Some(1.0)])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(-1.0), Some(f64::NEG_INFINITY), Some(f64::INFINITY)])),
+            Arc::new(StringArray::from(vec!["d", "e", "f", "h"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Log(LogScale::new_internal(vec![1.0, 10.0], vec![100.0, 0.0], 10.0, false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["d".into(), "e".into(), "f".into(), "h".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(groups_with_no_position(&ctx).unwrap(), Vec::new());
+    }
+
+    /// A null category on an Ordinal axis is absent only when the axis's
+    /// own resolved scale places no null band — the same lookup a banded
+    /// builder itself makes ([`crate::render::arrow_cast::NULL_CATEGORY`]),
+    /// not a standing "a null category is always absent" rule.
+    #[test]
+    fn a_null_category_is_absent_only_where_the_axis_places_no_null_band() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::discrete::DiscreteLayout;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Tick,
+            encoding: Encoding { x: Some(EncodingSpec { field: "x".into(), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec![None::<&str>]))]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let placement = Placement::new(PositionalChannel::X, "x", PlacementRead::Category);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+
+        let with_null_band = ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["a".into(), "null".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &with_null_band, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            placement_absent_rows(&ctx, &placement).unwrap(),
+            std::collections::BTreeSet::new(),
+            "the axis places a null band, so the null category is not absent"
+        );
+
+        let without_null_band = ResolvedScales { x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["a".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)), ..with_null_band };
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &without_null_band, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            placement_absent_rows(&ctx, &placement).unwrap(),
+            std::collections::BTreeSet::from([0]),
+            "the axis's scale places no null band, so the null category is absent"
+        );
+    }
+
+    /// A null-keyed group absent on every placement the mark draws is found
+    /// exactly like any other named group — there is no null-key exemption:
+    /// a row whose own grouping field ("z") is null, with every column this
+    /// layer's spec binds also null on that row, is still named "z=null",
+    /// never silently dropped. The group whose rows this layer actually
+    /// draws ("z=1", x/y always placed) is never named.
+    #[test]
+    fn a_null_keyed_group_null_on_every_placement_is_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "z".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("z", DataType::Utf8, true),
+        ]));
+        // Rows 0, 1: group "z=1", x/y always placed -- never absent, so it
+        // is never found. Rows 2, 3: group "z=null" (the key itself is
+        // null), also null in every other column this layer's spec reads
+        // (x, y alike).
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            Arc::new(StringArray::from(vec![Some("1"), Some("1"), None, None])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec!["1".into()], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            groups_with_no_position(&ctx).unwrap(),
+            vec![GroupWithNoPosition { name: Some("z=null".to_string()), channels: vec!["x".to_string(), "y".to_string()], rows: vec![2, 3] }]
+        );
+    }
+
+    /// A null-keyed group absent on SOME but not every placement (a real
+    /// row of this layer whose own grouping key happens to be null) is
+    /// still found, the same row-by-row rule any other group is named by.
+    #[test]
+    fn a_null_keyed_group_partially_absent_is_still_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::borrow::Cow;
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        // Group "g=null": x is always placed (never absent), y is null on
+        // both its rows -- a real row range of this layer, not foreign.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![None, None])),
+            Arc::new(StringArray::from(vec![None::<&str>, None])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical { domain: vec![], palette: Cow::Owned(vec![]) }),
+            size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let found = groups_with_no_position(&ctx).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].channels, vec!["y".to_string()]);
+    }
+
+    /// A bare `fm.Layer(mark="polygon")` with a Utf8 x column names a ring
+    /// whose x is null even when the x axis's own resolved scale places a
+    /// null band — `CategoryNullSkipped`'s own case: polygon's `col_as_str`
+    /// read never places a null the way every other banded builder's
+    /// `col_as_positional_category_str` does, so the null band's mere
+    /// existence does not save this ring. Fails if `polygon_read` returned
+    /// `Category` instead, since that would trigger
+    /// the null-band short-circuit and blank this ring silently.
+    #[test]
+    fn a_polygon_string_axis_null_ring_is_found() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::discrete::DiscreteLayout;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            mark: Mark::Polygon,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, false),
+            Field::new("ring", DataType::Utf8, false),
+        ]));
+        // Ring "a" draws (x present on both rows); ring "b" is null on x,
+        // y present on both rows.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec![Some("p"), Some("q"), None, None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        // The x axis's own Ordinal scale places a null band: "null" is in
+        // its domain.
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["p".into(), "q".into(), "null".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Polygon).unwrap();
+        mark_style.group.detail = Some("ring".to_string());
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            groups_with_no_position(&ctx).unwrap(),
+            vec![GroupWithNoPosition { name: Some("ring=b".to_string()), channels: vec!["x".to_string()], rows: vec![2, 3] }]
+        );
+    }
+
 }

@@ -116,6 +116,19 @@ impl SpaceWalkStep<'_> {
     }
 }
 
+/// One step a batch's rows passed, and the fields it grouped by
+/// ([`OutputLineage::steps`]): `step` is the step's own identity, `groupby`
+/// is the `TransformSpec`'s own `groupby()` (`Run::step`) or `ComposedSpec`'s
+/// step's (`Run::run_copy`) — the fields `describe_group_row` reads to
+/// reproduce the label a fit warning raised at this exact step gave a row,
+/// so ownership is judged by which rows a step's own grouping covers, not
+/// by comparing names across two partitions that may group differently.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PassedStep {
+    pub(crate) step: StepInstance,
+    pub(crate) groupby: Vec<String>,
+}
+
 /// What a run records beside one published batch ([`apply_transforms_named`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OutputLineage {
@@ -158,6 +171,19 @@ pub(crate) struct OutputLineage {
     /// column read is counted. Empty for a lineage no space demand ever
     /// reached.
     pub(crate) log_input: HashMap<(PositionalAxis, String), arrow::array::ArrayRef>,
+    /// Every step and composition copy the batch's rows passed through,
+    /// with that step's own grouping fields, in order: `Chain(id)` for a
+    /// step the batch descends from ([`Run::step`]'s own tail, named
+    /// output or secondary output), `Composed(group)` for a composition
+    /// copy's computed result ([`Run::run_copy`]'s published or returned
+    /// output). Read by `render::scene_build::group_owned_by_its_fit` to
+    /// tell whether a `DegenerateFit`/`IntervalUndefined`/`ExtentUndefined`
+    /// warning's own step is one of the steps a layer's rows actually came
+    /// from, and to re-derive that step's own label for one of the layer's
+    /// rows, so the warning keeps sole ownership of the rows it actually
+    /// describes, under whatever partition shape the layer's own mark
+    /// draws them in.
+    pub(crate) steps: Vec<PassedStep>,
 }
 
 impl OutputLineage {
@@ -165,6 +191,11 @@ impl OutputLineage {
     /// step. Every other batch holds the user's rows.
     pub(crate) fn is_statistic(&self) -> bool {
         !self.lowered.is_empty()
+    }
+
+    /// The batch's own [`PassedStep`] for `step`, if its rows passed it.
+    pub(crate) fn passed(&self, step: &StepInstance) -> Option<&PassedStep> {
+        self.steps.iter().find(|p| &p.step == step)
     }
 
     /// The rows a data-aware sort reads for this batch, `batch`: the rows
@@ -320,6 +351,8 @@ struct Lineage<'s> {
     composed: ComposedState<'s>,
     /// See [`OutputLineage::log_input`].
     log_input: HashMap<(PositionalAxis, String), arrow::array::ArrayRef>,
+    /// See [`OutputLineage::steps`].
+    steps: Vec<PassedStep>,
 }
 
 impl Lineage<'_> {
@@ -334,6 +367,7 @@ impl Lineage<'_> {
             origin: RowsOrigin::default(),
             composed: ComposedState::default(),
             log_input: HashMap::new(),
+            steps: Vec::new(),
         }
     }
 
@@ -345,6 +379,7 @@ impl Lineage<'_> {
             written_groupby: self.written_groupby,
             source: self.source,
             log_input: self.log_input,
+            steps: self.steps,
         }
     }
 
@@ -576,9 +611,14 @@ impl<'s> Run<'s, '_> {
         };
         // Secondary outputs first, so a named step's explicit `name` wins a
         // key collision. A secondary output descends from no Swarm.
+        let passed_step = || PassedStep {
+            step: StepInstance::Chain(id.clone()),
+            groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(),
+        };
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
             let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone(), &step_log_input) });
             lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(key.clone()) };
+            lineage.steps.push(passed_step());
             let rows = self.fork(&mut current, Rows { batch, lineage }, published)?;
             published.insert(key, rows);
         }
@@ -586,6 +626,7 @@ impl<'s> Run<'s, '_> {
             Some(name) => {
                 let mut lineage = after(with_swarm(forked(&current, own, &step_log_input), spec));
                 lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: Some(name.to_string()) };
+                lineage.steps.push(passed_step());
                 let rows = self.fork(&mut current, Rows { batch: result, lineage }, published)?;
                 published.insert(name.to_string(), rows);
                 Ok(current)
@@ -600,6 +641,7 @@ impl<'s> Run<'s, '_> {
                     }
                 }
                 lineage.origin = RowsOrigin { step: StepInstance::Chain(id.clone()), output: None };
+                lineage.steps.push(passed_step());
                 self.settle(Rows { batch: result, lineage: with_swarm(lineage, spec) }, published)
             }
         }
@@ -653,12 +695,17 @@ impl<'s> Run<'s, '_> {
         let out = copy.step.apply_with_context(&rows.batch, &step_ctx)?;
         self.composed.ran(&copy.group);
         let Rows { batch, mut lineage } = rows;
+        let passed_step = || PassedStep {
+            step: StepInstance::Composed(copy.group.clone()),
+            groupby: copy.step.groupby().map(<[String]>::to_vec).unwrap_or_default(),
+        };
         match spec_name(&copy.step) {
             Some(name) => {
                 lineage.composed.ran(copy, None);
                 let mut published_lineage = lineage.clone().written(copy.step.groupby().unwrap_or(&[]));
                 published_lineage.origin =
                     RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: Some(name.to_string()) };
+                published_lineage.steps.push(passed_step());
                 published.insert(name.to_string(), Rows { batch: out, lineage: published_lineage });
                 Ok(Rows { batch, lineage })
             }
@@ -666,6 +713,7 @@ impl<'s> Run<'s, '_> {
                 lineage.composed.ran(copy, Some((&batch.schema(), &out.schema())));
                 let mut lineage = lineage.written(copy.step.groupby().unwrap_or(&[]));
                 lineage.origin = RowsOrigin { step: StepInstance::Composed(copy.group.clone()), output: None };
+                lineage.steps.push(passed_step());
                 Ok(Rows { batch: out, lineage })
             }
         }
@@ -996,6 +1044,53 @@ mod tests {
         let column = batch.column_by_name("count").expect("a count column");
         let column = arrow::compute::cast(column, &DataType::Float64).unwrap();
         column.as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec()
+    }
+
+    /// A named step does not advance the chain pointer ([`apply_transforms_named`]'s
+    /// own doc), so its own published output records its OWN step and the
+    /// chain's tail does not; two unnamed steps in sequence each add their
+    /// own `Chain(id)` to the tail's accumulated list, in order; an unnamed
+    /// composition copy adds its own `Composed(group)` the same way. Each
+    /// recorded step carries its own grouping fields (`count_by_g`'s `["g"]`;
+    /// the filters' own empty list), not just its identity.
+    #[test]
+    fn a_published_batch_records_every_step_its_rows_passed() {
+        pyo3::Python::initialize();
+        let filter = serde_json::json!({"type": "filter", "predicate": "datum.v > 1"});
+        let named_filter = serde_json::json!({"type": "filter", "predicate": "datum.v > 1", "name": "f1"});
+        let g = vec!["g".to_string()];
+
+        let spec = chain(serde_json::json!([named_filter, count_by_g(None)]));
+        let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(
+            lineages["f1"].steps,
+            vec![PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![] }],
+            "the named step's own output records its own step and its (empty) grouping"
+        );
+        assert_eq!(
+            lineages[FINAL_OUTPUT_KEY].steps,
+            vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone() }],
+            "the tail never ran the named step, so it only records its own (the count's) step and grouping"
+        );
+
+        let spec = chain(serde_json::json!([filter, count_by_g(None)]));
+        let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(
+            lineages[FINAL_OUTPUT_KEY].steps,
+            vec![
+                PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![] },
+                PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone() },
+            ],
+            "two unnamed steps in sequence each add their own step and grouping, in order"
+        );
+
+        let spec = chain(serde_json::json!([composed("datum.v > 1"), count_by_g(None)]));
+        let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
+        assert_eq!(
+            lineages[FINAL_OUTPUT_KEY].steps[0],
+            PassedStep { step: StepInstance::Composed("f".to_string()), groupby: vec![] },
+            "the composition copy's own step and (empty) grouping precede the count's"
+        );
     }
 
     /// The wire round-trips, a named step is a copy like any other, and a

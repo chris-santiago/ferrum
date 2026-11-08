@@ -2131,6 +2131,36 @@ fn lm_zero_variance_pushes_a_degenerate_fit_warning() {
     ));
 }
 
+/// A degenerate fit's own warning names the exact pipeline step that
+/// raised it ([`TransformContext::step`]), not the `Unplaced` default —
+/// the step a layer's rows must have passed for
+/// `render::scene_build::group_owned_by_its_fit` to defer to this warning
+/// instead of repeating it.
+#[test]
+fn a_degenerate_fit_names_the_step_that_raised_it() {
+    use crate::transform::context::StepInstance;
+
+    let batch = xy_batch(vec![1.0], vec![1.0]);
+    let spec = SmoothSpec {
+        x: "x".into(), y: "y".into(),
+        method: SmoothMethod::Lm,
+        ci: None,
+        bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+        x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+        inject_zero_ref: false, inject_metrics: false, x_range: None, x_range_pad: None,
+        groupby: vec![], name: None,
+    };
+    let step = StepInstance::Chain(vec![2]);
+    let ctx = TransformContext { step: step.clone(), ..TransformContext::default() };
+    let _ = apply_with_context(&spec, &batch, &ctx).expect("fewer than 2 points degrades, not fails");
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(matches!(
+        &warnings[0],
+        TransformWarning::DegenerateFit { step: raised_at, .. } if raised_at == &step
+    ));
+}
+
 /// A grouped call attributes the warning to the specific degenerate
 /// group — the healthy group must NOT warn.
 #[test]

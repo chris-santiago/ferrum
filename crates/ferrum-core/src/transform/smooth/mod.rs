@@ -442,6 +442,7 @@ fn apply_one_group(
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
             panel: None,
+            step: ctx.step.clone(),
         });
         return match spec.output {
             SmoothOutput::Fitted => all_nan_output(spec),
@@ -511,6 +512,7 @@ fn apply_one_group(
                 group: group.map(str::to_string),
                 reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
                 panel: None,
+                step: ctx.step.clone(),
             });
         }
         return Ok(out);
@@ -593,6 +595,7 @@ fn apply_one_group(
             group: group.map(str::to_string),
             reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
             panel: None,
+            step: ctx.step.clone(),
         });
     } else if let (Some(level), Some(reason)) = (spec.ci, band_undefined) {
         // The fit line survived; only the band is undefined. Reported once
@@ -604,6 +607,7 @@ fn apply_one_group(
             ci: level,
             reason,
             panel: None,
+            step: ctx.step.clone(),
         });
     }
     Ok(out)

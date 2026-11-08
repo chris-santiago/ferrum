@@ -2979,6 +2979,99 @@ pub enum RenderWarning {
         rule: String,
         series: Vec<String>,
     },
+    /// A legend category, a connected mark's own series or ring, a facet
+    /// panel's share of one, or a whole layer, found a null or
+    /// non-finite value on some positional channel on EVERY one of its
+    /// rows: WARN DEGRADED, once per layer however many panels draw it. A
+    /// group some but not all of whose rows are null stays silent — the
+    /// documented per-row skip
+    /// (`render::draw::placement_absent_rows`'s doc) — and a group an
+    /// explicit domain or a log scale's off side empties keeps
+    /// [`Self::DomainRowsLeftOut`](Self::DomainRowsLeftOut)/
+    /// [`Self::LogScaleRowsLeftOut`](Self::LogScaleRowsLeftOut) as its only
+    /// report. The legend keeps the group's entry regardless (one color
+    /// scale is resolved over every layer's rows, so dropping a category
+    /// here would shift the palette of every other one). Voiced as
+    /// [`Self::SeriesDropped`](Self::SeriesDropped) is: `layer` is the
+    /// caller-placed index (`prepare::public_layer`), `entry` the public
+    /// call that built the layer, `mark` its mark. `channels` are the
+    /// un-flipped positional channels (`prepare::user_facing_channel`)
+    /// found null on every row of some reported group, in
+    /// `render::draw::dispatch_mark_placements`'s own order. `groups` is
+    /// each null-blocked group's own name
+    /// (`transform::context::describe_group_row` over
+    /// `render::draw::dispatch_mark_groups`'s own naming fields), with its
+    /// own facet-panel clause when it has one, exactly as `SeriesDropped`'s
+    /// `series` carries one per run — a group null in every one of several
+    /// panels is one entry per panel, never merged, since each is where it
+    /// dropped. A partition with no naming fields (a per-row mark with no
+    /// categorical channel bound, or a connected mark with no `detail`)
+    /// names the layer's own rows in that panel: the empty string when
+    /// unfaceted, else the panel's own clause alone. Collected per layer
+    /// across every panel, in a ledger of `SeriesDroppedLedger`'s own
+    /// shape, flushed once after the panel loop; in a composite, each leaf
+    /// reports its own layers, never merged across leaves.
+    GroupsWithNoPosition {
+        layer: Option<usize>,
+        entry: String,
+        mark: crate::spec::mark::Mark,
+        channels: Vec<String>,
+        groups: Vec<String>,
+    },
+}
+
+impl RenderWarning {
+    /// Fold `next` — a later panel's own report for the SAME layer — into
+    /// `self`'s running one, the one place every per-layer-across-panels
+    /// ledger (`scene_build::LayerReportLedger`) merges a report instead of
+    /// each report's own variant writing its own merge: `SeriesDropped`
+    /// extends `series`; `GroupsWithNoPosition` unions `channels` in
+    /// first-seen order and extends `groups`. Any other pairing — two
+    /// reports of different variants, since each ledger instance only
+    /// ever holds the one kind its caller notes — hands `next` back
+    /// unfolded (`Some`), so the caller pushes it as its own entry instead
+    /// of losing it.
+    pub(crate) fn fold_layer_report(&mut self, next: RenderWarning) -> Option<RenderWarning> {
+        match (self, next) {
+            (RenderWarning::SeriesDropped { series, .. }, RenderWarning::SeriesDropped { series: next_series, .. }) => {
+                series.extend(next_series);
+                None
+            }
+            (
+                RenderWarning::GroupsWithNoPosition { channels, groups, .. },
+                RenderWarning::GroupsWithNoPosition { channels: next_channels, groups: next_groups, .. },
+            ) => {
+                for channel in next_channels {
+                    if !channels.contains(&channel) {
+                        channels.push(channel);
+                    }
+                }
+                groups.extend(next_groups);
+                None
+            }
+            (_, next) => Some(next),
+        }
+    }
+}
+
+/// Join `groups` for [`RenderWarning::GroupsWithNoPosition`]'s named-group
+/// sentence — the first item carries no `"of "` prefix, since the
+/// sentence template already supplies one (`"every row of {list} has
+/// ..."`); every later item does, so a reader is told each is another
+/// location the same fact holds at. Shares its list grammar with
+/// [`crate::transform::context::TransformWarning::ExtentUndefined`]'s own
+/// groups list, through [`crate::transform::context::and_prefixed_list`].
+fn and_of_list(groups: &[String], sep: &str) -> String {
+    crate::transform::context::and_prefixed_list(groups, "of ", sep)
+}
+
+/// Join a no-field partition's own facet-panel phrases (`"in facet panel
+/// f=p"`, already read in full from their own clause — no prefix to add,
+/// unlike [`and_of_list`]'s group names) for
+/// [`RenderWarning::GroupsWithNoPosition`]'s no-field, several-panels
+/// sentence.
+fn and_panel_list(panels: &[String], sep: &str) -> String {
+    crate::transform::context::and_prefixed_list(panels, "", sep)
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -3382,6 +3475,67 @@ impl std::fmt::Display for RenderWarning {
                 let sep = if series.iter().any(|s| s.contains(',')) { "; " } else { ", " };
                 write!(f, "{entry}: {rule}, so it did not draw {}", series.join(sep))
             }
+            RenderWarning::GroupsWithNoPosition { layer, entry, mark: _, channels, groups } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                let channel_list = channels.join(" and ");
+                // Semicolons when a name itself holds a comma (a two-field
+                // group name, or a row-and-column facet's own clause) —
+                // `SeriesDropped`'s own rule, so the two warnings read
+                // alike.
+                let sep = if groups.iter().any(|g| g.contains(',')) { "; " } else { ", " };
+                if groups.iter().all(|g| g.is_empty() || g.starts_with(' ')) {
+                    // A partition with no naming fields: `describe_group_row`
+                    // names nothing (an empty field list), so every entry is
+                    // at most a bare facet-panel clause, never an "of X" to
+                    // state — the sentence names the layer itself instead.
+                    match groups.as_slice() {
+                        // Unfaceted: the one entry is the empty string, no
+                        // panel to name.
+                        [only] if only.is_empty() => write!(
+                            f,
+                            "{entry}: every row has a null or non-finite {channel_list}, so the layer draws nothing"
+                        ),
+                        // Exactly one panel emptied among several: the
+                        // clause moves between "every row" and "has", the
+                        // one-item case of the several-panel list below —
+                        // no comma to close, since there is nothing to
+                        // join.
+                        [only] => {
+                            let phrase = only.trim_start();
+                            write!(f, "{entry}: every row {phrase} has a null or non-finite {channel_list}, so they draw nothing")
+                        }
+                        // Several panels emptied: the clause list moves
+                        // between "every row" and "has", set off by its
+                        // own trailing comma — never the panels' own
+                        // clauses run together with no separator.
+                        panels => {
+                            let phrases: Vec<String> = panels.iter().map(|p| p.trim_start().to_string()).collect();
+                            write!(
+                                f,
+                                "{entry}: every row {}, has a null or non-finite {channel_list}, so they draw nothing",
+                                and_panel_list(&phrases, sep)
+                            )
+                        }
+                    }
+                } else {
+                    match groups.as_slice() {
+                        // One named group: no list to close with a comma.
+                        [only] => write!(
+                            f,
+                            "{entry}: every row of {only} has a null or non-finite {channel_list}, so it draws nothing"
+                        ),
+                        // Two or more: the list is set off by its own
+                        // trailing comma before "has", as the panel list is.
+                        groups => write!(
+                            f,
+                            "{entry}: every row of {}, has a null or non-finite {channel_list}, so they draw nothing",
+                            and_of_list(groups, sep)
+                        ),
+                    }
+                }
+            }
         }
     }
 }
@@ -3437,6 +3591,14 @@ mod tests {
                 group: Some("g=a".into()),
                 reason: "fewer than 2 usable points".into(),
                 panel: None,
+                step: crate::transform::context::StepInstance::default(),
+            }),
+            RenderWarning::Transform(TransformWarning::ExtentUndefined {
+                transform: "Summary".into(),
+                interval: "ci=0.95".into(),
+                groups: vec!["cat=a".into(), "cat=b".into()],
+                panel: None,
+                step: crate::transform::context::StepInstance::default(),
             }),
             RenderWarning::LogScaleRowsLeftOut {
                 channel: "size".into(),
@@ -3542,6 +3704,13 @@ mod tests {
                 rule: "mark_line() joins two or more points per series".into(),
                 series: vec!["g=b (one point)".into()],
             },
+            RenderWarning::GroupsWithNoPosition {
+                layer: Some(1),
+                entry: "mark_line".into(),
+                mark: crate::spec::mark::Mark::Line,
+                channels: vec!["y".into()],
+                groups: vec!["g=c".into()],
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -3579,6 +3748,153 @@ mod tests {
             two_field.to_string(),
             "mark_line: mark_line() joins two or more points per series, so it did not draw g=b, h=x (one point); \
              g=c, h=y (one point)"
+        );
+    }
+
+    /// `GroupsWithNoPosition`'s `Display`: a single named group reads as
+    /// "it draws nothing"; several join with `and_of_list` and read as
+    /// "they draw nothing"; a partition with no naming fields drops the
+    /// "of X" clause entirely and names the layer instead, carrying a
+    /// facet-panel clause straight onto "nothing" when only that panel
+    /// emptied.
+    #[test]
+    fn groups_with_no_position_names_one_group_several_groups_and_no_fields() {
+        let one = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            channels: vec!["y".into()],
+            groups: vec!["g=c".into()],
+        };
+        assert_eq!(one.to_string(), "mark_line: every row of g=c has a null or non-finite y, so it draws nothing");
+
+        let several = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            channels: vec!["y".into()],
+            groups: vec!["g=c".into(), "g=d in facet panel f=q".into()],
+        };
+        assert_eq!(
+            several.to_string(),
+            "mark_line: every row of g=c, and of g=d in facet panel f=q, has a null or non-finite y, so they \
+             draw nothing"
+        );
+
+        let two_unfaceted = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            channels: vec!["y".into()],
+            groups: vec!["g=c".into(), "g=d".into()],
+        };
+        assert_eq!(
+            two_unfaceted.to_string(),
+            "mark_line: every row of g=c, and of g=d, has a null or non-finite y, so they draw nothing"
+        );
+
+        let three_unfaceted = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_line".into(),
+            mark: crate::spec::mark::Mark::Line,
+            channels: vec!["y".into()],
+            groups: vec!["g=b".into(), "g=c".into(), "g=d".into()],
+        };
+        assert_eq!(
+            three_unfaceted.to_string(),
+            "mark_line: every row of g=b, of g=c, and of g=d, has a null or non-finite y, so they draw nothing"
+        );
+
+        let both_axes = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["x".into(), "y".into()],
+            groups: vec!["g=c".into()],
+        };
+        assert_eq!(
+            both_axes.to_string(),
+            "mark_point: every row of g=c has a null or non-finite x and y, so it draws nothing"
+        );
+
+        let whole_layer = RenderWarning::GroupsWithNoPosition {
+            layer: Some(0),
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["y".into()],
+            groups: vec!["".into()],
+        };
+        assert_eq!(
+            whole_layer.to_string(),
+            "layer 0: mark_point: every row has a null or non-finite y, so the layer draws nothing"
+        );
+
+        let one_panel = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["y".into()],
+            groups: vec![" in facet panel f=q".into()],
+        };
+        assert_eq!(
+            one_panel.to_string(),
+            "mark_point: every row in facet panel f=q has a null or non-finite y, so they draw nothing"
+        );
+
+        let two_field_groups = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["y".into()],
+            groups: vec!["g=c, k=u".into(), "g=d, k=w".into()],
+        };
+        assert_eq!(
+            two_field_groups.to_string(),
+            "mark_point: every row of g=c, k=u; and of g=d, k=w, has a null or non-finite y, so they draw nothing"
+        );
+    }
+
+    /// A no-field partition emptied in several facet panels joins its
+    /// panel clauses the same list grammar a named group's own list uses
+    /// (`and_of_list`, comma-separated with a final `"and"`), never
+    /// run-together clauses: two panels read "in facet panel f=p, and in
+    /// facet panel f=q"; three read "in facet panel f=p, in facet panel
+    /// f=q, and in facet panel f=r". The list sits between "every row" and
+    /// "has", set off by its own trailing comma, and the sentence reads
+    /// plural ("they draw nothing") — a single emptied panel instead keeps
+    /// the singular sentence with its clause after "nothing"
+    /// (`groups_with_no_position_names_one_group_several_groups_and_no_fields`'s
+    /// `one_panel` case, unchanged).
+    #[test]
+    fn groups_with_no_position_joins_multiple_empty_panels_for_a_no_field_partition() {
+        let two_panels = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["y".into()],
+            groups: vec![" in facet panel f=p".into(), " in facet panel f=q".into()],
+        };
+        assert_eq!(
+            two_panels.to_string(),
+            "mark_point: every row in facet panel f=p, and in facet panel f=q, has a null or non-finite y, so \
+             they draw nothing"
+        );
+
+        let three_panels = RenderWarning::GroupsWithNoPosition {
+            layer: None,
+            entry: "mark_point".into(),
+            mark: crate::spec::mark::Mark::Point,
+            channels: vec!["y".into()],
+            groups: vec![
+                " in facet panel f=p".into(),
+                " in facet panel f=q".into(),
+                " in facet panel f=r".into(),
+            ],
+        };
+        assert_eq!(
+            three_panels.to_string(),
+            "mark_point: every row in facet panel f=p, in facet panel f=q, and in facet panel f=r, has a null \
+             or non-finite y, so they draw nothing"
         );
     }
 

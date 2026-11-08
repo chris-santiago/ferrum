@@ -512,6 +512,73 @@ pub(crate) fn grouping_series_values(ctx: &DrawCtx) -> Vec<(String, Vec<Option<S
         .collect()
 }
 
+/// A per-row mark's own partition (`point`, `bar`, `tick`, `rule`,
+/// `segment`, `text`, `rect`, `image`, `label`): the categorical channels
+/// it draws, each row placed independently rather than joined into one
+/// mark per group the way a connected mark's [`build_color_detail_groups`]
+/// caller is. Read by
+/// [`crate::render::draw::dispatch_mark_groups`] for every mark this
+/// module's siblings (`line`, `area`, `ribbon`, `polygon`) do not
+/// partition themselves.
+///
+/// `color` under [`line::series_groups`](crate::render::marks::line::series_groups)'s
+/// own precedence: a binned color's own keys
+/// ([`BinnedColorSeries`]) when the color is binned, else the category-keyed
+/// gate [`color_column_loader`] applies — a quantitative, unbinned color is
+/// not grouped, for the reason that sibling documents (it would fragment
+/// the partition into near-singleton numeric groups). Then a categorical
+/// `stroke_dash` and a categorical `shape` (`point`'s own legend channel),
+/// in [`build_color_detail_groups`]'s splits order — the order the code
+/// below applies, not color/shape/stroke_dash. A numeric `shape`/
+/// `stroke_dash` (or neither bound) contributes no split, so the mark
+/// still draws every row with no grouping at all. A binned partition is
+/// ordered by bin, as `line`'s is. `detail` is a connected mark's own
+/// grouping ([`GroupStyle::detail`](crate::render::draw::GroupStyle))
+/// these marks never read, so it never appears here.
+pub(crate) fn per_row_mark_groups(ctx: &DrawCtx) -> SeriesPartition {
+    let spec = ctx.spec;
+    let n_rows = ctx.batch.num_rows();
+    let cf = color_field(ctx, spec);
+    let binned = BinnedColorSeries::of(ctx);
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
+        match color_input {
+            Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
+            Some(ColorInput::Numeric) => None,
+        }
+    });
+    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
+    let dash_cols = stroke_dash_column_loader(ctx);
+    let dash_field = ctx
+        .scales
+        .stroke_dash
+        .is_some()
+        .then(|| spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str()))
+        .flatten();
+    let shape_field = ctx
+        .scales
+        .shape
+        .is_some()
+        .then(|| spec.encoding.shape.as_ref().map(|e| e.field.as_str()))
+        .flatten();
+    let shape_values = shape_field.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+
+    let mut partition = build_color_detail_groups(
+        cf.zip(color_values),
+        None,
+        dash_field
+            .zip(dash_cols.categorical.as_ref())
+            .into_iter()
+            .chain(shape_field.zip(shape_values.as_ref())),
+        ctx.scales.color.is_some(),
+        n_rows,
+    );
+    if let Some(binned) = &binned {
+        binned.order(&mut partition.groups);
+    }
+    partition
+}
+
 /// The series a binned color (`Color(bin=...)`) splits a mark into: each
 /// row's bin ([`binned_color_rows`]) and the key its series groups by, the
 /// bin's lower edge, a value that bin's color resolves from through

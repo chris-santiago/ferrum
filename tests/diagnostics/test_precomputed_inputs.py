@@ -667,10 +667,18 @@ def test_precomputed_1d_degenerate_single_class_still_renders(chart_fn):
     """A degenerate single-class y_true (all-same) is not multiclass -- it
     is the pre-existing "one class present, both slots describe it"
     shape that binary_class_values already handles (NaN AUC/AP, curve
-    still renders). #208's 1-D-vs-multiclass refusal must not catch this
-    case (regression guard for the width-check's own edge)."""
+    still renders for pr/gain/lift). #208's 1-D-vs-multiclass refusal
+    must not catch this case (regression guard for the width-check's own
+    edge). ``roc_chart`` is the one exception: its false-positive rate
+    has no negative samples to divide by on a single class, so it names
+    that cause and refuses instead of drawing a curve, a chance diagonal
+    and an AUC label with nothing to anchor on."""
     y_true = np.array([0, 0, 0, 0])
     y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    if chart_fn is ferrum.roc_chart:
+        with pytest.raises(ValueError, match="holds a single class"):
+            chart_fn(y_true=y_true, y_pred=y_pred)
+        return
     chart = chart_fn(y_true=y_true, y_pred=y_pred)
     assert "<svg" in chart.to_svg()
 

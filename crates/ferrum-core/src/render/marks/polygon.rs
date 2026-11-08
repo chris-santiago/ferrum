@@ -36,14 +36,19 @@ pub(crate) fn color_is_quantitative(ctx: &DrawCtx) -> bool {
         .is_some_and(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
 }
 
-/// Strict when `field` reads as `f64`, else Category — `build`'s own
-/// `xpx`/`ypx` reader order below (`col_as_f64` tried first, `col_as_str`
-/// the fallback), not a static "by scale kind" rule: a polygon's x/y
-/// placement depends on the COLUMN's own dtype, since `build` never
-/// consults `ctx.scales.{x,y}`'s kind to choose a reader.
+/// Strict when `field` reads as `f64`, else `CategoryNullSkipped` —
+/// `build`'s own `xpx`/`ypx` reader order below (`col_as_f64` tried first,
+/// `col_as_str` the fallback), not a static "by scale kind" rule: a
+/// polygon's x/y placement depends on the COLUMN's own dtype, since
+/// `build` never consults `ctx.scales.{x,y}`'s kind to choose a reader.
+/// The string fallback reads `col_as_str` (below), which never maps a
+/// null into the null band every OTHER banded builder's
+/// `col_as_positional_category_str` read places — `CategoryNullSkipped`,
+/// not `Category`, names that: this read never places a null row,
+/// whether or not the axis has a null band.
 fn polygon_read(ctx: &DrawCtx, field: &str) -> crate::render::draw::PlacementRead {
     use crate::render::draw::PlacementRead;
-    if col_as_f64(ctx.batch, field).is_ok() { PlacementRead::Strict } else { PlacementRead::Category }
+    if col_as_f64(ctx.batch, field).is_ok() { PlacementRead::Strict } else { PlacementRead::CategoryNullSkipped }
 }
 
 /// One first-appearance-order group per distinct non-null `key_at(i)`, over

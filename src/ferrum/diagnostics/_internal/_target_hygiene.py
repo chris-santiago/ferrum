@@ -302,6 +302,42 @@ def require_no_null_target(y_true: np.ndarray, *, diagnostic: str) -> None:
     )
 
 
+def require_two_classes(y_true: np.ndarray, *, diagnostic: str) -> None:
+    """Refuse a target that holds only one class.
+
+    A single-class target gives every false-positive rate no negative
+    samples to divide by, so an ROC curve has no point to plot: not the
+    curve, not the chance diagonal (drawn from the same ``fpr`` column),
+    not an AUC label anchored at one of its points. scikit-learn's
+    ``roc_auc_score`` refuses the same target (``"Only one class present
+    in y_true"``); this mirrors that refusal in the diagnostic's own
+    voice rather than letting every one of those layers draw nothing in
+    silence.
+
+    Null rows are excluded before counting classes, so this guard reads
+    correctly whether or not :func:`require_no_null_target` already ran
+    on the same target. Precision-recall, gain and lift stay defined for
+    one class (their denominators do not vanish), so only this guard
+    exists.
+
+    The message says ``y``, never ``y_true`` -- the same generic term
+    :func:`require_no_null_target` uses regardless of the caller's own
+    argument name (``y_true=`` on the precomputed path, ``y=`` on the
+    model path), so a model-path caller is never told their target holds
+    a single class under a name they never wrote.
+    """
+    arr = np.asarray(y_true)
+    observed = arr[~_null_mask(arr)]
+    unique = np.unique(observed)
+    if len(unique) < 2:
+        value = unique[0].item() if len(unique) else None
+        raise ValueError(
+            f"{diagnostic}: y holds a single class ({value}), so the "
+            "false-positive rate has no negative samples to divide by and no "
+            "ROC curve exists; pass labels that include both classes"
+        )
+
+
 def require_no_null_predictions(
     y_pred: np.ndarray, *, diagnostic: str, predictions_from: PredictionsFrom = "caller"
 ) -> None:

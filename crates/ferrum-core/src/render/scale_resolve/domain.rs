@@ -6696,6 +6696,7 @@ mod tests {
                 written_groupby: Vec::new(),
                 source: panel.schema(),
                 log_input: HashMap::from([((crate::spec::layer::PositionalAxis::X, "v".to_string()), column())]),
+                steps: Vec::new(),
             },
         );
         fold_log_input_into_tally(&lineages, crate::spec::layer::PositionalAxis::X, side, &mut tally).expect("v is Float64 here");
@@ -6723,6 +6724,7 @@ mod tests {
                 written_groupby: Vec::new(),
                 source: Arc::new(Schema::new(vec![Field::new("v", DataType::Float16, false)])),
                 log_input: HashMap::from([((crate::spec::layer::PositionalAxis::X, "v".to_string()), column)]),
+                steps: Vec::new(),
             },
         );
         let mut tally = LeftOutTally::new();
@@ -7302,6 +7304,7 @@ mod tests {
                 written_groupby: Vec::new(),
                 source: primary.schema(),
                 log_input: HashMap::new(),
+                steps: Vec::new(),
             },
         );
         let layer = Layer {
@@ -7460,6 +7463,7 @@ mod tests {
             written_groupby: Vec::new(),
             source: pre.schema(),
             log_input: HashMap::new(),
+            steps: Vec::new(),
         };
         let rows = chart_sort_rows(&drawn, Some(&lineage), None, Some("mean_y"));
         assert_eq!(rows.batch.num_rows(), 3, "batch is the chart's pre-statistic rows");

@@ -273,8 +273,11 @@ ALLOWED: dict[tuple[str, str], str] = {
     ): "Confusion-matrix / report-heatmap cell value — a continuous count or rate.",
     (
         "src/ferrum/plots/ranking.py",
-        "'scatter_z'",
-    ): "rank2d correlation coefficient — continuous on [-1, 1].",
+        "'z'",
+    ): "decision_boundary_chart's scatter overlay colors by the column the "
+    "grid cells color by, so it lands on the scale the cells establish: "
+    "nominal Utf8 under proba=False, the continuous probability scale "
+    "under proba=True.",
     (
         "src/ferrum/marks/diagnostic/_explanation.py",
         "'shap_sign'",

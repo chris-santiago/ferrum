@@ -195,6 +195,7 @@ class ROCVisualizer(FerrumVisualizer):
             properties=self.properties,
             layers=self.layers,
             theme=self.theme,
+            diagnostic="ROCVisualizer",
         )
 
     @property

@@ -20110,6 +20110,7 @@ fn fold_log_input_into_tally_keeps_a_slot_1_entry_out_of_the_slot_0_tally() {
             written_groupby: Vec::new(),
             source: Arc::new(Schema::empty()),
             log_input: HashMap::from([((PositionalAxis::Y, "v".to_string()), slot0), ((PositionalAxis::secondary_y(1), "w".to_string()), slot1)]),
+            steps: Vec::new(),
         },
     );
     let mut tally = crate::render::scale_resolve::LeftOutTally::new();

@@ -9681,6 +9681,7 @@ fn an_independent_y_slots_x_naming_never_walks_through_its_own_lineage() {
                 ],
             }],
             log_input: HashMap::from([((PositionalAxis::secondary_y(1), "caller_y".to_string()), caller_y)]),
+            steps: Vec::new(),
         },
     );
 

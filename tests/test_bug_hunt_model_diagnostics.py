@@ -595,7 +595,7 @@ def test_pr_chart_annotate_ap_true_has_text_labels():
 
 def test_pr_chart_iso_lines_annotation_text():
     """iso_lines=True should inject F-score iso curves with text labels F=0.2 etc.
-    Tests that the _inject_pr_iso_lines code path produces valid annotations."""
+    Tests that the iso-line and iso-label overlay layers produce valid annotations."""
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, iso_lines=True)
@@ -2067,18 +2067,42 @@ def test_precomputed_roc_all_same_class_does_not_crash():
 
 
 def test_precomputed_roc_all_same_class_chart_renders():
-    """Precomputed ROC chart with single-class y_true should still render valid SVG."""
+    """``roc_chart`` with a single-class y_true refuses, naming the class
+    it holds: every false-positive rate is undefined, so neither the
+    curve, the chance diagonal, nor an AUC label has anything to draw.
+    Symmetric to the all-zeros refusal above: an all-ones target names
+    class ``1`` as the one it holds."""
     y_true = np.array([1, 1, 1, 1])
     y_pred = np.array([0.1, 0.3, 0.7, 0.9])
-    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
-    svg = chart.to_svg()
-    assert "<svg" in svg
-    assert "NaN" not in svg  # NaN in auc column should not leak to SVG coordinates
-    # Symmetric to the all-zeros case above: an all-ones target labels its
-    # curve "1", not a class absent from the data. Since #219/D4 the legend
-    # value is the bare class name -- the metric lives only in the endpoint
-    # overlay -- so this is an equality, not a prefix check.
-    assert chart._data["class"].unique().to_list() == ["1"]
+    with pytest.raises(ValueError, match=r"holds a single class \(1\)"):
+        ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+
+
+def test_precomputed_roc_all_null_target_gives_the_null_refusal_not_single_class():
+    """An all-null y_true is a null-target problem, not a single-class
+    one: ``roc_chart`` must refuse for its nulls, with the null remedy,
+    before the single-class check ever runs. The null check's own
+    sentence shape matches ``pr_chart``'s (``'y has N null row(s) ...
+    Drop or impute the null rows before calling <entry>.'``); the wrong
+    refusal would instead report 'holds a single class (None)', naming
+    no real class and giving no way to fix it."""
+    y_true = np.array([np.nan, np.nan, np.nan, np.nan])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    with pytest.raises(ValueError, match=r"y has 4 null row\(s\)"):
+        ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+    with pytest.raises(ValueError, match="Drop or impute the null rows before calling roc_chart"):
+        ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+
+
+def test_precomputed_roc_one_null_row_among_a_single_class_gives_the_null_refusal():
+    """``[1, 1, nan, 1]`` has only one real class (1) among its non-null
+    rows, so a single-class check run first would report 'holds a single
+    class (1.0)' -- a believable-looking but wrong diagnosis, since the
+    actual problem is the null row. The null check owns this case."""
+    y_true = np.array([1.0, 1.0, np.nan, 1.0])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    with pytest.raises(ValueError, match=r"y has 1 null row\(s\)"):
+        ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
 
 
 # ---------------------------------------------------------------------------
@@ -2441,13 +2465,13 @@ def test_precomputed_source_roc_macro_average():
 
 
 # ---------------------------------------------------------------------------
-# Category: _inject_cook_outliers adversarial inputs (Round 2)
+# Category: _cook_outlier_rows adversarial inputs
 # ---------------------------------------------------------------------------
 
 
-def test_inject_cook_outliers_zero_row_df():
-    """_inject_cook_outliers with zero-row DataFrame should return unchanged."""
-    from ferrum.plots._helpers import _inject_cook_outliers
+def test_cook_outlier_rows_zero_row_df():
+    """_cook_outlier_rows with a zero-row DataFrame returns zero rows."""
+    from ferrum.plots._helpers import _cook_outlier_rows
 
     df = pl.DataFrame(
         {
@@ -2457,14 +2481,32 @@ def test_inject_cook_outliers_zero_row_df():
             "cooks_distance": pl.Series([], dtype=pl.Float64),
         }
     )
-    result = _inject_cook_outliers(df, threshold="auto")
+    result = _cook_outlier_rows(df, threshold="auto")
     assert result.height == 0
 
 
-def test_inject_cook_outliers_all_nan_cooks():
-    """_inject_cook_outliers where cooks_distance is all NaN (non-linear model).
-    Should produce no outliers (NaN > threshold is guarded by is_not_nan())."""
-    from ferrum.plots._helpers import _inject_cook_outliers
+def test_cook_outlier_rows_missing_cooks_distance_column():
+    """A frame with rows but no ``cooks_distance`` column at all (not
+    merely all-NaN) returns zero rows, not every row: there is no
+    distance to compare against the threshold, which is "no outlier
+    found", never "every row is one"."""
+    from ferrum.plots._helpers import _cook_outlier_rows
+
+    df = pl.DataFrame(
+        {
+            "y_pred": [1.0, 2.0, 3.0],
+            "residual": [0.1, -0.2, 0.3],
+            "studentized_residual": [0.5, -1.0, 1.5],
+        }
+    )
+    result = _cook_outlier_rows(df, threshold="auto")
+    assert result.height == 0
+
+
+def test_cook_outlier_rows_all_nan_cooks():
+    """_cook_outlier_rows where cooks_distance is all NaN (non-linear model).
+    Returns zero rows (NaN > threshold is guarded by is_not_nan())."""
+    from ferrum.plots._helpers import _cook_outlier_rows
 
     df = pl.DataFrame(
         {
@@ -2474,7 +2516,5 @@ def test_inject_cook_outliers_all_nan_cooks():
             "cooks_distance": [float("nan"), float("nan"), float("nan")],
         }
     )
-    result = _inject_cook_outliers(df, threshold="auto")
-    assert "_cook_outlier_x" in result.columns
-    # All should be null (no outliers when cooks is NaN)
-    assert result["_cook_outlier_x"].is_null().all()
+    result = _cook_outlier_rows(df, threshold="auto")
+    assert result.height == 0

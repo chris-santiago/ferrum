@@ -230,17 +230,22 @@ pub fn build_scene(
     // `text_overrun_ledger`.
     let mut domain_left_out_ledger = DomainLeftOutLedger::default();
 
-    // One render-wide tally of the series a line/area/ribbon/polygon layer
-    // drew some of and dropped others, named per panel at the per-layer
-    // draw site (`build_panel_mark_batches`) and flushed once below, beside
-    // `domain_left_out_ledger`.
-    let mut series_dropped_ledger = SeriesDroppedLedger::default();
+    // One render-wide tally, per layer, of two reports: the series a
+    // line/area/ribbon/polygon layer drew some of and dropped others
+    // (`SeriesDropped`), and every group (legend category, series, ring,
+    // facet panel's share of one, or a no-grouping layer's whole rows)
+    // whose every row this layer's mark found null or non-finite on some
+    // positional channel (`GroupsWithNoPosition`) — each named per panel
+    // at the per-layer draw site (`build_panel_mark_batches`) and flushed
+    // once below, beside `domain_left_out_ledger`.
+    let mut layer_report_ledger = LayerReportLedger::default();
 
     // One render-wide tally, per layer, of whether it drew in any panel at
     // all, and of every panel where it drew nothing — resolved once below,
     // after the whole panel loop, into either a fold onto
-    // `series_dropped_ledger` (the layer drew elsewhere) or its own
-    // `MarkBuildEmpty` per empty panel (the layer drew nowhere).
+    // `layer_report_ledger`'s own `SeriesDropped` (the layer drew
+    // elsewhere) or its own `MarkBuildEmpty` per empty panel (the layer
+    // drew nowhere).
     let mut layer_empty_ledger = LayerEmptyLedger::default();
 
     // Each layer's batch across the whole chart, before any facet filter: the
@@ -546,7 +551,7 @@ pub fn build_scene(
             &mut PanelMarkOutputs {
                 warnings,
                 domain_left_out_ledger: &mut domain_left_out_ledger,
-                series_dropped_ledger: &mut series_dropped_ledger,
+                layer_report_ledger: &mut layer_report_ledger,
                 layer_empty_ledger: &mut layer_empty_ledger,
             },
         )?;
@@ -805,13 +810,13 @@ pub fn build_scene(
     domain_left_out_ledger.flush(warnings);
     // Resolve every layer's pending all-short panels, now that every panel
     // has had its say: a layer that drew elsewhere folds them into
-    // `series_dropped_ledger`, one that drew nowhere gets its own
-    // `MarkBuildEmpty` per empty panel. Must run before that ledger's own
-    // flush, since it can still add to it.
-    layer_empty_ledger.resolve(&mut series_dropped_ledger, warnings);
-    // One `SeriesDropped` per layer, once every panel has noted its own
-    // dropped-series chunk.
-    series_dropped_ledger.flush(warnings);
+    // `layer_report_ledger`'s own `SeriesDropped`, one that drew nowhere
+    // gets its own `MarkBuildEmpty` per empty panel. Must run before that
+    // ledger's own flush, since it can still add to it.
+    layer_empty_ledger.resolve(&mut layer_report_ledger, warnings);
+    // One `SeriesDropped` and one `GroupsWithNoPosition` per layer, once
+    // every panel has noted its own chunk of each.
+    layer_report_ledger.flush(warnings);
 
     // `#120`(7) + N2: once at least one panel actually resolved its own
     // scales, the panel-real pass has already re-reported every
@@ -1869,30 +1874,129 @@ fn resolve_layer_styles(
         .collect()
 }
 
-/// `panel`'s own [`crate::transform::context::panel_clause`] text for one
-/// kept [`RenderWarning::SeriesDropped`] name, built the same way the
-/// transform warnings label a facet panel
-/// ([`facet_partition_label`]), read off `spec.facet` and the panel's own
-/// [`crate::layout::FacetKey`]s rather than a facet partition key, since
-/// this runs once per panel at the per-layer draw site, not once per
-/// transform's own facet partition. `None` for an unfaceted chart, so an
-/// unfaceted name carries no clause.
-fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLayout) -> Option<String> {
+/// Whether an existing `TransformWarning::DegenerateFit`/`IntervalUndefined`/
+/// `ExtentUndefined` already covers every one of `rows` (this panel's
+/// batch, `ctx.batch`'s row indices) — the existing one-point, domain,
+/// log-scale and degenerate-fit warnings keep sole ownership of their own
+/// cases, so a layer whose rows came from the step that raised one defers
+/// to that explanation rather than repeating it in `GroupsWithNoPosition`'s
+/// own voice (`mark_smooth(ci=...)`'s confidence band stays silent beside
+/// `Smooth`'s own "the ci=... band is undefined" warning: its fit line
+/// draws fine, only the band's own `y`/`y2` are undefined; a totally
+/// degenerate fit's own "could not fit the data" warning keeps the same
+/// sole ownership too, whether or not a sibling layer draws anything).
+/// Ownership is judged row by row, not by comparing the warning's own
+/// group name against the mark's partition name: a row is covered by `w`
+/// when `w` names no group at all (an ungrouped fit's own run, or
+/// `ExtentUndefined`'s empty `groups` for an ungrouped call — the step ran
+/// every row as one group) or when the row's own label, read through
+/// `w`'s own step's grouping fields
+/// ([`crate::transform::run::OutputLineage::passed`]), is among the names
+/// `w` gives; a row whose label cannot be read is not covered. This way a
+/// mark whose own partition groups by different fields than the
+/// statistic did (a no-field catplot whisker over `Summary`'s per-category
+/// groups, a color partition narrower than the fit's `groupby`) is still
+/// judged by what the statistic actually degraded, not by a name string
+/// the two sides may spell differently. `panel` must match the warning's
+/// own facet label, so one panel's fit never explains away rows in a
+/// sibling panel.
+fn group_owned_by_its_fit(
+    warnings: &[RenderWarning],
+    lineage: Option<&crate::transform::run::OutputLineage>,
+    batch: &RecordBatch,
+    rows: &[usize],
+    panel: Option<&str>,
+) -> bool {
+    let Some(lineage) = lineage else { return false };
+    // Built once per call, not once per row: each relevant warning's own
+    // grouping fields and named-group set (a lookup is then O(1), not a
+    // linear scan of a list as long as the number of degraded groups).
+    let relevant: Vec<RelevantFitWarning> =
+        warnings.iter().filter_map(|w| RelevantFitWarning::of(w, lineage, panel)).collect();
+    if relevant.is_empty() {
+        return false;
+    }
+    rows.iter().all(|&row| relevant.iter().any(|r| r.covers(batch, row)))
+}
+
+/// One `DegenerateFit`/`IntervalUndefined`/`ExtentUndefined` whose own
+/// panel already matched this layer's panel and whose own step is already
+/// among the layer's own lineage's passed steps ([`RelevantFitWarning::of`]),
+/// with its own grouping fields and named-group set built once rather than
+/// per row: a lookup against `names` is then an `O(1)` set membership
+/// check, not a linear scan of a list `ExtentUndefined` can make as long
+/// as the data.
+struct RelevantFitWarning<'a> {
+    groupby: &'a [String],
+    /// `None` when the warning names no group at all (an ungrouped fit's
+    /// own run, or `ExtentUndefined`'s empty `groups` for an ungrouped
+    /// call) — it then covers every row regardless of label.
+    names: Option<std::collections::HashSet<&'a str>>,
+}
+
+impl<'a> RelevantFitWarning<'a> {
+    /// `w` filtered to this layer's own panel and lineage: `None` when `w`
+    /// is not a fit warning, its own panel does not match `panel`, or its
+    /// own step never reached this layer's rows.
+    fn of(w: &'a RenderWarning, lineage: &'a crate::transform::run::OutputLineage, panel: Option<&str>) -> Option<Self> {
+        use crate::transform::context::TransformWarning;
+        let (warning_panel, step, names): (&Option<String>, &crate::transform::context::StepInstance, Vec<&str>) = match w {
+            RenderWarning::Transform(TransformWarning::DegenerateFit { group, panel, step, .. })
+            | RenderWarning::Transform(TransformWarning::IntervalUndefined { group, panel, step, .. }) => {
+                (panel, step, group.as_deref().into_iter().collect())
+            }
+            RenderWarning::Transform(TransformWarning::ExtentUndefined { groups, panel, step, .. }) => {
+                (panel, step, groups.iter().map(String::as_str).collect())
+            }
+            _ => return None,
+        };
+        if warning_panel.as_deref() != panel {
+            return None;
+        }
+        let passed = lineage.passed(step)?;
+        let names = (!names.is_empty()).then(|| names.into_iter().collect());
+        Some(Self { groupby: &passed.groupby, names })
+    }
+
+    /// Whether this warning covers `row` of `batch`: it names no group at
+    /// all, or `row`'s own label under [`Self::groupby`] is one of
+    /// [`Self::names`].
+    fn covers(&self, batch: &RecordBatch, row: usize) -> bool {
+        let Some(names) = &self.names else { return true };
+        crate::transform::context::describe_group_row(batch, self.groupby, row)
+            .is_some_and(|label| names.contains(label.as_str()))
+    }
+}
+
+/// `spec.facet`'s own raw label for `panel` (`"f=q"`, matching a transform
+/// warning's own `panel: Option<String>`), built off `spec.facet` and the
+/// panel's own [`crate::layout::FacetKey`]s rather than a facet partition
+/// key, since this runs once per panel at the per-layer draw site, not once
+/// per transform's own facet partition. `None` for an unfaceted chart.
+fn panel_label(spec: &ChartSpec, panel: &crate::layout::PanelLayout) -> Option<String> {
     let facet = spec.facet.as_ref()?;
     let col = panel.facet_key.as_ref()?;
     let key: (String, Option<String>) = (col.value.clone(), panel.row_facet_key.as_ref().map(|r| r.value.clone()));
-    Some(crate::transform::context::panel_clause(Some(&facet_partition_label(facet, &key))))
+    Some(facet_partition_label(facet, &key))
+}
+
+/// `panel`'s own [`crate::transform::context::panel_clause`] text for one
+/// kept [`RenderWarning::SeriesDropped`] name. `None` for an unfaceted
+/// chart, so an unfaceted name carries no clause.
+fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLayout) -> Option<String> {
+    Some(crate::transform::context::panel_clause(Some(&panel_label(spec, panel)?)))
 }
 
 /// The four render-wide outputs `build_panel_mark_batches` writes for every
 /// layer of one panel: the chart's warnings list, this render's
-/// explicit-domain-left-out tally, its dropped-series tally, and its
-/// per-layer drawn-or-not tally. All four are write-only here and owned by
-/// the caller across the whole panel loop.
+/// explicit-domain-left-out tally, its per-layer report tally (dropped
+/// series and null-blocked groups alike), and its per-layer drawn-or-not
+/// tally. All four are write-only here and owned by the caller across the
+/// whole panel loop.
 struct PanelMarkOutputs<'a> {
     warnings: &'a mut Vec<RenderWarning>,
     domain_left_out_ledger: &'a mut DomainLeftOutLedger,
-    series_dropped_ledger: &'a mut SeriesDroppedLedger,
+    layer_report_ledger: &'a mut LayerReportLedger,
     layer_empty_ledger: &'a mut LayerEmptyLedger,
 }
 
@@ -1914,7 +2018,7 @@ fn build_panel_mark_batches(
     panel: &crate::layout::PanelLayout,
     outputs: &mut PanelMarkOutputs,
 ) -> Result<Vec<MarkBatch>, RenderError> {
-    let PanelMarkOutputs { warnings, domain_left_out_ledger, series_dropped_ledger, layer_empty_ledger } = outputs;
+    let PanelMarkOutputs { warnings, domain_left_out_ledger, layer_report_ledger, layer_empty_ledger } = outputs;
     let &PanelResolveCtx { spec, prep, theme, .. } = ctx;
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -2192,6 +2296,38 @@ fn build_panel_mark_batches(
             domain_left_out_ledger.note(left_out);
         }
 
+        // Every group this layer's mark draws whose rows are null or
+        // non-finite on every one of this panel's own rows: named with
+        // this panel's own facet clause (`series_dropped_panel_clause`,
+        // the same clause `SeriesDropped` attaches), un-flipped to the
+        // channel THIS layer's own caller wrote, and noted into the
+        // render-wide ledger flushed once after the whole panel loop —
+        // independent of whether the layer draws elsewhere, since the
+        // fact this names belongs to the group, not to the layer's own
+        // emptiness.
+        let layer_lineage = crate::render::prepare::layer_output_lineage(layer, &prep.transform_lineages);
+        let this_panel_label = panel_label(spec, panel);
+        for group in draw::groups_with_no_position(&ctx).map_err(name_layer)? {
+            if group_owned_by_its_fit(warnings, layer_lineage, ctx.batch, &group.rows, this_panel_label.as_deref()) {
+                continue;
+            }
+            let channels: Vec<String> =
+                group.channels.iter().map(|c| user_facing_channel(c, layer_flipped).to_string()).collect();
+            let name = match (group.name, series_dropped_panel_clause(spec, panel)) {
+                (Some(name), Some(clause)) => format!("{name}{clause}"),
+                (Some(name), None) => name,
+                (None, Some(clause)) => clause,
+                (None, None) => String::new(),
+            };
+            layer_report_ledger.note(li, RenderWarning::GroupsWithNoPosition {
+                layer: public_layer(spec, li, layer.mark),
+                entry: entry.clone(),
+                mark: layer.mark,
+                channels,
+                groups: vec![name],
+            });
+        }
+
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
         let layer_drew_this_panel = !result.nodes.is_empty();
         if layer_drew_this_panel {
@@ -2240,7 +2376,13 @@ fn build_panel_mark_batches(
                         names,
                     }),
                     None if !names.is_empty() => {
-                        series_dropped_ledger.note(li, public_layer(spec, li, layer.mark), entry.clone(), layer.mark, dropped.rule, names);
+                        layer_report_ledger.note(li, RenderWarning::SeriesDropped {
+                            layer: public_layer(spec, li, layer.mark),
+                            entry: entry.clone(),
+                            mark: layer.mark,
+                            rule: dropped.rule,
+                            series: names,
+                        });
                     }
                     None => {}
                 }
@@ -3567,41 +3709,46 @@ impl DomainLeftOutLedger {
     }
 }
 
-/// Per layer across the whole panel loop, every panel's own dropped-series
-/// names — one [`RenderWarning::SeriesDropped`] per layer, never one per
-/// panel, mirroring [`DomainLeftOutLedger`]'s multiplicity. Unlike that
-/// ledger there is nothing to SUM here: each kept run is already named in
+/// Per layer across the whole panel loop, every panel's own report for a
+/// fact [`RenderWarning::fold_layer_report`] knows how to merge —
+/// `SeriesDropped`'s dropped-series names and `GroupsWithNoPosition`'s
+/// null-blocked groups both ride this ONE shape, one `RenderWarning` per
+/// layer per report kind, never one per panel, mirroring
+/// [`DomainLeftOutLedger`]'s multiplicity. Each report is already named in
 /// full at its own draw site (its own facet clause attached, when it has
-/// one), so this only collects those names, in panel order, onto the
-/// layer's running report. Keyed by the layer's own internal index (`li`,
+/// one) before it is noted, so there is nothing to sum here beyond what
+/// the fold does. Keyed by the layer's own internal index (`li`,
 /// [`build_panel_mark_batches`]' own loop variable), never by
 /// [`public_layer`]'s voiced index: `public_layer` is `None` for every
 /// layer a call built, so two distinct call-built layers sharing one
-/// `(entry, mark, rule)` under `+` would otherwise fold into one warning
-/// naming the same ring or series twice — `li` is unique per layer
-/// regardless of voice. In a composite, each leaf builds and flushes its
-/// own ledger — `SeriesDropped` fans out per leaf exactly as
-/// `MarkBuildEmpty` does, never merged across leaves.
+/// voice under `+` would otherwise fold into one warning naming the same
+/// ring or series twice — `li` is unique per layer regardless of voice.
+/// In a composite, each leaf builds and flushes its own ledger — a report
+/// fans out per leaf exactly as `MarkBuildEmpty` does, never merged
+/// across leaves.
 #[derive(Default)]
-pub(super) struct SeriesDroppedLedger {
+pub(super) struct LayerReportLedger {
     entries: Vec<(usize, RenderWarning)>,
 }
 
-impl SeriesDroppedLedger {
-    /// Append `names` to the running [`RenderWarning::SeriesDropped`] for
-    /// layer `li`, creating it on first sight; `layer` is that layer's
-    /// voiced index ([`public_layer`]), carried only as the warning's own
-    /// display field, never as part of the key.
-    pub(super) fn note(&mut self, li: usize, layer: Option<usize>, entry: String, mark: crate::spec::mark::Mark, rule: String, names: Vec<String>) {
+impl LayerReportLedger {
+    /// Fold `report` into layer `li`'s running entry of the same kind
+    /// through [`RenderWarning::fold_layer_report`]; creates a new entry
+    /// on first sight, and whenever `li` already holds a running report of
+    /// a DIFFERENT kind (the fold's own `Some` case), so a layer's
+    /// `SeriesDropped` and `GroupsWithNoPosition` run side by side rather
+    /// than one overwriting the other.
+    pub(super) fn note(&mut self, li: usize, report: RenderWarning) {
+        let mut report = report;
         for (entry_li, w) in &mut self.entries {
             if *entry_li == li {
-                if let RenderWarning::SeriesDropped { series, .. } = w {
-                    series.extend(names);
-                    return;
+                match w.fold_layer_report(report) {
+                    None => return,
+                    Some(unconsumed) => report = unconsumed,
                 }
             }
         }
-        self.entries.push((li, RenderWarning::SeriesDropped { layer, entry, mark, rule, series: names }));
+        self.entries.push((li, report));
     }
 
     pub(super) fn flush(self, warnings: &mut Vec<RenderWarning>) {
@@ -3630,8 +3777,8 @@ pub(super) struct PendingLayerEmpty {
 /// [`resolve`](Self::resolve) decides, once every panel has had its say,
 /// which outcome each pending panel gets: a layer that drew somewhere
 /// folds its empty panels' own dropped-run names into that layer's running
-/// [`SeriesDroppedLedger`] entry (each name already carrying its own
-/// facet-panel clause); a layer that drew nowhere emits one
+/// [`LayerReportLedger`] `SeriesDropped` entry (each name already carrying
+/// its own facet-panel clause); a layer that drew nowhere emits one
 /// [`RenderWarning::MarkBuildEmpty`] per empty panel, one for each panel
 /// where it drew nothing.
 #[derive(Default)]
@@ -3656,12 +3803,18 @@ impl LayerEmptyLedger {
 
     /// Resolve every pending panel now that the whole panel loop (for this
     /// leaf) has run.
-    pub(super) fn resolve(self, series_dropped_ledger: &mut SeriesDroppedLedger, warnings: &mut Vec<RenderWarning>) {
+    pub(super) fn resolve(self, layer_report_ledger: &mut LayerReportLedger, warnings: &mut Vec<RenderWarning>) {
         let Self { drew_any, pending } = self;
         for p in pending {
             if drew_any.contains(&p.li) {
                 if !p.names.is_empty() {
-                    series_dropped_ledger.note(p.li, p.public_layer, p.entry, p.mark, p.rule, p.names);
+                    layer_report_ledger.note(p.li, RenderWarning::SeriesDropped {
+                        layer: p.public_layer,
+                        entry: p.entry,
+                        mark: p.mark,
+                        rule: p.rule,
+                        series: p.names,
+                    });
                 }
             } else {
                 warnings.push(RenderWarning::MarkBuildEmpty {
@@ -15757,6 +15910,318 @@ mod tests {
             dropped[0].to_string(),
             "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point) in \
              facet panel c=p1, g=c (one point) in facet panel c=p2"
+        );
+    }
+
+    /// A color group null-blocked in two different facet panels gets ONE
+    /// `GroupsWithNoPosition` warning for the layer, naming each
+    /// null-blocked group with its OWN panel clause — never one warning
+    /// per panel, mirroring `SeriesDropped`'s own once-per-layer rule.
+    #[test]
+    fn a_group_null_in_two_facet_panels_warns_once_naming_each_panel() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        // Panel p1: color group "a" draws (2 rows); "b" is null on y (2
+        // rows, p1 only). Panel p2: color group "a" draws again; "d" is
+        // null on y (2 rows, p2 only).
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2"])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "a", "a", "d", "d"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![
+                    Some(0.0), Some(1.0), None, None, Some(0.0), Some(1.0), None, None,
+                ])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+            "facet": {"field": "c", "mode": {"kind": "wrap", "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        let found: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })).collect();
+        assert_eq!(found.len(), 1, "one warning for the layer, not one per panel: {warnings:?}");
+        assert_eq!(
+            found[0].to_string(),
+            "mark_point: every row of g=b in facet panel c=p1, and of g=d in facet panel c=p2, has a null or \
+             non-finite y, so they draw nothing"
+        );
+    }
+
+    /// A whole unfaceted layer with no grouping channel, every row null on
+    /// its drawn axis, names the layer itself rather than a group — the
+    /// no-field sentence the per-row null skip has no second report for.
+    #[test]
+    fn a_whole_layer_with_no_placed_row_says_so() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![None, None])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+        }));
+        let (_, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let found: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })).collect();
+        assert_eq!(found.len(), 1, "{warnings:?}");
+        assert_eq!(
+            found[0].to_string(),
+            "mark_point: every row has a null or non-finite y, so the layer draws nothing"
+        );
+    }
+
+    /// A no-field (ungrouped) layer null-blocked in two different facet
+    /// panels gets ONE `GroupsWithNoPosition` warning naming both panels
+    /// through the same list grammar the named-group case uses, never two
+    /// clauses run together with no separator.
+    #[test]
+    fn a_whole_layer_with_no_placed_row_in_two_facet_panels_says_so_once() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["p", "p", "q", "q"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![None, None, None, None])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "facet": {"field": "c", "mode": {"kind": "wrap", "ncols": 2}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        let found: Vec<&RenderWarning> =
+            warnings.iter().filter(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })).collect();
+        assert_eq!(found.len(), 1, "one warning for the layer, not one per panel: {warnings:?}");
+        assert_eq!(
+            found[0].to_string(),
+            "mark_point: every row in facet panel c=p, and in facet panel c=q, has a null or non-finite y, so \
+             they draw nothing"
+        );
+    }
+
+    /// A chart with no all-null group warns nothing — the partial null in
+    /// group "a" still draws, so the per-row skip stays silent as
+    /// documented.
+    #[test]
+    fn a_chart_with_no_all_null_group_warns_nothing() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "a"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), None])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "g"}},
+        }));
+        let (_, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        assert!(
+            !warnings.iter().any(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })),
+            "{warnings:?}"
+        );
+    }
+
+    /// [`group_owned_by_its_fit`]'s own unit contract: ownership is judged
+    /// row by row, through each row's own label under the warning's step's
+    /// grouping fields, not by comparing a group name string. It requires
+    /// the candidate lineage to have passed the warning's own step, and
+    /// the warning's own panel label to match — so a statistic-sourced
+    /// layer defers to its own transform's explanation only for the rows
+    /// that transform actually produced, in the panel it names, and
+    /// neither a sibling panel's nor a sibling layer's fit silently
+    /// swallows these rows. An ungrouped fit (`group: None`) covers every
+    /// row regardless of label; a row whose grouping column cannot be
+    /// read is never covered.
+    #[test]
+    fn a_fit_warning_owns_only_the_rows_of_its_own_groups_in_its_own_panel() {
+        use crate::transform::context::{StepInstance, TransformWarning};
+        use crate::transform::run::{OutputLineage, PassedStep};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        fn lineage(steps: Vec<PassedStep>) -> OutputLineage {
+            OutputLineage {
+                swarm: None,
+                statistic_input: None,
+                lowered: Vec::new(),
+                written_groupby: Vec::new(),
+                source: std::sync::Arc::new(Schema::empty()),
+                log_input: std::collections::HashMap::new(),
+                steps,
+            }
+        }
+
+        // Rows 0 and 2 are group "g=a"; row 1 is "g=b".
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![std::sync::Arc::new(StringArray::from(vec!["a", "b", "a"]))],
+        )
+        .unwrap();
+
+        let step = StepInstance::Chain(vec![0]);
+        let warnings = vec![
+            RenderWarning::Transform(TransformWarning::DegenerateFit {
+                transform: "Smooth".into(),
+                group: Some("g=a".into()),
+                reason: "fewer than 2 usable points".into(),
+                panel: Some("f=p".into()),
+                step: step.clone(),
+            }),
+            RenderWarning::Transform(TransformWarning::IntervalUndefined {
+                transform: "Smooth".into(),
+                group: None,
+                ci: 0.95,
+                reason: "fewer than 2 usable points".into(),
+                panel: None,
+                step: step.clone(),
+            }),
+        ];
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["g".into()] }]);
+        let not_reached = lineage(Vec::new());
+        let missing_column = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["absent".into()] }]);
+
+        assert!(group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 2], Some("f=p")), "both g=a rows are named");
+        assert!(
+            !group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 1], Some("f=p")),
+            "row 1 is g=b, which the g=a fit never named, so not every row is covered"
+        );
+        assert!(
+            !group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 2], Some("f=q")),
+            "a sibling panel's fit never owns these rows"
+        );
+        assert!(
+            !group_owned_by_its_fit(&warnings, Some(&not_reached), &batch, &[0, 2], Some("f=p")),
+            "a layer whose rows never reached the step that raised the warning is not owned"
+        );
+        assert!(
+            !group_owned_by_its_fit(&warnings, None, &batch, &[0, 2], Some("f=p")),
+            "a layer with no lineage (not a statistic-sourced layer) is never owned"
+        );
+        assert!(
+            group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 1, 2], None),
+            "the ungrouped fit (group: None) covers every row regardless of label, when its own panel matches"
+        );
+        assert!(
+            !group_owned_by_its_fit(&warnings, Some(&missing_column), &batch, &[0], Some("f=p")),
+            "a row whose step's own grouping column cannot be read is never covered"
+        );
+        assert!(group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[], Some("f=p")), "no rows to cover is vacuously owned");
+        assert!(!group_owned_by_its_fit(&[], Some(&reached), &batch, &[0], Some("f=p")));
+    }
+
+    /// `group_owned_by_its_fit` must still resolve ownership correctly
+    /// when a group's rows carry many distinct labels under the fit's own
+    /// grouping fields (a `mark_errorband`-style group whose rows each
+    /// pair with a different `t`, the shape that made the per-row linear
+    /// scan over `ExtentUndefined`'s names quadratic): every row's own
+    /// label is checked, not a cached prefix or a shortcut that happens to
+    /// answer true once a lookup has succeeded a few times.
+    #[test]
+    fn many_distinct_group_labels_still_resolve_ownership_correctly() {
+        use crate::transform::context::{StepInstance, TransformWarning};
+        use crate::transform::run::{OutputLineage, PassedStep};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        fn lineage(steps: Vec<PassedStep>) -> OutputLineage {
+            OutputLineage {
+                swarm: None,
+                statistic_input: None,
+                lowered: Vec::new(),
+                written_groupby: Vec::new(),
+                source: std::sync::Arc::new(Schema::empty()),
+                log_input: std::collections::HashMap::new(),
+                steps,
+            }
+        }
+
+        const N: usize = 500;
+        let labels: Vec<String> = (0..N).map(|i| format!("t={i}")).collect();
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![Field::new("t", DataType::Utf8, false)])),
+            vec![std::sync::Arc::new(StringArray::from(
+                (0..N).map(|i| format!("{i}")).collect::<Vec<_>>(),
+            ))],
+        )
+        .unwrap();
+        let rows: Vec<usize> = (0..N).collect();
+        let step = StepInstance::Chain(vec![0]);
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["t".into()] }]);
+
+        let every_label_named = vec![RenderWarning::Transform(TransformWarning::ExtentUndefined {
+            transform: "ErrorExtent".into(),
+            interval: "ci=0.95".into(),
+            groups: labels.clone(),
+            panel: None,
+            step: step.clone(),
+        })];
+        assert!(
+            group_owned_by_its_fit(&every_label_named, Some(&reached), &batch, &rows, None),
+            "every one of the 500 distinct labels is named, so every row is covered"
+        );
+
+        let mut missing_one = labels.clone();
+        missing_one.remove(N / 2);
+        let one_label_missing = vec![RenderWarning::Transform(TransformWarning::ExtentUndefined {
+            transform: "ErrorExtent".into(),
+            interval: "ci=0.95".into(),
+            groups: missing_one,
+            panel: None,
+            step: step.clone(),
+        })];
+        assert!(
+            !group_owned_by_its_fit(&one_label_missing, Some(&reached), &batch, &rows, None),
+            "dropping exactly one of 500 labels from the warning's own list must still be caught"
         );
     }
 

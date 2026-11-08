@@ -502,6 +502,7 @@ fn compute_one_group(
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) values".into(),
             panel: None,
+            step: warn_ctx.step.clone(),
         });
         vec![f64::NAN; spec.n]
     } else {
@@ -512,6 +513,7 @@ fn compute_one_group(
                 group: group.map(str::to_string),
                 reason: "the bandwidth resolved to a non-positive or non-finite value".into(),
                 panel: None,
+                step: warn_ctx.step.clone(),
             });
             vec![f64::NAN; spec.n]
         } else {

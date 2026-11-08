@@ -93,6 +93,7 @@ fn apply_one_group(
             group: group.map(str::to_string),
             reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
             panel: None,
+            step: ctx.step.clone(),
         });
         return all_nan_output(spec);
     }

@@ -5,7 +5,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::context::TransformContext;
+use crate::transform::context::{describe_group_keys, TransformContext};
 use crate::transform::group_key::{
     group_partition_multi, groupby_field_nullable, materialize_groupby_col,
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
@@ -82,6 +82,12 @@ pub(crate) fn apply_with_context(
     let mut means: Vec<f64> = Vec::with_capacity(partition.groups.len());
     let mut lowers: Vec<f64> = Vec::with_capacity(partition.groups.len());
     let mut uppers: Vec<f64> = Vec::with_capacity(partition.groups.len());
+    // A group that holds exactly one usable value has no spread to form an
+    // interval from — reported once, after the loop, as one
+    // ExtentUndefined naming every such group (empty here for the ungrouped
+    // case, named below). A group with no usable value at all is untouched.
+    let mut undefined_any = false;
+    let mut undefined_groups: Vec<String> = Vec::new();
 
     for (key, rows) in &partition.groups {
         group_keys_out.push(key.clone());
@@ -98,10 +104,19 @@ pub(crate) fn apply_with_context(
                 Some(v)
             })
             .collect();
+        if vals.len() == 1 {
+            undefined_any = true;
+            if !spec.groupby.is_empty() {
+                undefined_groups.push(describe_group_keys(&spec.groupby, key));
+            }
+        }
         let (m, lo, hi) = summarize(&vals, spec);
         means.push(m);
         lowers.push(lo);
         uppers.push(hi);
+    }
+    if undefined_any {
+        ctx.report_extent_undefined("Summary", &interval_label(spec), undefined_groups);
     }
 
     // Build output.
@@ -132,6 +147,17 @@ pub(crate) fn apply_with_context(
 /// for the guard and for the emitted schema, so the two cannot drift.
 fn output_field_names() -> [String; 3] {
     ["mean".to_string(), "lower".to_string(), "upper".to_string()]
+}
+
+/// This call's own interval label, for [`TransformContext::report_extent_undefined`]:
+/// `"ci={level}"` for a bootstrap confidence interval, else the error
+/// function's own name.
+fn interval_label(spec: &SummarySpec) -> String {
+    match spec.error_fn {
+        ErrorFn::Ci => format!("ci={}", spec.ci),
+        ErrorFn::Stderr => "stderr".to_string(),
+        ErrorFn::Stdev => "stdev".to_string(),
+    }
 }
 
 fn summarize(vals: &[f64], spec: &SummarySpec) -> (f64, f64, f64) {
@@ -426,6 +452,61 @@ mod tests {
         assert!((mean[a] - 7.0).abs() < 1e-12);
         assert!(lower[a].is_nan());
         assert!(upper[a].is_nan());
+    }
+
+    /// The group with exactly one usable value (`n<2` above shows its own
+    /// NaN bounds) also raises one `ExtentUndefined` naming it, labeled by
+    /// the error function in use; group "b" (two values) is unaffected.
+    /// An ungrouped call whose one implicit group holds a single value
+    /// raises the same warning with an empty `groups` list.
+    #[test]
+    fn test_summary_single_observation_group_reports_extent_undefined() {
+        use crate::transform::context::TransformWarning;
+
+        for (error_fn, interval) in [(ErrorFn::Ci, "ci=0.95"), (ErrorFn::Stderr, "stderr"), (ErrorFn::Stdev, "stdev")] {
+            let batch = batch_value_group(vec![Some(7.0), Some(1.0), Some(2.0)], vec!["a", "b", "b"]);
+            let spec = SummarySpec {
+                field: "v".into(),
+                groupby: vec!["group".into()],
+                error_fn,
+                ci: 0.95,
+                n_boot: 1000,
+                seed: 0,
+                name: None,
+            };
+            let ctx = TransformContext::default();
+            apply_with_context(&spec, &batch, &ctx).unwrap();
+            let warnings = ctx.warnings.borrow();
+            assert_eq!(warnings.len(), 1, "{error_fn:?}: got {warnings:?}");
+            assert!(
+                matches!(
+                    &warnings[0],
+                    TransformWarning::ExtentUndefined { transform, interval: got, groups, .. }
+                        if transform == "Summary" && got == interval && groups == &vec!["group=a".to_string()]
+                ),
+                "{error_fn:?}: {:?}",
+                warnings[0]
+            );
+        }
+
+        let ungrouped = batch_value_group(vec![Some(7.0)], vec!["a"]);
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec![],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        let ctx = TransformContext::default();
+        apply_with_context(&spec, &ungrouped, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::ExtentUndefined { transform, groups, .. } if transform == "Summary" && groups.is_empty()
+        ));
     }
 
     #[test]

@@ -23,6 +23,9 @@ pre-fix code and pass only once the grey is actually painted.
 
 from __future__ import annotations
 
+import warnings
+
+import pytest
 from sklearn.datasets import make_classification
 from sklearn.linear_model import LogisticRegression
 
@@ -106,3 +109,53 @@ def test_pr_chart_iso_lines_and_ap_annotation_compose():
     assert _iso_polyline_strokes(svg) == [_ISO_STROKE_RGBA] * 4
     assert "AP = 0." in svg
     assert "F=0.6" in svg
+
+
+def _fit_multiclass_model():
+    X, y = make_classification(
+        n_samples=300,
+        n_classes=3,
+        n_informative=4,
+        random_state=0,
+    )
+    model = LogisticRegression(max_iter=300).fit(X, y)
+    return model, X, y
+
+
+@pytest.mark.parametrize("fit", [_fit_binary_model, _fit_multiclass_model], ids=["binary", "multiclass"])
+@pytest.mark.parametrize("annotate_ap", [True, False])
+def test_pr_chart_iso_lines_warn_nothing(fit, annotate_ap):
+    """The iso-line and iso-label overlays each read their own frame, so
+    neither the PR curve nor the overlay carries a null-padded share of
+    the other's rows -- no ``GroupsWithNoPosition`` warning, any class
+    count, any ``annotate_ap`` setting."""
+    model, X, y = fit()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = fm.pr_chart(model, X, y, iso_lines=True, annotate_ap=annotate_ap).to_svg()
+    null_position_warnings = [
+        str(w.message) for w in caught if "null or non-finite" in str(w.message)
+    ]
+    assert null_position_warnings == []
+    for f in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
+        assert f in svg
+
+
+def test_pr_chart_iso_layer_overrides_reach_their_layers():
+    """``mark={'iso_line': {...}}``, ``{'iso_line': False}`` and
+    ``{'iso_label': False}`` reach the figure's own attached overlay
+    layers by name, exactly as they reached the composite mark's former
+    iso sub-layers."""
+    model, X, y = _fit_binary_model()
+    styled = fm.pr_chart(model, X, y, iso_lines=True, mark={"iso_line": {"stroke": "#ff0000"}})
+    styled_strokes = _iso_polyline_strokes(styled.to_svg())
+    assert styled_strokes == ["rgba(255,0,0,0.600)"] * 4
+
+    dropped_line = fm.pr_chart(model, X, y, iso_lines=True, mark={"iso_line": False})
+    assert _iso_polyline_strokes(dropped_line.to_svg()) == []
+
+    dropped_label = fm.pr_chart(model, X, y, iso_lines=True, mark={"iso_label": False})
+    dropped_label_svg = dropped_label.to_svg()
+    assert len(_iso_polyline_strokes(dropped_label_svg)) == 4
+    for f in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
+        assert f not in dropped_label_svg

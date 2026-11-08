@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
+
+import pytest
+
 import ferrum
 from tests.fixtures import load_dataset, load_fixture
 
@@ -243,7 +247,8 @@ def test_mark_residuals_cook_threshold_explicit_float():
 def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
     """For non-linear estimators ModelSource.predictions emits NaN
     Cook's D. NaN > threshold is False so no outliers highlight; chart
-    still renders cleanly."""
+    still renders cleanly and the zero-row outlier overlay warns
+    nothing -- not only outside a strict run, but under one too."""
     from sklearn.ensemble import RandomForestRegressor
 
     df = load_dataset("regression")
@@ -252,15 +257,67 @@ def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
         X.to_numpy(),
         df["y"].to_numpy(),
     )
-    svg = ferrum.residuals_chart(
-        model,
-        X,
-        df["y"],
-        cook_threshold="auto",
-    ).to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = ferrum.residuals_chart(
+            model,
+            X,
+            df["y"],
+            cook_threshold="auto",
+        ).to_svg()
+    null_position_warnings = [
+        str(w.message) for w in caught if "null or non-finite" in str(w.message)
+    ]
+    assert null_position_warnings == []
     assert "<svg" in svg
     # No red outlier overlay since Cook's D is NaN for every row.
     assert "#e15759" not in svg
+
+
+@pytest.mark.parametrize("panels", [None, "single"], ids=["auto_panels", "single_panel"])
+def test_residuals_chart_cook_overlay_without_outliers_warns_nothing(panels):
+    """The Cook's-distance outlier overlay reads only the outlier rows
+    through its own ``fm.Layer(data=...)``, so a threshold (``100.0``)
+    no row's Cook's distance exceeds leaves a zero-row overlay that
+    draws and warns nothing -- never the base scatter's own rows read
+    as null. ``panels=None`` (the public default, ``"auto"``) also
+    exercises the leverage panel's own ``base + Chart(outlier_rows)``
+    overlay; ``panels="single"`` exercises the single-panel path. The
+    non-linear model case (an undefined Cook's distance on every row)
+    is ``test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers``
+    above, which asserts the same no-warning condition directly rather
+    than relying on a second model-kind parametrization here."""
+    source, _ = _ridge_source()
+    kwargs = {"cook_threshold": 100.0}
+    if panels is not None:
+        kwargs["panels"] = panels
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = ferrum.residuals_chart(source, **kwargs).to_svg()
+
+    null_position_warnings = [
+        str(w.message) for w in caught if "null or non-finite" in str(w.message)
+    ]
+    assert null_position_warnings == []
+    assert "<svg" in svg
+    assert "#e15759" not in svg
+
+
+def test_residuals_chart_outlier_override_reaches_its_layer():
+    """``mark={'outlier': {...}}`` and ``{'outlier': False}`` reach the
+    figure's own attached outlier layer by name, exactly as they reached
+    the composite mark's former ``cook_threshold`` sub-layer."""
+    source, _ = _ridge_source()
+    styled = ferrum.residuals_chart(
+        source, cook_threshold=0.001, panels="single", mark={"outlier": {"fill": "#00ff00"}}
+    ).to_svg()
+    assert "#00ff00" in styled
+    assert "#e15759" not in styled
+
+    dropped = ferrum.residuals_chart(
+        source, cook_threshold=0.001, panels="single", mark={"outlier": False}
+    ).to_svg()
+    assert "#e15759" not in dropped
 
 
 def test_mark_prediction_error_ci_renders_quantile_ribbon():

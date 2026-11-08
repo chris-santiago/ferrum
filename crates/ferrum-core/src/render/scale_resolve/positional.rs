@@ -2941,6 +2941,7 @@ mod tests {
             written_groupby: Vec::new(),
             source: schema,
             log_input: std::collections::HashMap::new(),
+            steps: Vec::new(),
         }
     }
 

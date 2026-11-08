@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from ferrum import Chart, ConcatChart
+    from ferrum import Chart, ConcatChart, Layer
 
 from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.diagnostics.source import ComparedModelSource
@@ -45,6 +45,20 @@ from ferrum.plots._helpers import (
 register_layer_names("calibration", frozenset({"line", "reference", "point", "brier_label"}))
 
 
+def _source_target(source: Any) -> Any:
+    """Return *source*'s own target series, or ``None`` when it has none.
+
+    Shared by ROC's single-class refusal and PR's prevalence baseline --
+    both read the same ``y``/``_y`` attribute a compare source may not
+    expose, so the one reader keeps them from drifting on which attribute
+    name wins.
+    """
+    y_series = getattr(source, "y", None)
+    if y_series is None:
+        y_series = getattr(source, "_y", None)
+    return y_series
+
+
 def _color_field_and_title(df: pl.DataFrame) -> tuple[str | None, str]:
     """ROC/PR's color field plus its legend title: ``"Model"`` for the
     compare-source path (a ``model`` column), else ``"Class"``.
@@ -59,90 +73,69 @@ def _color_field_and_title(df: pl.DataFrame) -> tuple[str | None, str]:
 # ---------------------------------------------------------------------------
 
 
-def _inject_pr_iso_lines(
-    df: pl.DataFrame,
+def _pr_iso_layers(
     *,
     f_scores: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
     n_points: int = 50,
-) -> pl.DataFrame:
-    """Append F-score iso-curve rows to a PR-curve DataFrame.
+) -> tuple["Layer", "Layer"]:
+    """Build the PR chart's F-score iso-curve overlay as two independent layers.
 
     For each F in ``f_scores``, parameterizes the iso curve
     ``precision = F * recall / (2 * recall - F)`` (the locus of points
     with the chosen F1) over the recall range ``(F/2, 1]`` where
-    precision stays in ``(0, 1]``.  Each iso curve gets ``n_points``
-    rows with synthetic ``_iso_recall`` / ``_iso_precision`` /
-    ``_iso_f`` columns plus one ``_iso_label_x`` / ``_iso_label_y`` /
-    ``_iso_label`` row near the curve's right end for the F-value
-    annotation.  The original PR columns are extended with nulls on the
-    new rows so ``mark_line`` skips them on the PR-curve layer (and
-    vice-versa on the iso layer).
+    precision stays in ``(0, 1]``. Each iso curve gets ``n_points`` rows in
+    its own frame (``_iso_recall`` / ``_iso_precision`` / ``_iso_f``); a
+    second, four-row frame holds one label anchor per curve
+    (``_iso_label_x`` / ``_iso_label_y`` / ``_iso_label``) at its rightmost
+    point. Each frame is its own ``fm.Layer(data=...)``, so neither carries
+    a null-padded share of the PR curve's own rows (or vice versa): the PR
+    curve layer and the iso overlay each read only their own rows.
     """
     import numpy as np
 
-    # Build the iso-curve rows.
-    iso_rows: list[dict] = []
+    import ferrum
+    from ferrum.marks.diagnostic._classification import PR_ISO_LABEL_STYLE, PR_ISO_LINE_STYLE
+
+    line_rows: list[dict] = []
+    label_rows: list[dict] = []
     for f in f_scores:
         recalls = np.linspace(f / 2 + 1e-3, 1.0, n_points)
         # precision = F * recall / (2 * recall - F)
         precisions = f * recalls / (2 * recalls - f)
         valid = (precisions > 0.0) & (precisions <= 1.0)
         for r, p in zip(recalls[valid], precisions[valid]):
-            iso_rows.append(
+            line_rows.append(
                 {
                     "_iso_recall": float(r),
                     "_iso_precision": float(p),
                     "_iso_f": f"F={f:.1f}",
-                    "_iso_label_x": None,
-                    "_iso_label_y": None,
-                    "_iso_label": None,
                 }
             )
         # Label anchor at the rightmost (recall ~ 1) point of the iso curve.
-        if iso_rows:
-            iso_rows[-1]["_iso_label_x"] = float(recalls[valid][-1]) - 0.02
-            iso_rows[-1]["_iso_label_y"] = float(precisions[valid][-1]) + 0.02
-            iso_rows[-1]["_iso_label"] = f"F={f:.1f}"
+        if np.any(valid):
+            label_rows.append(
+                {
+                    "_iso_label_x": float(recalls[valid][-1]) - 0.02,
+                    "_iso_label_y": float(precisions[valid][-1]) + 0.02,
+                    "_iso_label": f"F={f:.1f}",
+                }
+            )
 
-    iso_df = pl.DataFrame(iso_rows)
-    # Extend the original PR DataFrame with null iso columns.
-    null_iso = pl.DataFrame(
-        {
-            "_iso_recall": [None] * df.height,
-            "_iso_precision": [None] * df.height,
-            "_iso_f": [None] * df.height,
-            "_iso_label_x": [None] * df.height,
-            "_iso_label_y": [None] * df.height,
-            "_iso_label": [None] * df.height,
-        },
-        schema={
-            "_iso_recall": pl.Float64,
-            "_iso_precision": pl.Float64,
-            "_iso_f": pl.Utf8,
-            "_iso_label_x": pl.Float64,
-            "_iso_label_y": pl.Float64,
-            "_iso_label": pl.Utf8,
-        },
+    line_layer = ferrum.Layer(
+        data=pl.DataFrame(line_rows),
+        mark="line",
+        name="iso_line",
+        encoding={"x": "_iso_recall", "y": "_iso_precision", "detail": "_iso_f"},
+        mark_kwargs=dict(PR_ISO_LINE_STYLE),
     )
-    df = pl.concat([df, null_iso], how="horizontal")
-
-    # Extend iso_df with null PR columns so the schemas align for vertical concat.
-    pr_columns = [c for c in df.columns if c not in iso_df.columns]
-    null_pr_for_iso: dict[str, list] = {}
-    schema_for_iso: dict[str, pl.DataType] = {}
-    for col in pr_columns:
-        null_pr_for_iso[col] = [None] * iso_df.height
-        schema_for_iso[col] = df.schema[col]
-    iso_df = pl.concat(
-        [iso_df, pl.DataFrame(null_pr_for_iso, schema=schema_for_iso)],
-        how="horizontal",
+    label_layer = ferrum.Layer(
+        data=pl.DataFrame(label_rows),
+        mark="text",
+        name="iso_label",
+        encoding={"x": "_iso_label_x", "y": "_iso_label_y", "text": "_iso_label"},
+        mark_kwargs=dict(PR_ISO_LABEL_STYLE),
     )
-
-    # Vertical concat: original PR rows first, then iso rows.
-    return pl.concat(
-        [df.select(df.columns), iso_df.select(df.columns)],
-        how="vertical_relaxed",
-    )
+    return line_layer, label_layer
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +155,7 @@ def _roc_chart_from_source(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
+    diagnostic: str = "roc_chart",
 ):
     """Build an ROC chart from a ModelSource.
 
@@ -176,11 +170,34 @@ def _roc_chart_from_source(
     legend's ``1 (AUC = 0.987)`` rename are gone, so a multi-curve ROC
     prints each AUC once and ``annotate_auc=False`` shows no AUC anywhere
     (the title used to leak one regardless of the flag).
+
+    A null in the target is refused for its nulls before any class-count
+    check runs, the same order ``source.roc_curve`` and ``pr_chart`` apply:
+    a null is not a class observation, so counting null rows one way or
+    the other would be a guess about data the caller never gave. A
+    single-class target is refused next, before the curve is built: every
+    false-positive rate would be undefined, drawing no curve, no chance
+    diagonal and no AUC label, with no word said about why.
+
+    ``diagnostic`` names the entry the caller actually invoked
+    (``"roc_chart"`` for the figure function, ``"ROCVisualizer"`` for the
+    visualizer that builds this same chart without ever calling
+    ``roc_chart`` or ``ModelSource.roc_curve`` itself), threaded into
+    every refusal this function raises.
     """
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit
+    from ferrum.diagnostics._internal._target_hygiene import (
+        require_no_null_target,
+        require_two_classes,
+    )
 
-    df = source.roc_curve(average=None if per_class else average, diagnostic="roc_chart")
+    y_series = _source_target(source)
+    if y_series is not None:
+        require_no_null_target(y_series, diagnostic=diagnostic)
+        require_two_classes(y_series, diagnostic=diagnostic)
+
+    df = source.roc_curve(average=None if per_class else average, diagnostic=diagnostic)
     color_field, color_title = _color_field_and_title(df)
 
     # Single annotation surface: the figure builder owns the AUC overlay
@@ -251,13 +268,16 @@ def _pr_chart_from_source(
     per-curve overlay below; the title's ``— AP 0.912`` suffix and the
     legend's ``1 (AP = 0.912)`` rename are gone. See
     :func:`_roc_chart_from_source`.
+
+    ``iso_lines=True`` attaches the F-score iso-curve overlay
+    (:func:`_pr_iso_layers`) as two of this figure's own layers, each
+    reading its own frame -- the PR curve's rows never carry a null-padded
+    share of the iso overlay's rows, or vice versa.
     """
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.pr_curve(average=None if per_class else average, diagnostic="pr_chart")
-    if iso_lines:
-        df = _inject_pr_iso_lines(df)
 
     # Inject the positive-class-prevalence baseline as a same-data column
     # (one non-null entry, rest null) so the mark_rule overlay shares
@@ -265,9 +285,7 @@ def _pr_chart_from_source(
     # fallback.  Binary classifiers only -- multi-class baselines would
     # need one rule per class which is information-dense without payoff.
     baseline_prevalence: float | None = None
-    y_series = getattr(source, "y", None)
-    if y_series is None:
-        y_series = getattr(source, "_y", None)
+    y_series = _source_target(source)
     if y_series is not None:
         unique_y = y_series.unique().sort()
         if len(unique_y) == 2:
@@ -297,7 +315,7 @@ def _pr_chart_from_source(
         ferrum.Chart(df)
         .mark_pr(
             annotate_ap=False,
-            iso_lines=iso_lines,
+            iso_lines=False,
             color_field=color_field,
         )
         .encode(
@@ -306,6 +324,10 @@ def _pr_chart_from_source(
         )
     )
     chart = _title_legend(chart, "color", color_title)
+
+    if iso_lines:
+        iso_line_layer, iso_label_layer = _pr_iso_layers()
+        chart = chart.layer(iso_line_layer, iso_label_layer)
 
     chart = chart.properties(
         title=ferrum.Title("Precision–Recall Curve", subtitle=subtitle),
