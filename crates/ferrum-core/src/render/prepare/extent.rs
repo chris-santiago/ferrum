@@ -976,6 +976,7 @@ mod tests {
 
     fn smooth_pad_spec(x_range_pad: f64) -> crate::transform::smooth::SmoothSpec {
         crate::transform::smooth::SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             method: crate::transform::smooth::SmoothMethod::Lm,
             ci: None,
@@ -1023,6 +1024,7 @@ mod tests {
     /// routes, same underlying extent functions.
     fn robust_pad_spec(x_range_pad: f64) -> crate::transform::robust::RobustSpec {
         crate::transform::robust::RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             n_grid: 5, ci: None, huber_c: 1.345, max_iter: 50, tol: 1e-9,
             output: crate::transform::smooth::SmoothOutput::Fitted,

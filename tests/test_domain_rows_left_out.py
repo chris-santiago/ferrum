@@ -969,12 +969,24 @@ def test_the_same_unknown_x2_column_on_a_layered_door_names_the_layer():
 
 
 def test_a_statistic_layers_inherited_binding_drops_and_warns_like_the_plus_door():
-    """``residplot``'s own door and ``mark_histogram().layer()`` both
-    inherit a non-positional binding (``opacity``) naming a source column
-    their own statistic's output does not carry: both drop the binding,
-    warn naming it, and still render, exactly as ``+`` already does for
-    the same mistake. Rejects a fix that refuses instead of warning on
-    either the own-figure or the ``.layer()`` door."""
+    """``mark_histogram().layer()`` inherits a non-positional binding
+    (``opacity``) naming a source column its own statistic's output does
+    not carry: it drops the binding, warns naming it, and still renders,
+    exactly as ``+`` already does for the same mistake. Rejects a fix that
+    refuses instead of warning on either door.
+
+    ``residplot``'s own door carries every column of the caller's row
+    through its residual batch (beside the columns it computes), so the
+    point layer -- which draws one mark per row -- reads the SAME binding
+    (``v``, the predictor itself) silently, the same value a plain chart's
+    point layer would. The reference and metrics layers draw one mark for
+    their whole fit, so the carried column is still there to read, but an
+    inherited per-row binding on a one-mark-per-fit layer is exactly the
+    mistake this test's other two doors already warn about: both drop the
+    binding and warn, naming the rule and text marks in turn. Its
+    ``lowess=True`` overlay reads a genuinely separate fit-grid batch that
+    lacks ``v`` outright, and keeps the same drop-and-warn contract, on
+    that one layer as well."""
     df = pl.DataFrame({"v": [float(i) for i in range(20)], "w": [float(i) * 2 for i in range(20)]})
 
     plus_msgs, plus_svg = _warnings_of(
@@ -992,18 +1004,35 @@ def test_a_statistic_layers_inherited_binding_drops_and_warns_like_the_plus_door
     assert layer_msgs == [expected]
     assert "<svg" in layer_svg
 
-    residplot_msgs, residplot_svg = _warnings_of(
-        fm.residplot(df, x="v", y="w").encode(opacity="v").to_svg
-    )
-    assert residplot_msgs == [
-        "residplot: opacity 'v' was dropped: the statistic this point mark draws does not "
-        "carry 'v', so it draws without opacity",
+    rule_dropped = (
         "residplot: opacity 'v' was dropped: the statistic this rule mark draws does not "
-        "carry 'v', so it draws without opacity",
+        "carry 'v', so it draws without opacity"
+    )
+    text_dropped = (
         "residplot: opacity 'v' was dropped: the statistic this text mark draws does not "
-        "carry 'v', so it draws without opacity",
-    ]
+        "carry 'v', so it draws without opacity"
+    )
+    line_dropped = (
+        "residplot: opacity 'v' was dropped: the statistic this line mark draws does not "
+        "carry 'v', so it draws without opacity"
+    )
+
+    residplot_chart = fm.residplot(df, x="v", y="w").encode(opacity="v")
+    residplot_msgs, residplot_svg = _warnings_of(residplot_chart.to_svg)
+    assert residplot_msgs == [rule_dropped, text_dropped]
     assert "<svg" in residplot_svg
+    point_opacities = [n["style"]["opacity"] for n in _scene(residplot_chart)["panels"][0]["marks"][0]["nodes"]]
+    sibling_opacities = [
+        n["style"]["opacity"]
+        for n in _scene(Chart(df).mark_point().encode(x="v", y="w", opacity="v"))["panels"][0]["marks"][0]["nodes"]
+    ]
+    assert point_opacities == sibling_opacities
+
+    residplot_lowess_msgs, residplot_lowess_svg = _warnings_of(
+        fm.residplot(df, x="v", y="w", lowess=True).encode(opacity="v").to_svg
+    )
+    assert residplot_lowess_msgs == [rule_dropped, text_dropped, line_dropped]
+    assert "<svg" in residplot_lowess_svg
 
 
 # ---------------------------------------------------------------------------

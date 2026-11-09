@@ -45,6 +45,7 @@ fn test_lm_recovers_slope_and_intercept_exactly() {
     let ys: Vec<f64> = xs.iter().map(|x| 3.0 + 2.0 * x).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -74,6 +75,7 @@ fn test_lm_ci_band_brackets_fit_at_mean_x() {
     let mean_x = xs.iter().sum::<f64>() / xs.len() as f64;
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: Some(0.95),
@@ -103,6 +105,7 @@ fn test_lm_zero_variance_x_emits_nan_line() {
     let ys: Vec<f64> = (0..10).map(|i| i as f64).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: Some(0.95),
@@ -123,6 +126,7 @@ fn test_lm_zero_variance_x_emits_nan_line() {
 fn test_lm_n_lt_2_emits_all_nan() {
     let batch = xy_batch(vec![1.0], vec![1.0]);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -142,6 +146,7 @@ fn test_lm_n_lt_2_emits_all_nan() {
 #[test]
 fn test_smooth_round_trip_json() {
     let original = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: Some(0.95),
@@ -175,6 +180,7 @@ fn test_loess_deg1_against_fixtures() {
         if case.degree != 1 { continue; }
         let batch = xy_batch(case.x.clone(), case.y.clone());
         let spec = SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Loess, ci: None,
             bandwidth: case.bandwidth, degree: case.degree, k: gam::DEFAULT_BASIS_DIM, n: case.n, seed: 0,
@@ -212,6 +218,7 @@ fn test_loess_deg2_against_fixtures() {
         if case.degree != 2 { continue; }
         let batch = xy_batch(case.x.clone(), case.y.clone());
         let spec = SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Loess, ci: None,
             bandwidth: case.bandwidth, degree: case.degree, k: gam::DEFAULT_BASIS_DIM, n: case.n, seed: 0,
@@ -242,6 +249,7 @@ fn test_loess_deg2_local_window_too_small_emits_nan() {
     let ys: Vec<f64> = vec![0.0, 1.0, 4.0];
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Loess, ci: None,
         bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
@@ -276,6 +284,7 @@ fn test_loess_deg1_bootstrap_ci_is_reproducible_under_seed() {
     let ys: Vec<f64> = xs.iter().map(|x| (x).sin()).collect();
     let batch = xy_batch(xs, ys);
     let spec1 = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Loess,
         ci: Some(0.95),
@@ -306,6 +315,7 @@ fn smooth_x_bins_pre_aggregates_then_fits() {
     let ys: Vec<f64> = xs.iter().map(|x| 2.0 * x + 1.0).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm, ci: None,
         bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
@@ -333,6 +343,7 @@ fn smooth_output_residuals_returns_y_minus_fitted() {
     ).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm, ci: None,
         bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
@@ -360,6 +371,7 @@ fn smooth_output_default_is_fitted() {
     let ys: Vec<f64> = xs.iter().map(|x| x + 1.0).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm, ci: Some(0.95),
         bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
@@ -382,6 +394,7 @@ fn test_lm_two_row_minimal_fit() {
     // 2 points is the minimum for a valid linear fit: y = 1 + 2x.
     let batch = xy_batch(vec![0.0, 1.0], vec![1.0, 3.0]);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -414,6 +427,7 @@ fn test_lm_constant_y_flat_line() {
     let ys: Vec<f64> = vec![3.0; 10];
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -444,6 +458,7 @@ fn test_linear_alias_matches_lm() {
     let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 3.0).collect();
     let batch = xy_batch(xs, ys);
     let base = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: Some(0.95),
@@ -475,6 +490,7 @@ fn test_quadratic_recovers_degree2_polynomial() {
     let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x + 3.0 * x * x).collect();
     let batch = xy_batch(xs.clone(), ys.clone());
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 2 },
         ci: None,
@@ -504,6 +520,7 @@ fn test_cubic_recovers_degree3_polynomial() {
     let ys: Vec<f64> = xs.iter().map(|&x| -2.0 + x - 0.5 * x * x + 0.1 * x * x * x).collect();
     let batch = xy_batch(xs.clone(), ys.clone());
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 3 },
         ci: None,
@@ -532,6 +549,7 @@ fn test_log_x_recovers_log_relationship() {
     let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 3.0 * x.ln()).collect();
     let batch = xy_batch(xs.clone(), ys.clone());
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::LogX,
         ci: None,
@@ -560,6 +578,7 @@ fn test_sqrt_x_recovers_sqrt_relationship() {
     let ys: Vec<f64> = xs.iter().map(|&x| 2.0 + 4.0 * x.sqrt()).collect();
     let batch = xy_batch(xs.clone(), ys.clone());
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::SqrtX,
         ci: None,
@@ -587,6 +606,7 @@ fn test_log_x_nan_at_nonpositive_grid_points() {
     let ys: Vec<f64> = xs.iter().map(|&x| x.ln()).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::LogX,
         ci: None,
@@ -688,6 +708,7 @@ fn test_nan_in_x_is_dropped_from_smooth() {
     let batch_nan = xy_batch(xs_nan, ys_clean.clone());
 
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -729,6 +750,7 @@ fn test_nan_in_y_is_dropped_from_smooth() {
     let batch_nan = xy_batch(xs_clean.clone(), ys_nan);
 
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -800,6 +822,7 @@ fn test_smooth_grouped_int64_group_roundtrips_as_int64() {
     )
     .unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -865,6 +888,7 @@ fn test_smooth_grouped_name_collision_with_output_column_refuses() {
     )
     .unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x_in".into(), y: "y_in".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -917,6 +941,7 @@ fn test_smooth_grouped_boolean_group_column() {
     )
     .unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -977,6 +1002,7 @@ fn test_smooth_grouped_utf8_group_unchanged() {
     )
     .unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -1024,6 +1050,7 @@ fn test_smooth_all_null_group_pools_the_whole_batch_with_a_null_group_column() {
     )
     .unwrap();
     let grouped = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -1111,6 +1138,7 @@ fn test_glm_point_estimate_matches_lm_ols() {
         .collect();
     let batch = xy_batch(xs, ys);
     let lm_spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -1144,6 +1172,7 @@ fn test_glm_ci_band_differs_from_lm_ci_band_proving_distinct_implementation() {
         .collect();
     let batch = xy_batch(xs, ys);
     let lm_spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: Some(0.95),
@@ -1176,6 +1205,7 @@ fn test_lm_degree_2_byte_equal_to_quadratic() {
     let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x + 3.0 * x * x).collect();
     let batch = xy_batch(xs, ys);
     let lm_deg2_spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 2 },
         ci: None,
@@ -1367,6 +1397,7 @@ fn test_degree_exactly_n_minus_one_is_not_rank_deficient() {
     let ys: Vec<f64> = xs.iter().map(|&x| x + 1.0).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 19 },
         ci: None,
@@ -1409,6 +1440,7 @@ fn test_rank_deficient_degree_inside_one_group_stays_nan_not_refused() {
         ],
     ).unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 19 },
         ci: None,
@@ -1453,6 +1485,7 @@ fn test_apply_grouped_survives_degenerate_non_first_group_with_inject_metrics() 
         ],
     ).unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Glm,
         ci: None,
@@ -1541,6 +1574,7 @@ fn all_nan_output_via_apply_with_inject_metrics_emits_null_metrics_columns() {
         ],
     ).unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None, bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
@@ -1589,6 +1623,7 @@ fn poly_fit_degenerate_group_with_inject_metrics_emits_null_not_garbage() {
         ],
     ).unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Poly { degree: 3 },
         ci: None,
@@ -1632,6 +1667,7 @@ fn gam_spec(ci: Option<f64>, n: usize) -> SmoothSpec {
 
 fn gam_spec_with_k(ci: Option<f64>, n: usize, k: usize) -> SmoothSpec {
     SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Gam,
         ci,
@@ -1731,6 +1767,7 @@ fn test_gam_is_not_loess_point_estimates_and_seed_dependence_both_differ() {
     let gam_out = apply(&gam_spec(Some(0.95), 40), &batch).unwrap();
     let loess_out = apply(
         &SmoothSpec {
+            residual_columns: Default::default(),
             method: SmoothMethod::Loess,
             degree: 2,
             ..gam_spec(Some(0.95), 40)
@@ -1754,6 +1791,7 @@ fn test_gam_is_not_loess_point_estimates_and_seed_dependence_both_differ() {
     }
     let loess_reseeded = apply(
         &reseed(SmoothSpec {
+            residual_columns: Default::default(),
             method: SmoothMethod::Loess,
             degree: 2,
             ..gam_spec(Some(0.95), 40)
@@ -1912,6 +1950,7 @@ fn test_gam_residuals_output_and_metrics_compose() {
     let n_rows = xs.len();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         output: SmoothOutput::Residuals,
         inject_metrics: true,
         ..gam_spec(None, 20)
@@ -2111,6 +2150,7 @@ fn lm_zero_variance_pushes_a_degenerate_fit_warning() {
     let ys: Vec<f64> = (0..10).map(|i| i as f64).collect();
     let batch = xy_batch(xs, ys);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -2142,6 +2182,7 @@ fn a_degenerate_fit_names_the_step_that_raised_it() {
 
     let batch = xy_batch(vec![1.0], vec![1.0]);
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -2184,6 +2225,7 @@ fn smooth_grouped_degenerate_group_names_the_group() {
         Arc::new(arrow::array::StringArray::from(groups)),
     ]).unwrap();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci: None,
@@ -2358,6 +2400,7 @@ fn test_gam_k_below_min_basis_dim_via_json_deserialization() {
     // This bypasses Python validation, simulating what happens when a
     // ChartSpec JSON with explicit "k": 2 deserializes in Rust.
     let spec_low = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Gam,
         ci: None,
@@ -2399,6 +2442,7 @@ fn test_gam_k_zero_via_json_deserialization() {
 
     // Build a spec with k=0.
     let spec_zero = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Gam,
         ci: None,
@@ -2559,6 +2603,7 @@ fn smooth_x_estimator_parses_through_the_agg_fn_subset() {
 /// knobs the tests below vary.
 fn lm_ci_spec(ci: Option<f64>, groupby: Vec<String>) -> SmoothSpec {
     SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(), y: "y".into(),
         method: SmoothMethod::Lm,
         ci,
@@ -2657,6 +2702,7 @@ fn poly_quadratic_n3_warns_with_the_parameter_count() {
     let batch = xy_batch(xs, ys);
     let ctx = TransformContext::default();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         method: SmoothMethod::Poly { degree: 2 },
         ..lm_ci_spec(Some(0.95), vec![])
     };
@@ -2712,6 +2758,7 @@ fn loess_partial_band_warns_with_the_point_count() {
     let batch = xy_batch(xs, ys);
     let ctx = TransformContext::default();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         method: SmoothMethod::Loess,
         bandwidth: 3.0 / 11.0,
         degree: 1,
@@ -2743,6 +2790,7 @@ fn loess_partial_band_warns_with_a_single_undefined_point() {
     let batch = xy_batch(xs, ys);
     let ctx = TransformContext::default();
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         method: SmoothMethod::Loess,
         bandwidth: 3.0 / 11.0,
         degree: 1,
@@ -3068,4 +3116,611 @@ fn x_range_pad_in_log_units_never_goes_off_side_where_a_data_space_pad_would() {
         close(grid.iter().cloned().reduce(f64::max).unwrap(), expected_hi),
         "expected the padded high end {expected_hi}, got {grid:?}"
     );
+}
+
+// ── Residuals mode carries the caller's other input columns ─────────────
+
+/// A minimal `lm`-method residuals-output spec, with `x`/`y`/`groupby` as
+/// the knobs the carried-column tests below vary.
+fn residuals_spec(x: &str, y: &str, groupby: Vec<String>) -> SmoothSpec {
+    SmoothSpec {
+        residual_columns: Default::default(),
+        x: x.into(), y: y.into(),
+        method: SmoothMethod::Lm,
+        ci: None,
+        bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+        x_bins: None, x_estimator: None, output: SmoothOutput::Residuals,
+        inject_zero_ref: false, inject_metrics: false, x_range: None, x_range_pad: None,
+        groupby,
+        name: None,
+    }
+}
+
+/// Every other column the caller's batch holds rides along on the
+/// residuals batch, copied at exactly the rows the fit kept (one row is
+/// dropped for a NaN `y`), in the surviving rows' own order, at every
+/// dtype, with a null and a NaN each copied as the caller's own row held
+/// them — the `Bin(per_row=True)` row-preserving contract applied to
+/// `Smooth`'s residual mode. The predictor's own column ("v") and the
+/// computed output ("x") hold the same surviving values under their own,
+/// different, names.
+#[test]
+fn smooth_residuals_carries_other_input_columns_at_surviving_rows_in_order() {
+    let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+    let w: Vec<f64> = vec![1.0, 3.0, f64::NAN, 7.0, 9.0]; // row 2 dropped (NaN y)
+    let s: Vec<Option<f64>> = vec![Some(10.0), None, Some(30.0), Some(f64::NAN), Some(50.0)];
+    let id: Vec<&str> = vec!["r0", "r1", "r2", "r3", "r4"];
+    let flag: Vec<bool> = vec![true, false, true, false, true];
+    let count: Vec<i64> = vec![100, 200, 300, 400, 500];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+        Field::new("s", DataType::Float64, true),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("flag", DataType::Boolean, true),
+        Field::new("count", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v.clone())),
+        Arc::new(Float64Array::from(w.clone())),
+        Arc::new(Float64Array::from(s.clone())),
+        Arc::new(arrow::array::StringArray::from(id.clone())),
+        Arc::new(arrow::array::BooleanArray::from(flag.clone())),
+        Arc::new(arrow::array::Int64Array::from(count.clone())),
+    ]).unwrap();
+    let spec = residuals_spec("v", "w", vec![]);
+    let out = apply(&spec, &batch).unwrap();
+
+    assert_eq!(out.num_rows(), 4, "row 2 (NaN y) is dropped from the fit, and from every carried column");
+    let schema = out.schema();
+    let mut names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["count", "flag", "id", "residual", "s", "v", "w", "x"]);
+
+    assert_eq!(col(&out, "v"), vec![0.0, 1.0, 3.0, 4.0], "the predictor's own column carries too");
+    assert_eq!(col(&out, "x"), vec![0.0, 1.0, 3.0, 4.0], "the computed x holds the same surviving values");
+    assert_eq!(col(&out, "w"), vec![1.0, 3.0, 7.0, 9.0], "the response column rides along as a carried column");
+
+    let s_out = out.column(out.schema().index_of("s").unwrap())
+        .as_any().downcast_ref::<Float64Array>().unwrap();
+    assert_eq!(s_out.value(0), 10.0);
+    assert!(s_out.is_null(1), "the caller's own null in a carried column stays null");
+    assert!(!s_out.is_null(2) && s_out.value(2).is_nan(), "a NaN (never nulled) in a carried column is copied as the caller's row held it");
+    assert_eq!(s_out.value(3), 50.0);
+
+    let id_out = out.column(out.schema().index_of("id").unwrap())
+        .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!((0..4).map(|i| id_out.value(i)).collect::<Vec<_>>(), vec!["r0", "r1", "r3", "r4"]);
+
+    let flag_out = out.column(out.schema().index_of("flag").unwrap())
+        .as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    assert_eq!((0..4).map(|i| flag_out.value(i)).collect::<Vec<_>>(), vec![true, false, false, true]);
+
+    let count_out = out.column(out.schema().index_of("count").unwrap())
+        .as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    assert_eq!((0..4).map(|i| count_out.value(i)).collect::<Vec<_>>(), vec![100, 200, 400, 500]);
+}
+
+/// A predictor literally named `x` is not carried a second time: the
+/// computed `x` output already holds its values, so the row-preserving
+/// carry does not duplicate it — it simply does not refuse the call
+/// either, since the column's content is byte-identical to what `x`
+/// already carries. The response `y` still rides along as an ordinary
+/// carried column.
+#[test]
+fn smooth_residuals_predictor_named_x_is_not_carried_twice() {
+    let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
+    let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 1.0).collect();
+    let batch = xy_batch(xs, ys.clone());
+    let spec = residuals_spec("x", "y", vec![]);
+    let out = apply(&spec, &batch).unwrap();
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, vec!["x", "residual", "y"], "x is not duplicated; y rides along as a carried column");
+    assert_eq!(col(&out, "y"), ys, "the carried y column holds the caller's own response values");
+}
+
+/// An input column named like one of the step's own output columns is
+/// refused rather than shadowed — the `Bin(per_row=True)` collision text,
+/// applied to `Smooth`'s residual mode, for every name the step can emit:
+/// the always-emitted `residual`, the computed `x` when the predictor is
+/// a different column (`v`), and `_ref_zero`/`_metrics_text`/`_metrics_y`
+/// only when their own inject flag asks for them.
+#[test]
+fn smooth_residuals_refuses_an_input_column_named_like_each_column_it_emits() {
+    pyo3::Python::initialize();
+    for (taken, spec) in [
+        ("residual", residuals_spec("v", "w", vec![])),
+        ("x", residuals_spec("v", "w", vec![])),
+        ("_ref_zero", SmoothSpec { inject_zero_ref: true, ..residuals_spec("v", "w", vec![]) }),
+        ("_metrics_text", SmoothSpec { inject_metrics: true, ..residuals_spec("v", "w", vec![]) }),
+        ("_metrics_y", SmoothSpec { inject_metrics: true, ..residuals_spec("v", "w", vec![]) }),
+    ] {
+        let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+        let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+        let taken_col: Vec<f64> = vec![-1.0, -2.0, -3.0, -4.0];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new(taken, DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v)),
+            Arc::new(Float64Array::from(w)),
+            Arc::new(Float64Array::from(taken_col)),
+        ]).unwrap();
+        let err = apply(&spec, &batch).expect_err(&format!("a data column named '{taken}' must refuse"));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "ValueError: stat_smooth: residual output column '{taken}' collides with an \
+                 input column of the same name; rename the input column"
+            ),
+            "{taken}",
+        );
+    }
+}
+
+/// An optional column this call does NOT emit (`_ref_zero`/`_metrics_text`/
+/// `_metrics_y` with the matching inject flag unset) is carried like any
+/// other column — the collision check names only what a call actually
+/// emits, not every column the step could ever emit.
+#[test]
+fn smooth_residuals_carries_an_input_column_named_like_an_optional_column_it_does_not_emit() {
+    for taken in ["_ref_zero", "_metrics_text", "_metrics_y"] {
+        let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+        let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+        let taken_col: Vec<f64> = vec![9.0, 8.0, 7.0, 6.0];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new(taken, DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v)),
+            Arc::new(Float64Array::from(w)),
+            Arc::new(Float64Array::from(taken_col)),
+        ]).unwrap();
+        let spec = residuals_spec("v", "w", vec![]);
+        let out = apply(&spec, &batch).expect(&format!("'{taken}' is an ordinary carried column when not requested"));
+        assert_eq!(col(&out, taken), vec![9.0, 8.0, 7.0, 6.0], "{taken}");
+    }
+}
+
+/// Fewer than 2 usable points degrades to the existing zero-row residuals
+/// batch (unchanged), but its schema still carries every other input
+/// column, at its own dtype — so a value channel on a data column
+/// resolves even though no row is drawn.
+#[test]
+fn smooth_residuals_degenerate_batch_still_carries_input_schema() {
+    let v: Vec<f64> = vec![1.0];
+    let w: Vec<f64> = vec![2.0];
+    let s: Vec<&str> = vec!["only-row"];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+        Field::new("s", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v)),
+        Arc::new(Float64Array::from(w)),
+        Arc::new(arrow::array::StringArray::from(s)),
+    ]).unwrap();
+    let spec = residuals_spec("v", "w", vec![]);
+    let out = apply(&spec, &batch).expect("fewer than 2 points degrades, not fails");
+    assert_eq!(out.num_rows(), 0, "a single usable row still can't fit a line");
+    let schema = out.schema();
+    let mut names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["residual", "s", "v", "w", "x"]);
+    assert_eq!(
+        out.schema().field(out.schema().index_of("s").unwrap()).data_type(),
+        &DataType::Utf8,
+        "the carried column keeps its own dtype even with no rows to carry",
+    );
+}
+
+/// A grouped residuals fit carries every other input column per group, in
+/// each group's own row order, and the group key is appended once by the
+/// stacking template — not duplicated by the carry (the predictor is
+/// literally named `x` here too, so this also covers "a predictor named x
+/// and group keys not duplicated" together).
+#[test]
+fn smooth_residuals_grouped_carries_columns_without_duplicating_group_key() {
+    let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let ys: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0, 5.0, 3.0];
+    let s: Vec<f64> = vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
+    let expected_groups: Vec<&str> = vec!["a", "a", "a", "b", "b", "b"];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("s", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys)),
+        Arc::new(Float64Array::from(s.clone())),
+        Arc::new(arrow::array::StringArray::from(expected_groups.clone())),
+    ]).unwrap();
+    let spec = residuals_spec("x", "y", vec!["g".into()]);
+    let out = apply(&spec, &batch).unwrap();
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, vec!["x", "residual", "y", "s", "g"], "x is not duplicated, and g is appended once");
+    assert_eq!(col(&out, "s"), s, "the carried column follows each group's own rows, in order, group by group");
+    let g_col = out.column(out.schema().index_of("g").unwrap())
+        .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!((0..6).map(|i| g_col.value(i)).collect::<Vec<_>>(), expected_groups);
+}
+
+/// With the groups interleaved in the input (`a, b, a, b, ...`), each
+/// group's emitted rows carry its OWN input row's values, in that row's
+/// own position within the group — not the input's own interleaved
+/// order, and not another group's row at the same input position. A
+/// carry that read `row_idx` against the wrong partition, or read values
+/// in plain input order instead of per-group, would mix `a`'s and `b`'s
+/// `id` values here; a contiguous fixture (as above) cannot tell the two
+/// apart.
+#[test]
+fn smooth_residuals_grouped_rows_carry_their_own_values_under_interleaved_groups() {
+    let xs: Vec<f64> = (0..8).map(|i| i as f64).collect();
+    let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| if i % 2 == 0 { 2.0 * x } else { -1.0 * x }).collect();
+    let id: Vec<&str> = vec!["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+    let g: Vec<&str> = vec!["a", "b", "a", "b", "a", "b", "a", "b"];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys)),
+        Arc::new(arrow::array::StringArray::from(id)),
+        Arc::new(arrow::array::StringArray::from(g)),
+    ]).unwrap();
+    let spec = residuals_spec("x", "y", vec!["g".into()]);
+    let out = apply(&spec, &batch).unwrap();
+
+    assert_eq!(out.num_rows(), 8);
+    let id_out = out.column(out.schema().index_of("id").unwrap())
+        .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(
+        (0..8).map(|i| id_out.value(i)).collect::<Vec<_>>(),
+        vec!["r0", "r2", "r4", "r6", "r1", "r3", "r5", "r7"],
+        "group a's own rows (even input positions), then group b's own rows (odd), each in its original relative order",
+    );
+    let g_out = out.column(out.schema().index_of("g").unwrap())
+        .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(
+        (0..8).map(|i| g_out.value(i)).collect::<Vec<_>>(),
+        vec!["a", "a", "a", "a", "b", "b", "b", "b"],
+    );
+}
+
+/// Under `x_bins=`, the FIT aggregates into bins, but the residual rows —
+/// and every carried column — stay at the ORIGINAL (un-binned) input
+/// rows, in their original order: residual mode is always row-preserving
+/// over the caller's own rows, `x_bins` or not.
+#[test]
+fn smooth_residuals_with_x_bins_still_carries_the_original_rows() {
+    let xs: Vec<f64> = (0..20).map(|i| i as f64 / 2.0).collect();
+    let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 1.0).collect();
+    let s: Vec<f64> = (0..20).map(|i| i as f64 * 10.0).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("s", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys)),
+        Arc::new(Float64Array::from(s.clone())),
+    ]).unwrap();
+    let spec = SmoothSpec { x_bins: Some(4), ..residuals_spec("x", "y", vec![]) };
+    let out = apply(&spec, &batch).unwrap();
+    assert_eq!(out.num_rows(), 20, "residual rows stay one per ORIGINAL input row; x_bins does not shrink them");
+    assert_eq!(col(&out, "s"), s, "the carried column follows the original rows, not the binned ones");
+}
+
+/// A carried (non-positional) column rides through a demanded log x
+/// unmapped: its own values are copied straight from the caller's batch,
+/// never forward/backward-mapped the way the predictor's own `x` slot is
+/// — and the predictor's own column, literally named `x` here, is still
+/// not carried a second time even though the fit now reads it through a
+/// log-mapped private column, not its own name.
+#[test]
+fn smooth_residuals_on_a_demanded_log_x_carries_other_columns_unmapped() {
+    pyo3::Python::initialize();
+    let xs: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let ys: Vec<f64> = xs.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+    let weights: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys.clone())),
+        Arc::new(Float64Array::from(weights.clone())),
+    ]).unwrap();
+    let spec = SmoothSpec { output: SmoothOutput::Residuals, ..lm_ci_spec(None, vec![]) };
+    let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+    let out = apply_with_context(&spec, &batch, &ctx).expect("a clean log-x fit emits residuals");
+    assert_eq!(out.num_rows(), 6, "every row survives (no nulls to drop)");
+    assert_eq!(col(&out, "w"), weights, "the carried column is copied straight from the caller, never log-mapped");
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(
+        names, vec!["x", "residual", "y", "w"],
+        "the caller's own x column is not carried a second time even under a demanded log x",
+    );
+}
+
+/// When the predictor is NOT named `x` (it is `v` here), a demanded log x
+/// maps only a fresh, private column for the fit itself — the caller's
+/// own `v` column is carried verbatim, in data units, and the private
+/// column never leaks into the output: `run_in_log_space`'s own
+/// post-body filter strips any column named in its `private` set, which
+/// is exactly what the generated name would be.
+#[test]
+fn smooth_residuals_on_a_demanded_log_x_keeps_a_predictor_not_named_x_in_data_units() {
+    pyo3::Python::initialize();
+    let v: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let w: Vec<f64> = v.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v.clone())),
+        Arc::new(Float64Array::from(w)),
+    ]).unwrap();
+    let spec = SmoothSpec { x: "v".into(), y: "w".into(), output: SmoothOutput::Residuals, ..lm_ci_spec(None, vec![]) };
+    let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+    let out = apply_with_context(&spec, &batch, &ctx).expect("a clean log-x fit emits residuals");
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert!(
+        names.iter().all(|n| !n.starts_with("__log_space_")),
+        "no private log-space column leaks into the output: {names:?}",
+    );
+    assert_eq!(names, vec!["x", "residual", "v", "w"], "v carries under its own name, not folded into x");
+    assert_eq!(col(&out, "v"), v, "the carried predictor is the caller's own data-space values, never log-mapped");
+    let xg = col(&out, "x");
+    for (xq, vq) in xg.iter().zip(v.iter()) {
+        assert!(
+            (xq - vq).abs() < 1e-9,
+            "the computed x, mapped back, must equal the predictor's own data-space value: x={xq} v={vq}",
+        );
+    }
+}
+
+// ── The internal residual_columns naming setting ─────────────────────────
+
+/// Setting every computed column's name moves them all out of the way:
+/// the output carries the computed columns under their SET names first,
+/// then every input column in input order — including the predictor, and
+/// including data columns that happen to be named like the DEFAULT output
+/// names (`x`, `residual`, `_ref_zero`, `_metrics_text`, `_metrics_y`),
+/// which are now ordinary data, not a collision.
+#[test]
+fn smooth_residuals_emits_its_columns_under_the_names_its_setting_gives() {
+    let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+    let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+    let x_col: Vec<f64> = vec![100.0, 101.0, 102.0, 103.0];
+    let residual_col: Vec<f64> = vec![200.0, 201.0, 202.0, 203.0];
+    let ref_zero_col: Vec<f64> = vec![300.0, 301.0, 302.0, 303.0];
+    let metrics_text_col: Vec<f64> = vec![400.0, 401.0, 402.0, 403.0];
+    let metrics_y_col: Vec<f64> = vec![500.0, 501.0, 502.0, 503.0];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+        Field::new("x", DataType::Float64, true),
+        Field::new("residual", DataType::Float64, true),
+        Field::new("_ref_zero", DataType::Float64, true),
+        Field::new("_metrics_text", DataType::Float64, true),
+        Field::new("_metrics_y", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v)),
+        Arc::new(Float64Array::from(w)),
+        Arc::new(Float64Array::from(x_col.clone())),
+        Arc::new(Float64Array::from(residual_col.clone())),
+        Arc::new(Float64Array::from(ref_zero_col.clone())),
+        Arc::new(Float64Array::from(metrics_text_col.clone())),
+        Arc::new(Float64Array::from(metrics_y_col.clone())),
+    ]).unwrap();
+    let mut spec = SmoothSpec { inject_zero_ref: true, inject_metrics: true, ..residuals_spec("v", "w", vec![]) };
+    spec.residual_columns = ResidualColumns {
+        x: "x_1".into(), residual: "residual_1".into(), ref_zero: "_ref_zero_1".into(),
+        metrics_text: "_metrics_text_1".into(), metrics_y: "_metrics_y_1".into(),
+    };
+    let out = apply(&spec, &batch).unwrap();
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["x_1", "residual_1", "_ref_zero_1", "_metrics_text_1", "_metrics_y_1", "v", "w", "x", "residual", "_ref_zero", "_metrics_text", "_metrics_y"],
+        "the computed columns under their set names, then every input column in input order",
+    );
+    assert_eq!(col(&out, "x"), x_col, "the data's own 'x' column, not the computed output, carries verbatim");
+    assert_eq!(col(&out, "residual"), residual_col);
+    assert_eq!(col(&out, "_ref_zero"), ref_zero_col);
+    assert_eq!(col(&out, "_metrics_text"), metrics_text_col);
+    assert_eq!(col(&out, "_metrics_y"), metrics_y_col);
+}
+
+/// An input column named like a SET name (not a default one) is refused
+/// the same way an input column named like a default output name is.
+#[test]
+fn smooth_residuals_refuses_an_input_column_named_like_a_set_name() {
+    pyo3::Python::initialize();
+    let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+    let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+    let r1_col: Vec<f64> = vec![9.0, 8.0, 7.0, 6.0];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+        Field::new("r1", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v)),
+        Arc::new(Float64Array::from(w)),
+        Arc::new(Float64Array::from(r1_col)),
+    ]).unwrap();
+    let mut spec = residuals_spec("v", "w", vec![]);
+    spec.residual_columns.residual = "r1".into();
+    let err = apply(&spec, &batch).expect_err("a data column named like the SET residual name must refuse");
+    assert_eq!(
+        err.to_string(),
+        "ValueError: stat_smooth: residual output column 'r1' collides with an input column of the same name; rename the input column",
+    );
+}
+
+/// An empty residual column name, or two columns sharing one name, both
+/// refuse before the fit even runs.
+#[test]
+fn smooth_residuals_refuses_an_empty_or_shared_column_name() {
+    pyo3::Python::initialize();
+    let batch = xy_batch(vec![0.0, 1.0], vec![1.0, 3.0]);
+
+    let mut empty_name = residuals_spec("x", "y", vec![]);
+    empty_name.residual_columns.residual = String::new();
+    let err = apply(&empty_name, &batch).expect_err("an empty residual column name must refuse");
+    assert_eq!(err.to_string(), "ValueError: stat_smooth: a residual column name cannot be empty");
+
+    let mut shared_name = residuals_spec("x", "y", vec![]);
+    shared_name.residual_columns.ref_zero = "residual".into();
+    let err = apply(&shared_name, &batch).expect_err("two columns sharing one name must refuse");
+    assert_eq!(
+        err.to_string(),
+        "ValueError: stat_smooth: residual column name 'residual' is given to more than one column",
+    );
+}
+
+/// A set `x` name reaches the log-space machinery: declared in the X slot
+/// by `TransformSpec::space_columns`, and actually mapped back to data
+/// units by a demanded log x at render time.
+#[test]
+fn smooth_residuals_with_a_set_x_name_on_a_demanded_log_x_maps_that_column_back() {
+    let mut spec = residuals_spec("v", "w", vec![]);
+    spec.residual_columns.x = "x_1".into();
+    let columns = TransformSpec::Smooth(spec.clone()).space_columns();
+    assert_eq!(columns.len(), 1, "{columns:?}");
+    assert_eq!(columns[0].output, "x_1");
+    assert_eq!(columns[0].slot, SpaceSlot::X);
+    assert_eq!(columns[0].input, "v");
+
+    let v: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let w: Vec<f64> = v.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v.clone())),
+        Arc::new(Float64Array::from(w)),
+    ]).unwrap();
+    let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+    let out = apply_with_context(&spec, &batch, &ctx).expect("a clean log-x fit emits residuals");
+    let xg = col(&out, "x_1");
+    for (xq, vq) in xg.iter().zip(v.iter()) {
+        assert!(
+            (xq - vq).abs() < 1e-9,
+            "x_1, mapped back, must equal v's own data-space value: x_1={xq} v={vq}",
+        );
+    }
+}
+
+/// Grouping by a column named like the DEFAULT residual column works once
+/// the computed residual is given a fresh name: the group key keeps the
+/// caller's own values, under a different name from the computed column.
+#[test]
+fn smooth_residuals_grouped_by_a_column_named_like_the_default_residual_with_the_residual_set_fresh() {
+    let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0, 5.0, 3.0];
+    let residual_group: Vec<&str> = vec!["a", "a", "a", "b", "b", "b"];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("v", DataType::Float64, true),
+        Field::new("w", DataType::Float64, true),
+        Field::new("residual", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(v)),
+        Arc::new(Float64Array::from(w)),
+        Arc::new(arrow::array::StringArray::from(residual_group.clone())),
+    ]).unwrap();
+    let mut spec = residuals_spec("v", "w", vec!["residual".into()]);
+    spec.residual_columns.residual = "residual_1".into();
+    let out = apply(&spec, &batch).expect(
+        "grouping by a column named like the default residual, with the residual set fresh, must not collide",
+    );
+
+    let schema = out.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(
+        names, vec!["x", "residual_1", "v", "w", "residual"],
+        "the computed residual is 'residual_1'; the group key keeps the data's own 'residual' values",
+    );
+    let g_col = out.column(out.schema().index_of("residual").unwrap())
+        .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!((0..6).map(|i| g_col.value(i)).collect::<Vec<_>>(), residual_group);
+}
+
+/// The default setting is omitted from the wire; setting one name
+/// serializes only that one field, and deserializing it back fills every
+/// other name from the default.
+#[test]
+fn smooth_spec_residual_columns_default_is_omitted_and_a_partial_setting_round_trips() {
+    let spec = residuals_spec("v", "w", vec![]);
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(!json.contains("residual_columns"), "the default setting is omitted from the wire: {json}");
+    let parsed: SmoothSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, spec);
+
+    let mut with_setting = spec.clone();
+    with_setting.residual_columns.residual = "r1".into();
+    let json2 = serde_json::to_string(&with_setting).unwrap();
+    assert!(
+        json2.contains(r#""residual_columns":{"residual":"r1"}"#),
+        "only the set name travels: {json2}",
+    );
+    let parsed2: SmoothSpec = serde_json::from_str(&json2).unwrap();
+    assert_eq!(parsed2, with_setting);
+    assert_eq!(parsed2.residual_columns.x, "x", "the unset names keep their default");
+}
+
+/// The wire omits a default setting and refuses unknown keys: a misspelled
+/// key is refused, not silently filled from `ResidualColumns::default()` as
+/// `#[serde(default)]` alone would do without `deny_unknown_fields`.
+#[test]
+fn smooth_spec_residual_columns_with_an_unknown_key_fails_to_deserialize() {
+    let err = serde_json::from_str::<ResidualColumns>(r#"{"residul": "r1"}"#)
+        .expect_err("a misspelled key must be refused, not silently defaulted");
+    assert!(err.to_string().contains("residul"), "the error should name the unknown key: {err}");
+}
+
+/// `_with_residual_columns` only reaches a non-Smooth spec through a
+/// `PySmooth` built directly in Rust, never through the public `fm.Smooth`
+/// door (whose one constructor, `PySmooth::new`, only ever builds
+/// `TransformSpec::Smooth`) — still a typed error, not a panic, at that
+/// PyO3 boundary.
+#[test]
+fn with_residual_columns_on_a_non_smooth_spec_is_a_typed_error_not_a_panic() {
+    pyo3::Python::initialize();
+    let wrong = PySmooth(TransformSpec::Identity(crate::transform::identity::IdentitySpec {
+        name: None,
+        statistics: false,
+    }));
+    let err = wrong._with_residual_columns(None, None, None, None, None)
+        .expect_err("a non-Smooth spec must be refused, not panic");
+    assert!(err.to_string().contains("Smooth"), "{err}");
 }

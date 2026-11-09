@@ -361,7 +361,58 @@ impl PySmooth {
             name,
             x_range,
             x_range_pad,
+            residual_columns: crate::transform::residuals::ResidualColumns::default(),
         })))
+    }
+
+    /// Internal: gives this step's own computed residual-mode columns
+    /// fresh names, so a figure can keep drawing a data column named like
+    /// one `Smooth` computes under the caller's own name, without
+    /// renaming the caller's frame. `None` keeps a column's current name
+    /// (the default, or whatever an earlier call already set). Never a
+    /// user kwarg — `fm.Smooth` exposes no public door to this; only the
+    /// figure layer (residplot) calls it, and `src/ferrum/_core.pyi`
+    /// declares it beside the constructor, not in it. Refuses on a
+    /// `Fitted` spec, which never reads `residual_columns`, and on an
+    /// empty name or one name shared by two columns
+    /// ([`crate::transform::residuals::ResidualColumns::check`]).
+    #[pyo3(signature = (*, x=None, residual=None, ref_zero=None, metrics_text=None, metrics_y=None))]
+    pub(super) fn _with_residual_columns(
+        &self,
+        x: Option<String>,
+        residual: Option<String>,
+        ref_zero: Option<String>,
+        metrics_text: Option<String>,
+        metrics_y: Option<String>,
+    ) -> PyResult<Self> {
+        // `PySmooth` only ever wraps `TransformSpec::Smooth` (its only
+        // constructor, `new` above, guarantees it), so the other arm is
+        // unreachable through the public API; it still returns a typed
+        // error rather than `unreachable!()`, mirroring `new`'s own
+        // "declared in METHODS but has no parser arm" arm above, so a
+        // future internal caller that got this wrong fails safely at the
+        // PyO3 boundary instead of panicking.
+        let TransformSpec::Smooth(spec) = &self.0 else {
+            return Err(PyValueError::new_err(
+                "Smooth: internal error — _with_residual_columns called on a spec that is not \
+                 Smooth; this is a bug in ferrum, not a user error",
+            ));
+        };
+        if !matches!(spec.output, SmoothOutput::Residuals) {
+            return Err(PyValueError::new_err(
+                "Smooth: residual column names apply only to output='residuals'",
+            ));
+        }
+        let mut names = spec.residual_columns.clone();
+        if let Some(v) = x { names.x = v; }
+        if let Some(v) = residual { names.residual = v; }
+        if let Some(v) = ref_zero { names.ref_zero = v; }
+        if let Some(v) = metrics_text { names.metrics_text = v; }
+        if let Some(v) = metrics_y { names.metrics_y = v; }
+        names.check("Smooth")?;
+        let mut spec = spec.clone();
+        spec.residual_columns = names;
+        Ok(Self(TransformSpec::Smooth(spec)))
     }
 
     fn __repr__(&self) -> String {

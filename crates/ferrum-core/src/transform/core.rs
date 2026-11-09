@@ -575,7 +575,7 @@ impl TransformSpec {
     /// map-back, so the demand and the map-back can never drift apart —
     /// see `space_columns`'s own doc for why `Fitted` carries
     /// `_metrics_y` and `Residuals` carries only `x`.
-    pub(crate) fn fit_space_columns(x: &str, y: &str, output: SmoothOutput) -> Vec<SpaceColumn> {
+    pub(crate) fn fit_space_columns(x: &str, y: &str, output: SmoothOutput, residual_x: &str) -> Vec<SpaceColumn> {
         let column = |output: &str, slot: SpaceSlot, input: &str| SpaceColumn { output: output.to_string(), slot, input: input.to_string(), pass_through: false };
         match output {
             SmoothOutput::Fitted => vec![
@@ -583,9 +583,13 @@ impl TransformSpec {
                 column("y", SpaceSlot::Y, y),
                 column("ci_lower", SpaceSlot::Y, y),
                 column("ci_upper", SpaceSlot::Y, y),
-                column("_metrics_y", SpaceSlot::Y, y),
+                column(crate::transform::residuals::DEFAULT_RESIDUAL_METRICS_Y, SpaceSlot::Y, y),
             ],
-            SmoothOutput::Residuals => vec![column("x", SpaceSlot::X, x)],
+            // Residual mode's own `x` output is published under
+            // `residual_x` — its step's `ResidualColumns` setting, `"x"`
+            // at the default — so a demanded log x maps back onto whatever
+            // name the caller's residual batch actually carries.
+            SmoothOutput::Residuals => vec![column(residual_x, SpaceSlot::X, x)],
         }
     }
 
@@ -638,8 +642,8 @@ impl TransformSpec {
                 column("contour_y2", SpaceSlot::GridY, "grid_y"),
             ],
             Self::DataWindow(s) => s.sort.iter().flatten().enumerate().map(|(i, f)| pass_through(f, SpaceSlot::Sort(i), f)).collect(),
-            Self::Smooth(s) => Self::fit_space_columns(&s.x, &s.y, s.output),
-            Self::Robust(s) => Self::fit_space_columns(&s.x, &s.y, s.output),
+            Self::Smooth(s) => Self::fit_space_columns(&s.x, &s.y, s.output, &s.residual_columns.x),
+            Self::Robust(s) => Self::fit_space_columns(&s.x, &s.y, s.output, &s.residual_columns.x),
             Self::Logistic(s) => Self::fit_x_only_space_columns(&s.x),
             Self::Glm(s) => Self::fit_x_only_space_columns(&s.x),
             Self::Bin2D(_)
@@ -1235,6 +1239,7 @@ mod tests {
         cases.push((
             "Robust",
             TransformSpec::Robust(RobustSpec {
+                residual_columns: Default::default(),
                 x: "x".into(), y: "y".into(),
                 n_grid: 8, ci: None, huber_c: 1.345, max_iter: 50, tol: 1e-10,
                 output: SmoothOutput::Fitted,
@@ -1251,6 +1256,7 @@ mod tests {
             cases.push((
                 "Smooth",
                 TransformSpec::Smooth(SmoothSpec {
+                    residual_columns: Default::default(),
                     x: "x".into(), y: "y".into(),
                     method: SmoothMethod::Gam,
                     ci: None, bandwidth: 0.75, degree: 1, k, n: 20, seed: 0,

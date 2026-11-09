@@ -130,7 +130,7 @@ use crate::transform::group_key::{
 };
 use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::numeric_util::coerce_to_float64;
-use crate::transform::residuals;
+use crate::transform::residuals::{self, ResidualCarry, ResidualColumns};
 use fits::{
     build_degenerate_smooth_batch, build_predictor, build_residuals_batch, gam_fit,
     gam_residuals_fit, glm_fit, lm_fit, loess_fit, log_x_fit, poly_fit, report_gam_outcome,
@@ -275,6 +275,14 @@ pub(crate) struct SmoothSpec {
     /// `truncate=False` makes when the caller gave no explicit range.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub x_range_pad: Option<f64>,
+    /// The names this step's own computed residual-mode columns are
+    /// published under — internal, never a user kwarg (set only through
+    /// `PySmooth`'s private `_with_residual_columns`); see
+    /// [`ResidualColumns`]'s own doc. Omitted from the wire at its default,
+    /// so every spec written before this field existed, and every `Fitted`
+    /// spec (which never reads it), round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "ResidualColumns::is_default")]
+    pub residual_columns: ResidualColumns,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -299,10 +307,16 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    // The fitted path never reads `residual_columns`, so it never needs
+    // this check; residual mode runs it before any dispatch, ahead of a
+    // malformed setting reaching deep into the fit.
+    if matches!(spec.output, SmoothOutput::Residuals) {
+        spec.residual_columns.check("stat_smooth")?;
+    }
     let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
     let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
     if x_slot.is_none() && y_slot.is_none() {
-        return apply_in_data_space(spec, batch, ctx);
+        return apply_in_data_space(spec, &spec.x, batch, ctx);
     }
     apply_in_log_space(spec, batch, ctx, x_slot, y_slot)
 }
@@ -317,11 +331,21 @@ pub(crate) fn apply_with_context(
 /// [`crate::transform::numeric_util::evaluation_range`], so the pad is
 /// applied once, in whichever space this body is already running in,
 /// identically on both routes.
-fn apply_in_data_space(spec: &SmoothSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
+///
+/// `predictor_field` is the caller's OWN predictor column name, never a
+/// demanded slot's log-mapped private name: `spec.x` itself when not
+/// demanded, but [`apply_in_log_space`]'s own `spec.x` (captured before it
+/// builds the mapped spec passed as `spec` here) when it is. A residuals
+/// batch's carry ([`fits::build_residuals_batch`]) reads this to decide
+/// whether the caller's predictor is "carried a second time" — a question
+/// about the caller's own column, which the demanded route's mapped `spec.x`
+/// cannot answer, since by the time it reaches this function it already
+/// names the private column, not the caller's.
+fn apply_in_data_space(spec: &SmoothSpec, predictor_field: &str, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby, ctx.is_partition, ctx);
+        return apply_grouped(spec, predictor_field, batch, &spec.groupby, ctx.is_partition, ctx);
     }
-    apply_one_group(spec, batch, None, ctx.is_partition, ctx, None)
+    apply_one_group(spec, predictor_field, batch, None, ctx.is_partition, ctx, None)
 }
 
 /// `method='sqrt'` on a demanded log x, voiced by both the primary refusal
@@ -374,11 +398,11 @@ fn apply_in_log_space(
         ctx,
         "stat_smooth",
         batch,
-        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output),
+        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output, &spec.residual_columns.x),
         (&spec.x, x_slot),
         (&spec.y, y_slot),
         |mapped_batch, x, y, ctx| {
-            apply_in_data_space(&SmoothSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, mapped_batch, ctx)
+            apply_in_data_space(&SmoothSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, &spec.x, mapped_batch, ctx)
         },
     )
 }
@@ -420,13 +444,14 @@ fn value_column_is_all_nan(batch: &RecordBatch, idx: usize) -> bool {
 
 fn apply_one_group(
     spec: &SmoothSpec,
+    predictor_field: &str,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     is_partition: bool,
     ctx: &TransformContext,
     group: Option<&str>,
 ) -> PyResult<RecordBatch> {
-    let (xs_raw, ys_raw) = extract_xy(spec, batch, only_indices)?;
+    let (xs_raw, ys_raw, row_idx) = extract_xy(spec, batch, only_indices)?;
 
     // Pre-aggregate xs/ys into n equal-width bins if x_bins is set.
     let (xs, ys) = if let Some(n_bins) = spec.x_bins {
@@ -447,6 +472,8 @@ fn apply_one_group(
         return match spec.output {
             SmoothOutput::Fitted => all_nan_output(spec),
             SmoothOutput::Residuals => build_residuals_batch(
+                &ResidualCarry { batch, row_idx: &[], predictor_field, group_cols: &spec.groupby },
+                &spec.residual_columns,
                 Vec::new(), Vec::new(),
                 spec.inject_zero_ref,
                 // Batch-D T9 round 4: zero rows either way, but when
@@ -499,13 +526,14 @@ fn apply_one_group(
         // `build_predictor`'s `Gam` arm called `gam::fit` and threw away
         // whether it clamped, so `Smooth(method="gam", output="residuals",
         // k=<over-large>)` silently clamped with no warning at all.
+        let carry = ResidualCarry { batch, row_idx: &row_idx, predictor_field, group_cols: &spec.groupby };
         if matches!(spec.method, SmoothMethod::Gam) {
-            let (out, outcome) = gam_residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw)?;
+            let (out, outcome) = gam_residuals_fit(spec, &carry, &xs, &ys, &xs_raw, &ys_raw)?;
             report_gam_outcome(ctx, group, outcome);
             return Ok(out);
         }
         // Fit at original (un-aggregated) input xs; emit (x, y - fit(x)) rows.
-        let out = residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw)?;
+        let out = residuals_fit(spec, &carry, &xs, &ys, &xs_raw, &ys_raw)?;
         if value_column_is_all_nan(&out, 1) {
             ctx.warn(TransformWarning::DegenerateFit {
                 transform: "Smooth".into(),
@@ -618,6 +646,7 @@ fn apply_one_group(
 /// columns appended (with their original dtypes, XFORM-03) as additional fields.
 fn apply_grouped(
     spec: &SmoothSpec,
+    predictor_field: &str,
     batch: &RecordBatch,
     group_cols: &[String],
     is_partition: bool,
@@ -642,7 +671,7 @@ fn apply_grouped(
         // `apply_one_group` never gates on `is_partition` for this call —
         // T6's per-group degrade-to-NaN contract already applies.
         let label = describe_group_keys(group_cols, g);
-        let out = apply_one_group(spec, batch, Some(ixs), is_partition, ctx, Some(&label))?;
+        let out = apply_one_group(spec, predictor_field, batch, Some(ixs), is_partition, ctx, Some(&label))?;
         per_group_batches.push((g.clone(), out));
     }
 
@@ -659,7 +688,7 @@ fn apply_grouped(
         // themselves all-null (`pooled_group_key`'s doc) — a facet field
         // folded into `group_cols` is never null and keeps its real value,
         // so a faceted panel still gets a group it can assign.
-        let pooled = apply_one_group(spec, batch, None, is_partition, ctx, None)?;
+        let pooled = apply_one_group(spec, predictor_field, batch, None, is_partition, ctx, None)?;
         let key = pooled_group_key(batch, group_cols)?;
         return stack_grouped_batches("stat_smooth", &[(key, pooled)], group_cols, &partition.dtypes);
     }
@@ -727,7 +756,12 @@ fn pre_aggregate_xy(
     (out_x, out_y)
 }
 
-fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<(Vec<f64>, Vec<f64>)> {
+/// `(xs, ys, row_idx)`: the jointly non-null/non-NaN `x`/`y` pairs, and the
+/// ORIGINAL row position in `batch` each pair came from, in order — the
+/// positions a residuals-mode fit's carried columns are read at
+/// ([`fits::build_residuals_batch`]), since a residual is only ever
+/// computed for a row both columns kept.
+fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<(Vec<f64>, Vec<f64>, Vec<usize>)> {
     let schema = batch.schema();
     let xi = schema.index_of(&spec.x)
         .map_err(|_| PyValueError::new_err(format!("stat_smooth: column '{}' not found", spec.x)))?;
@@ -755,7 +789,7 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
     // This reuses the same null+NaN drop logic across all transform callers.
     let xs = clean_float64_values(&xa, Some(&valid_indices));
     let ys = clean_float64_values(&ya, Some(&valid_indices));
-    Ok((xs, ys))
+    Ok((xs, ys, valid_indices))
 }
 
 fn all_nan_output(spec: &SmoothSpec) -> PyResult<RecordBatch> {

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::transform::context::{partial_band_reason, zero_residual_dof_reason, TransformContext, TransformWarning};
 use crate::transform::gam;
-use crate::transform::residuals;
+use crate::transform::residuals::{self, ResidualCarry, ResidualColumns};
 
 use super::{SmoothMethod, SmoothSpec};
 
@@ -144,19 +144,28 @@ const GLM_SMOOTH_TOL: f64 = 1e-8;
 ///   and ``_metrics_y`` (Float64) with one non-null row at the anchor
 ///   (max ``x``).
 ///
+/// Row-preserving (the `Bin(per_row=True)` contract, applied here): every
+/// other column `carry.batch` holds is carried at exactly the row
+/// positions `carry.row_idx` names, in order — `residuals::
+/// append_carried_columns`'s own doc states the exclude/collision rule in
+/// full, derived from the computed columns this builds below rather than
+/// hand-listed again here.
+///
 /// Both column-emission helpers live in
 /// `crate::transform::residuals` so the schema invariant
 /// (`_ref_zero`, `_metrics_text`, `_metrics_y`) is owned in one place
 /// and shared with `transform::robust::build_residuals_batch`.
 pub(super) fn build_residuals_batch(
+    carry: &ResidualCarry,
+    names: &ResidualColumns,
     xs: Vec<f64>, resid: Vec<f64>,
     inject_zero_ref: bool,
     metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
     let n = xs.len();
     let mut fields = vec![
-        Field::new("x",        DataType::Float64, true),
-        Field::new("residual", DataType::Float64, true),
+        Field::new(&names.x,        DataType::Float64, true),
+        Field::new(&names.residual, DataType::Float64, true),
     ];
     let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(xs.clone())),
@@ -164,12 +173,14 @@ pub(super) fn build_residuals_batch(
     ];
 
     if inject_zero_ref {
-        residuals::append_zero_ref_column(&mut fields, &mut cols, n);
+        residuals::append_zero_ref_column(&mut fields, &mut cols, n, &names.ref_zero);
     }
 
     if let Some(m) = metrics {
-        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, m);
+        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, m, &names.metrics_text, &names.metrics_y);
     }
+
+    residuals::append_carried_columns("stat_smooth", &mut fields, &mut cols, carry)?;
 
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
@@ -178,25 +189,27 @@ pub(super) fn build_residuals_batch(
 
 pub(super) fn residuals_fit(
     spec: &SmoothSpec,
+    carry: &ResidualCarry,
     xs_fit: &[f64], ys_fit: &[f64],
     xs_input: &[f64], ys_input: &[f64],
 ) -> PyResult<RecordBatch> {
     // Fit the chosen model on (xs_fit, ys_fit); then evaluate at xs_input and subtract.
     let predictor = build_predictor(spec, xs_fit, ys_fit);
-    residuals_from_predictor(&*predictor, xs_input, ys_input, spec.inject_zero_ref, spec.inject_metrics)
+    residuals_from_predictor(spec, carry, &*predictor, xs_input, ys_input)
 }
 
 /// The shared tail of [`residuals_fit`]/[`gam_residuals_fit`]: evaluate
 /// `predictor` at each `xs_input` point, subtract from `ys_input`, and emit
 /// the `[x, residual]` batch (plus the optional `_ref_zero`/metrics
-/// columns). Factored out so `gam_residuals_fit` — which builds its own
-/// predictor directly from `gam::fit` instead of going through
-/// [`build_predictor`], so it can also report a [`GamFitOutcome`] — does not
-/// need to re-duplicate this loop.
+/// columns and every carried input column). Factored out so
+/// `gam_residuals_fit` — which builds its own predictor directly from
+/// `gam::fit` instead of going through [`build_predictor`], so it can also
+/// report a [`GamFitOutcome`] — does not need to re-duplicate this loop.
 fn residuals_from_predictor(
+    spec: &SmoothSpec,
+    carry: &ResidualCarry,
     predictor: &dyn Fn(f64) -> f64,
     xs_input: &[f64], ys_input: &[f64],
-    inject_zero_ref: bool, inject_metrics: bool,
 ) -> PyResult<RecordBatch> {
     let mut out_x = Vec::with_capacity(xs_input.len());
     let mut out_r = Vec::with_capacity(xs_input.len());
@@ -206,12 +219,12 @@ fn residuals_from_predictor(
         out_x.push(xi);
         out_r.push(r);
     }
-    let metrics = if inject_metrics {
+    let metrics = if spec.inject_metrics {
         Some(residuals::compute(ys_input, &out_r))
     } else {
         None
     };
-    build_residuals_batch(out_x, out_r, inject_zero_ref, metrics)
+    build_residuals_batch(carry, &spec.residual_columns, out_x, out_r, spec.inject_zero_ref, metrics)
 }
 
 /// `SmoothOutput::Residuals` counterpart to [`gam_fit`]: fits `gam` directly
@@ -220,6 +233,7 @@ fn residuals_from_predictor(
 /// same [`GamFitOutcome`] the Fitted path reports via [`report_gam_outcome`].
 pub(super) fn gam_residuals_fit(
     spec: &SmoothSpec,
+    carry: &ResidualCarry,
     xs_fit: &[f64], ys_fit: &[f64],
     xs_input: &[f64], ys_input: &[f64],
 ) -> PyResult<(RecordBatch, GamFitOutcome)> {
@@ -230,9 +244,7 @@ pub(super) fn gam_residuals_fit(
         }
         None => (Box::new(|_: f64| f64::NAN), GamFitOutcome::Degenerate),
     };
-    let out = residuals_from_predictor(
-        &*predictor, xs_input, ys_input, spec.inject_zero_ref, spec.inject_metrics,
-    )?;
+    let out = residuals_from_predictor(spec, carry, &*predictor, xs_input, ys_input)?;
     Ok((out, outcome))
 }
 
@@ -301,7 +313,12 @@ fn build_smooth_batch(
     ];
 
     if let Some(m) = metrics {
-        residuals::append_metrics_columns(&mut fields, &mut cols, &x, &y, m);
+        // The Fitted path never reads `residual_columns` (only residual
+        // mode does), so its metrics columns stay the stock names.
+        residuals::append_metrics_columns(
+            &mut fields, &mut cols, &x, &y, m,
+            residuals::DEFAULT_RESIDUAL_METRICS_TEXT, residuals::DEFAULT_RESIDUAL_METRICS_Y,
+        );
     }
 
     let schema = Arc::new(Schema::new(fields));

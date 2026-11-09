@@ -289,6 +289,23 @@ pub struct Layer {
     /// pre-#52 layer wire JSON stays byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub independent_y: bool,
+    /// Whether this layer draws one mark for its whole fit — a figure's
+    /// zero-reference rule or metrics-corner text — rather than one per
+    /// input row. Read only by the column gate
+    /// ([`crate::render::prepare::validate_layer_columns`]): an inherited
+    /// per-row binding whose column this layer's own batch carries is
+    /// dropped and warned about anyway, the way a statistic sub-layer's
+    /// inherited binding already is when its batch LACKS the column — a
+    /// fit-summary layer's batch can carry the column (the caller's rows
+    /// ride along on a row-preserving residual batch) and still draws one
+    /// mark, so size/opacity/tooltip/etc. from an arbitrary row would be
+    /// meaningless on it. `color`, `shape` and `stroke_dash` (a figure's
+    /// own grouping channels) are exempt and still draw. `false` (absent
+    /// on the wire) is an ordinary layer, and `fm.Layer` never sets it — it
+    /// is a figure's own internal fact about a layer it builds, never a
+    /// user-facing knob.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit_summary: bool,
     /// Whether this layer, reading a named `data_source`, reads its chart's
     /// data through it: Python points a layer attached with `Chart.layer` or
     /// `SecondaryY` at the output that recomputes the chart's rows when they
@@ -357,6 +374,7 @@ impl Default for Layer {
             inherited_position: false,
             name: None,
             independent_y: false,
+            fit_summary: false,
             reads_chart_data: false,
             coord: None,
             entry: None,
@@ -649,6 +667,47 @@ mod tests {
         let parsed: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, layer);
         assert!(!parsed.independent_y);
+    }
+
+    #[test]
+    fn layer_fit_summary_defaults_false_when_absent_on_wire() {
+        let json = r#"{"mark":"point"}"#;
+        let layer: Layer = serde_json::from_str(json).unwrap();
+        assert!(!layer.fit_summary);
+    }
+
+    #[test]
+    fn layer_fit_summary_round_trips_true() {
+        let layer = Layer {
+            mark: Mark::Rule,
+            encoding: Encoding::default(),
+            fit_summary: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            json.contains(r#""fit_summary":true"#),
+            "expected fit_summary:true in JSON: {json}"
+        );
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_fit_summary_round_trips_false() {
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            !json.contains("fit_summary"),
+            "fit_summary=false must be omitted from the wire: {json}"
+        );
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+        assert!(!parsed.fit_summary);
     }
 
     // --- `#172`(1): per-layer coord ---------------------------------------

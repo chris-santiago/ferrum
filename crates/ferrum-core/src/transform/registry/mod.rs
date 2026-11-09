@@ -419,10 +419,14 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             method_canonical: identity_canonical(crate::transform::smooth::METHODS),
             outputs: fit_outputs(),
             secondary_outputs: vec![],
+            // `residual_columns` is internal — not a user kwarg, set only
+            // through `_with_residual_columns` — the same "serde-visible,
+            // not a constructor param" shape `hex`'s `extent_x`/`extent_y`
+            // already carry here.
             params: vec![
                 "x", "y", "method", "ci", "bandwidth", "degree", "k", "n", "seed", "x_bins",
                 "x_estimator", "output", "inject_zero_ref", "inject_metrics", "groupby", "name",
-                "x_range", "x_range_pad",
+                "x_range", "x_range_pad", "residual_columns",
             ],
         },
         // `aggregate`/`join_aggregate` publish `AggFn`'s vocabulary (aliases
@@ -642,9 +646,12 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "robust" => TransformRegistryEntry {
             outputs: fit_outputs(),
             secondary_outputs: vec![],
+            // `residual_columns` mirrors `smooth`'s own internal setting —
+            // see its entry's comment.
             params: vec![
                 "x", "y", "n_grid", "ci", "huber_c", "max_iter", "tol", "output",
                 "inject_zero_ref", "inject_metrics", "groupby", "name", "x_range", "x_range_pad",
+                "residual_columns",
             ],
             ..Default::default()
         },

@@ -16,7 +16,11 @@ at the call. residplot's y is the one exception: it keeps refusing a
 post-build ``scale=``/``format=``, since the response column the call named
 is not the residual the figure draws. A binding on any other field (another
 variable, or a figure's own drawn column) is unaffected, whatever else the
-same call writes.
+same call writes -- except flat residplot's x/y, which draw straight from
+the chart-level encoding with no layer of their own to shadow it: naming
+another column of the data is refused, naming the call as the remedy,
+since the one mark would draw that column raw instead of refitting
+against it; a column the data lacks still fails the same raw way.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._entry import EntryRefusal
 from ferrum.encoding import X, Y
 
 
@@ -814,17 +819,31 @@ def test_residplot_predictor_named_like_the_drawn_column_stays_honored(lowess):
     assert styled != plain
 
 
-def test_residplot_response_named_like_the_residual_column_stays_honored():
-    """The symmetric case for y: a response column literally named
-    'residual' collides with residplot's own drawn-column name, and a
-    post-build binding naming it is read, not refused."""
+def test_residplot_response_named_residual_is_the_called_field_after_the_call():
+    """The caller's data is never renamed: a response column literally
+    named 'residual' stays 'residual', and the COMPUTED residual takes a
+    fresh name instead. So 'residual' is the
+    CALLED field here, not the drawn column: a later binding naming it
+    re-points like any other called-field binding -- a title restates and
+    reaches the axis -- but scale=/format= are still refused, the same
+    way they always are on residplot's y, since the response column the
+    call named is not the residual the figure draws."""
     frame = pl.DataFrame(
         {"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "residual": [2.0, 3.0, 1.0, 5.0, 4.0, 2.0, 6.0, 3.0]}
     )
     chart = fm.residplot(frame, x="v", y="residual", zero_line=False, show_metrics=False)
     plain = chart.to_svg()
-    styled = chart.encode(y=Y("residual", format=".2f")).to_svg()
+    styled = chart.encode(y=Y("residual", title="T")).to_svg()
     assert styled != plain
+    assert ">T<" in styled
+    with pytest.raises(ValueError) as err:
+        chart.encode(y=Y("residual", format=".2f")).to_svg()
+    assert str(err.value) == (
+        "residplot(y=Y('residual', format='.2f')) after the call is not supported: "
+        "residplot draws y from the y= it was called with, so format= would be "
+        "ignored. Drop format=, or pass it in the call: "
+        "residplot(y=fm.Y('residual', format=...))."
+    )
 
 
 @pytest.mark.parametrize("declared_type", ["N", "O", "T"])
@@ -1012,18 +1031,107 @@ def test_a_post_build_binding_on_another_variable_keeps_its_current_output(form_
     assert plain.to_svg() == rebound.to_svg()
 
 
-def test_a_post_build_binding_on_another_variable_keeps_flat_residplots_raw_failure():
-    """Flat residplot draws its one mark straight from the chart-level
-    encoding (no layers to shadow it), so a binding on a column the
-    residual batch never emits ('u' is not one of its output columns)
-    fails the same raw way regardless: this binding names neither the
-    called field nor a drawn column, so the record leaves it alone, and
-    rendering a raw, unrecognized column name is an unrelated, pre-existing
-    behavior."""
-    plain = _residplot_flat()
+#: Each another-variable door on flat residplot and the exact refusal it
+#: raises: a later `.encode()`, and `encode=` at the call (which lands on
+#: the chart the same way, after the layers are already built).
+_FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = {
+    "later-x": (
+        lambda: _residplot_flat().encode(x="u"),
+        "residplot(x=X('u')) after the call is not supported: residplot computes its "
+        "residuals from the x= it was called with ('v'), so 'u' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(x='u', ...).",
+    ),
+    "later-y": (
+        lambda: _residplot_flat().encode(y="u"),
+        "residplot(y=Y('u')) after the call is not supported: residplot computes its "
+        "residuals from the y= it was called with ('w'), so 'u' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(y='u', ...).",
+    ),
+    "encode-x": (
+        lambda: fm.residplot(_frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"x": "u"}),
+        "residplot(x=X('u')) after the call is not supported: residplot computes its "
+        "residuals from the x= it was called with ('v'), so 'u' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(x='u', ...).",
+    ),
+    "encode-y": (
+        lambda: fm.residplot(_frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"y": "u"}),
+        "residplot(y=Y('u')) after the call is not supported: residplot computes its "
+        "residuals from the y= it was called with ('w'), so 'u' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(y='u', ...).",
+    ),
+    "later-x-named-x": (
+        # The data's own 'x' column is not the predictor ('v' is), so it is
+        # another variable -- even though its literal name matches what
+        # residplot calls the predictor's drawn column internally. When the
+        # data holds its own 'x', the computed one takes a fresh name
+        # instead (the naming mechanism's own rule), so this 'x' is
+        # genuinely the caller's column, never residplot's drawn one.
+        lambda: fm.residplot(
+            _frame().with_columns(pl.col("u").alias("x")), x="v", y="w", zero_line=False, show_metrics=False
+        ).encode(x="x"),
+        "residplot(x=X('x')) after the call is not supported: residplot computes its "
+        "residuals from the x= it was called with ('v'), so 'x' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(x='x', ...).",
+    ),
+    "later-y-named-residual": (
+        # Symmetric case on y: the data's own 'residual' is not the
+        # response ('w' is), so it is another variable, not the computed
+        # residual (which took a fresh name once this clash existed).
+        lambda: fm.residplot(
+            _frame().with_columns(pl.col("u").alias("residual")), x="v", y="w", zero_line=False, show_metrics=False
+        ).encode(y="residual"),
+        "residplot(y=Y('residual')) after the call is not supported: residplot computes its "
+        "residuals from the y= it was called with ('w'), so 'residual' would be drawn without "
+        "a refit. Pass it in the call instead: residplot(y='residual', ...).",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_FLAT_ANOTHER_VARIABLE_DOORS))
+def test_a_post_build_binding_on_another_variable_is_refused_on_flat_residplot(door):
+    """Flat residplot's one mark reads x/y straight from the chart-level
+    encoding, with no layer of its own to keep drawing the fit's residuals
+    once that binding points somewhere else: naming another column of the
+    data -- 'u', neither the called field nor a drawn column -- is refused
+    naming the call as the remedy, rather than silently drawing that
+    column's raw values (or the fit's residuals at its positions) under
+    the residual axis's title. An EntryRefusal, re-voiceable as any public
+    call that reaches flat residplot's builder, not a bare ValueError."""
+    build, text = _FLAT_ANOTHER_VARIABLE_DOORS[door]
+    with pytest.raises(EntryRefusal) as err:
+        build().to_svg()
+    assert str(err.value) == text
+
+
+def test_a_post_build_binding_on_a_column_the_data_lacks_keeps_flat_residplots_raw_failure():
+    """'zz' names no column at all: Python cannot carry a column that does
+    not exist, so this stays the same raw failure it always was, not the
+    another-variable refusal (which would misname 'zz' as a column the
+    fit could have refit on)."""
     with pytest.raises(ValueError) as err:
-        plain.encode(x="u").to_svg()
-    assert str(err.value) == "unknown column 'u' referenced by an encoding"
+        _residplot_flat().encode(x="zz").to_svg()
+    assert str(err.value) == "unknown column 'zz' referenced by an encoding"
+
+
+def test_a_post_build_binding_on_the_called_field_re_points_onto_a_fresh_computed_column():
+    """The called field ('v') still re-points through a later binding even
+    when the data's own clashing 'x' column pushed the computed x onto a
+    fresh name ('x_1', not the literal 'x'): the re-point has to use
+    whatever fresh name this call actually chose, not a hardcoded 'x'."""
+    clash = _frame().with_columns(pl.col("u").alias("x"))
+    chart = fm.residplot(clash, x="v", y="w", zero_line=False, show_metrics=False)
+    plain = chart.to_svg()
+    styled = chart.encode(x=X("v", format=".2f")).to_svg()
+    assert styled != plain
+    # A sibling with no clash at all (so the computed x stays the literal
+    # 'x', never renamed) renders byte-identically under the same style:
+    # proof the re-point landed on the SAME predictor values, through
+    # whichever fresh name this call's own naming chose, not a copy the
+    # clashing 'x' column itself supplied.
+    no_clash = _frame()
+    sibling = fm.residplot(no_clash, x="v", y="w", zero_line=False, show_metrics=False)
+    sibling_styled = sibling.encode(x=X("v", format=".2f")).to_svg()
+    assert styled == sibling_styled
 
 
 # ---------------------------------------------------------------------------

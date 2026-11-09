@@ -1048,6 +1048,35 @@ def _refuse_fieldless_positional(
     raise EntryRefusal(text, entry)
 
 
+def _refuse_residplot_another_variable(entry: str, channel: str, ch: ChannelBase, *, called_field: str) -> None:
+    """Refuse a post-build x/y binding naming neither residplot's called field nor its drawn column.
+
+    Flat residplot's one mark reads x/y straight from the chart-level
+    encoding, with no layer of its own to keep drawing the fit's
+    residuals once that binding points somewhere else: naming another
+    column of the data would draw that column's raw values under the
+    residual axis's title, or the residuals at that column's own
+    positions, neither of which the figure ever refit against. Named in
+    the call instead (``residplot(x='u', ...)``), the fit reads it and
+    refits correctly, which is the remedy this names.
+    """
+    from ferrum._entry import EntryRefusal
+
+    cls_name = type(ch).__name__
+    kwargs_repr = "".join(f", {k}={_quoted_statistic_value(v)}" for k, v in ch._kwargs.items())
+    written = f"{cls_name}({ch.field!r}{kwargs_repr})"
+
+    def text(voice: str) -> str:
+        return (
+            f"{voice}({channel}={written}) after the call is not supported: {voice} computes "
+            f"its residuals from the {channel}= it was called with ({called_field!r}), so "
+            f"{ch.field!r} would be drawn without a refit. Pass it in the call instead: "
+            f"{voice}({channel}={ch.field!r}, ...)."
+        )
+
+    raise EntryRefusal(text, entry)
+
+
 def _refuse_fieldless_categorical_type(
     entry: str,
     channel: str,

@@ -2904,9 +2904,15 @@ pub enum RenderWarning {
     },
     /// A statistic sub-layer inherited a binding on a channel its mark draws,
     /// but the statistic's output does not carry the bound column (the
-    /// chart's source does), so the layer draws without that channel: WARN
-    /// DEGRADED. Decided once per layer per dropped column by the column
-    /// gate (`prepare::validate_layer_columns`), before any scale resolves,
+    /// chart's source does), so the layer draws without that channel; or the
+    /// layer is flagged `fit_summary` (a reference line or metrics
+    /// annotation drawing a fit, not the caller's own rows) and inherited a
+    /// per-row binding, which drops even when that layer's own batch happens
+    /// to carry a same-named column, since `color`/`shape`/`stroke_dash`
+    /// aside, a per-row value from elsewhere never means anything against a
+    /// fit summary's one row per group: WARN DEGRADED either way. Decided
+    /// once per layer per dropped column by the column gate
+    /// (`prepare::validate_layer_columns`), before any scale resolves,
     /// naming the first channel that dropped it. Voiced as
     /// [`Self::MarkStyleInert`] is: `layer` is its index when the caller
     /// placed the layer (`prepare::public_layer`), `entry` the public call

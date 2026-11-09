@@ -749,18 +749,24 @@ _UNPIVOT_VALUE = (
     "assert a relationship that does not exist."
 )
 _RESIDPLOT_X = (
-    "residplot's `_resid_x` reads the residuals batch `build_residuals_batch` "
-    "emits (`smooth.rs:667`, `robust.rs:365`), which declares its own literal "
-    '`x` column uncoupled from `FIT_OUTPUT_COLUMNS` -- the `output="fitted"` '
-    "schema `transform_registry('smooth'|'robust')` actually declares "
-    "(`registry/mod.rs:165-167` scopes that constant to fitted mode). Checking "
-    "this site against `FIT_OUTPUT_COLUMNS` would stay silently green if the "
-    "residuals batch's own `x` were ever renamed independently, and would raise "
-    "here on an unrelated `FIT_OUTPUT_COLUMNS` rename that never touched this "
-    "code path -- a lookup against the wrong schema is worse than no lookup, so "
-    "this site stays a bare literal. The registry declares no residuals-mode "
-    "schema at all, so this class stays invisible to the outer bound above by "
-    "construction; declaring one is the batch-close follow-up, not this task."
+    "`_RESIDUAL_COLUMN_DEFAULTS['x']` names what the residuals batch "
+    "`build_residuals_batch` emits by default (`smooth.rs:667`, "
+    "`robust.rs:365`), which declares its own literal `x` column uncoupled "
+    'from `FIT_OUTPUT_COLUMNS` -- the `output="fitted"` schema '
+    "`transform_registry('smooth'|'robust')` actually declares "
+    "(`registry/mod.rs:165-167` scopes that constant to fitted mode). "
+    "Checking this site against `FIT_OUTPUT_COLUMNS` would stay silently "
+    "green if the residuals batch's own `x` were ever renamed independently, "
+    "and would raise here on an unrelated `FIT_OUTPUT_COLUMNS` rename that "
+    "never touched this code path -- a lookup against the wrong schema is "
+    "worse than no lookup, so this site stays a bare literal. "
+    "`residplot`'s own computed `x` keeps this default unless the data "
+    "already holds a column named `x` that is not the predictor, in which "
+    "case `_residual_column_names` gives the computed column a fresh name "
+    "instead (`_unique_col_name`), never this one. The registry declares no "
+    "residuals-mode schema at all, so this class stays invisible to the "
+    "outer bound above by construction; declaring one would let this site "
+    "read the registry directly instead."
 )
 
 #: The letter_value and linkage secondary batches (`lv_depth_{k}` /
@@ -886,7 +892,7 @@ DISPOSITIONED: dict[tuple[str, str, str], str] = {
     ("src/ferrum/plots/matrix.py", "_heatmap_build", "value"): _UNPIVOT_VALUE,
     ("src/ferrum/plots/matrix.py", "_clustermap_build", "value"): _UNPIVOT_VALUE,
     # --- a column reference checked against the wrong registry schema -----
-    ("src/ferrum/plots/regression.py", "residplot", "x"): _RESIDPLOT_X,
+    ("src/ferrum/plots/regression.py", "<module>", "x"): _RESIDPLOT_X,
     ("src/ferrum/marks/statistical.py", "desugar_ecdf", "count"): (
         "desugar_ecdf's rolling-count `DataWindow` op declares its own output "
         "name through `as:`, Python's to choose; `data_window` declares no "

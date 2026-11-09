@@ -1853,6 +1853,7 @@ fn smooth_cubic_spec(
     let mut spec = base_spec();
     spec.facet = facet;
     spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         method: SmoothMethod::Poly { degree: 3 },
@@ -2073,6 +2074,7 @@ fn smooth_lm_ci_facet_spec() -> ChartSpec {
         resolve: crate::layout::FacetResolve::default(),
     });
     spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         method: SmoothMethod::Lm,
@@ -2176,6 +2178,7 @@ fn smooth_gam_facet_spec() -> ChartSpec {
         resolve: crate::layout::FacetResolve::default(),
     });
     spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         method: SmoothMethod::Gam,
@@ -2365,6 +2368,7 @@ fn smooth_lm_groupby_spec(
     let mut spec = base_spec();
     spec.facet = facet;
     spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         method: SmoothMethod::Lm,
@@ -3338,6 +3342,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             inherited_position: false,
             name: None,
             independent_y: false,
+            fit_summary: false,
             reads_chart_data: false,
             coord: None,
             entry: None,
@@ -10941,6 +10946,92 @@ fn a_statistic_sub_layer_drops_an_inherited_read_its_statistic_does_not_carry_wi
             "layer 1: mark_point: color 'k' was dropped: the statistic this point mark draws does not carry 'k', so it draws without color",
             "layer 1: mark_point: size 'z' was dropped: the statistic this point mark draws does not carry 'z', so it draws without size",
         ]
+    );
+}
+
+/// A layer flagged `fit_summary: true` draws one mark for its whole fit,
+/// so an inherited per-row binding is dropped and warned about even
+/// though its OWN batch carries the column (unlike a statistic sub-layer,
+/// which lacks the column outright) — `color` is exempt by wire (a
+/// figure's own grouping channel) and still draws.
+#[test]
+fn a_fit_summary_layer_drops_an_inherited_per_row_read_its_batch_carries_with_a_warning() {
+    let mut spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "fit_summary": true, "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    spec.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    let scene = scene.expect("the fit-summary layer draws without size; color stays, exempt by wire");
+    assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()), "both layers draw");
+    let dropped: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w, RenderWarning::StatisticDroppedChannel { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        ["layer 1: mark_point: size 'z' was dropped: the statistic this point mark draws does not carry 'z', so it draws without size"]
+    );
+    // The warning alone doesn't prove size was actually dropped from the
+    // drawn marks — assert the effect too. `z` is [10, 20, 30, 40]: if size
+    // had drawn, the four radii would differ sharply; dropped, every row
+    // gets the mark's one default radius.
+    let radii: Vec<f64> = scene.panels[0].marks[1]
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Circle { r, .. } => Some(*r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radii.len(), 4, "every row draws a point");
+    assert!(
+        radii.iter().all(|&r| (r - radii[0]).abs() < 1e-9),
+        "size 'z' was dropped, so every row's radius is the mark's one default, not scaled \
+         by z's own wildly different values: {radii:?}",
+    );
+}
+
+/// Without the flag, the same inherited binding draws normally on both
+/// layers — the flag, not the mere presence of an inherited binding, is
+/// what drops it.
+#[test]
+fn an_unflagged_layer_draws_the_same_inherited_binding_its_batch_carries() {
+    let mut spec = column_gate_spec(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "color": {"field": "k"}}},
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+        ]),
+    );
+    spec.encoding.color = Some(EncodingSpec { field: "k".into(), ..Default::default() });
+    spec.encoding.size = Some(EncodingSpec { field: "z".into(), ..Default::default() });
+    let (scene, warnings) = gate_render(&spec, &column_gate_batch());
+    let scene = scene.expect("both layers draw size with no flag set");
+    assert!(scene.panels[0].marks.iter().all(|batch| !batch.nodes.is_empty()));
+    assert!(
+        warnings.iter().all(|w| !matches!(w, RenderWarning::StatisticDroppedChannel { .. })),
+        "{warnings:?}",
+    );
+    // Positive control: without the flag, size actually draws here — the
+    // four radii, scaled from z = [10, 20, 30, 40], are NOT all equal.
+    let radii: Vec<f64> = scene.panels[0].marks[1]
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            ferrum_scene::SceneNode::Circle { r, .. } => Some(*r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radii.len(), 4, "every row draws a point");
+    assert!(
+        radii.iter().any(|&r| (r - radii[0]).abs() > 1e-9),
+        "size 'z' should actually draw here (no flag), so the radii should vary with z: {radii:?}",
     );
 }
 
@@ -20334,6 +20425,7 @@ fn smooth_sqrt_method_on_a_demanded_log_x_is_refused_in_the_layer_entrys_voice()
     spec.transforms = vec![
         TransformSpec::Identity(IdentitySpec { name: None, statistics: true }),
         TransformSpec::Smooth(SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(),
             y: "y".into(),
             method: SmoothMethod::SqrtX,
@@ -20441,6 +20533,7 @@ fn residplot_residuals_spec(y_encoding: EncodingSpec) -> ChartSpec {
     spec.transforms = vec![
         TransformSpec::Identity(IdentitySpec { name: None, statistics: true }),
         TransformSpec::Smooth(SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(),
             y: "y".into(),
             method: SmoothMethod::Lm,

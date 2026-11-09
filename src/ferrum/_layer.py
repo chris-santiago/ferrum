@@ -108,6 +108,21 @@ class _Layer:
     # when True, so absent/false round-trips byte-identically with
     # pre-#52 specs.
     independent_y: bool = False
+    #: Whether this layer draws one mark for its whole fit -- a figure's
+    #: zero-reference rule or corner-metrics annotation, never one per
+    #: input row -- rather than one mark per row like every ordinary
+    #: layer, ``fm.Layer`` included. Read by Rust's inherited-column gate
+    #: (``validate_layer_columns``) to drop an inherited per-row binding
+    #: this layer's own batch happens to carry (the carry made every
+    #: residual-batch column resolvable, which would otherwise size or
+    #: fade one summary mark by an arbitrary row's value) and warn, the
+    #: same way it already drops a binding a statistic's output lacks.
+    #: ``Chart._build_layers_list`` serializes it onto the wire layer dict
+    #: only when True, so a layer that draws one mark per row, absent or
+    #: false, round-trips byte-identically (see ``Layer::fit_summary`` in
+    #: Rust ``spec/layer.rs``). The one producer is ``residplot``, on its
+    #: ``"reference"`` and ``"metrics"`` layers.
+    fit_summary: bool = False
     #: This layer's OWN coordinate system (`#172`(1)) -- a coord value class
     #: (``CoordFlip``/``CoordPolar``/...) or the ``"flip"`` string
     #: ``mark_*(orient="horizontal")`` stamps on a chart. ``None`` means

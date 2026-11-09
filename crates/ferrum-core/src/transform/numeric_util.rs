@@ -162,6 +162,22 @@ pub(crate) fn coerce_xy_pairs_at(
     ctx: &str,
     only_indices: Option<&[usize]>,
 ) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    coerce_xy_pairs_at_indexed(batch, x_field, y_field, ctx, only_indices).map(|(xs, ys, _)| (xs, ys))
+}
+
+/// Like [`coerce_xy_pairs_at`], but also returns the ORIGINAL row index of
+/// each surviving pair, in the same order — used where a caller needs to
+/// carry other columns for exactly the rows a residuals-mode fit kept
+/// (`Robust`'s own residual batch; mirrors
+/// [`clean_float64_values_indexed`]'s identical shape for the single-column
+/// case).
+pub(crate) fn coerce_xy_pairs_at_indexed(
+    batch: &RecordBatch,
+    x_field: &str,
+    y_field: &str,
+    ctx: &str,
+    only_indices: Option<&[usize]>,
+) -> PyResult<(Vec<f64>, Vec<f64>, Vec<usize>)> {
     let schema = batch.schema();
     let xi = schema
         .index_of(x_field)
@@ -180,6 +196,7 @@ pub(crate) fn coerce_xy_pairs_at(
     let cap = only_indices.map_or(xa.len(), <[usize]>::len);
     let mut xs = Vec::with_capacity(cap);
     let mut ys = Vec::with_capacity(cap);
+    let mut idxs = Vec::with_capacity(cap);
     for i in candidate_iter {
         if xa.is_null(i) || ya.is_null(i) {
             continue;
@@ -190,8 +207,9 @@ pub(crate) fn coerce_xy_pairs_at(
         }
         xs.push(xv);
         ys.push(yv);
+        idxs.push(i);
     }
-    Ok((xs, ys))
+    Ok((xs, ys, idxs))
 }
 
 /// Extract clean `f64` values from a Float64Array, dropping null and NaN entries.

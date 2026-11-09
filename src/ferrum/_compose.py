@@ -251,6 +251,15 @@ class _PostBuildChannel:
     type_remedy: Callable[[str], str] | None = None
     always_honors_drawn_column: bool = False
     restore_declared_type: str | None = None
+    #: A figure's own refusal for a binding naming neither the called
+    #: field nor the drawn column -- another variable -- called with
+    #: ``(entry, channel, binding)``. ``None`` (every channel but flat
+    #: residplot's x/y) leaves such a binding to render as it already
+    #: does, since the figure's own layers keep drawing their own column
+    #: regardless of what the chart-level binding says. Set only where the
+    #: figure's one mark reads the chart-level binding directly, with no
+    #: layer of its own to keep drawing the right thing once it changes.
+    refuse_another_variable: Callable[[str, str, ChannelBase], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -305,8 +314,12 @@ def apply_post_build_positional(chart: Any) -> Any:
     a field-less binding either refuses a declared ``N``/``O``/``T`` a
     computed axis cannot place, then styles that axis the same way, or is
     refused naming the column to restate; any other field (another
-    variable) is left to render as it already does. Every channel this
-    pass re-points -- never one left alone -- then pushes its own
+    variable) is left to render as it already does, unless
+    :attr:`_PostBuildChannel.refuse_another_variable` is set and the field
+    is a column of the chart's own rows (:func:`known_chart_data_columns`
+    is ``None``, an engine-produced column Python cannot rule out, or
+    lists it), in which case that callable refuses it instead. Every
+    channel this pass re-points -- never one left alone -- then pushes its own
     ``scale=``/``format=``/``format_type=``/``axis=`` down onto the
     figure's own layers (:func:`_push_down_positional_options`), the
     later write always replacing whatever a layer already carries for
@@ -404,6 +417,18 @@ def apply_post_build_positional(chart: Any) -> Any:
                 if spec.restore_declared_type is not None:
                     rebound = rebound._with_options(type=spec.restore_declared_type)
                 updates[channel] = rebound
+            elif spec.refuse_another_variable is not None:
+                # Another variable: a column of the chart's own rows (or
+                # one an un-inspectable step might have produced) names
+                # neither the called field nor the drawn column. Left
+                # alone everywhere but here, since every other figure's
+                # layers keep drawing their own column regardless of a
+                # chart-level binding; refused where the one check this
+                # spec carries says a figure's one mark would draw it
+                # raw, without a refit.
+                known = known_chart_data_columns(chart)
+                if known is None or field in known:
+                    spec.refuse_another_variable(record.entry, channel, binding)
             # else: another variable -- left alone.
     if not updates and not deferred_to_pending_prep:
         return chart

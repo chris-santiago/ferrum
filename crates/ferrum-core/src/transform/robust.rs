@@ -42,8 +42,8 @@ use crate::transform::group_key::{
 };
 use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::logistic::inv_normal_cdf;
-use crate::transform::numeric_util::coerce_xy_pairs_at;
-use crate::transform::residuals;
+use crate::transform::numeric_util::coerce_xy_pairs_at_indexed;
+use crate::transform::residuals::{self, ResidualCarry, ResidualColumns};
 use crate::transform::smooth::SmoothOutput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,6 +91,11 @@ pub(crate) struct RobustSpec {
     /// no-op: it is the request to extend past the data's own range.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub x_range_pad: Option<f64>,
+    /// See `SmoothSpec.residual_columns` — the identical internal naming
+    /// setting, mirrored here so `Robust` gives its own computed columns
+    /// fresh names the same way.
+    #[serde(default, skip_serializing_if = "ResidualColumns::is_default")]
+    pub residual_columns: ResidualColumns,
 }
 
 // ---------- Main apply ----------
@@ -118,10 +123,15 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    // The fitted path never reads `residual_columns`; residual mode runs
+    // this before any dispatch, mirroring `smooth::apply_with_context`.
+    if matches!(spec.output, SmoothOutput::Residuals) {
+        spec.residual_columns.check("Robust")?;
+    }
     let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
     let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
     if x_slot.is_none() && y_slot.is_none() {
-        return apply_in_data_space(spec, batch, ctx);
+        return apply_in_data_space(spec, &spec.x, batch, ctx);
     }
     apply_in_log_space(spec, batch, ctx, x_slot, y_slot)
 }
@@ -133,11 +143,19 @@ pub(crate) fn apply_with_context(
 /// evaluation range via
 /// [`crate::transform::numeric_util::evaluation_range`], padding once in
 /// whichever space this body already runs in.
-fn apply_in_data_space(spec: &RobustSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
+///
+/// `predictor_field` is the caller's OWN predictor column name, never a
+/// demanded slot's log-mapped private name: `spec.x` itself when not
+/// demanded, but [`apply_in_log_space`]'s own `spec.x` (captured before it
+/// builds the mapped spec passed as `spec` here) when it is — mirrors
+/// `smooth::apply_in_data_space`'s identical parameter, for the identical
+/// reason (`build_residuals_batch`'s carry needs to ask about the caller's
+/// own column, not this call's internal fit column).
+fn apply_in_data_space(spec: &RobustSpec, predictor_field: &str, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby, ctx);
+        return apply_grouped(spec, predictor_field, batch, &spec.groupby, ctx);
     }
-    apply_one_group(spec, batch, None, ctx, None)
+    apply_one_group(spec, predictor_field, batch, None, ctx, None)
 }
 
 /// `apply_with_context` under a drawn log axis's demand, mirroring
@@ -166,11 +184,11 @@ fn apply_in_log_space(
         ctx,
         "Robust",
         batch,
-        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output),
+        &TransformSpec::fit_space_columns(&spec.x, &spec.y, spec.output, &spec.residual_columns.x),
         (&spec.x, x_slot),
         (&spec.y, y_slot),
         |mapped_batch, x, y, ctx| {
-            apply_in_data_space(&RobustSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, mapped_batch, ctx)
+            apply_in_data_space(&RobustSpec { x: x.to_string(), y: y.to_string(), ..mapped_spec.clone() }, &spec.x, mapped_batch, ctx)
         },
     )
 }
@@ -182,12 +200,13 @@ fn apply_in_log_space(
 /// `None` for a whole-frame call — attached to any degrade warning pushed here.
 fn apply_one_group(
     spec: &RobustSpec,
+    predictor_field: &str,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     ctx: &TransformContext,
     group: Option<&str>,
 ) -> PyResult<RecordBatch> {
-    let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Robust", only_indices)?;
+    let (xs, ys, row_idx) = coerce_xy_pairs_at_indexed(batch, &spec.x, &spec.y, "Robust", only_indices)?;
 
     let n_grid = spec.n_grid.max(1);
 
@@ -202,6 +221,8 @@ fn apply_one_group(
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
             SmoothOutput::Residuals => build_residuals_batch(
+                &ResidualCarry { batch, row_idx: &[], predictor_field, group_cols: &spec.groupby },
+                &spec.residual_columns,
                 Vec::new(), Vec::new(), &[],
                 spec.inject_zero_ref, spec.inject_metrics,
             ),
@@ -229,6 +250,8 @@ fn apply_one_group(
             SmoothOutput::Residuals => {
                 let nans = vec![f64::NAN; xs.len()];
                 build_residuals_batch(
+                    &ResidualCarry { batch, row_idx: &row_idx, predictor_field, group_cols: &spec.groupby },
+                    &spec.residual_columns,
                     xs.clone(), nans, &ys,
                     spec.inject_zero_ref, spec.inject_metrics,
                 )
@@ -288,6 +311,8 @@ fn apply_one_group(
 
     if matches!(spec.output, SmoothOutput::Residuals) {
         return build_residuals_batch(
+            &ResidualCarry { batch, row_idx: &row_idx, predictor_field, group_cols: &spec.groupby },
+            &spec.residual_columns,
             xs.clone(), r_final, &ys,
             spec.inject_zero_ref, spec.inject_metrics,
         );
@@ -446,6 +471,7 @@ fn apply_one_group(
 /// way it is for Smooth.
 fn apply_grouped(
     spec: &RobustSpec,
+    predictor_field: &str,
     batch: &RecordBatch,
     group_cols: &[String],
     ctx: &TransformContext,
@@ -464,7 +490,7 @@ fn apply_grouped(
     let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
     for (g, ixs) in &partition.groups {
         let label = describe_group_keys(group_cols, g);
-        let out = apply_one_group(spec, batch, Some(ixs), ctx, Some(&label))?;
+        let out = apply_one_group(spec, predictor_field, batch, Some(ixs), ctx, Some(&label))?;
         per_group_batches.push((g.clone(), out));
     }
 
@@ -475,7 +501,7 @@ fn apply_grouped(
         // the null-keyed group, stacked with a key that nulls only the
         // `groupby` column(s) actually all-null (`pooled_group_key`'s
         // doc), so a facet field folded into `group_cols` keeps its value.
-        let pooled = apply_one_group(spec, batch, None, ctx, None)?;
+        let pooled = apply_one_group(spec, predictor_field, batch, None, ctx, None)?;
         let key = pooled_group_key(batch, group_cols)?;
         return stack_grouped_batches("Robust", &[(key, pooled)], group_cols, &partition.dtypes);
     }
@@ -580,7 +606,12 @@ fn build_fitted_batch(
         Arc::new(Float64Array::from(hi)),
     ];
     if let Some(m) = metrics {
-        residuals::append_metrics_columns(&mut fields, &mut cols, &x, &y, m);
+        // The Fitted path never reads `residual_columns`, so its metrics
+        // columns stay the stock names.
+        residuals::append_metrics_columns(
+            &mut fields, &mut cols, &x, &y, m,
+            residuals::DEFAULT_RESIDUAL_METRICS_TEXT, residuals::DEFAULT_RESIDUAL_METRICS_Y,
+        );
     }
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
@@ -609,14 +640,23 @@ fn build_nan_fitted(n_grid: usize, metrics_requested: bool) -> PyResult<RecordBa
 /// ``y_obs`` to derive R² / RMSE / MAE; delegates column emission to
 /// `crate::transform::residuals` so the schema + text-format invariant
 /// is owned in one home (post-C4 rework, 2026-05-12).
+///
+/// Row-preserving (the `Bin(per_row=True)` contract, applied here): every
+/// other column `carry.batch` holds is carried at exactly the row
+/// positions `carry.row_idx` names, in order — see
+/// `residuals::append_carried_columns`'s own doc for the exclude/collision
+/// rule, derived there from the computed columns this builds below rather
+/// than hand-listed again here; mirrors `smooth::fits::build_residuals_batch`.
 fn build_residuals_batch(
+    carry: &ResidualCarry,
+    names: &ResidualColumns,
     xs: Vec<f64>, resid: Vec<f64>, ys_obs: &[f64],
     inject_zero_ref: bool, inject_metrics: bool,
 ) -> PyResult<RecordBatch> {
     let n = xs.len();
     let mut fields = vec![
-        Field::new("x",        DataType::Float64, true),
-        Field::new("residual", DataType::Float64, true),
+        Field::new(&names.x,        DataType::Float64, true),
+        Field::new(&names.residual, DataType::Float64, true),
     ];
     let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(xs.clone())),
@@ -624,13 +664,15 @@ fn build_residuals_batch(
     ];
 
     if inject_zero_ref {
-        residuals::append_zero_ref_column(&mut fields, &mut cols, n);
+        residuals::append_zero_ref_column(&mut fields, &mut cols, n, &names.ref_zero);
     }
 
     if inject_metrics {
         let metrics = residuals::compute(ys_obs, &resid);
-        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, metrics);
+        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, metrics, &names.metrics_text, &names.metrics_y);
     }
+
+    residuals::append_carried_columns("Robust", &mut fields, &mut cols, carry)?;
 
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
@@ -796,7 +838,50 @@ impl PyRobust {
             name,
             x_range,
             x_range_pad,
+            residual_columns: ResidualColumns::default(),
         })))
+    }
+
+    /// Internal: mirrors `PySmooth`'s identical private method (see its
+    /// doc for the full contract) — gives `Robust`'s own computed
+    /// residual-mode columns fresh names, refusing on a `Fitted` spec or
+    /// a malformed name set, with `Robust`'s own voice.
+    #[pyo3(signature = (*, x=None, residual=None, ref_zero=None, metrics_text=None, metrics_y=None))]
+    fn _with_residual_columns(
+        &self,
+        x: Option<String>,
+        residual: Option<String>,
+        ref_zero: Option<String>,
+        metrics_text: Option<String>,
+        metrics_y: Option<String>,
+    ) -> PyResult<Self> {
+        // `PyRobust` only ever wraps `TransformSpec::Robust` (its only
+        // constructor, `new` above, guarantees it), so the other arm is
+        // unreachable through the public API; it still returns a typed
+        // error rather than `unreachable!()`, mirroring `PySmooth`'s own
+        // identical method, so a future internal caller that got this
+        // wrong fails safely at the PyO3 boundary instead of panicking.
+        let TransformSpec::Robust(spec) = &self.0 else {
+            return Err(PyValueError::new_err(
+                "Robust: internal error — _with_residual_columns called on a spec that is not \
+                 Robust; this is a bug in ferrum, not a user error",
+            ));
+        };
+        if !matches!(spec.output, SmoothOutput::Residuals) {
+            return Err(PyValueError::new_err(
+                "Robust: residual column names apply only to output='residuals'",
+            ));
+        }
+        let mut names = spec.residual_columns.clone();
+        if let Some(v) = x { names.x = v; }
+        if let Some(v) = residual { names.residual = v; }
+        if let Some(v) = ref_zero { names.ref_zero = v; }
+        if let Some(v) = metrics_text { names.metrics_text = v; }
+        if let Some(v) = metrics_y { names.metrics_y = v; }
+        names.check("Robust")?;
+        let mut spec = spec.clone();
+        spec.residual_columns = names;
+        Ok(Self(TransformSpec::Robust(spec)))
     }
 
     fn __repr__(&self) -> String {
@@ -854,6 +939,7 @@ mod tests {
 
     fn spec(n_grid: usize, ci: Option<f64>, huber_c: f64, output: SmoothOutput) -> RobustSpec {
         RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             n_grid, ci, huber_c,
             max_iter: 50, tol: 1e-10,
@@ -869,6 +955,7 @@ mod tests {
     #[test]
     fn test_robust_round_trip_json() {
         let s = RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             n_grid: 100, ci: Some(0.95),
             huber_c: 1.345, max_iter: 25, tol: 1e-8,
@@ -885,6 +972,7 @@ mod tests {
 
         // Also check residuals variant + name.
         let s2 = RobustSpec {
+            residual_columns: Default::default(),
             x: "a".into(), y: "b".into(),
             n_grid: 50, ci: None,
             huber_c: 2.0, max_iter: 10, tol: 1e-6,
@@ -1002,18 +1090,23 @@ mod tests {
 
     #[test]
     fn test_robust_residuals_schema_and_zero_sum() {
-        // For perfectly linear data, all residuals are ~0.
+        // For perfectly linear data, all residuals are ~0. The response
+        // column "y" is carried alongside the computed [x, residual] pair —
+        // it is not one of this transform's own output names, so the
+        // row-preserving contract keeps it under its own name.
         let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 1.0).collect();
         let batch = xy_batch(xs.clone(), ys.clone());
         let s = spec(100, None, 1.345, SmoothOutput::Residuals);
         let out = apply(&s, &batch).unwrap();
 
-        // Schema check.
+        // Schema check: the computed [x, residual] pair plus the carried "y".
         let schema = out.schema();
-        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.fields().len(), 3, "x, residual, and the carried response column y");
         assert_eq!(schema.field(0).name(), "x");
         assert_eq!(schema.field(1).name(), "residual");
+        assert_eq!(schema.field(2).name(), "y");
+        assert_eq!(col(&out, "y"), ys, "the carried y column holds the caller's own response values");
 
         // Sum-of-residuals ≈ 0.
         let r = col(&out, "residual");
@@ -1047,6 +1140,7 @@ mod tests {
         let ys: Vec<f64> = xs.iter().map(|&x| 0.5 * x + 1.0).collect();
         let batch = xy_batch(xs, ys);
         let s = RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             n_grid: 30, ci: Some(0.95),
             huber_c: 1.345, max_iter: 50, tol: 1e-10,
@@ -1103,6 +1197,7 @@ mod tests {
         let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 1.0 + if (x as i64) % 3 == 0 { 5.0 } else { 0.0 }).collect();
         let batch = xy_batch(xs, ys);
         let s = RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(),
             n_grid: 10, ci: None,
             huber_c: 1.345, max_iter: 1, tol: 1e-8,
@@ -1323,7 +1418,9 @@ mod tests {
     fn test_robust_grouped_residuals_output() {
         // The grouped path must work for output="residuals" too (cross-task
         // note: BOTH output modes), mirroring Smooth's grouped-residuals
-        // contract.
+        // contract. The response column "y" rides along as a carried
+        // column, and the groupby column "g" is appended once by the
+        // stacking template, not carried a second time.
         let n_per_group = 10;
         let xs_a: Vec<f64> = (0..n_per_group).map(|i| i as f64).collect();
         let ys_a: Vec<f64> = xs_a.iter().map(|&x| 2.0 * x + 1.0).collect();
@@ -1339,23 +1436,375 @@ mod tests {
             .chain(std::iter::repeat("b").take(n_per_group))
             .collect();
 
-        let batch = xy_batch_with_group(xs, ys, groups);
+        let batch = xy_batch_with_group(xs, ys.clone(), groups);
         let mut s = spec(10, None, 1.345, SmoothOutput::Residuals);
         s.groupby = vec!["g".into()];
         let out = apply(&s, &batch).unwrap();
 
         let schema = out.schema();
-        assert_eq!(schema.fields().len(), 3, "residuals [x, residual] + 1 groupby column");
+        assert_eq!(schema.fields().len(), 4, "residuals [x, residual] + carried y + 1 groupby column");
         assert_eq!(schema.field(0).name(), "x");
         assert_eq!(schema.field(1).name(), "residual");
-        assert_eq!(schema.field(2).name(), "g");
+        assert_eq!(schema.field(2).name(), "y");
+        assert_eq!(schema.field(3).name(), "g");
         assert_eq!(out.num_rows(), 2 * n_per_group);
+        assert_eq!(col(&out, "y"), ys, "the carried y column holds every group's own response values, in order");
 
         // Clean per-group linear data → residuals ~0 for both groups.
         let r = col(&out, "residual");
         for &v in &r {
             assert!(v.abs() < 1e-6, "residual on clean linear per-group data should be ~0; got {v}");
         }
+    }
+
+    /// With the groups interleaved in the input, each group's emitted rows
+    /// carry its OWN input row's values, in that row's own position within
+    /// the group — mirrors `smooth::tests`'s identical contract (see its
+    /// doc for why a contiguous fixture cannot discriminate this).
+    #[test]
+    fn test_robust_grouped_residuals_carry_their_own_values_under_interleaved_groups() {
+        let xs: Vec<f64> = (0..8).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| if i % 2 == 0 { 2.0 * x } else { -1.0 * x }).collect();
+        let id: Vec<&str> = vec!["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+        let g: Vec<&str> = vec!["a", "b", "a", "b", "a", "b", "a", "b"];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(id)),
+            Arc::new(StringArray::from(g)),
+        ]).unwrap();
+        let mut s_spec = spec(10, None, 1.345, SmoothOutput::Residuals);
+        s_spec.groupby = vec!["g".into()];
+        let out = apply(&s_spec, &batch).unwrap();
+
+        assert_eq!(out.num_rows(), 8);
+        let id_out = out.column(out.schema().index_of("id").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(
+            (0..8).map(|i| id_out.value(i)).collect::<Vec<_>>(),
+            vec!["r0", "r2", "r4", "r6", "r1", "r3", "r5", "r7"],
+            "group a's own rows (even input positions), then group b's own rows (odd), each in its original relative order",
+        );
+        let g_out = out.column(out.schema().index_of("g").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(
+            (0..8).map(|i| g_out.value(i)).collect::<Vec<_>>(),
+            vec!["a", "a", "a", "a", "b", "b", "b", "b"],
+        );
+    }
+
+    // ── Residuals mode carries the caller's other input columns ─────────
+
+    /// Every other column the caller's batch holds rides along on the
+    /// residuals batch, copied at exactly the rows the fit kept (one row
+    /// is dropped for a NaN `y`), in the surviving rows' own order, at
+    /// every dtype — mirrors `smooth::tests`'s identical contract.
+    #[test]
+    fn test_robust_residuals_carries_other_input_columns_at_surviving_rows_in_order() {
+        let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let w: Vec<f64> = vec![1.0, 3.0, f64::NAN, 7.0, 9.0]; // row 2 dropped (NaN y)
+        let s: Vec<Option<f64>> = vec![Some(10.0), None, Some(30.0), Some(f64::NAN), Some(50.0)];
+        let id: Vec<&str> = vec!["r0", "r1", "r2", "r3", "r4"];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new("s", DataType::Float64, true),
+            Field::new("id", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v.clone())),
+            Arc::new(Float64Array::from(w.clone())),
+            Arc::new(Float64Array::from(s.clone())),
+            Arc::new(StringArray::from(id.clone())),
+        ]).unwrap();
+        let mut s_spec = spec(100, None, 1.345, SmoothOutput::Residuals);
+        s_spec.x = "v".into();
+        s_spec.y = "w".into();
+        let out = apply(&s_spec, &batch).unwrap();
+
+        assert_eq!(out.num_rows(), 4, "row 2 (NaN y) is dropped from the fit, and from every carried column");
+        let schema = out.schema();
+        let mut names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["id", "residual", "s", "v", "w", "x"]);
+
+        assert_eq!(col(&out, "v"), vec![0.0, 1.0, 3.0, 4.0], "the predictor's own column carries too");
+        assert_eq!(col(&out, "x"), vec![0.0, 1.0, 3.0, 4.0], "the computed x holds the same surviving values");
+        assert_eq!(col(&out, "w"), vec![1.0, 3.0, 7.0, 9.0], "the response column rides along as a carried column");
+
+        let s_out = out.column(out.schema().index_of("s").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(s_out.value(0), 10.0);
+        assert!(s_out.is_null(1), "the caller's own null in a carried column stays null");
+        assert!(!s_out.is_null(2) && s_out.value(2).is_nan(), "a NaN (never nulled) in a carried column is copied as the caller's row held it");
+        assert_eq!(s_out.value(3), 50.0);
+
+        let id_out = out.column(out.schema().index_of("id").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((0..4).map(|i| id_out.value(i)).collect::<Vec<_>>(), vec!["r0", "r1", "r3", "r4"]);
+    }
+
+    /// An input column named like one of the step's own output columns is
+    /// refused rather than shadowed — the `Bin(per_row=True)` collision
+    /// text, applied to `Robust`'s residual mode, with `Robust`'s own
+    /// prefix, for every name the step can emit: the always-emitted
+    /// `residual`, the computed `x` when the predictor is a different
+    /// column (`v`), and `_ref_zero`/`_metrics_text`/`_metrics_y` only
+    /// when their own inject flag asks for them.
+    #[test]
+    fn test_robust_residuals_refuses_an_input_column_named_like_each_column_it_emits() {
+        pyo3::Python::initialize();
+        let base = || {
+            let mut s_spec = spec(100, None, 1.345, SmoothOutput::Residuals);
+            s_spec.x = "v".into();
+            s_spec.y = "w".into();
+            s_spec
+        };
+        for (taken, s_spec) in [
+            ("residual", base()),
+            ("x", base()),
+            ("_ref_zero", RobustSpec { inject_zero_ref: true, ..base() }),
+            ("_metrics_text", RobustSpec { inject_metrics: true, ..base() }),
+            ("_metrics_y", RobustSpec { inject_metrics: true, ..base() }),
+        ] {
+            let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+            let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+            let taken_col: Vec<f64> = vec![-1.0, -2.0, -3.0, -4.0];
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new(taken, DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(v)),
+                Arc::new(Float64Array::from(w)),
+                Arc::new(Float64Array::from(taken_col)),
+            ]).unwrap();
+            let err = apply(&s_spec, &batch).expect_err(&format!("a data column named '{taken}' must refuse"));
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "ValueError: Robust: residual output column '{taken}' collides with an \
+                     input column of the same name; rename the input column"
+                ),
+                "{taken}",
+            );
+        }
+    }
+
+    /// An optional column this call does NOT emit is carried like any
+    /// other column — mirrors `smooth::tests`'s identical contract.
+    #[test]
+    fn test_robust_residuals_carries_an_input_column_named_like_an_optional_column_it_does_not_emit() {
+        for taken in ["_ref_zero", "_metrics_text", "_metrics_y"] {
+            let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+            let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+            let taken_col: Vec<f64> = vec![9.0, 8.0, 7.0, 6.0];
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new(taken, DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(v)),
+                Arc::new(Float64Array::from(w)),
+                Arc::new(Float64Array::from(taken_col)),
+            ]).unwrap();
+            let mut s_spec = spec(100, None, 1.345, SmoothOutput::Residuals);
+            s_spec.x = "v".into();
+            s_spec.y = "w".into();
+            let out = apply(&s_spec, &batch).expect(&format!("'{taken}' is an ordinary carried column when not requested"));
+            assert_eq!(col(&out, taken), vec![9.0, 8.0, 7.0, 6.0], "{taken}");
+        }
+    }
+
+    /// Fewer than 2 usable points degrades to the existing zero-row
+    /// residuals batch (unchanged), but its schema still carries every
+    /// other input column, at its own dtype.
+    #[test]
+    fn test_robust_residuals_degenerate_batch_still_carries_input_schema() {
+        let v: Vec<f64> = vec![1.0];
+        let w: Vec<f64> = vec![2.0];
+        let id: Vec<&str> = vec!["only-row"];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new("id", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v)),
+            Arc::new(Float64Array::from(w)),
+            Arc::new(StringArray::from(id)),
+        ]).unwrap();
+        let mut s_spec = spec(100, None, 1.345, SmoothOutput::Residuals);
+        s_spec.x = "v".into();
+        s_spec.y = "w".into();
+        let out = apply(&s_spec, &batch).expect("fewer than 2 points degrades, not fails");
+        assert_eq!(out.num_rows(), 0, "a single usable row still can't fit a line");
+        let schema = out.schema();
+        let mut names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["id", "residual", "v", "w", "x"]);
+        assert_eq!(
+            out.schema().field(out.schema().index_of("id").unwrap()).data_type(),
+            &DataType::Utf8,
+            "the carried column keeps its own dtype even with no rows to carry",
+        );
+    }
+
+    /// A carried (non-positional) column rides through a demanded log x
+    /// unmapped: its own values are copied straight from the caller's
+    /// batch, never forward/backward-mapped the way the predictor's own
+    /// `x` slot is — and the predictor's own column, literally named `x`
+    /// here, is still not carried a second time even though the fit now
+    /// reads it through a log-mapped private column, not its own name.
+    #[test]
+    fn robust_residuals_on_a_demanded_log_x_carries_other_columns_unmapped() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let ys: Vec<f64> = xs.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+        let weights: Vec<f64> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys.clone())),
+            Arc::new(Float64Array::from(weights.clone())),
+        ]).unwrap();
+        let s = spec(6, None, 1.345, SmoothOutput::Residuals);
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s, &batch, &ctx).expect("a clean log-x fit emits residuals");
+        assert_eq!(out.num_rows(), 6, "every row survives (no nulls to drop)");
+        assert_eq!(col(&out, "w"), weights, "the carried column is copied straight from the caller, never log-mapped");
+
+        let schema = out.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names, vec!["x", "residual", "y", "w"],
+            "the caller's own x column is not carried a second time even under a demanded log x",
+        );
+    }
+
+    /// When the predictor is NOT named `x` (it is `v` here), a demanded
+    /// log x maps only a fresh, private column for the fit itself —
+    /// mirrors `smooth::tests`'s identical contract.
+    #[test]
+    fn robust_residuals_on_a_demanded_log_x_keeps_a_predictor_not_named_x_in_data_units() {
+        pyo3::Python::initialize();
+        let v: Vec<f64> = vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let w: Vec<f64> = v.iter().map(|&x| 3.0 + 2.0 * x.log10()).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v.clone())),
+            Arc::new(Float64Array::from(w)),
+        ]).unwrap();
+        let mut s_spec = spec(6, None, 1.345, SmoothOutput::Residuals);
+        s_spec.x = "v".into();
+        s_spec.y = "w".into();
+        let ctx = ctx_demanding(axis_slots(Some(positive_space()), None));
+        let out = apply_with_context(&s_spec, &batch, &ctx).expect("a clean log-x fit emits residuals");
+
+        let schema = out.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            names.iter().all(|n| !n.starts_with("__log_space_")),
+            "no private log-space column leaks into the output: {names:?}",
+        );
+        assert_eq!(names, vec!["x", "residual", "v", "w"], "v carries under its own name, not folded into x");
+        assert_eq!(col(&out, "v"), v, "the carried predictor is the caller's own data-space values, never log-mapped");
+        let xg = col(&out, "x");
+        for (xq, vq) in xg.iter().zip(v.iter()) {
+            assert!(
+                (xq - vq).abs() < 1e-9,
+                "the computed x, mapped back, must equal the predictor's own data-space value: x={xq} v={vq}",
+            );
+        }
+    }
+
+    // ── The internal residual_columns naming setting ─────────────────────
+
+    /// Setting every computed column's name moves them all out of the
+    /// way — mirrors `smooth::tests`'s identical contract, with `Robust`'s
+    /// own prefix.
+    #[test]
+    fn test_robust_residuals_emits_its_columns_under_the_names_its_setting_gives() {
+        let v: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0];
+        let w: Vec<f64> = vec![1.0, 3.0, 5.0, 7.0];
+        let x_col: Vec<f64> = vec![100.0, 101.0, 102.0, 103.0];
+        let residual_col: Vec<f64> = vec![200.0, 201.0, 202.0, 203.0];
+        let ref_zero_col: Vec<f64> = vec![300.0, 301.0, 302.0, 303.0];
+        let metrics_text_col: Vec<f64> = vec![400.0, 401.0, 402.0, 403.0];
+        let metrics_y_col: Vec<f64> = vec![500.0, 501.0, 502.0, 503.0];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new("x", DataType::Float64, true),
+            Field::new("residual", DataType::Float64, true),
+            Field::new("_ref_zero", DataType::Float64, true),
+            Field::new("_metrics_text", DataType::Float64, true),
+            Field::new("_metrics_y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(v)),
+            Arc::new(Float64Array::from(w)),
+            Arc::new(Float64Array::from(x_col.clone())),
+            Arc::new(Float64Array::from(residual_col.clone())),
+            Arc::new(Float64Array::from(ref_zero_col.clone())),
+            Arc::new(Float64Array::from(metrics_text_col.clone())),
+            Arc::new(Float64Array::from(metrics_y_col.clone())),
+        ]).unwrap();
+        let mut s_spec = spec(100, None, 1.345, SmoothOutput::Residuals);
+        s_spec.x = "v".into();
+        s_spec.y = "w".into();
+        s_spec.inject_zero_ref = true;
+        s_spec.inject_metrics = true;
+        s_spec.residual_columns = ResidualColumns {
+            x: "x_1".into(), residual: "residual_1".into(), ref_zero: "_ref_zero_1".into(),
+            metrics_text: "_metrics_text_1".into(), metrics_y: "_metrics_y_1".into(),
+        };
+        let out = apply(&s_spec, &batch).unwrap();
+
+        let schema = out.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["x_1", "residual_1", "_ref_zero_1", "_metrics_text_1", "_metrics_y_1", "v", "w", "x", "residual", "_ref_zero", "_metrics_text", "_metrics_y"],
+            "the computed columns under their set names, then every input column in input order",
+        );
+        assert_eq!(col(&out, "x"), x_col, "the data's own 'x' column, not the computed output, carries verbatim");
+        assert_eq!(col(&out, "residual"), residual_col);
+        assert_eq!(col(&out, "_ref_zero"), ref_zero_col);
+        assert_eq!(col(&out, "_metrics_text"), metrics_text_col);
+        assert_eq!(col(&out, "_metrics_y"), metrics_y_col);
+    }
+
+    /// `_with_residual_columns` only reaches a non-Robust spec through a
+    /// `PyRobust` built directly in Rust, never through the public
+    /// `fm.Robust` door (whose one constructor, `PyRobust::new`, only ever
+    /// builds `TransformSpec::Robust`) — still a typed error, not a panic,
+    /// at that PyO3 boundary.
+    #[test]
+    fn test_with_residual_columns_on_a_non_robust_spec_is_a_typed_error_not_a_panic() {
+        pyo3::Python::initialize();
+        let wrong = PyRobust(TransformSpec::Identity(crate::transform::identity::IdentitySpec {
+            name: None,
+            statistics: false,
+        }));
+        let err = wrong._with_residual_columns(None, None, None, None, None)
+            .expect_err("a non-Robust spec must be refused, not panic");
+        assert!(err.to_string().contains("Robust"), "{err}");
     }
 
     #[test]

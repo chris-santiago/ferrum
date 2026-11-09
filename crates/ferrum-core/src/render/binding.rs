@@ -2914,6 +2914,7 @@ mod composite_warning_tests {
             // Smooth's canonical output columns.
             spec.encoding.color = None;
             spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+                residual_columns: Default::default(),
                 x: "x".into(),
                 y: "y".into(),
                 method: SmoothMethod::Lm,

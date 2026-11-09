@@ -606,6 +606,15 @@ class Smooth:
         x_range: Optional[Tuple[float, float]] = None,
         x_range_pad: Optional[float] = None,
     ) -> None: ...
+    def _with_residual_columns(
+        self,
+        *,
+        x: Optional[str] = None,
+        residual: Optional[str] = None,
+        ref_zero: Optional[str] = None,
+        metrics_text: Optional[str] = None,
+        metrics_y: Optional[str] = None,
+    ) -> "Smooth": ...
 
 class AggregateOp:
     def __init__(self, field: str, fn_: str, as_: str) -> None: ...
@@ -819,6 +828,15 @@ class Robust:
         x_range: Optional[Tuple[float, float]] = None,
         x_range_pad: Optional[float] = None,
     ) -> None: ...
+    def _with_residual_columns(
+        self,
+        *,
+        x: Optional[str] = None,
+        residual: Optional[str] = None,
+        ref_zero: Optional[str] = None,
+        metrics_text: Optional[str] = None,
+        metrics_y: Optional[str] = None,
+    ) -> "Robust": ...
 
 # ---------- Data transforms (Vega-lite-style, declared missing from stub) ----------
 #

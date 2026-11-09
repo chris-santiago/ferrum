@@ -973,6 +973,12 @@ class SpecBuildMixin:
             # to a pre-#52 spec (see Layer::independent_y in Rust spec/layer.rs).
             if layer.independent_y:
                 layer_dict["independent_y"] = True
+            # Per-fit summary layer flag: only emitted when True, so a layer
+            # that draws one mark per row (every layer but residplot's
+            # "reference"/"metrics") round-trips byte-identically (see
+            # `Layer::fit_summary` in Rust `spec/layer.rs`).
+            if layer.fit_summary:
+                layer_dict["fit_summary"] = True
             # Per-layer coordinate system (`#172`(1)). Only emitted when the
             # layer carries one of its own -- absent means "inherit the chart's",
             # which is every layer of every chart that does not mix coordinate

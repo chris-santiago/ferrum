@@ -3059,6 +3059,16 @@ pub(in crate::render) fn voiced_layer(index: usize, entry: &str, mark: crate::sp
 /// layer's own binding, a layer over the user's rows (no `data_source`, or
 /// a `Branch` output) and a column found nowhere still refuse.
 ///
+/// **A fit-summary layer's inherited read is dropped the same way, even
+/// when its own batch carries the column.** A layer whose raw spec sets
+/// [`crate::spec::layer::Layer::fit_summary`] draws one mark for its whole
+/// fit (a figure's zero-reference rule or metrics-corner text), so an
+/// inherited per-row binding would draw an arbitrary row's value on it —
+/// dropped and warned about exactly like a statistic sub-layer's missing
+/// column, except the gate decides it from the flag, not from whether the
+/// column is there. `color`, `shape` and `stroke_dash` (a figure's own
+/// grouping channels) are exempt by wire and still draw.
+///
 /// **Scope (normative).**
 /// - Every layer of a layered spec is judged, layer 0 included: a channel's
 ///   scale, axis and legend are read only from the batch of a layer that
@@ -3111,6 +3121,16 @@ pub(in crate::render) fn validate_layer_columns(
     let mut dropped = Vec::new();
     for read in layer_column_reads(layer_index, layer, raw, encoding, conditionals) {
         if batch.column_by_name(read.field).is_some() {
+            // A fit-summary layer draws one mark for its whole fit, so an
+            // inherited per-row binding is dropped even though its own
+            // batch carries the column — color/shape/stroke_dash (a
+            // figure's own grouping channels) are exempt and still draw.
+            if raw.is_some_and(|r| r.fit_summary)
+                && read.inherited
+                && read.wire.is_some_and(|w| !matches!(w, "color" | "shape" | "stroke_dash"))
+            {
+                dropped.push(DroppedRead { channel: read.channel, wire: read.wire, field: read.field.to_string() });
+            }
             continue;
         }
         if statistic_layer && read.inherited && pipeline.source.index_of(read.field).is_ok() {

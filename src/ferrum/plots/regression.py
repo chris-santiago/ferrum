@@ -17,7 +17,7 @@ _prediction_error_chart_from_source.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,7 @@ from ferrum._encode_lowering import (
     _rebind_positional,
     _refuse_bin_aggregate_fit,
     _refuse_categorical_input,
+    _refuse_residplot_another_variable,
     _refuse_residplot_bin_aggregate,
     _refuse_unreadable_positional_options,
     _residual_axis_categorical_reads,
@@ -52,9 +53,10 @@ from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
+from ferrum.encoding._channel_policy import _FACET_CHANNELS
 from ferrum.encoding._resolve import channel_for_value
 from ferrum.encoding.base import ChannelBase, declared_title, drawn_title
-from ferrum.marks._desugar_helpers import with_grouping
+from ferrum.marks._desugar_helpers import _unique_col_name, with_grouping
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.diagnostic._regression import COOK_OUTLIER_STYLE
 from ferrum.marks.statistical import desugar_smooth
@@ -903,6 +905,7 @@ def _eager_post_build_channel(
     type_remedy: Callable[[str], str] | None = None,
     always_honors_drawn_column: bool = False,
     restore_declared_type: str | None = None,
+    refuse_another_variable: Callable[[str, str, ChannelBase], None] | None = None,
 ) -> _PostBuildChannel:
     """Build a regression figure's ``_PostBuildChannel`` for *channel*.
 
@@ -925,9 +928,9 @@ def _eager_post_build_channel(
     if it wants one. *type_remedy* overrides the default declared-type
     ending for a form whose call door drops a declared ``T`` too
     (``scatter=False``, no sibling layer drawn).
-    *always_honors_drawn_column*/*restore_declared_type* pass straight
-    through to :class:`~ferrum._compose._PostBuildChannel` (residplot's
-    own use, documented there).
+    *always_honors_drawn_column*/*restore_declared_type*/*refuse_another_variable*
+    pass straight through to :class:`~ferrum._compose._PostBuildChannel`
+    (residplot's own use, documented there).
     """
     own = out._encoding.get(channel)
     call_type = own.option("type") if isinstance(own, ChannelBase) else None
@@ -949,6 +952,7 @@ def _eager_post_build_channel(
         type_remedy=type_remedy,
         always_honors_drawn_column=always_honors_drawn_column,
         restore_declared_type=restore_declared_type,
+        refuse_another_variable=refuse_another_variable,
     )
 
 
@@ -1041,40 +1045,50 @@ def _residplot_post_build_positional(
     x_field: str,
     y_field: str,
     residual_title: str,
-    resid_x: str,
+    drawn_x: str,
+    drawn_residual: str,
     x_declared_type: str | None,
+    flat: bool,
 ) -> _PostBuildPositional:
     """Residplot's ``_PostBuildPositional`` record, attached to *out* before it is returned.
 
     x is an input the fit reads, built like regplot/lmplot's own
     (:func:`_eager_post_build_channel`, re-pointed onto its drawn column
-    *resid_x* -- residplot's one source for that column name, read at the
-    call site rather than repeated here -- with no *default_title*: the
-    re-point's own fallback -- the post-build binding's own field, which
-    equals *x_field* by the time this channel is re-pointed at all --
-    already matches residplot's call-time rebind, which passes none
+    *drawn_x* -- the name :func:`_residual_column_names` chose, read at
+    the call site rather than repeated here -- with no *default_title*:
+    the re-point's own fallback -- the post-build binding's own field,
+    which equals *x_field* by the time this channel is re-pointed at all
+    -- already matches residplot's call-time rebind, which passes none
     either). *x_declared_type* restores a call-time declared ``T`` after
     the re-point forces it back to ``"Q"`` (:attr:`~ferrum._compose._PostBuildChannel.restore_declared_type`),
     the same restoration residplot's own call-time rebind runs
-    (``regression.py``, near the ``_resid_x`` re-point below): needed
-    because flat residplot draws x straight from the chart's own
-    encoding, with no layer of its own to keep the declared type safe
-    from a later ``.encode()`` the way a layered figure's own layer does.
+    (``regression.py``, near the x re-point below): needed because flat
+    residplot draws x straight from the chart's own encoding, with no
+    layer of its own to keep the declared type safe from a later
+    ``.encode()`` the way a layered figure's own layer does.
 
-    y is the residual axis residplot computes: a field-less binding
-    styles it (``honors_fieldless=True``) rather than being refused, a
-    declared type also disallows ``T`` (the residual axis is never a
-    time axis either, refused on a field-less binding the same way as a
-    field-bearing one -- :func:`~ferrum._encode_lowering._refuse_fieldless_categorical_type`),
+    y is the residual axis residplot computes, re-pointed onto
+    *drawn_residual*: a field-less binding styles it
+    (``honors_fieldless=True``) rather than being refused, a declared type
+    also disallows ``T`` (the residual axis is never a time axis either,
+    refused on a field-less binding the same way as a field-bearing one --
+    :func:`~ferrum._encode_lowering._refuse_fieldless_categorical_type`),
     and its scale=/format= unreadable check uses residplot's own remedy
     (:func:`_refuse_residplot_y_unreadable`).
 
     Both channels pass ``always_honors_drawn_column=True``: a caller
-    whose predictor happens to share residplot's own x column's name
-    (``residplot(df, x="x", y="y")``), or whose response shares the
-    residual column's (``y="residual"``), is naming the column the
-    figure already draws -- read as the figure's own drawn-column
-    binding is, never refused as a rewrite of the called field.
+    whose predictor happens to share residplot's own drawn x column's
+    name, or whose response shares the drawn residual column's, is naming
+    the column the figure already draws -- read as the figure's own
+    drawn-column binding is, never refused as a rewrite of the called
+    field. *flat* is ``True`` only when no overlay is drawn: flat
+    residplot's one mark reads x/y straight from the chart-level encoding,
+    with no layer to shadow a later binding naming neither the called
+    field nor the drawn column, so only there does each channel also pass
+    ``refuse_another_variable`` (:func:`~ferrum._encode_lowering._refuse_residplot_another_variable`),
+    naming this call's own field. The layered form passes none: its
+    layers keep drawing their own columns regardless of what the
+    chart-level encoding says, as `regplot`/`lmplot` already do.
     """
     return _PostBuildPositional(
         entry="residplot",
@@ -1083,15 +1097,18 @@ def _residplot_post_build_positional(
                 out,
                 "x",
                 called_field=x_field,
-                drawn_column=resid_x,
+                drawn_column=drawn_x,
                 always_honors_drawn_column=True,
                 restore_declared_type=x_declared_type,
+                refuse_another_variable=(
+                    partial(_refuse_residplot_another_variable, called_field=x_field) if flat else None
+                ),
             ),
             "y": _eager_post_build_channel(
                 out,
                 "y",
                 called_field=y_field,
-                drawn_column="residual",
+                drawn_column=drawn_residual,
                 default_title=residual_title,
                 honors_fieldless=True,
                 categorical_reads=_residual_axis_categorical_reads,
@@ -1099,6 +1116,9 @@ def _residplot_post_build_positional(
                 unreadable=("scale", "format"),
                 check_unreadable=_refuse_residplot_y_unreadable,
                 always_honors_drawn_column=True,
+                refuse_another_variable=(
+                    partial(_refuse_residplot_another_variable, called_field=y_field) if flat else None
+                ),
             ),
         },
         statistic_refusal=_refuse_residplot_bin_aggregate,
@@ -1754,6 +1774,79 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
     return False
 
 
+#: The channels residplot's layered form binds at the chart level: x/y/x2/y2,
+#: a grouping channel (refits the residuals per group, so every layer that
+#: reads the chart's rows must regroup the same way) or a facet channel
+#: (partitions the rows before any layer draws them). Every other channel a
+#: keyword or ``encode=`` binds on the layered form reaches the point layer
+#: alone, through its own explicit encoding, never the chart's -- otherwise
+#: the zero-reference rule and the corner metrics, which draw one mark for
+#: the whole fit, and the lowess overlay, which reads its own fit grid,
+#: would each inherit a per-row binding meant for the points (a residplot
+#: with no overlay drawn -- the flat form -- has no sibling layer to shadow
+#: it from, so every channel reaches the chart there instead).
+_RESIDPLOT_CHART_LEVEL_CHANNELS = frozenset(("x", "y", "x2", "y2")) | COMPOSITE_GROUPING_CHANNELS | _FACET_CHANNELS
+
+
+#: The names the residual transform emits by default
+#: (``crates/ferrum-core/src/transform/smooth/fits.rs::build_residuals_batch``,
+#: mirrored byte-for-byte in ``transform/robust.rs::build_residuals_batch``),
+#: keyed the way :func:`_residual_column_names` and ``Smooth``/``Robust``'s
+#: own ``_with_residual_columns`` both key them.
+_RESIDUAL_COLUMN_DEFAULTS = {
+    "x": "x",
+    "residual": "residual",
+    "ref_zero": "_ref_zero",
+    "metrics_text": "_metrics_text",
+    "metrics_y": "_metrics_y",
+}
+
+
+def _residual_column_names(
+    columns: Iterable[str], *, x_field: str, zero_line: bool, metrics_applied: bool
+) -> dict[str, str]:
+    """Return the names residplot's residual transform emits this call, read by every layer that draws them.
+
+    The caller's data is never renamed: every door that reads the
+    caller's rows -- a later binding, a ``.transform()`` step, an
+    attached layer, a facet -- reads the caller's own column under its
+    own name. Instead, when *columns* (the data's own, after the
+    ``_label`` injection) already uses one of the transform's default names,
+    the COMPUTED column takes a fresh one instead, through
+    :func:`~ferrum.marks._desugar_helpers._unique_col_name`, via an internal
+    ``residual_columns`` setting on the ``Smooth``/``Robust`` transform
+    (never a public kwarg).
+
+    ``x`` keeps its default when the predictor itself is named ``x`` --
+    the batch's own ``x`` already holds those values, so there is nothing
+    to carry a second time either way -- or when the data has no ``x`` at
+    all. ``residual`` always takes a fresh name when the data already has
+    one: the computed residual is never the same values as a raw column of
+    that name, the caller's own response included. ``_ref_zero``,
+    ``_metrics_text`` and ``_metrics_y`` are reserved only when THIS call's
+    transform actually emits them (*zero_line*, *metrics_applied*): a
+    column the transform never computes is left entirely the caller's, and
+    no name is chosen for it at all.
+    """
+    taken = set(columns)
+    names: dict[str, str] = {}
+    names["x"] = _RESIDUAL_COLUMN_DEFAULTS["x"] if x_field == "x" or "x" not in taken else _unique_col_name(
+        taken, "x"
+    )
+    taken.add(names["x"])
+    names["residual"] = _unique_col_name(taken, "residual")
+    taken.add(names["residual"])
+    if zero_line:
+        names["ref_zero"] = _unique_col_name(taken, "_ref_zero")
+        taken.add(names["ref_zero"])
+    if metrics_applied:
+        names["metrics_text"] = _unique_col_name(taken, "_metrics_text")
+        taken.add(names["metrics_text"])
+        names["metrics_y"] = _unique_col_name(taken, "_metrics_y")
+        taken.add(names["metrics_y"])
+    return names
+
+
 @_figure_entry
 def residplot(
     data: Any,
@@ -1869,14 +1962,20 @@ def residplot(
         layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
-        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        Additional encoding kwargs, validated via ``Chart.encode()``. On
+        the layered form (any overlay requested: the default), a channel
+        other than x/y/x2/y2, a grouping channel, or a facet channel
+        binds the point layer alone, not the chart -- the zero-reference
+        rule, the corner metrics, and the lowess overlay never inherit a
+        per-row binding meant for the points.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
-        Additional keyword arguments forwarded to ``Chart.encode()``.
+        Additional keyword arguments, validated and bound the same way as
+        ``encode``'s entries above.
 
     Returns
     -------
@@ -1909,6 +2008,13 @@ def residplot(
     ValueError
         If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``,
         ``O`` or ``T``: see ``x``/``y`` above.
+    ValueError
+        On the flat form (no overlay drawn), if an ``x``/``y`` binding
+        written after the call -- ``encode=`` or a later ``.encode()`` --
+        names another column of the data: the figure's one mark would
+        draw that column without refitting against it. Naming the call as
+        the remedy. The layered form is unaffected -- its layers bind
+        ``x``/``y`` themselves, as ``regplot``/``lmplot`` already do.
 
     Examples
     --------
@@ -2000,12 +2106,12 @@ def residplot(
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
     # ``inject_*`` kwargs are set — single source of truth for residual
     # computation lives in Rust; Python only declares the spec.
-    # A column reaches the residual output only by being in ``groupby``: the
-    # transforms emit their declared columns plus the group keys, nothing
-    # else. So ``label=`` injects a constant ``_label`` column and groups by
-    # it, and a grouping ``color=`` joins the same list — both Smooth and
-    # Robust take a list of group columns (Robust gained ``groupby`` in
-    # batch F), so the two compose and residuals are refit per group.
+    # The residual transforms carry every input column of the row a
+    # residual came from, a `groupby` column riding once, under its own
+    # name, as the group key. So `label=` injects a constant `_label`
+    # column and groups by it, and a grouping `color=` joins the same
+    # list — both Smooth and Robust take a list of group columns, so the
+    # two compose and residuals are refit per group.
     groupby: list[str] = []
     if label is not None:
         # `_label` is this function's own synthetic column, so a caller who
@@ -2042,25 +2148,6 @@ def residplot(
     if not robust:
         _smooth_degree_kwargs("lm", order, "residplot")
 
-    # `_resid_x` is a bare literal, deliberately NOT a registry lookup
-    # (spec §4.6 / M6a). `Smooth`/`Robust` in `output="residuals"` mode build
-    # their batch via `build_residuals_batch` (`smooth.rs`, `robust.rs`),
-    # which declares its own `x` column uncoupled from `FIT_OUTPUT_COLUMNS`
-    # -- the `output="fitted"` schema `transform_registry("smooth"|"robust")`
-    # actually declares. Checking `_resid_x` against that schema would pass
-    # today (both happen to list `x`) and stay silently green if the
-    # residuals batch's own `x` were renamed independently, while raising
-    # here on an unrelated `FIT_OUTPUT_COLUMNS` rename that never touched
-    # this path: a lookup against the wrong schema is worse than no lookup.
-    # Recorded as a dispositioned column reference in
-    # `tests/test_registry_output_column_consumers.py`'s `_DISPOSITIONED`
-    # (site: `("src/ferrum/plots/regression.py", "residplot", "x")`), which
-    # fails if this code ever stops needing the disposition. The end state --
-    # Rust declaring a residuals-mode output schema, the way it now declares
-    # the secondary batches -- is a Rust change, tracked as a batch-close
-    # follow-up.
-    _resid_x = "x"
-
     # Mirrors `lmplot`'s `metrics_applied`: the corner annotation is one
     # R²/RMSE/MAE for one fit, so a residplot refit per data group has no
     # single corner to render, and labelling one group's metrics as the
@@ -2081,6 +2168,18 @@ def residplot(
     )
     metrics_applied = _metrics_applied("residplot", show_metrics, metrics_grouping)
 
+    # The names this call's transform emits, read by every layer below: the
+    # caller's own data is never renamed (see `_residual_column_names`), so
+    # when it already uses one of these names the COMPUTED column takes a
+    # fresh one instead, through an internal `residual_columns` setting on
+    # the transform.
+    names = _residual_column_names(
+        data.columns, x_field=x_field, zero_line=zero_line, metrics_applied=metrics_applied
+    )
+    residual_column_overrides = {
+        role: name for role, name in names.items() if name != _RESIDUAL_COLUMN_DEFAULTS[role]
+    }
+
     # Both residual transforms take the same residual-mode arguments; only
     # the fit family differs (and `degree`, which Robust has no analogue for).
     resid_kwargs: dict = dict(
@@ -2096,6 +2195,8 @@ def residplot(
         resid_transform = Robust(**resid_kwargs)
     else:
         resid_transform = Smooth(method="lm", degree=order, ci=None, **resid_kwargs)
+    if residual_column_overrides:
+        resid_transform = resid_transform._with_residual_columns(**residual_column_overrides)
 
     # A literal `color=` paints the residual points through the point mark's
     # own kwargs -- never through `encode(color=)`, which would fabricate a
@@ -2124,7 +2225,7 @@ def residplot(
     # function's own "<y> residual", not the field itself, which is the
     # one difference from the bare re-point: an explicit title (including
     # a suppressing `None`) still wins either way.
-    rebound_x = _rebind_positional(_resid_x, x_ch, X)
+    rebound_x = _rebind_positional(names["x"], x_ch, X)
     if x_ch.option("type") == "T":
         # `_rebind_positional` forces `type="Q"` on every re-point (its
         # other callers lower a `bin=`/`aggregate=`, never a declared axis
@@ -2134,7 +2235,7 @@ def residplot(
         rebound_x = rebound_x._with_options(type="T")
     enc: dict = {
         "x": rebound_x,
-        "y": _rebind_positional("residual", y_ch, Y, title=residual_title),
+        "y": _rebind_positional(names["residual"], y_ch, Y, title=residual_title),
     }
     if color is not None:
         enc["color"] = color
@@ -2143,7 +2244,6 @@ def residplot(
     elif label is not None:
         enc["color"] = "_label"
     enc.update(encode_kwargs)
-    chart = chart.encode(**enc)
 
     # Build the layered chart when any overlay is requested (zero rule,
     # metrics text, or lowess smoother). The augmented-DataFrame pattern
@@ -2155,8 +2255,26 @@ def residplot(
     # requested whenever it is not explicitly `False` (unset still asks
     # for the corner when there is one fit to describe).
     layered = lowess or zero_line or show_metrics is not False
+    # `Chart.encode` is every channel's one validator (a constant like
+    # `size=30` raises its own `TypeError` here, the same as on any
+    # chart): run it over the whole of `enc` regardless of form, then, on
+    # the layered form only, drop the point-only channels back off the
+    # chart's own encoding below -- stripping them before this call would
+    # validate none of them.
+    chart = chart.encode(**enc)
     if layered:
+        # On the layered form, a value channel (keyword or `encode=`) binds
+        # the point layer alone, never the chart level: the chart's own
+        # encoding only ever carries x/y/x2/y2, a grouping channel
+        # (`COMPOSITE_GROUPING_CHANNELS`) or a facet channel
+        # (`_FACET_CHANNELS`), so the zero-reference rule, the corner
+        # metrics and the lowess overlay -- which all read the chart-level
+        # encoding or its own residual batch, never a per-row binding of
+        # their own -- never inherit a row-level value meant for the
+        # points. The point layer itself still binds every one of them,
+        # below.
         chart = chart._clone()
+        chart._encoding = {k: v for k, v in chart._encoding.items() if k in _RESIDPLOT_CHART_LEVEL_CHANNELS}
         internal_layers: list = [
             _Layer(
                 name="point",
@@ -2187,8 +2305,9 @@ def residplot(
                 _Layer(
                     name="reference",
                     mark="rule",
-                    encoding={"y": Y("_ref_zero", title=residual_title)},
+                    encoding={"y": Y(names["ref_zero"], title=residual_title)},
                     mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+                    fit_summary=True,
                 )
             )
         if metrics_applied:
@@ -2197,18 +2316,19 @@ def residplot(
                     name="metrics",
                     mark="text",
                     encoding={
-                        "x": X(_resid_x, title=x_title),
-                        "y": Y("_metrics_y", title=residual_title),
-                        "text": "_metrics_text",
+                        "x": X(names["x"], title=x_title),
+                        "y": Y(names["metrics_y"], title=residual_title),
+                        "text": names["metrics_text"],
                     },
                     mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+                    fit_summary=True,
                 )
             )
         if lowess:
             chart = chart._with_statistics(
                 Smooth(
-                    x=_resid_x,
-                    y="residual",
+                    x=names["x"],
+                    y=names["residual"],
                     method="loess",
                     ci=None,
                     name="lowess",
@@ -2254,23 +2374,45 @@ def residplot(
 
     # An x/y binding the caller writes after this call -- `encode=` below
     # included -- reads or refuses this call's own x=/y=, in residplot's
-    # voice, applied by `Chart._resolve_pending`.
+    # voice, applied by `Chart._resolve_pending`. Only the flat form (no
+    # layer of its own to shadow a chart-level binding) also refuses a
+    # binding naming another column of the data.
     chart = chart._with_post_build_positional(
         _residplot_post_build_positional(
             chart,
             x_field=x_field,
             y_field=y_field,
             residual_title=residual_title,
-            resid_x=_resid_x,
+            drawn_x=names["x"],
+            drawn_residual=names["residual"],
             x_declared_type=x_ch.option("type"),
+            flat=not layered,
         )
     )
+
+    # On the layered form, `encode=` lands on the chart the same way the
+    # keyword door does (above): only its x/y/grouping/facet channels
+    # reach the chart level, since the point layer already has every
+    # other channel through its own encoding, and the summary/lowess
+    # layers must not inherit one meant for the points.
+    finalize_encode = encode
+    if layered and encode:
+        point_only = {k: v for k, v in encode.items() if k not in _RESIDPLOT_CHART_LEVEL_CHANNELS}
+        if point_only:
+            # Validate the point-only entries `_finalize_chart` below never
+            # sees once `finalize_encode` strips them out -- `_drawn_bindings`
+            # merges them straight into the point layer's encoding dict
+            # with no type check of its own, so a malformed value here
+            # (`encode={"opacity": 0.5}`) would otherwise render with the
+            # binding silently dropped instead of `Chart.encode`'s TypeError.
+            chart.encode(**point_only)
+        finalize_encode = {k: v for k, v in encode.items() if k in _RESIDPLOT_CHART_LEVEL_CHANNELS}
 
     return _finalize_chart(
         chart,
         entry="residplot",
         mark=mark,
-        encode=encode,
+        encode=finalize_encode,
         properties=properties,
         layers=layers,
         theme=theme,

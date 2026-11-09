@@ -300,6 +300,7 @@ fn smooth_fitted_outputs_match_shared_fit_schema() {
     pyo3::Python::initialize();
     use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
     let spec = SmoothSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         method: SmoothMethod::Lm,
@@ -584,6 +585,7 @@ fn robust_outputs_match_shared_fit_schema() {
     use crate::transform::robust::RobustSpec;
     use crate::transform::smooth::SmoothOutput;
     let spec = RobustSpec {
+        residual_columns: Default::default(),
         x: "x".into(),
         y: "y".into(),
         n_grid: 10,
@@ -886,6 +888,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
             groupby: vec![], count_scale: None, count_scale_extent: None, name: None,
         })),
         ("smooth", Smooth(SmoothSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(), method: SmoothMethod::Lm, ci: None, bandwidth: 0.75,
             degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0, x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, groupby: vec![], name: None, x_range: None, x_range_pad: None,
@@ -956,6 +959,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
             n_grid: 10, ci: None, max_iter: 25, tol: 1e-8, groupby: Vec::new(), name: None,
         })),
         ("robust", Robust(RobustSpec {
+            residual_columns: Default::default(),
             x: "x".into(), y: "y".into(), n_grid: 10, ci: None, huber_c: 1.345, max_iter: 25,
             tol: 1e-8, output: SmoothOutput::Fitted, inject_zero_ref: false, inject_metrics: false,
             groupby: vec![], name: None, x_range: None, x_range_pad: None,
