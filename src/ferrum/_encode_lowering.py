@@ -697,6 +697,12 @@ class _DoorVocabulary:
     position_stack: str | None = None
     channel_stack: str | None = "stack=True"
     chains_transform: bool = True
+    #: The door's statistic reads only the columns its own call names, so a
+    #: ``.transform(...)`` step's output column reaches it by being named as
+    #: the call's own ``x=``/``y=``, never by a later ``.encode()`` (which
+    #: the fit ignores). :func:`_chained_remedy` then names the call door
+    #: instead of the binding half. True on regplot and lmplot only.
+    binds_at_call: bool = False
     styles_dropped_axis: bool = True
     #: mark_hex's own cell-sizing knob, and its cell-aggregate call template
     #: (a ``str.format`` template over ``op``/``field``, the codebase's
@@ -766,8 +772,8 @@ _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
     ),
     "pairplot": _DoorVocabulary(chains_transform=False),
     "mark_smooth": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
-    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
-    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
+    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
     "mark_hex": _DoorVocabulary(
         hex_bin_size="mark_hex's bin_size=",
         hex_cells="mark_hex(aggregate={op!r}, field={field!r})",
@@ -1298,17 +1304,23 @@ def _refuse_color_aggregate(
     )
 
 
-def _chained_remedy(door: _DoorVocabulary, *, remedy: str, kwarg: str) -> str:
-    """*remedy* when *door*'s result takes ``.transform(...)``, else dropping *kwarg*=.
+def _chained_remedy(door: _DoorVocabulary, *, remedy: str, call_remedy: str, kwarg: str) -> str:
+    """*door*'s own ending for a ``.transform(...)``-chained remedy.
 
     jointplot (``JointChart``) and pairplot (``RepeatChart``) have neither
     ``.transform`` nor ``.encode`` on their own result, so the generic
     ``.transform(...)``-chaining remedy every other door's result can run
-    is untypeable there; dropping the kwarg is the only remedy that renders.
+    is untypeable there; dropping the kwarg is the only remedy that
+    renders. A door whose statistic reads only the columns its own call
+    names (``binds_at_call``) takes *call_remedy*, which names the output
+    column as that call's own ``x=``/``y=`` instead of binding it in a
+    later ``.encode()`` the fit ignores; every other door takes *remedy*.
     """
-    if door.chains_transform:
-        return remedy
-    return f"Drop {kwarg}=."
+    if not door.chains_transform:
+        return f"Drop {kwarg}=."
+    if door.binds_at_call:
+        return call_remedy
+    return remedy
 
 
 def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
@@ -1322,45 +1334,55 @@ def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _
     field to bin, so the only remedy is to drop it. *call_kwargs*, when
     given, names an extra keyword the remedy's own call needs to render
     (``residplot``'s ``dropna=False``, since its default drops the rows
-    the remedy's ``.transform()`` step would otherwise read). The text is
-    chained onto ``.transform(...)`` only on a door whose result has one
-    (:func:`_chained_remedy`); a door with none drops the kwarg instead,
-    even though this helper's own text always chains.
+    the remedy's ``.transform()`` step would otherwise read); it belongs
+    to that step, so only the binding ending carries it. Two endings
+    are built: ``and bind its <column> column`` for a chart door, and
+    ``and pass its <column> column as the call's own <channel>=`` for one
+    whose statistic reads only the columns its own call names, which has
+    no step for the keyword to configure; :func:`_chained_remedy` picks
+    the door's own, and a door with no ``.transform(...)`` drops the
+    kwarg instead.
     """
     from ferrum.encoding._aliases import _channel_field
 
     field = _channel_field(ch)
     if not field:
-        text = "Drop bin=."
+        remedy = call_remedy = "Drop bin=."
     else:
         from ferrum._registry import registry_output_columns
 
         bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
         with_clause = f" with {call_kwargs}" if call_kwargs else ""
-        text = (
-            f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
-            f"and bind its {bin_start!r} column{with_clause}, or drop bin=."
+        instruction = f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True))"
+        remedy = f"{instruction} and bind its {bin_start!r} column{with_clause}, or drop bin=."
+        call_remedy = (
+            f"{instruction} and pass its {bin_start!r} column as the call's own "
+            f"{ch._channel_name}=, or drop bin=."
         )
-    return partial(_chained_remedy, remedy=text, kwarg="bin")
+    return partial(_chained_remedy, remedy=remedy, call_remedy=call_remedy, kwarg="bin")
 
 
 def _generic_aggregate_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
     """The remedy for an ``aggregate=`` a statistic does not fold in.
 
-    See :func:`_generic_bin_remedy` for *call_kwargs* and the
-    ``.transform(...)``-chaining door capability.
+    See :func:`_generic_bin_remedy` for *call_kwargs*, which configures
+    the remedy's own ``.transform(...)`` step and so reaches only the
+    binding ending, and for the two endings :func:`_chained_remedy` picks
+    between.
     """
     from ferrum.encoding._aliases import _channel_field
 
     if not _channel_field(ch):
-        text = "Drop aggregate=."
+        remedy = call_remedy = "Drop aggregate=."
     else:
         with_clause = f" with {call_kwargs}" if call_kwargs else ""
-        text = (
-            "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
-            f"output column{with_clause}, or drop aggregate=."
+        instruction = "Compute the aggregate with .transform(fm.transform_aggregate(...))"
+        remedy = f"{instruction} and bind its output column{with_clause}, or drop aggregate=."
+        call_remedy = (
+            f"{instruction} and pass its output column as the call's own "
+            f"{ch._channel_name}=, or drop aggregate=."
         )
-    return partial(_chained_remedy, remedy=text, kwarg="aggregate")
+    return partial(_chained_remedy, remedy=remedy, call_remedy=call_remedy, kwarg="aggregate")
 
 
 def _value_axis_drop_clause(door: _DoorVocabulary, value_axis: str) -> str:

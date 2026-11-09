@@ -1014,10 +1014,11 @@ def _residplot_y_scale_remedy(ch: ChannelBase) -> Callable[[str], str] | None:
     """Residplot's y scale remedy: ``None`` (the default ending), unless *ch* declares a log scale.
 
     A domain or ``format=`` names the call door as the working remedy
-    (``residplot(y=fm.Y('w', ...))``); a log scale never does, because the
-    call door refuses it too (residplot's own Rust refusal, wherever the
-    resolved y scale is log), so naming it as a remedy would send the
-    caller to a door that also fails.
+    (``residplot(y=fm.Y('w', ...))``). A log scale names the same call
+    door carrying ``fm.SymlogScale()`` -- the one scale that places signed
+    residuals -- because the bare log scale is refused there too
+    (residplot's own Rust refusal, wherever the resolved y scale is log),
+    so naming it would send the caller to a door that also fails.
     """
     scale = ch.option("scale")
     if scale is None:
@@ -1025,7 +1026,11 @@ def _residplot_y_scale_remedy(ch: ChannelBase) -> Callable[[str], str] | None:
     from ferrum.encoding._scale import _scale_to_dict
 
     if _scale_to_dict(scale).get("type") == "log":
-        return lambda voice: "Use fm.SymlogScale(), or drop scale=."
+        field = ch.field
+        return lambda voice: (
+            "Drop scale=, or pass fm.SymlogScale() in the call: "
+            f"{voice}(y=fm.Y({field!r}, scale=fm.SymlogScale()))."
+        )
     return None
 
 
@@ -1747,9 +1752,11 @@ def lmplot(
         and for an ``x aggregate=`` on every method (``x_estimator=``
         aggregates the response within each ``x_bins`` bin, never the
         predictor, so it is never the remedy), the remedy is to compute it
-        ahead of the fit with ``.transform(...)`` and bind its output
-        column. ``y``'s ``bin=``/``aggregate=`` take that same remedy on
-        every method.
+        ahead of the fit with ``.transform(...)`` and pass its output
+        column as the call's own ``x=``. ``y``'s ``bin=``/``aggregate=``
+        take that same remedy on every method, naming the column as the
+        call's own ``y=`` -- the fit reads only the columns the call
+        names, so a later ``.encode()`` would be ignored.
 
     Examples
     --------
