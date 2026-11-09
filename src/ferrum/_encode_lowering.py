@@ -649,6 +649,22 @@ def _written_channel(channel: str, ch: ChannelBase, kwarg: str) -> str:
     return f"{channel}={type(ch).__name__}({kwarg}={quoted})"
 
 
+def _written_binding(ch: ChannelBase) -> str:
+    """*ch* as the caller wrote its binding: the class name, its field, then its kwargs.
+
+    A field-bearing binding quotes its field before its options
+    (``X2('u', aggregate='mean')``); a fieldless one quotes none, since
+    the caller wrote none (``X2(aggregate='mean')``, never
+    ``X2(None, aggregate='mean')``). Every option goes through
+    :func:`_quoted_statistic_value`, so a pre-built object quotes by its
+    class name rather than its raw repr. Shared by every refusal that
+    echoes the binding it refuses.
+    """
+    parts = [] if ch.field is None else [repr(ch.field)]
+    parts.extend(f"{name}={_quoted_statistic_value(value)}" for name, value in ch._kwargs.items())
+    return f"{type(ch).__name__}({', '.join(parts)})"
+
+
 #: The normalized-stack mode a histogram's value axis draws instead of a
 #: plain count: ``multiple='fill'``, the chart's own normalizing
 #: ``position=``, or the value channel's own ``stack='normalize'``
@@ -1022,8 +1038,7 @@ def _refuse_fieldless_positional(
     declared_type = ch.option("type")
     if declared_type is not None and declared_type != (call_type or "Q"):
         blocked.add("type")
-    kwargs_repr = ", ".join(f"{k}={_quoted_statistic_value(v)}" for k, v in ch._kwargs.items())
-    written = f"{cls_name}({kwargs_repr})" if kwargs_repr else f"{cls_name}()"
+    written = _written_binding(ch)
     restatable = {k: v for k, v in ch._kwargs.items() if k not in blocked}
     restatable_repr = ", ".join(f"{k}={_quoted_statistic_value(v)}" for k, v in restatable.items())
     restated = f"{called_field!r}, {restatable_repr}" if restatable_repr else f"{called_field!r}"
@@ -1065,9 +1080,7 @@ def _refuse_residplot_another_variable(
     """
     from ferrum._entry import EntryRefusal
 
-    cls_name = type(ch).__name__
-    kwargs_repr = "".join(f", {k}={_quoted_statistic_value(v)}" for k, v in ch._kwargs.items())
-    written = f"{cls_name}({ch.field!r}{kwargs_repr})"
+    written = _written_binding(ch)
 
     def text(voice: str) -> str:
         return (
@@ -1078,6 +1091,49 @@ def _refuse_residplot_another_variable(
         )
 
     raise EntryRefusal(text, entry)
+
+
+def _refuse_undrawn_positional(
+    entry: str, bindings: dict, *, channels: tuple[str, ...], why: str
+) -> None:
+    """Refuse a channel *entry* draws on no layer, naming the drop as the remedy.
+
+    A figure whose marks draw one positional dimension (a residual
+    scatter's points, and its per-fit summaries) has no use for the
+    secondary channels ``x2``/``y2``: a binding on either can only bend a
+    summary layer or stretch an axis, never draw what the caller meant.
+    *bindings* is the caller's own channel dictionary, so a value is read
+    exactly as ``Chart.encode`` reads it -- a ``None`` or a missing entry
+    is unset and skipped, and any other value that is no binding keeps
+    ``Chart.encode``'s own ``TypeError``. *channels* is checked in order,
+    so a call writing both is refused on the first. *why* is a
+    ``str.format`` template over ``voice`` and ``channel``, the family's
+    message-template idiom, so a sibling figure can state its own reason
+    with the same sentence shape.
+
+    Shared by the figure's call-time check and its post-build record
+    (:attr:`ferrum._compose._PostBuildPositional.refuse_undrawn`), so the
+    two doors cannot drift apart.
+    """
+    from ferrum._entry import EntryRefusal
+    from ferrum.encoding._resolve import channel_for_value
+
+    for channel in channels:
+        value = bindings.get(channel)
+        if value is None:
+            continue
+        ch = channel_for_value(channel, value, declare=f"encode({channel}=...)")
+        written = _written_binding(ch)
+
+        # Raised on the first written channel, so the closure has no later
+        # loop iteration to misread: its two names are this iteration's.
+        def text(voice: str) -> str:
+            return (
+                f"{voice}({channel}={written}) is not supported: "
+                f"{why.format(voice=voice, channel=channel)}. Drop {channel}=."
+            )
+
+        raise EntryRefusal(text, entry)
 
 
 def _refuse_fieldless_categorical_type(

@@ -45,6 +45,7 @@ from ferrum._encode_lowering import (
     _refuse_categorical_input,
     _refuse_residplot_another_variable,
     _refuse_residplot_bin_aggregate,
+    _refuse_undrawn_positional,
     _refuse_unreadable_positional_options,
     _residual_axis_categorical_reads,
 )
@@ -1045,6 +1046,32 @@ def _refuse_residplot_y_unreadable(entry: str, channel: str, ch: ChannelBase) ->
     )
 
 
+#: The sentence residplot's refusal gives for a channel it draws on no layer
+#: (``{voice}``/``{channel}`` are filled by
+#: :func:`~ferrum._encode_lowering._refuse_undrawn_positional`). The
+#: residual points draw one position per row and the zero rule and corner
+#: metrics are per-fit summaries, so a binding on either secondary channel
+#: can only bend a summary layer or stretch an axis.
+_RESIDPLOT_UNDRAWN_WHY = "{voice} draws each residual as a point, which has no {channel}"
+
+
+def _refuse_residplot_undrawn(bindings: dict) -> None:
+    """Refuse an ``x2``/``y2`` binding *bindings* gives residplot's marks nowhere to draw.
+
+    Shared by residplot's own call-time check and the post-build record
+    (:attr:`ferrum._compose._PostBuildPositional.refuse_undrawn`), so the
+    two doors cannot drift apart. residplot has no sibling spelling (unlike
+    regplot/lmplot), so the refusal always speaks as ``"residplot"``, with
+    :data:`_RESIDPLOT_UNDRAWN_WHY` as the reason.
+    """
+    _refuse_undrawn_positional(
+        "residplot",
+        bindings,
+        channels=("x2", "y2"),
+        why=_RESIDPLOT_UNDRAWN_WHY,
+    )
+
+
 def _residplot_post_build_positional(
     out: Chart,
     *,
@@ -1095,6 +1122,10 @@ def _residplot_post_build_positional(
     naming this call's own field. The layered form passes none: its
     layers keep drawing their own columns regardless of what the
     chart-level encoding says, as `regplot`/`lmplot` already do.
+
+    ``refuse_undrawn`` refuses ``x2``/``y2``, which no mark the figure
+    draws reads (:data:`_RESIDPLOT_UNDRAWN_WHY`), before either channel's
+    own x/y check runs.
     """
     return _PostBuildPositional(
         entry="residplot",
@@ -1132,6 +1163,7 @@ def _residplot_post_build_positional(
             ),
         },
         statistic_refusal=_refuse_residplot_bin_aggregate,
+        refuse_undrawn=_refuse_residplot_undrawn,
     )
 
 
@@ -1791,8 +1823,8 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
     return False
 
 
-#: The channels residplot's layered form binds at the chart level: x/y/x2/y2,
-#: a grouping channel (refits the residuals per group, so every layer that
+#: The channels residplot's layered form binds at the chart level: x/y, a
+#: grouping channel (refits the residuals per group, so every layer that
 #: reads the chart's rows must regroup the same way) or a facet channel
 #: (partitions the rows before any layer draws them). Every other channel a
 #: keyword or ``encode=`` binds on the layered form reaches the point layer
@@ -1801,9 +1833,11 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
 #: the whole fit, and the lowess overlay, which reads its own fit grid,
 #: would each inherit a per-row binding meant for the points (a residplot
 #: with no overlay drawn -- the flat form -- has no sibling layer to shadow
-#: it from, so every channel reaches the chart there instead).
+#: it from, so every channel reaches the chart there instead). ``x2``/``y2``
+#: are absent because the figure refuses them on every door: no mark it
+#: draws reads either channel.
 _RESIDPLOT_CHART_LEVEL_CHANNELS = (
-    frozenset(("x", "y", "x2", "y2")) | COMPOSITE_GROUPING_CHANNELS | _FACET_CHANNELS
+    frozenset(("x", "y")) | COMPOSITE_GROUPING_CHANNELS | _FACET_CHANNELS
 )
 
 
@@ -1985,10 +2019,11 @@ def residplot(
     encode : dict, optional
         Additional encoding kwargs, validated via ``Chart.encode()``. On
         the layered form (any overlay requested: the default), a channel
-        other than x/y/x2/y2, a grouping channel, or a facet channel
-        binds the point layer alone, not the chart -- the zero-reference
-        rule, the corner metrics, and the lowess overlay never inherit a
-        per-row binding meant for the points.
+        other than x/y, a grouping channel, or a facet channel binds the
+        point layer alone, not the chart -- the zero-reference rule, the
+        corner metrics, and the lowess overlay never inherit a per-row
+        binding meant for the points. ``x2=``/``y2=`` are refused, on this
+        door and every other: no mark the figure draws reads either.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
@@ -2026,6 +2061,12 @@ def residplot(
         ``.transform(...)`` and bind its output column (the remedy call
         needs ``dropna=False``, since the default drops rows before any
         ``.transform()`` step runs), or drop the kwarg.
+    ValueError
+        If ``x2`` or ``y2`` is bound, through a keyword, ``encode=`` or a
+        later ``.encode()``: the residual points place one value per row,
+        and the zero rule, the corner metrics and the lowess overlay are
+        per-fit summaries, so no mark this figure draws reads either
+        channel. Drop the binding.
     ValueError
         If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``,
         ``O`` or ``T``: see ``x``/``y`` above.
@@ -2078,6 +2119,13 @@ def residplot(
     # .transform() step needs dropna=False to see the column it binds.
     drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
     _refuse_residplot_bin_aggregate(drawn)
+    # Neither secondary positional channel reaches a mark residplot draws:
+    # the points place one value per row, and the zero rule, the corner
+    # metrics and the lowess overlay are per-fit summaries the caller never
+    # positioned. Read over the merged keyword/`encode=` bindings, so both
+    # call doors refuse the same sentence; the post-build record below
+    # backstops a later `.encode()`.
+    _refuse_residplot_undrawn(_drawn_bindings(encode_kwargs, encode))
     # A declared categorical type is refused on both axes: the residual
     # fit reads x as its predictor, the same as regplot's fit, and the
     # residual axis itself draws signed differences around zero, which is
@@ -2286,7 +2334,7 @@ def residplot(
     if layered:
         # On the layered form, a value channel (keyword or `encode=`) binds
         # the point layer alone, never the chart level: the chart's own
-        # encoding only ever carries x/y/x2/y2, a grouping channel
+        # encoding only ever carries x/y, a grouping channel
         # (`COMPOSITE_GROUPING_CHANNELS`) or a facet channel
         # (`_FACET_CHANNELS`), so the zero-reference rule, the corner
         # metrics and the lowess overlay -- which all read the chart-level

@@ -4718,6 +4718,8 @@ parameter is forwarded to `lmplot` unchanged.
 
 > **2026-11-01.** The `truncate=` parameter's sentence gains a clause on off-side rows: the margin extends the fit's own on-side data range, and a row off the log axis's side is left out of that range and warned, never refused. Before, a `truncate=False` whose evaluation range would otherwise reach an off-side value raised the internal transform's own extent-refusal text (naming `extent=`, a parameter no figure-level door exposes) instead of warning the row the same way the on-side sibling route does.
 
+> **2026-11-09.** `residplot` refuses `x2=` and `y2=` on every door that writes them: a keyword, an `encode=` entry, and a later `.encode()` before or after a `+`, on the layered and the flat form alike, naming the drop as the remedy -- `residplot(x2=X2('u')) is not supported: residplot draws each residual as a point, which has no x2. Drop x2=.`, and the same sentence for `y2=`. Before, both channels were carried at the chart level on the layered form (since `x2`/`y2` reached every layer that draws them), so a binding bent the zero reference rule or stretched the residual axis with no warning, and a nonexistent column raised `unknown column` instead. The refusal reads the value as `Chart.encode` reads it, so a value that is no binding keeps its own `TypeError` and `None` leaves the channel unset; a binding on a composition, on a chart whose mark the caller replaced, or on a caller's own layer is the caller's own and unchanged, and `lmplot`/`regplot` keep their `x2=`/`y2=` for now. `_RESIDPLOT_CHART_LEVEL_CHANNELS` therefore loses both channels.
+
 ## 3.15 Sklearn-Protocol Visualizers
 
 > **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`

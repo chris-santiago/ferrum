@@ -276,6 +276,13 @@ class _PostBuildPositional:
     trips is always this one, never a later, differently-worded refusal
     from the pending statistic's own resolve-time prep.
 
+    *refuse_undrawn* refuses a channel this figure draws on no layer
+    (``x2``/``y2`` on a residual scatter), whatever its field, and runs
+    before the per-channel pass below so a binding on such a channel is
+    named the same way a ``bin=``/``aggregate=`` is: by this record, not
+    by a later render-time error, and on a chart whose x/y the caller
+    never touched too.
+
     Read by :func:`apply_post_build_positional`, which
     ``Chart._resolve_pending`` runs first, before any pending composite
     mark resolves.
@@ -284,12 +291,20 @@ class _PostBuildPositional:
     entry: str
     channels: dict[str, _PostBuildChannel]
     statistic_refusal: Callable[[dict[str, ChannelBase]], None]
+    #: A figure's own refusal for a channel it draws on no layer, called
+    #: with the chart's whole encoding before any x/y is read. ``None``
+    #: (every figure whose layers draw every channel a binding could name)
+    #: leaves such a channel to render as it already does.
+    refuse_undrawn: Callable[[dict[str, ChannelBase]], None] | None = None
 
 
 def apply_post_build_positional(chart: Any) -> Any:
     """*chart*, its x/y bindings written after a regression figure's build read or refused.
 
-    A binding equal by identity to the figure's own (:attr:`_PostBuildChannel.own`)
+    A channel the figure draws on no layer is refused before anything else
+    is read (:attr:`_PostBuildPositional.refuse_undrawn`), so a chart whose
+    x/y the caller never touched still names it. A binding equal by
+    identity to the figure's own (:attr:`_PostBuildChannel.own`)
     was never rewritten and is left alone. Of the rest: any field's
     ``bin=``/``aggregate=`` is refused first, by
     :attr:`_PostBuildPositional.statistic_refusal`, on every form -- a
@@ -341,6 +356,14 @@ def apply_post_build_positional(chart: Any) -> Any:
     record: _PostBuildPositional | None = chart._post_build_positional
     if record is None:
         return chart
+    from ferrum._entry import voiced_as
+
+    # Before any x/y is read, and before the early return below: a record
+    # whose own x/y the caller never touched still refuses a channel the
+    # figure draws on no layer.
+    if record.refuse_undrawn is not None:
+        with voiced_as(record.entry):
+            record.refuse_undrawn(chart._encoding)
     written: dict[str, ChannelBase] = {}
     for channel, spec in record.channels.items():
         binding = chart._encoding.get(channel)
@@ -349,7 +372,6 @@ def apply_post_build_positional(chart: Any) -> Any:
         written[channel] = binding
     if not written:
         return chart
-    from ferrum._entry import voiced_as
 
     pending = chart._pending_stat_mark is not None
     deferred_to_pending_prep = False
