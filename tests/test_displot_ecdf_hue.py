@@ -83,7 +83,9 @@ class TestEcdfHueCarriesGroupKey:
         y_ladder = value_axis_ladder(svg, axis="y")
         for _stroke, corners in lines:
             heights = sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
-            assert len(corners) == 151, f"expected the zero riser plus 150 steps, got {len(corners)}"
+            assert len(corners) == 151, (
+                f"expected the zero riser plus 150 steps, got {len(corners)}"
+            )
             assert heights[0] == 0, f"expected the line to rise from 0, got {heights[0]}"
             assert heights[-1] == 150, f"expected this level's own row count, got {heights[-1]}"
 

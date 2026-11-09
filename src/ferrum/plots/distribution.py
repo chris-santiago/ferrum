@@ -2680,7 +2680,9 @@ def _relplot_build(
         # for the same reason every other hue-binding site in this module
         # routes through it: one declared-typed call the AST completeness
         # guard (`tests/test_color_binding_completeness.py`) can see.
-        enc["color"] = hue if kind == "scatter" else nominal_color_channel(_grouping_hue("relplot", hue))
+        enc["color"] = (
+            hue if kind == "scatter" else nominal_color_channel(_grouping_hue("relplot", hue))
+        )
     if size is not None:
         enc["size"] = size
     if style is not None:

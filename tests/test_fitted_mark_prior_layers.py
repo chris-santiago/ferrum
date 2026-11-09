@@ -447,9 +447,10 @@ def test_mark_smooth_refuses_after_displots_pending_ecdf(hist_df):
 
 def test_the_ecdf_refusals_plus_remedy_renders(hist_df):
     """The ``+`` spelling the ecdf's refusal names runs as written."""
-    chart = fm.displot(hist_df, x="x", kind="ecdf") + fm.Chart(hist_df).encode(
-        x="x", y="x"
-    ).mark_smooth()
+    chart = (
+        fm.displot(hist_df, x="x", kind="ecdf")
+        + fm.Chart(hist_df).encode(x="x", y="x").mark_smooth()
+    )
     assert chart.to_svg()
 
 
@@ -576,6 +577,7 @@ def test_a_chained_tick_mark_draws_the_plain_rug_across_every_kind(displot_kind_
     """``displot(kind=k).mark_tick()`` draws the same rug on every kind --
     the replaced mark reads the chart's own x binding, not the statistic's
     rows."""
-    assert fm.displot(displot_kind_df, x="x", kind="hist").mark_tick().to_svg() == fm.displot(
-        displot_kind_df, x="x", kind=kind
-    ).mark_tick().to_svg()
+    assert (
+        fm.displot(displot_kind_df, x="x", kind="hist").mark_tick().to_svg()
+        == fm.displot(displot_kind_df, x="x", kind=kind).mark_tick().to_svg()
+    )

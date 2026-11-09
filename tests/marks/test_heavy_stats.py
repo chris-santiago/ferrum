@@ -900,12 +900,16 @@ def test_dispatcher_path_replaces_the_style_of_the_mark_before_it():
 
     direct_svg = fe.Chart(None).mark_function(fn, domain=domain, n=n, clip=False).to_svg()
 
-    dispatched_bare = fe.Chart(None)._set_composite_mark(
-        "function",
-        _function_desugar_via_dispatcher,
-        {"fn": fn, "domain": domain, "n": n, "clip": False},
-        placeholder="line",
-    ).to_svg()
+    dispatched_bare = (
+        fe.Chart(None)
+        ._set_composite_mark(
+            "function",
+            _function_desugar_via_dispatcher,
+            {"fn": fn, "domain": domain, "n": n, "clip": False},
+            placeholder="line",
+        )
+        .to_svg()
+    )
 
     dispatched_with_prior_style = (
         fe.Chart(None)

@@ -76,8 +76,12 @@ def test_a_resolved_color_column_is_bound_as_written():
     builds: dict[str, fm.Chart] = {
         "boxplot": fm.Chart(_CAT_DF).mark_boxplot().encode(x="cat", y="v", color=Color("temp (C)")),
         "boxen": fm.Chart(_CAT_DF).mark_boxen().encode(x="cat", y="v", color=Color("temp (C)")),
-        "errorbar": fm.Chart(_CAT_DF).mark_errorbar().encode(x="cat", y="v", color=Color("temp (C)")),
-        "errorband": fm.Chart(_CAT_DF).mark_errorband().encode(x="cat", y="v", color=Color("temp (C)")),
+        "errorbar": fm.Chart(_CAT_DF)
+        .mark_errorbar()
+        .encode(x="cat", y="v", color=Color("temp (C)")),
+        "errorband": fm.Chart(_CAT_DF)
+        .mark_errorband()
+        .encode(x="cat", y="v", color=Color("temp (C)")),
         "swarm": fm.Chart(_CAT_DF).mark_swarm().encode(x="cat", y="v", color=Color("temp (C)")),
         "fh": fm.Chart(_CAT_DF).mark_boxplot().encode(x="cat", y="v", color=Color("f(h)")),
         "hx": fm.Chart(_CAT_DF).mark_boxplot().encode(x="cat", y="v", color=Color("h:x")),
@@ -88,7 +92,9 @@ def test_a_resolved_color_column_is_bound_as_written():
     # mark_violin warns about its undodged inner mark under a hue split --
     # expected here, unrelated to the column-reading rule under test.
     with pytest.warns(UserWarning, match="inner marks are drawn"):
-        violin_svg = fm.Chart(_CAT_DF).mark_violin().encode(x="cat", y="v", color=Color("temp (C)")).to_svg()
+        violin_svg = (
+            fm.Chart(_CAT_DF).mark_violin().encode(x="cat", y="v", color=Color("temp (C)")).to_svg()
+        )
     assert _digest(violin_svg) == _RESOLVED_COLOR_DIGESTS["violin"]
 
     catplot_svg = fm.catplot(_CAT_DF, x="cat", y="v", kind="box", hue=Color("temp (C)")).to_svg()
@@ -166,7 +172,9 @@ def test_a_shorthand_hue_reaches_every_consumer_as_its_channel():
     kde_object = fm.displot(_HUE_DF, x="v", hue=Color("g", type="N"), kind="kde").to_svg()
     assert kde_shorthand == kde_bare == kde_object
 
-    hist_kde_overlay_shorthand = fm.displot(_HUE_DF, x="v", hue="g:N", kde=True, kind="hist").to_svg()
+    hist_kde_overlay_shorthand = fm.displot(
+        _HUE_DF, x="v", hue="g:N", kde=True, kind="hist"
+    ).to_svg()
     hist_kde_overlay_bare = fm.displot(_HUE_DF, x="v", hue="g", kde=True, kind="hist").to_svg()
     assert hist_kde_overlay_shorthand == hist_kde_overlay_bare
 
@@ -223,7 +231,9 @@ def test_catplot_typed_shorthand_hue_meets_the_hue_order_refusal():
     being silently dropped and drawn nominal.
     """
     with pytest.raises(ValueError) as excinfo:
-        fm.catplot(_HUE_DF, x="cat", y="v", hue="k:Q", hue_order=["1.0", "2.0"], kind="strip").to_svg()
+        fm.catplot(
+            _HUE_DF, x="cat", y="v", hue="k:Q", hue_order=["1.0", "2.0"], kind="strip"
+        ).to_svg()
     assert str(excinfo.value) == (
         "catplot(hue=fm.Color('k', type_=...), hue_order=...): hue_order= cannot order a "
         "quantitative hue channel -- there is no discrete legend order for a continuous "

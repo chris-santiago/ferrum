@@ -409,7 +409,9 @@ def apply_post_build_positional(chart: Any) -> Any:
                 )
                 declared_type = binding.option("type")
                 if declared_type is not None and declared_type != (spec.call_type or "Q"):
-                    _refuse_unreadable_option(record.entry, channel, binding, "type", remedy=spec.type_remedy)
+                    _refuse_unreadable_option(
+                        record.entry, channel, binding, "type", remedy=spec.type_remedy
+                    )
                 spec.check_unreadable(record.entry, channel, binding)
                 rebound = _rebind_positional(
                     spec.drawn_column, binding, type(binding), title=spec.default_title
@@ -481,7 +483,9 @@ def _push_down_positional_channel(layer_value: Any, pushed: ChannelBase) -> Any:
     """
     if not isinstance(layer_value, ChannelBase):
         return None
-    extra = {name: pushed.option(name) for name in _PUSHDOWN_OPTIONS if pushed.option(name) is not None}
+    extra = {
+        name: pushed.option(name) for name in _PUSHDOWN_OPTIONS if pushed.option(name) is not None
+    }
     for alias in _FORMAT_TYPE_ALIASES:
         format_type = pushed.option(alias)
         if format_type is not None:

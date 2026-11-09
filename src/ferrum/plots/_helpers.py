@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 import polars as pl
 
 from ferrum._compose import figure_recorded
-from ferrum._encode_lowering import COMPOSITE_GROUPING_CHANNELS, _composite_groupby, _written_channel
+from ferrum._encode_lowering import (
+    COMPOSITE_GROUPING_CHANNELS,
+    _composite_groupby,
+    _written_channel,
+)
 from ferrum._entry import EntryRefusal, _voiced, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
@@ -347,7 +351,11 @@ def _grouping_hue(entry: str, hue: Any) -> "ChannelBase | None":
     if not _unset_statistic("aggregate", agg):
         written = _written_channel("hue", channel, "aggregate")
         field = _channel_field(channel)
-        remedy = f"Drop the aggregate (hue={field!r})." if field else "Pass the column to group by as hue=."
+        remedy = (
+            f"Drop the aggregate (hue={field!r})."
+            if field
+            else "Pass the column to group by as hue=."
+        )
         raise EntryRefusal(
             lambda voice, written=written, agg=agg, remedy=remedy: (
                 f"{voice}({written}) is not supported: hue= names the column the "

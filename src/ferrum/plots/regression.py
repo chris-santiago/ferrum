@@ -394,8 +394,8 @@ def _residuals_panel(
         )
         if cook_threshold is not None:
             rows = _cook_outlier_rows(df, kind=kind, threshold=cook_threshold, x_col="leverage")
-            overlay = ferrum.Chart(rows).mark_point(**COOK_OUTLIER_STYLE).encode(
-                x="leverage", y=y_col
+            overlay = (
+                ferrum.Chart(rows).mark_point(**COOK_OUTLIER_STYLE).encode(x="leverage", y=y_col)
             )
             return base + overlay
         return base
@@ -1003,7 +1003,9 @@ def _lmplot_post_build_positional(
                 out, "y", called_field=y_field, drawn_column=y_field, type_remedy=type_remedy
             ),
         },
-        statistic_refusal=partial(_refuse_bin_aggregate_fit, entry, x_bins_knob=method in _SMOOTH_ROUTED_METHODS),
+        statistic_refusal=partial(
+            _refuse_bin_aggregate_fit, entry, x_bins_knob=method in _SMOOTH_ROUTED_METHODS
+        ),
     )
 
 
@@ -1035,7 +1037,11 @@ def _refuse_residplot_y_unreadable(entry: str, channel: str, ch: ChannelBase) ->
     nothing on the chart for either option to describe any more.
     """
     _refuse_unreadable_positional_options(
-        entry, channel, ch, unreadable=("scale", "format"), scale_remedy=_residplot_y_scale_remedy(ch)
+        entry,
+        channel,
+        ch,
+        unreadable=("scale", "format"),
+        scale_remedy=_residplot_y_scale_remedy(ch),
     )
 
 
@@ -1101,7 +1107,9 @@ def _residplot_post_build_positional(
                 always_honors_drawn_column=True,
                 restore_declared_type=x_declared_type,
                 refuse_another_variable=(
-                    partial(_refuse_residplot_another_variable, called_field=x_field) if flat else None
+                    partial(_refuse_residplot_another_variable, called_field=x_field)
+                    if flat
+                    else None
                 ),
             ),
             "y": _eager_post_build_channel(
@@ -1117,7 +1125,9 @@ def _residplot_post_build_positional(
                 check_unreadable=_refuse_residplot_y_unreadable,
                 always_honors_drawn_column=True,
                 refuse_another_variable=(
-                    partial(_refuse_residplot_another_variable, called_field=y_field) if flat else None
+                    partial(_refuse_residplot_another_variable, called_field=y_field)
+                    if flat
+                    else None
                 ),
             ),
         },
@@ -1322,7 +1332,9 @@ def _lmplot_impl(
     # (`_with_fit_bindings`): a misspelled flag refuses there instead of
     # rendering a plain fit, and a binding the fit's statistic does not
     # draw warns rather than vanishing without a word.
-    keyword_bindings = {channel: value for channel, value in enc.items() if channel not in ("x", "y")}
+    keyword_bindings = {
+        channel: value for channel, value in enc.items() if channel not in ("x", "y")
+    }
 
     # Every fit method groups by the hue and by every grouping channel the
     # caller binds (color, fill, stroke, detail, shape, stroke_dash), whether
@@ -1417,7 +1429,12 @@ def _lmplot_impl(
     # `entry`'s voice, applied by `Chart._resolve_pending`.
     out = out._with_post_build_positional(
         _lmplot_post_build_positional(
-            out, entry=entry, method=method, x_field=x_field, y_field=y_field, has_scatter=scatter_layer is not None
+            out,
+            entry=entry,
+            method=method,
+            x_field=x_field,
+            y_field=y_field,
+            has_scatter=scatter_layer is not None,
         )
     )
 
@@ -1785,7 +1802,9 @@ def _metrics_applied(entry: str, show_metrics: bool | None, grouping: list[str])
 #: would each inherit a per-row binding meant for the points (a residplot
 #: with no overlay drawn -- the flat form -- has no sibling layer to shadow
 #: it from, so every channel reaches the chart there instead).
-_RESIDPLOT_CHART_LEVEL_CHANNELS = frozenset(("x", "y", "x2", "y2")) | COMPOSITE_GROUPING_CHANNELS | _FACET_CHANNELS
+_RESIDPLOT_CHART_LEVEL_CHANNELS = (
+    frozenset(("x", "y", "x2", "y2")) | COMPOSITE_GROUPING_CHANNELS | _FACET_CHANNELS
+)
 
 
 #: The names the residual transform emits by default
@@ -1830,8 +1849,10 @@ def _residual_column_names(
     """
     taken = set(columns)
     names: dict[str, str] = {}
-    names["x"] = _RESIDUAL_COLUMN_DEFAULTS["x"] if x_field == "x" or "x" not in taken else _unique_col_name(
-        taken, "x"
+    names["x"] = (
+        _RESIDUAL_COLUMN_DEFAULTS["x"]
+        if x_field == "x" or "x" not in taken
+        else _unique_col_name(taken, "x")
     )
     taken.add(names["x"])
     names["residual"] = _unique_col_name(taken, "residual")
@@ -2274,7 +2295,9 @@ def residplot(
         # points. The point layer itself still binds every one of them,
         # below.
         chart = chart._clone()
-        chart._encoding = {k: v for k, v in chart._encoding.items() if k in _RESIDPLOT_CHART_LEVEL_CHANNELS}
+        chart._encoding = {
+            k: v for k, v in chart._encoding.items() if k in _RESIDPLOT_CHART_LEVEL_CHANNELS
+        }
         internal_layers: list = [
             _Layer(
                 name="point",

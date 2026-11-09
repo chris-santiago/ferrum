@@ -83,7 +83,9 @@ def _sibling_bound_message(mark: str, need_clause: str, channel: str, *, layer: 
     )
 
 
-def _double_sibling_bound_message(mark: str, need_clause: str, remedy_join: str, *, layer: int = 0) -> str:
+def _double_sibling_bound_message(
+    mark: str, need_clause: str, remedy_join: str, *, layer: int = 0
+) -> str:
     """A layer that cannot reach EITHER positional channel while a sibling
     layer binds both: the validator's sibling-bound clause, two unreached
     channels."""
@@ -160,7 +162,10 @@ def test_a_mark_with_no_positional_channel_bound_names_both_unbound_channels() -
     "composite, primitive, expected_mark",
     [
         pytest.param(
-            lambda c: c.mark_histogram(), lambda c: c.mark_point(), "point", id="histogram-then-point"
+            lambda c: c.mark_histogram(),
+            lambda c: c.mark_point(),
+            "point",
+            id="histogram-then-point",
         ),
         pytest.param(
             lambda c: c.mark_density(), lambda c: c.mark_point(), "point", id="density-then-point"
@@ -261,7 +266,9 @@ def test_a_layerchart_member_whose_channel_no_member_binds_names_it_unbound() ->
 #: control row that renders instead of refusing.
 _LATER_MEMBER_MESSAGES = {
     "Lxy-Px": _sibling_bound_message("point", "needs both positional channels", "y", layer=1),
-    "Lxy-P": _double_sibling_bound_message("point", "needs both positional channels", "and", layer=1),
+    "Lxy-P": _double_sibling_bound_message(
+        "point", "needs both positional channels", "and", layer=1
+    ),
     "Lxy-T": _double_sibling_bound_message("tick", "needs one positional channel", "or", layer=1),
     "Tx-Lxy": None,
 }
@@ -563,7 +570,8 @@ def test_a_flipped_member_that_inherits_a_channel_from_its_layer_renders_like_pl
         layer = mark_layer(svg)
         circles = [(c["cx"], c["cy"]) for c in svg_elements(layer, "circle", lambda a: True)]
         lines = [
-            (l["x1"], l["y1"], l["x2"], l["y2"]) for l in svg_elements(layer, "line", lambda a: True)
+            (l["x1"], l["y1"], l["x2"], l["y2"])
+            for l in svg_elements(layer, "line", lambda a: True)
         ]
         polys = [p["points"] for p in svg_elements(layer, "polyline", lambda a: "points" in a)]
         return circles, lines, polys

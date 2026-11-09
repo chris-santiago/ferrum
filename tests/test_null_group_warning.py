@@ -50,7 +50,9 @@ def _render_capturing(render: Callable[[], str]) -> tuple[str, list[str]]:
 def test_a_group_with_no_placed_row_is_named_once():
     chart = fm.Chart(_TWO_GROUP_ONE_NULL).mark_line().encode(x="x", y="y", color="g")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_line: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
     assert ">c<" in svg
     assert ">a<" in svg
 
@@ -67,7 +69,9 @@ def test_mark_area_and_ribbon_name_their_own_null_group(mark_method: str):
     chart = getattr(fm.Chart(df), mark_method)().encode(x="x", y="y", color="g")
     if mark_method == "mark_ribbon":
         chart = chart.encode(y2="y")
-        expected = "mark_ribbon: every row of g=c has a null or non-finite y and y2, so it draws nothing"
+        expected = (
+            "mark_ribbon: every row of g=c has a null or non-finite y and y2, so it draws nothing"
+        )
     else:
         expected = "mark_area: every row of g=c has a null or non-finite y, so it draws nothing"
     svg, messages = _render_capturing(chart.to_svg)
@@ -109,9 +113,7 @@ def test_displot_ecdf_hue_names_its_own_null_group():
             "h": ["a", "a", "a", "c", "c", "c"],
         }
     )
-    svg, messages = _render_capturing(
-        lambda: fm.displot(df, x="v", kind="ecdf", hue="h").to_svg()
-    )
+    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="ecdf", hue="h").to_svg())
     assert messages == ["displot: every row of h=c has a null or non-finite x, so it draws nothing"]
     assert ">c<" in svg
     assert ">a<" in svg
@@ -121,14 +123,18 @@ def test_displot_ecdf_hue_names_its_own_null_group():
 def test_a_point_mark_names_a_null_group_by_shape_or_stroke_dash(group_channel: str):
     chart = fm.Chart(_TWO_GROUP_ONE_NULL).mark_point().encode(x="x", y="y", **{group_channel: "g"})
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_point: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
     assert ">c<" in svg
 
 
 def test_a_line_mark_names_a_null_group_by_detail():
     chart = fm.Chart(_TWO_GROUP_ONE_NULL).mark_line().encode(x="x", y="y", detail="g")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_line: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 @pytest.mark.parametrize("mark_method", ["mark_point", "mark_line"])
@@ -137,11 +143,11 @@ def test_a_binned_color_bin_with_no_placed_row_is_named(mark_method: str):
     one, read the same way the connected marks already read it, not just
     on ``mark_line``."""
     df = pl.DataFrame({"v": [10.0, 20.0, 90.0, 95.0], "y": [1.0, 2.0, None, None]})
-    chart = getattr(fm.Chart(df), mark_method)().encode(
-        x="v", y="y", color=fm.Color("v", bin=True)
-    )
+    chart = getattr(fm.Chart(df), mark_method)().encode(x="v", y="y", color=fm.Color("v", bin=True))
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == [f"{mark_method}: every row of v=90 has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        f"{mark_method}: every row of v=90 has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_a_null_group_key_is_named_the_way_a_null_is_rendered():
@@ -150,7 +156,9 @@ def test_a_null_group_key_is_named_the_way_a_null_is_rendered():
     )
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row of g=null has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_point: every row of g=null has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_a_group_null_on_both_axes_names_both_channels():
@@ -218,11 +226,15 @@ def test_a_band_axis_null_with_no_null_band_is_named_declared_domain():
     df = pl.DataFrame(
         {"x": ["p", "p", None, None], "y": [1.0, 2.0, 3.0, 4.0], "g": ["a", "a", "c", "c"]}
     )
-    chart = fm.Chart(df).mark_bar().encode(
-        x=fm.X("x", scale=fm.BandScale(domain=["p", "q"])), y="y", color="g"
+    chart = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("x", scale=fm.BandScale(domain=["p", "q"])), y="y", color="g")
     )
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_bar: every row of g=c has a null or non-finite x, so it draws nothing"]
+    assert messages == [
+        "mark_bar: every row of g=c has a null or non-finite x, so it draws nothing"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -232,7 +244,9 @@ def test_nan_and_inf_in_the_drawn_column_count_as_null(value: float):
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [value, value], "g": ["c", "c"]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_point: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_two_field_groups_join_with_semicolons():
@@ -264,7 +278,9 @@ def test_a_flipped_chart_names_the_unflipped_channel_the_caller_bound():
         .coord(fm.CoordFlip())
     )
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_point: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -276,14 +292,18 @@ def test_a_layer_with_no_placed_row_says_so():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [None, None, None]}).cast({"y": pl.Float64})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row has a null or non-finite y, so the layer draws nothing"]
+    assert messages == [
+        "mark_point: every row has a null or non-finite y, so the layer draws nothing"
+    ]
 
 
 def test_a_one_row_layer_with_a_null_y_and_no_grouping_says_so_too():
     df = pl.DataFrame({"x": [1.0], "y": [None]}).cast({"y": pl.Float64})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row has a null or non-finite y, so the layer draws nothing"]
+    assert messages == [
+        "mark_point: every row has a null or non-finite y, so the layer draws nothing"
+    ]
 
 
 def test_a_facet_panel_with_no_placed_row_names_the_facet_panel():
@@ -346,8 +366,8 @@ def test_several_emptied_groups_across_facet_panels_join_with_their_panels():
 
 
 def _base_point_chart() -> fm.Chart:
-    return fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})).mark_point().encode(
-        x="x", y="y"
+    return (
+        fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})).mark_point().encode(x="x", y="y")
     )
 
 
@@ -365,7 +385,9 @@ def test_a_plus_layer_names_its_own_layer():
 def test_an_hconcat_leaf_names_its_own_drop():
     base, null_leaf = _base_point_chart(), _null_group_line_chart()
     _, messages = _render_capturing((base | null_leaf).to_svg)
-    assert messages == ["mark_line: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_two_null_leaves_in_one_composite_warn_once_each():
@@ -379,7 +401,9 @@ def test_two_null_leaves_in_one_composite_warn_once_each():
 def test_a_layer_chart_leaf_names_its_own_drop():
     chart = fm.LayerChart(_base_point_chart(), _null_group_line_chart())
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_line: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_a_layer_chart_with_independent_y_names_its_own_layer():
@@ -411,9 +435,7 @@ def test_interactive_to_html_warns_once_per_render_like_series_dropped():
     )
     _, series_messages = _render_capturing(lambda: series_dropped_chart.interactive().to_html())
     expected_group = "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
-    expected_series = (
-        "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point)"
-    )
+    expected_series = "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point)"
     assert group_messages == [expected_group] * len(group_messages)
     assert series_messages == [expected_series] * len(series_messages)
     assert len(group_messages) == len(series_messages)
@@ -425,7 +447,9 @@ def test_chart_to_html_warns_once():
     once, so its warning count is one, unlike the double-rendering
     ``.interactive().to_html()`` route above."""
     _, messages = _render_capturing(_null_group_line_chart().to_html)
-    assert messages == ["mark_line: every row of g=c has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_line: every row of g=c has a null or non-finite y, so it draws nothing"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -446,9 +470,7 @@ def test_a_group_that_draws_stays_silent():
 def test_a_partial_null_in_a_group_that_still_draws_stays_silent():
     """One null row beside a drawn one in the same group is the documented
     per-row skip, not an all-null group -- it stays silent."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [1.0, None, 3.0], "g": ["a", "a", "a"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, None, 3.0], "g": ["a", "a", "a"]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
     _, messages = _render_capturing(chart.to_svg)
     assert messages == []
@@ -485,8 +507,10 @@ def test_a_group_cut_by_an_explicit_domain_is_reported_only_by_the_domain_warnin
     df = pl.DataFrame(
         {"x": [1.0, 2.0, 100.0, 100.0], "y": [1.0, 2.0, 3.0, 4.0], "g": ["a", "a", "c", "c"]}
     )
-    chart = fm.Chart(df).mark_point().encode(
-        x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])), y="y", color="g"
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])), y="y", color="g")
     )
     _, messages = _render_capturing(chart.to_svg)
     assert messages == [
@@ -525,9 +549,7 @@ def test_a_histogram_hue_group_a_null_column_empties_stays_silent():
             "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
         }
     )
-    svg, messages = _render_capturing(
-        lambda: fm.displot(df, x="v", kind="hist", hue="h").to_svg()
-    )
+    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="hist", hue="h").to_svg())
     assert messages == []
     assert ">c<" not in svg
 
@@ -543,9 +565,7 @@ def test_a_kde_hue_group_with_no_usable_values_is_reported_by_degenerate_fit_onl
             "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
         }
     )
-    svg, messages = _render_capturing(
-        lambda: fm.displot(df, x="v", kind="kde", hue="h").to_svg()
-    )
+    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="kde", hue="h").to_svg())
     assert messages == [
         "Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); "
         "it degraded to an empty/flat output instead of failing the whole chart"
@@ -569,7 +589,9 @@ def test_a_zero_row_layer_still_warns_no_rows_to_draw_not_a_new_warning():
     df = pl.DataFrame({"x": [1.0], "y": [1.0]}).filter(pl.col("x") > 100)
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == ["the chart has no rows to draw after its transforms; its panel is drawn empty"]
+    assert messages == [
+        "the chart has no rows to draw after its transforms; its panel is drawn empty"
+    ]
 
 
 def test_a_wrong_type_column_refuses_as_it_already_did():
@@ -585,13 +607,19 @@ def test_a_wrong_type_column_refuses_as_it_already_did():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value,label", [(float("-inf"), "-inf"), (float("inf"), "inf"), (float("nan"), "nan")], ids=["-inf", "inf", "nan"])
+@pytest.mark.parametrize(
+    "value,label",
+    [(float("-inf"), "-inf"), (float("inf"), "inf"), (float("nan"), "nan")],
+    ids=["-inf", "inf", "nan"],
+)
 def test_an_infinity_on_a_log_axis_is_left_to_its_own_report(value: float, label: str):
     """On a log y, group ``c``'s own report differs by value: a negative
     value is reported by the log side's own warning, a value outside the
     scale's explicit domain by the domain warning, and only a true NaN (no
     axis report of its own) falls to the census."""
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, value, value], "g": ["a", "a", "c", "c"]})
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, value, value], "g": ["a", "a", "c", "c"]}
+    )
     chart = fm.Chart(df).mark_point().encode(x="x", y=fm.Y("y", scale=fm.LogScale()), color="g")
     _, messages = _render_capturing(chart.to_svg)
     if label == "-inf":
@@ -605,7 +633,9 @@ def test_an_infinity_on_a_log_axis_is_left_to_its_own_report(value: float, label
             "drawn; widen the domain, or pass clamp=True to draw them at the axis edge"
         ]
     else:
-        assert messages == ["mark_point: every row of g=c has a null or non-finite y, so it draws nothing"]
+        assert messages == [
+            "mark_point: every row of g=c has a null or non-finite y, so it draws nothing"
+        ]
 
 
 @pytest.mark.parametrize("mark_method", ["mark_point", "mark_line"])
@@ -618,7 +648,9 @@ def test_a_group_whose_rows_miss_different_channels_is_named(mark_method: str):
     )
     chart = getattr(fm.Chart(df), mark_method)().encode(x="x", y="y", color="g")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == [f"{mark_method}: every row of g=a has a null or non-finite x and y, so it draws nothing"]
+    assert messages == [
+        f"{mark_method}: every row of g=a has a null or non-finite x and y, so it draws nothing"
+    ]
 
 
 def test_a_group_null_on_y_everywhere_names_only_y():
@@ -627,7 +659,9 @@ def test_a_group_null_on_y_everywhere_names_only_y():
     )
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == ["mark_point: every row of g=a has a null or non-finite y, so it draws nothing"]
+    assert messages == [
+        "mark_point: every row of g=a has a null or non-finite y, so it draws nothing"
+    ]
 
 
 def test_a_null_keyed_group_null_on_every_placement_is_named():
@@ -651,7 +685,11 @@ def test_an_all_null_layer_bound_to_a_null_color_is_named():
     forms no partition at all and would fall through to the whole-layer
     sentence instead -- not what this test means to pin)."""
     df = pl.DataFrame(
-        {"x": [None, None, None, None], "y": [None, None, None, None], "g": [None, None, None, None]}
+        {
+            "x": [None, None, None, None],
+            "y": [None, None, None, None],
+            "g": [None, None, None, None],
+        }
     ).cast({"x": pl.Float64, "y": pl.Float64, "g": pl.Utf8})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
     _, messages = _render_capturing(chart.to_svg)
@@ -661,10 +699,15 @@ def test_an_all_null_layer_bound_to_a_null_color_is_named():
 
 
 def _smooth_and_aggregate_line_charts() -> tuple["fm.Chart", "fm.Chart"]:
-    df_a = pl.DataFrame({"x": [1.0, 1.0, 2.0, 2.0], "y": [1.0, 2.0, None, None], "g": ["a", "a", "a", "a"]})
+    df_a = pl.DataFrame(
+        {"x": [1.0, 1.0, 2.0, 2.0], "y": [1.0, 2.0, None, None], "g": ["a", "a", "a", "a"]}
+    )
     df_b = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [None, None, None], "g": ["a", "a", "a"]})
-    layer_a = fm.Chart(df_a).transform(fm.Smooth(x="x", y="y", groupby=["g"])).mark_line().encode(
-        x="x", y="y", color="g"
+    layer_a = (
+        fm.Chart(df_a)
+        .transform(fm.Smooth(x="x", y="y", groupby=["g"]))
+        .mark_line()
+        .encode(x="x", y="y", color="g")
     )
     layer_b = fm.Chart(df_b).mark_line().encode(x="x", y=fm.Y("y", aggregate="mean"), color="g")
     return layer_a, layer_b
@@ -672,12 +715,20 @@ def _smooth_and_aggregate_line_charts() -> tuple["fm.Chart", "fm.Chart"]:
 
 def _kde_and_ecdf_charts() -> tuple["fm.Chart", "fm.Chart"]:
     df_kde = pl.DataFrame(
-        {"v": [1.0, 2.0, 3.0, 4.0, None, None, None, None], "h": ["a", "a", "a", "a", "c", "c", "c", "c"]}
+        {
+            "v": [1.0, 2.0, 3.0, 4.0, None, None, None, None],
+            "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
+        }
     )
     df_ecdf = pl.DataFrame(
-        {"v": [5.0, 6.0, 7.0, 8.0, None, None, None, None], "h": ["a", "a", "a", "a", "c", "c", "c", "c"]}
+        {
+            "v": [5.0, 6.0, 7.0, 8.0, None, None, None, None],
+            "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
+        }
     )
-    return fm.displot(df_kde, x="v", kind="kde", hue="h"), fm.displot(df_ecdf, x="v", kind="ecdf", hue="h")
+    return fm.displot(df_kde, x="v", kind="kde", hue="h"), fm.displot(
+        df_ecdf, x="v", kind="ecdf", hue="h"
+    )
 
 
 @pytest.mark.parametrize(

@@ -1016,7 +1016,8 @@ def _refuse_fieldless_positional(
     blocked = {
         option
         for option in unreadable
-        if ch.option(option) is not None and _unreadable_option_is_plausible(option, ch.option(option))
+        if ch.option(option) is not None
+        and _unreadable_option_is_plausible(option, ch.option(option))
     }
     declared_type = ch.option("type")
     if declared_type is not None and declared_type != (call_type or "Q"):
@@ -1048,7 +1049,9 @@ def _refuse_fieldless_positional(
     raise EntryRefusal(text, entry)
 
 
-def _refuse_residplot_another_variable(entry: str, channel: str, ch: ChannelBase, *, called_field: str) -> None:
+def _refuse_residplot_another_variable(
+    entry: str, channel: str, ch: ChannelBase, *, called_field: str
+) -> None:
     """Refuse a post-build x/y binding naming neither residplot's called field nor its drawn column.
 
     Flat residplot's one mark reads x/y straight from the chart-level
@@ -1117,7 +1120,7 @@ def _missing_xy_channels(x_field: str | None, y_field: str | None) -> tuple[str,
 
 
 def _channel_names_clause(channels: tuple[str, ...]) -> str:
-    """"the variable x names" for one channel, "the variables x and y name" for more.
+    """ "the variable x names" for one channel, "the variables x and y name" for more.
 
     The one reading of a resolver's *channels* as the idiom every member
     of this refusal family shares: a channel "names" the variable (column)
@@ -1132,7 +1135,7 @@ def _channel_names_clause(channels: tuple[str, ...]) -> str:
 
 
 def _binding_names_none_clause(channels: tuple[str, ...]) -> str:
-    """"this x binding names none" for one channel, "these x and y bindings name none" for more."""
+    """ "this x binding names none" for one channel, "these x and y bindings name none" for more."""
     from ferrum.encoding._aliases import _prose_list
 
     names = _prose_list(list(channels))
@@ -1578,7 +1581,9 @@ _FIT_CATEGORICAL_READS = _categorical_reads(
 
 #: Shared by mark_density, mark_contour and displot(kind="kde"): all three
 #: estimate a kernel density over raw rows, never a bin or category.
-_KDE_CATEGORICAL_READS = _categorical_reads("the kernel density estimate reads {channel} as numbers")
+_KDE_CATEGORICAL_READS = _categorical_reads(
+    "the kernel density estimate reads {channel} as numbers"
+)
 
 #: Shared by the ecdf prep backstop and displot's own call-time check.
 _ECDF_CATEGORICAL_READS = _categorical_reads("the ECDF counts the raw values of {channel}")
@@ -1849,9 +1854,7 @@ def _refuse_ecdf_bin_aggregate(drawn: dict) -> None:
         )
 
 
-def _refuse_bin_aggregate_fit(
-    entry: str, encoding: dict, *, x_bins_knob: bool = False
-) -> None:
+def _refuse_bin_aggregate_fit(entry: str, encoding: dict, *, x_bins_knob: bool = False) -> None:
     """Refuse an x bin=/aggregate= a fit reads raw, and a y one it folds in nowhere.
 
     x is the predictor; *x_bins_knob* is True on a call whose fit bins the

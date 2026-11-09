@@ -94,9 +94,7 @@ def test_a_shorthand_keyword_is_read_as_encode_reads_it(xy_df, figure, scatter, 
     """
     y_col = _response_column(method)
     bare = _figure_call(figure, xy_df, method=method, scatter=scatter, ci=ci).to_svg()
-    typed = figure(
-        xy_df, x="v:Q", y=f"{y_col}:Q", method=method, scatter=scatter, ci=ci
-    ).to_svg()
+    typed = figure(xy_df, x="v:Q", y=f"{y_col}:Q", method=method, scatter=scatter, ci=ci).to_svg()
     assert bare == typed
 
 
@@ -185,7 +183,14 @@ def test_a_categorical_type_on_a_fit_axis_is_refused(
     field = "v" if channel == "x" else y_col
     cls, cls_name = (X, "X") if channel == "x" else (Y, "Y")
     value = cls(field, type=type_) if as_object else f"{field}:{type_}"
-    kwargs = {"x": "v", "y": y_col, "method": method, "scatter": scatter, "ci": None, channel: value}
+    kwargs = {
+        "x": "v",
+        "y": y_col,
+        "method": method,
+        "scatter": scatter,
+        "ci": None,
+        channel: value,
+    }
     with pytest.raises(EntryRefusal) as excinfo:
         figure(xy_df, **kwargs).to_svg()
     assert str(excinfo.value) == _fit_categorical_message(
@@ -326,7 +331,9 @@ def test_a_temporal_shorthand_keeps_its_type_under_logx(xy_df, figure):
 @pytest.mark.parametrize("method", _METHODS)
 @pytest.mark.parametrize("scatter", [True, False])
 @pytest.mark.parametrize("channel", ["x", "y"])
-def test_a_temporal_shorthand_renders_the_same_as_the_channel_object(xy_df, figure, method, scatter, channel):
+def test_a_temporal_shorthand_renders_the_same_as_the_channel_object(
+    xy_df, figure, method, scatter, channel
+):
     """``"v:T"``/``"w:T"`` draws byte-identical to ``X(..., type="T")``/
     ``Y(..., type="T")`` on every method and both ``scatter=`` forms --
     whatever a declared ``T`` does to the render (applied with a scatter
@@ -444,8 +451,7 @@ def test_hue_a_non_binding_value_is_the_parses_typeerror(xy_df, figure):
     with pytest.raises(TypeError) as excinfo:
         figure(xy_df, x="v", y="w", hue=5, ci=None).to_svg()
     assert str(excinfo.value) == (
-        f"{figure.__name__}(hue=...) expects str, Color instance, or Repeat "
-        "placeholder; got int"
+        f"{figure.__name__}(hue=...) expects str, Color instance, or Repeat placeholder; got int"
     )
 
 
@@ -545,7 +551,14 @@ def test_a_value_channel_is_refused_on_the_single_line_shortcut(xy_df, channel):
     """
     with pytest.raises(ValueError) as excinfo:
         fm.regplot(
-            xy_df, x="v", y="w", method="lm", scatter=False, ci=None, show_metrics=False, **{channel: "k"}
+            xy_df,
+            x="v",
+            y="w",
+            method="lm",
+            scatter=False,
+            ci=None,
+            show_metrics=False,
+            **{channel: "k"},
         ).to_svg()
     assert str(excinfo.value) == "unknown column 'k' referenced by an encoding"
 
@@ -569,7 +582,10 @@ def test_a_tooltip_is_dropped_on_the_single_line_shortcut(xy_df):
     assert without == with_tooltip
 
     direct_without = (
-        fm.Chart(xy_df).mark_smooth(method="lm", ci=None, show_metrics=False).encode(x="v", y="w").to_svg()
+        fm.Chart(xy_df)
+        .mark_smooth(method="lm", ci=None, show_metrics=False)
+        .encode(x="v", y="w")
+        .to_svg()
     )
     direct_with_tooltip = (
         fm.Chart(xy_df)
@@ -594,7 +610,9 @@ def test_an_undrawn_text_or_x2_binding_matches_the_encode_door(xy_df, method, ch
     y_col = _response_column(method)
     with warnings.catch_warnings(record=True) as kw_record:
         warnings.simplefilter("always")
-        kw_svg = fm.regplot(xy_df, x="v", y=y_col, method=method, scatter=False, **{channel: value}).to_svg()
+        kw_svg = fm.regplot(
+            xy_df, x="v", y=y_col, method=method, scatter=False, **{channel: value}
+        ).to_svg()
     with warnings.catch_warnings(record=True) as enc_record:
         warnings.simplefilter("always")
         enc_svg = fm.regplot(
@@ -679,9 +697,7 @@ def test_lmplot_scatter_false_with_facet_still_warns_a_dropped_value_channel(xy_
     warning raised while binding the fit survives faceting unaffected.
     """
     with pytest.warns(UserWarning, match=r"size 'k' was dropped"):
-        fm.lmplot(
-            xy_df, x="v", y="w", scatter=False, ci=None, col="g", size="k"
-        ).to_svg()
+        fm.lmplot(xy_df, x="v", y="w", scatter=False, ci=None, col="g", size="k").to_svg()
 
 
 def test_encode_kwarg_on_every_form_is_unaffected(xy_df):
@@ -692,8 +708,12 @@ def test_encode_kwarg_on_every_form_is_unaffected(xy_df):
     with pytest.warns(UserWarning):
         with_scatter = fm.regplot(xy_df, x="v", y="w", ci=None, encode={"size": "k"}).to_svg()
     with pytest.warns(UserWarning):
-        no_scatter = fm.regplot(xy_df, x="v", y="w", scatter=False, ci=None, encode={"size": "k"}).to_svg()
-    assert _digest(with_scatter) == "6efee6f305670f238425fcf29dffc5396d443ef5e7ef8e9cb47b917fefc9b261"
+        no_scatter = fm.regplot(
+            xy_df, x="v", y="w", scatter=False, ci=None, encode={"size": "k"}
+        ).to_svg()
+    assert (
+        _digest(with_scatter) == "6efee6f305670f238425fcf29dffc5396d443ef5e7ef8e9cb47b917fefc9b261"
+    )
     assert _digest(no_scatter) == "92cd391cbd7960be92340d48199ed6c4a16ef193bc6b3a2a79ed8edb05bc00ce"
 
 

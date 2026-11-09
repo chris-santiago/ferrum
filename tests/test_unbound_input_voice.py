@@ -81,14 +81,26 @@ def test_a_re_voiced_refusals_text_survives_copy_and_pickle(via):
     from ferrum._encode_lowering import _unbound_input_refusal
 
     own_refusal = _unbound_input_refusal(
-        "mark_smooth", ("x", "y"), "the fit reads", own="mark_smooth() requires .encode(x=..., y=...)"
+        "mark_smooth",
+        ("x", "y"),
+        "the fit reads",
+        own="mark_smooth() requires .encode(x=..., y=...)",
     )
-    duplicated = copy.copy(own_refusal) if via == "copy" else pickle.loads(pickle.dumps(own_refusal))
+    duplicated = (
+        copy.copy(own_refusal) if via == "copy" else pickle.loads(pickle.dumps(own_refusal))
+    )
     assert str(duplicated) == "mark_smooth() requires .encode(x=..., y=...)"
 
     reads = "the ECDF counts the raw values of"
-    ecdf_refusal = _unbound_input_refusal("displot", ("x",), reads, own=f"displot(kind='ecdf') needs x bound to a column -- {reads} the variable x names, and this x binding names none. Bind x to a column: x='<column>', or fm.X('<column>', ...) to keep the channel's options.")
-    duplicated_ecdf = copy.copy(ecdf_refusal) if via == "copy" else pickle.loads(pickle.dumps(ecdf_refusal))
+    ecdf_refusal = _unbound_input_refusal(
+        "displot",
+        ("x",),
+        reads,
+        own=f"displot(kind='ecdf') needs x bound to a column -- {reads} the variable x names, and this x binding names none. Bind x to a column: x='<column>', or fm.X('<column>', ...) to keep the channel's options.",
+    )
+    duplicated_ecdf = (
+        copy.copy(ecdf_refusal) if via == "copy" else pickle.loads(pickle.dumps(ecdf_refusal))
+    )
     assert "kind='ecdf'" in str(duplicated_ecdf)
 
 
@@ -108,17 +120,50 @@ def test_a_re_voiced_refusals_text_survives_copy_and_pickle(via):
             lambda: fm.Chart(_frame()).mark_histogram().to_svg(),
             "mark_histogram() requires .encode(x=...) to specify the histogram field",
         ),
-        (lambda: fm.Chart(_frame()).mark_smooth().to_svg(), "mark_smooth() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_contour().to_svg(), "mark_contour() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_violin().to_svg(), "mark_violin() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_raster().to_svg(), "mark_raster() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_hex().to_svg(), "mark_hex() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_swarm().to_svg(), "mark_swarm() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_boxplot().to_svg(), "mark_boxplot() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_errorbar().to_svg(), "mark_errorbar() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_errorband().to_svg(), "mark_errorband() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_ribbon().to_svg(), "mark_ribbon() requires .encode(x=..., y=...)"),
-        (lambda: fm.Chart(_frame()).mark_boxen().to_svg(), "mark_boxen() requires .encode(x=..., y=...)"),
+        (
+            lambda: fm.Chart(_frame()).mark_smooth().to_svg(),
+            "mark_smooth() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_contour().to_svg(),
+            "mark_contour() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_violin().to_svg(),
+            "mark_violin() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_raster().to_svg(),
+            "mark_raster() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_hex().to_svg(),
+            "mark_hex() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_swarm().to_svg(),
+            "mark_swarm() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_boxplot().to_svg(),
+            "mark_boxplot() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_errorbar().to_svg(),
+            "mark_errorbar() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_errorband().to_svg(),
+            "mark_errorband() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_ribbon().to_svg(),
+            "mark_ribbon() requires .encode(x=..., y=...)",
+        ),
+        (
+            lambda: fm.Chart(_frame()).mark_boxen().to_svg(),
+            "mark_boxen() requires .encode(x=..., y=...)",
+        ),
         (
             lambda: fm.Chart(_frame()).mark_qq().to_svg(),
             "mark_qq() requires .encode(x=...) to specify the sample field",
@@ -168,7 +213,9 @@ def test_displot_ecdf_fieldless_x_keeps_its_existing_text():
     )
 
 
-@pytest.mark.parametrize("kind,reads", [("box", "boxplot"), ("violin", "violin"), ("boxen", "boxen")])
+@pytest.mark.parametrize(
+    "kind,reads", [("box", "boxplot"), ("violin", "violin"), ("boxen", "boxen")]
+)
 def test_catplot_speaks_its_own_voice_for_an_unbound_axis_at_the_call(kind, reads):
     with pytest.raises(ValueError) as err:
         fm.catplot(_frame(), y="w", kind=kind).to_svg()

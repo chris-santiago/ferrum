@@ -35,7 +35,9 @@ import ferrum as fm
 from ferrum._layer import _Layer, layer_mark
 
 _DF = pl.DataFrame({"v": [1.0, 2.0, 2.5, 3.0, 4.0, 5.5], "w": [2.0, 1.0, 3.0, 5.0, 4.0, 6.0]})
-_EMPTY_DF = pl.DataFrame({"v": pl.Series([], dtype=pl.Float64), "w": pl.Series([], dtype=pl.Float64)})
+_EMPTY_DF = pl.DataFrame(
+    {"v": pl.Series([], dtype=pl.Float64), "w": pl.Series([], dtype=pl.Float64)}
+)
 _ONE_ROW_DF = pl.DataFrame({"v": [1.0], "w": [2.0]})
 
 #: Every public method that is itself one of ``Chart._set_mark``'s 14 call
@@ -183,7 +185,9 @@ def _assert_layered_refusal(
         ],
     ],
 )
-def test_a_primitive_mark_on_a_layered_chart_is_refused_at_the_call(build, call, expected_names) -> None:
+def test_a_primitive_mark_on_a_layered_chart_is_refused_at_the_call(
+    build, call, expected_names
+) -> None:
     """Every door that produces a layered chart, and every public primitive
     mark method, refuses that method's own call, naming the chart's own
     layers -- each by its name where it has one, else by the mark it draws
@@ -255,7 +259,9 @@ def test_a_wrong_type_kwarg_on_a_layered_receiver_is_refused_as_the_layering_not
 
 
 @pytest.mark.parametrize("position", [None, "dodge"], ids=["none", "dodge"])
-def test_position_on_a_layered_receiver_is_refused_as_the_layering_even_when_unset(position) -> None:
+def test_position_on_a_layered_receiver_is_refused_as_the_layering_even_when_unset(
+    position,
+) -> None:
     """``position=`` is popped from kwargs after the layering check runs, so
     it never reaches eligibility validation either way -- including
     ``position=None``, which is unset and would otherwise be a no-op."""
@@ -284,9 +290,10 @@ def test_mark_line_point_overlay_itself_renders_unaffected() -> None:
     layers the composition produces, so it renders exactly as the
     equivalent hand-built composition does."""
     built_in = fm.Chart(_DF).encode(x="v", y="w").mark_line(point=True)
-    hand_built = fm.Chart(_DF).encode(x="v", y="w").mark_line() + fm.Chart(_DF).encode(
-        x="v", y="w"
-    ).mark_point()
+    hand_built = (
+        fm.Chart(_DF).encode(x="v", y="w").mark_line()
+        + fm.Chart(_DF).encode(x="v", y="w").mark_point()
+    )
 
     assert built_in.to_svg() == hand_built.to_svg()
 

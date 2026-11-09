@@ -112,7 +112,9 @@ def test_lmplot_displot_catplot_col_name_the_same_non_shorthand_column():
         }
     )
     bare_catplot = fm.catplot(cat_df, x="cat", y="v", kind="bar", col="grp (k)").to_svg()
-    object_catplot = fm.catplot(cat_df, x="cat", y="v", kind="bar", col=FacetCol("grp (k)")).to_svg()
+    object_catplot = fm.catplot(
+        cat_df, x="cat", y="v", kind="bar", col=FacetCol("grp (k)")
+    ).to_svg()
     assert bare_catplot == object_catplot
 
 
@@ -174,8 +176,7 @@ def test_a_non_binding_value_is_the_parses_typeerror(kwarg, cls_name):
     with pytest.raises(TypeError) as excinfo:
         _plain().facet(**{kwarg: 5}).to_svg()
     assert str(excinfo.value) == (
-        f"Chart.facet({kwarg}=...) expects str, {cls_name} instance, or Repeat "
-        "placeholder; got int"
+        f"Chart.facet({kwarg}=...) expects str, {cls_name} instance, or Repeat placeholder; got int"
     )
 
 
@@ -217,7 +218,9 @@ def test_the_calls_own_title_and_sort_win_over_the_channels():
     assert "H:" in grid_row_title
     assert "G:" not in grid_row_title
 
-    via_call_sort = _plain().facet(col=FacetCol("g", sort=["c", "b", "a"]), sort=["a", "b", "c"]).to_svg()
+    via_call_sort = (
+        _plain().facet(col=FacetCol("g", sort=["c", "b", "a"]), sort=["a", "b", "c"]).to_svg()
+    )
     bare_sort = _plain().facet(col="g", sort=["a", "b", "c"]).to_svg()
     assert via_call_sort == bare_sort
 

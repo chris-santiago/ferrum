@@ -218,7 +218,9 @@ class TestFillAndCumulativeAreTruthValuesOnEveryKind:
         svg = fm.displot(two_group_df, x="v", kind=kind, **{param: value}).to_svg()
         is_default = value is None or bool(value) == self._PARAM_DEFAULT[param]
         if is_default or kind not in self._PARAM_READING_KINDS[param]:
-            assert svg == base, f"{kind}({param}={value!r}) should render byte-identically to the default"
+            assert svg == base, (
+                f"{kind}({param}={value!r}) should render byte-identically to the default"
+            )
         else:
             assert svg != base, f"{kind}({param}={value!r}) should change the render"
 

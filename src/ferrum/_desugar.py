@@ -652,7 +652,9 @@ def _propagate_positional_axis(chart_encoding: dict, layer_encoding: dict) -> di
     for axis in ("x", "y"):
         if axis not in layer_encoding:
             continue
-        merged = _merge_positional_channel_axis(layer_encoding[axis], chart_encoding.get(axis), axis)
+        merged = _merge_positional_channel_axis(
+            layer_encoding[axis], chart_encoding.get(axis), axis
+        )
         if merged is not None:
             updates[axis] = merged
     if not updates:
@@ -1135,7 +1137,10 @@ def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
         names_aggregate = (reads_column and color_field == kwargs.get("field")) or (
             color_consumed and not reads_column
         )
-        if not names_aggregate and color_field != registry_output_columns("hex", ["value"])["value"]:
+        if (
+            not names_aggregate
+            and color_field != registry_output_columns("hex", ["value"])["value"]
+        ):
             of_field = f" of field={kwargs.get('field')!r}" if reads_column else ""
             raise ValueError(
                 f"{entry}: color={color_field!r} is drawn nowhere; the cells are colored by "
@@ -1490,7 +1495,10 @@ def _prep_refuse_hex_statistics(ctx: _ResolveContext) -> None:
         ("x", "y"),
         reason="the hexagons bin x and y by their own grid",
         bin_remedy=partial(
-            _own_knob_remedy, knob=attrgetter("hex_bin_size"), verb="Size the cells with", kwarg="bin"
+            _own_knob_remedy,
+            knob=attrgetter("hex_bin_size"),
+            verb="Size the cells with",
+            kwarg="bin",
         ),
     )
     _refuse_categorical_input(
@@ -1973,7 +1981,9 @@ def _resolve_pending_as(
         # layer that cannot resolve them.
         smooth_enc = {k: v for k, v in chart._encoding.items() if k not in ("x2", "y2")}
         if remap:
-            _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
+            _apply_remap(
+                smooth_enc, remap, orig_encoding=chart._encoding, titles=result.remap_titles
+            )
         smooth_enc = _propagate_positional_axis(chart._encoding, smooth_enc)
         smooth_enc = titled_encoding(smooth_enc, chart._pending_stat_mark.legend_titles)
         # Style applies to the composite's emitted smooth layer only; the prior
@@ -2014,7 +2024,9 @@ def _resolve_pending_as(
     if result.position is not None:
         new._position = result.position
     if remap:
-        _apply_remap(new._encoding, remap, orig_encoding=chart._encoding, titles=result.remap_titles)
+        _apply_remap(
+            new._encoding, remap, orig_encoding=chart._encoding, titles=result.remap_titles
+        )
     new._encoding = _propagate_positional_axis(chart._encoding, new._encoding)
     new._encoding = titled_encoding(new._encoding, chart._pending_stat_mark.legend_titles)
     return new

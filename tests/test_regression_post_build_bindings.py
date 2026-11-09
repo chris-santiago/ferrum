@@ -171,7 +171,11 @@ def _y_field_of(form_name: str) -> str:
 #: door drops a declared type the same way the post-build door does, so
 #: these share one type= remedy ending (_lmplot_type_remedy_without_scatter).
 _NO_SCATTER_DRAWN_FORMS = frozenset(
-    {"regplot_scatter_false_dedicated", "regplot_scatter_false_logistic", "regplot_scatter_false_glm"}
+    {
+        "regplot_scatter_false_dedicated",
+        "regplot_scatter_false_logistic",
+        "regplot_scatter_false_glm",
+    }
 )
 
 
@@ -197,7 +201,9 @@ def test_a_post_build_bin_or_aggregate_is_refused_with_the_call_time_text(form_n
     # binding, is the one the post-build backstop must reuse verbatim.
     with pytest.raises(ValueError) as call_err:
         if form_name == "residplot_flat":
-            fm.residplot(_frame(), x=X(field, **{kwarg: value}), y="w", zero_line=False, show_metrics=False)
+            fm.residplot(
+                _frame(), x=X(field, **{kwarg: value}), y="w", zero_line=False, show_metrics=False
+            )
         elif form_name == "residplot_layered":
             fm.residplot(_frame(), x=X(field, **{kwarg: value}), y="w", lowess=True)
         elif form_name == "lmplot_plain":
@@ -207,9 +213,13 @@ def test_a_post_build_bin_or_aggregate_is_refused_with_the_call_time_text(form_n
         elif form_name == "regplot_scatter_false_pending":
             fm.regplot(_frame(), x=X(field, **{kwarg: value}), y="w", scatter=False)
         elif form_name == "regplot_scatter_false_dedicated":
-            fm.regplot(_frame(), x=X(field, **{kwarg: value}), y="w", scatter=False, method="robust")
+            fm.regplot(
+                _frame(), x=X(field, **{kwarg: value}), y="w", scatter=False, method="robust"
+            )
         elif form_name == "regplot_scatter_false_logistic":
-            fm.regplot(_frame(), x=X(field, **{kwarg: value}), y="b", scatter=False, method="logistic")
+            fm.regplot(
+                _frame(), x=X(field, **{kwarg: value}), y="b", scatter=False, method="logistic"
+            )
         elif form_name == "regplot_scatter_false_glm":
             fm.regplot(_frame(), x=X(field, **{kwarg: value}), y="b", scatter=False, method="glm")
         else:
@@ -288,7 +298,9 @@ def test_a_post_build_title_on_a_declared_temporal_call_is_honored_not_refused(f
     y_field = _y_field_of(form_name)
     keyword = entry_fn(_frame(), x=X("v", type="T", title="Date"), y=y_field, **extra).to_svg()
     if door == "later_dot_encode":
-        styled = entry_fn(_frame(), x="v:T", y=y_field, **extra).encode(x=X("v", title="Date")).to_svg()
+        styled = (
+            entry_fn(_frame(), x="v:T", y=y_field, **extra).encode(x=X("v", title="Date")).to_svg()
+        )
     else:
         styled = entry_fn(
             _frame(), x="v:T", y=y_field, encode={"x": X("v", title="Date")}, **extra
@@ -336,7 +348,9 @@ def test_a_post_build_type_matching_a_declared_temporal_call_is_honored(form_nam
     "kwargs",
     [{"scale": fm.LogScale()}, {"scale": fm.LinearScale(domain=(-5.0, 5.0))}, {"format": ".3f"}],
 )
-def test_a_post_build_scale_or_format_pushes_down_byte_identical_to_the_keyword_door(form_name, channel, kwargs):
+def test_a_post_build_scale_or_format_pushes_down_byte_identical_to_the_keyword_door(
+    form_name, channel, kwargs
+):
     field = "v" if channel == "x" else _y_field_of(form_name)
     cls = X if channel == "x" else Y
     plain = _EAGER_ENTRY_FORMS[form_name]()
@@ -384,7 +398,9 @@ def test_a_dedicated_scatter_false_fit_draws_an_appended_layer(form_name, append
     if append_door == "chart_layer_method":
         appended = base.layer(fm.Layer(mark="point")).to_svg()
     else:
-        appended = entry_fn(_frame(), x="v", y=y_field, layers=[fm.Layer(mark="point")], **extra).to_svg()
+        appended = entry_fn(
+            _frame(), x="v", y=y_field, layers=[fm.Layer(mark="point")], **extra
+        ).to_svg()
     assert appended == plus
 
 
@@ -413,7 +429,9 @@ def test_a_call_time_encode_kwarg_pushes_down_the_same_way_as_a_later_encode_cal
     """``encode={...}`` at the call lands post-build too, so it pushes down the same way."""
     plain = fm.regplot(_frame(), x="v", y="w").to_svg()
     keyword = fm.regplot(_frame(), x=X("v", scale=fm.LogScale()), y="w").to_svg()
-    via_encode_kwarg = fm.regplot(_frame(), x="v", y="w", encode={"x": X("v", scale=fm.LogScale())}).to_svg()
+    via_encode_kwarg = fm.regplot(
+        _frame(), x="v", y="w", encode={"x": X("v", scale=fm.LogScale())}
+    ).to_svg()
     assert via_encode_kwarg != plain
     assert via_encode_kwarg == keyword
 
@@ -446,7 +464,9 @@ def test_a_post_build_y_domain_or_log_scale_pushes_down_on_regplot_and_lmplot(en
     assert post_build_log != plain
     assert post_build_log == keyword_log
 
-    keyword_domain = entry_fn(_frame(), x="v", y=Y("w", scale=fm.LinearScale(domain=(-5.0, 5.0)))).to_svg()
+    keyword_domain = entry_fn(
+        _frame(), x="v", y=Y("w", scale=fm.LinearScale(domain=(-5.0, 5.0)))
+    ).to_svg()
     post_build_domain = chart.encode(y=Y("w", scale=fm.LinearScale(domain=(-5.0, 5.0)))).to_svg()
     assert post_build_domain == keyword_domain
 
@@ -636,7 +656,9 @@ def test_a_pending_forms_fieldless_remedy_states_only_what_holds_on_the_form():
 
 
 @pytest.mark.parametrize("declared_type", ["N", "O"])
-def test_a_pending_forms_fieldless_remedy_for_a_categorical_type_matches_the_eager_ending(declared_type):
+def test_a_pending_forms_fieldless_remedy_for_a_categorical_type_matches_the_eager_ending(
+    declared_type,
+):
     """A declared N/O restated on the pending form is refused again, by
     the pending preparation's own categorical rule -- unlike a declared T,
     it is never silently dropped there, so its remedy keeps the same
@@ -811,7 +833,12 @@ def test_residplot_predictor_named_like_the_drawn_column_stays_honored(lowess):
     figure's own drawn-column binding, read as that is -- not refused as a
     rewrite of the called field, even though the field also equals the
     called field here."""
-    frame = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "y": [2.0, 3.0, 1.0, 5.0, 4.0, 2.0, 6.0, 3.0]})
+    frame = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "y": [2.0, 3.0, 1.0, 5.0, 4.0, 2.0, 6.0, 3.0],
+        }
+    )
     kwargs = {"lowess": True} if lowess else {"zero_line": False, "show_metrics": False}
     chart = fm.residplot(frame, x="x", y="y", **kwargs)
     plain = chart.to_svg()
@@ -829,7 +856,10 @@ def test_residplot_response_named_residual_is_the_called_field_after_the_call():
     way they always are on residplot's y, since the response column the
     call named is not the residual the figure draws."""
     frame = pl.DataFrame(
-        {"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "residual": [2.0, 3.0, 1.0, 5.0, 4.0, 2.0, 6.0, 3.0]}
+        {
+            "v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "residual": [2.0, 3.0, 1.0, 5.0, 4.0, 2.0, 6.0, 3.0],
+        }
     )
     chart = fm.residplot(frame, x="v", y="residual", zero_line=False, show_metrics=False)
     plain = chart.to_svg()
@@ -887,7 +917,10 @@ def test_residplot_flat_post_build_title_only_keeps_a_declared_temporal_x():
 
     assert any("e12" in text for text in legend_texts(baseline)) is False
     assert any("e12" in text for text in legend_texts(styled)) is False
-    assert any(text.strip().endswith("2021") or text.strip().endswith("2022") for text in legend_texts(styled))
+    assert any(
+        text.strip().endswith("2021") or text.strip().endswith("2022")
+        for text in legend_texts(styled)
+    )
 
 
 def test_residplot_flat_post_build_type_differing_from_a_declared_temporal_call_is_refused():
@@ -984,9 +1017,13 @@ def test_a_genuinely_pending_form_honors_format_on_every_door(door):
     if door == "keyword":
         styled = fm.regplot(frame, x=X("v", format=".3f"), y="w", scatter=False).to_svg()
     elif door == "call_time_encode_kwarg":
-        styled = fm.regplot(frame, x="v", y="w", scatter=False, encode={"x": X("v", format=".3f")}).to_svg()
+        styled = fm.regplot(
+            frame, x="v", y="w", scatter=False, encode={"x": X("v", format=".3f")}
+        ).to_svg()
     else:
-        styled = fm.regplot(frame, x="v", y="w", scatter=False).encode(x=X("v", format=".3f")).to_svg()
+        styled = (
+            fm.regplot(frame, x="v", y="w", scatter=False).encode(x=X("v", format=".3f")).to_svg()
+        )
     assert styled != baseline
 
 
@@ -1048,13 +1085,17 @@ _FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = 
         "a refit. Pass it in the call instead: residplot(y='u', ...).",
     ),
     "encode-x": (
-        lambda: fm.residplot(_frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"x": "u"}),
+        lambda: fm.residplot(
+            _frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"x": "u"}
+        ),
         "residplot(x=X('u')) after the call is not supported: residplot computes its "
         "residuals from the x= it was called with ('v'), so 'u' would be drawn without "
         "a refit. Pass it in the call instead: residplot(x='u', ...).",
     ),
     "encode-y": (
-        lambda: fm.residplot(_frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"y": "u"}),
+        lambda: fm.residplot(
+            _frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"y": "u"}
+        ),
         "residplot(y=Y('u')) after the call is not supported: residplot computes its "
         "residuals from the y= it was called with ('w'), so 'u' would be drawn without "
         "a refit. Pass it in the call instead: residplot(y='u', ...).",
@@ -1067,7 +1108,11 @@ _FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = 
         # instead (the naming mechanism's own rule), so this 'x' is
         # genuinely the caller's column, never residplot's drawn one.
         lambda: fm.residplot(
-            _frame().with_columns(pl.col("u").alias("x")), x="v", y="w", zero_line=False, show_metrics=False
+            _frame().with_columns(pl.col("u").alias("x")),
+            x="v",
+            y="w",
+            zero_line=False,
+            show_metrics=False,
         ).encode(x="x"),
         "residplot(x=X('x')) after the call is not supported: residplot computes its "
         "residuals from the x= it was called with ('v'), so 'x' would be drawn without "
@@ -1078,7 +1123,11 @@ _FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = 
         # response ('w' is), so it is another variable, not the computed
         # residual (which took a fresh name once this clash existed).
         lambda: fm.residplot(
-            _frame().with_columns(pl.col("u").alias("residual")), x="v", y="w", zero_line=False, show_metrics=False
+            _frame().with_columns(pl.col("u").alias("residual")),
+            x="v",
+            y="w",
+            zero_line=False,
+            show_metrics=False,
         ).encode(y="residual"),
         "residplot(y=Y('residual')) after the call is not supported: residplot computes its "
         "residuals from the y= it was called with ('w'), so 'residual' would be drawn without "
@@ -1227,7 +1276,9 @@ def test_a_wrong_type_channel_value_still_raises_the_existing_type_error():
 
 
 @pytest.mark.parametrize("kwargs,exc", [({"format": 5}, TypeError), ({"scale": 5}, ValueError)])
-def test_a_wrong_type_unreadable_option_raises_the_channels_own_validation_not_the_unreadable_refusal(kwargs, exc):
+def test_a_wrong_type_unreadable_option_raises_the_channels_own_validation_not_the_unreadable_refusal(
+    kwargs, exc
+):
     """``format=5``/``scale=5`` never had a valid shape in the first place
     (they fail the same way on a plain chart), so the post-build door
     leaves them alone rather than refusing them as unreadable with a
@@ -1341,7 +1392,9 @@ def test_every_channel_option_is_honored_refused_or_inert_on_every_door(option):
     plain = fm.regplot(_frame(), x="v", y="w")
     baseline = plain.to_svg()
 
-    keyword_outcome = _outcome(lambda: fm.regplot(_frame(), x=X("v", **kwargs), y="w").to_svg(), baseline)
+    keyword_outcome = _outcome(
+        lambda: fm.regplot(_frame(), x=X("v", **kwargs), y="w").to_svg(), baseline
+    )
     post_build_outcome = _outcome(lambda: plain.encode(x=X("v", **kwargs)).to_svg(), baseline)
 
     assert keyword_outcome == keyword_expected, (option, "keyword")
@@ -1352,7 +1405,9 @@ def test_every_channel_option_is_honored_refused_or_inert_on_every_door(option):
 @pytest.mark.parametrize("channel", ["x", "y"])
 @pytest.mark.parametrize("form_name", sorted(_FULL_SWEEP_FORMS))
 @pytest.mark.parametrize("option", sorted(_CHANNEL_OPTIONS))
-def test_every_channel_option_is_honored_refused_or_inert_on_every_form_and_door(form_name, option, channel, door):
+def test_every_channel_option_is_honored_refused_or_inert_on_every_form_and_door(
+    form_name, option, channel, door
+):
     """The sweep above, run over every form's x AND y (every eager form,
     plus a genuinely pending scatter=False regplot and an lmplot(col=)
     facet grid), through both post-build doors (``encode=`` at the call,
@@ -1376,5 +1431,7 @@ def test_every_channel_option_is_honored_refused_or_inert_on_every_form_and_door
     if door == "later_dot_encode":
         outcome = _outcome(lambda: plain.encode(**{channel: binding}).to_svg(), baseline)
     else:
-        outcome = _outcome(lambda: _build_with_encode_kwarg(form_name, channel, binding).to_svg(), baseline)
+        outcome = _outcome(
+            lambda: _build_with_encode_kwarg(form_name, channel, binding).to_svg(), baseline
+        )
     assert outcome == post_build_expected, (form_name, option, channel, door)

@@ -67,7 +67,9 @@ def test_a_layered_statistic_carries_the_callers_axis_presentation(kind):
 
     plain = build().encode(**companion, **{channel: field}).to_svg()
     formatted = build().encode(**companion, **{channel: cls(field, format=".3f")}).to_svg()
-    axis_styled = build().encode(**companion, **{channel: cls(field, axis=fm.Axis(label_angle=45))}).to_svg()
+    axis_styled = (
+        build().encode(**companion, **{channel: cls(field, axis=fm.Axis(label_angle=45))}).to_svg()
+    )
 
     assert formatted != plain, f"{kind}: format= did not reach the layer"
     assert axis_styled != plain, f"{kind}: axis= did not reach the layer"
@@ -98,7 +100,9 @@ def _cv_scores_chart():
 
     Xd, y = make_classification(n_samples=200, n_classes=2, random_state=0)
     model = RandomForestClassifier(random_state=0, n_estimators=5)
-    return lambda **encode: fm.cv_scores_chart(model, X=Xd, y=y, split="train", cv=3, encode=encode or None)
+    return lambda **encode: fm.cv_scores_chart(
+        model, X=Xd, y=y, split="train", cv=3, encode=encode or None
+    )
 
 
 def _discrimination_threshold_chart():
@@ -107,7 +111,9 @@ def _discrimination_threshold_chart():
 
     Xd, y = make_classification(n_samples=200, n_classes=2, random_state=0)
     model = LogisticRegression().fit(Xd, y)
-    return lambda **encode: fm.discrimination_threshold_chart(model, X=Xd, y=y, encode=encode or None)
+    return lambda **encode: fm.discrimination_threshold_chart(
+        model, X=Xd, y=y, encode=encode or None
+    )
 
 
 #: Each model-diagnostic kind's own (factory, channel, field) triple:

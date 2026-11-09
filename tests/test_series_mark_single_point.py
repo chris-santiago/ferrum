@@ -195,12 +195,10 @@ _PARTIAL_GROUPS = pl.DataFrame(
 )
 
 _LINE_PARTIAL = (
-    "mark_line: mark_line() joins two or more points per series, "
-    "so it did not draw g=b (one point)"
+    "mark_line: mark_line() joins two or more points per series, so it did not draw g=b (one point)"
 )
 _AREA_PARTIAL = (
-    "mark_area: mark_area() spans two or more points per series, "
-    "so it did not draw g=b (one point)"
+    "mark_area: mark_area() spans two or more points per series, so it did not draw g=b (one point)"
 )
 _RIBBON_PARTIAL = (
     "mark_ribbon: mark_ribbon() spans two or more points per band, "
@@ -222,10 +220,12 @@ _RIBBON_PARTIAL = (
             band_paths,
         ),
         (
-            lambda: fm.Chart(_PARTIAL_GROUPS)
-            .mark_ribbon()
-            .encode(x="v", y="lo", y2="hi", color="g")
-            .to_svg(),
+            lambda: (
+                fm.Chart(_PARTIAL_GROUPS)
+                .mark_ribbon()
+                .encode(x="v", y="lo", y2="hi", color="g")
+                .to_svg()
+            ),
             _RIBBON_PARTIAL,
             band_paths,
         ),
@@ -288,34 +288,42 @@ _DASH_ROWS = pl.DataFrame(
     "render,expected",
     [
         (
-            lambda: fm.Chart(_DASH_ROWS)
-            .mark_line()
-            .encode(x="x", y="y", color="g", stroke_dash="d")
-            .to_svg(),
+            lambda: (
+                fm.Chart(_DASH_ROWS)
+                .mark_line()
+                .encode(x="x", y="y", color="g", stroke_dash="d")
+                .to_svg()
+            ),
             "mark_line: mark_line() joins two or more points per series, "
             "so it did not draw g=c (one point)",
         ),
         (
-            lambda: fm.Chart(_DASH_ROWS)
-            .mark_line()
-            .encode(x="x", y="y", color="g", stroke_dash="d:N")
-            .to_svg(),
+            lambda: (
+                fm.Chart(_DASH_ROWS)
+                .mark_line()
+                .encode(x="x", y="y", color="g", stroke_dash="d:N")
+                .to_svg()
+            ),
             "mark_line: mark_line() joins two or more points per series, "
             "so it did not draw g=c, d=3 (one point)",
         ),
         (
-            lambda: fm.Chart(_DASH_ROWS.with_columns((pl.col("y") + 1).alias("hi")))
-            .mark_ribbon()
-            .encode(x="x", y="y", y2="hi", color="g", stroke_dash="d")
-            .to_svg(),
+            lambda: (
+                fm.Chart(_DASH_ROWS.with_columns((pl.col("y") + 1).alias("hi")))
+                .mark_ribbon()
+                .encode(x="x", y="y", y2="hi", color="g", stroke_dash="d")
+                .to_svg()
+            ),
             "mark_ribbon: mark_ribbon() spans two or more points per band, "
             "so it did not draw g=c (one point)",
         ),
         (
-            lambda: fm.Chart(_DASH_ROWS.with_columns((pl.col("y") + 1).alias("hi")))
-            .mark_ribbon()
-            .encode(x="x", y="y", y2="hi", color="g", stroke_dash="d:N")
-            .to_svg(),
+            lambda: (
+                fm.Chart(_DASH_ROWS.with_columns((pl.col("y") + 1).alias("hi")))
+                .mark_ribbon()
+                .encode(x="x", y="y", y2="hi", color="g", stroke_dash="d:N")
+                .to_svg()
+            ),
             "mark_ribbon: mark_ribbon() spans two or more points per band, "
             "so it did not draw g=c, d=3 (one point)",
         ),
@@ -354,10 +362,12 @@ def test_a_polygon_layer_with_one_short_ring_names_its_detail_value():
     and is dropped, named by the detail field that distinguishes the rings
     rather than by any internal ring id."""
     svg, messages = _render_capturing(
-        lambda: fm.Chart(_POLYGON_PARTIAL_RINGS)
-        .encode(x="x", y="y", detail="ring")
-        .layer(fm.Layer(mark="polygon"))
-        .to_svg()
+        lambda: (
+            fm.Chart(_POLYGON_PARTIAL_RINGS)
+            .encode(x="x", y="y", detail="ring")
+            .layer(fm.Layer(mark="polygon"))
+            .to_svg()
+        )
     )
     rings = _polygon_rings(svg)
     assert len(rings) == 1
@@ -383,10 +393,12 @@ def test_a_caller_placed_polygon_ring_is_named_by_detail_even_with_color_bound()
         }
     )
     _, messages = _render_capturing(
-        lambda: fm.Chart(rows)
-        .encode(x="x", y="y", detail="ring", color="kind")
-        .layer(fm.Layer(mark="polygon"))
-        .to_svg()
+        lambda: (
+            fm.Chart(rows)
+            .encode(x="x", y="y", detail="ring", color="kind")
+            .layer(fm.Layer(mark="polygon"))
+            .to_svg()
+        )
     )
     expected = (
         "layer 1: mark_polygon: a polygon joins three or more vertices, "
@@ -404,10 +416,12 @@ def test_a_log_scale_short_hex_cell_is_named_by_its_color_field():
         {"x": list(np.exp(rng.normal(0, 1, 200))), "y": list(np.exp(rng.normal(0, 1, 200)))}
     )
     _, messages = _render_capturing(
-        lambda: fm.Chart(rows)
-        .mark_hex()
-        .encode(x=fm.X("x", scale=fm.LogScale()), y=fm.Y("y", scale=fm.LogScale()))
-        .to_svg()
+        lambda: (
+            fm.Chart(rows)
+            .mark_hex()
+            .encode(x=fm.X("x", scale=fm.LogScale()), y=fm.Y("y", scale=fm.LogScale()))
+            .to_svg()
+        )
     )
     assert messages == [
         "x scale: 10 row(s) of 'hex_x' are zero or negative, which a LogScale cannot place, "
@@ -451,10 +465,14 @@ def test_a_statistic_run_the_domain_already_reports_is_not_named_again():
     """Group "c"'s x=100 row is cut by the explicit domain, leaving it with
     one aggregated point -- the domain warning already reports it as not
     drawn, so SeriesDropped does not repeat it; no other group is short."""
-    chart = fm.Chart(_DOMAIN_CUT_ROWS).mark_line().encode(
-        x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])),
-        y=fm.Y("y", aggregate="mean"),
-        color="g",
+    chart = (
+        fm.Chart(_DOMAIN_CUT_ROWS)
+        .mark_line()
+        .encode(
+            x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])),
+            y=fm.Y("y", aggregate="mean"),
+            color="g",
+        )
     )
     _, messages = _render_capturing(chart.to_svg)
     assert messages == [_DOMAIN_WARNING_MARK_COUNT]
@@ -464,10 +482,14 @@ def test_a_short_statistic_run_beside_a_domain_cut_one_is_still_named():
     """Group "b" is short on its own (one row, not touched by the domain);
     group "c" is still exempted. The domain warning and one SeriesDropped
     naming only "b" both fire."""
-    chart = fm.Chart(_DOMAIN_CUT_AND_SHORT_ROWS).mark_line().encode(
-        x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])),
-        y=fm.Y("y", aggregate="mean"),
-        color="g",
+    chart = (
+        fm.Chart(_DOMAIN_CUT_AND_SHORT_ROWS)
+        .mark_line()
+        .encode(
+            x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])),
+            y=fm.Y("y", aggregate="mean"),
+            color="g",
+        )
     )
     _, messages = _render_capturing(chart.to_svg)
     expected = (
@@ -481,8 +503,10 @@ def test_a_primitive_layers_row_census_exempts_no_series():
     """Over the caller's own rows (no aggregate), the domain warning counts
     rows rather than series, so it never exempts a series from being
     named: both "b" and "c" are named beside the row-count domain warning."""
-    chart = fm.Chart(_DOMAIN_CUT_AND_SHORT_ROWS).mark_line().encode(
-        x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])), y="y", color="g"
+    chart = (
+        fm.Chart(_DOMAIN_CUT_AND_SHORT_ROWS)
+        .mark_line()
+        .encode(x=fm.X("x", scale=fm.LinearScale(domain=[0.0, 3.0])), y="y", color="g")
     )
     _, messages = _render_capturing(chart.to_svg)
     expected = (
@@ -508,10 +532,12 @@ def test_a_faceted_partial_drop_warns_once_naming_every_short_series():
     """Both drops share panel p2, so both name it -- each dropped series
     carries its own panel clause, even when it repeats the one before it."""
     _, messages = _render_capturing(
-        lambda: fm.Chart(_FACET_PARTIAL_ROWS)
-        .mark_line()
-        .encode(x="v", y="w", color="g", facet="c")
-        .to_svg()
+        lambda: (
+            fm.Chart(_FACET_PARTIAL_ROWS)
+            .mark_line()
+            .encode(x="v", y="w", color="g", facet="c")
+            .to_svg()
+        )
     )
     expected = (
         "mark_line: mark_line() joins two or more points per series, so it did not draw "
@@ -537,10 +563,12 @@ def test_a_faceted_partial_drop_across_two_panels_names_both():
     p2 -- two independent partial drops in two different panels, folded
     into one warning that names each series beside its own panel."""
     _, messages = _render_capturing(
-        lambda: fm.Chart(_FACET_PARTIAL_ACROSS_PANELS_ROWS)
-        .mark_line()
-        .encode(x="v", y="w", color="g", facet="c")
-        .to_svg()
+        lambda: (
+            fm.Chart(_FACET_PARTIAL_ACROSS_PANELS_ROWS)
+            .mark_line()
+            .encode(x="v", y="w", color="g", facet="c")
+            .to_svg()
+        )
     )
     expected = (
         "mark_line: mark_line() joins two or more points per series, so it did not draw "
@@ -550,8 +578,8 @@ def test_a_faceted_partial_drop_across_two_panels_names_both():
 
 
 def test_a_plus_layered_partial_line_names_its_own_layer():
-    base = fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})).mark_point().encode(
-        x="x", y="y"
+    base = (
+        fm.Chart(pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})).mark_point().encode(x="x", y="y")
     )
     partial_line = fm.Chart(_PARTIAL_GROUPS).mark_line().encode(x="v", y="w", color="g")
     _, messages = _render_capturing((base + partial_line).to_svg)

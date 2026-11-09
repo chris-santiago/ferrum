@@ -135,7 +135,9 @@ _VALUE_CHANNELS: dict[str, tuple[str, Callable[[dict], list]]] = {
 }
 
 
-def _sibling_values(channel: str, field: str, read: Callable[[dict], list], frame: pl.DataFrame) -> list:
+def _sibling_values(
+    channel: str, field: str, read: Callable[[dict], list], frame: pl.DataFrame
+) -> list:
     """What *channel* reads for *field* on a plain chart over the same column.
 
     The one reference every "reached the points" assertion below compares
@@ -202,7 +204,9 @@ def _layer_style_and_tooltips(batch: dict) -> tuple:
 @pytest.mark.parametrize("lowess", [False, True])
 @pytest.mark.parametrize("door", ["keyword", "encode_dict"])
 @pytest.mark.parametrize("channel", ["size", "opacity", "tooltip"])
-def test_a_value_channel_bound_at_the_call_never_reaches_the_summary_or_lowess_layers(channel, door, lowess):
+def test_a_value_channel_bound_at_the_call_never_reaches_the_summary_or_lowess_layers(
+    channel, door, lowess
+):
     field, read = _VALUE_CHANNELS[channel]
     frame = _frame()
     kwargs: dict = {"lowess": lowess}
@@ -352,11 +356,19 @@ def test_color_grouping_still_refits_per_group_while_an_explicit_tooltip_replace
     # (a) refit per group: two distinct point fills (one per group), and
     # residual positions that differ from a pooled, ungrouped fit over the
     # same rows.
-    fills = {(n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"]) for n in batch["nodes"]}
+    fills = {
+        (n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"])
+        for n in batch["nodes"]
+    }
     assert len(fills) == 2
-    pooled_cy = [n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]]
+    pooled_cy = [
+        n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]
+    ]
     grouped_cy = [
-        n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", color="g", **_flat_kwargs()))["nodes"]
+        n["cy"]
+        for n in _point_batch(fm.residplot(frame, x="v", y="w", color="g", **_flat_kwargs()))[
+            "nodes"
+        ]
     ]
     assert grouped_cy != pooled_cy
     # (b) the point batch's tooltip field names are exactly the explicit
@@ -379,7 +391,10 @@ def test_a_grouping_keyword_still_refits_per_group_and_drops_the_corner_metrics(
     # layered default shrinks from 3 batches (point, rule, text) to 2.
     assert [b["kind"] for b in batches] == ["point", "rule"]
     grouped_cy = [_node_cy(n) for n in batches[0]["nodes"]]
-    pooled_cy = [_node_cy(n) for n in _point_batch(_quiet(lambda: fm.residplot(frame, x="v", y="w")))["nodes"]]
+    pooled_cy = [
+        _node_cy(n)
+        for n in _point_batch(_quiet(lambda: fm.residplot(frame, x="v", y="w")))["nodes"]
+    ]
     assert grouped_cy != pooled_cy
 
 
@@ -459,7 +474,11 @@ def test_text_channel_on_a_point_is_not_drawn(form, kwargs, tooltip_names):
     plain = fm.residplot(frame, x="v", y="w", **kwargs).to_svg()
     with_text = fm.residplot(frame, x="v", y="w", **kwargs, text="id").to_svg()
     assert plain == with_text
-    names = {f["name"] for t in _point_batch(fm.residplot(frame, x="v", y="w", **kwargs, text="id"))["tooltips"] for f in t["fields"]}
+    names = {
+        f["name"]
+        for t in _point_batch(fm.residplot(frame, x="v", y="w", **kwargs, text="id"))["tooltips"]
+        for f in t["fields"]
+    }
     assert names == tooltip_names
 
 
@@ -490,7 +509,9 @@ def test_an_unbound_clashing_column_stays_the_callers_and_renders_byte_identical
     role = collision_column.lstrip("_")
     smooth_spec = json.loads(chart.to_spec().to_json())["transforms"][1]
     assert smooth_spec["residual_columns"][role] == f"{collision_column}_1"
-    no_clash_spec = json.loads(fm.residplot(plain, x="v", y="w").to_spec().to_json())["transforms"][1]
+    no_clash_spec = json.loads(fm.residplot(plain, x="v", y="w").to_spec().to_json())["transforms"][
+        1
+    ]
     assert "residual_columns" not in no_clash_spec
 
 
@@ -512,11 +533,15 @@ def test_tooltip_residual_reads_the_callers_column_when_the_data_has_its_own(doo
 
 def test_a_multi_field_tooltip_naming_a_clashing_column_reads_the_callers_column():
     frame = _frame(residual=["r0", "r1", "r2", "r3", "r4", "r5"])
-    chart = fm.residplot(frame, x="v", y="w", **_flat_kwargs(), tooltip=fm.Tooltip("id", "residual"))
+    chart = fm.residplot(
+        frame, x="v", y="w", **_flat_kwargs(), tooltip=fm.Tooltip("id", "residual")
+    )
     batch = _point_batch(chart)
     fields = [{f["name"]: f["value"] for f in t["fields"]} for t in batch["tooltips"]]
     plain = fm.Chart(frame).mark_point().encode(x="v", y="w", tooltip=fm.Tooltip("id", "residual"))
-    plain_fields = [{f["name"]: f["value"] for f in t["fields"]} for t in _point_batch(plain)["tooltips"]]
+    plain_fields = [
+        {f["name"]: f["value"] for f in t["fields"]} for t in _point_batch(plain)["tooltips"]
+    ]
     assert fields == plain_fields
 
 
@@ -547,10 +572,15 @@ def test_a_grouping_field_named_like_a_computed_column_groups_by_the_callers_col
         chart = fm.residplot(frame, x="v", y="w", **kwargs)
         batch = _point_batch(chart)
     assert not [w for w in caught if issubclass(w.category, UserWarning)]
-    fills = {(n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"]) for n in batch["nodes"]}
+    fills = {
+        (n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"])
+        for n in batch["nodes"]
+    }
     assert len(fills) == 2
     grouped_cy = [n["cy"] for n in batch["nodes"]]
-    pooled_cy = [n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]]
+    pooled_cy = [
+        n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]
+    ]
     assert grouped_cy != pooled_cy
     # The wire: groupby names the caller's own 'residual' column, and the
     # fit's own residual output still took a fresh name beside it.
@@ -566,7 +596,10 @@ def test_shape_on_a_clashing_column_groups_by_the_callers_column():
         chart = fm.residplot(frame, x="v", y="w", **_flat_kwargs(), shape="x")
         grouped_cy = [_node_cy(n) for n in _point_batch(chart)["nodes"]]
     assert not [w for w in caught if issubclass(w.category, UserWarning)]
-    pooled_cy = [_node_cy(n) for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]]
+    pooled_cy = [
+        _node_cy(n)
+        for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]
+    ]
     assert grouped_cy != pooled_cy
 
 
@@ -613,7 +646,16 @@ def test_a_facet_method_call_on_a_clashing_column_facets_by_the_callers_column(f
 #: residplot's own computed names. The caller's data is never renamed, so
 #: a later door reads exactly what an at-call door does.
 @pytest.mark.parametrize(
-    "case", ["tooltip-layered", "tooltip-flat", "size-x", "color-residual", "color-x", "facet-method", "facet-encode"]
+    "case",
+    [
+        "tooltip-layered",
+        "tooltip-flat",
+        "size-x",
+        "color-residual",
+        "color-x",
+        "facet-method",
+        "facet-encode",
+    ],
 )
 def test_a_later_binding_naming_a_clashing_column_reads_the_callers_column(case):
     if case.startswith("tooltip"):
@@ -638,15 +680,25 @@ def test_a_later_binding_naming_a_clashing_column_reads_the_callers_column(case)
             chart = fm.residplot(frame, x="v", y="w", **_flat_kwargs()).encode(color=clash_column)
             batch = _point_batch(chart)
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
-        fills = {(n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"]) for n in batch["nodes"]}
+        fills = {
+            (n["style"]["fill"]["r"], n["style"]["fill"]["g"], n["style"]["fill"]["b"])
+            for n in batch["nodes"]
+        }
         assert len(fills) == 2
         grouped_cy = [n["cy"] for n in batch["nodes"]]
-        pooled_cy = [n["cy"] for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]]
+        pooled_cy = [
+            n["cy"]
+            for n in _point_batch(fm.residplot(frame, x="v", y="w", **_flat_kwargs()))["nodes"]
+        ]
         assert grouped_cy != pooled_cy
     else:
         frame = _frame(residual=["p", "p", "p", "q", "q", "q"])
         chart = fm.residplot(frame, x="v", y="w", **_flat_kwargs())
-        chart = chart.facet(col="residual") if case == "facet-method" else chart.encode(facet_col="residual")
+        chart = (
+            chart.facet(col="residual")
+            if case == "facet-method"
+            else chart.encode(facet_col="residual")
+        )
         scene_json, _packed = _render_scene(chart)
         panels = json.loads(scene_json)["panels"]
         assert len(panels) == 2
@@ -674,9 +726,12 @@ def test_tooltip_residual_shows_the_computed_residual_with_no_data_column():
     assert "residual" not in frame.columns
     chart = fm.residplot(frame, x="v", y="w", **_flat_kwargs(), tooltip="residual")
     values = _STRING_CHANNELS["tooltip"](_point_batch(chart))
-    sibling = fm.Chart(frame).transform(
-        fm.Smooth(x="v", y="w", method="lm", degree=1, ci=None, output="residuals")
-    ).mark_point().encode(x="x", y="residual", tooltip="residual")
+    sibling = (
+        fm.Chart(frame)
+        .transform(fm.Smooth(x="v", y="w", method="lm", degree=1, ci=None, output="residuals"))
+        .mark_point()
+        .encode(x="x", y="residual", tooltip="residual")
+    )
     assert values == _STRING_CHANNELS["tooltip"](_point_batch(sibling))
 
 
@@ -775,8 +830,7 @@ def test_zero_row_data_resolves_a_value_channel_without_a_new_refusal():
         "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
         "x/y points); it degraded to an empty/flat output instead of failing "
         "the whole chart",
-        "the chart has no rows to draw after its transforms; its panel is "
-        "drawn empty",
+        "the chart has no rows to draw after its transforms; its panel is drawn empty",
     }
 
 
@@ -791,8 +845,7 @@ def test_one_row_data_keeps_the_degenerate_fit_path_with_a_value_channel():
         "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
         "x/y points); it degraded to an empty/flat output instead of failing "
         "the whole chart",
-        "the chart has no rows to draw after its transforms; its panel is "
-        "drawn empty",
+        "the chart has no rows to draw after its transforms; its panel is drawn empty",
     }
 
 
@@ -873,7 +926,9 @@ def test_a_transform_step_reads_a_clashing_column_under_the_callers_name():
         fm.transform_filter("datum.residual > 55")
     )
     svg = chart.to_svg()
-    sibling = fm.residplot(frame.filter(pl.col("residual") > 55), x="v", y="w", **_flat_kwargs()).to_svg()
+    sibling = fm.residplot(
+        frame.filter(pl.col("residual") > 55), x="v", y="w", **_flat_kwargs()
+    ).to_svg()
     assert svg == sibling
 
 
@@ -881,7 +936,9 @@ def test_an_attached_layer_reads_a_clashing_column_under_the_callers_name():
     frame = _frame(residual=[10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
     overlay = fm.Layer(mark="point", encoding={"x": "v", "y": "residual"})
     via_layer = fm.residplot(frame, x="v", y="w", **_flat_kwargs()).layer(overlay).to_svg()
-    via_layers_kwarg = fm.residplot(frame, x="v", y="w", **_flat_kwargs(), layers=[overlay]).to_svg()
+    via_layers_kwarg = fm.residplot(
+        frame, x="v", y="w", **_flat_kwargs(), layers=[overlay]
+    ).to_svg()
     assert via_layer == via_layers_kwarg
     # A sibling with no clash at all -- the same values under a name the
     # computed residual never takes -- renders byte-identically if the

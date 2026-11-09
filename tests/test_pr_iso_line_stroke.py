@@ -122,7 +122,9 @@ def _fit_multiclass_model():
     return model, X, y
 
 
-@pytest.mark.parametrize("fit", [_fit_binary_model, _fit_multiclass_model], ids=["binary", "multiclass"])
+@pytest.mark.parametrize(
+    "fit", [_fit_binary_model, _fit_multiclass_model], ids=["binary", "multiclass"]
+)
 @pytest.mark.parametrize("annotate_ap", [True, False])
 def test_pr_chart_iso_lines_warn_nothing(fit, annotate_ap):
     """The iso-line and iso-label overlays each read their own frame, so

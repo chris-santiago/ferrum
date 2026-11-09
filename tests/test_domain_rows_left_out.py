@@ -1021,10 +1021,14 @@ def test_a_statistic_layers_inherited_binding_drops_and_warns_like_the_plus_door
     residplot_msgs, residplot_svg = _warnings_of(residplot_chart.to_svg)
     assert residplot_msgs == [rule_dropped, text_dropped]
     assert "<svg" in residplot_svg
-    point_opacities = [n["style"]["opacity"] for n in _scene(residplot_chart)["panels"][0]["marks"][0]["nodes"]]
+    point_opacities = [
+        n["style"]["opacity"] for n in _scene(residplot_chart)["panels"][0]["marks"][0]["nodes"]
+    ]
     sibling_opacities = [
         n["style"]["opacity"]
-        for n in _scene(Chart(df).mark_point().encode(x="v", y="w", opacity="v"))["panels"][0]["marks"][0]["nodes"]
+        for n in _scene(Chart(df).mark_point().encode(x="v", y="w", opacity="v"))["panels"][0][
+            "marks"
+        ][0]["nodes"]
     ]
     assert point_opacities == sibling_opacities
 

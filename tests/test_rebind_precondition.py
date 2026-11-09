@@ -422,7 +422,9 @@ def test_a_kind_with_its_refusal_prep_removed_is_caught() -> None:
         )
     )
     scratch = {**_PENDING_PREP, "histogram": stripped}
-    assert _unguarded_remap_desugars(_desugar_functions(), scratch, _DIRECT_REFUSAL) == ["histogram"]
+    assert _unguarded_remap_desugars(_desugar_functions(), scratch, _DIRECT_REFUSAL) == [
+        "histogram"
+    ]
 
 
 def test_a_remap_returning_desugar_no_kind_reaches_is_caught() -> None:
@@ -648,7 +650,10 @@ def test_every_exclusion_entry_names_a_live_mark_with_a_known_verdict() -> None:
 
 def test_the_exclusion_check_catches_a_dead_name_and_an_unknown_verdict() -> None:
     synthetic = {
-        "mark_not_a_real_mark": ("ignored", "a rationale written long enough to pass the word check"),
+        "mark_not_a_real_mark": (
+            "ignored",
+            "a rationale written long enough to pass the word check",
+        ),
         "mark_roc": ("ignore", "a rationale written long enough to pass the word check too"),
     }
     assert _malformed_exclusions(synthetic, _composite_mark_population()) == [
@@ -826,8 +831,8 @@ def test_the_exclusion_allowlist_has_no_stale_entries() -> None:
                 stale.append(f"{name} {variant} {channel} {kwarg}")
         if not probed_any:
             stale.append(f"{name}: no probe ran")
-    assert not stale, "exclusion entries that do not match the mark's rendered behavior:\n" + "\n".join(
-        stale
+    assert not stale, (
+        "exclusion entries that do not match the mark's rendered behavior:\n" + "\n".join(stale)
     )
 
 
@@ -855,5 +860,7 @@ def test_the_honored_redundancy_allowance_is_live_and_still_honored() -> None:
             field = _probed_field(build(), channel)
             outcome = _probe(build, name, channel, field, kwarg, value)
             if outcome.refused or not outcome.rendered_same:
-                broken.append(f"{name} {variant} {channel} {kwarg}: refused or rendered differently")
+                broken.append(
+                    f"{name} {variant} {channel} {kwarg}: refused or rendered differently"
+                )
     assert not broken, "stale honored-redundancy allowance(s):\n" + "\n".join(broken)
