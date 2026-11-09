@@ -100,42 +100,24 @@ def _written(channel: str, cls: str, field: str | None, kwarg: str, value: Any) 
     return f"{channel}={cls}({kwarg}={quoted})"
 
 
-def _generic_bin_remedy(
-    field: str | None, *, call_kwargs: str | None = None, call_channel: str | None = None
-) -> str:
-    """The generic per-row-``Bin`` remedy, binding the output column.
-
-    *call_channel* names ``x``/``y`` on a door whose statistic reads only
-    the columns its own call names: the output column then reaches it by
-    being named as the call's own ``x=``/``y=``, not by a later
-    ``.encode()``, which the fit never reads.
-    """
+def _generic_bin_remedy(field: str | None, *, call_kwargs: str | None = None) -> str:
     if not field:
         return "Drop bin=."
     with_clause = f" with {call_kwargs}" if call_kwargs else ""
-    instruction = f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True))"
-    if call_channel is not None:
-        return (
-            f"{instruction} and pass its 'bin_start' column as the call's own "
-            f"{call_channel}={with_clause}, or drop bin=."
-        )
-    return f"{instruction} and bind its 'bin_start' column{with_clause}, or drop bin=."
+    return (
+        f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
+        f"and bind its 'bin_start' column{with_clause}, or drop bin=."
+    )
 
 
-def _generic_aggregate_remedy(
-    field: str | None, *, call_kwargs: str | None = None, call_channel: str | None = None
-) -> str:
-    """The generic ``transform_aggregate`` remedy; see :func:`_generic_bin_remedy`."""
+def _generic_aggregate_remedy(field: str | None, *, call_kwargs: str | None = None) -> str:
     if not field:
         return "Drop aggregate=."
     with_clause = f" with {call_kwargs}" if call_kwargs else ""
-    instruction = "Compute the aggregate with .transform(fm.transform_aggregate(...))"
-    if call_channel is not None:
-        return (
-            f"{instruction} and pass its output column as the call's own "
-            f"{call_channel}={with_clause}, or drop aggregate=."
-        )
-    return f"{instruction} and bind its output column{with_clause}, or drop aggregate=."
+    return (
+        "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
+        f"output column{with_clause}, or drop aggregate=."
+    )
 
 
 def _hist_value_axis_remedy(
@@ -525,12 +507,12 @@ def _fit_cases() -> list[_Case]:
                         remedy = (
                             "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
                             if method in smooth_routed
-                            else _generic_bin_remedy(field, call_channel=channel)
+                            else _generic_bin_remedy(field)
                         )
                     elif kwarg == "bin":
-                        remedy = _generic_bin_remedy(field, call_channel=channel)
+                        remedy = _generic_bin_remedy(field)
                     else:
-                        remedy = _generic_aggregate_remedy(field, call_channel=channel)
+                        remedy = _generic_aggregate_remedy(field)
                     other_channel = "y" if channel == "x" else "x"
                     other_field = yf if channel == "x" else "v"
 
@@ -582,9 +564,9 @@ def _fit_cases() -> list[_Case]:
                     "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
                     if channel == "x" and kwarg == "bin"
                     else (
-                        _generic_bin_remedy(field, call_channel=channel)
+                        _generic_bin_remedy(field)
                         if kwarg == "bin"
-                        else _generic_aggregate_remedy(field, call_channel=channel)
+                        else _generic_aggregate_remedy(field)
                     )
                 )
 
@@ -1173,7 +1155,7 @@ def _spelling_cases() -> list[_Case]:
             "the fit reads the raw predictor",
             fit_bin_remedy,
             "the fit reads the raw predictor",
-            _generic_aggregate_remedy("v", call_channel="x"),
+            _generic_aggregate_remedy("v"),
         ),
         "regplot": (
             lambda **kw: fm.regplot(_XY_ROWS, y="w", **kw),
@@ -1182,7 +1164,7 @@ def _spelling_cases() -> list[_Case]:
             "the fit reads the raw predictor",
             fit_bin_remedy,
             "the fit reads the raw predictor",
-            _generic_aggregate_remedy("v", call_channel="x"),
+            _generic_aggregate_remedy("v"),
         ),
         "residplot": (
             lambda **kw: fm.residplot(_XY_ROWS, y="w", **kw),
@@ -2481,14 +2463,6 @@ _AGGREGATE_REMEDY_TEXT = (
     ".transform(fm.transform_aggregate(...)) and bind its output column{with_clause}, "
     "or drop aggregate=."
 )
-_BIN_AT_CALL_REMEDY_TEXT = (
-    ".transform(fm.Bin({field!r}, per_row=True)) and pass its 'bin_start' column as the "
-    "call's own {channel}={with_clause}, or drop bin=."
-)
-_AGGREGATE_AT_CALL_REMEDY_TEXT = (
-    ".transform(fm.transform_aggregate(...)) and pass its output column as the call's own "
-    "{channel}={with_clause}, or drop aggregate=."
-)
 
 
 def _names_bin(field: str, with_clause: str = "") -> str:
@@ -2497,14 +2471,6 @@ def _names_bin(field: str, with_clause: str = "") -> str:
 
 def _names_aggregate(with_clause: str = "") -> str:
     return _AGGREGATE_REMEDY_TEXT.format(with_clause=with_clause)
-
-
-def _names_bin_at_call(field: str, channel: str, with_clause: str = "") -> str:
-    return _BIN_AT_CALL_REMEDY_TEXT.format(field=field, channel=channel, with_clause=with_clause)
-
-
-def _names_aggregate_at_call(channel: str, with_clause: str = "") -> str:
-    return _AGGREGATE_AT_CALL_REMEDY_TEXT.format(channel=channel, with_clause=with_clause)
 
 
 def _per_row_bin(field: str) -> fm.Bin:
@@ -2582,7 +2548,7 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         refused=lambda: fm.regplot(
             _NONSEPARABLE_ROWS, x=X("v", bin=True), y="b", method="logistic"
         ),
-        names=_names_bin_at_call("v", "x"),
+        names=_names_bin("v"),
         remedied=lambda: fm.regplot(
             _NONSEPARABLE_ROWS, x="bin_start", y="b", method="logistic"
         ).transform(_per_row_bin("v")),
@@ -2597,7 +2563,7 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
     ),
     "per_row_bin_regplot_robust_x": _RemedyRun(
         refused=lambda: fm.regplot(_XY_ROWS, x=X("v", bin=True), y="w", method="robust"),
-        names=_names_bin_at_call("v", "x"),
+        names=_names_bin("v"),
         remedied=lambda: fm.regplot(_XY_ROWS, x="bin_start", y="w", method="robust").transform(
             _per_row_bin("v")
         ),
@@ -2612,28 +2578,13 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
     ),
     "per_row_bin_lmplot_lm_y": _RemedyRun(
         refused=lambda: fm.lmplot(_XY_ROWS, x="v", y=Y("w", bin=True), method="lm"),
-        names=_names_bin_at_call("w", "y"),
+        names=_names_bin("w"),
         remedied=lambda: fm.lmplot(_XY_ROWS, x="v", y="bin_start", method="lm").transform(
             _per_row_bin("w")
         ),
         sibling=lambda: fm.lmplot(_prebinned(_XY_ROWS, "w"), x="v", y="bin_start", method="lm"),
         without=_MissingColumn(
             build=lambda: fm.lmplot(_XY_ROWS, x="v", y="bin_start", method="lm"),
-            error=ValueError,
-            column="bin_start",
-        ),
-    ),
-    "per_row_bin_regplot_glm_x": _RemedyRun(
-        refused=lambda: fm.regplot(_NONSEPARABLE_ROWS, x=X("v", bin=True), y="b", method="glm"),
-        names=_names_bin_at_call("v", "x"),
-        remedied=lambda: fm.regplot(
-            _NONSEPARABLE_ROWS, x="bin_start", y="b", method="glm"
-        ).transform(_per_row_bin("v")),
-        sibling=lambda: fm.regplot(
-            _prebinned(_NONSEPARABLE_ROWS, "v"), x="bin_start", y="b", method="glm"
-        ),
-        without=_MissingColumn(
-            build=lambda: fm.regplot(_NONSEPARABLE_ROWS, x="bin_start", y="b", method="glm"),
             error=ValueError,
             column="bin_start",
         ),
@@ -2875,41 +2826,13 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
     ),
     "transform_aggregate_lmplot_lm_x": _RemedyRun(
         refused=lambda: fm.lmplot(_GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w", method="lm"),
-        names=_names_aggregate_at_call("x"),
+        names=_names_aggregate(),
         remedied=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm").transform(
             _per_group_mean()
         ),
         sibling=lambda: fm.lmplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="lm"),
         without=_MissingColumn(
             build=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm"),
-            error=ValueError,
-            column="mean_v",
-        ),
-    ),
-    "transform_aggregate_lmplot_y": _RemedyRun(
-        refused=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="v", y=Y("w", aggregate="mean"), method="lm"),
-        names=_names_aggregate_at_call("y"),
-        remedied=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm").transform(
-            _per_group_mean()
-        ),
-        sibling=lambda: fm.lmplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="lm"),
-        without=_MissingColumn(
-            build=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm"),
-            error=ValueError,
-            column="mean_v",
-        ),
-    ),
-    "transform_aggregate_regplot_x_robust": _RemedyRun(
-        refused=lambda: fm.regplot(
-            _GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w", method="robust"
-        ),
-        names=_names_aggregate_at_call("x"),
-        remedied=lambda: fm.regplot(
-            _GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"
-        ).transform(_per_group_mean()),
-        sibling=lambda: fm.regplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="robust"),
-        without=_MissingColumn(
-            build=lambda: fm.regplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"),
             error=ValueError,
             column="mean_v",
         ),
@@ -2918,7 +2841,7 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         refused=lambda: fm.regplot(
             _GROUPED_XY_ROWS, x="v", y=Y("w", aggregate="mean"), method="robust"
         ),
-        names=_names_aggregate_at_call("y"),
+        names=_names_aggregate(),
         remedied=lambda: fm.regplot(
             _GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"
         ).transform(_per_group_mean()),
@@ -3119,54 +3042,6 @@ def test_the_ecdf_aggregate_remedy_draws_one_step_line_per_hue_level(run_id: str
     """
     svg = _REMEDY_RUNS[run_id].remedied().to_svg()
     assert len(step_after_paths(svg)) == steps
-
-
-@pytest.mark.parametrize(
-    "kwarg,value,remedy",
-    [
-        (
-            "bin",
-            True,
-            "Bin the field per row with .transform(fm.Bin('w', per_row=True)) and pass its "
-            "'bin_start' column as the call's own y=, or drop bin=.",
-        ),
-        (
-            "aggregate",
-            "mean",
-            "Compute the aggregate with .transform(fm.transform_aggregate(...)) and pass its "
-            "output column as the call's own y=, or drop aggregate=.",
-        ),
-    ],
-    ids=["bin", "aggregate"],
-)
-def test_a_call_door_remedy_leaves_out_the_clause_its_transform_step_would_need(
-    monkeypatch: pytest.MonkeyPatch, kwarg: str, value: Any, remedy: str
-) -> None:
-    """A door that both names the call's own channel and needs the remedy's
-    own call keyword renders the call form with no trailing clause.
-
-    ``dropna=False`` belongs to the ``.transform(...)`` step, which only
-    the binding ending runs, so it must never trail the ``y=``. The
-    vocabulary row is injected: no shipped door combines the two knobs
-    yet, and this is the shape such a row takes when it gains the
-    call-door ending while its figure still passes ``call_kwargs``.
-    """
-    from ferrum import _encode_lowering
-
-    monkeypatch.setitem(
-        _encode_lowering._DOOR_VOCABULARY,
-        "residplot",
-        _encode_lowering._DoorVocabulary(binds_at_call=True),
-    )
-    with pytest.raises(ValueError) as excinfo:
-        fm.residplot(_XY_ROWS, x="v", y=Y("w", **{kwarg: value}))
-    assert str(excinfo.value) == _message(
-        "residplot",
-        _written("y", "Y", "w", kwarg, value),
-        kwarg,
-        "the residual fit reads the raw predictor and response",
-        remedy,
-    )
 
 
 _X_BINS_REMEDY_TEXT = "Bin the predictor with x_bins=<number of bins>, the fit's own binning"

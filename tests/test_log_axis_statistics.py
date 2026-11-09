@@ -4171,16 +4171,15 @@ def test_residplot_refuses_a_log_y_through_the_encode_door():
     keyword already bound -- is refused before this call's own Rust
     refusal ever runs: `encode=` lands on the chart the same way a later
     `.encode()` does, so residplot's own post-build record catches it
-    first, naming the call door with `fm.SymlogScale()`, the scale that
-    places signed residuals."""
+    first, naming `fm.SymlogScale()` rather than the call door (which
+    would refuse the same scale too)."""
     df = _residplot_log_y_df()
     with pytest.raises(ValueError) as excinfo:
         fm.residplot(df, x="x", y="y", encode={"y": fm.Y("y", scale=fm.LogScale())}).to_svg()
     assert str(excinfo.value) == (
         "residplot(y=Y('y', scale=LogScale(...))) after the call is not supported: "
         "residplot draws y from the y= it was called with, so scale= would be "
-        "ignored. Drop scale=, or pass fm.SymlogScale() in the call: "
-        "residplot(y=fm.Y('y', scale=fm.SymlogScale()))."
+        "ignored. Use fm.SymlogScale(), or drop scale=."
     )
 
 
