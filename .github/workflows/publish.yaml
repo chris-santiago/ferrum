@@ -44,8 +44,10 @@ jobs:
           - { platform: musllinux, runner: ubuntu-latest, target: aarch64, manylinux: musllinux_1_2 }
           # --- macOS universal2 (Intel + Apple Silicon in ONE wheel), built on
           #     the readily-available Apple Silicon runner. Avoids the scarce /
-          #     retiring macos-13 Intel runner that otherwise queues for hours. ---
-          - { platform: macos,   runner: macos-14,       target: universal2-apple-darwin, manylinux: auto }
+          #     retiring Intel runners that otherwise queue for hours. Tracks
+          #     macos-latest, like the Linux and Windows rows, so a retired
+          #     pinned image cannot fail the release. ---
+          - { platform: macos,   runner: macos-latest,   target: universal2-apple-darwin, manylinux: auto }
           # --- Windows ---
           - { platform: windows, runner: windows-latest, target: x64,     manylinux: auto }
     steps:
