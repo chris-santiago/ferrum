@@ -8,7 +8,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 The initial build (the 12 phases in `design-docs/superpowers/ferrum-phases.md`) is done. Work now runs as campaign waves and batches of fixes and capabilities, each on its own branch.
 
-1. **Find where the work stands.** Check the branch and `git status`, then the campaign entries in memory (`MEMORY.md`). For an in-flight subagent-driven run, read its store under `.sdd/<run>/`: the ledger (`ledger.py completed` / `open`) and `orchestrator-notes.md`.
+1. **Find where the work stands.** Check the branch and `git status`, then the campaign entries in memory (`MEMORY.md`). For an in-flight subagent-driven run, run `ledger.py run-state --store .sdd/<run>` (stages, task states, notes owed, open disclosures and questions, handles, the latest checkpoint) instead of reading `orchestrator-notes.md`.
 2. **Read the run's design artifacts** before writing code: the decision doc, spec and plan under `.claude/output/{decisions,specs,plans}/`. New, design-open work starts with `chris-code:brainstorming`; a determined change starts with `chris-code:coherent-change` (or `chris-code:remediating-issues` for a known defect).
 3. **Read the code before stating anything about behavior.** `ferrum-spec.md` is the user-facing API contract, but its weight varies by section; see the `ferrum-spec.md` bullet under Hard constraints.
 
