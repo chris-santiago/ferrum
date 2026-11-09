@@ -28,11 +28,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.x
-      # The versions uv.lock pins for the local `nox -s docs` build; an
-      # unpinned zensical drifted to a release that rejects
-      # zensical.toml's autorefs options. Bump these with uv.lock.
-      - run: pip install zensical==0.0.41 mkdocstrings==1.0.4 mkdocstrings-python==2.0.3
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+      # Build with the exact toolchain uv.lock pins for the local `nox -s docs`
+      # build, transitive dependencies included: an unpinned zensical (and
+      # then pymdown-extensions under it) drifted to releases that reject
+      # this site's configuration. The constraints track uv.lock on their own.
+      - run: uv export --frozen --no-hashes --no-emit-project --only-group dev --output-file docs-constraints.txt
+      - run: pip install -c docs-constraints.txt zensical mkdocstrings mkdocstrings-python
       - run: zensical build --clean
       - uses: actions/upload-pages-artifact@v5
         with:
