@@ -203,6 +203,15 @@ impl<'a> Placement<'a> {
     }
 }
 
+/// The resolved scale a positional channel reads through: `x`'s for `x`/`x2`,
+/// `y`'s for `y`/`y2`.
+fn channel_scale<'s>(ctx: &'s DrawCtx, channel: PositionalChannel) -> &'s ScaleKind {
+    match channel {
+        PositionalChannel::X | PositionalChannel::X2 => &ctx.scales.x,
+        PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
+    }
+}
+
 /// A vertex-unit mark's own drawing facts (`line`, `area`, `ribbon`,
 /// `polygon`), read by the census so a statistic layer's mark outcome is
 /// the one its builder reaches: `groups` is the series/ring partition the
@@ -451,10 +460,7 @@ pub(crate) struct StatisticVoice {
 /// mean the census and the builder disagree about a column — the drift
 /// class a raster's own `ImagePath` resolver closes for `mark_image`.
 fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
-    let scale = match placement.channel {
-        PositionalChannel::X | PositionalChannel::X2 => &ctx.scales.x,
-        PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
-    };
+    let scale = channel_scale(ctx, placement.channel);
     match placement.read {
         PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
             let mut columns = Vec::with_capacity(placement.columns.len());
@@ -528,10 +534,7 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
 /// [`placement_left_out_rows`]'s own dtype short-circuit (the builder's
 /// identical read fails the identical way); any other error propagates.
 fn placement_absent_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
-    let scale = match placement.channel {
-        PositionalChannel::X | PositionalChannel::X2 => &ctx.scales.x,
-        PositionalChannel::Y | PositionalChannel::Y2 => &ctx.scales.y,
-    };
+    let scale = channel_scale(ctx, placement.channel);
     match placement.read {
         PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
             // A null-band lookup is only meaningful for `Category`'s own
@@ -747,17 +750,19 @@ pub(crate) fn domain_left_out_counts(
 
 /// One group [`dispatch_mark_groups`] names (a legend category, a
 /// connected mark's own series or ring, or — for a partition with no
-/// naming fields — the layer's whole set of rows in this panel) found
-/// [`groups_with_no_position`]'s own way: every row of the group is
-/// unplaced, each by some placement absent on it — the mark draws no
-/// mark at all for the group. `name` is [`crate::transform::context::describe_group_row`]'s
+/// naming fields — the layer's whole set of rows in this panel), or one
+/// band slot ([`band_slot_groups`]: a category of a categorical positional
+/// axis), found [`groups_with_no_position`]'s own way: every row of the
+/// group is unplaced, each by some placement absent on it — the mark draws
+/// no mark at all for the group. `name` is [`crate::transform::context::describe_group_row`]'s
 /// own read of the group's representative row over
-/// [`dispatch_mark_groups`]'s own naming fields — `None` for a partition
-/// with no fields, where the group is this panel's whole layer. `channels`
-/// are this mark's own positional tokens (`dispatch_mark_placements`'s own
-/// order, pre-un-flip): every one absent on every row of the group when
-/// there is at least one (the strongest true statement), else every one
-/// absent on some row of the group (each row is blocked by one of them).
+/// [`dispatch_mark_groups`]'s own naming fields (a slot: over its category
+/// column) — `None` for a partition with no fields, where the group is this
+/// panel's whole layer. `channels` are this mark's own positional tokens
+/// (`dispatch_mark_placements`'s own order, pre-un-flip): every one absent
+/// on every row of the group when there is at least one (the strongest true
+/// statement), else every one absent on some row of the group (each row is
+/// blocked by one of them).
 #[derive(Debug, PartialEq)]
 pub(crate) struct GroupWithNoPosition {
     pub(crate) name: Option<String>,
@@ -771,8 +776,118 @@ pub(crate) struct GroupWithNoPosition {
     pub(crate) rows: Vec<usize>,
 }
 
-/// Every group [`dispatch_mark_groups`] names whose every row is
-/// unplaced: some positional placement [`dispatch_mark_placements`] lists
+/// One category of a categorical positional axis — its band slot — and the
+/// rows of this layer that sit in it: the second way
+/// [`groups_with_no_position`] carves a layer's rows, beside
+/// [`dispatch_mark_groups`]' partition by legend category or series. That
+/// partition never reads a positional channel, so an ungrouped chart's empty
+/// slot shares its one group with the slots that draw; the slot is the unit
+/// a reader sees empty. `channel` is the positional channel whose axis the
+/// slot is on, `column` the layer column that axis is read from, and
+/// `category` the slot's text as the axis's scale knows it
+/// (`arrow_cast::NULL_CATEGORY` for a null category).
+struct SlotGroup {
+    channel: PositionalChannel,
+    column: String,
+    category: String,
+    rows: Vec<usize>,
+}
+
+impl SlotGroup {
+    /// Whether the axis holds a band for this category, so a reader sees an
+    /// (empty) slot at all. A category an explicit domain leaves off the
+    /// axis has no slot, and a null category has one only where the axis
+    /// places a null band for it.
+    fn has_band(&self, ctx: &DrawCtx) -> bool {
+        channel_scale(ctx, self.channel).to_pixel_str(&self.category).is_some()
+    }
+
+    /// The slot's label in the caller's terms (`c=z`): the same label a
+    /// legend group bound to its column carries, so the two read alike.
+    fn name(&self, ctx: &DrawCtx) -> String {
+        self.rows
+            .first()
+            .and_then(|&row| {
+                crate::transform::context::describe_group_row(ctx.batch, std::slice::from_ref(&self.column), row)
+            })
+            .unwrap_or_else(|| format!("{}={}", self.column, self.category))
+    }
+}
+
+/// Every band slot this layer's mark places by: for each placement
+/// [`dispatch_mark_placements`] returns on a channel whose resolved scale is
+/// `Ordinal`, the layer's rows bucketed by that placement's category value
+/// ([`col_as_positional_category_str`], the reader every banded builder
+/// places a row by, so a null category is its own
+/// [`crate::render::arrow_cast::NULL_CATEGORY`] slot), in first-appearance
+/// order. The key is the scale, not the
+/// placement's [`PlacementRead`], so a mark that reads a band channel as
+/// `Strict` or `ClipAware` (`area`, `label`) is partitioned the same way.
+/// A placement over several columns (a raster image's extent pair) names no
+/// category and is skipped, as is a column that cannot be read as a category
+/// (the builder's identical read fails the identical way and draws nothing
+/// for it); any other read error propagates, as [`placement_absent_rows`]'s
+/// does. A column two placements share is partitioned once.
+fn band_slot_groups(ctx: &DrawCtx, placements: &[Placement]) -> Result<Vec<SlotGroup>, RenderError> {
+    use std::collections::HashMap;
+
+    let mut out = Vec::new();
+    let mut partitioned: Vec<&str> = Vec::new();
+    for placement in placements {
+        let [column] = placement.columns.as_slice() else { continue };
+        if !matches!(channel_scale(ctx, placement.channel), ScaleKind::Ordinal(_)) || partitioned.contains(column) {
+            continue;
+        }
+        partitioned.push(column);
+        let categories = match col_as_positional_category_str(ctx.batch, column) {
+            Ok(categories) => categories,
+            Err(RenderError::UnsupportedDtype { .. }) => continue,
+            Err(e) => return Err(e),
+        };
+        let mut slot_of: HashMap<&str, usize> = HashMap::new();
+        let mut slots: Vec<SlotGroup> = Vec::new();
+        for (row, category) in categories.iter().enumerate() {
+            let category = category.as_deref().unwrap_or(super::arrow_cast::NULL_CATEGORY);
+            let slot = *slot_of.entry(category).or_insert_with(|| {
+                slots.push(SlotGroup {
+                    channel: placement.channel,
+                    column: (*column).to_string(),
+                    category: category.to_string(),
+                    rows: Vec::new(),
+                });
+                slots.len() - 1
+            });
+            slots[slot].rows.push(row);
+        }
+        out.extend(slots);
+    }
+    Ok(out)
+}
+
+/// The channels a group or slot made of `rows` is named by, out of
+/// `absents` (each placement's channel token with the rows it is absent on):
+/// those absent on every one of its rows when there is at least one (the
+/// strongest true statement), else those absent on some row of it (each row
+/// is blocked by one of them).
+fn channels_absent_on(absents: &[(String, std::collections::BTreeSet<usize>)], rows: &[usize]) -> Vec<String> {
+    let on_every_row: Vec<String> = absents
+        .iter()
+        .filter(|(_, absent)| rows.iter().all(|r| absent.contains(r)))
+        .map(|(channel, _)| channel.clone())
+        .collect();
+    if !on_every_row.is_empty() {
+        return on_every_row;
+    }
+    absents
+        .iter()
+        .filter(|(_, absent)| rows.iter().any(|r| absent.contains(r)))
+        .map(|(channel, _)| channel.clone())
+        .collect()
+}
+
+/// Every group [`dispatch_mark_groups`] names, and then every band slot
+/// ([`band_slot_groups`]), whose every row is unplaced: some positional
+/// placement [`dispatch_mark_placements`] lists
 /// is [`placement_absent_rows`]'s own absent read for it, the same
 /// predicate a builder's own draw drops the row by (a `VertexFrame`'s
 /// `placed[i]`: every placed channel maps). Different rows of one group
@@ -792,6 +907,15 @@ pub(crate) struct GroupWithNoPosition {
 /// ([`dispatch_mark_placements`] returns no placement for either), so
 /// this is always empty for them.
 ///
+/// The slots follow the groups, with their channels chosen by the same
+/// rule, and add a name only where the groups leave rows unnamed: a slot
+/// every one of whose rows a returned group already holds (`color` bound to
+/// the category column, or several groups that between them fill the slot)
+/// is that group's report, not a second one, while a group wholly inside an
+/// empty slot beside rows no group names is reported beside the slot. A slot
+/// the axis holds no band for ([`SlotGroup::has_band`]) is no unit a reader
+/// sees empty, so it is not named.
+///
 /// Returns before building [`dispatch_mark_groups`]' partition at all when
 /// no row of the batch is unplaced by any placement — the common case on a
 /// layer with no nulls, where the partition's own cost (every row's
@@ -804,7 +928,7 @@ pub(crate) struct GroupWithNoPosition {
 /// the result, and attaches this panel's own facet clause to `name` before
 /// folding it into the render-wide ledger flushed once per layer.
 pub(crate) fn groups_with_no_position(ctx: &DrawCtx) -> Result<Vec<GroupWithNoPosition>, RenderError> {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     let placements = dispatch_mark_placements(&ctx.spec.mark, ctx);
     if placements.is_empty() {
@@ -826,22 +950,22 @@ pub(crate) fn groups_with_no_position(ctx: &DrawCtx) -> Result<Vec<GroupWithNoPo
         if rows.is_empty() || !rows.iter().all(|r| unplaced.contains(r)) {
             continue;
         }
-        let null_on_every_row: Vec<String> = absents
-            .iter()
-            .filter(|(_, absent)| rows.iter().all(|r| absent.contains(r)))
-            .map(|(channel, _)| channel.clone())
-            .collect();
-        let channels = if null_on_every_row.is_empty() {
-            absents
-                .iter()
-                .filter(|(_, absent)| rows.iter().any(|r| absent.contains(r)))
-                .map(|(channel, _)| channel.clone())
-                .collect()
-        } else {
-            null_on_every_row
-        };
         let name = crate::transform::context::describe_group_row(ctx.batch, &fields, rows[0]);
-        out.push(GroupWithNoPosition { name, channels, rows: rows.clone() });
+        out.push(GroupWithNoPosition { name, channels: channels_absent_on(&absents, rows), rows: rows.clone() });
+    }
+    // A slot is named when none of its rows is placed, the groups above leave
+    // some of its rows unnamed, and the axis shows it (the band lookup scans
+    // the axis's domain, so it is asked last).
+    let named_rows: HashSet<usize> = out.iter().flat_map(|group| group.rows.iter().copied()).collect();
+    for slot in band_slot_groups(ctx, &placements)? {
+        if !slot.rows.iter().all(|r| unplaced.contains(r))
+            || slot.rows.iter().all(|r| named_rows.contains(r))
+            || !slot.has_band(ctx)
+        {
+            continue;
+        }
+        let channels = channels_absent_on(&absents, &slot.rows);
+        out.push(GroupWithNoPosition { name: Some(slot.name(ctx)), channels, rows: slot.rows });
     }
     Ok(out)
 }
@@ -4496,6 +4620,457 @@ mod tests {
             vec![GroupWithNoPosition { name: Some("g=c".to_string()), channels: expected_channels, rows: vec![2, 3] }],
             "image's url-tile path"
         );
+    }
+
+    // ── Band slots ────────────────────────────────────────────────────────
+
+    use crate::spec::chart::ChartSpec;
+
+    /// Everything one band-slot test draws through, owned so a [`DrawCtx`] can
+    /// borrow it: a layer of `mark` over `batch`, drawn through an `Ordinal`
+    /// scale holding `domain` on `band_axis` and a linear scale on the other
+    /// axis, with no color scale unless the test sets `scales.color`.
+    struct SlotFixture {
+        spec: ChartSpec,
+        batch: RecordBatch,
+        scales: ResolvedScales,
+        panel: PanelLayout,
+        theme: ThemeInputs,
+        mark_style: MarkStyle,
+    }
+
+    impl SlotFixture {
+        fn new(
+            mark: Mark,
+            encoding: crate::spec::encoding::Encoding,
+            batch: RecordBatch,
+            band_axis: PositionalChannel,
+            domain: &[&str],
+        ) -> Self {
+            use crate::layout::Rect;
+            use crate::scale::discrete::DiscreteLayout;
+            use crate::scale::linear::LinearScale;
+            use crate::scale::ordinal::OrdinalScale;
+
+            let theme = ThemeInputs::default();
+            let band = ScaleKind::Ordinal(OrdinalScale::new_internal(
+                domain.iter().map(|c| c.to_string()).collect(),
+                vec![0.0, 100.0],
+                DiscreteLayout::UNPADDED,
+            ));
+            let value = ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false));
+            let (x, y) = if band_axis == PositionalChannel::X { (band, value) } else { (value, band) };
+            Self {
+                spec: ChartSpec { mark, encoding, ..Default::default() },
+                batch,
+                scales: ResolvedScales {
+                    x,
+                    y,
+                    color: None,
+                    size: None,
+                    shape: None,
+                    opacity: None,
+                    fill_opacity: None,
+                    stroke_opacity: None,
+                    stroke_dash: None,
+                    stroke_width: None,
+                    x2: None,
+                    y2: None,
+                    y_slots: Default::default(),
+                    raster_cells: None,
+                },
+                panel: PanelLayout {
+                    plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                    facet_key: None,
+                    row: 0,
+                    col: 0,
+                    strip_title: None,
+                    row_strip_title: None,
+                    row_facet_key: None,
+                },
+                mark_style: resolve_mark_style(None, &theme, &mark).unwrap(),
+                theme,
+            }
+        }
+
+        /// The layer's color drawn from `g` over `levels`.
+        fn colored_by(mut self, field: &str, levels: &[&str]) -> Self {
+            self.spec.encoding.color = bound(field);
+            self.scales.color = Some(ColorScale::Categorical {
+                domain: levels.iter().map(|l| l.to_string()).collect(),
+                palette: std::borrow::Cow::Owned(vec![]),
+            });
+            self
+        }
+
+        fn ctx(&self) -> DrawCtx<'_> {
+            DrawCtx {
+                spec: &self.spec,
+                panel: &self.panel,
+                theme: &self.theme,
+                scales: &self.scales,
+                batch: &self.batch,
+                mark_style: &self.mark_style,
+            }
+        }
+
+        fn found(&self) -> Vec<GroupWithNoPosition> {
+            groups_with_no_position(&self.ctx()).unwrap()
+        }
+    }
+
+    fn bound(field: &str) -> Option<crate::spec::encoding::EncodingSpec> {
+        Some(crate::spec::encoding::EncodingSpec { field: field.into(), ..Default::default() })
+    }
+
+    fn slot_report(name: &str, channels: &[&str], rows: &[usize]) -> GroupWithNoPosition {
+        GroupWithNoPosition {
+            name: Some(name.to_string()),
+            channels: channels.iter().map(|c| c.to_string()).collect(),
+            rows: rows.to_vec(),
+        }
+    }
+
+    /// Columns `c` (the category, nullable), `y` (nullable), `y2` (`y` + 1,
+    /// null where `y` is) and `g` (a second grouping column) over `(c, y, g)`
+    /// rows.
+    fn slot_batch(rows: &[(Option<&str>, Option<f64>, &str)]) -> RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("y2", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(rows.iter().map(|r| r.1.map(|y| y + 1.0)).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Two categories, `a` drawn on both its rows and `z` null on every value
+    /// column on both of its.
+    fn one_empty_slot() -> RecordBatch {
+        slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "p"), (Some("z"), None, "p"), (Some("z"), None, "p")])
+    }
+
+    /// The exhaustive sweep every `Mark` variant gets through the band-slot
+    /// partition: an `Ordinal` x holding `a`, whose rows all draw, and `z`,
+    /// whose every value column is null, with no color. Every mark that
+    /// places a row finds exactly slot `z`, named `c=z`, with the value
+    /// channels the mark reads as its `channels` (the category channel is
+    /// present on every row) — including `area` and `label`, which read a
+    /// band channel without consulting the scale's kind, and `segment`, which
+    /// never reads a category at all: the slot is keyed on the scale. A mark
+    /// whose band read went missing from `dispatch_mark_placements` finds
+    /// nothing here and fails. `arc`/`geoshape` place nothing and are never
+    /// named.
+    #[test]
+    fn band_slot_groups_find_the_null_blocked_slot_for_every_mark() {
+        use crate::spec::encoding::Encoding;
+
+        const Y: &[&str] = &["y"];
+        const Y_AND_Y2: &[&str] = &["y", "y2"];
+        let xy = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let xy_y2 = Encoding { y2: bound("y2"), ..xy.clone() };
+        let url = Encoding { url: bound("url"), ..xy.clone() };
+        let cases: Vec<(Mark, Encoding, &[&str])> = vec![
+            (Mark::Point, xy.clone(), Y),
+            (Mark::Bar, xy.clone(), Y),
+            (Mark::Tick, xy.clone(), Y),
+            (Mark::Line, xy.clone(), Y),
+            (Mark::Area, xy.clone(), Y),
+            (Mark::Text, xy.clone(), Y),
+            (Mark::Label, xy.clone(), Y),
+            (Mark::Polygon, xy.clone(), Y),
+            (Mark::Image, url, Y),
+            (Mark::Rule, xy_y2.clone(), Y_AND_Y2),
+            (Mark::Segment, xy_y2.clone(), Y_AND_Y2),
+            (Mark::Rect, xy_y2.clone(), Y_AND_Y2),
+            (Mark::Ribbon, xy_y2, Y_AND_Y2),
+        ];
+        for (mark, encoding, channels) in cases {
+            let fixture = SlotFixture::new(mark, encoding, one_empty_slot(), PositionalChannel::X, &["a", "z"]);
+            assert_eq!(fixture.found(), vec![slot_report("c=z", channels, &[2, 3])], "{mark:?}");
+        }
+        for mark in [Mark::Arc, Mark::Geoshape] {
+            let fixture = SlotFixture::new(mark, xy.clone(), one_empty_slot(), PositionalChannel::X, &["a", "z"]);
+            assert_eq!(fixture.found(), Vec::new(), "{mark:?}: never named");
+        }
+    }
+
+    /// A `rule` with `x` and `y` and no `x2` or `y2` is a horizontal line at
+    /// `y` across the panel, so it places by `y` alone: no placement is on the
+    /// ordinal `x`, and the emptied category has no slot for the census to key
+    /// on although its rows are unplaced. Bound to `y2` as well it is a
+    /// vertical segment per row, placed in its category, and the same slot is
+    /// named. This records the built disposition; a change to the rule's band
+    /// read fails here instead of flipping unseen.
+    #[test]
+    fn a_span_rule_places_by_y_alone_so_no_slot_is_named() {
+        use crate::spec::encoding::Encoding;
+
+        let span = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let segment = Encoding { y2: bound("y2"), ..span.clone() };
+
+        let fixture = SlotFixture::new(Mark::Rule, span, one_empty_slot(), PositionalChannel::X, &["a", "z"]);
+        let ctx = fixture.ctx();
+        let placed_by: Vec<PositionalChannel> =
+            dispatch_mark_placements(&Mark::Rule, &ctx).iter().map(|p| p.channel).collect();
+        assert_eq!(placed_by, [PositionalChannel::Y]);
+        assert_eq!(fixture.found(), Vec::new());
+
+        let fixture = SlotFixture::new(Mark::Rule, segment, one_empty_slot(), PositionalChannel::X, &["a", "z"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z", &["y", "y2"], &[2, 3])]);
+    }
+
+    /// The horizontal form names the slot's category column the same way and
+    /// the value channel it blocks: `x`.
+    #[test]
+    fn a_horizontal_band_slot_names_the_x_channel() {
+        use crate::spec::encoding::Encoding;
+
+        let encoding = Encoding { x: bound("y"), y: bound("c"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Bar, encoding, one_empty_slot(), PositionalChannel::Y, &["a", "z"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z", &["x"], &[2, 3])]);
+    }
+
+    /// A slot some of whose rows draw stays silent: the documented per-row
+    /// skip.
+    #[test]
+    fn a_slot_some_of_whose_rows_draw_stays_silent() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "p"), (Some("z"), None, "p"), (Some("z"), Some(3.0), "p")]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"]);
+        assert_eq!(fixture.found(), Vec::new());
+    }
+
+    /// `color` bound to the slot's own column: the legend group `c=z` holds
+    /// every row of the slot, so the one name is the group's, never a second
+    /// from the slot beside it.
+    #[test]
+    fn a_slot_its_own_color_group_names_is_named_once() {
+        use crate::spec::encoding::Encoding;
+
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, one_empty_slot(), PositionalChannel::X, &["a", "z"])
+            .colored_by("c", &["a", "z"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z", &["y"], &[2, 3])]);
+    }
+
+    /// A group wholly inside the empty slot is named, and the slot is named
+    /// beside it when it holds rows no group names: each visible unit once.
+    /// `p` fills part of slot `z`; `q` draws in `a` and has its own empty row
+    /// in `z`, so `q` is not reported but its row is in the slot.
+    #[test]
+    fn a_group_inside_an_empty_slot_and_the_slot_are_each_named() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[
+            (Some("a"), Some(1.0), "q"),
+            (Some("a"), Some(2.0), "q"),
+            (Some("z"), None, "p"),
+            (Some("z"), None, "p"),
+            (Some("z"), None, "q"),
+        ]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q"]);
+        assert_eq!(
+            fixture.found(),
+            vec![slot_report("g=p", &["y"], &[2, 3]), slot_report("c=z", &["y"], &[2, 3, 4])]
+        );
+    }
+
+    /// Several groups that between them fill the slot already name every row
+    /// of it, so the slot adds no name beside them.
+    #[test]
+    fn groups_that_between_them_fill_a_slot_leave_it_unnamed() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[(Some("a"), Some(1.0), "q"), (Some("a"), Some(2.0), "q"), (Some("z"), None, "p"), (Some("z"), None, "r")]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q", "r"]);
+        assert_eq!(fixture.found(), vec![slot_report("g=p", &["y"], &[2]), slot_report("g=r", &["y"], &[3])]);
+    }
+
+    /// A dodged sub-slot: group `p` is empty in slot `z` but draws in `a`, and
+    /// slot `z` still draws group `q`, so neither unit is named.
+    #[test]
+    fn a_dodged_sub_slot_stays_silent() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "q"), (Some("z"), None, "p"), (Some("z"), Some(3.0), "q")]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q"]);
+        assert_eq!(fixture.found(), Vec::new());
+    }
+
+    /// A slot is a unit a reader sees empty, so it is named only where the
+    /// axis holds a band for its category. A category the axis omits (an
+    /// explicit domain that leaves it out) has none: the domain census owns
+    /// it. A null category has a band only where the axis places a null band
+    /// for it.
+    #[test]
+    fn a_slot_is_named_only_where_the_axis_holds_its_band() {
+        use crate::spec::encoding::Encoding;
+
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+
+        let omitted = SlotFixture::new(Mark::Point, encoding.clone(), one_empty_slot(), PositionalChannel::X, &["a"]);
+        assert_eq!(omitted.found(), Vec::new(), "category z is off the axis");
+
+        let null_rows = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "p"), (None, Some(f64::NAN), "p"), (None, Some(f64::NAN), "p")]);
+        let no_null_band = SlotFixture::new(Mark::Point, encoding.clone(), null_rows.clone(), PositionalChannel::X, &["a"]);
+        assert_eq!(no_null_band.found(), Vec::new(), "no null band on the axis");
+
+        let null_band = SlotFixture::new(Mark::Point, encoding, null_rows, PositionalChannel::X, &["a", "null"]);
+        assert_eq!(null_band.found(), vec![slot_report("c=null", &["y"], &[2, 3])]);
+    }
+
+    /// A zero-row batch has no slot to name, whatever categories the axis
+    /// holds: the partition is built from the layer's own rows, not from the
+    /// scale's domain. The census returns before it for a batch with no
+    /// unplaced row, so only a direct call reaches the partition; a batch that
+    /// lacks a category the axis holds partitions only the categories it has.
+    #[test]
+    fn a_zero_row_batch_names_no_slot() {
+        use crate::spec::encoding::Encoding;
+
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let empty = SlotFixture::new(Mark::Point, encoding.clone(), slot_batch(&[]), PositionalChannel::X, &["a", "z"]);
+        let ctx = empty.ctx();
+        let placements = dispatch_mark_placements(&Mark::Point, &ctx);
+        assert!(band_slot_groups(&ctx, &placements).unwrap().is_empty());
+        assert_eq!(empty.found(), Vec::new());
+
+        let only_a = SlotFixture::new(
+            Mark::Point,
+            encoding,
+            slot_batch(&[(Some("a"), Some(1.0), "p")]),
+            PositionalChannel::X,
+            &["a", "z"],
+        );
+        let ctx = only_a.ctx();
+        let placements = dispatch_mark_placements(&Mark::Point, &ctx);
+        let slots: Vec<(String, Vec<usize>)> =
+            band_slot_groups(&ctx, &placements).unwrap().into_iter().map(|s| (s.category, s.rows)).collect();
+        assert_eq!(slots, vec![("a".to_string(), vec![0])]);
+    }
+
+    /// NaN and infinity are as unplaced as a null on a linear axis, and a
+    /// category named in non-ASCII text keeps its text in the slot's name.
+    #[test]
+    fn a_slot_of_non_finite_values_is_named_by_its_own_text() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[
+            (Some("a"), Some(1.0), "p"),
+            (Some("a"), Some(2.0), "p"),
+            (Some("z\u{e9}"), Some(f64::NAN), "p"),
+            (Some("z\u{e9}"), Some(f64::INFINITY), "p"),
+        ]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z\u{e9}"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z\u{e9}", &["y"], &[2, 3])]);
+    }
+
+    /// An integer-coded category is a slot like a text one: the axis keys it
+    /// by its digits and the slot is named by the same digits.
+    #[test]
+    fn an_integer_coded_category_names_its_slot() {
+        use crate::spec::encoding::Encoding;
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Int64, false),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 2, 2])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            ],
+        )
+        .unwrap();
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["1", "2"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=2", &["y"], &[2, 3])]);
+    }
+
+    /// The partition itself: one slot per category of each `Ordinal` channel,
+    /// in first-appearance order, each named by its column. A placement on a
+    /// continuous channel, one over several columns, one over a column
+    /// another placement already partitioned, and one over a column that
+    /// cannot be read as a category contribute none; an unknown column is the
+    /// error `placement_absent_rows` raises too.
+    #[test]
+    fn band_slot_groups_bucket_rows_by_category_in_first_appearance_order() {
+        use crate::spec::encoding::Encoding;
+        use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("when", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["z", "a", "z", "a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["z", "a", "b"]);
+        let ctx = fixture.ctx();
+
+        let category = |channel| Placement::new(channel, "c", PlacementRead::Category);
+        let placements = vec![
+            category(PositionalChannel::X),
+            category(PositionalChannel::X2),
+            Placement::new(PositionalChannel::Y, "y", PlacementRead::Strict),
+            // Over several columns: skipped whichever column comes first, so
+            // neither a first-column nor a last-column read slips in a slot
+            // (`y` is a column no placement above has partitioned).
+            Placement { channel: PositionalChannel::X, columns: vec!["c", "y"], read: PlacementRead::Strict },
+            Placement { channel: PositionalChannel::X, columns: vec!["y", "c"], read: PlacementRead::Strict },
+            Placement::new(PositionalChannel::X, "when", PlacementRead::Category),
+        ];
+        let slots = band_slot_groups(&ctx, &placements).unwrap();
+        let summary: Vec<(String, Vec<usize>)> = slots.iter().map(|s| (s.name(&ctx), s.rows.clone())).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("c=z".to_string(), vec![0, 2]),
+                ("c=a".to_string(), vec![1, 3]),
+                ("c=b".to_string(), vec![4]),
+            ]
+        );
+        assert!(slots.iter().all(|s| s.channel == PositionalChannel::X && s.column == "c"));
+
+        let unknown = [Placement::new(PositionalChannel::X, "nope", PlacementRead::Category)];
+        assert!(matches!(band_slot_groups(&ctx, &unknown), Err(RenderError::UnknownColumn { .. })));
     }
 
     /// A group whose rows are each blocked by a DIFFERENT placement — one

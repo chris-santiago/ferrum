@@ -8785,6 +8785,18 @@ fn a_log_aux_drop_keeps_source_rows_on_every_mark() {
     }
 }
 
+/// What dropping the infinite row of the two guards below warns on `mark`:
+/// that row is category `b`'s only row, so a mark with a categorical `x`
+/// (`g`) is left with an empty slot `g=b` and names it, while a numeric `x`
+/// has no slot and the drop stays silent.
+fn expected_infinite_row_warnings(mark: &str, encoding: &serde_json::Value) -> Vec<String> {
+    if encoding["x"]["field"] == "g" {
+        vec![format!("mark_{mark}: every row of g=b has a null or non-finite y, so it draws nothing")]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Guard, pinned per mark family: every mark builder's positional
 /// pre-filter reads `ScaleKind::admits_for_pixel`, the one shared predicate
 /// that admits a
@@ -8839,7 +8851,11 @@ fn an_infinite_positional_value_is_silently_dropped_on_every_mark_under_linear()
         let (finite_scene, finite_warnings) = scene_over(&spec, &finite_batch, &crate::layout::ThemeInputs::default());
         assert!(finite_warnings.is_empty(), "{mark} (control): {finite_warnings:?}");
         let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
-        assert!(inf_warnings.is_empty(), "{mark}: an infinite Linear value is dropped silently, no warning: {inf_warnings:?}");
+        assert_eq!(
+            inf_warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            expected_infinite_row_warnings(mark, &encoding),
+            "{mark}: an infinite Linear value is dropped without a warning of its own"
+        );
         let finite_count: usize = finite_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
         let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
         assert_eq!(finite_count, 3, "{mark} (control)");
@@ -8939,7 +8955,11 @@ fn a_clamped_non_log_scale_still_drops_matching_sign_infinity_on_every_mark() {
             let (control_scene, control_warnings) = scene_over(&spec, &control_batch, &crate::layout::ThemeInputs::default());
             assert!(control_warnings.is_empty(), "{kind}/{mark} (control): {control_warnings:?}");
             let (inf_scene, inf_warnings) = scene_over(&spec, &infinite_batch, &crate::layout::ThemeInputs::default());
-            assert!(inf_warnings.is_empty(), "{kind}/{mark}: a dropped row warns nothing under a non-Log scale: {inf_warnings:?}");
+            assert_eq!(
+                inf_warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                expected_infinite_row_warnings(mark, &encoding),
+                "{kind}/{mark}: a dropped row warns nothing of its own under a non-Log scale"
+            );
             let control_count: usize = control_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
             let inf_count: usize = inf_scene.panels[0].marks.iter().map(|b| b.nodes.len()).sum();
             assert_eq!(control_count, 3, "{kind}/{mark} (control)");

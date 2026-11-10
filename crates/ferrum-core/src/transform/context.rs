@@ -583,9 +583,10 @@ impl std::fmt::Display for TransformWarning {
 /// carries no prefix beyond `prefix` itself (the sentence template already
 /// supplies any lead-in text before the list), every later item does, and
 /// the last is set off by `", and "`/`"; and "` (per `sep`). Shared by
-/// [`crate::render::RenderWarning::GroupsWithNoPosition`]'s own
-/// `and_of_list`/`and_panel_list` (`render::mod`) and
-/// [`TransformWarning::ExtentUndefined`]'s groups list here, so the three
+/// [`crate::render::RenderWarning::GroupsWithNoPosition`]'s `Display`
+/// (`render::mod`), which reads each entry of its list in its own shape and
+/// joins the results here, and by
+/// [`TransformWarning::ExtentUndefined`]'s groups list here, so the two
 /// cannot drift grammatically from one another.
 pub(crate) fn and_prefixed_list(items: &[String], prefix: &str, sep: &str) -> String {
     let mut iter = items.iter();
@@ -596,6 +597,15 @@ pub(crate) fn and_prefixed_list(items: &[String], prefix: &str, sep: &str) -> St
     parts.extend(middle.iter().map(|g| format!("{prefix}{g}")));
     format!("{}{sep}and {prefix}{last}", parts.join(sep))
 }
+
+/// What every facet-panel clause starts with. [`panel_clause`] writes it, and
+/// [`crate::render::RenderWarning::GroupsWithNoPosition`]'s `Display` reads
+/// it to tell a bare clause (a wholly emptied panel of a layer with no
+/// grouping channel) from a named unit, so a column whose name merely starts
+/// with a space is still read as a name. The entries are strings, so the one
+/// name this cannot tell apart from a clause is a column literally named
+/// with this prefix.
+pub(crate) const PANEL_CLAUSE_PREFIX: &str = " in facet panel ";
 
 /// The " in facet panel f=F2" clause [`TransformWarning::DegenerateFit`],
 /// [`TransformWarning::ParameterClamped`], [`TransformWarning::IntervalUndefined`]
@@ -608,7 +618,7 @@ pub(crate) fn and_prefixed_list(items: &[String], prefix: &str, sep: &str) -> St
 /// panel ..."` text a second time.
 pub(crate) fn panel_clause(panel: Option<&str>) -> String {
     match panel {
-        Some(p) => format!(" in facet panel {p}"),
+        Some(p) => format!("{PANEL_CLAUSE_PREFIX}{p}"),
         None => String::new(),
     }
 }

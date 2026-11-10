@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::{facet_partition_label, layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
+use super::prepare::{built_by_call, facet_partition_label, layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -1987,6 +1987,36 @@ fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLay
     Some(crate::transform::context::panel_clause(Some(&panel_label(spec, panel)?)))
 }
 
+/// The positional channels a null-position report names, in the terms of
+/// whoever wrote them. Each resolved token of `channels` (a
+/// [`draw::GroupWithNoPosition`]'s own) is un-flipped to the channel the
+/// layer's caller wrote ([`user_facing_channel`]). A layer a call built
+/// ([`built_by_call`]) then names a secondary channel by its primary (`x2`
+/// as `x`, `y2` as `y`, once): the call, not the caller, bound it (a
+/// composite's box spans `y` to `y2`, a channel the caller never wrote), so
+/// every sub-layer of the call raises the one text the caller can act on. A
+/// layer the caller placed keeps every channel it wrote.
+fn caller_channels(
+    channels: &[String],
+    layer_flipped: bool,
+    entry: &str,
+    mark: crate::spec::mark::Mark,
+) -> Vec<String> {
+    let call_built = built_by_call(entry, mark);
+    let mut named: Vec<String> = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let channel = match user_facing_channel(channel, layer_flipped) {
+            "x2" if call_built => "x",
+            "y2" if call_built => "y",
+            other => other,
+        };
+        if !named.iter().any(|seen| seen == channel) {
+            named.push(channel.to_string());
+        }
+    }
+    named
+}
+
 /// The four render-wide outputs `build_panel_mark_batches` writes for every
 /// layer of one panel: the chart's warnings list, this render's
 /// explicit-domain-left-out tally, its per-layer report tally (dropped
@@ -2296,11 +2326,11 @@ fn build_panel_mark_batches(
             domain_left_out_ledger.note(left_out);
         }
 
-        // Every group this layer's mark draws whose rows are null or
-        // non-finite on every one of this panel's own rows: named with
-        // this panel's own facet clause (`series_dropped_panel_clause`,
-        // the same clause `SeriesDropped` attaches), un-flipped to the
-        // channel THIS layer's own caller wrote, and noted into the
+        // Every group or band slot this layer's mark draws whose rows are
+        // null or non-finite on every one of this panel's own rows: named
+        // with this panel's own facet clause (`series_dropped_panel_clause`,
+        // the same clause `SeriesDropped` attaches), in the channels THIS
+        // layer's own caller wrote (`caller_channels`), and noted into the
         // render-wide ledger flushed once after the whole panel loop —
         // independent of whether the layer draws elsewhere, since the
         // fact this names belongs to the group, not to the layer's own
@@ -2311,8 +2341,7 @@ fn build_panel_mark_batches(
             if group_owned_by_its_fit(warnings, layer_lineage, ctx.batch, &group.rows, this_panel_label.as_deref()) {
                 continue;
             }
-            let channels: Vec<String> =
-                group.channels.iter().map(|c| user_facing_channel(c, layer_flipped).to_string()).collect();
+            let channels = caller_channels(&group.channels, layer_flipped, &entry, layer.mark);
             let name = match (group.name, series_dropped_panel_clause(spec, panel)) {
                 (Some(name), Some(clause)) => format!("{name}{clause}"),
                 (Some(name), None) => name,
@@ -16069,6 +16098,372 @@ mod tests {
             !warnings.iter().any(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })),
             "{warnings:?}"
         );
+    }
+
+    /// Columns `f` (a facet field), `c` (a category) and `w` (a value,
+    /// nullable) over `(f, c, w)` rows.
+    fn band_slot_batch(rows: &[(&str, &str, Option<f64>)]) -> RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("f", DataType::Utf8, false),
+            Field::new("c", DataType::Utf8, false),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn null_position_warnings(warnings: &[RenderWarning]) -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. }))
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// A category of a categorical axis whose every row is null on the drawn
+    /// value names itself once, in the caller's channel, where the chart
+    /// binds no color to split it into a group: the slot shows empty and the
+    /// layer's one group draws the other categories.
+    #[test]
+    fn a_band_slot_with_no_placed_row_is_named_once() {
+        let batch = band_slot_batch(&[
+            ("p", "a", Some(1.0)),
+            ("p", "a", Some(2.0)),
+            ("p", "b", Some(3.0)),
+            ("p", "z", None),
+            ("p", "z", None),
+        ]);
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        assert_eq!(
+            null_position_warnings(&warnings),
+            ["mark_point: every row of c=z has a null or non-finite y, so it draws nothing"]
+        );
+    }
+
+    /// A slot empty in one facet panel names that panel: the same category
+    /// that draws in the other panel is not reported there. A slot empty in
+    /// both panels is still one warning for the layer, naming each panel.
+    #[test]
+    fn a_band_slot_null_in_one_facet_panel_names_the_panel() {
+        let faceted = serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+            "facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 2}},
+        });
+        let rows = |z_in_p: Option<f64>| {
+            [
+                ("p", "a", Some(1.0)),
+                ("p", "a", Some(2.0)),
+                ("p", "z", z_in_p),
+                ("p", "z", z_in_p),
+                ("q", "a", Some(5.0)),
+                ("q", "a", Some(6.0)),
+                ("q", "z", None),
+                ("q", "z", None),
+            ]
+        };
+
+        let (scene, warnings) =
+            try_build_scene_for_capturing_warnings(&spec_from(faceted.clone()), &band_slot_batch(&rows(Some(3.0))));
+        assert_eq!(scene.unwrap().panels.len(), 2);
+        assert_eq!(
+            null_position_warnings(&warnings),
+            ["mark_point: every row of c=z in facet panel f=q has a null or non-finite y, so it draws nothing"]
+        );
+
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec_from(faceted), &band_slot_batch(&rows(None)));
+        assert_eq!(scene.unwrap().panels.len(), 2);
+        assert_eq!(
+            null_position_warnings(&warnings),
+            ["mark_point: every row of c=z in facet panel f=p, and of c=z in facet panel f=q, has a null or non-finite \
+              y, so they draw nothing"]
+        );
+    }
+
+    /// A faceted layer with no grouping channel reports a panel whose every
+    /// row is unplaced as a bare panel clause and a band slot of another panel
+    /// by name. The ledger folds the two into one entry in panel order, and
+    /// the sentence reads each in its own shape: the clause with no `of` and
+    /// no doubled space, the slot as `of c=z in facet panel ...`. Panel order
+    /// is sentence order.
+    #[test]
+    fn a_wholly_empty_panel_beside_an_empty_band_slot_reads_as_one_sentence() {
+        let faceted = serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+            "facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 3}},
+        });
+        // Categories `a`, `b`, `z` of two rows in each panel; every value is
+        // null in the panels `blank` names, and in category `z` of the panels
+        // `z_empty` names.
+        let rows = |panels: &[&'static str], blank: &[&str], z_empty: &[&str]| {
+            let mut rows = Vec::new();
+            for &panel in panels {
+                for (category, values) in [("a", [1.0, 2.0]), ("b", [3.0, 4.0]), ("z", [5.0, 6.0])] {
+                    for value in values {
+                        let empty = blank.contains(&panel) || (category == "z" && z_empty.contains(&panel));
+                        rows.push((panel, category, (!empty).then_some(value)));
+                    }
+                }
+            }
+            rows
+        };
+        let cases: [(&[&'static str], &[&str], &[&str], &str); 3] = [
+            (
+                &["p", "q"],
+                &["p"],
+                &["q"],
+                "mark_point: every row in facet panel f=p, and of c=z in facet panel f=q, has a null or non-finite \
+                 y, so they draw nothing",
+            ),
+            (
+                &["p", "q"],
+                &["q"],
+                &["p"],
+                "mark_point: every row of c=z in facet panel f=p, and in facet panel f=q, has a null or non-finite \
+                 y, so they draw nothing",
+            ),
+            (
+                &["p", "q", "r"],
+                &["p", "r"],
+                &["q"],
+                "mark_point: every row in facet panel f=p, of c=z in facet panel f=q, and in facet panel f=r, has \
+                 a null or non-finite y, so they draw nothing",
+            ),
+        ];
+        for (panels, blank, z_empty, expected) in cases {
+            let batch = band_slot_batch(&rows(panels, blank, z_empty));
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec_from(faceted.clone()), &batch);
+            assert_eq!(scene.unwrap().panels.len(), panels.len(), "{panels:?}");
+            assert_eq!(null_position_warnings(&warnings), [expected], "panels {panels:?}, blank {blank:?}");
+        }
+    }
+
+    /// `batch` with its column `from` renamed `to`.
+    fn with_column_renamed(batch: RecordBatch, from: &str, to: &str) -> RecordBatch {
+        let fields: Vec<arrow::datatypes::Field> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| if f.name() == from { f.as_ref().clone().with_name(to) } else { f.as_ref().clone() })
+            .collect();
+        RecordBatch::try_new(std::sync::Arc::new(arrow::datatypes::Schema::new(fields)), batch.columns().to_vec())
+            .unwrap()
+    }
+
+    /// A category column named with a leading space (a CSV header such as
+    /// `a, b`, read as ` b`, keeps it) is a named unit like any other. Built
+    /// by the real draw site, the sentence keeps the unit's `of` and its
+    /// singular or plural wording whether the slot is alone, beside an
+    /// ordinary group, or beside the bare clause of a wholly emptied panel:
+    /// only the clause the draw site writes for a panel reads as bare, never
+    /// a bare leading space. The space is the column's own, so it shows after
+    /// `of`.
+    #[test]
+    fn a_band_slot_on_a_column_named_with_a_leading_space_reads_as_a_name() {
+        let warnings_of = |spec: serde_json::Value, batch: RecordBatch| {
+            let batch = with_column_renamed(batch, "c", " c");
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec_from(spec), &batch);
+            scene.unwrap();
+            null_position_warnings(&warnings)
+        };
+        // The slot alone.
+        assert_eq!(
+            warnings_of(
+                serde_json::json!({
+                    "data": {"kind": "named", "name": "default"},
+                    "mark": "point",
+                    "encoding": {"x": {"field": " c"}, "y": {"field": "w"}},
+                }),
+                band_slot_batch(&[
+                    ("p", "a", Some(1.0)),
+                    ("p", "a", Some(2.0)),
+                    ("p", "b", Some(3.0)),
+                    ("p", "z", None),
+                    ("p", "z", None),
+                ]),
+            ),
+            ["mark_point: every row of  c=z has a null or non-finite y, so it draws nothing"]
+        );
+
+        // Beside an ordinary group: group `p` sits wholly inside slot `z`, and
+        // `q` has an empty row there too, so both units are named.
+        assert_eq!(
+            warnings_of(
+                serde_json::json!({
+                    "data": {"kind": "named", "name": "default"},
+                    "mark": "point",
+                    "encoding": {"x": {"field": " c"}, "y": {"field": "w"}, "color": {"field": "f"}},
+                }),
+                band_slot_batch(&[
+                    ("q", "a", Some(1.0)),
+                    ("q", "a", Some(2.0)),
+                    ("p", "z", None),
+                    ("p", "z", None),
+                    ("q", "z", None),
+                ]),
+            ),
+            ["mark_point: every row of f=p, and of  c=z, has a null or non-finite y, so they draw nothing"]
+        );
+
+        // Beside the bare clause of a wholly emptied panel, in panel order.
+        assert_eq!(
+            warnings_of(
+                serde_json::json!({
+                    "data": {"kind": "named", "name": "default"},
+                    "mark": "point",
+                    "encoding": {"x": {"field": " c"}, "y": {"field": "w"}},
+                    "facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 2}},
+                }),
+                band_slot_batch(&[
+                    ("p", "a", None),
+                    ("p", "a", None),
+                    ("p", "z", None),
+                    ("p", "z", None),
+                    ("q", "a", Some(1.0)),
+                    ("q", "a", Some(2.0)),
+                    ("q", "z", None),
+                    ("q", "z", None),
+                ]),
+            ),
+            [
+                "mark_point: every row in facet panel f=p, and of  c=z in facet panel f=q, has a null or \
+                 non-finite y, so they draw nothing"
+            ]
+        );
+    }
+
+    /// A group on a column named with a leading space reads as a named unit
+    /// too: the group report and the slot report share one sentence, so the
+    /// unit keeps its `of` and the singular wording.
+    #[test]
+    fn a_group_on_a_column_named_with_a_leading_space_reads_as_a_name() {
+        // Group `p` is wholly empty and holds every empty row of slot `z`, so
+        // it is the one unit named.
+        let batch = with_column_renamed(
+            band_slot_batch(&[("q", "a", Some(1.0)), ("q", "a", Some(2.0)), ("p", "z", None), ("p", "z", None)]),
+            "f",
+            " f",
+        );
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}, "color": {"field": " f"}},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        assert_eq!(
+            null_position_warnings(&warnings),
+            ["mark_point: every row of  f=p has a null or non-finite y, so it draws nothing"]
+        );
+    }
+
+    /// Under `CoordFlip` the census works on the resolved channels (the
+    /// category on the drawn `y`, the value on the drawn `x`), and the report
+    /// names the channel the caller wrote.
+    #[test]
+    fn a_band_slot_under_a_flipped_coord_names_the_callers_channel() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", None), ("p", "z", None)]);
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+            "coord": {"kind": "flip"},
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        assert_eq!(
+            null_position_warnings(&warnings),
+            ["mark_point: every row of c=z has a null or non-finite y, so it draws nothing"]
+        );
+    }
+
+    /// A chart with no empty slot warns nothing, and a slot some of whose
+    /// rows draw is the documented per-row skip.
+    #[test]
+    fn a_chart_with_no_empty_slot_warns_nothing() {
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+        }));
+        let drawn = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", Some(3.0)), ("p", "z", Some(4.0))]);
+        let (_, warnings) = try_build_scene_for_capturing_warnings(&spec, &drawn);
+        assert!(!warnings.iter().any(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })), "{warnings:?}");
+
+        let partly = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", Some(3.0)), ("p", "z", None)]);
+        let (_, warnings) = try_build_scene_for_capturing_warnings(&spec, &partly);
+        assert!(!warnings.iter().any(|w| matches!(w, RenderWarning::GroupsWithNoPosition { .. })), "{warnings:?}");
+    }
+
+    /// Two layers drawing the same empty slot through the same mark differ
+    /// only in who built them: a layer a call built (its entry is the call,
+    /// not the mark's primitive) names the `y` the caller wrote, since the
+    /// call bound the `y2` the rule spans to, while a layer the caller placed
+    /// names every channel it wrote.
+    #[test]
+    fn a_call_built_layer_names_the_callers_channel_and_a_placed_one_names_every_channel() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", None), ("p", "z", None)]);
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "rule",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}, "y2": {"field": "w"}},
+            "layers": [
+                {"mark": "rule", "entry": "mark_boxplot",
+                 "encoding": {"x": {"field": "c"}, "y": {"field": "w"}, "y2": {"field": "w"}}},
+                {"mark": "rule", "encoding": {"x": {"field": "c"}, "y": {"field": "w"}, "y2": {"field": "w"}}},
+            ],
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        assert_eq!(
+            null_position_warnings(&warnings),
+            [
+                "mark_boxplot: every row of c=z has a null or non-finite y, so it draws nothing",
+                "layer 1: mark_rule: every row of c=z has a null or non-finite y and y2, so it draws nothing",
+            ]
+        );
+    }
+
+    /// [`caller_channels`]: a resolved token is un-flipped to the one the
+    /// caller wrote, and only a layer a call built folds a secondary channel
+    /// onto its primary, once, in either orientation.
+    #[test]
+    fn caller_channels_name_the_callers_terms() {
+        use crate::spec::mark::Mark;
+        let names = |channels: &[&str]| channels.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let named = |channels: &[&str], flipped: bool, entry: &str, mark: Mark| {
+            caller_channels(&names(channels), flipped, entry, mark)
+        };
+        // A call-built layer: a secondary is its primary, once.
+        assert_eq!(named(&["y", "y2"], false, "mark_boxplot", Mark::Rule), names(&["y"]));
+        assert_eq!(named(&["x2", "x"], false, "catplot", Mark::Rule), names(&["x"]));
+        assert_eq!(named(&["y2"], false, "mark_errorbar", Mark::Rule), names(&["y"]));
+        assert_eq!(named(&["x", "y"], false, "mark_boxplot", Mark::Rule), names(&["x", "y"]));
+        // Un-flipped first, then folded: a flipped layer's resolved x/x2 are the caller's y/y2.
+        assert_eq!(named(&["x", "x2"], true, "mark_boxplot", Mark::Rule), names(&["y"]));
+        // A caller-placed layer keeps every channel it wrote, flipped or not.
+        assert_eq!(named(&["y", "y2"], false, "mark_ribbon", Mark::Ribbon), names(&["y", "y2"]));
+        assert_eq!(named(&["x", "x2"], true, "mark_rule", Mark::Rule), names(&["y", "y2"]));
+        assert_eq!(named(&["x2"], false, "mark_rule", Mark::Rule), names(&["x2"]));
     }
 
     /// [`group_owned_by_its_fit`]'s own unit contract: ownership is judged
