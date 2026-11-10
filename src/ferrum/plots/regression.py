@@ -970,6 +970,25 @@ def _lmplot_type_remedy_without_scatter(voice: str) -> str:
     return "Drop type=: with no scatter drawn, a declared type is never applied."
 
 
+def _refuse_fit_bin_aggregate(entry: str, encoding: dict, *, method: str) -> None:
+    """Refuse a bin=/aggregate= on regplot/lmplot's x or y that *method*'s fit reads raw.
+
+    Shared by the call-time check and the post-build record
+    (:func:`_lmplot_post_build_positional`), so the two doors cannot drift
+    apart. *method* shapes two remedies
+    (:func:`~ferrum._encode_lowering._refuse_bin_aggregate_fit`): every
+    ``mark_smooth``-routed method bins x through its own ``x_bins=`` knob,
+    and ``"logistic"`` fits a response that must be the raw 0/1 column, so
+    its y can only drop the kwarg.
+    """
+    _refuse_bin_aggregate_fit(
+        entry,
+        encoding,
+        x_bins_knob=method in _SMOOTH_ROUTED_METHODS,
+        binary_y=method == "logistic",
+    )
+
+
 def _lmplot_post_build_positional(
     out: Chart, *, entry: str, method: str, x_field: str, y_field: str, has_scatter: bool
 ) -> _PostBuildPositional:
@@ -984,12 +1003,12 @@ def _lmplot_post_build_positional(
     may already have resolved a pending smooth into an eager one, which a
     record shaped at this call could not see coming.
     ``statistic_refusal`` refuses a bin=/aggregate= the fit reads raw or
-    folds in nowhere (:func:`~ferrum._encode_lowering._refuse_bin_aggregate_fit`),
-    naming ``x_bins=`` as x's bin remedy on a ``mark_smooth``-routed
-    method, the same knob the call-time check names, on every form too --
-    the pending prep's own resolve-time refusal would say the same thing
-    moments later, so running this one first keeps one wording. With
-    ``has_scatter=False`` both channels pass
+    folds in nowhere (:func:`_refuse_fit_bin_aggregate`, the call-time
+    check's own), naming ``x_bins=`` as x's bin remedy on a
+    ``mark_smooth``-routed method and dropping a logistic y's kwarg, on
+    every form too -- the pending prep's own resolve-time refusal would say
+    the same thing moments later, so running this one first keeps one
+    wording. With ``has_scatter=False`` both channels pass
     :func:`_lmplot_type_remedy_without_scatter` as their declared-``T``
     ending.
     """
@@ -1004,9 +1023,7 @@ def _lmplot_post_build_positional(
                 out, "y", called_field=y_field, drawn_column=y_field, type_remedy=type_remedy
             ),
         },
-        statistic_refusal=partial(
-            _refuse_bin_aggregate_fit, entry, x_bins_knob=method in _SMOOTH_ROUTED_METHODS
-        ),
+        statistic_refusal=partial(_refuse_fit_bin_aggregate, entry, method=method),
     )
 
 
@@ -1014,10 +1031,14 @@ def _residplot_y_scale_remedy(ch: ChannelBase) -> Callable[[str], str] | None:
     """Residplot's y scale remedy: ``None`` (the default ending), unless *ch* declares a log scale.
 
     A domain or ``format=`` names the call door as the working remedy
-    (``residplot(y=fm.Y('w', ...))``); a log scale never does, because the
-    call door refuses it too (residplot's own Rust refusal, wherever the
-    resolved y scale is log), so naming it as a remedy would send the
-    caller to a door that also fails.
+    (``residplot(y=fm.Y('w', ...))``). A log scale names the call door
+    too, with the one scale the residual axis draws in its place,
+    ``fm.SymlogScale()``: the call door refuses a log scale itself
+    (residplot's own Rust refusal, wherever the resolved y scale is log),
+    so restating the caller's scale, as the default ending does, would
+    send the caller to a call that also fails. The post-build door cannot
+    take the symlog scale instead, since it refuses any field-bearing
+    ``scale=``.
     """
     scale = ch.option("scale")
     if scale is None:
@@ -1025,7 +1046,15 @@ def _residplot_y_scale_remedy(ch: ChannelBase) -> Callable[[str], str] | None:
     from ferrum.encoding._scale import _scale_to_dict
 
     if _scale_to_dict(scale).get("type") == "log":
-        return lambda voice: "Use fm.SymlogScale(), or drop scale=."
+        field = ch.field
+
+        def symlog_in_the_call(voice: str) -> str:
+            return (
+                "Drop scale=, or pass fm.SymlogScale() in the call: "
+                f"{voice}(y=fm.Y({field!r}, scale=fm.SymlogScale()))."
+            )
+
+        return symlog_in_the_call
     return None
 
 
@@ -1245,13 +1274,11 @@ def _lmplot_impl(
     # and the fit silently ignore it. x_bins= is a working remedy only on
     # the methods that build Smooth (it bins before any method dispatch);
     # the dedicated methods have no such knob (refused above), so their x
-    # bin= falls back to the generic, field-aware remedy.
+    # bin= falls back to the generic, field-aware remedy. A logistic fit
+    # needs its y to be the raw 0/1 column, which a bin start or a mean of
+    # it is not, so its y refusals only drop the kwarg.
     drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
-    _refuse_bin_aggregate_fit(
-        entry,
-        drawn,
-        x_bins_knob=method in _SMOOTH_ROUTED_METHODS,
-    )
+    _refuse_fit_bin_aggregate(entry, drawn, method=method)
     # A declared categorical type on either channel is refused the same
     # way: the fit reads both as numbers, so a `N`/`O` would place the
     # fitted curve's values as categories instead of positions on a
@@ -1747,9 +1774,14 @@ def lmplot(
         and for an ``x aggregate=`` on every method (``x_estimator=``
         aggregates the response within each ``x_bins`` bin, never the
         predictor, so it is never the remedy), the remedy is to compute it
-        ahead of the fit with ``.transform(...)`` and bind its output
-        column. ``y``'s ``bin=``/``aggregate=`` take that same remedy on
-        every method.
+        ahead of the fit with ``.transform(...)`` and pass its output
+        column as the call's own ``x=`` (``y=`` for the response): the fit
+        is built at the call from the columns it names, so a column bound
+        by a later ``.encode()`` is not read. ``y``'s ``bin=``/
+        ``aggregate=`` take that same remedy on every method but
+        ``"logistic"``, whose response must be the raw 0/1 column (a bin
+        start or a mean of it is not binary, so the fit would refuse the
+        computed column): there the remedy is to drop the kwarg.
 
     Examples
     --------

@@ -236,7 +236,8 @@ def test_a_post_build_aggregate_on_y_is_refused_too():
     assert str(err.value) == (
         "regplot(y=Y('w', aggregate='mean')) is not supported: the fit reads the raw response, "
         "so aggregate= would be ignored. Compute the aggregate with "
-        ".transform(fm.transform_aggregate(...)) and bind its output column, or drop aggregate=."
+        ".transform(fm.transform_aggregate(...)) and pass its output column as the call's own "
+        "y=, or drop aggregate=."
     )
 
 
@@ -263,8 +264,7 @@ def test_a_declared_type_differing_from_the_call_is_refused(form_name):
         ending = "Drop type=: with no scatter drawn, a declared type is never applied."
     else:
         # On x, the call door honors a declared T (the common case, since
-        # the call itself declared none), so the remedy names it -- unlike
-        # residplot's y under a log scale, covered by its own test below.
+        # the call itself declared none), so the remedy names it.
         ending = f"Drop type=, or pass it in the call: {entry}(x=fm.X({field!r}, type=...))."
     assert str(err.value) == (
         f"{entry}(x=X({field!r}, type='T')) after the call is not supported: {entry} draws x "
@@ -707,22 +707,72 @@ def test_a_fieldless_binding_echoes_none_as_none_not_nonetype():
 
 # ---------------------------------------------------------------------------
 # residplot's y scale/domain/format refusal names only remedies that
-# render -- a log scale never names the call door, since it refuses there
-# too.
+# render -- a log scale names the call door with a symlog scale, since the
+# call door refuses the log scale itself and the post-build door refuses a
+# symlog one.
 # ---------------------------------------------------------------------------
 
+#: The ending of residplot's post-build log-y refusal: drop the scale, or
+#: write a symlog scale in the call, the one door that draws it.
+_LOG_Y_REMEDY = (
+    "Drop scale=, or pass fm.SymlogScale() in the call: "
+    "residplot(y=fm.Y('w', scale=fm.SymlogScale()))."
+)
 
-def test_residplot_y_log_scale_refusal_never_names_the_call_door():
+#: Each residplot form's own call keywords: layered (a lowess overlay) and flat (one mark).
+_RESIDPLOT_FORM_KWARGS = {
+    "layered": {"lowess": True},
+    "flat": {"zero_line": False, "show_metrics": False},
+}
+
+
+def _residplot_with_log_y(door: str, form_kwargs: dict) -> "fm.Chart":
+    """A residplot of the *form_kwargs* form whose y log scale is written at *door*, after the call."""
+    if door == "encode_kwarg":
+        return fm.residplot(
+            _frame(), x="v", y="w", encode={"y": Y("w", scale=fm.LogScale())}, **form_kwargs
+        )
+    chart = fm.residplot(_frame(), x="v", y="w", **form_kwargs)
+    if door == "later_encode":
+        return chart.encode(y=Y("w", scale=fm.LogScale()))
+    if door == "scale_dict":
+        return chart.encode(y=Y("w", scale={"type": "log"}))
+    assert door == "scale_and_format", door
+    return chart.encode(y=Y("w", scale=fm.LogScale(), format=".2f"))
+
+
+def test_residplot_y_log_scale_refusal_names_the_call_with_a_symlog_scale():
     chart = fm.residplot(_frame(), x="v", y="w", lowess=True)
     with pytest.raises(ValueError) as err:
         chart.encode(y=Y("w", scale=fm.LogScale())).to_svg()
-    message = str(err.value)
-    assert message == (
+    assert str(err.value) == (
         "residplot(y=Y('w', scale=LogScale(...))) "
         "after the call is not supported: residplot draws y from the y= it was called with, so "
-        "scale= would be ignored. Use fm.SymlogScale(), or drop scale=."
+        f"scale= would be ignored. {_LOG_Y_REMEDY}"
     )
-    assert "residplot(y=fm.Y(" not in message
+
+
+@pytest.mark.parametrize("form", sorted(_RESIDPLOT_FORM_KWARGS))
+@pytest.mark.parametrize("door", ["later_encode", "encode_kwarg", "scale_dict", "scale_and_format"])
+def test_the_log_y_remedy_renders_when_followed(form, door):
+    """Every door a log y can be written at after the call (a later ``.encode()``,
+    ``encode=``, a dict scale, a ``format=`` beside it) ends the same way, and the
+    call it names draws a symlog axis -- not the plain residual chart. A symlog
+    scale written after the call is refused too, which is why the ending names the
+    call."""
+    form_kwargs = _RESIDPLOT_FORM_KWARGS[form]
+    with pytest.raises(ValueError) as err:
+        _residplot_with_log_y(door, form_kwargs).to_svg()
+    assert str(err.value).endswith(_LOG_Y_REMEDY)
+
+    followed = fm.residplot(
+        _frame(), x="v", y=fm.Y("w", scale=fm.SymlogScale()), **form_kwargs
+    ).to_svg()
+    assert followed != fm.residplot(_frame(), x="v", y="w", **form_kwargs).to_svg()
+
+    post_build = fm.residplot(_frame(), x="v", y="w", **form_kwargs)
+    with pytest.raises(ValueError, match="Drop scale=, or pass it in the call"):
+        post_build.encode(y=Y("w", scale=fm.SymlogScale())).to_svg()
 
 
 def test_residplot_y_domain_scale_refusal_names_the_call_door():
@@ -753,8 +803,7 @@ def test_residplot_y_format_refusal_names_the_call_door():
         (
             {"scale": fm.LogScale()},
             "residplot(y=Y('w', scale=LogScale(...))) after the call is not supported: residplot "
-            "draws y from the y= it was called with, so scale= would be ignored. Use "
-            "fm.SymlogScale(), or drop scale=.",
+            f"draws y from the y= it was called with, so scale= would be ignored. {_LOG_Y_REMEDY}",
         ),
         (
             {"scale": fm.LinearScale(domain=(-5.0, 5.0))},

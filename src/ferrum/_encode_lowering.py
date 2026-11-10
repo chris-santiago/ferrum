@@ -697,6 +697,12 @@ class _DoorVocabulary:
     position_stack: str | None = None
     channel_stack: str | None = "stack=True"
     chains_transform: bool = True
+    #: The door's statistic reads only the columns its own call names, so a
+    #: ``.transform(...)`` step's output column is bound by naming it as the
+    #: call's own ``x=``/``y=``, never by a later ``.encode()`` (which the
+    #: statistic would not read). Only meaningful where ``chains_transform``
+    #: holds: a door with no ``.transform(...)`` takes no such step at all.
+    binds_at_call: bool = False
     styles_dropped_axis: bool = True
     #: mark_hex's own cell-sizing knob, and its cell-aggregate call template
     #: (a ``str.format`` template over ``op``/``field``, the codebase's
@@ -736,6 +742,11 @@ _CHART_CALL_VOCABULARY = _DoorVocabulary()
 #: ``hex_bin_size``/``hex_cells`` reach ``kind='hex'``'s center through
 #: ``joint_kws=``, which ``_jointplot_build`` forwards to ``mark_hex``
 #: verbatim, so those two spellings run exactly as written.
+#:
+#: regplot's and lmplot's rows set ``binds_at_call``: both build their scatter
+#: and fit once, at the call, from the ``x=``/``y=`` it names, so the
+#: ``.transform(...)`` remedy's output column is read only when the call
+#: itself names it, not when a later ``.encode()`` binds it.
 _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
     "mark_histogram": _DoorVocabulary(
         bin_rule="mark_histogram's bins=, bin_count= or bin_width=",
@@ -766,8 +777,8 @@ _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
     ),
     "pairplot": _DoorVocabulary(chains_transform=False),
     "mark_smooth": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
-    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
-    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
+    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
+    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
     "mark_hex": _DoorVocabulary(
         hex_bin_size="mark_hex's bin_size=",
         hex_cells="mark_hex(aggregate={op!r}, field={field!r})",
@@ -926,9 +937,10 @@ def _refuse_unreadable_option(
     ending names that voice's own call as the remedy that renders
     (``regplot(x=fm.X('v', scale=...))``). *remedy*, when given,
     overrides that ending for an option a figure's call door either
-    refuses too (residplot's y, under a log scale) or never applies
-    either way (a declared ``T`` with no sibling layer drawn), so the
-    refusal never points at a remedy that would also fail.
+    refuses as the caller wrote it (residplot's y, under a log scale: its
+    ending names the symlog scale the call draws instead) or never
+    applies either way (a declared ``T`` with no sibling layer drawn), so
+    the refusal never points at a remedy that would also fail.
     """
     from ferrum._entry import EntryRefusal
 
@@ -1298,21 +1310,60 @@ def _refuse_color_aggregate(
     )
 
 
-def _chained_remedy(door: _DoorVocabulary, *, remedy: str, kwarg: str) -> str:
-    """*remedy* when *door*'s result takes ``.transform(...)``, else dropping *kwarg*=.
+def _drop_remedy(door: _DoorVocabulary, *, kwarg: str) -> str:
+    """The remedy when there is nothing to compute ahead of the statistic: drop *kwarg*=.
+
+    The same text on every door; it takes *door* only to be a :data:`_DoorText`.
+    """
+    return f"Drop {kwarg}=."
+
+
+def _chained_remedy(
+    door: _DoorVocabulary,
+    *,
+    recipe: str,
+    column: str,
+    kwarg: str,
+    channel: str,
+    call_kwargs: str | None = None,
+) -> str:
+    """*recipe*, then how *door*'s caller binds the *column* it computes, else dropping *kwarg*=.
+
+    *recipe* is the ``.transform(...)`` step that computes the column and
+    *column* names it as the message reads it (``'bin_start'``,
+    ``output``); *channel* is the positional slot the refused binding sits
+    in, and *call_kwargs* an extra keyword the remedy's own call needs to
+    render.
 
     jointplot (``JointChart``) and pairplot (``RepeatChart``) have neither
     ``.transform`` nor ``.encode`` on their own result, so the generic
     ``.transform(...)``-chaining remedy every other door's result can run
     is untypeable there; dropping the kwarg is the only remedy that renders.
+    Every other door binds the computed column with a later ``.encode()``,
+    except one that reads only the columns its own call names
+    (:attr:`_DoorVocabulary.binds_at_call`, regplot and lmplot): a later
+    binding never reaches its fit, so the remedy names the column as the
+    call's own *channel*= instead.
     """
-    if door.chains_transform:
-        return remedy
-    return f"Drop {kwarg}=."
+    if not door.chains_transform:
+        return _drop_remedy(door, kwarg=kwarg)
+    with_clause = f" with {call_kwargs}" if call_kwargs else ""
+    if door.binds_at_call:
+        binding = f"pass its {column} column as the call's own {channel}="
+    else:
+        binding = f"bind its {column} column"
+    return f"{recipe} and {binding}{with_clause}, or drop {kwarg}=."
 
 
-def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
-    """The remedy for a ``bin=`` a statistic does not fold in.
+def _generic_bin_remedy(
+    channel: str, ch: ChannelBase, *, call_kwargs: str | None = None
+) -> _DoorText:
+    """The remedy for a ``bin=`` a statistic does not fold in on *ch*, bound at slot *channel*.
+
+    *channel* is the positional slot (``x``/``y``) *ch* is bound in, the
+    one a door that binds at the call names (:func:`_chained_remedy`). It
+    is read from the slot rather than from *ch*'s own class, since a ``Y``
+    written in the x slot still binds x.
 
     A field-bearing channel is binned ahead of time, PER ROW
     (``per_row=True``): a default ``Bin`` aggregates its rows and drops
@@ -1323,44 +1374,49 @@ def _generic_bin_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _
     given, names an extra keyword the remedy's own call needs to render
     (``residplot``'s ``dropna=False``, since its default drops the rows
     the remedy's ``.transform()`` step would otherwise read). The text is
-    chained onto ``.transform(...)`` only on a door whose result has one
-    (:func:`_chained_remedy`); a door with none drops the kwarg instead,
-    even though this helper's own text always chains.
+    chained onto ``.transform(...)`` only on a door whose result has one,
+    and binds the column the way that door reads it
+    (:func:`_chained_remedy`); a door with no ``.transform(...)`` drops the
+    kwarg instead.
     """
     from ferrum.encoding._aliases import _channel_field
 
     field = _channel_field(ch)
     if not field:
-        text = "Drop bin=."
-    else:
-        from ferrum._registry import registry_output_columns
+        return partial(_drop_remedy, kwarg="bin")
+    from ferrum._registry import registry_output_columns
 
-        bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
-        with_clause = f" with {call_kwargs}" if call_kwargs else ""
-        text = (
-            f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
-            f"and bind its {bin_start!r} column{with_clause}, or drop bin=."
-        )
-    return partial(_chained_remedy, remedy=text, kwarg="bin")
+    bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
+    return partial(
+        _chained_remedy,
+        recipe=f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True))",
+        column=repr(bin_start),
+        kwarg="bin",
+        channel=channel,
+        call_kwargs=call_kwargs,
+    )
 
 
-def _generic_aggregate_remedy(ch: ChannelBase, *, call_kwargs: str | None = None) -> _DoorText:
-    """The remedy for an ``aggregate=`` a statistic does not fold in.
+def _generic_aggregate_remedy(
+    channel: str, ch: ChannelBase, *, call_kwargs: str | None = None
+) -> _DoorText:
+    """The remedy for an ``aggregate=`` a statistic does not fold in on *ch*, bound at slot *channel*.
 
-    See :func:`_generic_bin_remedy` for *call_kwargs* and the
+    See :func:`_generic_bin_remedy` for *channel*, *call_kwargs* and the
     ``.transform(...)``-chaining door capability.
     """
     from ferrum.encoding._aliases import _channel_field
 
     if not _channel_field(ch):
-        text = "Drop aggregate=."
-    else:
-        with_clause = f" with {call_kwargs}" if call_kwargs else ""
-        text = (
-            "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
-            f"output column{with_clause}, or drop aggregate=."
-        )
-    return partial(_chained_remedy, remedy=text, kwarg="aggregate")
+        return partial(_drop_remedy, kwarg="aggregate")
+    return partial(
+        _chained_remedy,
+        recipe="Compute the aggregate with .transform(fm.transform_aggregate(...))",
+        column="output",
+        kwarg="aggregate",
+        channel=channel,
+        call_kwargs=call_kwargs,
+    )
 
 
 def _value_axis_drop_clause(door: _DoorVocabulary, value_axis: str) -> str:
@@ -1560,7 +1616,7 @@ def _refuse_statistic_input(
             ch,
             "bin",
             reason=reason,
-            remedy=bin_remedy if bin_remedy is not None else _generic_bin_remedy(ch),
+            remedy=bin_remedy if bin_remedy is not None else _generic_bin_remedy(channel, ch),
         )
     if not _unset_statistic("aggregate", ch._kwargs.get("aggregate")):
         _refuse_bin_or_aggregate(
@@ -1571,7 +1627,7 @@ def _refuse_statistic_input(
             reason=reason,
             remedy=aggregate_remedy
             if aggregate_remedy is not None
-            else _generic_aggregate_remedy(ch),
+            else _generic_aggregate_remedy(channel, ch),
         )
 
 
@@ -1792,7 +1848,7 @@ def _refuse_histogram_bin_aggregate(
                 bin_ch,
                 "bin",
                 reason=f"the histogram bins {bin_axis} by its own rule",
-                remedy=partial(_bin_rule_remedy, fallback=_generic_bin_remedy(bin_ch)),
+                remedy=partial(_bin_rule_remedy, fallback=_generic_bin_remedy(bin_axis, bin_ch)),
             )
         if not _unset_statistic("aggregate", bin_ch._kwargs.get("aggregate")):
             _refuse_bin_or_aggregate(
@@ -1801,7 +1857,7 @@ def _refuse_histogram_bin_aggregate(
                 bin_ch,
                 "aggregate",
                 reason=f"the histogram bins {bin_axis} rather than aggregating it",
-                remedy=_generic_aggregate_remedy(bin_ch),
+                remedy=_generic_aggregate_remedy(bin_axis, bin_ch),
             )
 
     value_ch = encoding.get(value_axis)
@@ -1910,7 +1966,9 @@ def _refuse_ecdf_bin_aggregate(drawn: dict) -> None:
         )
 
 
-def _refuse_bin_aggregate_fit(entry: str, encoding: dict, *, x_bins_knob: bool = False) -> None:
+def _refuse_bin_aggregate_fit(
+    entry: str, encoding: dict, *, x_bins_knob: bool = False, binary_y: bool = False
+) -> None:
     """Refuse an x bin=/aggregate= a fit reads raw, and a y one it folds in nowhere.
 
     x is the predictor; *x_bins_knob* is True on a call whose fit bins the
@@ -1927,19 +1985,33 @@ def _refuse_bin_aggregate_fit(entry: str, encoding: dict, *, x_bins_knob: bool =
     RESPONSE within each x bin, never x), so naming it would send the
     caller to a knob that does something else. y is the response the fit
     reads raw, with no knob of its own, so both its kwargs take the
-    generic remedy.
+    generic remedy. *binary_y* is True on a fit whose response must be the
+    raw 0/1 column (``method='logistic'``): a bin start or a mean of it is
+    not binary, so the generic remedy's computed column, named as the
+    call's own y=, would be refused again by the fit itself. y's remedy
+    for either kwarg is then to drop it. x is unaffected.
     """
-    x_ch = encoding.get("x")
-    if isinstance(x_ch, ChannelBase):
-        bin_remedy = (
-            partial(_fit_x_bin_remedy, fallback=_generic_bin_remedy(x_ch)) if x_bins_knob else None
-        )
+    for channel, reason in (
+        ("x", "the fit reads the raw predictor"),
+        ("y", "the fit reads the raw response"),
+    ):
+        ch = encoding.get(channel)
+        if not isinstance(ch, ChannelBase):
+            continue
+        bin_remedy = aggregate_remedy = None
+        if channel == "x" and x_bins_knob:
+            bin_remedy = partial(_fit_x_bin_remedy, fallback=_generic_bin_remedy(channel, ch))
+        elif channel == "y" and binary_y:
+            bin_remedy = partial(_drop_remedy, kwarg="bin")
+            aggregate_remedy = partial(_drop_remedy, kwarg="aggregate")
         _refuse_statistic_input(
-            entry, "x", x_ch, reason="the fit reads the raw predictor", bin_remedy=bin_remedy
+            entry,
+            channel,
+            ch,
+            reason=reason,
+            bin_remedy=bin_remedy,
+            aggregate_remedy=aggregate_remedy,
         )
-    y_ch = encoding.get("y")
-    if isinstance(y_ch, ChannelBase):
-        _refuse_statistic_input(entry, "y", y_ch, reason="the fit reads the raw response")
 
 
 def _refuse_residplot_bin_aggregate(encoding: dict) -> None:
@@ -1958,8 +2030,8 @@ def _refuse_residplot_bin_aggregate(encoding: dict) -> None:
                 channel,
                 ch,
                 reason="the residual fit reads the raw predictor and response",
-                bin_remedy=_generic_bin_remedy(ch, call_kwargs="dropna=False"),
-                aggregate_remedy=_generic_aggregate_remedy(ch, call_kwargs="dropna=False"),
+                bin_remedy=_generic_bin_remedy(channel, ch, call_kwargs="dropna=False"),
+                aggregate_remedy=_generic_aggregate_remedy(channel, ch, call_kwargs="dropna=False"),
             )
 
 

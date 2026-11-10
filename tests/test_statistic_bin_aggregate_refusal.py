@@ -12,10 +12,11 @@ string alike. Every refusal is raised as an
 :class:`~ferrum._entry.EntryRefusal`, so it speaks as the public call the
 caller made, never the inner mark or its own parameters, and names a
 remedy that renders -- in the voicing call's own spelling when that knob
-has one (``displot``'s ``bins=``, ``jointplot``'s ``marginal_kws=``), the
-knob-free remedy otherwise. The honored rows render byte-identically to a
-sibling route without the option, or to a committed digest of the same
-chart.
+has one (``displot``'s ``bins=``, ``jointplot``'s ``marginal_kws=``,
+``regplot``'s and ``lmplot``'s passing a computed column as the call's
+own ``x=``/``y=``), the knob-free remedy otherwise. The honored rows
+render byte-identically to a sibling route without the option, or to a
+committed digest of the same chart.
 """
 
 from __future__ import annotations
@@ -47,6 +48,13 @@ _XY_ROWS = pl.DataFrame(
 )
 #: A binary response, for the logistic/glm-routed fit cases.
 _XB_ROWS = _XY_ROWS.with_columns((pl.col("w") > 20.0).cast(pl.Int64).alias("b"))
+#: A binary response that varies along the predictor without separating it, so
+#: a logistic fit converges, with a grouping column for the fit figures' hue and
+#: facet forms. (``_XB_ROWS``' response is a step in the predictor, which a
+#: logistic fit cannot fit.)
+_XB_GROUPED_ROWS = _XY_ROWS.with_columns(
+    b=((pl.col("v") % 3) == 0).cast(pl.Int64), g=pl.Series(["a", "b"] * 10)
+)
 #: Grouped rows, for the histogram's normalized-stack cases.
 _GROUPED_HIST_ROWS = _HIST_ROWS.with_columns(g=(pl.col("v") > 10.0))
 #: A third numeric column, for mark_hex's color-aggregate fold cases.
@@ -100,23 +108,42 @@ def _written(channel: str, cls: str, field: str | None, kwarg: str, value: Any) 
     return f"{channel}={cls}({kwarg}={quoted})"
 
 
-def _generic_bin_remedy(field: str | None, *, call_kwargs: str | None = None) -> str:
+def _bind_half(column: str, *, with_clause: str = "", call_channel: str | None = None) -> str:
+    """How a generic remedy binds the column its ``.transform(...)`` step writes.
+
+    A chart door binds it with a later ``.encode()``. ``call_channel`` is
+    the door whose fit reads only the columns its own call names
+    (``regplot``, ``lmplot``): its remedy says to pass the column as the
+    call's own ``x=``/``y=`` instead.
+    """
+    if call_channel is None:
+        return f"bind its {column} column{with_clause}"
+    return f"pass its {column} column as the call's own {call_channel}={with_clause}"
+
+
+def _generic_bin_remedy(
+    field: str | None, *, call_kwargs: str | None = None, call_channel: str | None = None
+) -> str:
     if not field:
         return "Drop bin=."
     with_clause = f" with {call_kwargs}" if call_kwargs else ""
+    binding = _bind_half("'bin_start'", with_clause=with_clause, call_channel=call_channel)
     return (
         f"Bin the field per row with .transform(fm.Bin({field!r}, per_row=True)) "
-        f"and bind its 'bin_start' column{with_clause}, or drop bin=."
+        f"and {binding}, or drop bin=."
     )
 
 
-def _generic_aggregate_remedy(field: str | None, *, call_kwargs: str | None = None) -> str:
+def _generic_aggregate_remedy(
+    field: str | None, *, call_kwargs: str | None = None, call_channel: str | None = None
+) -> str:
     if not field:
         return "Drop aggregate=."
     with_clause = f" with {call_kwargs}" if call_kwargs else ""
+    binding = _bind_half("output", with_clause=with_clause, call_channel=call_channel)
     return (
-        "Compute the aggregate with .transform(fm.transform_aggregate(...)) and bind its "
-        f"output column{with_clause}, or drop aggregate=."
+        f"Compute the aggregate with .transform(fm.transform_aggregate(...)) and {binding}, "
+        "or drop aggregate=."
     )
 
 
@@ -483,7 +510,13 @@ def _smooth_cases() -> list[_Case]:
 
 
 def _fit_cases() -> list[_Case]:
-    """lmplot/regplot over method x x/y x bin/aggregate."""
+    """lmplot/regplot over door x method x x/y x bin/aggregate.
+
+    The door is how the refused channel reaches the figure: the keyword itself, the
+    figure's own ``encode=`` entry, or a ``.encode()`` written after a ``scatter=False``
+    call. The last two land on the chart after the call has parsed its keywords and
+    must name the same remedy the keyword door does.
+    """
     cases: list[_Case] = []
     methods_data = {
         "lm": _XY_ROWS,
@@ -494,108 +527,61 @@ def _fit_cases() -> list[_Case]:
     y_field = {"lm": "w", "logistic": "b", "glm": "b", "robust": "w"}
     smooth_routed = {"lm"}
 
-    for door in ("lmplot", "regplot"):
-        call = fm.lmplot if door == "lmplot" else fm.regplot
-        for method, rows in methods_data.items():
-            yf = y_field[method]
-            for channel, field, reason in (
-                ("x", "v", "the fit reads the raw predictor"),
-                ("y", yf, "the fit reads the raw response"),
-            ):
-                for kwarg, value in (("bin", True), ("aggregate", "mean")):
-                    if channel == "x" and kwarg == "bin":
-                        remedy = (
-                            "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
-                            if method in smooth_routed
-                            else _generic_bin_remedy(field)
-                        )
-                    elif kwarg == "bin":
-                        remedy = _generic_bin_remedy(field)
-                    else:
-                        remedy = _generic_aggregate_remedy(field)
-                    other_channel = "y" if channel == "x" else "x"
-                    other_field = yf if channel == "x" else "v"
+    def remedy_for(method: str, channel: str, kwarg: str, field: str) -> str:
+        # The fit reads only the columns the call names, so a generic remedy
+        # passes the computed column as the call's own x=/y=. A logistic
+        # fit's y must stay the raw 0/1 response and a bin start or a mean of
+        # it is not binary, so that remedy only drops the kwarg.
+        if channel == "y" and method == "logistic":
+            return f"Drop {kwarg}=."
+        if channel == "x" and kwarg == "bin" and method in smooth_routed:
+            return "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
+        if kwarg == "bin":
+            return _generic_bin_remedy(field, call_channel=channel)
+        return _generic_aggregate_remedy(field, call_channel=channel)
 
-                    def build(
-                        call=call,
-                        rows=rows,
-                        method=method,
-                        channel=channel,
-                        field=field,
-                        kwarg=kwarg,
-                        value=value,
-                        other_channel=other_channel,
-                        other_field=other_field,
-                    ):
-                        def run() -> None:
-                            ch = (
-                                X(field, **{kwarg: value})
-                                if channel == "x"
-                                else Y(field, **{kwarg: value})
+    def build(call, rows, method, channel, field, kwarg, value, route):
+        ch = X(field, **{kwarg: value}) if channel == "x" else Y(field, **{kwarg: value})
+        other_channel = "y" if channel == "x" else "x"
+        other_field = y_field[method] if channel == "x" else "v"
+
+        def run() -> None:
+            if route == "keyword":
+                call(rows, method=method, **{channel: ch, other_channel: other_field})
+            elif route == "encode":
+                call(rows, x="v", y=y_field[method], method=method, encode={channel: ch})
+            else:
+                call(rows, x="v", y=y_field[method], method=method, scatter=False).encode(
+                    **{channel: ch}
+                ).to_svg()
+
+        return run
+
+    for route in ("keyword", "encode", "posthoc"):
+        for door in ("lmplot", "regplot"):
+            call = fm.lmplot if door == "lmplot" else fm.regplot
+            for method, rows in methods_data.items():
+                for channel, field, reason in (
+                    ("x", "v", "the fit reads the raw predictor"),
+                    ("y", y_field[method], "the fit reads the raw response"),
+                ):
+                    for kwarg, value in (("bin", True), ("aggregate", "mean")):
+                        # The keyword door's ids carry no route; the post-hoc ones
+                        # keep the ``posthoc`` marker they always had.
+                        marker = "" if route == "keyword" else f"{route}_"
+                        cases.append(
+                            (
+                                f"{door}_{marker}{method}_{channel}_{kwarg}",
+                                build(call, rows, method, channel, field, kwarg, value, route),
+                                _message(
+                                    door,
+                                    _written(channel, _CLS[channel], field, kwarg, value),
+                                    kwarg,
+                                    reason,
+                                    remedy_for(method, channel, kwarg, field),
+                                ),
                             )
-                            call(rows, method=method, **{channel: ch, other_channel: other_field})
-
-                        return run
-
-                    cases.append(
-                        (
-                            f"{door}_{method}_{channel}_{kwarg}",
-                            build(),
-                            _message(
-                                door,
-                                _written(channel, _CLS[channel], field, kwarg, value),
-                                kwarg,
-                                reason,
-                                remedy,
-                            ),
                         )
-                    )
-
-    # Post-hoc twins (scatter=False, method='lm'): the same remedies as the
-    # keyword lm cells, reached through a `.encode()` written after the call.
-    for door in ("lmplot", "regplot"):
-        call = fm.lmplot if door == "lmplot" else fm.regplot
-        for channel, field, reason in (
-            ("x", "v", "the fit reads the raw predictor"),
-            ("y", "w", "the fit reads the raw response"),
-        ):
-            for kwarg, value in (("bin", True), ("aggregate", "mean")):
-                remedy = (
-                    "Bin the predictor with x_bins=<number of bins>, the fit's own binning, or drop bin=."
-                    if channel == "x" and kwarg == "bin"
-                    else (
-                        _generic_bin_remedy(field)
-                        if kwarg == "bin"
-                        else _generic_aggregate_remedy(field)
-                    )
-                )
-
-                def build(call=call, channel=channel, field=field, kwarg=kwarg, value=value):
-                    def run() -> None:
-                        ch = (
-                            X(field, **{kwarg: value})
-                            if channel == "x"
-                            else Y(field, **{kwarg: value})
-                        )
-                        call(_XY_ROWS, x="v", y="w", method="lm", scatter=False).encode(
-                            **{channel: ch}
-                        ).to_svg()
-
-                    return run
-
-                cases.append(
-                    (
-                        f"{door}_posthoc_lm_{channel}_{kwarg}",
-                        build(),
-                        _message(
-                            door,
-                            _written(channel, _CLS[channel], field, kwarg, value),
-                            kwarg,
-                            reason,
-                            remedy,
-                        ),
-                    )
-                )
     return cases
 
 
@@ -1155,7 +1141,7 @@ def _spelling_cases() -> list[_Case]:
             "the fit reads the raw predictor",
             fit_bin_remedy,
             "the fit reads the raw predictor",
-            _generic_aggregate_remedy("v"),
+            _generic_aggregate_remedy("v", call_channel="x"),
         ),
         "regplot": (
             lambda **kw: fm.regplot(_XY_ROWS, y="w", **kw),
@@ -1164,7 +1150,7 @@ def _spelling_cases() -> list[_Case]:
             "the fit reads the raw predictor",
             fit_bin_remedy,
             "the fit reads the raw predictor",
-            _generic_aggregate_remedy("v"),
+            _generic_aggregate_remedy("v", call_channel="x"),
         ),
         "residplot": (
             lambda **kw: fm.residplot(_XY_ROWS, y="w", **kw),
@@ -1473,6 +1459,43 @@ def _revoiced_figure_cases() -> list[_Case]:
                 "bin",
                 "the fit reads the raw predictor",
                 "Drop bin=.",
+            ),
+        )
+    )
+
+    # jointplot(kind="reg") and pairplot(kind="reg") y aggregate=: neither
+    # result takes a .transform(...) step, and regplot's/lmplot's remedy
+    # (pass the column as the call's own y=) is not theirs, so each drops the
+    # kwarg.
+    cases.append(
+        (
+            "jointplot_reg_y_aggregate",
+            lambda: fm.jointplot(_XY_ROWS, x="v", y=Y("w", aggregate="mean"), kind="reg").to_svg(),
+            _message(
+                "jointplot",
+                _written("y", "Y", "w", "aggregate", "mean"),
+                "aggregate",
+                "the fit reads the raw response",
+                "Drop aggregate=.",
+            ),
+        )
+    )
+    cases.append(
+        (
+            "pairplot_reg_y_aggregate",
+            lambda: fm.pairplot(
+                _XY_ROWS,
+                kind="reg",
+                diag_kind=None,
+                vars=["v", "w"],
+                encode={"y": Y("w", aggregate="mean")},
+            ).to_svg(),
+            _message(
+                "pairplot",
+                _written("y", "Y", "w", "aggregate", "mean"),
+                "aggregate",
+                "the fit reads the raw response",
+                "Drop aggregate=.",
             ),
         )
     )
@@ -2159,6 +2182,9 @@ _PICKLE_CONTRACT_REFUSALS: dict[str, Callable[[], Any]] = {
     "fit_x_bins": lambda: (
         fm.Chart(_XY_ROWS).mark_smooth().encode(x=X("v", bin=True), y="w").to_svg()
     ),
+    "fit_call_binding": lambda: (
+        fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y=Y("w", aggregate="mean")).to_svg()
+    ),
     "hex_bin_size": lambda: (
         fm.Chart(_XY_ROWS).mark_hex().encode(x=X("v", bin=True), y="w").to_svg()
     ),
@@ -2226,6 +2252,212 @@ def test_a_door_spelled_refusal_survives_pickle_and_copy(
         assert str(clone_of_clone.spoken_as(door)) == original_text
         tails.add(original_text.partition(") is not supported: ")[2])
     assert len(tails) > 1, "every door produced the same tail; cannot distinguish spellings"
+
+
+#: What the fit's generic y remedy says in each voice. regplot and lmplot
+#: build their fit at the call, so only they say to pass the column as the
+#: call's own y=; every other voice that takes ``.transform(...)`` binds it
+#: later (a voice absent from the vocabulary table included), and the two
+#: figures with no ``.transform(...)`` on their result drop the kwarg. (The
+#: refusal here comes from ``mark_smooth``, which has no logistic route; a
+#: logistic regplot or lmplot raises its own y refusal, which drops the kwarg.)
+_FIT_Y_REMEDY_VOICES = {
+    "mark_smooth": "binds_later",
+    "displot": "binds_later",
+    "residplot": "binds_later",
+    "roc_chart": "binds_later",
+    "regplot": "binds_at_call",
+    "lmplot": "binds_at_call",
+    "jointplot": "drops",
+    "pairplot": "drops",
+}
+
+
+@pytest.mark.parametrize("pickled", [False, True], ids=["raised", "pickled"])
+@pytest.mark.parametrize("kwarg", ["bin", "aggregate"])
+@pytest.mark.parametrize("voice", list(_FIT_Y_REMEDY_VOICES))
+def test_a_generic_remedy_binds_at_the_call_only_in_the_regplot_and_lmplot_voices(
+    voice: str, kwarg: str, pickled: bool
+) -> None:
+    """One ``mark_smooth`` refusal, re-voiced (and pickled, then re-voiced) into each
+    voice, ends the way that voice's door reads a column: ``regplot``/``lmplot``
+    pass it as the call's own ``y=``, a door with no ``.transform(...)`` drops the
+    kwarg, and every other door -- one absent from the vocabulary table too --
+    keeps binding it later.
+    """
+    channel = Y("w", bin=True) if kwarg == "bin" else Y("w", aggregate="mean")
+    value = True if kwarg == "bin" else "mean"
+    refusal = _refused(lambda: fm.Chart(_XY_ROWS).mark_smooth().encode(x="v", y=channel).to_svg())
+    if pickled:
+        refusal = _pickle_copy(refusal)
+
+    generic = _generic_bin_remedy if kwarg == "bin" else _generic_aggregate_remedy
+    remedy = {
+        "binds_later": generic("w"),
+        "binds_at_call": generic("w", call_channel="y"),
+        "drops": f"Drop {kwarg}=.",
+    }[_FIT_Y_REMEDY_VOICES[voice]]
+    assert str(refusal.spoken_as(voice)) == _message(
+        voice,
+        _written("y", "Y", "w", kwarg, value),
+        kwarg,
+        "the fit reads the raw response",
+        remedy,
+    )
+
+
+#: A channel object written in the other positional slot, which the library
+#: reads as that slot's binding: case id -> (slot, the channel class, field).
+_OTHER_AXIS_CHANNEL_CASES = {
+    "x_object_in_the_y_slot": ("y", X, "w"),
+    "y_object_in_the_x_slot": ("x", Y, "v"),
+}
+
+
+@pytest.mark.parametrize("fit_door", ["call", "post_build"])
+@pytest.mark.parametrize("figure", ["regplot", "lmplot"])
+@pytest.mark.parametrize("kwarg", ["bin", "aggregate"])
+@pytest.mark.parametrize("case", list(_OTHER_AXIS_CHANNEL_CASES))
+def test_a_call_binding_remedy_names_the_slot_the_refused_channel_is_bound_in(
+    case: str, kwarg: str, figure: str, fit_door: str
+) -> None:
+    """The remedy names the slot the refusal's own ``y=X(...)`` echoes, not the axis the
+    channel object's class belongs to: an ``X`` written as ``y=`` still binds y, so
+    the column is passed as the call's own ``y=``. ``method='robust'`` keeps an x
+    ``bin=`` on the generic remedy instead of ``x_bins=``.
+    """
+    slot, channel_class, field = _OTHER_AXIS_CHANNEL_CASES[case]
+    value = True if kwarg == "bin" else "mean"
+    refused = channel_class(field, **{kwarg: value})
+    call = {"regplot": fm.regplot, "lmplot": fm.lmplot}[figure]
+    bindings = {"x": "v", "y": "w"}
+    with pytest.raises(ValueError) as excinfo:
+        if fit_door == "call":
+            call(_XY_ROWS, method="robust", **{**bindings, slot: refused})
+        else:
+            call(_XY_ROWS, method="robust", **bindings).encode(**{slot: refused}).to_svg()
+    generic = _generic_bin_remedy if kwarg == "bin" else _generic_aggregate_remedy
+    reason = "the fit reads the raw predictor" if slot == "x" else "the fit reads the raw response"
+    assert str(excinfo.value) == _message(
+        figure,
+        _written(slot, channel_class.__name__, field, kwarg, value),
+        kwarg,
+        reason,
+        generic(field, call_channel=slot),
+    )
+
+
+@pytest.mark.parametrize("figure", ["regplot", "lmplot"])
+@pytest.mark.parametrize("kwarg", ["bin", "aggregate"])
+@pytest.mark.parametrize("channel", ["x", "y"])
+def test_a_fieldless_fit_channel_only_drops_the_kwarg_in_the_regplot_and_lmplot_voices(
+    channel: str, kwarg: str, figure: str
+) -> None:
+    """A channel with no field has no column to compute ahead of the fit, so even a
+    door that binds at the call has nothing to pass as its ``x=``/``y=``: the remedy
+    drops the kwarg, as on every other door."""
+    value = True if kwarg == "bin" else "mean"
+    channel_class = X if channel == "x" else Y
+    call = {"regplot": fm.regplot, "lmplot": fm.lmplot}[figure]
+    bindings = {"x": "v", "y": "w", channel: channel_class(**{kwarg: value})}
+    with pytest.raises(ValueError) as excinfo:
+        call(_XY_ROWS, method="robust", **bindings)
+    reason = (
+        "the fit reads the raw predictor" if channel == "x" else "the fit reads the raw response"
+    )
+    assert str(excinfo.value) == _message(
+        figure,
+        _written(channel, channel_class.__name__, None, kwarg, value),
+        kwarg,
+        reason,
+        f"Drop {kwarg}=.",
+    )
+
+
+#: Every form lmplot and regplot take: the default (a scatter and the fit), no
+#: scatter, a hue grouping, and lmplot's col= facets (regplot does not facet).
+_FIT_FORMS: dict[str, dict[str, Any]] = {
+    "default": {},
+    "no_scatter": {"scatter": False},
+    "hue": {"hue": "g"},
+    "col": {"col": "g"},
+}
+
+#: Every (figure, form, door, kwarg) through which a logistic y ``bin=``/
+#: ``aggregate=`` reaches the fit's refusal. The door is how the binding is
+#: written: the call's own ``y=``, the figure's ``encode=`` entry, a shorthand
+#: string (an aggregate only), or a ``.encode()`` written after the call.
+_LOGISTIC_Y_DOORS = [
+    pytest.param(figure, form, door, kwarg, id=f"{figure}-{form}-{door}-{kwarg}")
+    for figure in ("lmplot", "regplot")
+    for form in _FIT_FORMS
+    for door in ("call", "encode", "shorthand", "later_encode")
+    for kwarg in ("bin", "aggregate")
+    if not (figure == "regplot" and form == "col") and not (door == "shorthand" and kwarg == "bin")
+]
+
+
+def _logistic_fit(figure: str, form: str, **bindings: Any) -> fm.Chart:
+    """*figure*'s ``method='logistic'`` chart of *form* over the binary response ``b``."""
+    call = {"lmplot": fm.lmplot, "regplot": fm.regplot}[figure]
+    kwargs = {"x": "v", "y": "b", "method": "logistic"} | _FIT_FORMS[form] | bindings
+    return call(_XB_GROUPED_ROWS, **kwargs)
+
+
+@pytest.mark.parametrize("figure,form,door,kwarg", _LOGISTIC_Y_DOORS)
+def test_a_logistic_y_refusal_drops_the_kwarg_on_every_door_and_the_drop_renders(
+    figure: str, form: str, door: str, kwarg: str
+) -> None:
+    """The logistic fit needs its response to be the raw 0/1 column, which a bin start
+    or a mean of it is not, so a y ``bin=``/``aggregate=`` ends by dropping the
+    kwarg wherever it is written: the call, ``encode=``, the shorthand, a later
+    ``.encode()``, on every form. The drop it names, the same call without the
+    kwarg, renders."""
+    value = True if kwarg == "bin" else "mean"
+    refused = Y("b", **{kwarg: value})
+    with pytest.raises(ValueError) as excinfo:
+        if door == "call":
+            _logistic_fit(figure, form, y=refused)
+        elif door == "encode":
+            _logistic_fit(figure, form, encode={"y": refused})
+        elif door == "shorthand":
+            _logistic_fit(figure, form, y="mean(b)")
+        else:
+            _logistic_fit(figure, form).encode(y=refused).to_svg()
+    assert str(excinfo.value) == _message(
+        figure,
+        _written("y", "Y", "b", kwarg, value),
+        kwarg,
+        "the fit reads the raw response",
+        f"Drop {kwarg}=.",
+    )
+    assert "<svg" in _logistic_fit(figure, form).to_svg()
+
+
+@pytest.mark.parametrize("figure", ["lmplot", "regplot"])
+@pytest.mark.parametrize("kwarg", ["bin", "aggregate"])
+def test_the_call_binding_ending_would_reach_the_logistic_fits_own_refusal(
+    figure: str, kwarg: str
+) -> None:
+    """Why a logistic y drops the kwarg instead of passing a computed column as the
+    call's own ``y=``: the fit refuses a response that is not 0 or 1, and a bin
+    start or a mean of the 0/1 column is not."""
+    call = {"lmplot": fm.lmplot, "regplot": fm.regplot}[figure]
+    rows = _XB_GROUPED_ROWS.with_columns(bucket=pl.col("v") // 4)
+    if kwarg == "bin":
+        chart = call(rows, x="v", y="bin_start", method="logistic").transform(
+            fm.Bin("b", per_row=True)
+        )
+    else:
+        chart = call(rows, x="mean_v", y="mean_b", method="logistic").transform(
+            fm.transform_aggregate(
+                {"field": "v", "fn": "mean", "as": "mean_v"},
+                {"field": "b", "fn": "mean", "as": "mean_b"},
+                groupby=["bucket"],
+            )
+        )
+    with pytest.raises(ValueError, match="y must be binary"):
+        chart.to_svg()
 
 
 #: Degenerate x/y frames, built the same way as the fit's own degenerate
@@ -2455,22 +2687,16 @@ def _per_group_and_hue_mean() -> dict:
     return fm.transform_aggregate({"field": "v", "fn": "mean", "as": "mean_v"}, groupby=["g", "h"])
 
 
-_BIN_REMEDY_TEXT = (
-    ".transform(fm.Bin({field!r}, per_row=True)) and bind its 'bin_start' column{with_clause}, "
-    "or drop bin=."
-)
-_AGGREGATE_REMEDY_TEXT = (
-    ".transform(fm.transform_aggregate(...)) and bind its output column{with_clause}, "
-    "or drop aggregate=."
-)
+def _names_bin(field: str, with_clause: str = "", *, call_channel: str | None = None) -> str:
+    """The generic bin remedy from its ``.transform(...)`` step on, as a refusal message carries it."""
+    binding = _bind_half("'bin_start'", with_clause=with_clause, call_channel=call_channel)
+    return f".transform(fm.Bin({field!r}, per_row=True)) and {binding}, or drop bin=."
 
 
-def _names_bin(field: str, with_clause: str = "") -> str:
-    return _BIN_REMEDY_TEXT.format(field=field, with_clause=with_clause)
-
-
-def _names_aggregate(with_clause: str = "") -> str:
-    return _AGGREGATE_REMEDY_TEXT.format(with_clause=with_clause)
+def _names_aggregate(with_clause: str = "", *, call_channel: str | None = None) -> str:
+    """The generic aggregate remedy from its ``.transform(...)`` step on, as a refusal message carries it."""
+    binding = _bind_half("output", with_clause=with_clause, call_channel=call_channel)
+    return f".transform(fm.transform_aggregate(...)) and {binding}, or drop aggregate=."
 
 
 def _per_row_bin(field: str) -> fm.Bin:
@@ -2544,11 +2770,15 @@ _COLUMN_NOT_FOUND = pl.exceptions.ColumnNotFoundError
 
 _REMEDY_RUNS: dict[str, _RemedyRun] = {
     # The per-row Bin: bin the refused field per row, bind 'bin_start'.
+    # regplot's and lmplot's fits read only the columns their own call
+    # names, so their remedies pass 'bin_start' as the call's own x=/y=
+    # (every remedied call below names it that way; a logistic y, which must
+    # stay the raw 0/1 response, only drops the kwarg).
     "per_row_bin_regplot_logistic_x": _RemedyRun(
         refused=lambda: fm.regplot(
             _NONSEPARABLE_ROWS, x=X("v", bin=True), y="b", method="logistic"
         ),
-        names=_names_bin("v"),
+        names=_names_bin("v", call_channel="x"),
         remedied=lambda: fm.regplot(
             _NONSEPARABLE_ROWS, x="bin_start", y="b", method="logistic"
         ).transform(_per_row_bin("v")),
@@ -2561,9 +2791,24 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             column="bin_start",
         ),
     ),
+    "per_row_bin_regplot_glm_x": _RemedyRun(
+        refused=lambda: fm.regplot(_NONSEPARABLE_ROWS, x=X("v", bin=True), y="b", method="glm"),
+        names=_names_bin("v", call_channel="x"),
+        remedied=lambda: fm.regplot(
+            _NONSEPARABLE_ROWS, x="bin_start", y="b", method="glm"
+        ).transform(_per_row_bin("v")),
+        sibling=lambda: fm.regplot(
+            _prebinned(_NONSEPARABLE_ROWS, "v"), x="bin_start", y="b", method="glm"
+        ),
+        without=_MissingColumn(
+            build=lambda: fm.regplot(_NONSEPARABLE_ROWS, x="bin_start", y="b", method="glm"),
+            error=ValueError,
+            column="bin_start",
+        ),
+    ),
     "per_row_bin_regplot_robust_x": _RemedyRun(
         refused=lambda: fm.regplot(_XY_ROWS, x=X("v", bin=True), y="w", method="robust"),
-        names=_names_bin("v"),
+        names=_names_bin("v", call_channel="x"),
         remedied=lambda: fm.regplot(_XY_ROWS, x="bin_start", y="w", method="robust").transform(
             _per_row_bin("v")
         ),
@@ -2578,7 +2823,7 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
     ),
     "per_row_bin_lmplot_lm_y": _RemedyRun(
         refused=lambda: fm.lmplot(_XY_ROWS, x="v", y=Y("w", bin=True), method="lm"),
-        names=_names_bin("w"),
+        names=_names_bin("w", call_channel="y"),
         remedied=lambda: fm.lmplot(_XY_ROWS, x="v", y="bin_start", method="lm").transform(
             _per_row_bin("w")
         ),
@@ -2824,9 +3069,12 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             column="mean_v",
         ),
     ),
+    # regplot's and lmplot's remedies pass the aggregate's output column as
+    # the call's own x=/y=, as every remedied call below names it (a logistic
+    # y, which must stay the raw 0/1 response, only drops the kwarg).
     "transform_aggregate_lmplot_lm_x": _RemedyRun(
         refused=lambda: fm.lmplot(_GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w", method="lm"),
-        names=_names_aggregate(),
+        names=_names_aggregate(call_channel="x"),
         remedied=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="lm").transform(
             _per_group_mean()
         ),
@@ -2837,11 +3085,39 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             column="mean_v",
         ),
     ),
+    "transform_aggregate_lmplot_y": _RemedyRun(
+        refused=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="v", y=Y("w", aggregate="mean")),
+        names=_names_aggregate(call_channel="y"),
+        remedied=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
+            _per_group_mean()
+        ),
+        sibling=lambda: fm.lmplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w"),
+        without=_MissingColumn(
+            build=lambda: fm.lmplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w"),
+            error=ValueError,
+            column="mean_v",
+        ),
+    ),
     "transform_aggregate_regplot_robust_y": _RemedyRun(
         refused=lambda: fm.regplot(
             _GROUPED_XY_ROWS, x="v", y=Y("w", aggregate="mean"), method="robust"
         ),
-        names=_names_aggregate(),
+        names=_names_aggregate(call_channel="y"),
+        remedied=lambda: fm.regplot(
+            _GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"
+        ).transform(_per_group_mean()),
+        sibling=lambda: fm.regplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", method="robust"),
+        without=_MissingColumn(
+            build=lambda: fm.regplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"),
+            error=ValueError,
+            column="mean_v",
+        ),
+    ),
+    "transform_aggregate_regplot_x_robust": _RemedyRun(
+        refused=lambda: fm.regplot(
+            _GROUPED_XY_ROWS, x=X("v", aggregate="mean"), y="w", method="robust"
+        ),
+        names=_names_aggregate(call_channel="x"),
         remedied=lambda: fm.regplot(
             _GROUPED_XY_ROWS, x="mean_v", y="mean_w", method="robust"
         ).transform(_per_group_mean()),
