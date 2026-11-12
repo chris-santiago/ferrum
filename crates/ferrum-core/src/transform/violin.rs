@@ -19,6 +19,7 @@ use crate::transform::group_key::{
     empty_groupby_col, group_partition_multi, groupby_field_nullable, materialize_groupby_col,
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::kde::{self, BandwidthSpec, KdeSpec};
 
 fn default_bandwidth() -> BandwidthSpec {
@@ -103,14 +104,55 @@ fn output_field_names(offset_col_name: &str) -> [String; 4] {
     ]
 }
 
+/// Reason a group with fewer than two usable values cannot be estimated, in
+/// `Kde`'s own wording.
+const FEWER_THAN_TWO_USABLE: &str = "fewer than 2 usable (non-null/non-NaN) values";
+const ALL_VALUES_EQUAL: &str = "its usable values are all equal";
+const DENSITY_ZERO: &str = "its density is zero across the evaluation range";
+/// A group whose values reach an infinite extent: `Kde` reports the same
+/// cause as its bandwidth failing to resolve.
+const EXTENT_NOT_FINITE: &str = "the bandwidth resolved to a non-positive or non-finite value";
+
+/// Number of vertices in the placeholder ring a group the statistic cannot
+/// estimate keeps, so its key, slot and legend entry survive.
+const PLACEHOLDER_RING_VERTICES: usize = 4;
+
+/// The polygon vertices being accumulated, one row per vertex.
+#[derive(Default)]
+struct RingRows {
+    group_ids: Vec<u32>,
+    keys: Vec<Vec<KeyValue>>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+}
+
+impl RingRows {
+    fn push(&mut self, gid: usize, key: &[KeyValue], x: f64, y: f64) {
+        self.group_ids.push(gid as u32);
+        self.keys.push(key.to_vec());
+        self.x.push(x);
+        self.y.push(y);
+    }
+
+    /// A zero-width ring at `y`, or a NaN ring when there is no value to put
+    /// it at. Both keep the group's key; the zero-width ring also keeps a
+    /// finite `violin_y` for scale resolution. Neither paints anything: the
+    /// zero-width ring encloses no area and the NaN vertices have no position.
+    fn push_placeholder(&mut self, gid: usize, key: &[KeyValue], y: f64) {
+        for _ in 0..PLACEHOLDER_RING_VERTICES {
+            self.push(gid, key, if y.is_nan() { f64::NAN } else { 0.0 }, y);
+        }
+    }
+}
+
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    apply_with_context(spec, batch, &crate::transform::context::TransformContext::default())
+    apply_with_context(spec, batch, &TransformContext::default())
 }
 
 pub(crate) fn apply_with_context(
     spec: &ViolinSpec,
     batch: &RecordBatch,
-    ctx: &crate::transform::context::TransformContext,
+    ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     let schema = batch.schema();
 
@@ -212,10 +254,7 @@ pub(crate) fn apply_with_context(
     };
 
     // Per-group KDE → mirrored polygon vertices.
-    let mut group_ids: Vec<u32> = Vec::new();
-    let mut keys_out: Vec<Vec<KeyValue>> = Vec::new();
-    let mut violin_x: Vec<f64> = Vec::new();
-    let mut violin_y: Vec<f64> = Vec::new();
+    let mut rings = RingRows::default();
 
     for (gid, (key, rows)) in partition.groups.iter().enumerate() {
         let vals: Vec<f64> = rows
@@ -232,7 +271,27 @@ pub(crate) fn apply_with_context(
             })
             .collect();
 
-        if vals.is_empty() {
+        // A group the statistic cannot estimate is named once, as `Kde` names
+        // the same data, and keeps a placeholder ring so its key, slot and
+        // legend entry stay.
+        let group_label = (!spec.groupby.is_empty()).then(|| describe_group_keys(&spec.groupby, key));
+        let degrade = |reason: &str| {
+            ctx.warn(TransformWarning::DegenerateFit {
+                transform: "Violin".into(),
+                group: group_label.clone(),
+                reason: reason.into(),
+                panel: None,
+                step: ctx.step.clone(),
+            });
+        };
+
+        // No usable value, or one (finite or not), is `Kde`'s own `fewer than
+        // 2` case. A finite single value keeps its ring at that value, so the
+        // scale still sees it; otherwise the ring has no position.
+        if vals.len() < 2 {
+            degrade(FEWER_THAN_TWO_USABLE);
+            let at = vals.first().copied().filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+            rings.push_placeholder(gid, key, at);
             continue;
         }
 
@@ -242,21 +301,20 @@ pub(crate) fn apply_with_context(
                 (a.min(v), b.max(v))
             });
         if !(lo.is_finite() && hi.is_finite()) {
+            degrade(EXTENT_NOT_FINITE);
+            rings.push_placeholder(gid, key, f64::NAN);
             continue;
         }
         // Degenerate group: a single observation or all-equal values produce
-        // lo == hi (zero-width KDE domain). Emit a minimal zero-width polygon
+        // lo == hi (zero-width KDE domain). Emit a minimal zero-width ring
         // (4 vertices at violin_x=0, violin_y=lo) so the output batch is
         // non-empty and scale_resolve can find finite values in violin_y. The
-        // polygon mark's `ring.len() < 3` guard will still skip rendering it —
-        // a 1-point violin is correctly invisible — but the column is populated.
+        // four vertices clear the polygon mark's three-vertex minimum but are
+        // collinear, so the ring encloses no area and paints nothing: the
+        // warning is what names the missing body.
         if lo >= hi {
-            for _ in 0..4 {
-                group_ids.push(gid as u32);
-                keys_out.push(key.clone());
-                violin_x.push(0.0);
-                violin_y.push(lo);
-            }
+            degrade(ALL_VALUES_EQUAL);
+            rings.push_placeholder(gid, key, lo);
             continue;
         }
 
@@ -328,6 +386,8 @@ pub(crate) fn apply_with_context(
             }
         }
         if !(max_density.is_finite()) || max_density <= 0.0 {
+            degrade(DENSITY_ZERO);
+            rings.push_placeholder(gid, key, lo);
             continue;
         }
 
@@ -346,10 +406,7 @@ pub(crate) fn apply_with_context(
                     0.0
                 }
             };
-            group_ids.push(gid as u32);
-            keys_out.push(key.clone());
-            violin_x.push(scale * d);
-            violin_y.push(value_col.value(i));
+            rings.push(gid, key, scale * d, value_col.value(i));
         }
         // Left side: top→bottom  (i in (0..n).rev()) → -scale * density
         for i in (0..n).rev() {
@@ -363,13 +420,11 @@ pub(crate) fn apply_with_context(
                     0.0
                 }
             };
-            group_ids.push(gid as u32);
-            keys_out.push(key.clone());
-            violin_x.push(-scale * d);
-            violin_y.push(value_col.value(i));
+            rings.push(gid, key, -scale * d, value_col.value(i));
         }
     }
 
+    let RingRows { group_ids, keys: keys_out, x: violin_x, y: violin_y } = rings;
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 3);
     cols.push(Arc::new(UInt32Array::from(group_ids)));
     for (gi, dt) in group_dtypes.iter().enumerate() {
@@ -1994,4 +2049,201 @@ mod tests {
         );
     }
 
+
+    // ── groups the statistic cannot estimate are named and keep a ring ───────
+
+    fn spec_for(groupby: &[&str], n: usize) -> ViolinSpec {
+        ViolinSpec {
+            field: "v".into(),
+            groupby: groupby.iter().map(|g| g.to_string()).collect(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        }
+    }
+
+    /// Warnings a call raised, as `(transform, group, reason)`.
+    fn degenerate_fits(ctx: &TransformContext) -> Vec<(String, Option<String>, String)> {
+        ctx.warnings
+            .borrow()
+            .iter()
+            .map(|w| match w {
+                TransformWarning::DegenerateFit { transform, group, reason, .. } => {
+                    (transform.clone(), group.clone(), reason.clone())
+                }
+                other => panic!("unexpected warning {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Rows `(group_id, violin_x, violin_y)` of one group.
+    fn group_rows(out: &RecordBatch, gid: u32) -> Vec<(f64, f64)> {
+        let ids = col_u32(out, "group_id");
+        let xs = col_f64(out, "violin_x");
+        let ys = col_f64(out, "violin_y");
+        (0..ids.len()).filter(|&i| ids[i] == gid).map(|i| (xs[i], ys[i])).collect()
+    }
+
+    /// One group of well-formed values plus a group per degenerate shape.
+    fn degenerate_frame() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("group", DataType::Utf8, false),
+        ]));
+        let values: Vec<Option<f64>> = (0..20)
+            .map(|i| Some(i as f64))
+            .chain([Some(5.0)])
+            .chain([Some(2.0), Some(2.0), Some(2.0)])
+            .chain([None, None])
+            .collect();
+        let mut groups = vec!["ok"; 20];
+        groups.extend(["one"]);
+        groups.extend(["tied"; 3]);
+        groups.extend(["none"; 2]);
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(values)), Arc::new(StringArray::from(groups))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn violin_names_each_group_it_cannot_estimate_in_kdes_wording() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec_for(&["group"], 32), &degenerate_frame(), &ctx).unwrap();
+        assert_eq!(
+            degenerate_fits(&ctx),
+            vec![
+                ("Violin".to_string(), Some("group=one".to_string()), FEWER_THAN_TWO_USABLE.to_string()),
+                ("Violin".to_string(), Some("group=tied".to_string()), ALL_VALUES_EQUAL.to_string()),
+                ("Violin".to_string(), Some("group=none".to_string()), FEWER_THAN_TWO_USABLE.to_string()),
+            ]
+        );
+        // Every group keeps rows: the well-formed body plus a ring each.
+        let ids: std::collections::BTreeSet<u32> = col_u32(&out, "group_id").into_iter().collect();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        assert_eq!(group_rows(&out, 0).len(), 64);
+    }
+
+    #[test]
+    fn violin_placeholder_rings_sit_at_the_value_or_are_nan() {
+        pyo3::Python::initialize();
+        let out = apply(&spec_for(&["group"], 32), &degenerate_frame()).unwrap();
+        for (gid, y) in [(1, 5.0), (2, 2.0)] {
+            let rows = group_rows(&out, gid);
+            assert_eq!(rows.len(), PLACEHOLDER_RING_VERTICES);
+            assert!(rows.iter().all(|&(x, yy)| x == 0.0 && yy == y), "{rows:?}");
+        }
+        let none = group_rows(&out, 3);
+        assert_eq!(none.len(), PLACEHOLDER_RING_VERTICES);
+        assert!(none.iter().all(|&(x, y)| x.is_nan() && y.is_nan()), "{none:?}");
+        // The offset column agrees with the vertices: NaN where violin_x is
+        // NaN, zero where it is zero.
+        let offsets = col_f64(&out, "__pos_x_offset__");
+        let xs = col_f64(&out, "violin_x");
+        let nan_rows = xs.iter().filter(|x| x.is_nan()).count();
+        let zero_rows = xs.iter().filter(|x| **x == 0.0).count();
+        assert!(nan_rows > 0 && zero_rows > 0, "the frame holds both ring shapes");
+        for (i, (off, x)) in offsets.iter().zip(&xs).enumerate() {
+            if x.is_nan() {
+                assert!(off.is_nan(), "offset[{i}] = {off} where violin_x is NaN");
+            } else if *x == 0.0 {
+                assert_eq!(*off, 0.0, "offset[{i}] where violin_x is zero");
+            }
+        }
+    }
+
+    /// Groups with values draw exactly as they did before the degenerate
+    /// groups were kept: the well-formed group's rows equal those of a call
+    /// over that group alone.
+    #[test]
+    fn violin_groups_with_values_are_unchanged_by_the_placeholders() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let with = apply_with_context(&spec_for(&["group"], 32), &degenerate_frame(), &ctx).unwrap();
+        let alone = apply(
+            &spec_for(&["group"], 32),
+            &batch_value_group((0..20).map(|i| i as f64).collect(), vec!["ok"; 20]),
+        )
+        .unwrap();
+        // The pixel offsets differ with the band count; the polygon does not.
+        assert_eq!(group_rows(&with, 0), group_rows(&alone, 0));
+    }
+
+    #[test]
+    fn violin_ungrouped_degenerate_call_names_no_group() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        apply_with_context(&spec_for(&[], 32), &batch("v", vec![3.0]), &ctx).unwrap();
+        assert_eq!(
+            degenerate_fits(&ctx),
+            vec![("Violin".to_string(), None, FEWER_THAN_TWO_USABLE.to_string())]
+        );
+    }
+
+    /// A density that is zero everywhere has no peak to scale by. A pinned
+    /// extent far from the data puts every grid point out in the kernel's
+    /// tail, where the density underflows to zero.
+    #[test]
+    fn violin_density_zero_across_the_range_is_named_and_keeps_a_ring() {
+        pyo3::Python::initialize();
+        let mut spec = spec_for(&[], 16);
+        spec.bandwidth = BandwidthSpec::Fixed { value: 1.0 };
+        spec.extent = Some((1.0e6, 1.0e6 + 10.0));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch("v", vec![0.0, 1.0, 2.0]), &ctx).unwrap();
+        assert_eq!(
+            degenerate_fits(&ctx),
+            vec![("Violin".to_string(), None, DENSITY_ZERO.to_string())]
+        );
+        let rows = group_rows(&out, 0);
+        assert_eq!(rows.len(), PLACEHOLDER_RING_VERTICES);
+        assert!(rows.iter().all(|&(x, y)| x == 0.0 && y == 0.0), "{rows:?}");
+    }
+
+    #[test]
+    fn violin_infinite_values_are_named_with_a_nan_ring() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let out =
+            apply_with_context(&spec_for(&[], 16), &batch("v", vec![1.0, f64::INFINITY]), &ctx).unwrap();
+        assert_eq!(
+            degenerate_fits(&ctx),
+            vec![("Violin".to_string(), None, EXTENT_NOT_FINITE.to_string())]
+        );
+        assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
+    }
+
+    /// One infinite value is a single usable value: it is named as `Kde`
+    /// names the same data, not as a failed bandwidth.
+    #[test]
+    fn violin_one_infinite_value_is_named_as_a_single_value() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let out =
+            apply_with_context(&spec_for(&[], 16), &batch("v", vec![f64::INFINITY]), &ctx).unwrap();
+        assert_eq!(
+            degenerate_fits(&ctx),
+            vec![("Violin".to_string(), None, FEWER_THAN_TWO_USABLE.to_string())]
+        );
+        assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
+    }
+
+    #[test]
+    fn violin_well_formed_groups_warn_nothing() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let b = batch_value_group(
+            (0..40).map(|i| (i % 20) as f64).collect(),
+            (0..40).map(|i| if i < 20 { "a" } else { "b" }).collect(),
+        );
+        apply_with_context(&spec_for(&["group"], 32), &b, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
+    }
 }

@@ -14075,6 +14075,54 @@ fn a_grouped_qq_facet_panel_the_drop_emptied_draws_empty_and_all_emptied_refuses
     );
 }
 
+/// Eight rows over facet panels `F1`/`F2` and hue `h` (a, b, a, b, ...),
+/// with `val` as given.
+fn faceted_valued_rows(val: Vec<Option<f64>>) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("val", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+            Field::new("f", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(val)),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a", "b", "a", "b"])),
+            Arc::new(StringArray::from(vec!["F1", "F1", "F1", "F1", "F2", "F2", "F2", "F2"])),
+        ],
+    )
+    .expect("schema and columns agree")
+}
+
+/// A faceted qq with no usable value in any panel refuses as the whole frame
+/// does, and carries no warning that says a panel or group degraded instead
+/// of failing; with a usable value in one panel the chart draws and the
+/// emptied panel's groups are each named once.
+#[test]
+fn a_faceted_qq_with_no_usable_value_in_any_panel_refuses_without_a_degrade_warning() {
+    pyo3::Python::initialize();
+    let grouped: ChartSpec = serde_json::from_str(FACETED_GROUPED_QQ).expect("the qq wire deserializes");
+    let ungrouped: ChartSpec = serde_json::from_str(
+        &FACETED_GROUPED_QQ
+            .replace(r#","color":{"field":"h"}"#, "")
+            .replace(r#""groupby":["h","f"]"#, r#""groupby":["f"]"#),
+    )
+    .expect("the ungrouped qq wire deserializes");
+    for (name, spec) in [("grouped", &grouped), ("ungrouped", &ungrouped)] {
+        let err = prepare_with(spec, &faceted_valued_rows(vec![None; 8])).err().expect("every panel emptied refuses");
+        assert_eq!(err.to_string(), "transform failed: ValueError: stat_qq: empty input after filter", "{name}");
+        assert!(err.carried_warnings().is_empty(), "{name}: {:?}", err.carried_warnings());
+    }
+    let mixed = faceted_valued_rows(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), None, None, None, None]);
+    let p = prep(&grouped, &mixed);
+    let degraded: Vec<String> = p
+        .warnings
+        .iter()
+        .map(|w| w.to_string())
+        .filter(|w| w.contains("degraded to an empty/flat output"))
+        .collect();
+    assert_eq!(degraded.len(), 2, "each emptied group of the emptied panel is named once: {degraded:?}");
+}
+
 /// Thirty rows over three interleaved `c` groups (`a`, `b`, `c` in turn),
 /// whose `v` and `y` vary within each group, and an ordinal `t` with a
 /// two-valued `o` (and its numeric twin `w`) beside it: one series through

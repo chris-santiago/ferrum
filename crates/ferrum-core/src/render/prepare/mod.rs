@@ -2501,6 +2501,13 @@ fn settle_all_null_partitions(
         }
         match outcome {
             AllNullOutcome::Refused(refusal) if every_panel => {
+                // Each panel's per-group fit warning says its group degraded
+                // instead of failing the chart; the chart fails, so the step's
+                // own fit warnings are not reported beside its refusal. Other
+                // steps' warnings and the null-key drop warning still are.
+                ctx.warnings.borrow_mut().retain(
+                    |warning| !matches!(warning, TransformWarning::DegenerateFit { step: fit_step, .. } if *fit_step == step),
+                );
                 return Err(transform_refusal(refusal.to_string(), ctx));
             }
             AllNullOutcome::Refused(_) => {}

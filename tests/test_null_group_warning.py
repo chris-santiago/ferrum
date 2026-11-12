@@ -57,6 +57,9 @@ import ferrum as fm
 from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import data_bar_rects, mark_groups, mark_layer, svg_elements
 
+# The tail every degenerate-fit sentence ends with.
+_FIT_DEGRADED = "it degraded to an empty/flat output instead of failing the whole chart"
+
 _TWO_GROUP_ONE_NULL = pl.DataFrame(
     {
         "x": [1.0, 2.0, 3.0, 4.0],
@@ -597,7 +600,7 @@ def test_a_kde_hue_group_with_no_usable_values_is_reported_by_degenerate_fit_onl
     svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="kde", hue="h").to_svg())
     assert messages == [
         "Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); "
-        "it degraded to an empty/flat output instead of failing the whole chart"
+        f"{_FIT_DEGRADED}"
     ]
     assert ">c<" in svg
 
@@ -767,15 +770,14 @@ def _kde_and_ecdf_charts() -> tuple["fm.Chart", "fm.Chart"]:
             _smooth_and_aggregate_line_charts,
             [
                 "Smooth: could not fit group g=a (the loess fit could not be computed for this data); "
-                "it degraded to an empty/flat output instead of failing the whole chart",
+                f"{_FIT_DEGRADED}",
                 "layer 1: mark_line: every row of g=a has a null or non-finite y, so it draws nothing",
             ],
         ),
         (
             _kde_and_ecdf_charts,
             [
-                "Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); it "
-                "degraded to an empty/flat output instead of failing the whole chart",
+                f"Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); {_FIT_DEGRADED}",
                 "displot: every row of h=c has a null or non-finite x, so it draws nothing",
             ],
         ),
@@ -810,8 +812,8 @@ def test_a_user_written_fit_step_owns_its_degenerate_group():
     assert messages == [
         "Smooth: every row has a null in its groupby key (gi), so the data could not be split "
         "into groups; the whole batch was used as one ungrouped computation instead",
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) x/y points); it "
-        "degraded to an empty/flat output instead of failing the whole chart",
+        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) x/y points); "
+        f"{_FIT_DEGRADED}",
     ]
 
 
@@ -867,11 +869,9 @@ def test_a_fit_owns_every_layer_drawn_from_its_degraded_groups():
         "residual degrees of freedom for a 4-parameter fit; the band needs at least 5); "
         "the fit line is drawn without it",
         "Smooth: could not fit group gi=1 in facet panel sp=p2 (the poly(degree=3) fit "
-        "could not be computed for this data); it degraded to an empty/flat output "
-        "instead of failing the whole chart",
+        f"could not be computed for this data); {_FIT_DEGRADED}",
         "Smooth: could not fit group gi=2 in facet panel sp=p2 (the poly(degree=3) fit "
-        "could not be computed for this data); it degraded to an empty/flat output "
-        "instead of failing the whole chart",
+        f"could not be computed for this data); {_FIT_DEGRADED}",
         "Smooth: every row in facet panel sp=p1 has a null in its groupby key (gi), so "
         "that panel's rows could not be split into groups; in that panel, the whole "
         "batch was used as one ungrouped computation instead",
@@ -978,6 +978,35 @@ def _census(messages: list[str]) -> list[str]:
     return [m for m in messages if "null or non-finite" in m]
 
 
+# The reasons a density statistic gives for a group it cannot estimate (the sentence's tail,
+# ``_FIT_DEGRADED``, is defined at the top of the module).
+FIT_FEW = "fewer than 2 usable (non-null/non-NaN) values"
+FIT_NONE = "no usable (non-null/non-NaN) values"
+
+
+def _fit_message(statistic: str, group: str, reason: str, *, panel: str | None = None) -> str:
+    """The ``DegenerateFit`` sentence for one group ``statistic`` could not estimate, in the
+    facet panel ``panel`` when given."""
+    where = "" if panel is None else f" in facet panel {panel}"
+    return f"{statistic}: could not fit group {group}{where} ({reason}); {_FIT_DEGRADED}"
+
+
+def _panel_fit_message(statistic: str, reason: str, panel: str = "f=q") -> str:
+    """The ``DegenerateFit`` sentence for a facet panel ``statistic`` could not estimate."""
+    return f"{statistic}: could not fit the data in facet panel {panel} ({reason}); {_FIT_DEGRADED}"
+
+
+def _fit_warnings(messages: list[str], statistic: str) -> list[str]:
+    """The ``DegenerateFit`` messages of ``statistic`` among ``messages``."""
+    return [m for m in messages if m.startswith(f"{statistic}: could not fit")]
+
+
+def _statistic_reports(mark_method: str) -> set[str]:
+    """What an emptied category ``z`` adds beside the census report of ``mark_method``: a violin's
+    body is a density statistic, which names the category itself; every other mark adds nothing."""
+    return {_fit_message("Violin", "c=z", FIT_FEW)} if mark_method == "mark_violin" else set()
+
+
 def _given(**channels: Any) -> dict[str, Any]:
     """The channels of ``channels`` that are bound, so one left unbound is left out of a call
     instead of being passed as ``None``."""
@@ -1073,10 +1102,10 @@ def test_a_composites_empty_slot_is_named_in_the_callers_channel(mark_method: st
     chart = _slot_chart(_slot_frame(_EMPTY_Z), mark_method, encoding)
     expected = _slot_message(mark_method)
     svg, shown = _render_capturing(chart.to_svg, action="default")
-    assert shown == [expected]
+    assert sorted(shown) == sorted([expected, *_statistic_reports(mark_method)])
     assert ">z<" in svg
     _, every = _render_capturing(chart.to_svg)
-    assert set(every) == {expected}
+    assert set(every) == {expected, *_statistic_reports(mark_method)}
 
 
 @pytest.mark.parametrize("mark_method", ["mark_boxplot", "mark_errorbar", "mark_violin"])
@@ -1198,7 +1227,9 @@ def test_a_horizontal_band_slot_is_named(mark_method: str, mark_kwargs: dict):
         y="c", x="w"
     )
     svg, shown = _render_capturing(chart.to_svg, action="default")
-    assert shown == [_slot_message(mark_method, "x")]
+    assert sorted(shown) == sorted(
+        [_slot_message(mark_method, "x"), *_statistic_reports(mark_method)]
+    )
     assert ">z<" in svg
 
 
@@ -1720,7 +1751,7 @@ def test_a_composite_with_no_empty_slot_warns_nothing(mark_method: str, encoding
     )
     assert messages == []
     _, emptied = _render_capturing(_slot_chart(_slot_frame(_EMPTY_Z), mark_method, encoding).to_svg)
-    assert set(emptied) == {_slot_message(mark_method)}
+    assert set(emptied) == {_slot_message(mark_method)} | _statistic_reports(mark_method)
 
 
 @pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
@@ -3068,3 +3099,55 @@ def test_an_emptied_histogram_level_and_boxen_category_reach_the_interactive_rou
     assert static
     assert interactive == static * 2
     assert "NaN" not in scene and "Infinity" not in scene
+
+
+# ---------------------------------------------------------------------------
+# A violin's all-null category or panel: the body is the statistic's to name, the
+# inner marks over it are the census's. Each text appears once per layer that owns it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("inner", ["none", "box", "quartile", "point"])
+def test_an_all_null_violin_category_is_named_by_its_body_and_its_inner_marks_each_once(
+    inner: str,
+):
+    """The body's report is the statistic's, so the census names the category only for the inner
+    marks laid over it: one report per inner layer (the chart's layers beside the body), never
+    one more for the body, and none at all for ``inner='none'``, whose body is the sole layer."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z)).mark_violin(inner=inner).encode(x="c", y="w")
+    inner_layers = len(chart.to_dict()["layers"]) - 1
+    svg, shown = _render_capturing(chart.to_svg)
+    assert _fit_warnings(shown, "Violin") == [_fit_message("Violin", "c=z", FIT_FEW)]
+    assert _census(shown) == [_slot_message("mark_violin")] * inner_layers
+    assert (inner_layers == 0) == (inner == "none")
+    assert ">z<" in svg
+
+
+def test_an_all_null_violin_category_reads_once_per_text_by_default_with_its_box():
+    """What a caller sees under Python's own filter: the statistic's sentence and the box's."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z)).mark_violin().encode(x="c", y="w")
+    _, shown = _render_capturing(chart.to_svg, action="default")
+    assert sorted(shown) == sorted(
+        [_fit_message("Violin", "c=z", FIT_FEW), _slot_message("mark_violin")]
+    )
+
+
+def test_a_catplot_violin_names_an_all_null_category_by_its_body_and_its_box():
+    chart = _catplot_chart(_slot_frame(_EMPTY_Z), "violin", None)
+    svg, shown = _render_capturing(chart.to_svg, action="default")
+    assert sorted(shown) == sorted(
+        [_fit_message("Violin", "c=z", FIT_FEW), _slot_message("catplot")]
+    )
+    assert ">z<" in svg
+
+
+def test_an_emptied_violin_panel_is_named_by_its_categories_and_by_the_boxs_panel_report():
+    """Panel ``q`` holds only nulls: the statistic names each of its categories with the panel
+    clause, and the box names the panel once; the body adds no panel report of its own."""
+    df = _faceted_slot_frame(["q"], blank_in=("q",))
+    chart = fm.Chart(df).mark_violin().encode(x="c", y="w").facet(col="f")
+    _, shown = _render_capturing(chart.to_svg, action="default")
+    assert sorted(_fit_warnings(shown, "Violin")) == [
+        _fit_message("Violin", f"c={category}", FIT_FEW, panel="f=q") for category in "abz"
+    ]
+    assert _census(shown) == [_panel_message("mark_violin")]
