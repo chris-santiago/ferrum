@@ -13278,7 +13278,7 @@ _GROUPED: dict[str, tuple[str, str, list[str]]] = {
             ("smooth", ["c"]),
             ("smooth-ci", ["c"]),
             ("qq", ["c"]),
-            ("boxen", ["c"]),
+            ("boxen", ["g", "c"]),
             ("boxplot", ["g", "c"]),
             ("violin", ["g", "c"]),
         )
@@ -13293,8 +13293,8 @@ _GROUPED: dict[str, tuple[str, str, list[str]]] = {
 def test_a_composite_statistic_groups_by_each_grouping_channel(case):
     """Color under each spelling, detail, shape and stroke_dash each split the statistic.
 
-    Every step the composite builds groups by the field, after the box and
-    violin's category, so no sub-layer drops a binding its rows lack.
+    Every step the composite builds groups by the field, after the box,
+    boxen and violin's category, so no sub-layer drops a binding its rows lack.
     Rejects reading only ``color`` (``mark_smooth(color=)`` was refused and
     ``mark_boxplot(shape=)`` drew one box per category, its outliers
     shaped by rows the box never split), and rejects an alias spelling
@@ -15283,7 +15283,7 @@ _POST_MERGE_GROUPBY: dict[str, tuple[Callable[[], Any], str, list[str] | None]] 
     "boxen": (
         lambda: (mk("boxen", x="g", y="z") + P(x="g", y="z")).encode(color="c"),
         "letter_value",
-        ["c"],
+        ["g", "c"],
     ),
     "contour": (lambda: (mk("contour", x="v", y="y") + P()).encode(color="g"), "kde2_d", ["g"]),
 }

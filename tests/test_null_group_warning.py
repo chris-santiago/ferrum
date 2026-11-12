@@ -9,16 +9,31 @@ now warns once per layer through ``RenderWarning::GroupsWithNoPosition``,
 voiced the way ``RenderWarning::SeriesDropped`` is. The legend keeps the
 named group's entry, and the axis keeps the named slot. A row inside a group
 or slot that still draws some rows stays the documented, silent per-row null
-skip; a group an explicit domain or a log scale's off side already reports, a
-one-point series, a group a statistic's own transform warning
-(``DegenerateFit``, ``IntervalUndefined``) already names by the same group,
-and a histogram hue group a null column emptied also keep their own,
-unchanged reports.
+skip; a group an explicit domain cuts, a primitive mark's or a boxen
+category's rows a log scale's off side cuts, a one-point series, and a group a
+statistic's own transform warning (``DegenerateFit``, ``IntervalUndefined``)
+already names by the same group keep their own, unchanged reports.
+
+A summary statistic keeps the key of a group a null column empties. ``Bin`` (a
+histogram) and ``LetterValue`` (a boxen) leave one placeholder row for it, as
+``Aggregate`` and ``BoxStats`` do, so a histogram hue group keeps its legend
+entry, a facet panel keeps its place on the figure, a boxen category keeps its
+band slot, and the census above names each. A kept key keeps its dodge
+sub-slot, empty, as every statistic that keeps one leaves it, so the other
+groups' marks keep the width and place they have when that group holds a
+value. A zero-row frame has no group to keep and still reports that the chart
+has no rows to draw. A statistic that bins in a log axis's space sees no value
+in a group whose every value is off the axis's side, so a histogram level that
+way keeps its legend entry and is named beside the log warning, as the ECDF
+kind's is.
 
 A layer is named in the channels its caller wrote. A layer a call built (a
 composite mark, a figure function) bound its secondary positional channel
 itself, so it names ``x2`` as ``x`` and ``y2`` as ``y``; a layer the caller
-placed keeps every channel it wrote.
+placed keeps every channel it wrote. A band slot is named by the column that
+holds its categories (the caller's, or a boxen's ``color_field=`` column): the
+lowering carries it through the statistic's ``groupby``, except a column named
+like one of its outputs, which cannot be carried and reads ``group``.
 
 One figure is the exception. ``catplot`` lowers a horizontal call
 (``orient="h"``) to ``x=category, y=value`` plus ``CoordFlip``, so it names the
@@ -31,13 +46,16 @@ fix turns them into failures that say to delete their marker.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import warnings
-from typing import Callable, Literal
+from typing import Any, Callable, Literal, NamedTuple
 
 import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_extents import axis_tick_labels
+from tests._svg_rects import data_bar_rects, mark_groups, mark_layer, svg_elements
 
 _TWO_GROUP_ONE_NULL = pl.DataFrame(
     {
@@ -565,18 +583,6 @@ def test_a_one_point_series_is_reported_only_by_series_dropped():
     ]
 
 
-def test_a_histogram_hue_group_a_null_column_empties_stays_silent():
-    df = pl.DataFrame(
-        {
-            "v": [1.0, 2.0, 3.0, 4.0, None, None, None, None],
-            "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
-        }
-    )
-    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="hist", hue="h").to_svg())
-    assert messages == []
-    assert ">c<" not in svg
-
-
 def test_a_kde_hue_group_with_no_usable_values_is_reported_by_degenerate_fit_only():
     """``Kde`` already names group ``c`` through ``DegenerateFit`` before
     its NaN-filled grid reaches the draw step, so that existing, more
@@ -935,12 +941,35 @@ def _small_slot_frame(
     )
 
 
-def _slot_message(entry: str, channels: str = "y", category: str = "z", column: str = "c") -> str:
-    """The text that names the empty slot ``<column>=<category>`` on layer ``entry``."""
+def _slot_message(
+    entry: str,
+    channels: str = "y",
+    category: str = "z",
+    column: str = "c",
+    *,
+    panel: str | None = None,
+) -> str:
+    """The text that names one unit that draws nothing, ``<column>=<category>`` (a
+    band slot or a hue group), on layer ``entry``; in facet panel ``panel`` when given."""
+    where = "" if panel is None else f" in facet panel {panel}"
     return (
-        f"{entry}: every row of {column}={category} has a null or non-finite {channels}, "
+        f"{entry}: every row of {column}={category}{where} has a null or non-finite {channels}, "
         "so it draws nothing"
     )
+
+
+def _panel_message(entry: str, channels: str = "y", panel: str = "f=q") -> str:
+    """The text that names facet panel ``panel``, none of whose rows of layer ``entry``
+    has a position."""
+    return (
+        f"{entry}: every row in facet panel {panel} has a null or non-finite {channels}, "
+        "so they draw nothing"
+    )
+
+
+def _layer_message(entry: str, channels: str = "y") -> str:
+    """The text that names layer ``entry``, none of whose rows has a position."""
+    return f"{entry}: every row has a null or non-finite {channels}, so the layer draws nothing"
 
 
 def _census(messages: list[str]) -> list[str]:
@@ -949,12 +978,20 @@ def _census(messages: list[str]) -> list[str]:
     return [m for m in messages if "null or non-finite" in m]
 
 
+def _given(**channels: Any) -> dict[str, Any]:
+    """The channels of ``channels`` that are bound, so one left unbound is left out of a call
+    instead of being passed as ``None``."""
+    return {name: value for name, value in channels.items() if value is not None}
+
+
 def _slot_chart(df: pl.DataFrame, mark_method: str, encoding: dict) -> fm.Chart:
     return getattr(fm.Chart(df), mark_method)().encode(**encoding)
 
 
-def _catplot_chart(df: pl.DataFrame, kind: str, hue: str | None) -> fm.Chart:
-    return fm.catplot(df, x="c", y="w", kind=kind, hue=hue)
+def _catplot_chart(
+    df: pl.DataFrame, kind: str, hue: str | None, *, facet: str | None = None
+) -> fm.Chart:
+    return fm.catplot(df, x="c", y="w", kind=kind, **_given(hue=hue, col=facet))
 
 
 # Marks the caller places layer by layer, with the channels each names for an
@@ -1878,3 +1915,1156 @@ def test_a_call_built_layer_in_a_composition_carries_no_layer_index():
     band = fm.Chart(_slot_frame(_EMPTY_Z)).mark_errorband().encode(x="c", y="w")
     _, messages = _render_capturing((other + band).to_svg)
     assert messages == [_slot_message("mark_errorband")]
+
+
+# ---------------------------------------------------------------------------
+# A summary statistic keeps the key of a group a null column empties. ``Bin``
+# (a histogram) and ``LetterValue`` (a boxen) leave one placeholder row for such
+# a group, as ``Aggregate`` and ``BoxStats`` do, so the legend keeps the hue
+# level, the figure keeps the facet panel, the axis keeps the category's band
+# slot, and the census names the unit. A zero-row frame has no group to keep
+# and still reports that it has no rows to draw.
+# ---------------------------------------------------------------------------
+
+_NO_ROWS_TO_DRAW = "the chart has no rows to draw after its transforms; its panel is drawn empty"
+
+# Hue levels ``a`` and ``b`` always hold values to bin; ``c`` holds what a test gives it.
+_HIST_A = [1.0, 2.0, 2.0, 3.0, 4.0, 5.0]
+_HIST_B = [2.0, 3.0, 4.0, 4.0, 5.0, 6.0]
+
+
+def _hist_group_frame(c_values: list[float | None]) -> pl.DataFrame:
+    """Hue levels ``a`` and ``b`` of six values each, then level ``c`` holding ``c_values``."""
+    return pl.DataFrame(
+        {"v": _HIST_A + _HIST_B + c_values, "g": ["a"] * 6 + ["b"] * 6 + ["c"] * len(c_values)},
+        schema={"v": pl.Float64, "g": pl.Utf8},
+    )
+
+
+def _hist_facet_frame(q_values: list[float | None]) -> pl.DataFrame:
+    """Facet panel ``p`` of six values, then panel ``q`` holding ``q_values``."""
+    return pl.DataFrame(
+        {"v": _HIST_A + q_values, "f": ["p"] * 6 + ["q"] * len(q_values)},
+        schema={"v": pl.Float64, "f": pl.Utf8},
+    )
+
+
+def _hist_panel_level_frame(panels: dict[str, dict[str, list[float | None]]]) -> pl.DataFrame:
+    """One frame of ``v`` split by hue level ``g`` and facet panel ``f``: ``panels`` maps each
+    panel to the values each of its levels holds."""
+    rows = [
+        (panel, level, value)
+        for panel, levels in panels.items()
+        for level, values in levels.items()
+        for value in values
+    ]
+    return pl.DataFrame(rows, schema={"f": pl.Utf8, "g": pl.Utf8, "v": pl.Float64}, orient="row")
+
+
+def _displot_hist(frame: pl.DataFrame, *, hue=None, facet=None, x="v", **options) -> fm.Chart:
+    return fm.displot(frame, x=x, kind="hist", **_given(hue=hue, col=facet), **options)
+
+
+def _mark_histogram(frame: pl.DataFrame, *, hue=None, facet=None, x="v", **options) -> fm.Chart:
+    chart = fm.Chart(frame).mark_histogram(**options).encode(x=x, **_given(color=hue))
+    return chart if facet is None else chart.facet(col=facet)
+
+
+def _binned_bar(frame: pl.DataFrame, *, hue=None, facet=None, **options) -> fm.Chart:
+    chart = (
+        fm.Chart(frame)
+        .mark_bar(**options)
+        .encode(x=fm.X("v", bin=True), y="count()", **_given(color=hue))
+    )
+    return chart if facet is None else chart.facet(col=facet)
+
+
+class _HistogramDoor(NamedTuple):
+    """One way to draw a histogram of ``v``."""
+
+    build: Callable[..., fm.Chart]  # ``build(frame, hue=, facet=, **options)``
+    entry: str  # the entry its layer speaks as
+    channels: str  # the channels it names for a bar with no position
+    variants: dict[str, dict]  # the options that place or scale its bars differently
+
+
+_HISTOGRAM_DOORS = {
+    "displot": _HistogramDoor(
+        _displot_hist,
+        "displot",
+        "x",
+        {
+            "layer": {},
+            "stack": {"multiple": "stack"},
+            "dodge": {"multiple": "dodge"},
+            "fill": {"multiple": "fill"},
+            "density": {"stat": "density"},
+            "cumulative": {"cumulative": True},
+        },
+    ),
+    "mark_histogram": _HistogramDoor(
+        _mark_histogram,
+        "mark_histogram",
+        "x",
+        {
+            "layer": {},
+            "stack": {"multiple": "stack"},
+            "dodge": {"multiple": "dodge"},
+            "fill": {"multiple": "fill"},
+            "density": {"density": True},
+            "cumulative": {"cumulative": True},
+        },
+    ),
+    # The caller placed this bar layer itself, so it names every channel the binning wrote.
+    "binned_bar": _HistogramDoor(_binned_bar, "mark_bar", "x and x2", {"layer": {}}),
+}
+_HISTOGRAM_DOOR_CASES = [pytest.param(door, id=name) for name, door in _HISTOGRAM_DOORS.items()]
+_HISTOGRAM_VARIANTS = [
+    (name, door, variant, options)
+    for name, door in _HISTOGRAM_DOORS.items()
+    for variant, options in door.variants.items()
+]
+_HISTOGRAM_VARIANT_CASES = [
+    pytest.param(door, options, id=f"{name}-{variant}")
+    for name, door, variant, options in _HISTOGRAM_VARIANTS
+]
+# The variants whose bars an emptied level leaves exactly where they are. A dodge is the one
+# placement that gives the level a share: it keeps its sub-slot, empty.
+_HISTOGRAM_UNMOVED_VARIANT_CASES = [
+    pytest.param(door, options, id=f"{name}-{variant}")
+    for name, door, variant, options in _HISTOGRAM_VARIANTS
+    if variant != "dodge"
+]
+# The doors that place their bars side by side.
+_DODGED_HISTOGRAM_DOORS = [
+    pytest.param(door, id=name)
+    for name, door in _HISTOGRAM_DOORS.items()
+    if "dodge" in door.variants
+]
+
+
+@pytest.mark.parametrize("value", _UNDRAWABLE)
+def test_a_histogram_hue_group_a_null_column_empties_is_named(value: float | None):
+    """Hue level ``c`` has no value to bin, so it draws no bar; it keeps its legend entry and is
+    named, as the same level of an ECDF is. A null, a NaN and either infinity read alike."""
+    df = pl.DataFrame(
+        {
+            "v": [1.0, 2.0, 3.0, 4.0] + [value] * 4,
+            "h": ["a", "a", "a", "a", "c", "c", "c", "c"],
+        },
+        schema={"v": pl.Float64, "h": pl.Utf8},
+    )
+    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="hist", hue="h").to_svg())
+    assert messages == [_slot_message("displot", "x", "c", "h")]
+    assert ">c<" in svg
+    assert ">a<" in svg
+
+
+def test_a_histogram_hue_group_of_an_integer_column_with_no_value_is_named():
+    """An integer column holds nulls but no NaN or infinity; its emptied level is kept and named
+    like a float column's."""
+    df = pl.DataFrame(
+        {"v": [1, 2, 3, 4, None, None, None, None], "h": ["a"] * 4 + ["c"] * 4},
+        schema={"v": pl.Int64, "h": pl.Utf8},
+    )
+    svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="hist", hue="h").to_svg())
+    assert messages == [_slot_message("displot", "x", "c", "h")]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door,options", _HISTOGRAM_UNMOVED_VARIANT_CASES)
+def test_a_histogram_placeholder_adds_only_the_legend_entry_and_the_warning(
+    door: _HistogramDoor, options: dict
+):
+    """However the bars are overlaid, stacked, normalized, scaled or accumulated, the emptied
+    level ``c`` adds its legend entry and one warning and changes no mark: the same chart without
+    ``c``'s rows is silent and draws the groups ``a`` and ``b`` byte for byte alike. The sibling
+    has no rows for ``c`` and so no legend entry for it; the marks are what is compared. A dodge
+    is the one placement the level takes a share of: see
+    ``test_a_dodged_histogram_keeps_the_emptied_levels_slot``."""
+    frame = _hist_group_frame([None] * 4)
+    sibling = frame.filter(pl.col("g") != "c")
+    svg, messages = _render_capturing(door.build(frame, hue="g", **options).to_svg)
+    sibling_svg, sibling_messages = _render_capturing(
+        door.build(sibling, hue="g", **options).to_svg
+    )
+    assert messages == [_slot_message(door.entry, door.channels, "c", "g")]
+    assert sibling_messages == []
+    assert ">c<" in svg
+    assert data_bar_rects(mark_layer(sibling_svg)), "the sibling drew no bar to compare"
+    assert mark_layer(svg) == mark_layer(sibling_svg), (
+        "the emptied level changed how the other groups draw"
+    )
+
+
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_a_histogram_facet_panel_a_null_column_empties_is_named(door: _HistogramDoor):
+    """Panel ``q`` has no value to bin and no grouping of its own, so it draws no bar; the panel
+    stays on the figure and is named."""
+    svg, messages = _render_capturing(door.build(_hist_facet_frame([None] * 4), facet="f").to_svg)
+    assert messages == [_panel_message(door.entry, door.channels)]
+    assert ">q<" in svg
+
+
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_a_histogram_hue_group_a_null_column_empties_in_one_facet_panel_is_named(
+    door: _HistogramDoor,
+):
+    """Level ``a`` has values in panel ``p`` and none in panel ``q``, where level ``b`` still
+    draws: the level is named with the panel it is empty in."""
+    frame = _hist_panel_level_frame(
+        {
+            "p": {"a": [1.0, 2.0, 3.0, 4.0], "b": [2.0, 3.0, 4.0, 5.0]},
+            "q": {"a": [None] * 4, "b": [3.0, 4.0, 5.0, 6.0]},
+        }
+    )
+    _, messages = _render_capturing(door.build(frame, hue="g", facet="f").to_svg)
+    assert messages == [_slot_message(door.entry, door.channels, "a", "g", panel="f=q")]
+
+
+@pytest.mark.parametrize("emptied_first", [True, False], ids=["emptied_first", "emptied_second"])
+@pytest.mark.parametrize("value", _UNDRAWABLE)
+def test_an_all_null_histogram_layer_beside_another_is_named(
+    value: float | None, emptied_first: bool
+):
+    """A histogram layer with no value to bin is named by its call, whichever side of the ``+`` it
+    is on and with no layer index, since the caller never wrote the call's own layers; the layer
+    beside it still draws all its bars."""
+    drawn = _mark_histogram(pl.DataFrame({"v": _HIST_A}))
+    emptied = _mark_histogram(pl.DataFrame({"v": [value] * 4}, schema={"v": pl.Float64}))
+    pair = (emptied + drawn) if emptied_first else (drawn + emptied)
+    svg, messages = _render_capturing(pair.to_svg)
+    assert messages == [_layer_message("mark_histogram", "x")]
+    alone = len(data_bar_rects(mark_layer(drawn.to_svg())))
+    assert alone > 0
+    assert len(data_bar_rects(mark_layer(svg))) == alone
+
+
+@pytest.mark.parametrize("value", _UNDRAWABLE)
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_an_all_null_histogram_names_its_nulls(door: _HistogramDoor, value: float | None):
+    """Rows are present and none has a value to bin, so the cause is the values: the layer is
+    named, not reported as a chart with no rows to draw."""
+    frame = pl.DataFrame({"v": [value] * 4}, schema={"v": pl.Float64})
+    _, messages = _render_capturing(door.build(frame).to_svg)
+    assert messages == [_layer_message(door.entry, door.channels)]
+
+
+@pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_a_zero_row_histogram_still_warns_no_rows_to_draw(door: _HistogramDoor, hue: str | None):
+    """With no row at all there is no group to keep and no value to blame, so the histogram
+    reports a chart with no rows to draw."""
+    frame = _hist_group_frame([None]).clear()
+    _, messages = _render_capturing(door.build(frame, hue=hue).to_svg)
+    assert messages == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("door,options", _HISTOGRAM_VARIANT_CASES)
+def test_a_histogram_group_that_keeps_a_usable_value_warns_nothing(
+    door: _HistogramDoor, options: dict
+):
+    """Level ``c`` keeps one usable value beside its nulls, so it still draws: nothing is named,
+    and the nulls change nothing, the chart being byte for byte the one with those rows left
+    out."""
+    frame = _hist_group_frame([7.0, None, None, None])
+    without_nulls = frame.filter(pl.col("v").is_not_null())
+    svg, messages = _render_capturing(door.build(frame, hue="g", **options).to_svg)
+    expected_svg, expected_messages = _render_capturing(
+        door.build(without_nulls, hue="g", **options).to_svg
+    )
+    assert messages == []
+    assert expected_messages == []
+    assert ">c<" in svg
+    assert svg == expected_svg, "the null rows changed how a group with a usable value draws"
+
+
+@pytest.mark.parametrize(
+    "frame,split",
+    [
+        pytest.param(_hist_facet_frame([7.0, None, None, None]), {"facet": "f"}, id="panel"),
+        pytest.param(
+            pl.DataFrame({"v": [1.0, None, 2.0, None, 3.0]}, schema={"v": pl.Float64}),
+            {},
+            id="layer",
+        ),
+    ],
+)
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_a_histogram_panel_or_layer_that_keeps_a_usable_value_warns_nothing(
+    door: _HistogramDoor, frame: pl.DataFrame, split: dict
+):
+    """A facet panel, and an unfaceted layer, that keeps a usable value beside its nulls still
+    draws: nothing is named, and the nulls change nothing, the chart being byte for byte the one
+    with those rows left out."""
+    svg, messages = _render_capturing(door.build(frame, **split).to_svg)
+    expected_svg, expected_messages = _render_capturing(
+        door.build(frame.filter(pl.col("v").is_not_null()), **split).to_svg
+    )
+    assert messages == []
+    assert expected_messages == []
+    assert svg == expected_svg, "the null rows changed how a panel or layer with a value draws"
+
+
+def _bars(marks: str) -> list[dict[str, str]]:
+    """The bars in ``marks`` (a render's mark layer, or one panel of it), each with every attribute
+    it was drawn with, left to right."""
+    return sorted(data_bar_rects(marks), key=lambda bar: (float(bar["x"]), bar["fill"]))
+
+
+def _bar_widths(bars: list[dict[str, str]]) -> set[float]:
+    return {float(bar["width"]) for bar in bars}
+
+
+def _widest_mark(svg: str) -> float:
+    """The widest extent across its axis of any mark a render draws: a rect's width or a line's span."""
+    marks = mark_layer(svg)
+    spans = [float(rect["width"]) for rect in data_bar_rects(marks)]
+    lines = svg_elements(marks, "line", lambda attrs: "x1" in attrs and "x2" in attrs)
+    spans += [abs(float(line["x2"]) - float(line["x1"])) for line in lines]
+    return max(spans)
+
+
+@pytest.mark.parametrize("door", _DODGED_HISTOGRAM_DOORS)
+def test_a_dodged_histogram_keeps_the_emptied_levels_slot(door: _HistogramDoor):
+    """A level with no usable value keeps its sub-slot in every dodged bin, empty, as every
+    statistic that keeps a group's key does: the bars of ``a`` and ``b`` are rect for rect those
+    of the chart whose level ``c`` holds values inside their range, a third narrower than
+    without ``c``'s rows, and nothing is drawn in ``c``'s third."""
+    options = door.variants["dodge"]
+    emptied = _hist_group_frame([None] * 4)
+    svg, messages = _render_capturing(door.build(emptied, hue="g", **options).to_svg)
+    valued, _ = _render_capturing(
+        door.build(_hist_group_frame([2.5, 3.5, 4.5]), hue="g", **options).to_svg
+    )
+    alone, _ = _render_capturing(
+        door.build(emptied.filter(pl.col("g") != "c"), hue="g", **options).to_svg
+    )
+    drawn, real = _bars(mark_layer(svg)), _bars(mark_layer(valued))
+    level_c = {bar["fill"] for bar in real} - {bar["fill"] for bar in drawn}
+    assert messages == [_slot_message(door.entry, door.channels, "c", "g")]
+    assert ">c<" in svg
+    assert len(level_c) == 1, "a bar drew in the emptied level's slot"
+    assert drawn == [bar for bar in real if bar["fill"] not in level_c]
+    width, alone_width = _bar_widths(drawn), _bar_widths(_bars(mark_layer(alone)))
+    assert len(width) == len(alone_width) == 1
+    assert width.pop() == pytest.approx(alone_width.pop() * 2 / 3, abs=0.01)
+
+
+@pytest.mark.parametrize("door", _DODGED_HISTOGRAM_DOORS)
+def test_a_dodged_histogram_level_emptied_in_one_panel_keeps_every_panels_bar_width(
+    door: _HistogramDoor,
+):
+    """Level ``c`` holds values in panel ``p`` and only nulls in panel ``q``. Its sub-slot stays in
+    ``q``, so the bars of ``a`` and ``b`` have one width in both panels; with ``c``'s rows left
+    out of ``q`` they would widen there, one level changing width between the panels of one
+    figure."""
+    options = door.variants["dodge"]
+    levels = {"a": _HIST_A, "b": _HIST_B}
+    frame = _hist_panel_level_frame(
+        {"p": {**levels, "c": [2.5, 3.5, 4.5]}, "q": {**levels, "c": [None] * 3}}
+    )
+    svg, messages = _render_capturing(door.build(frame, hue="g", facet="f", **options).to_svg)
+    assert messages == [_slot_message(door.entry, door.channels, "c", "g", panel="f=q")]
+    assert len({w for panel in mark_groups(svg) for w in _bar_widths(_bars(panel))}) == 1
+    without = frame.filter(~((pl.col("g") == "c") & (pl.col("f") == "q")))
+    svg_without, _ = _render_capturing(door.build(without, hue="g", facet="f", **options).to_svg)
+    widths = [_bar_widths(_bars(panel)) for panel in mark_groups(svg_without)]
+    assert len(widths) == 2 and widths[0] != widths[1], "the bars did not widen in panel q"
+
+
+@pytest.mark.parametrize(
+    "mark_method,encoding",
+    [
+        pytest.param(
+            "mark_bar", {"x": "c", "y": fm.Y("w", aggregate="mean"), "color": "g"}, id="mean_bar"
+        ),
+        pytest.param("mark_boxplot", {"x": "c", "y": "w", "color": "g"}, id="boxplot"),
+        pytest.param("mark_errorbar", {"x": "c", "y": "w", "color": "g"}, id="errorbar"),
+        pytest.param("mark_boxen", {"x": "c", "y": "w", "color": "g"}, id="boxen"),
+    ],
+)
+def test_an_emptied_hue_level_keeps_its_dodge_slot_on_every_placeholder_statistic(
+    mark_method: str, encoding: dict
+):
+    """A key a statistic keeps keeps its slot. ``Aggregate``, ``BoxStats``, ``ErrorExtent`` and
+    ``LetterValue`` each leave a placeholder row for a hue level with no usable value, and a dodge
+    counts the groups a layer's rows carry, so the marks of the other two levels are two thirds of
+    the width they have in the chart without that level's rows."""
+    frame = _hue_group_frame()
+
+    def widest(rows: pl.DataFrame) -> float:
+        chart = getattr(fm.Chart(rows), mark_method)(position=fm.Dodge()).encode(**encoding)
+        return _widest_mark(_render_capturing(chart.to_svg)[0])
+
+    assert widest(frame) == pytest.approx(
+        widest(frame.filter(pl.col("g") != "r")) * 2 / 3, abs=0.01
+    )
+
+
+# A color scale applies an explicit domain together with a color range.
+_THREE_COLORS = ["#e41a1c", "#377eb8", "#4daf4a"]
+
+
+def test_an_explicit_colour_domain_orders_the_dodge_slots_but_adds_none():
+    """A color scale's explicit domain says which level takes which sub-slot of a dodged bin, and
+    a level it lists beyond those the rows carry takes none: with ``c`` listed the legend gains
+    its entry and the bars of ``a`` and ``b`` keep the width and place they have without it, and
+    reversing the domain swaps their places. A domain with no range is not applied, so it
+    changes nothing, and cannot reserve a slot either."""
+    levels = _hist_group_frame([])
+
+    def dodged(color) -> tuple[str, list[dict[str, str]]]:
+        svg, _ = _render_capturing(_displot_hist(levels, hue=color, multiple="dodge").to_svg)
+        return svg, _bars(mark_layer(svg))
+
+    def domain(names: list[str], *, colors: list[str] | None = None) -> fm.Color:
+        scale = fm.OrdinalScale(domain=names, **({} if colors is None else {"range": colors}))
+        return fm.Color("g", scale=scale)
+
+    _, plain = dodged("g")
+    _, unapplied = dodged(domain(["a", "b", "c"]))
+    svg, listed = dodged(domain(["a", "b", "c"], colors=_THREE_COLORS))
+    assert unapplied == plain
+    assert ">c<" in svg
+    assert [(bar["x"], bar["width"]) for bar in listed] == [
+        (bar["x"], bar["width"]) for bar in plain
+    ]
+
+    one_each = pl.DataFrame({"c": ["p", "p"], "g": ["a", "b"], "w": [1.0, 2.0]})
+
+    def heights(names: list[str]) -> list[float]:
+        color = domain(names, colors=_THREE_COLORS[:2])
+        chart = fm.Chart(one_each).mark_bar(position=fm.Dodge()).encode(x="c", y="w", color=color)
+        svg, _ = _render_capturing(chart.to_svg)
+        return [float(bar["height"]) for bar in _bars(mark_layer(svg))]
+
+    a_then_b = heights(["a", "b"])
+    assert a_then_b[0] != a_then_b[1]
+    assert heights(["b", "a"]) == a_then_b[::-1]
+
+
+def _log_message(axis: str, field: str, rows: int) -> str:
+    """The text that reports ``rows`` rows of ``field`` a log scale on ``axis`` cannot place."""
+    return (
+        f"{axis} scale: {rows} row(s) of '{field}' are zero or negative, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
+    )
+
+
+# The options that put each histogram door's value axis on a log scale.
+_LOG_AXIS = {
+    "displot": {"log_scale": True},
+    "mark_histogram": {"x": fm.X("v", scale=fm.LogScale())},
+}
+_LOG_AXIS_DOORS = list(_LOG_AXIS)
+
+
+def _log_histogram(door: str, frame: pl.DataFrame, **options) -> tuple[str, list[str]]:
+    """``frame`` as ``door``'s histogram on a log value axis, split by ``g``: its svg and warnings."""
+    chart = _HISTOGRAM_DOORS[door].build(frame, hue="g", **_LOG_AXIS[door], **options)
+    return _render_capturing(chart.to_svg)
+
+
+@pytest.mark.parametrize("multiple", ["layer", "stack"])
+@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+def test_a_histogram_hue_level_a_log_axis_empties_keeps_its_entry_and_is_named_beside_the_log_warning(
+    door: str, multiple: str
+):
+    """On a log axis the histogram bins in the axis's space, where a level whose every value is
+    zero or negative has no value to bin: the level keeps its legend entry as a placeholder and
+    the census names it, beside the log warning that counts the rows the axis cannot place. The
+    census sentence's cause is the statistic's output row, null or non-finite, not the caller's
+    finite values; a statistic-side cause would change this sentence, and this test, with it."""
+    svg, messages = _log_histogram(door, _hist_group_frame([-1.0, 0.0, -3.0]), multiple=multiple)
+    expected = [
+        _log_message("x", "v", 3),
+        _slot_message(_HISTOGRAM_DOORS[door].entry, "x", "c", "g"),
+    ]
+    assert messages == expected
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+def test_a_histogram_hue_level_with_an_on_side_value_on_a_log_axis_is_not_named(door: str):
+    """Level ``c`` keeps two values on the log axis's side beside the one it cannot place, so it
+    draws its bars: the log warning counts the one row and the level is not named."""
+    svg, messages = _log_histogram(door, _hist_group_frame([-1.0, 5.0, 7.0]))
+    assert messages == [_log_message("x", "v", 1)]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+def test_a_histogram_hue_level_of_nulls_on_a_log_axis_is_named_by_the_census_alone(door: str):
+    """No value of a level of nulls is off the axis's side, so the log warning has nothing to count
+    and the census names the level, as it does on a linear axis."""
+    svg, messages = _log_histogram(door, _hist_group_frame([None] * 4))
+    assert messages == [_slot_message(_HISTOGRAM_DOORS[door].entry, "x", "c", "g")]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+def test_a_histogram_hue_level_an_explicit_domain_cuts_is_reported_by_the_domain_warning_alone(
+    door: str,
+):
+    """A level whose every value lies outside the value axis's explicit domain is reported by the
+    domain warning, which counts marks for a statistic layer; the census leaves it alone and the
+    level keeps its legend entry."""
+    x = fm.X("v", scale=fm.LinearScale(domain=[0, 10]))
+    chart = _HISTOGRAM_DOORS[door].build(_hist_group_frame([50.0, 55.0, 60.0]), hue="g", x=x)
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [
+        f"{_HISTOGRAM_DOORS[door].entry}: x scale: 3 mark(s) of 'v' fall outside the scale's "
+        "explicit domain, so they are not drawn; widen the domain, or pass clamp=True to draw "
+        "them at the axis edge"
+    ]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _HISTOGRAM_DOOR_CASES)
+def test_a_histogram_hue_level_with_one_null_row_keeps_its_entry_and_is_named(door: _HistogramDoor):
+    """The smallest emptied level is one row: it keeps its legend entry and is named."""
+    svg, messages = _render_capturing(door.build(_hist_group_frame([None]), hue="g").to_svg)
+    assert messages == [_slot_message(door.entry, door.channels, "c", "g")]
+    assert ">c<" in svg
+
+
+def test_a_binned_mean_bar_names_the_channels_its_binning_wrote():
+    """The caller placed the bar, so the census keeps every channel the binning wrote for it: an
+    emptied level has no ``x`` or ``x2``, and the null aggregate reads as a null ``y``."""
+    values = _HIST_A + _HIST_B + [None] * 3
+    frame = pl.DataFrame(
+        {"v": values, "w": [1.0] * 15, "g": ["a"] * 6 + ["b"] * 6 + ["c"] * 3},
+        schema={"v": pl.Float64, "w": pl.Float64, "g": pl.Utf8},
+    )
+    chart = (
+        fm.Chart(frame)
+        .mark_bar()
+        .encode(x=fm.X("v", bin=True), y=fm.Y("w", aggregate="mean"), color="g")
+    )
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [_slot_message("mark_bar", "x and y and x2", "c", "g")]
+    assert ">c<" in svg
+
+
+def _mark_boxen(frame: pl.DataFrame, hue=None, facet=None) -> fm.Chart:
+    chart = _slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", **_given(color=hue)})
+    return chart if facet is None else chart.facet(col=facet)
+
+
+def _catplot_boxen(frame: pl.DataFrame, hue=None, facet=None) -> fm.Chart:
+    return _catplot_chart(frame, "boxen", hue, facet=facet)
+
+
+# The two ways to draw a boxen of ``w`` by category ``c``, keyed by the entry each speaks as.
+_BOXEN_DOORS: dict[str, Callable[..., fm.Chart]] = {
+    "mark_boxen": _mark_boxen,
+    "catplot": _catplot_boxen,
+}
+
+
+@pytest.mark.parametrize(
+    "value", [pytest.param(None, id="null"), pytest.param(float("nan"), id="nan")]
+)
+@pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_category_with_no_usable_value_keeps_its_slot(
+    door: str, hue: str | None, value: float | None
+):
+    """The axis still holds category ``z`` when none of its values is usable, whether or not a
+    hue splits the boxes."""
+    svg, _ = _render_capturing(_BOXEN_DOORS[door](_slot_frame([value] * 6), hue).to_svg)
+    assert ">z<" in svg
+
+
+@pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_empty_category_is_named_in_the_callers_terms(door: str, hue: str | None):
+    """The caller bound the categories to ``c``, so the empty slot reads ``c=z``, whatever column
+    the boxen's own statistic keeps the category in. It is one text, whichever of the boxen's
+    layers raises it."""
+    chart = _BOXEN_DOORS[door](_slot_frame(_EMPTY_Z), hue)
+    _, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [_slot_message(door)]
+    _, every = _render_capturing(chart.to_svg)
+    assert set(every) == {_slot_message(door)}
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_hue_group_a_null_column_empties_is_named(door: str):
+    """Hue level ``r`` has no usable value in any category while every category still draws
+    through the other levels: the level keeps its legend entry and is named."""
+    svg, shown = _render_capturing(
+        _BOXEN_DOORS[door](_hue_group_frame(), "g").to_svg, action="default"
+    )
+    assert shown == [_slot_message(door, category="r", column="g")]
+    assert ">r<" in svg
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_facet_panel_a_null_column_empties_is_named(door: str):
+    """Panel ``q`` has no usable value in any category, so it draws no box; the panel stays on the
+    figure and is named."""
+    frame = _faceted_slot_frame([], blank_in=("q",))
+    svg, shown = _render_capturing(_BOXEN_DOORS[door](frame, facet="f").to_svg, action="default")
+    assert shown == [_panel_message(door)]
+    assert ">q<" in svg
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_empty_category_in_one_facet_panel_is_named_in_the_callers_terms(door: str):
+    """Category ``z`` is empty in panel ``q`` alone, where it draws nothing though it draws in
+    panel ``p``; it is named with the panel, by the caller's own column."""
+    frame = _faceted_slot_frame(["q"])
+    _, shown = _render_capturing(_BOXEN_DOORS[door](frame, facet="f").to_svg, action="default")
+    assert shown == [_slot_message(door, panel="f=q")]
+
+
+def test_a_boxen_category_of_an_integer_column_with_no_value_keeps_its_slot():
+    """An integer column holds nulls but no NaN or infinity; its emptied category keeps its slot
+    like a float column's."""
+    df = pl.DataFrame(
+        {"c": ["a"] * 6 + ["b"] * 6 + ["z"] * 6, "w": list(range(1, 13)) + [None] * 6},
+        schema={"c": pl.Utf8, "w": pl.Int64},
+    )
+    svg, _ = _render_capturing(_mark_boxen(df).to_svg)
+    assert ">z<" in svg
+
+
+@pytest.mark.parametrize(
+    "order,expected",
+    [
+        pytest.param("ascending", ["a", "d", "b", "z", "y"], id="ascending"),
+        pytest.param("descending", ["b", "d", "a", "z", "y"], id="descending"),
+    ],
+)
+def test_a_boxen_sorted_by_an_aggregate_keeps_its_order_with_the_emptied_categories_last(
+    order: str, expected: list[str]
+):
+    """The categories with values are ordered by their mean as they would be without the empty
+    ones; ``z`` and ``y`` have no value, and follow them in either direction, in the order the
+    data meets them."""
+    df = pl.DataFrame(
+        {
+            "c": ["z"] * 6 + ["a"] * 6 + ["b"] * 6 + ["d"] * 6 + ["y"] * 6,
+            "w": [None] * 6
+            + [1.0, 2.0, 3.0, 2.0, 1.0, 3.0]
+            + [7.0, 8.0, 9.0, 8.0, 7.0, 9.0]
+            + [4.0, 5.0, 6.0, 5.0, 4.0, 6.0]
+            + [None] * 6,
+        },
+        schema={"c": pl.Utf8, "w": pl.Float64},
+    )
+    sort = {"field": "w", "op": "mean", "order": order}
+    chart = fm.Chart(df).mark_boxen().encode(x=fm.X("c", sort=sort), y="w")
+    svg, _ = _render_capturing(chart.to_svg)
+    assert axis_tick_labels(svg, axis="x") == expected
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_an_all_null_boxen_names_its_nulls(door: str):
+    """Rows are present and none has a value, so the cause is the values: the layer is named,
+    not reported as a chart with no rows to draw, and every category keeps its slot."""
+    df = pl.DataFrame(
+        {"c": ["a"] * 3 + ["b"] * 3, "w": [None] * 6}, schema={"c": pl.Utf8, "w": pl.Float64}
+    )
+    svg, shown = _render_capturing(_BOXEN_DOORS[door](df).to_svg, action="default")
+    assert shown == [_layer_message(door)]
+    assert ">a<" in svg
+    assert ">b<" in svg
+
+
+@pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_zero_row_boxen_still_warns_no_rows_to_draw(door: str, hue: str | None):
+    """With no row at all there is no category to keep and no value to blame, so the boxen
+    reports a chart with no rows to draw."""
+    frame = _slot_frame(_DRAWN_Z).clear()
+    _, messages = _render_capturing(_BOXEN_DOORS[door](frame, hue).to_svg)
+    assert messages == [_NO_ROWS_TO_DRAW]
+
+
+_SOME_NULL_Z = [3.0, None, 5.0, 6.0, None, 8.0]
+# The cases where category ``z`` keeps a usable value; the last three also hold a null row.
+_BOXEN_USABLE_Z_CASES = [
+    pytest.param(_DRAWN_Z, None, id="all_usable"),
+    pytest.param(_DRAWN_Z, "g", id="all_usable_hue"),
+    pytest.param(_SOME_NULL_Z, None, id="some_null"),
+    pytest.param(_SOME_NULL_Z, "g", id="some_null_hue"),
+    pytest.param([None, 5.0, None, None, None, None], None, id="one_usable"),
+]
+
+
+@pytest.mark.parametrize("z_values,hue", _BOXEN_USABLE_Z_CASES)
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_category_that_keeps_a_usable_value_warns_nothing(
+    door: str, z_values: list[float | None], hue: str | None
+):
+    """Category ``z`` keeps a usable value, or all of them, so it still draws: nothing is named
+    and its slot stays on the axis."""
+    svg, shown = _render_capturing(
+        _BOXEN_DOORS[door](_slot_frame(z_values), hue).to_svg, action="default"
+    )
+    assert shown == []
+    assert ">z<" in svg
+
+
+@pytest.mark.parametrize("z_values,hue", _BOXEN_USABLE_Z_CASES[2:])
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_category_with_null_rows_beside_a_usable_value_draws_as_without_them(
+    door: str, z_values: list[float | None], hue: str | None
+):
+    """The null rows of a category that keeps a usable value change nothing: the chart is byte for
+    byte the one with those rows left out."""
+    frame = _slot_frame(z_values)
+    build = _BOXEN_DOORS[door]
+    svg, _ = _render_capturing(build(frame, hue).to_svg)
+    expected_svg, _ = _render_capturing(build(frame.filter(pl.col("w").is_not_null()), hue).to_svg)
+    assert svg == expected_svg, "the null rows changed how a category with a usable value draws"
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_category_with_one_null_row_keeps_its_slot_and_is_named(door: str):
+    """The smallest emptied category is one row: it keeps its slot and is named."""
+    chart = _BOXEN_DOORS[door](_slot_frame(_EMPTY_Z).head(13))
+    svg, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [_slot_message(door)]
+    assert ">z<" in svg
+
+
+def test_a_horizontal_mark_boxen_empty_category_is_named_in_the_callers_terms():
+    """The horizontal form puts the categories on ``y`` and the values on ``x``, so the empty slot
+    reads ``c=z`` and the channel the caller wrote, ``x``: the call writes no flip of its own."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z)).mark_boxen(horizontal=True).encode(x="w", y="c")
+    svg, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [_slot_message("mark_boxen", "x")]
+    assert ">z<" in svg
+
+
+def test_a_boxen_category_bound_to_color_is_named_once():
+    """With the color on the category column too, the empty slot is the color's own group: the one
+    unit is named once, by the caller's column, whichever layer of the boxen raises it."""
+    chart = _slot_chart(_slot_frame(_EMPTY_Z), "mark_boxen", {"x": "c", "y": "w", "color": "c"})
+    _, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [_slot_message("mark_boxen")]
+    _, every = _render_capturing(chart.to_svg)
+    assert set(every) == {_slot_message("mark_boxen")}
+
+
+@pytest.mark.parametrize("color", [None, "g"], ids=["color_unbound", "color_on_the_level"])
+@pytest.mark.parametrize("horizontal", [False, True], ids=["vertical", "horizontal"])
+def test_a_boxen_color_field_level_a_null_column_empties_is_named_by_the_color_column(
+    horizontal: bool, color: str | None
+):
+    """``color_field="g"`` makes the levels of ``g`` the boxen's categories, so the lowering carries
+    ``g``, not the ``c`` the call binds to the axis, and the axis lists the levels of ``g``. The
+    level ``r`` no usable value reaches keeps its slot and reads ``g=r`` in the channel the caller
+    wrote for the values, named once whether or not the color is bound to ``g`` as well."""
+    value, category = ("x", "y") if horizontal else ("y", "x")
+    chart = (
+        fm.Chart(_hue_group_frame())
+        .mark_boxen(color_field="g", horizontal=horizontal)
+        .encode(**{value: "w", category: "c"}, **_given(color=color))
+    )
+    expected = _slot_message("mark_boxen", value, "r", "g")
+    svg, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [expected]
+    assert axis_tick_labels(svg, axis=category) == ["p", "q", "r"]
+    _, every = _render_capturing(chart.to_svg)
+    assert set(every) == {expected}
+
+
+# Marks that band a category on an axis and carry its column to the layers they draw. A channel
+# other than ``x`` and ``y`` bound to that column is read from what each carries: a tooltip takes
+# effect, and an opacity bound to a text column is refused.
+_CATEGORY_BANDED_MARKS = [
+    "mark_boxen",
+    "mark_boxplot",
+    "mark_violin",
+    "mark_errorbar",
+    "mark_point",
+]
+
+
+@pytest.mark.parametrize("mark_method", _CATEGORY_BANDED_MARKS)
+def test_a_tooltip_bound_to_the_category_column_reaches_what_a_category_mark_draws(
+    mark_method: str,
+):
+    """The boxen's statistic carries the category column, so a tooltip bound to it is read there as
+    it is on the other marks that band a category: nothing is dropped, and each category's marks
+    carry its text."""
+    chart = _slot_chart(_slot_frame(_DRAWN_Z), mark_method, {"x": "c", "y": "w", "tooltip": "c"})
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    for category in ("a", "b", "z"):
+        assert f"<title>c: {category}</title>" in svg
+
+
+@pytest.mark.parametrize("mark_method", _CATEGORY_BANDED_MARKS)
+def test_an_opacity_bound_to_a_text_category_column_is_refused_by_every_category_mark(
+    mark_method: str,
+):
+    """A text column has no opacity scale, and the boxen reaches the category column as the other
+    marks that band a category do, so the same refusal meets an opacity bound to it, naming the
+    channel and the column."""
+    chart = _slot_chart(_slot_frame(_DRAWN_Z), mark_method, {"x": "c", "y": "w", "opacity": "c"})
+    with pytest.raises(ValueError, match="opacity: column 'c' has unsupported dtype: Utf8"):
+        chart.to_svg()
+
+
+# The category column of ``_slot_frame`` as the text a, b, z and as the integers 1, 2, 4.
+_CATEGORY_FRAMES = {
+    "text": _slot_frame(_DRAWN_Z),
+    "integer": _slot_frame(_DRAWN_Z).with_columns(
+        pl.col("c").replace_strict({"a": 1, "b": 2, "z": 4}, return_dtype=pl.Int64)
+    ),
+}
+
+# What a channel bound to the category column does to a boxen of a text and of an integer
+# category. ``title``, ``desc`` and ``anchor`` add that element to the unbound chart's SVG,
+# ``unbound`` draws its bytes, ``scaled`` changes them through the channel's scale, ``rotated``
+# adds rotations to the unbound chart's SVG (the outlier points turn), and ``refused`` raises the
+# unsupported-dtype error. A binding the boxen accepts warns nothing.
+_CARRIED_CHANNEL_CASES = [
+    pytest.param(category, channel, effect, id=f"{category}-{channel}")
+    for channel, text_effect, integer_effect in [
+        ("tooltip", "title", "title"),
+        ("description", "desc", "desc"),
+        ("href", "anchor", "unbound"),
+        ("key", "unbound", "unbound"),
+        ("text", "unbound", "unbound"),
+        ("opacity", "refused", "scaled"),
+        ("fill_opacity", "refused", "scaled"),
+        ("stroke_opacity", "refused", "scaled"),
+        ("size", "refused", "scaled"),
+        ("stroke_width", "refused", "scaled"),
+        ("angle", "unbound", "rotated"),
+    ]
+    for category, effect in (("text", text_effect), ("integer", integer_effect))
+]
+_EFFECT_ELEMENTS = {"title": "<title>", "desc": "<desc>", "anchor": "<a "}
+
+
+@pytest.mark.parametrize("category,channel,effect", _CARRIED_CHANNEL_CASES)
+def test_a_channel_bound_to_a_boxens_category_column_reads_the_carried_column(
+    category: str, channel: str, effect: str
+):
+    """The boxen's statistic carries the category column, so a channel bound to it is judged by what
+    the column holds, as on any layer that draws it. A text category feeds a tooltip, a description
+    and a link, leaves a key, a text label and an angle drawing as the unbound chart does, and is
+    refused by the channels that read numbers (the opacity family, ``size`` and ``stroke_width``).
+    An integer category feeds a tooltip and a description, leaves a link, a key and a text label
+    drawing as the unbound chart does, feeds the channels that read numbers through their scales
+    and turns the outlier points by an angle. Nothing the boxen accepts warns."""
+    frame = _CATEGORY_FRAMES[category]
+    chart = _slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", channel: "c"})
+    if effect == "refused":
+        with pytest.raises(ValueError, match=f"{channel}: column 'c' has unsupported dtype: Utf8"):
+            chart.to_svg()
+        return
+    unbound, _ = _render_capturing(_mark_boxen(frame).to_svg)
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    if effect == "unbound":
+        assert svg == unbound
+    elif effect == "scaled":
+        assert svg != unbound
+    elif effect == "rotated":
+        assert svg.count("rotate(") > unbound.count("rotate(")
+    else:
+        assert _EFFECT_ELEMENTS[effect] in svg
+        assert _EFFECT_ELEMENTS[effect] not in unbound
+
+
+def test_a_channel_bound_to_a_column_the_boxens_statistic_does_not_carry_is_still_dropped_with_a_warning():
+    """The statistic carries the category column and no other column of the source. An opacity bound
+    to the value column is dropped as on every statistic's layer: the chart is the unbound chart,
+    and each warning says the binding was dropped. A lowering that carried every column would pass
+    the table above and fail here."""
+    frame = _CATEGORY_FRAMES["text"]
+    unbound, _ = _render_capturing(_mark_boxen(frame).to_svg)
+    chart = _slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", "opacity": "w"})
+    svg, shown = _render_capturing(chart.to_svg)
+    assert svg == unbound
+    assert shown, "the dropped binding was not reported"
+    assert all("opacity 'w' was dropped" in message for message in shown)
+
+
+def _scene_keys(chart: fm.Chart) -> list[list[str] | None]:
+    """The ``keys`` of every mark of every panel of ``chart``'s interactive scene."""
+    scene, _ = _render_capturing(lambda: chart.interactive().scene_json)
+    return [mark["keys"] for panel in json.loads(scene)["panels"] for mark in panel["marks"]]
+
+
+def test_a_key_bound_to_a_boxens_category_column_reaches_the_interactive_scene():
+    """A key draws nothing in a static render, but the interactive scene pairs marks by it: with
+    ``key="c"`` the boxen's marks carry the category of each mark (or row) and the unbound chart's
+    carry none."""
+    frame = _CATEGORY_FRAMES["text"]
+    unbound = _scene_keys(_mark_boxen(frame))
+    keyed = _scene_keys(_slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", "key": "c"}))
+    assert unbound and all(keys is None for keys in unbound)
+    carried = [keys for keys in keyed if keys is not None]
+    assert carried, "no mark of the interactive scene carries the key"
+    assert {key for keys in carried for key in keys} == {"a", "b", "z"}
+
+
+@pytest.mark.parametrize(
+    "channel,column",
+    [
+        pytest.param("tooltip", "g", id="tooltip-on-the-level"),
+        pytest.param("opacity", "g", id="opacity-on-the-level"),
+        pytest.param("tooltip", "c", id="tooltip-on-the-x-column"),
+        pytest.param("opacity", "c", id="opacity-on-the-x-column"),
+    ],
+)
+def test_a_boxen_color_field_carries_its_own_column_to_the_channels_bound_to_it(
+    channel: str, column: str
+):
+    """Under ``color_field="g"`` the carried column is ``g``: a tooltip bound to it draws titles
+    and an opacity bound to it is refused as a text column, while the same channels bound to the
+    ``c`` the call puts on ``x``, which the statistic does not carry, draw the unbound chart and
+    warn that the binding was dropped."""
+    frame = _CATEGORY_FRAMES["text"]
+    plain = fm.Chart(frame).mark_boxen(color_field="g")
+    chart = plain.encode(x="c", y="w", **{channel: column})
+    if column == "g" and channel == "opacity":
+        with pytest.raises(ValueError, match="opacity: column 'g' has unsupported dtype: Utf8"):
+            chart.to_svg()
+        return
+    unbound, _ = _render_capturing(plain.encode(x="c", y="w").to_svg)
+    svg, shown = _render_capturing(chart.to_svg)
+    if column == "g":
+        assert shown == []
+        assert "<title>g: p</title>" in svg and "<title>g: q</title>" in svg
+    else:
+        assert svg == unbound
+        assert shown, "the dropped binding was not reported"
+        assert all(f"{channel} 'c' was dropped" in message for message in shown)
+
+
+def test_a_channel_bound_to_the_carried_column_of_an_emptied_category_leaves_it_named_once():
+    """The placeholder row of an emptied category carries its key like any row: the census names
+    ``c=z`` once beside a tooltip bound to the category, and the other categories' marks carry the
+    tooltip while ``z`` draws no title; an opacity bound to the text category refuses."""
+    frame = _slot_frame(_EMPTY_Z)
+    chart = _slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", "tooltip": "c"})
+    svg, shown = _render_capturing(chart.to_svg)
+    assert set(shown) == {_slot_message("mark_boxen")}
+    assert "<title>c: a</title>" in svg and "<title>c: b</title>" in svg
+    assert "<title>c: z</title>" not in svg
+    refused = _slot_chart(frame, "mark_boxen", {"x": "c", "y": "w", "opacity": "c"})
+    with pytest.raises(ValueError, match="opacity: column 'c' has unsupported dtype: Utf8"):
+        refused.to_svg()
+
+
+# The shapes of a boxen the two lowerings below must draw alike.
+_BOXEN_SHAPES: dict[str, dict[str, Any]] = {
+    "plain": {},
+    "hue": {"hue": "g"},
+    "facet": {"facet": "g"},
+    "hue_and_facet": {"hue": "g", "facet": "g"},
+    "horizontal": {"horizontal": True},
+    "sorted_by_name": {"sort": "descending"},
+    "sorted_by_list": {"sort": ["z", "a", "b"]},
+    "sorted_by_aggregate": {"sort": {"field": "w", "op": "mean", "order": "descending"}},
+}
+_Z_BY_STATE = {"drawn": _DRAWN_Z, "emptied": _EMPTY_Z}
+
+
+def _titled_boxen(
+    frame: pl.DataFrame,
+    column: str,
+    *,
+    horizontal: bool = False,
+    sort: Any = None,
+    hue: str | None = None,
+    facet: str | None = None,
+) -> fm.Chart:
+    """A boxen of ``w`` by the category column ``column`` under the axis title ``Category``, so two
+    charts over differently named columns show the same text."""
+    channel = fm.Y if horizontal else fm.X
+    category = channel(column, title="Category", **_given(sort=sort))
+    encoding = {"x": "w", "y": category} if horizontal else {"x": category, "y": "w"}
+    chart = (
+        fm.Chart(frame).mark_boxen(horizontal=horizontal).encode(**encoding, **_given(color=hue))
+    )
+    return chart if facet is None else chart.facet(col=facet)
+
+
+@pytest.mark.parametrize("state", _Z_BY_STATE)
+@pytest.mark.parametrize("shape", _BOXEN_SHAPES)
+def test_a_boxen_draws_and_warns_the_same_whether_or_not_its_category_is_carried(
+    shape: str, state: str
+):
+    """A category column named like one of the statistic's outputs, ``level`` here, cannot be
+    carried through its ``groupby``, so the layers read the statistic's own ``group`` column
+    instead. The two lowerings differ in the column the layers read and in nothing else: the same
+    data under the two names draws the same bytes in every shape of boxen, with a category emptied
+    or not, and warns the same text but for the column the slot is named by, ``c`` against
+    ``group``."""
+    frame = _slot_frame(_Z_BY_STATE[state])
+    shape_kwargs = _BOXEN_SHAPES[shape]
+    carried_svg, carried_shown = _render_capturing(_titled_boxen(frame, "c", **shape_kwargs).to_svg)
+    uncarried = _titled_boxen(frame.rename({"c": "level"}), "level", **shape_kwargs)
+    uncarried_svg, uncarried_shown = _render_capturing(uncarried.to_svg)
+    assert bool(carried_shown) == (state == "emptied"), (
+        "the census names the emptied category alone"
+    )
+    assert carried_svg == uncarried_svg
+    assert all(" c=" in m for m in carried_shown), (
+        "the carried slot is named by the caller's column"
+    )
+    assert uncarried_shown == [m.replace(" c=", " group=") for m in carried_shown]
+
+
+@pytest.mark.parametrize("value", _UNDRAWABLE[2:])
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_category_of_only_infinities_is_named_in_the_callers_terms(door: str, value: float):
+    """An infinity is a value the statistic keeps, so the category has rows and nothing to place:
+    it is named, in the caller's column, as the same category of nulls is."""
+    svg, shown = _render_capturing(
+        _BOXEN_DOORS[door](_slot_frame([value] * 6)).to_svg, action="default"
+    )
+    assert shown == [_slot_message(door)]
+    assert ">z<" in svg
+
+
+@pytest.mark.parametrize("mark_method", ["mark_boxen", "mark_boxplot", "mark_point"])
+def test_a_boxen_category_under_a_custom_title_is_named_by_its_column(mark_method: str):
+    """The census names columns and the axis shows the title: under ``title="Category"`` the empty
+    slot still reads ``c=z``, as it does for ``mark_boxplot`` and ``mark_point``, and the axis
+    reads ``Category``."""
+    x = fm.X("c", title="Category")
+    chart = getattr(fm.Chart(_slot_frame(_EMPTY_Z)), mark_method)().encode(x=x, y="w")
+    svg, shown = _render_capturing(chart.to_svg, action="default")
+    assert shown == [_slot_message(mark_method)]
+    assert ">Category<" in svg
+
+
+def test_a_boxen_category_named_group_renders_and_is_named_group():
+    """A category column called ``group`` is named like the statistic's own output column, so it
+    cannot be carried through the statistic's ``groupby``; the layers read the statistic's column,
+    which holds the caller's values under the caller's own name. The chart renders and the slot
+    reads ``group=z``."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z).rename({"c": "group"})).mark_boxen()
+    svg, shown = _render_capturing(chart.encode(x="group", y="w").to_svg, action="default")
+    assert shown == [_slot_message("mark_boxen", column="group")]
+    assert ">z<" in svg
+
+
+# The columns the boxen's statistic writes besides ``group``, which a category column cannot be
+# named like and still be carried through its ``groupby``.
+_TRANSFORM_OUTPUT_NAMES = ["level", "value", "depth", "lower", "upper", "is_outlier"]
+
+
+@pytest.mark.parametrize("name", _TRANSFORM_OUTPUT_NAMES)
+def test_a_boxen_category_named_like_a_transform_output_still_renders(name: str):
+    """The statistic refuses a ``groupby`` field named like one of its own output columns, so such
+    a category cannot be carried: the layers keep reading its ``group`` column, the chart renders
+    with the caller's own name on its axis, the slot is kept, and it reads ``group=z``, a
+    documented limit."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z).rename({"c": name})).mark_boxen()
+    svg, shown = _render_capturing(chart.encode(x=name, y="w").to_svg, action="default")
+    assert shown == [_slot_message("mark_boxen", column="group")]
+    assert ">z<" in svg
+    assert f">{name}<" in svg, "the axis lost the caller's name for the category"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "a category column named like one of LetterValue's output columns cannot be carried "
+        "through its groupby, so its slot reads group=z; when a fix makes this pass, delete this "
+        "marker and the spec's sentence that states the limit"
+    ),
+)
+def test_a_boxen_category_named_level_is_named_in_the_callers_terms():
+    """The caller's column is ``level``, so the empty slot should read ``level=z``; it reads
+    ``group=z``, the statistic's own column, while the category cannot be carried."""
+    chart = fm.Chart(_slot_frame(_EMPTY_Z).rename({"c": "level"})).mark_boxen()
+    _, shown = _render_capturing(chart.encode(x="level", y="w").to_svg, action="default")
+    assert shown == [_slot_message("mark_boxen", column="level")]
+
+
+_EMPTY_CELL_Z = [3.0, None, 5.0, None, 7.0, None]
+
+
+@pytest.mark.parametrize("door", _BOXEN_DOORS)
+def test_a_boxen_hue_cell_a_null_column_empties_inside_a_drawn_category_is_silent(door: str):
+    """Hue level ``q`` has no usable value in category ``z`` while ``p`` still draws there: the
+    category draws, so nothing is named, and the chart is byte for byte the one with the cell's
+    rows left out."""
+    frame = _slot_frame(_EMPTY_CELL_Z)
+    build = _BOXEN_DOORS[door]
+    svg, shown = _render_capturing(build(frame, "g").to_svg, action="default")
+    expected_svg, _ = _render_capturing(build(frame.filter(pl.col("w").is_not_null()), "g").to_svg)
+    assert shown == []
+    assert ">z<" in svg
+    assert svg == expected_svg
+
+
+@pytest.mark.parametrize(
+    "mark_method,sort,expected",
+    [
+        pytest.param("mark_boxen", None, ["a", "b", "d", "z"], id="boxen-unsorted"),
+        pytest.param("mark_boxen", "ascending", ["a", "b", "d", "z"], id="boxen-ascending"),
+        pytest.param("mark_boxen", "descending", ["z", "d", "b", "a"], id="boxen-descending"),
+        pytest.param("mark_boxplot", None, ["a", "b", "z", "d"], id="boxplot-unsorted"),
+    ],
+)
+def test_an_emptied_boxen_category_follows_the_categories_with_values_unless_sorted_by_name(
+    mark_method: str, sort: str | None, expected: list[str]
+):
+    """The boxen's statistic keeps its placeholders after its groups with values, so ``z``, met
+    third in the data, comes after ``d`` unsorted and under an ascending name sort, and a
+    descending name sort puts it first, at its name's place. ``mark_boxplot``, whose placeholders
+    keep their place in the data, reads ``a, b, z, d``."""
+    frame = pl.DataFrame(
+        {
+            "c": ["a"] * 6 + ["b"] * 6 + ["z"] * 6 + ["d"] * 6,
+            "w": [1.0, 2.0, 3.0, 2.0, 1.0, 3.0]
+            + [7.0, 8.0, 9.0, 8.0, 7.0, 9.0]
+            + [None] * 6
+            + [4.0, 5.0, 6.0, 5.0, 4.0, 6.0],
+        },
+        schema={"c": pl.Utf8, "w": pl.Float64},
+    )
+    x = "c" if sort is None else fm.X("c", sort=sort)
+    svg, _ = _render_capturing(getattr(fm.Chart(frame), mark_method)().encode(x=x, y="w").to_svg)
+    assert axis_tick_labels(svg, axis="x") == expected
+
+
+def test_a_boxen_category_a_log_axis_cuts_is_reported_by_the_log_warning_alone():
+    """The boxen's statistic does not work in the axis's space, so a category whose values are all
+    off a log axis's side has letter values the axis cannot place: the log warning reports them,
+    the census has nothing to add, and the category keeps its slot."""
+    chart = fm.Chart(_slot_frame([-1.0] * 6)).mark_boxen()
+    svg, messages = _render_capturing(
+        chart.encode(x="c", y=fm.Y("w", scale=fm.LogScale())).to_svg, action="default"
+    )
+    assert messages == [_log_message("y", "lower", 1)]
+    assert ">z<" in svg
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: _displot_hist(_hist_group_frame([None] * 3), hue="g"), id="histogram"),
+        pytest.param(lambda: _mark_boxen(_slot_frame(_EMPTY_Z)), id="boxen"),
+    ],
+)
+def test_an_emptied_histogram_level_and_boxen_category_reach_the_interactive_route(
+    build: Callable[[], fm.Chart],
+):
+    """The interactive export renders a static fallback and the scene, so an emptied unit is named
+    once per layer per render, twice what a static render names; the scene it ships holds no NaN
+    or infinity, since the placeholder row draws nothing."""
+    chart = build()
+    _, static = _render_capturing(chart.to_svg)
+    _, interactive = _render_capturing(lambda: chart.interactive().to_html())
+    scene, _ = _render_capturing(lambda: chart.interactive().scene_json)
+    assert static
+    assert interactive == static * 2
+    assert "NaN" not in scene and "Infinity" not in scene

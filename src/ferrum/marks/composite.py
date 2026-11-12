@@ -29,13 +29,18 @@ from ferrum._core import secondary_key
 from ferrum._encode_lowering import _missing_xy_channels, _unbound_input_refusal
 from ferrum._layer import MarkDesugarResult, _Layer, catch_all_over
 from ferrum._overrides import register_layer_names
-from ferrum._registry import registry_output_columns, registry_secondary_columns
+from ferrum._registry import (
+    registry_output_columns,
+    registry_output_names,
+    registry_secondary_columns,
+)
 from ferrum.color import palette as _named_palette_colors
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
     typed_positional_channel,
+    with_grouping,
 )
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
@@ -1220,11 +1225,22 @@ def desugar_boxen(
         ``lv_depth_K``:  ``[group, lower, upper, level]``
         ``lv_outliers``: ``[group, value, is_outlier]``
 
-    Layer encodings therefore use ``"group"`` / ``"lower"`` / ``"upper"`` /
-    ``"value"`` rather than the original chart-level column names — but the
-    chart-level x/y encoding still references the user's columns, so axis
-    scales resolve naturally (LetterValue copies the groupby values verbatim
-    into ``group``, and quantile outputs lie within the original value range).
+    Each layer's value channel therefore reads ``"lower"`` / ``"upper"`` /
+    ``"value"`` rather than the chart-level value column, which these batches
+    do not carry, and keeps the caller's own title; the chart-level x/y
+    encoding still references the user's columns, so axis scales resolve
+    naturally (quantile outputs lie within the original value range). The
+    category channel reads the column that holds the categories, the caller's
+    own category column or the ``color_field`` column when one is set: the
+    transform carries it through its ``groupby`` and publishes it under its own
+    name in every batch, as ``mark_boxplot`` carries its category, so the
+    render names an empty category by the column the caller wrote, and a
+    channel bound to that column (a tooltip, say) reads it too; one its dtype
+    cannot feed (an opacity on a text column) is refused, as on
+    ``mark_boxplot``. A category column named like one of the transform's own
+    output columns (``group`` included) cannot be carried, since the transform
+    refuses a ``groupby`` field that would shadow one; its layers read
+    ``group``, which holds the same values.
 
     Those two schemas are read through ``registry_secondary_columns``, not
     ``registry_output_columns`` (spec §4.6 / M6a): they are ``letter_value``'s
@@ -1306,7 +1322,7 @@ def desugar_boxen(
     # which emits its group rows in aggregate order.  The categorical axis domain
     # then falls out in first-appearance order, so no explicit layer sort is set.
     # Non-aggregate sorts (explicit list / "ascending" / "descending") still apply
-    # to the renamed "group" encoding in the layers.
+    # to the category encoding in the layers.
     if boxen_agg_sort is not None:
         cat_sort = None
 
@@ -1324,26 +1340,38 @@ def desugar_boxen(
     outlier_cols = registry_secondary_columns("letter_value", _LV_OUTLIERS_KEY, ["group", "value"])
     depth_count = _boxen_depth_count()
 
-    # The LetterValue transform renames the groupby column to "group" and the
-    # value axis to "lower"/"upper"/"value" in its output, so every layer's
-    # positional encoding must be retitled with the user's own field names
-    # (F-L03-12) or the rendered axes show LetterValue's internal column
-    # names instead. Unlike desugar_boxplot's enc() helper (composite.py
-    # ~L280), whose categorical field is never renamed, boxen renames BOTH
-    # channels identically across every layer, so both are titled once here
-    # rather than per call site.
+    # The category the layers read. LetterValue copies its `group` key into an
+    # output column of its own, named `group`, which no caller wrote, so a
+    # layer bound to it leaves the render no name for the category but that
+    # one: an empty band slot reads `group=z` where the caller bound `c`.
+    # Carried through `groupby` instead, the key is also published under the
+    # caller's own name in every batch (a `groupby` field equal to `group` adds
+    # no partition and keeps its null pooling), as desugar_boxplot carries its
+    # category, and every layer binds that column. `groupby` may not name one
+    # of the transform's own output columns (it refuses the field, since the
+    # group column it appends would shadow the output), so a category named
+    # like one keeps reading `group`; the live registry says which names.
+    carried = group not in registry_output_names("letter_value")
+    category_col = group if carried else depth_cols["group"]
+    groupby = with_grouping([group], grouping) if carried else list(grouping)
+
+    # The LetterValue transform replaces the value axis with
+    # "lower"/"upper"/"value" in its output, so every layer's value channel
+    # must be retitled with the user's own field name (F-L03-12) or the
+    # rendered axes show LetterValue's internal column names instead. The
+    # category channels are built once here, one per axis, and shared by every
+    # layer, so they are titled once rather than per call site.
     #
-    # Typed Nominal unless the caller declared otherwise (#171). ``group`` is
-    # LetterValue's rename of the user's category column and carries its
-    # dtype, so a numeric category column reaches these channels numeric and
-    # would otherwise infer Quantitative -- which every one of this mark's
-    # depth-band rects needs an ordinal scale to size against.
-    group_col = depth_cols["group"]
+    # Typed Nominal unless the caller declared otherwise (#171). The category
+    # column carries its input dtype, so a numeric category column reaches
+    # these channels numeric and would otherwise infer Quantitative -- which
+    # every one of this mark's depth-band rects needs an ordinal scale to size
+    # against.
     group_enc_x = typed_positional_channel(
-        group_col, channel=X, declared_type=x_type, sort=cat_sort, title=group_title
+        category_col, channel=X, declared_type=x_type, sort=cat_sort, title=group_title
     )
     group_enc_y = typed_positional_channel(
-        group_col, channel=Y, declared_type=y_type, sort=cat_sort, title=group_title
+        category_col, channel=Y, declared_type=y_type, sort=cat_sort, title=group_title
     )
 
     def enc(value_col: str, value2_col: str | None = None) -> dict:
@@ -1365,7 +1393,7 @@ def desugar_boxen(
         LetterValue(
             value=val,
             group=group,
-            groupby=list(grouping),
+            groupby=groupby,
             k_depth=k_depth,
             k_proportion=k_proportion,
             outlier_threshold=outlier_threshold,

@@ -2981,7 +2981,7 @@ def test_r3b_catplot_no_height_aspect_still_renders(_r3b_cat_df: pl.DataFrame) -
 # it emits its group rows in aggregate order, so the categorical axis domain
 # falls out in first-appearance order with no explicit categorical layer sort.
 # Non-aggregate forms (explicit list / "ascending" / "descending") still route
-# through the standard layer-sort path on the renamed "group" column.
+# through the standard layer-sort path on the category column the layers read.
 
 
 @pytest.fixture

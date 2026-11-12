@@ -28,6 +28,13 @@
 //! A call that dropped nothing returns whatever it computes, an empty batch
 //! included, exactly as the ungrouped call does.
 //!
+//! A group (or combination) whose rows hold no usable value, every one null
+//! or NaN, keeps its key as one placeholder row: depth 1, the median's
+//! letter, NaN `lower` and `upper`. Placeholders follow every group with
+//! values, in input order, so the order of the groups with values (and any
+//! `sort`) is what it is without them. The `depth_1` output carries the
+//! placeholder; no other depth and no outlier row does.
+//!
 //! Secondary named outputs:
 //! - `outliers` (or `<name>_outliers`): `[group: <original dtype>|Null, value: Float64, is_outlier: Bool]`,
 //!   filtered to rows where the input value falls outside the outermost letter-value
@@ -541,19 +548,21 @@ fn compute_depths(
     // partition's row indices.
     //
     // A group whose rows are ALL null/NaN filters down to an empty `vs`
-    // here — a group the pre-migration code could never see, since it built
-    // this map from already-filtered `(key, value)` pairs rather than raw
-    // partitioned rows. Such a group must NOT be inserted:
+    // here. Such a group must NOT be inserted into `groups`:
     // `group_order`'s `sort=Some(mean|median)` aggregate over an empty slice
     // is `NaN`, and `NaN.partial_cmp(_)` is `None`, which the comparator
     // degrades to `Ordering::Equal` against every other group — measured
     // (not just predicted) to silently INVERT the real groups' requested
     // order (`letter_value_all_nan_group_does_not_corrupt_sort_order`).
-    // Skipping the insert here restores the exact invariant the
-    // pre-migration `pairs`-based map always had: every key in `groups` has
-    // at least one real value.
+    // Every key in `groups` therefore has at least one real value. The
+    // emptied group keeps its key another way: `emptied` records it, in the
+    // partition's first-appearance order, and it is emitted as one
+    // placeholder row after every group with values (spec's all-null rule,
+    // as `Aggregate` and `BoxStats` keep an all-null group), so its band
+    // slot, legend entry and facet panel stay and the render can name it.
     warn_null_groupby_rows_dropped(batch, &dropping_fields, "stat_letter_value", ctx);
     let mut groups: BTreeMap<ComboKey, Vec<f64>> = BTreeMap::new();
+    let mut emptied: Vec<ComboKey> = Vec::new();
     let mut dropped_rows = 0_usize;
     for (key, rows) in &partition.groups {
         let g = key_columns.combo(key)?;
@@ -568,13 +577,16 @@ fn compute_depths(
             Some(v)
         }).collect();
         if vs.is_empty() {
+            emptied.push(g);
             continue;
         }
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         groups.insert(g, vs);
     }
-    // Only the null-key drop refuses: a call that dropped nothing returns
-    // what it computed, an empty batch included, as the ungrouped call does.
+    // Only the null-key drop refuses, and only when it leaves no group with
+    // values: a call that dropped nothing returns what it computed (an
+    // emptied group's placeholder, or an empty batch for a frame with no
+    // rows), as the ungrouped call does.
     if dropped_rows > 0 && groups.is_empty() {
         ctx.refuse_unless_partition(PyValueError::new_err("stat_letter_value: empty input after filter"))?;
     }
@@ -605,27 +617,46 @@ fn compute_depths(
             let p = 0.5_f64.powi(depth as i32);
             let lower = quantile_sorted(vs, p);
             let upper = quantile_sorted(vs, 1.0 - p);
-            // `k` is clamped to `K_MAX_NAMED` (== `LETTERS.len()`) by
-            // `k_for_depth`, so `depth` can never exceed `LETTERS.len()` here;
-            // the `depth_{depth}` fallback is defensive only — kept so a
-            // future divergence between the two constants degrades to a
-            // readable label instead of an out-of-bounds panic.
-            let letter = if depth >= 1 && depth <= LETTERS.len() {
-                LETTERS[depth - 1].to_string()
-            } else {
-                format!("depth_{depth}")
-            };
             rows.push(DepthRow {
                 group: g.0.clone(),
                 by: g.1.clone(),
                 depth: depth as i32,
                 lower,
                 upper,
-                level: letter,
+                level: level_label(depth),
             });
         }
     }
+    // Each emptied group's one row: its key at depth 1, the depth every group
+    // with values has a row at (the median tick and the innermost band read
+    // it), with NaN letter values, so the key reaches the category axis while
+    // nothing draws for it.
+    for g in &emptied {
+        rows.push(DepthRow {
+            group: g.0.clone(),
+            by: g.1.clone(),
+            depth: 1,
+            lower: f64::NAN,
+            upper: f64::NAN,
+            level: level_label(1),
+        });
+    }
     Ok((rows, dtypes))
+}
+
+/// The Tukey letter naming `depth` (1 is the median, `"M"`).
+///
+/// `k_for_depth` clamps every depth this transform emits to `K_MAX_NAMED`
+/// (== `LETTERS.len()`), so a `depth` past `LETTERS.len()` cannot occur here;
+/// the `depth_{depth}` fallback is defensive only, kept so a future
+/// divergence between the two constants degrades to a readable label instead
+/// of an out-of-bounds panic.
+fn level_label(depth: usize) -> String {
+    if depth >= 1 && depth <= LETTERS.len() {
+        LETTERS[depth - 1].to_string()
+    } else {
+        format!("depth_{depth}")
+    }
 }
 
 /// The primary batch's own columns, before any `groupby` column; `group`
@@ -951,6 +982,13 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// ``depth_1`` through ``depth_12`` hold ``group``, ``lower``, ``upper`` and
 /// ``level`` for that depth's rows (empty past the deepest depth). Each also
 /// ends with the ``groupby`` columns.
+///
+/// A group (or combination) whose rows hold no usable value, every one null
+/// or NaN, keeps its key as one placeholder row at depth 1 with NaN
+/// ``lower`` and ``upper``, after every group with values, in input order.
+/// The placeholder appears in ``depth_1`` and in no outlier row, so the
+/// group keeps its place on a categorical axis and in a legend while nothing
+/// draws for it.
 ///
 /// Parameters
 /// ----------
@@ -1826,24 +1864,21 @@ mod tests {
         assert_eq!(group_first_appearance(&out), vec!["a", "b", "c"]);
     }
 
-    /// Regression for stage1-rust-quality-reviewer Bug Risk 3 (cycle 3):
-    /// `compute_depths` used to insert EVERY partition group into `groups`,
-    /// including one whose value rows are all null/NaN (`vs` empty) — a
-    /// group the pre-migration code could never see, since it built the map
-    /// from already-filtered `(key, value)` pairs. `group_order`'s
-    /// sort-by-aggregate comparator has no filter for empty groups: an empty
-    /// group's `median`/`mean` aggregate is `NaN`, `NaN.partial_cmp(_)` is
-    /// `None`, and the comparator degrades to `Ordering::Equal` against
-    /// every other group.
+    /// An all-NaN group never takes part in the sort. Ranked beside the
+    /// groups that have values, its `median`/`mean` aggregate is `NaN`,
+    /// `NaN.partial_cmp(_)` is `None`, and the comparator degrades to
+    /// `Ordering::Equal` against every other group.
     ///
     /// MEASURED, not predicted: with three real groups (a/c/e, medians
     /// 10/50/90) and three all-NaN groups (b/d/f) interleaved
-    /// lexicographically between them, `sort=Some(median, Desc)` on the
-    /// pre-fix (cycle-2) code deterministically produced `["a", "c", "e"]`
-    /// — ascending order, the exact OPPOSITE of the requested descending
-    /// order — reproduced identically across three separate runs, with no
-    /// panic on this toolchain. That is the real symptom this test pins:
-    /// not a panic, a silently INVERTED sort.
+    /// lexicographically between them, `sort=Some(median, Desc)` with the
+    /// all-NaN groups in the ranking deterministically produced
+    /// `["a", "c", "e"]`: ascending order, the exact OPPOSITE of the
+    /// requested descending order, reproduced identically across three
+    /// separate runs, with no panic on this toolchain. That is the real
+    /// symptom this test pins: not a panic, a silently INVERTED sort. The
+    /// all-NaN groups keep a placeholder row each, after the groups with
+    /// values, in input order.
     #[test]
     fn letter_value_all_nan_group_does_not_corrupt_sort_order() {
         let groups: Vec<&str> = vec![
@@ -1872,16 +1907,227 @@ mod tests {
             sort: Some(LetterValueSort { op: SortOp::Median, order: SortOrder::Desc }),
         };
         let out = apply(&spec, &batch).unwrap();
-        // The all-NaN groups (b/d/f) never had any value rows and must not
-        // be emitted at all -- only the three real groups.
-        assert_eq!(out.num_rows(), 3, "only a/c/e's single Tukey depth row each should be emitted");
+        // a/c/e's single Tukey depth row each, then one placeholder row for
+        // each all-NaN group (b/d/f) in input order.
+        assert_eq!(out.num_rows(), 6, "a/c/e's depth row each, then b/d/f's placeholder row each");
         assert_eq!(
             group_first_appearance(&out),
-            vec!["e", "c", "a"],
+            vec!["e", "c", "a", "b", "d", "f"],
             "descending-by-median order must be e(90), c(50), a(10) -- \
              an all-NaN group's NaN aggregate must not collapse the comparator \
-             to Equal and invert the real groups' relative order"
+             to Equal and invert the real groups' relative order -- \
+             and the placeholders follow in input order"
         );
+    }
+
+    /// An all-NaN group keeps its key as one placeholder row (depth 1, the
+    /// median's letter, NaN letter values) after every group with values, in
+    /// input order, whether or not the groups with values are sorted; the
+    /// order of those is what it is without the emptied groups.
+    #[test]
+    fn an_emptied_group_follows_every_group_with_values() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        // Input order: z (a null and a NaN), b, a, y (NaN), c.
+        let groups: Vec<Option<&str>> = vec![
+            Some("z"), Some("z"),
+            Some("b"), Some("b"), Some("b"),
+            Some("a"), Some("a"), Some("a"),
+            Some("y"),
+            Some("c"), Some("c"), Some("c"),
+        ];
+        let values: Vec<Option<f64>> = vec![
+            None, Some(f64::NAN),
+            Some(8.0), Some(9.0), Some(10.0),
+            Some(1.0), Some(2.0), Some(3.0),
+            Some(f64::NAN),
+            Some(4.0), Some(5.0), Some(6.0),
+        ];
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(groups)), Arc::new(Float64Array::from(values))],
+        )
+        .unwrap();
+        for (sort, expected) in [
+            (None, ["a", "b", "c", "z", "y"]),
+            (Some(LetterValueSort { op: SortOp::Mean, order: SortOrder::Desc }), ["b", "c", "a", "z", "y"]),
+            (Some(LetterValueSort { op: SortOp::Mean, order: SortOrder::Asc }), ["a", "c", "b", "z", "y"]),
+        ] {
+            let spec = LetterValueSpec {
+                groupby: Vec::new(),
+                value: "v".into(), group: Some("g".into()),
+                k_depth: KDepth::Tukey,
+                outlier_threshold: 1.5,
+                name: None,
+                sort,
+            };
+            let out = apply(&spec, &batch).unwrap();
+            assert_eq!(group_first_appearance(&out), expected, "sort {sort:?}");
+            assert_eq!(ints(&out, "depth"), vec![1; 5], "sort {sort:?}: one depth-1 row per group");
+            let lower = floats(&out, "lower");
+            let upper = floats(&out, "upper");
+            assert!(lower[..3].iter().chain(&upper[..3]).all(|v| v.is_finite()), "sort {sort:?}");
+            assert!(lower[3..].iter().chain(&upper[3..]).all(|v| v.is_nan()), "sort {sort:?}: z and y carry NaN");
+            assert_eq!(strs(&out, "level"), some(&["M"; 5]), "sort {sort:?}");
+        }
+    }
+
+    /// With a `sort` and no group that has a value there is nothing to rank:
+    /// every group is a placeholder, in input order (neither sorted by name
+    /// nor ranked by row count), whichever aggregate and direction the sort
+    /// names, and the call does not refuse.
+    #[test]
+    fn a_sorted_letter_value_with_no_group_that_has_a_value_returns_the_placeholders_in_input_order() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        // Input order z (2 rows), y (1 row), x (3 rows): the name order (x, y,
+        // z) and the row-count order (x, z, y) both differ from it.
+        let groups: Vec<Option<&str>> =
+            vec![Some("z"), Some("z"), Some("y"), Some("x"), Some("x"), Some("x")];
+        let values: Vec<Option<f64>> = vec![
+            None, Some(f64::NAN),
+            Some(f64::NAN),
+            Some(f64::NAN), None, Some(f64::NAN),
+        ];
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(groups)), Arc::new(Float64Array::from(values))],
+        )
+        .unwrap();
+        for sort in [
+            LetterValueSort { op: SortOp::Count, order: SortOrder::Desc },
+            LetterValueSort { op: SortOp::Mean, order: SortOrder::Asc },
+        ] {
+            let spec = LetterValueSpec {
+                groupby: Vec::new(),
+                value: "v".into(), group: Some("g".into()),
+                k_depth: KDepth::Tukey,
+                outlier_threshold: 1.5,
+                name: None,
+                sort: Some(sort),
+            };
+            let out = apply(&spec, &batch).unwrap_or_else(|e| panic!("sort {sort:?}: refused: {e}"));
+            assert_eq!(group_first_appearance(&out), ["z", "y", "x"], "sort {sort:?}");
+            assert_eq!(ints(&out, "depth"), vec![1; 3], "sort {sort:?}: one depth-1 row per group");
+            let lower = floats(&out, "lower");
+            let upper = floats(&out, "upper");
+            assert!(lower.iter().chain(&upper).all(|v| v.is_nan()), "sort {sort:?}: every group carries NaN");
+            assert_eq!(strs(&out, "level"), some(&["M"; 3]), "sort {sort:?}");
+        }
+    }
+
+    /// The placeholder row reaches `depth_1` (the output the median tick and
+    /// the innermost band read, where every group has a row) and no other
+    /// depth, and no outlier row: its key keeps the category's slot and there
+    /// is nothing else to draw.
+    #[test]
+    fn an_emptied_group_reaches_only_the_depth_one_output() {
+        let groups: Vec<&str> = std::iter::repeat_n("a", 10).chain(std::iter::repeat_n("z", 3)).collect();
+        let values: Vec<f64> = (0..10).map(f64::from).chain([f64::NAN; 3]).collect();
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            groupby: Vec::new(),
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Full,
+            outlier_threshold: 0.0,
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let outs = secondary_outputs(&spec, &batch, &primary, &TransformContext::default()).unwrap();
+
+        let depth_1 = secondary(&outs, &depth_key(1));
+        assert_eq!(strs(depth_1, "group"), some(&["a", "z"]));
+        assert_eq!(floats(depth_1, "lower")[0], 4.5);
+        assert!(floats(depth_1, "lower")[1].is_nan() && floats(depth_1, "upper")[1].is_nan());
+        for k in 2..=3 {
+            assert_eq!(strs(secondary(&outs, &depth_key(k)), "group"), some(&["a"]), "depth {k}");
+        }
+        let outliers = secondary(&outs, OUTLIERS_KEY);
+        assert_eq!(floats(outliers, "value"), vec![0.0, 1.0, 8.0, 9.0], "a's values beyond its fence");
+        assert_eq!(strs(outliers, "group"), some(&["a"; 4]), "z has no value to be an outlier");
+    }
+
+    /// A null `group` value pools into one null-keyed group, and when none of
+    /// its rows has a usable value that group keeps its placeholder too, with
+    /// a null key.
+    #[test]
+    fn an_emptied_null_keyed_group_keeps_its_null_key() {
+        let batch = keyed_batch(
+            &[("g", vec![None, None, Some("a"), Some("a"), Some("a")])],
+            vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "k_depth": {"type": "tukey"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), vec![Some("a".to_string()), None]);
+        assert!(floats(&out, "lower")[1].is_nan());
+    }
+
+    /// A `groupby` field equal to `group` is `group`'s own dimension, so the
+    /// placeholder carries the one key in both columns.
+    #[test]
+    fn an_emptied_group_carries_its_key_in_a_groupby_field_equal_to_group() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("z"), Some("z"), Some("a"), Some("a"), Some("a")])],
+            vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "tukey"},
+        }));
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(strs(&out, "group"), some(&["a", "z"]));
+        assert_eq!(strs(&out, "g"), some(&["a", "z"]));
+        assert!(floats(&out, "lower")[1].is_nan());
+    }
+
+    /// An integer group column keeps its dtype on the placeholder row: the
+    /// emptied group's key is its own integer, not a stringified one.
+    #[test]
+    fn an_emptied_int64_group_keeps_its_key_and_dtype() {
+        use arrow::array::Int64Array;
+        let batch = batch_value_int64_group(
+            vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![7, 7, 6, 6, 6, 6, 6],
+        );
+        let spec = LetterValueSpec {
+            groupby: Vec::new(),
+            value: "v".into(), group: Some("cyl".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
+        let groups = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let keys: Vec<i64> = (0..out.num_rows()).map(|i| groups.value(i)).collect();
+        assert_eq!(*keys.last().unwrap(), 7, "the emptied group 7 follows group 6");
+        assert!(keys[..keys.len() - 1].iter().all(|&k| k == 6));
+        assert!(floats(&out, "lower").last().unwrap().is_nan());
+    }
+
+    /// A null `groupby` key still refuses a whole-frame call the drop leaves
+    /// with no group that has values, even when an all-NaN combination keeps
+    /// its placeholder: only the null-key drop makes the call refuse.
+    #[test]
+    fn a_null_key_drop_that_leaves_only_emptied_combinations_still_refuses() {
+        pyo3::Python::initialize();
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"); 3]), ("h", vec![None, Some("x"), Some("x")])],
+            vec![1.0, f64::NAN, f64::NAN],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let err = apply(&spec, &batch).unwrap_err().to_string();
+        assert_eq!(err, "ValueError: stat_letter_value: empty input after filter");
     }
 
     // ── default fence (outlier_threshold = 0.0) ───────────────────────────
@@ -2119,9 +2365,10 @@ mod tests {
         assert_eq!(floats(depth_2, "upper"), vec![4.0, 40.0]);
     }
 
-    /// A one-row combination computes its own degenerate statistic and a
-    /// combination with no plottable value emits nothing; neither disturbs
-    /// its siblings.
+    /// A one-row combination computes its own degenerate statistic, and a
+    /// combination with no plottable value keeps one placeholder row, carrying
+    /// both its keys, after the combinations that have values; neither
+    /// disturbs its siblings.
     #[test]
     fn letter_value_groupby_small_combinations_compute_their_own_statistic() {
         let batch = keyed_batch(
@@ -2135,10 +2382,12 @@ mod tests {
             "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
         let out = apply(&spec, &batch).unwrap();
-        assert_eq!(strs(&out, "group"), some(&["a", "b"]));
-        assert_eq!(strs(&out, "h"), some(&["x", "x"]));
-        assert_eq!(floats(&out, "lower"), vec![7.0, 2.0]);
-        assert_eq!(floats(&out, "upper"), vec![7.0, 2.0]);
+        assert_eq!(strs(&out, "group"), some(&["a", "b", "a"]));
+        assert_eq!(strs(&out, "h"), some(&["x", "x", "y"]));
+        let (lower, upper) = (floats(&out, "lower"), floats(&out, "upper"));
+        assert_eq!(lower[..2], [7.0, 2.0]);
+        assert_eq!(upper[..2], [7.0, 2.0]);
+        assert!(lower[2].is_nan() && upper[2].is_nan(), "the emptied combination carries NaN");
     }
 
     fn ctx_warnings(ctx: &TransformContext) -> Vec<TransformWarning> {
@@ -2200,10 +2449,12 @@ mod tests {
     }
 
     /// A grouped call that drops nothing behaves exactly like the ungrouped
-    /// call: all-NaN values (or no rows at all) return an empty batch, not a
-    /// refusal. Only rows removed by the null-key drop can make it refuse.
+    /// call: all-NaN values keep one placeholder row per combination (per
+    /// group, ungrouped), and no rows at all return an empty batch; neither
+    /// refuses nor warns. Only rows removed by the null-key drop can make it
+    /// refuse.
     #[test]
-    fn letter_value_groupby_without_null_keys_returns_empty_like_ungrouped() {
+    fn letter_value_groupby_without_null_keys_never_refuses_like_ungrouped() {
         let all_nan = keyed_batch(
             &[("g", vec![Some("a"), Some("a")]), ("h", vec![Some("x"), Some("y")])],
             vec![f64::NAN, f64::NAN],
@@ -2215,11 +2466,11 @@ mod tests {
         let ungrouped = lv_spec(serde_json::json!({
             "value": "v", "group": "g", "k_depth": {"type": "full"},
         }));
-        for batch in [&all_nan, &no_rows] {
+        for (batch, grouped_rows, ungrouped_rows) in [(&all_nan, 2, 1), (&no_rows, 0, 0)] {
             let ctx = TransformContext::default();
             let out = apply_with_context(&grouped, batch, &ctx).expect("nothing was dropped");
-            assert_eq!(out.num_rows(), 0);
-            assert_eq!(apply(&ungrouped, batch).unwrap().num_rows(), 0);
+            assert_eq!(out.num_rows(), grouped_rows);
+            assert_eq!(apply(&ungrouped, batch).unwrap().num_rows(), ungrouped_rows);
             assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
         }
     }

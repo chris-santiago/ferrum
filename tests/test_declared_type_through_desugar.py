@@ -156,15 +156,16 @@ def test_horizontal_boxplot_reads_the_y_declaration():
     assert cell == twin
 
 
-def test_boxen_desugar_types_its_group_channel_nominal():
+def test_boxen_desugar_types_its_category_channel_nominal():
     """`mark_boxen`'s Python half, pinned at the spec it builds.
 
     Boxen's rendered numeric cells are gated on `letter_value`'s Rust-side
     group-dtype acceptance (`#185`, a separate task), so this asserts the one
-    thing `#171` owns for this mark: the channel the desugar binds to
-    `letter_value`'s renamed `group` column declares Nominal. Without it, the
-    band rects would resolve continuous the moment the transform starts
-    returning that column in its original numeric dtype.
+    thing `#171` owns for this mark: the channel the desugar binds to the
+    caller's category column, which the statistic carries through its
+    `groupby` under its own name, declares Nominal. Without it, the band rects
+    would resolve continuous the moment the transform starts returning that
+    column in its original numeric dtype.
     """
     spec = json.loads(
         fm.Chart(category_frame("Int64"))
@@ -177,7 +178,7 @@ def test_boxen_desugar_types_its_group_channel_nominal():
 
     assert x_channels, "mark_boxen emitted no layers to check"
     assert all(channel["type"] == "nominal" for channel in x_channels)
-    assert all(channel["field"] == "group" for channel in x_channels)
+    assert all(channel["field"] == "cat" for channel in x_channels)
 
 
 def test_errorband_numeric_x_stays_continuous_by_default():

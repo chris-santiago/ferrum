@@ -733,13 +733,15 @@ def _prep_ribbon_y2(ctx: _ResolveContext) -> None:
 def _prep_boxen_agg_sort(ctx: _ResolveContext) -> None:
     """Route an aggregate categorical sort into the LetterValue transform.
 
-    The LetterValue transform renames the groupby column to "group" and drops
-    the original value column from its per-depth output batches.  A field-based
-    aggregate sort dict therefore cannot resolve through the standard layer-sort
-    path — the value column is absent from the layer batch.  Instead, hand the
-    aggregate op/order to the transform via its ``sort=`` kwarg and drop the
-    categorical layer sort for the aggregate case.  Non-aggregate forms still
-    resolve via the standard layer-sort path on the renamed ``group`` column.
+    The LetterValue transform drops the original value column from its
+    per-depth output batches.  A field-based aggregate sort dict therefore
+    cannot resolve through the standard layer-sort path — the value column is
+    absent from the layer batch.  Instead, hand the aggregate op/order to the
+    transform via its ``sort=`` kwarg and drop the categorical layer sort for
+    the aggregate case.  Non-aggregate forms still resolve via the standard
+    layer-sort path on the category column the layers read (the caller's own
+    column, or ``group`` for a category named like one of the statistic's
+    outputs).
     """
     cat_is_y = bool(ctx.transform_kwargs.get("horizontal", False))
     cat_sort = ctx.y_sort if cat_is_y else ctx.x_sort

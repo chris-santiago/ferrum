@@ -31,8 +31,9 @@ Three concerns:
 3. **The output-column lookup helpers** -- `ferrum._registry`'s
    `registry_output_columns` (primary batch) and `registry_secondary_columns`
    (a named secondary batch) validate a consumer's column names against the
-   live registry and return them as a lookup (spec §4.6 / decision M6a).
-   Tested here against the real registry, not a mock.
+   live registry and return them as a lookup (spec §4.6 / decision M6a), and
+   `registry_output_names` returns every column a kind writes, across all its
+   batches, as one set. Tested here against the real registry, not a mock.
 
 The *consumption* side -- which Python consumers read declared output columns,
 that none of them still hardcodes one, and that every name they do read is
@@ -295,6 +296,64 @@ def test_registry_secondary_columns_refuses_the_primary_schema():
     assert registry_output_columns("letter_value", ["depth"]) == {"depth": "depth"}
     with pytest.raises(ValueError, match="does not declare"):
         registry_secondary_columns("letter_value", "depth_1", ["depth"])
+
+
+def test_registry_output_names_reads_every_declared_batch():
+    """`registry_output_names` is every column a kind writes: its primary batch's and every secondary
+    batch's, as one set.
+
+    `letter_value`'s primary batch holds `group`, `depth`, `lower`, `upper` and `level`, its outlier
+    batch `group`, `value` and `is_outlier`, and each depth batch `group`, `lower`, `upper` and
+    `level`, so the set is their union. It is the set the statistic refuses a `groupby` field
+    against, which its own refusal lists, so the two cannot drift apart unseen.
+    """
+    import polars as pl
+
+    import ferrum as fm
+    from ferrum._registry import registry_output_names
+
+    names = registry_output_names("letter_value")
+    assert names == {"depth", "group", "is_outlier", "level", "lower", "upper", "value"}
+
+    frame = pl.DataFrame({"c": ["a", "b"], "w": [1.0, 2.0], "depth": [1, 2]})
+    step = fm.LetterValue(value="w", group="c", groupby=["depth"])
+    chart = fm.Chart(frame).transform(step).mark_point().encode(x="group", y="lower")
+    with pytest.raises(ValueError, match="collides with this transform's own output") as refusal:
+        chart.to_svg()
+    listed = re.search(r"\(output columns: ([^)]*)\)", str(refusal.value))
+    assert listed is not None, str(refusal.value)
+    assert set(listed.group(1).split(", ")) == names
+
+
+def test_registry_output_names_of_a_kind_with_one_batch_is_its_primary_columns():
+    """A kind that declares no secondary batch has nothing to add to its primary columns; one that
+    declares several (`linkage`: the table, its row order, the dendrogram coordinates and its
+    segments) contributes each batch's names once. Both sets are hand-pinned off the registry's
+    own declarations, not re-derived, so the test cannot share the computation it checks."""
+    from ferrum._registry import registry_output_names
+
+    assert registry_output_names("smooth") == {"x", "y", "ci_lower", "ci_upper"}
+    assert registry_output_names("linkage") == {
+        "node_id",
+        "left",
+        "right",
+        "distance",
+        "n_obs",
+        "original_idx",
+        "new_idx",
+        "x",
+        "y",
+        "x2",
+        "y2",
+    }
+
+
+def test_registry_output_names_rejects_an_unknown_kind():
+    """The kind reaches the registry, whose own refusal names the known kinds."""
+    from ferrum._registry import registry_output_names
+
+    with pytest.raises(ValueError, match="unknown transform kind"):
+        registry_output_names("not-a-real-transform-kind")
 
 
 # ---------------------------------------------------------------------------

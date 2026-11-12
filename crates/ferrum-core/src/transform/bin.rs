@@ -874,9 +874,17 @@ fn compute_one_group(
     // look up each aggregate's value for exactly the same rows a bin counts.
     let (clean, row_idx) = clean_float64_values_indexed(&arr, only_indices);
 
-    // Empty input → empty output (stat_bin is the exception that allows empty)
+    // No usable value. A group (or an ungrouped batch) that has rows but none
+    // of them usable keeps one placeholder row, so its key still reaches the
+    // legend, the facet panel and the axis and the render can name it; only a
+    // batch with no rows at all has no key to keep and stays empty.
     if clean.is_empty() {
-        return Ok(empty_bin_columns(aggs.len()));
+        let rows = only_indices.map_or(batch.num_rows(), <[usize]>::len);
+        return Ok(if rows == 0 {
+            empty_bin_columns(aggs.len())
+        } else {
+            placeholder_bin_columns(aggs.len())
+        });
     }
 
     let (lo, hi, n_bins) = match group_edges(spec, &clean, shared_edges)? {
@@ -1155,6 +1163,20 @@ fn empty_bin_columns(n_aggs: usize) -> BinColumns {
     }
 }
 
+/// The one row a group with rows but no usable value keeps: NaN edges (there
+/// is no bin to place), a zero count and density (a running total of nothing
+/// is nothing), and a null in every aggregate column, as a bin with no rows
+/// in its range yields.
+fn placeholder_bin_columns(n_aggs: usize) -> BinColumns {
+    BinColumns {
+        starts: vec![f64::NAN],
+        ends: vec![f64::NAN],
+        counts: vec![0],
+        densities: vec![0.0],
+        agg_values: vec![vec![None]; n_aggs],
+    }
+}
+
 fn single_unit_bin_columns(v: f64, count: u64, agg_values: Vec<f64>) -> BinColumns {
     let (start, end) = single_unit_bin(v);
     let density = (count as f64) / ((count as f64) * (end - start));
@@ -1181,6 +1203,11 @@ use crate::transform::core::TransformSpec;
 /// ``agg_value`` (Float64): the per-bin aggregate of ``agg_field``; with
 /// ``aggregates``, one such column per entry. With ``per_row=True`` the
 /// output is instead every input row with ``bin_start``/``bin_end`` appended.
+///
+/// A group (or, ungrouped, a batch) that has rows but no usable value, every
+/// one null or NaN, keeps one placeholder row carrying its group key:
+/// ``bin_start`` and ``bin_end`` NaN, ``count`` and ``density`` 0, and a null
+/// in every aggregate column. A batch with no rows at all stays empty.
 ///
 /// Parameters
 /// ----------
@@ -2537,18 +2564,21 @@ mod tests {
         assert!(r.is_err(), "deny_unknown_fields must reject a stray 'mode' key");
     }
 
-    /// A bin field that is entirely null produces empty output (zero rows) with
-    /// the correct 4-column schema, not a panic on the min/max fold or a div-by-0.
+    /// A bin field that is entirely null, with rows present, keeps one
+    /// placeholder row (no bin to place, so NaN edges and a zero count) under
+    /// the correct 4-column schema, not a panic on the min/max fold or a
+    /// div-by-0.
     #[test]
-    fn bughunt_bin_all_null_column_emits_empty_output() {
+    fn bughunt_bin_all_null_column_emits_one_placeholder_row() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
         let arr = Float64Array::from(vec![None, None, None]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let spec = BinSpec { field: "x".into(), mode: BinMode::Fixed { n: 5 }, ..sturges_spec() };
         let out = apply(&spec, &batch).unwrap();
-        assert_eq!(out.num_rows(), 0, "all-null column must produce zero bins");
+        assert_eq!(out.num_rows(), 1, "an all-null column with rows keeps one placeholder row");
         assert_eq!(out.num_columns(), 4, "schema must still be the 4 bin columns");
         assert_eq!(out.schema().field(0).name(), "bin_start");
+        assert_placeholder_row(&out, 0, &[]);
     }
 
     /// A zero-row column (columns exist, no rows) produces empty output, not a
@@ -2562,13 +2592,15 @@ mod tests {
         assert_eq!(out.num_columns(), 4);
     }
 
-    /// All-NaN column behaves like all-null: every value dropped → empty output.
+    /// All-NaN column behaves like all-null: every value dropped, one
+    /// placeholder row kept.
     #[test]
-    fn bughunt_bin_all_nan_column_emits_empty_output() {
+    fn bughunt_bin_all_nan_column_emits_one_placeholder_row() {
         let batch = batch_with(vec![f64::NAN, f64::NAN]);
         let spec = BinSpec { field: "x".into(), mode: BinMode::Fixed { n: 3 }, ..sturges_spec() };
         let out = apply(&spec, &batch).unwrap();
-        assert_eq!(out.num_rows(), 0, "all-NaN column must produce zero bins");
+        assert_eq!(out.num_rows(), 1, "an all-NaN column with rows keeps one placeholder row");
+        assert_placeholder_row(&out, 0, &[]);
     }
 
     /// An explicit extent with `lo >= hi` must error at apply with a legible
@@ -3174,6 +3206,298 @@ mod tests {
         // "Bin", not the wire tag "stat_bin" — wave-1 close remediation
         // (`display_name_for_label`).
         assert!(warnings[0].to_string().contains("Bin"), "{:?}", warnings[0]);
+    }
+
+    // ── an emptied group keeps one placeholder row ───────────────────────────
+
+    /// Rows of `(x, w, g)`: the binned value (null or NaN where a group has
+    /// none to bin), a value to aggregate per bin, and the group key.
+    fn rows_x_w_g(rows: &[(Option<f64>, f64, &str)]) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("w", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Row `row` of `out` is the placeholder an emptied group keeps: NaN
+    /// edges (there is no bin to place), a zero count and density, and an
+    /// Arrow null (not NaN, not 0) in each of `aggregates`.
+    fn assert_placeholder_row(out: &RecordBatch, row: usize, aggregates: &[&str]) {
+        assert!(col_f64(out, "bin_start").value(row).is_nan(), "row {row}: bin_start is NaN");
+        assert!(col_f64(out, "bin_end").value(row).is_nan(), "row {row}: bin_end is NaN");
+        assert_eq!(col_u64(out, "count").value(row), 0, "row {row}: count");
+        assert_eq!(col_f64(out, "density").value(row), 0.0, "row {row}: density");
+        for name in aggregates {
+            assert!(col_f64(out, name).is_null(row), "row {row}: {name} is an Arrow null");
+        }
+    }
+
+    /// The rows of `out` whose `column` key is not `emptied`: what the
+    /// output holds for the groups that have values.
+    fn without_group(out: &RecordBatch, column: &str, emptied: &str) -> RecordBatch {
+        let keys = col_str(out, column);
+        let keep: Vec<bool> = (0..out.num_rows()).map(|i| keys.value(i) != emptied).collect();
+        arrow::compute::filter_record_batch(out, &arrow::array::BooleanArray::from(keep)).unwrap()
+    }
+
+    /// A group whose rows hold no usable (non-null, non-NaN) value keeps one
+    /// placeholder row carrying its key, where the group first appears: NaN
+    /// edges, count 0, density 0 and a null for every aggregate. The groups
+    /// with values bin exactly as they do without it.
+    #[test]
+    fn a_group_with_no_usable_value_keeps_one_placeholder_row() {
+        let rows = [
+            (Some(1.0), 10.0, "a"), (Some(2.0), 20.0, "a"), (Some(4.0), 30.0, "a"),
+            (None, 40.0, "c"), (Some(f64::NAN), 50.0, "c"),
+            (Some(2.0), 60.0, "b"), (Some(3.0), 70.0, "b"), (Some(5.0), 80.0, "b"),
+        ];
+        let with_values: Vec<_> = rows.iter().copied().filter(|r| r.2 != "c").collect();
+        let spec = BinSpec {
+            groupby: vec!["g".into()],
+            ..agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean")
+        };
+        let out = apply(&spec, &rows_x_w_g(&rows)).unwrap();
+
+        let keys = col_str(&out, "g");
+        let order: Vec<&str> = (0..out.num_rows()).map(|i| keys.value(i)).collect();
+        assert_eq!(order, ["a", "a", "c", "b", "b"], "c keeps one row, where it first appears");
+        assert_placeholder_row(&out, 2, &["agg_value"]);
+        let sibling = apply(&spec, &rows_x_w_g(&with_values)).unwrap();
+        assert_eq!(without_group(&out, "g", "c"), sibling, "the groups with values are unchanged");
+    }
+
+    /// The placeholder is the same row, and the groups with values bin the
+    /// same, under `cumulative` (a running total of nothing is nothing) and
+    /// `shared_extent` (the pooled edges come from the usable values alone).
+    #[test]
+    fn an_emptied_group_keeps_its_placeholder_under_cumulative_and_shared_extent() {
+        pyo3::Python::initialize();
+        let rows = [
+            (Some(1.0), 10.0, "a"), (Some(2.0), 20.0, "a"), (Some(4.0), 30.0, "a"),
+            (None, 40.0, "c"), (None, 50.0, "c"),
+            (Some(2.0), 60.0, "b"), (Some(3.0), 70.0, "b"), (Some(9.0), 80.0, "b"),
+        ];
+        let with_values: Vec<_> = rows.iter().copied().filter(|r| r.2 != "c").collect();
+        for (cumulative, shared_extent) in [(false, false), (true, false), (false, true), (true, true)] {
+            let spec = BinSpec {
+                cumulative,
+                shared_extent,
+                groupby: vec!["g".into()],
+                ..agg_spec("x", BinMode::Fixed { n: 3 }, None, "w", "mean")
+            };
+            let out = apply(&spec, &rows_x_w_g(&rows)).unwrap();
+            let keys = col_str(&out, "g");
+            let c_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "c").collect();
+            assert_eq!(c_rows.len(), 1, "cumulative={cumulative} shared={shared_extent}: one row for c");
+            assert_placeholder_row(&out, c_rows[0], &["agg_value"]);
+            assert_eq!(
+                without_group(&out, "g", "c"),
+                apply(&spec, &rows_x_w_g(&with_values)).unwrap(),
+                "cumulative={cumulative} shared={shared_extent}: the groups with values are unchanged"
+            );
+        }
+    }
+
+    /// Under `shared_extent` with no usable value in any group there are no
+    /// pooled edges to share, and every group still keeps its one placeholder
+    /// row, in first-appearance order (never sorted), whatever the bin-count
+    /// rule or an explicit extent: no error and no warning.
+    #[test]
+    fn a_grouped_bin_with_shared_extent_and_no_usable_value_in_any_group_keeps_one_placeholder_per_group() {
+        pyo3::Python::initialize();
+        for first_appearance in [["a", "b"], ["b", "a"]] {
+            let rows = [
+                (None, 10.0, first_appearance[0]),
+                (None, 20.0, first_appearance[1]),
+                (Some(f64::NAN), 30.0, first_appearance[0]),
+                (None, 40.0, first_appearance[1]),
+            ];
+            for (mode, extent) in [
+                (BinMode::Sturges, None),
+                (BinMode::FreedmanDiaconis, None),
+                (BinMode::Fixed { n: 3 }, None),
+                (BinMode::Width { w: 2.5 }, None),
+                (BinMode::Sturges, Some((0.0, 10.0))),
+            ] {
+                let case = format!("{first_appearance:?} {mode:?} {extent:?}");
+                let spec = BinSpec {
+                    shared_extent: true,
+                    nice: true,
+                    groupby: vec!["g".into()],
+                    ..agg_spec("x", mode, extent, "w", "mean")
+                };
+                let ctx = TransformContext::default();
+                let out = apply_with_context(&spec, &rows_x_w_g(&rows), &ctx)
+                    .unwrap_or_else(|e| panic!("{case}: refused: {e}"));
+
+                let keys = col_str(&out, "g");
+                let order: Vec<&str> = (0..out.num_rows()).map(|i| keys.value(i)).collect();
+                assert_eq!(order, first_appearance, "{case}: one row per group, in first-appearance order");
+                for row in 0..out.num_rows() {
+                    assert_placeholder_row(&out, row, &["agg_value"]);
+                }
+                assert!(ctx.warnings.borrow().is_empty(), "{case}: warned {:?}", ctx.warnings.borrow());
+            }
+        }
+    }
+
+    /// A placeholder carries every key of its combination under a two-field
+    /// `groupby`.
+    #[test]
+    fn an_emptied_combination_keeps_every_one_of_its_group_keys() {
+        let batch = batch_with_two_groups(
+            vec![1.0, 9.0, f64::NAN, f64::NAN, 2.0, 8.0],
+            vec!["A", "A", "A", "A", "B", "B"],
+            vec!["x", "x", "y", "y", "x", "x"],
+        );
+        let spec = BinSpec {
+            mode: BinMode::Fixed { n: 2 },
+            groupby: vec!["g1".into(), "g2".into()],
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let (g1, g2) = (col_str(&out, "g1"), col_str(&out, "g2"));
+        let combos: Vec<(&str, &str)> =
+            (0..out.num_rows()).map(|i| (g1.value(i), g2.value(i))).collect();
+        assert_eq!(combos, [("A", "x"), ("A", "x"), ("A", "y"), ("B", "x"), ("B", "x")]);
+        assert_placeholder_row(&out, 2, &[]);
+    }
+
+    /// One usable value is enough: a group with one beside its nulls bins it
+    /// into its own unit bin, as it always has, and is not a placeholder.
+    #[test]
+    fn a_group_with_one_usable_value_beside_nulls_is_not_a_placeholder() {
+        let rows = [
+            (Some(1.0), 1.0, "a"), (Some(2.0), 2.0, "a"),
+            (None, 3.0, "c"), (Some(7.0), 4.0, "c"), (Some(f64::NAN), 5.0, "c"),
+        ];
+        let spec = BinSpec {
+            groupby: vec!["g".into()],
+            ..agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean")
+        };
+        let out = apply(&spec, &rows_x_w_g(&rows)).unwrap();
+        let keys = col_str(&out, "g");
+        let c_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "c").collect();
+        assert_eq!(c_rows.len(), 1);
+        let c = c_rows[0];
+        assert_eq!((col_f64(&out, "bin_start").value(c), col_f64(&out, "bin_end").value(c)), (6.5, 7.5));
+        assert_eq!(col_u64(&out, "count").value(c), 1);
+        assert_eq!(col_f64_opt(&out, "agg_value")[c], Some(4.0));
+    }
+
+    /// An infinity is a usable value (only a null or NaN is not), so a group
+    /// of infinities bins as it always has and is not replaced by the
+    /// placeholder, whose count is 0.
+    #[test]
+    fn a_group_of_infinite_values_is_binned_not_replaced_by_the_placeholder() {
+        let rows = [
+            (Some(1.0), 1.0, "a"), (Some(2.0), 2.0, "a"),
+            (Some(f64::INFINITY), 3.0, "c"), (Some(f64::INFINITY), 4.0, "c"),
+        ];
+        let spec = BinSpec {
+            groupby: vec!["g".into()],
+            ..agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean")
+        };
+        let out = apply(&spec, &rows_x_w_g(&rows)).unwrap();
+        let keys = col_str(&out, "g");
+        let c_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "c").collect();
+        assert_eq!(c_rows.len(), 1);
+        assert_eq!(col_u64(&out, "count").value(c_rows[0]), 2, "both infinite values are counted");
+    }
+
+    /// An integer column is widened before binning, so an integer group of
+    /// nulls keeps its placeholder like a float group does.
+    #[test]
+    fn an_integer_column_group_of_nulls_keeps_a_placeholder_row() {
+        use arrow::array::{Int64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2), Some(3), None, None])),
+                Arc::new(StringArray::from(vec!["a", "a", "a", "c", "c"])),
+            ],
+        )
+        .unwrap();
+        let spec = BinSpec {
+            mode: BinMode::Fixed { n: 2 },
+            groupby: vec!["g".into()],
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let keys = col_str(&out, "g");
+        let order: Vec<&str> = (0..out.num_rows()).map(|i| keys.value(i)).collect();
+        assert_eq!(order, ["a", "a", "c"]);
+        assert_placeholder_row(&out, 2, &[]);
+    }
+
+    /// Every `aggregates` column of a placeholder is an Arrow null, a
+    /// `count` included: the placeholder holds no bin to count in.
+    #[test]
+    fn an_emptied_group_nulls_every_aggregates_column() {
+        let rows = [(Some(1.0), 1.0, "a"), (Some(2.0), 2.0, "a"), (None, 3.0, "c")];
+        let spec = bin_json(
+            r#"{"field":"x","bin_count":2,"nice":false,"groupby":["g"],"aggregates":[{"field":"w","fn":"mean","as":"m"},{"field":"w","fn":"count","as":"n"},{"field":"*","fn":"count","as":"rows"}]}"#,
+        );
+        let out = apply(&spec, &rows_x_w_g(&rows)).unwrap();
+        assert_eq!(out.num_rows(), 3, "a's two bins, then c's placeholder");
+        assert_placeholder_row(&out, 2, &["m", "n", "rows"]);
+    }
+
+    /// A batch with no rows has no group to keep: the output stays empty,
+    /// grouped (with its aggregate and key columns) or not.
+    #[test]
+    fn a_zero_row_batch_keeps_the_empty_output_grouped_and_ungrouped() {
+        let grouped = BinSpec {
+            groupby: vec!["g".into()],
+            ..agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean")
+        };
+        let out = apply(&grouped, &rows_x_w_g(&[])).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        assert_eq!(field_names(&out), ["bin_start", "bin_end", "count", "density", "agg_value", "g"]);
+        let ungrouped = agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean");
+        let out = apply(&ungrouped, &rows_x_w_g(&[])).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        assert_eq!(field_names(&out), ["bin_start", "bin_end", "count", "density", "agg_value"]);
+    }
+
+    /// Under a demanded log axis a group whose every value is off the axis's
+    /// side has no value to bin, so it keeps its placeholder; the groups with
+    /// values bin in data units as they do without it.
+    #[test]
+    fn a_log_bin_group_with_every_value_off_side_keeps_a_placeholder_row() {
+        let rows = [
+            (Some(1.0), 1.0, "a"), (Some(10.0), 2.0, "a"), (Some(100.0), 3.0, "a"),
+            (Some(-5.0), 4.0, "c"), (Some(0.0), 5.0, "c"),
+        ];
+        let with_values: Vec<_> = rows.iter().copied().filter(|r| r.2 != "c").collect();
+        let spec = BinSpec {
+            groupby: vec!["g".into()],
+            ..agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean")
+        };
+        let ctx = ctx_demanding_x(positive_space());
+        let out = apply_with_context(&spec, &rows_x_w_g(&rows), &ctx).unwrap();
+        let keys = col_str(&out, "g");
+        let c_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "c").collect();
+        assert_eq!(c_rows.len(), 1, "c keeps one row");
+        assert_placeholder_row(&out, c_rows[0], &["agg_value"]);
+        let sibling =
+            apply_with_context(&spec, &rows_x_w_g(&with_values), &ctx_demanding_x(positive_space())).unwrap();
+        assert_eq!(without_group(&out, "g", "c"), sibling, "the groups with values are unchanged");
     }
 
 

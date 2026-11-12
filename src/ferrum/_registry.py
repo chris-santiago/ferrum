@@ -186,6 +186,39 @@ def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dic
     )
 
 
+def registry_output_names(kind: str) -> frozenset[str]:
+    """Every column name *kind* writes itself: its primary batch's and every secondary batch's.
+
+    A transform refuses a ``groupby`` field named like one of these, because the group column it
+    appends to a batch would shadow the output column of the same name. A consumer that wants to
+    carry a caller's column through a transform's ``groupby`` asks here whether it can, so the
+    answer is the live registry's rather than a list kept beside it.
+
+    Parameters
+    ----------
+    kind : str
+        The transform kind name passed to ``transform_registry``.
+
+    Returns
+    -------
+    frozenset of str
+        The union of the column names of ``transform_registry(kind)["outputs"]`` and of every batch
+        in its ``["secondary_outputs"]``.
+
+    Raises
+    ------
+    ValueError
+        If *kind* is not a transform kind the registry knows.
+    """
+    from ferrum._core import transform_registry
+
+    entry = transform_registry(kind)
+    names = {name for name, _dtype in entry["outputs"]}
+    for _key, columns in entry["secondary_outputs"]:
+        names.update(name for name, _dtype in columns)
+    return frozenset(names)
+
+
 def aggregate_needs_field(kind: str, aggregate: str) -> bool:
     """Return whether *kind*'s *aggregate* reads a ``field`` column (the Rust-published rule)."""
     from ferrum._core import transform_registry
