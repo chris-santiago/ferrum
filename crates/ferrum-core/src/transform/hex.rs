@@ -18,6 +18,11 @@
 //!
 //! Hexes are aggregated in a BTreeMap<(i64, i64), Aggregator> for deterministic
 //! emit order.
+//!
+//! A row with a null or non-finite x, y or (for an aggregate that reads it)
+//! field is skipped. A partition with rows and none usable keeps one placeholder
+//! hexagon and warns `DegenerateFit`: the statistic names the partition, since
+//! only it knows which input emptied it. A zero-row partition emits no rows.
 
 use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -28,6 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::HexAggregate;
+use crate::transform::context::{TransformContext, TransformWarning};
 use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
@@ -101,6 +107,10 @@ fn cube_round(q_frac: f64, r_frac: f64) -> (i64, i64) {
 }
 
 pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+pub(crate) fn apply_with_context(spec: &HexSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
     // 1. Validate columns exist + coerce to Float64.
     let schema = batch.schema();
     let xi = schema
@@ -131,8 +141,9 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     let xa = coerce_to_float64(batch.column(xi), "stat_hex", &spec.x)?;
     let ya = coerce_to_float64(batch.column(yi), "stat_hex", &spec.y)?;
 
-    // Filter (x, y) pairs: drop null/NaN. Capture field in lockstep when present.
-    // For "mean"/"sum", drop rows where field is null/NaN as well.
+    // Filter (x, y) pairs: drop null and non-finite. Capture field in lockstep
+    // when present. For a field-reading aggregate, drop rows where field is
+    // null or non-finite as well.
     let n_rows = xa.len();
     let mut xs: Vec<f64> = Vec::with_capacity(n_rows);
     let mut ys: Vec<f64> = Vec::with_capacity(n_rows);
@@ -143,7 +154,7 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         }
         let xv = xa.value(i);
         let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() {
+        if !xv.is_finite() || !yv.is_finite() {
             continue;
         }
         let fv = match &field_arr {
@@ -156,7 +167,7 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
                     0.0
                 } else {
                     let v = fa.value(i);
-                    if v.is_nan() {
+                    if !v.is_finite() {
                         if needs_field {
                             continue;
                         }
@@ -172,9 +183,23 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         fs.push(fv);
     }
 
-    // Empty input → empty output with the right schema.
+    // Nothing usable. A zero-row partition draws nothing and keeps the empty
+    // schema; a partition that has rows but no usable point (no row with a
+    // non-null, finite x, y and, where the aggregate reads it, field) keeps one
+    // placeholder hexagon so its facet panel still exists, and the statistic
+    // names it: only it knows which input emptied the partition.
     if xs.is_empty() {
-        return empty_output();
+        if n_rows == 0 {
+            return empty_output();
+        }
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Hex".into(),
+            group: None,
+            reason: crate::transform::raster::NO_USABLE_VALUES.into(),
+            panel: None,
+            step: ctx.step.clone(),
+        });
+        return placeholder_output();
     }
 
     // Compute extent (for x_min, y_min anchor).
@@ -299,12 +324,7 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         }
     }
 
-    let out_schema = Arc::new(Schema::new(vec![
-        Field::new("hex_x", DataType::Float64, false),
-        Field::new("hex_y", DataType::Float64, false),
-        Field::new("hex_id", DataType::Int64, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
+    let out_schema = out_schema();
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(hex_xs)),
         Arc::new(Float64Array::from(hex_ys)),
@@ -343,13 +363,30 @@ pub(crate) fn global_extent(
     Some((x_lo, x_hi, y_lo, y_hi))
 }
 
-fn empty_output() -> PyResult<RecordBatch> {
-    let out_schema = Arc::new(Schema::new(vec![
+fn out_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
         Field::new("hex_x", DataType::Float64, false),
         Field::new("hex_y", DataType::Float64, false),
         Field::new("hex_id", DataType::Int64, false),
         Field::new("value", DataType::Float64, false),
-    ]));
+    ]))
+}
+
+/// The one hexagon a partition with rows and no usable point keeps: six
+/// vertices with no position, cell id 0 and no value.
+fn placeholder_output() -> PyResult<RecordBatch> {
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(vec![f64::NAN; 6])),
+        Arc::new(Float64Array::from(vec![f64::NAN; 6])),
+        Arc::new(Int64Array::from(vec![0_i64; 6])),
+        Arc::new(Float64Array::from(vec![f64::NAN; 6])),
+    ];
+    RecordBatch::try_new(out_schema(), cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_hex: {e}")))
+}
+
+fn empty_output() -> PyResult<RecordBatch> {
+    let out_schema = out_schema();
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(Vec::<f64>::new())),
         Arc::new(Float64Array::from(Vec::<f64>::new())),
@@ -995,5 +1032,106 @@ mod tests {
             let e = apply(&fieldless, &b).unwrap_err();
             assert_eq!(e.value(py).to_string(), "stat_hex: aggregate='variance' requires field");
         });
+    }
+
+    fn count_spec() -> HexSpec {
+        HexSpec {
+            x: "x".into(), y: "y".into(), bin_size: None, aggregate: HexAggregate::Count,
+            field: None, name: None, extent_x: None, extent_y: None,
+        }
+    }
+
+    fn mean_spec() -> HexSpec {
+        HexSpec { aggregate: HexAggregate::Mean, field: Some("v".into()), ..count_spec() }
+    }
+
+    fn no_usable() -> Vec<(String, Option<String>, String)> {
+        vec![("Hex".to_string(), None, crate::transform::raster::NO_USABLE_VALUES.to_string())]
+    }
+
+    /// A partition with rows but no usable point keeps one placeholder
+    /// hexagon (six NaN vertices) so its panel exists, and is named once; a
+    /// zero-row partition keeps the empty output and names nothing; a
+    /// partition with a usable point draws as before and names nothing.
+    #[test]
+    fn a_partition_with_rows_and_no_usable_point_is_named_and_keeps_one_placeholder_hexagon() {
+        pyo3::Python::initialize();
+        let spec = count_spec();
+        let null_rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true), Field::new("y", DataType::Float64, true)])),
+            vec![
+                Arc::new(Float64Array::from(vec![None, Some(f64::NAN)])),
+                Arc::new(Float64Array::from(vec![Some(1.0), None])),
+            ],
+        )
+        .unwrap();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &null_rows, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 6);
+        assert!(col_f64(&out, "hex_x").iter().all(|v| v.is_nan()));
+        assert!(col_f64(&out, "hex_y").iter().all(|v| v.is_nan()));
+        assert_eq!(col_i64(&out, "hex_id"), vec![0; 6]);
+        assert_eq!(ctx.degenerate_fits(), no_usable());
+
+        let ctx = TransformContext::default();
+        let zero_rows = apply_with_context(&spec, &make_xy_batch(vec![], vec![]), &ctx).unwrap();
+        assert_eq!(zero_rows.num_rows(), 0, "a zero-row partition keeps empty_output");
+        assert_eq!(zero_rows.schema(), out.schema(), "and the same schema");
+        assert!(ctx.warnings.borrow().is_empty());
+
+        let ctx = TransformContext::default();
+        let drawn = apply_with_context(&spec, &make_xy_batch(vec![0.0, 1.0], vec![0.0, 1.0]), &ctx).unwrap();
+        assert!(col_f64(&drawn, "hex_x").iter().all(|v| v.is_finite()), "a usable point draws hexagons");
+        assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// A field-reading aggregate over a field with no usable value is named
+    /// like an emptied position, though x and y are usable; a count reads no
+    /// field and draws its hexagons.
+    #[test]
+    fn a_partition_whose_aggregated_field_has_no_usable_value_is_named() {
+        pyo3::Python::initialize();
+        let b = make_xyf_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![f64::NAN, f64::NAN]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&mean_spec(), &b, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 6);
+        assert!(col_f64(&out, "hex_x").iter().all(|v| v.is_nan()));
+        assert_eq!(ctx.degenerate_fits(), no_usable());
+
+        let ctx = TransformContext::default();
+        let counted = apply_with_context(&HexSpec { field: Some("v".into()), ..count_spec() }, &b, &ctx).unwrap();
+        assert!(col_f64(&counted, "hex_x").iter().all(|v| v.is_finite()));
+        assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// A row with an infinite x, y or (Mean) field is skipped as a null one
+    /// is: the finite rows draw as they do alone and nothing warns; a batch
+    /// with no finite row keeps its placeholder hexagon and is named.
+    #[test]
+    fn an_infinite_coordinate_or_field_is_skipped_as_a_null_one_is() {
+        pyo3::Python::initialize();
+        let (fx, fy, ff) = (vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 1.0, 1.0, 3.0], vec![1.0, 2.0, 3.0, 4.0]);
+        let alone = apply(&mean_spec(), &make_xyf_batch(fx.clone(), fy.clone(), ff.clone())).unwrap();
+        let inf = f64::INFINITY;
+        let extras = [
+            (vec![inf, f64::NEG_INFINITY], vec![1.0, 1.0], vec![1.0, 1.0]),
+            (vec![1.0, 1.0], vec![inf, f64::NEG_INFINITY], vec![1.0, 1.0]),
+            (vec![1.0, 1.0], vec![1.0, 1.0], vec![inf, f64::NEG_INFINITY]),
+        ];
+        for (ex, ey, ef) in extras {
+            let (mut xs, mut ys, mut fs) = (fx.clone(), fy.clone(), ff.clone());
+            xs.extend(ex);
+            ys.extend(ey);
+            fs.extend(ef);
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&mean_spec(), &make_xyf_batch(xs, ys, fs), &ctx).unwrap();
+            assert_eq!(out, alone, "the finite rows draw as they do alone");
+            assert!(ctx.warnings.borrow().is_empty());
+        }
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&count_spec(), &make_xy_batch(vec![inf, inf, f64::NEG_INFINITY], vec![1.0, inf, 2.0]), &ctx).unwrap();
+        assert_eq!(out.num_rows(), 6);
+        assert!(col_f64(&out, "hex_x").iter().all(|v| v.is_nan()));
+        assert_eq!(ctx.degenerate_fits(), no_usable());
     }
 }

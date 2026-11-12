@@ -1320,20 +1320,6 @@ mod tests {
         assert!(err.contains("QQ: groupby column 'h' is repeated"), "{err}");
     }
 
-    /// Warnings a call raised, as `(transform, group, reason)`.
-    fn degenerate_fits(ctx: &TransformContext) -> Vec<(String, Option<String>, String)> {
-        ctx.warnings
-            .borrow()
-            .iter()
-            .filter_map(|w| match w {
-                TransformWarning::DegenerateFit { transform, group, reason, .. } => {
-                    Some((transform.clone(), group.clone(), reason.clone()))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     const NO_USABLE: &str = "no usable (non-null/non-NaN) values";
 
     /// A hue group with no plottable value is named once and keeps a NaN row,
@@ -1349,7 +1335,7 @@ mod tests {
         let ctx = TransformContext::default();
         let out = apply_with_context(&spec, &batch, &ctx).unwrap();
         assert_eq!(
-            degenerate_fits(&ctx),
+            ctx.degenerate_fits(),
             vec![("QQ".to_string(), Some("h=c".to_string()), NO_USABLE.to_string())]
         );
         assert_eq!(strs(&out, "h"), some(&["a", "a", "c"]));
@@ -1373,7 +1359,7 @@ mod tests {
         let out = apply_with_context(&spec, &batch_field("v", vec![f64::NAN, f64::NAN]), &ctx).unwrap();
         assert_eq!(out.num_rows(), 1);
         assert!(col(&out, "sample")[0].is_nan());
-        assert_eq!(degenerate_fits(&ctx), vec![("QQ".to_string(), None, NO_USABLE.to_string())]);
+        assert_eq!(ctx.degenerate_fits(), vec![("QQ".to_string(), None, NO_USABLE.to_string())]);
         let recorded = ctx.all_null_partitions.borrow();
         assert_eq!(recorded.len(), 1);
         match &recorded[0].outcome {
@@ -1393,7 +1379,7 @@ mod tests {
         let spec = qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]}));
         let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
         apply_with_context(&spec, &batch, &ctx).unwrap();
-        assert_eq!(degenerate_fits(&ctx).len(), 2);
+        assert_eq!(ctx.degenerate_fits().len(), 2);
         assert_eq!(ctx.all_null_partitions.borrow().len(), 1);
     }
 

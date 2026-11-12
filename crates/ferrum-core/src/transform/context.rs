@@ -862,6 +862,25 @@ pub struct TransformContext {
     pub(crate) all_null_partitions: Rc<RefCell<Vec<AllNullPartition>>>,
 }
 
+#[cfg(test)]
+impl TransformContext {
+    /// The `(transform, group, reason)` of every [`TransformWarning::DegenerateFit`]
+    /// this context holds, in the order raised; any other warning is left out.
+    /// The one extractor the statistics' tests share.
+    pub(crate) fn degenerate_fits(&self) -> Vec<(String, Option<String>, String)> {
+        self.warnings
+            .borrow()
+            .iter()
+            .filter_map(|w| match w {
+                TransformWarning::DegenerateFit { transform, group, reason, .. } => {
+                    Some((transform.clone(), group.clone(), reason.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 impl TransformContext {
     /// Record a degrade at the current call site. Cheap and infallible —
     /// pushes onto the shared sink (see [`TransformContext::warnings`]'s doc

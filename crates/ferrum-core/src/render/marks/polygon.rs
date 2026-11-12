@@ -117,6 +117,14 @@ pub(crate) fn detail_groups(ctx: &DrawCtx) -> Vec<Vec<usize>> {
     vec![(0..n_rows).collect()]
 }
 
+/// Whether a call (`violin`/`hex`/`contour`) built this polygon layer, as
+/// opposed to a caller placing a bare `mark_polygon`.
+fn layer_built_by_call(ctx: &DrawCtx) -> bool {
+    let spec = ctx.spec;
+    let entry = spec.entry.clone().unwrap_or_else(|| format!("mark_{}", spec.mark.as_str()));
+    crate::render::prepare::built_by_call(&entry, spec.mark)
+}
+
 /// The caller's own column(s) naming a dropped ring's entry in
 /// [`crate::render::RenderWarning::SeriesDropped`]. A ring a CALL built
 /// (`entry` is not this mark's own `mark_polygon` primitive —
@@ -129,11 +137,11 @@ pub(crate) fn detail_groups(ctx: &DrawCtx) -> Vec<Vec<usize>> {
 /// and color a reader actually sees. A ring the CALLER placed (a bare
 /// `fm.Layer(mark="polygon")`) is named by `detail` alone, the one field
 /// its own rings partition by — color may be shared across rings there and
-/// would not distinguish the dropped one.
+/// would not distinguish the dropped one. A quantitative color still names
+/// one ring: its value (a hexagon's count) is what identifies that ring.
 pub(crate) fn naming_columns(ctx: &DrawCtx) -> Vec<String> {
     let spec = ctx.spec;
-    let entry = spec.entry.clone().unwrap_or_else(|| format!("mark_{}", spec.mark.as_str()));
-    if crate::render::prepare::built_by_call(&entry, spec.mark) {
+    if layer_built_by_call(ctx) {
         let mut cols = Vec::new();
         if let Some(f) = x_field(ctx, spec) {
             if matches!(ctx.scales.x, ScaleKind::Ordinal(_)) {
@@ -151,6 +159,22 @@ pub(crate) fn naming_columns(ctx: &DrawCtx) -> Vec<String> {
         return cols;
     }
     ctx.mark_style.group.detail.clone().into_iter().collect()
+}
+
+/// The columns naming a GROUP of a call-built polygon layer in the
+/// null-position census: [`naming_columns`] without a quantitative color
+/// ([`color_is_quantitative`]). A quantitative color (a hexagon's aggregated
+/// `value`, a contour's level) is a measure each ring carries, not a group
+/// the caller wrote, so a group is never named by it (a placeholder ring's
+/// value is NaN, which would print `value=NaN`). A caller-placed ring keeps
+/// its `detail` field as [`naming_columns`] gives it.
+pub(crate) fn group_naming_columns(ctx: &DrawCtx) -> Vec<String> {
+    let columns = naming_columns(ctx);
+    if !layer_built_by_call(ctx) || !color_is_quantitative(ctx) {
+        return columns;
+    }
+    let color = color_field(ctx, ctx.spec);
+    columns.into_iter().filter(|c| Some(c.as_str()) != color).collect()
 }
 
 /// `x` and `y` per vertex row, each placed Strict or Category by
@@ -1380,5 +1404,53 @@ mod tests {
             vec!["g=a (two vertices)"],
             "a field bound to both the categorical x position and color must be named once, not 'g=a, g=a'",
         );
+    }
+
+    /// A dropped ring keeps a quantitative color in its name (its value
+    /// identifies it), while the census's group naming drops it, a
+    /// hexagon's aggregated `value` being a measure and not a group, and keeps
+    /// a categorical color.
+    #[test]
+    fn a_ring_keeps_a_quantitative_color_in_its_name_and_the_census_drops_it() {
+        use crate::render::scale_resolve::ResolvedScales;
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, stroke_width: None, x2: None, y2: None, y_slots: Default::default(),
+            raster_cells: None,
+        };
+        let spec = ChartSpec {
+            mark: Mark::Polygon,
+            entry: Some("mark_hex".to_string()),
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+        let names = |color: Arc<dyn arrow::array::Array>, dt: DataType| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, true),
+                Field::new("c", dt, true),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![0.0])), Arc::new(Float64Array::from(vec![0.0])), color],
+            )
+            .unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            (naming_columns(&ctx), group_naming_columns(&ctx))
+        };
+        let (ring, group) = names(Arc::new(Float64Array::from(vec![f64::NAN])), DataType::Float64);
+        assert_eq!(ring, vec!["c".to_string()], "a ring is named by its quantitative color");
+        assert!(group.is_empty(), "a group is not");
+        let (ring, group) = names(Arc::new(arrow::array::StringArray::from(vec!["u"])), DataType::Utf8);
+        assert_eq!((ring, group), (vec!["c".to_string()], vec!["c".to_string()]));
     }
 }

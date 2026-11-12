@@ -183,6 +183,21 @@ struct SurfaceOutput {
     y2s: Option<Vec<f64>>,
 }
 
+/// The one row a flat surface keeps: level id 0, a NaN level and NaN
+/// coordinates (the isoline's end point too), so the row carries its group
+/// keys but places nothing.
+fn placeholder_surface(fill: bool) -> SurfaceOutput {
+    let (x2s, y2s) = if fill { (None, None) } else { (Some(vec![f64::NAN]), Some(vec![f64::NAN])) };
+    SurfaceOutput {
+        level_ids: vec![0],
+        level_vals: vec![f64::NAN],
+        xs: vec![f64::NAN],
+        ys: vec![f64::NAN],
+        x2s,
+        y2s,
+    }
+}
+
 /// Extract contour lines or isobands from a single 2-D density surface.
 /// The caller supplies pre-validated grid/density data; no RecordBatch access here.
 fn contour_one_surface(
@@ -585,11 +600,11 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             continue;
         }
 
-        let surface = contour_one_surface(spec, &grid_x, &grid_y, &density, nx, ny);
-        let surface = match surface {
-            None => continue, // degenerate surface (flat density etc.)
-            Some(s) => s,
-        };
+        // A flat surface (an emptied, one-point or tied group the density
+        // statistic could not estimate) keeps its key as one placeholder
+        // vertex with no position, so its legend entry and facet panel stay.
+        let surface = contour_one_surface(spec, &grid_x, &grid_y, &density, nx, ny)
+            .unwrap_or_else(|| placeholder_surface(spec.fill));
 
         let n_new = surface.level_ids.len();
         // FA-8: shift this surface's ids past all previously-emitted ids so they
@@ -1779,4 +1794,75 @@ mod tests {
         assert_eq!(undemanded, oracle, "no demand runs the data-space body");
     }
 
+    /// A flat surface in a grouped batch keeps its group as one placeholder
+    /// row with no position (NaN coordinates, the isoline's end point too in
+    /// line mode), and the groups with contours are exactly as they are
+    /// without it.
+    #[test]
+    fn a_flat_group_keeps_one_placeholder_row_and_leaves_the_others_as_they_are() {
+        pyo3::Python::initialize();
+        let n = 4usize;
+        let grid: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let peak: Vec<f64> = (0..n * n)
+            .map(|i| {
+                let (gx, gy) = ((i % n) as f64 - 1.0, (i / n) as f64 - 1.0);
+                (-(gx * gx + gy * gy)).exp()
+            })
+            .collect();
+        let flat = vec![0.0; n * n];
+        for fill in [false, true] {
+            let spec = ContourSpec { thresholds: 2, fill, smooth: false, name: None };
+            let with_flat = make_grouped_kde2d_batch(
+                vec![(grid.clone(), grid.clone(), flat.clone()), (grid.clone(), grid.clone(), peak.clone())],
+                "g",
+                vec!["flat", "peak"],
+            );
+            let alone = make_grouped_kde2d_batch(vec![(grid.clone(), grid.clone(), peak.clone())], "g", vec!["peak"]);
+            let out = apply(&spec, &with_flat).unwrap();
+            let reference = apply(&spec, &alone).unwrap();
+            let schema = out.schema();
+            let keys = out.column(schema.index_of("g").unwrap()).as_any().downcast_ref::<StringArray>().unwrap();
+            let flat_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "flat").collect();
+            assert_eq!(flat_rows.len(), 1, "fill={fill}: one placeholder row");
+            let coords: &[&str] = if fill { &["contour_x", "contour_y"] } else { &["contour_x", "contour_y", "contour_x2", "contour_y2"] };
+            for name in coords {
+                let col = out.column(schema.index_of(name).unwrap()).as_any().downcast_ref::<Float64Array>().unwrap();
+                assert!(col.value(flat_rows[0]).is_nan(), "fill={fill}: {name} is NaN");
+            }
+            assert_eq!(out.num_rows(), reference.num_rows() + 1, "fill={fill}: the peak group is unchanged");
+            for name in ["level_value", "contour_x", "contour_y"] {
+                let at = |b: &RecordBatch, rows: Vec<usize>| -> Vec<f64> {
+                    let c = b.column(b.schema().index_of(name).unwrap()).as_any().downcast_ref::<Float64Array>().unwrap();
+                    rows.into_iter().map(|r| c.value(r)).collect()
+                };
+                let peak_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "peak").collect();
+                assert_eq!(at(&out, peak_rows), at(&reference, (0..reference.num_rows()).collect()), "fill={fill}: {name}");
+            }
+        }
+    }
+
+    /// An ungrouped flat surface keeps one placeholder row too, so a chart
+    /// built on it is not reported as having no rows.
+    #[test]
+    fn an_ungrouped_flat_surface_keeps_one_placeholder_row() {
+        pyo3::Python::initialize();
+        let grid: Vec<f64> = (0..4).map(|i| i as f64).collect();
+        let b = make_kde2d_batch(grid.clone(), grid, vec![0.0; 16]);
+        for fill in [false, true] {
+            let out = apply(&ContourSpec { thresholds: 2, fill, smooth: true, name: None }, &b).unwrap();
+            assert_eq!(out.num_rows(), 1, "fill={fill}");
+            let x = out.column(out.schema().index_of("contour_x").unwrap()).as_any().downcast_ref::<Float64Array>().unwrap();
+            assert!(x.value(0).is_nan());
+        }
+    }
+
+    /// A zero-row surface batch stays empty: the placeholder is for a group
+    /// that exists, not for no rows at all.
+    #[test]
+    fn a_zero_row_surface_batch_stays_empty() {
+        pyo3::Python::initialize();
+        let grid: Vec<f64> = (0..4).map(|i| i as f64).collect();
+        let b = make_kde2d_batch(grid.clone(), grid, vec![0.0; 16]).slice(0, 0);
+        assert_eq!(apply(&ContourSpec { thresholds: 2, fill: false, smooth: true, name: None }, &b).unwrap().num_rows(), 0);
+    }
 }

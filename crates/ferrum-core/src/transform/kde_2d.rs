@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::color_bin_group::{SlotSpace, StepSpace};
-use crate::transform::context::TransformContext;
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::core::SpaceSlot;
 use crate::transform::log_space::{run_in_log_space, with_mapped_slot, ColumnShape, DemandedField};
 use crate::transform::group_key::{
@@ -41,6 +41,13 @@ const OUTPUT_FIELDS: [&str; 6] = ["grid_x", "grid_y", "density", "nx", "ny", "ex
 /// `crate::transform::log_space` call so a `Kde2D` refusal never borrows
 /// `Bin`'s or `Kde`'s.
 const LABEL: &str = "stat_kde_2d";
+
+/// Reason a 2-D group with fewer than two usable points cannot be estimated.
+/// Its bandwidth reason is `Kde`'s own, [`kde::BANDWIDTH_NOT_USABLE`].
+const FEWER_THAN_TWO_USABLE_POINTS: &str = "fewer than 2 usable (non-null/non-NaN) points";
+/// Reason an estimable group still has no density to draw: every grid node is
+/// zero. The grid-worded sibling of `Violin`'s evaluation-range text.
+const DENSITY_ZERO_ON_GRID: &str = "its density is zero across the evaluation grid";
 
 fn default_bandwidth() -> BandwidthSpec {
     BandwidthSpec::Scott
@@ -156,8 +163,10 @@ pub(crate) fn apply(spec: &Kde2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
 }
 
 /// Context-aware entry point. `ctx` is used as the GH #162 degrade-warning
-/// sink, for the one degrade this transform can report: an all-null `groupby`
-/// key column (GH #197), raised inside the shared partitioner; and, when a
+/// sink, for the degrades this transform can report: an all-null `groupby`
+/// key column (GH #197), raised inside the shared partitioner, and a group or
+/// partition it cannot estimate (too few usable points, an unusable
+/// bandwidth); and, when a
 /// drawn log axis demands this `Kde2D` on `x`, `y`, or both
 /// (`ctx.log_space`), as the caller-column sink
 /// ([`TransformContext::note_log_input`]).
@@ -184,7 +193,26 @@ fn apply_in_data_space(spec: &Kde2DSpec, batch: &RecordBatch, ctx: &TransformCon
     if !spec.groupby.is_empty() {
         return apply_grouped(spec, batch, &spec.groupby, ctx);
     }
-    apply_one_group(spec, batch, None, None)
+    // A frame with no rows has no surface to estimate, as a grouped one has no
+    // group: it emits no row and names nothing, so a layer over it reports
+    // that it has no rows to draw rather than a fit that never ran.
+    if batch.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(Arc::new(Schema::new(surface_fields()))));
+    }
+    apply_one_group(spec, batch, None, None, ctx, None)
+}
+
+/// The six surface columns of every `Kde2D` output batch, in schema order.
+fn surface_fields() -> Vec<Field> {
+    let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+    vec![
+        Field::new("grid_x", list_f64.clone(), false),
+        Field::new("grid_y", list_f64.clone(), false),
+        Field::new("density", list_f64.clone(), false),
+        Field::new("nx", DataType::UInt32, false),
+        Field::new("ny", DataType::UInt32, false),
+        Field::new("extent", list_f64, false),
+    ]
 }
 
 /// `apply_with_context` under a drawn log axis's demand on the `x` slot,
@@ -246,11 +274,17 @@ fn apply_in_log_space(
 /// Compute a single 2-D KDE surface from a subset of rows (or all rows when
 /// `only_indices` is None). The `extent_override` lets the caller supply a
 /// pre-computed global extent so all groups share the same grid axes.
+///
+/// A group with fewer than two usable points, or a bandwidth that resolves to
+/// zero or a non-finite value on either axis, still emits its all-zero surface
+/// and reports a [`TransformWarning::DegenerateFit`] naming `group`.
 fn apply_one_group(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     extent_override: Option<(f64, f64, f64, f64)>,
+    ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let xi = schema.index_of(&spec.x).map_err(|_| {
@@ -336,13 +370,26 @@ fn apply_one_group(
         })
         .collect();
 
-    // Density.
+    // Density. The cheapest cause is checked first, so the reason names the
+    // count when there are too few points rather than a bandwidth that never
+    // resolved.
+    let degrade = |reason: &str| {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Kde2D".into(),
+            group: group.map(str::to_string),
+            reason: reason.into(),
+            panel: None,
+            step: ctx.step.clone(),
+        });
+    };
     let density: Vec<f64> = if xs.len() < 2 {
+        degrade(FEWER_THAN_TWO_USABLE_POINTS);
         vec![0.0; n * n]
     } else {
         let hx = kde::bandwidth(&xs, &spec.bandwidth)?;
         let hy = kde::bandwidth(&ys, &spec.bandwidth)?;
         if hx <= 0.0 || hy <= 0.0 || !hx.is_finite() || !hy.is_finite() {
+            degrade(kde::BANDWIDTH_NOT_USABLE);
             vec![0.0; n * n]
         } else {
             let n_pts = xs.len() as f64;
@@ -358,6 +405,13 @@ fn apply_one_group(
                     }
                     d[gy * n + gx] = s / norm;
                 }
+            }
+            // A surface with no positive finite value (estimable points far
+            // narrower than a pinned or shared grid) is flat all the same;
+            // it is emitted as computed and named, as the cheaper causes are.
+            let peak = d.iter().copied().filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+            if !peak.is_finite() || peak <= 0.0 {
+                degrade(DENSITY_ZERO_ON_GRID);
             }
             d
         }
@@ -398,15 +452,7 @@ fn build_surface_batch(
     let nx_arr = UInt32Array::from(vec![n as u32]);
     let ny_arr = UInt32Array::from(vec![n as u32]);
 
-    let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
-    let out_schema = Arc::new(Schema::new(vec![
-        Field::new("grid_x", list_f64.clone(), false),
-        Field::new("grid_y", list_f64.clone(), false),
-        Field::new("density", list_f64.clone(), false),
-        Field::new("nx", DataType::UInt32, false),
-        Field::new("ny", DataType::UInt32, false),
-        Field::new("extent", list_f64, false),
-    ]));
+    let out_schema = Arc::new(Schema::new(surface_fields()));
     let cols: Vec<ArrayRef> = vec![
         Arc::new(grid_x_arr),
         Arc::new(grid_y_arr),
@@ -458,7 +504,8 @@ fn apply_grouped(
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(partition.groups.len());
 
     for (g, ixs) in &partition.groups {
-        let surface = apply_one_group(spec, batch, Some(ixs), shared_extent)?;
+        let label = describe_group_keys(group_cols, g);
+        let surface = apply_one_group(spec, batch, Some(ixs), shared_extent, warn_ctx, Some(&label))?;
 
         // Unpack the single-row surface batch back into its list values.
         let gx = list_values_at(&surface, "grid_x")?;
@@ -479,15 +526,7 @@ fn apply_grouped(
         group_keys_out.push(g.clone());
     }
 
-    let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
-    let mut fields = vec![
-        Field::new("grid_x", list_f64.clone(), false),
-        Field::new("grid_y", list_f64.clone(), false),
-        Field::new("density", list_f64.clone(), false),
-        Field::new("nx", DataType::UInt32, false),
-        Field::new("ny", DataType::UInt32, false),
-        Field::new("extent", list_f64, false),
-    ];
+    let mut fields = surface_fields();
     // FA-7: preserve the original groupby dtypes (nullable per FA-9; null keys
     // are skipped upstream in group_partition_multi).
     for (name, dtype) in group_cols.iter().zip(partition.dtypes.iter()) {
@@ -1549,4 +1588,135 @@ pub(crate) mod tests {
         assert!(err.contains("stat_kde_2d: column 'absent' not found"), "{err}");
     }
 
+    fn spec_for(groupby: Vec<String>) -> Kde2DSpec {
+        Kde2DSpec { x: "x".into(), y: "y".into(), bandwidth: default_bandwidth(), n: 6, extent: None, groupby, name: None }
+    }
+
+    /// Each group a 2-D density cannot estimate is named once, with the cause
+    /// the cheapest check finds, and still emits its all-zero surface: an
+    /// all-null group and a one-point group say too few points, tied points
+    /// say the bandwidth, and a group with spread says nothing.
+    #[test]
+    fn an_unestimable_group_is_named_and_keeps_its_zero_surface() {
+        pyo3::Python::initialize();
+        let b = batch_xy_g(
+            vec![f64::NAN, f64::NAN, 1.0, 2.0, 2.0, 2.0, 0.0, 1.0, 3.0],
+            vec![f64::NAN, f64::NAN, 1.0, 5.0, 5.0, 5.0, 0.0, 2.0, 1.0],
+            vec!["none", "none", "one", "tied", "tied", "tied", "ok", "ok", "ok"],
+        );
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec_for(vec!["g".into()]), &b, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 4, "every group keeps its row");
+        assert_eq!(
+            ctx.degenerate_fits(),
+            vec![
+                ("Kde2D".to_string(), Some("g=none".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
+                ("Kde2D".to_string(), Some("g=one".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
+                ("Kde2D".to_string(), Some("g=tied".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
+            ]
+        );
+        for (row, flat) in [(0, true), (1, true), (2, true), (3, false)] {
+            let density = list_f64_row(&out, "density", row);
+            assert_eq!(density.iter().all(|d| *d == 0.0), flat, "row {row}");
+        }
+    }
+
+    /// An ungrouped call names the whole fit, with no group, once; a bandwidth
+    /// that collapses on one axis alone is named too.
+    #[test]
+    fn an_ungrouped_unestimable_fit_is_named_without_a_group() {
+        pyo3::Python::initialize();
+        let all_null = batch_xy(vec![f64::NAN, f64::NAN], vec![f64::NAN, f64::NAN]);
+        let ctx = TransformContext::default();
+        apply_with_context(&spec_for(vec![]), &all_null, &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, FEWER_THAN_TWO_USABLE_POINTS.to_string())]);
+
+        let flat_y = batch_xy(vec![0.0, 1.0, 2.0], vec![4.0, 4.0, 4.0]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec_for(vec![]), &flat_y, &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, kde::BANDWIDTH_NOT_USABLE.to_string())]);
+        assert!(list_f64_at(&out, "density").iter().all(|d| *d == 0.0));
+    }
+
+    /// A well-formed surface warns nothing, grouped or not.
+    #[test]
+    fn an_estimable_fit_warns_nothing() {
+        pyo3::Python::initialize();
+        let xs = vec![0.0, 1.0, 3.0, 4.0, 0.5, 2.0];
+        let ys = vec![0.0, 2.0, 1.0, 5.0, 3.0, 2.5];
+        let ctx = TransformContext::default();
+        apply_with_context(&spec_for(vec![]), &batch_xy(xs.clone(), ys.clone()), &ctx).unwrap();
+        apply_with_context(&spec_for(vec!["g".into()]), &batch_xy_g(xs, ys, vec!["a", "a", "a", "b", "b", "b"]), &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// A zero-row frame emits no surface and names nothing, grouped or not; a
+    /// frame whose every row is null still emits and names one.
+    #[test]
+    fn a_zero_row_frame_emits_no_surface_and_warns_nothing() {
+        pyo3::Python::initialize();
+        for groupby in [vec![], vec!["g".to_string()]] {
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&spec_for(groupby.clone()), &batch_xy_g(vec![], vec![], vec![]), &ctx).unwrap();
+            assert_eq!(out.num_rows(), 0, "{groupby:?}");
+            assert!(ctx.warnings.borrow().is_empty(), "{groupby:?}");
+        }
+        let ungrouped = apply(&spec_for(vec![]), &batch_xy(vec![], vec![])).unwrap();
+        assert_eq!(ungrouped.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), OUTPUT_FIELDS);
+    }
+
+    fn pinned_spec(groupby: Vec<String>) -> Kde2DSpec {
+        Kde2DSpec { extent: Some((-50.0, 50.0, -50.0, 50.0)), ..spec_for(groupby) }
+    }
+
+    /// An estimable group whose density underflows to zero at every grid node
+    /// (points far narrower than a pinned grid) is named by its own reason and
+    /// keeps its all-zero surface; a spread group beside it warns nothing.
+    #[test]
+    fn a_surface_that_is_zero_at_every_grid_point_is_named_and_kept() {
+        pyo3::Python::initialize();
+        let tight = |d: f64| vec![0.3 + d, 0.3 + 2.0 * d, 0.3 + 3.0 * d, 0.3 + 4.0 * d, 0.3 + 5.0 * d, 0.3 + 6.0 * d];
+        let mut xs = tight(1e-7);
+        let mut ys: Vec<f64> = tight(2e-7);
+        let mut gs = vec!["tight"; 6];
+        xs.extend([-40.0, -10.0, 20.0, 45.0]);
+        ys.extend([-30.0, 10.0, -45.0, 40.0]);
+        gs.extend(["ok"; 4]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&pinned_spec(vec!["g".into()]), &batch_xy_g(xs, ys, gs), &ctx).unwrap();
+        assert_eq!(out.num_rows(), 2, "both groups keep their row");
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), Some("g=tight".to_string()), DENSITY_ZERO_ON_GRID.to_string())]);
+        assert!(list_f64_row(&out, "density", 0).iter().all(|d| *d == 0.0));
+        assert!(list_f64_row(&out, "density", 1).iter().any(|d| *d > 0.0));
+
+        let ctx = TransformContext::default();
+        let ungrouped = apply_with_context(&pinned_spec(vec![]), &batch_xy(tight(1e-7), tight(2e-7)), &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, DENSITY_ZERO_ON_GRID.to_string())]);
+        assert!(list_f64_at(&ungrouped, "density").iter().all(|d| *d == 0.0));
+    }
+
+    /// A bandwidth that is not finite on either axis alone is named with
+    /// `Kde`'s reason and keeps an all-zero surface, never also the zero-grid
+    /// text.
+    #[test]
+    fn a_non_finite_bandwidth_on_either_axis_is_named() {
+        pyo3::Python::initialize();
+        let b = batch_xy_g(
+            vec![0.0, 1.0, f64::INFINITY, 0.0, 1.0, 2.0],
+            vec![0.0, 1.0, 2.0, 0.0, f64::INFINITY, 1.0],
+            vec!["x_inf", "x_inf", "x_inf", "y_inf", "y_inf", "y_inf"],
+        );
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec_for(vec!["g".into()]), &b, &ctx).unwrap();
+        assert_eq!(
+            ctx.degenerate_fits(),
+            vec![
+                ("Kde2D".to_string(), Some("g=x_inf".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
+                ("Kde2D".to_string(), Some("g=y_inf".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
+            ]
+        );
+        for row in 0..2 {
+            assert!(list_f64_row(&out, "density", row).iter().all(|d| *d == 0.0), "row {row}");
+        }
+    }
 }

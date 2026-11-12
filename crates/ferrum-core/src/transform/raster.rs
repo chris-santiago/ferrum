@@ -30,9 +30,13 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::context::TransformContext;
+use crate::transform::context::{TransformContext, TransformWarning};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
+
+/// Reason a 2-D binning partition (`Raster`, `Hex`) has rows and no row with
+/// a non-null, finite x, y and, where the aggregate reads it, field.
+pub(crate) const NO_USABLE_VALUES: &str = "no usable (non-null, finite) values";
 
 /// The raster batch's one-row Utf8 column naming the field its cells hold:
 /// the aggregated `field=` column, else the aggregate's own name (`count`,
@@ -186,6 +190,21 @@ pub(crate) fn global_extent(
     Some((x_lo, x_hi, y_lo, y_hi))
 }
 
+/// The nine columns of every `Raster` output batch, in schema order.
+fn raster_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("x_min", DataType::Float64, false),
+        Field::new("x_max", DataType::Float64, false),
+        Field::new("y_min", DataType::Float64, false),
+        Field::new("y_max", DataType::Float64, false),
+        Field::new("width", DataType::UInt32, false),
+        Field::new("height", DataType::UInt32, false),
+        Field::new("pixel_data", DataType::Binary, false),
+        Field::new(RASTER_VALUE_FIELD, DataType::Utf8, false),
+        Field::new(RASTER_VALUE_SCALE, DataType::Utf8, false),
+    ]))
+}
+
 pub(crate) fn apply(spec: &RasterSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     apply_with_context(spec, batch, &TransformContext::default())
 }
@@ -263,8 +282,8 @@ pub(crate) fn apply_with_context(
     let xa = coerce_to_float64(batch.column(xi), "stat_raster", &spec.x)?;
     let ya = coerce_to_float64(batch.column(yi), "stat_raster", &spec.y)?;
 
-    // 5. Filter to (x, y) pairs that are non-null, non-NaN. Capture field values
-    // in lockstep when present.
+    // 5. Filter to (x, y) pairs that are non-null and finite. Capture field values
+    // in lockstep when present; a null or non-finite field drops the row too.
     let n_rows = xa.len();
     let mut xs: Vec<f64> = Vec::with_capacity(n_rows);
     let mut ys: Vec<f64> = Vec::with_capacity(n_rows);
@@ -275,7 +294,7 @@ pub(crate) fn apply_with_context(
         }
         let xv = xa.value(i);
         let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() {
+        if !xv.is_finite() || !yv.is_finite() {
             continue;
         }
         let fv = match field_arr.as_ref() {
@@ -285,7 +304,7 @@ pub(crate) fn apply_with_context(
                     continue;
                 }
                 let v = fa.value(i);
-                if v.is_nan() {
+                if !v.is_finite() {
                     continue;
                 }
                 v
@@ -294,6 +313,27 @@ pub(crate) fn apply_with_context(
         xs.push(xv);
         ys.push(yv);
         fs.push(fv);
+    }
+
+    // A batch with no rows, a whole frame or a facet partition, has nothing to
+    // rasterize: it emits no row and names nothing, so a layer over it reports
+    // that it has no rows to draw.
+    if n_rows == 0 {
+        return Ok(RecordBatch::new_empty(raster_schema()));
+    }
+
+    // A partition (or an unfaceted call) with rows and no usable value keeps
+    // its transparent row below, over the pinned extent; the statistic names
+    // it, since the image is still placed and the render cannot see that it is
+    // blank.
+    if xs.is_empty() {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Raster".into(),
+            group: None,
+            reason: NO_USABLE_VALUES.into(),
+            panel: None,
+            step: ctx.step.clone(),
+        });
     }
 
     // 6. Compute extent.
@@ -441,17 +481,7 @@ pub(crate) fn apply_with_context(
     // keep their raw values.
     let value_scale = if spec.log_scale { "symlog" } else { "linear" };
 
-    let out_schema = Arc::new(Schema::new(vec![
-        Field::new("x_min", DataType::Float64, false),
-        Field::new("x_max", DataType::Float64, false),
-        Field::new("y_min", DataType::Float64, false),
-        Field::new("y_max", DataType::Float64, false),
-        Field::new("width", DataType::UInt32, false),
-        Field::new("height", DataType::UInt32, false),
-        Field::new("pixel_data", DataType::Binary, false),
-        Field::new(RASTER_VALUE_FIELD, DataType::Utf8, false),
-        Field::new(RASTER_VALUE_SCALE, DataType::Utf8, false),
-    ]));
+    let out_schema = raster_schema();
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(vec![xmin])),
         Arc::new(Float64Array::from(vec![xmax])),
@@ -1170,5 +1200,99 @@ mod tests {
             let e = apply(&fieldless, &b).unwrap_err();
             assert_eq!(e.value(py).to_string(), "stat_raster: aggregate='mean' requires field");
         });
+    }
+
+    fn count_spec() -> RasterSpec {
+        serde_json::from_str(r#"{"x":"x","y":"y"}"#).unwrap()
+    }
+
+    /// A partition with rows and no usable value warns `DegenerateFit` once
+    /// and keeps its transparent grid; a usable one warns nothing.
+    #[test]
+    fn a_partition_with_rows_and_no_usable_value_is_named() {
+        pyo3::Python::initialize();
+        let nan_rows = make_xy_batch(vec![f64::NAN, f64::NAN], vec![1.0, f64::NAN]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&count_spec(), &nan_rows, &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Raster".to_string(), None, NO_USABLE_VALUES.to_string())]);
+        assert_eq!(out.num_rows(), 1, "the transparent row is unchanged");
+        assert!(pixel_at(&out, 0, 0).is_nan());
+
+        // A field with no usable value is the same cause.
+        let spec: RasterSpec = serde_json::from_str(r#"{"x":"x","y":"y","field":"f","aggregate":"mean"}"#).unwrap();
+        let ctx = TransformContext::default();
+        apply_with_context(&spec, &make_xyf_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![f64::NAN, f64::NAN]), &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits().len(), 1);
+
+        let ctx = TransformContext::default();
+        apply_with_context(&count_spec(), &make_xy_batch(vec![0.0, 1.0], vec![0.0, 1.0]), &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty(), "a usable partition warns nothing");
+    }
+
+    /// A batch with no rows, a whole frame or a facet partition under a
+    /// pinned extent alike, emits no row and names nothing.
+    #[test]
+    fn a_zero_row_frame_or_partition_emits_no_row_and_names_nothing() {
+        pyo3::Python::initialize();
+        let mut pinned = count_spec();
+        pinned.extent_x = Some((0.0, 10.0));
+        pinned.extent_y = Some((0.0, 5.0));
+        for (spec, is_partition) in [(count_spec(), false), (pinned, true)] {
+            let ctx = TransformContext { is_partition, ..TransformContext::default() };
+            let out = apply_with_context(&spec, &make_xy_batch(vec![], vec![]), &ctx).unwrap();
+            assert_eq!(out.num_rows(), 0, "is_partition={is_partition}");
+            assert_eq!(out.schema(), raster_schema());
+            assert!(ctx.warnings.borrow().is_empty(), "is_partition={is_partition}");
+        }
+    }
+
+    /// A partition under a pinned extent with rows and no usable value keeps
+    /// its transparent row over the pin and is named.
+    #[test]
+    fn a_pinned_partition_with_rows_and_no_usable_value_keeps_its_row_and_is_named() {
+        pyo3::Python::initialize();
+        let mut pinned = count_spec();
+        pinned.extent_x = Some((0.0, 10.0));
+        pinned.extent_y = Some((0.0, 5.0));
+        let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
+        let out = apply_with_context(&pinned, &make_xy_batch(vec![f64::NAN], vec![1.0]), &ctx).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        assert!(pixel_at(&out, 0, 0).is_nan());
+        assert_eq!(ctx.degenerate_fits(), vec![("Raster".to_string(), None, NO_USABLE_VALUES.to_string())]);
+    }
+
+    /// A row with an infinite x, y or (Mean) field is skipped as a null one
+    /// is: the finite rows bin exactly as they do alone and nothing warns; a
+    /// batch with no finite row is named and keeps its transparent row.
+    #[test]
+    fn an_infinite_coordinate_or_field_is_skipped_as_a_null_one_is() {
+        pyo3::Python::initialize();
+        let finite_x = vec![0.0, 1.0, 2.0, 3.0];
+        let finite_y = vec![0.0, 1.0, 1.0, 3.0];
+        let finite_f = vec![1.0, 2.0, 3.0, 4.0];
+        let mean: RasterSpec = serde_json::from_str(r#"{"x":"x","y":"y","field":"f","aggregate":"mean"}"#).unwrap();
+        let alone_ctx = TransformContext::default();
+        let alone = apply_with_context(&mean, &make_xyf_batch(finite_x.clone(), finite_y.clone(), finite_f.clone()), &alone_ctx).unwrap();
+        let inf = f64::INFINITY;
+        let mixed = [
+            (vec![inf, f64::NEG_INFINITY], vec![1.0, 1.0], vec![1.0, 1.0]),
+            (vec![1.0, 1.0], vec![inf, f64::NEG_INFINITY], vec![1.0, 1.0]),
+            (vec![1.0, 1.0], vec![1.0, 1.0], vec![inf, f64::NEG_INFINITY]),
+        ];
+        for (extra_x, extra_y, extra_f) in mixed {
+            let (mut xs, mut ys, mut fs) = (finite_x.clone(), finite_y.clone(), finite_f.clone());
+            xs.extend(extra_x);
+            ys.extend(extra_y);
+            fs.extend(extra_f);
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&mean, &make_xyf_batch(xs, ys, fs), &ctx).unwrap();
+            assert_eq!(out, alone, "the finite rows bin as they do alone");
+            assert!(ctx.warnings.borrow().is_empty());
+        }
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&count_spec(), &make_xy_batch(vec![inf, inf], vec![1.0, f64::NEG_INFINITY]), &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Raster".to_string(), None, NO_USABLE_VALUES.to_string())]);
+        assert_eq!(out.num_rows(), 1);
+        assert!(pixel_at(&out, 0, 0).is_nan());
     }
 }

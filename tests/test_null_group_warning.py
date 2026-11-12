@@ -982,6 +982,7 @@ def _census(messages: list[str]) -> list[str]:
 # ``_FIT_DEGRADED``, is defined at the top of the module).
 FIT_FEW = "fewer than 2 usable (non-null/non-NaN) values"
 FIT_NONE = "no usable (non-null/non-NaN) values"
+FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
 
 
 def _fit_message(statistic: str, group: str, reason: str, *, panel: str | None = None) -> str:
@@ -994,6 +995,12 @@ def _fit_message(statistic: str, group: str, reason: str, *, panel: str | None =
 def _panel_fit_message(statistic: str, reason: str, panel: str = "f=q") -> str:
     """The ``DegenerateFit`` sentence for a facet panel ``statistic`` could not estimate."""
     return f"{statistic}: could not fit the data in facet panel {panel} ({reason}); {_FIT_DEGRADED}"
+
+
+def _whole_fit_message(statistic: str, reason: str) -> str:
+    """The ``DegenerateFit`` sentence for a whole call (no group, no facet panel) ``statistic``
+    could not estimate."""
+    return f"{statistic}: could not fit the data ({reason}); {_FIT_DEGRADED}"
 
 
 def _fit_warnings(messages: list[str], statistic: str) -> list[str]:
@@ -1958,6 +1965,9 @@ def test_a_call_built_layer_in_a_composition_carries_no_layer_index():
 # ---------------------------------------------------------------------------
 
 _NO_ROWS_TO_DRAW = "the chart has no rows to draw after its transforms; its panel is drawn empty"
+_NO_FACET_ROWS_WARNING = (
+    "the chart has no rows to draw after its transforms; no facet panel is drawn"
+)
 
 # Hue levels ``a`` and ``b`` always hold values to bin; ``c`` holds what a test gives it.
 _HIST_A = [1.0, 2.0, 2.0, 3.0, 4.0, 5.0]

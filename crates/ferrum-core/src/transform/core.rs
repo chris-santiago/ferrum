@@ -331,7 +331,6 @@ impl TransformSpec {
                     Self::Bin2D(_)
                     | Self::Swarm(_)
                     | Self::Linkage(_)
-                    | Self::Hex(_)
                     | Self::Unpivot(_)
                     | Self::ReferenceLine(_)
                     | Self::Identity(_)
@@ -347,6 +346,7 @@ impl TransformSpec {
         }
         arm! {
             Raster => raster,
+            Hex => hex,
             Violin => violin,
             Smooth => smooth,
             Robust => robust,

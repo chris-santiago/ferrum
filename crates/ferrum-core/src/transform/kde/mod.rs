@@ -131,6 +131,14 @@ pub(crate) struct KdeSpec {
 /// `Bin`'s (`"stat_bin"`'s own `LABEL`, mirrored here).
 const LABEL: &str = "stat_kde";
 
+/// Reason a 1-D group with fewer than two usable values cannot be estimated.
+pub(crate) const FEWER_THAN_TWO_USABLE_VALUES: &str = "fewer than 2 usable (non-null/non-NaN) values";
+
+/// Reason a density estimate cannot be evaluated: the bandwidth resolved to
+/// zero, a negative number or a non-finite one. Shared by every density
+/// statistic that fits a kernel bandwidth.
+pub(crate) const BANDWIDTH_NOT_USABLE: &str = "the bandwidth resolved to a non-positive or non-finite value";
+
 pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
@@ -500,7 +508,7 @@ fn compute_one_group(
         warn_ctx.warn(TransformWarning::DegenerateFit {
             transform: "Kde".into(),
             group: group.map(str::to_string),
-            reason: "fewer than 2 usable (non-null/non-NaN) values".into(),
+            reason: FEWER_THAN_TWO_USABLE_VALUES.into(),
             panel: None,
             step: warn_ctx.step.clone(),
         });
@@ -511,7 +519,7 @@ fn compute_one_group(
             warn_ctx.warn(TransformWarning::DegenerateFit {
                 transform: "Kde".into(),
                 group: group.map(str::to_string),
-                reason: "the bandwidth resolved to a non-positive or non-finite value".into(),
+                reason: BANDWIDTH_NOT_USABLE.into(),
                 panel: None,
                 step: warn_ctx.step.clone(),
             });

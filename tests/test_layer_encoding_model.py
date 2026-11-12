@@ -59,6 +59,7 @@ from tests._legends import svg_root as _svg_root
 from tests._legends import tag as _tag
 from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
+from tests.test_null_group_warning import _NO_FACET_ROWS_WARNING
 from tests._wire_steps import all_steps, operand_branches
 
 SY = fm.SecondaryY
@@ -12529,9 +12530,6 @@ def test_a_flat_charts_step_runs_before_its_encoding_statistic(statistic, order)
 # one draws no facet panel and warns the same way.
 
 _NO_ROWS_WARNING = "the chart has no rows to draw after its transforms; its panel is drawn empty"
-_NO_FACET_ROWS_WARNING = (
-    "the chart has no rows to draw after its transforms; no facet panel is drawn"
-)
 
 
 def _nothing_above(field: str = "y") -> Any:

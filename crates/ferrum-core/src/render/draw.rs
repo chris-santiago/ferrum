@@ -335,7 +335,9 @@ pub(crate) fn dispatch_mark_placements<'a>(mark: &Mark, ctx: &'a DrawCtx<'a>) ->
 /// `area` and `ribbon` return their own [`series_groups`](super::marks::line::series_groups)
 /// (each mark's own module), `polygon` its ring partition
 /// ([`polygon::detail_groups`](super::marks::polygon::detail_groups)) named
-/// by [`polygon::naming_columns`](super::marks::polygon::naming_columns),
+/// by [`polygon::group_naming_columns`](super::marks::polygon::group_naming_columns)
+/// (the ring's own [`polygon::naming_columns`](super::marks::polygon::naming_columns)
+/// without a quantitative color),
 /// every per-row mark [`channels::per_row_mark_groups`](super::marks::channels::per_row_mark_groups),
 /// and `Arc`/`Geoshape` one group of every row — they place nothing by a
 /// positional scale ([`dispatch_mark_placements`]'s own doc), so there is
@@ -350,7 +352,7 @@ pub(crate) fn dispatch_mark_groups(mark: &Mark, ctx: &DrawCtx) -> SeriesPartitio
         Mark::Ribbon => super::marks::ribbon::series_groups(ctx),
         Mark::Polygon => SeriesPartition {
             groups: super::marks::polygon::detail_groups(ctx).into_iter().map(|rows| (None, rows)).collect(),
-            fields: super::marks::polygon::naming_columns(ctx),
+            fields: super::marks::polygon::group_naming_columns(ctx),
         },
         Mark::Rule
         | Mark::Segment

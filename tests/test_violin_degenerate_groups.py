@@ -22,6 +22,7 @@ import pytest
 
 import ferrum as fm
 from tests.test_null_group_warning import (
+    FIT_BANDWIDTH,
     FIT_FEW,
     FIT_NONE,
     _census,
@@ -34,7 +35,6 @@ from tests.test_null_group_warning import (
 
 _TIED = "its usable values are all equal"
 _ZERO_DENSITY = "its density is zero across the evaluation range"
-_NON_FINITE = "the bandwidth resolved to a non-positive or non-finite value"
 
 # Category ``z`` is the one the statistic cannot estimate; ``a`` and ``b`` hold two rows each.
 _Z_CASES = [
@@ -169,7 +169,7 @@ def test_a_density_mark_on_the_same_data_keeps_its_own_warning(
     """``mark_density`` reads the same estimate through ``Kde``, whose warning is unchanged.
     Tied values read ``Kde``'s own cause (the bandwidth), the one place its wording and the
     violin's differ."""
-    kde_reason = _NON_FINITE if reason == _TIED else reason
+    kde_reason = FIT_BANDWIDTH if reason == _TIED else reason
     chart = fm.Chart(_small_slot_frame(z_values)).mark_density().encode(x="w", color="c")
     _, shown = _render_capturing(chart.to_svg, action="default")
     assert shown == [_fit_message("Kde", "c=z", kde_reason)]
@@ -257,7 +257,7 @@ def test_a_violin_group_holding_an_infinity_is_named_in_kdes_non_finite_wording(
     df = pl.DataFrame(
         {"c": ["a"] * 4 + ["z"] * 4, "w": [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, float("inf"), 3.0]}
     )
-    reason = _NON_FINITE
+    reason = FIT_BANDWIDTH
     svg, shown = _render_capturing(_violin_door("mark", df, "none").to_svg, action="always")
     assert shown == [_fit_message("Violin", "c=z", reason)]
     assert ">z<" in svg

@@ -2067,7 +2067,9 @@ mod tests {
         }
     }
 
-    /// Warnings a call raised, as `(transform, group, reason)`.
+    /// Warnings a call raised, as `(transform, group, reason)`. Unlike
+    /// `TransformContext::degenerate_fits`, it panics on any other warning, so
+    /// a test using it also asserts nothing else was raised.
     fn degenerate_fits(ctx: &TransformContext) -> Vec<(String, Option<String>, String)> {
         ctx.warnings
             .borrow()
