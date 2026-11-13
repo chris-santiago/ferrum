@@ -324,6 +324,10 @@ pub(in crate::render) fn build_axis_scale(
     // layer-union loop, `build_auxiliary_scales`, `resolve_scales`'s
     // `EncodingTypeMismatch`).
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    // What the messages below print is a separate question from what the flip
+    // does: a flip the call applied itself leaves the resolved channel as the
+    // caller's own, so only the name reads this, never `sort_ctx`.
+    let names_unflipped = crate::render::prepare::layer_names_unflipped(spec, 0, spec.coord.as_ref());
 
     // #247A: the explicit-scale bypass is for a scale the CALLER wrote. A scale
     // ferrum's own spec build injected (the bar zero-anchor — see
@@ -486,21 +490,21 @@ pub(in crate::render) fn build_axis_scale(
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
         let axis_name = log_axis_name(enc, log_reads.statistic_field(enc));
-        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, &data_categories, text_demand, axis_name.as_deref(), warnings)
+        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, names_unflipped, &data_extent, &data_categories, text_demand, axis_name.as_deref(), warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
-                    RenderError::InvalidBandPadding { channel, error: e, coord_flipped }
+                    RenderError::InvalidBandPadding { channel, error: e, coord_flipped: names_unflipped }
                 }
                 RenderError::InvalidScaleDomainConfig { channel, reason, surface: ScaleDomainSurface::Scale, .. } => {
                     RenderError::InvalidScaleDomainConfig {
                         channel,
                         reason,
                         surface: ScaleDomainSurface::Scale,
-                        coord_flipped,
+                        coord_flipped: names_unflipped,
                     }
                 }
                 RenderError::LogScaleNoValueOnSide { channel, reason, .. } => {
-                    RenderError::LogScaleNoValueOnSide { channel, reason, coord_flipped }
+                    RenderError::LogScaleNoValueOnSide { channel, reason, coord_flipped: names_unflipped }
                 }
                 other => other,
             });
@@ -690,7 +694,7 @@ pub(in crate::render) fn imposed_axis_scale(
     // rows either, and it names no statistic field of its own: the
     // establishing member's tally names the axis.
     let axis_name = log_axis_name(binding, None);
-    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, &data_extent, &data_categories, &Default::default(), axis_name.as_deref(), warnings))
+    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, false, &data_extent, &data_categories, &Default::default(), axis_name.as_deref(), warnings))
 }
 
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
@@ -824,6 +828,11 @@ pub(in crate::render) fn build_from_scale_spec(
     batch: &RecordBatch,
     pr: (f64, f64),
     sort_ctx: &SortContext<'_>,
+    // Whether a message this scale raises un-flips `channel` back to the one
+    // its caller wrote ([`crate::render::prepare::layer_names_unflipped`]).
+    // Separate from `sort_ctx.coord_flipped`, which decides the sort's
+    // authored-token reading and never the name a message prints.
+    names_unflipped: bool,
     data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
     data_categories: &dyn Fn() -> Result<Vec<String>, RenderError>,
     // The channel's text-edge demand, already gated by the
@@ -861,7 +870,7 @@ pub(in crate::render) fn build_from_scale_spec(
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
-            resolve_log_scale(channel, log_axis_name, base, common, *nice, pr, data_extent, sort_ctx.coord_flipped, text_demand, warnings)?
+            resolve_log_scale(channel, log_axis_name, base, common, *nice, pr, data_extent, names_unflipped, text_demand, warnings)?
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
@@ -1161,8 +1170,8 @@ pub(super) fn validate_explicit_log_domain(channel: &str, domain: Option<&[f64]>
 ///   `scaleLog` default, the log-space twin of every other continuous
 ///   channel's unit-interval default).
 ///
-/// `channel` is the RESOLVED token; `coord_flipped` is `build_axis_scale`'s
-/// own flag (the real one, threaded straight through to
+/// `channel` is the RESOLVED token; `names_unflipped` is `build_axis_scale`'s
+/// own naming flag (threaded straight through to
 /// [`resolve_log_extent`] — see its doc), not corrected after the fact: a
 /// pushed [`RenderWarning`] has no `Result` for a caller to `map_err` over,
 /// unlike `InvalidScaleDomainConfig`/`InvalidBandPadding`/
@@ -1177,7 +1186,7 @@ fn resolve_log_scale(
     nice: bool,
     pr: (f64, f64),
     data_extent: &dyn Fn(Option<crate::scale::log::LogSide>) -> Result<(super::SidedExtent, super::LeftOutTally), RenderError>,
-    coord_flipped: bool,
+    names_unflipped: bool,
     text_demand: &crate::layout::geometry::TextEdgeDemand,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
@@ -1187,7 +1196,7 @@ fn resolve_log_scale(
     validate_explicit_log_domain(channel, common.domain.as_deref())?;
     let side = LogSide::of(common.domain.as_deref());
     let (extent, tally) = data_extent(Some(side))?;
-    let (lo, hi) = resolve_log_extent(channel, name, common.domain.is_some(), side, (extent.lo, extent.hi), &tally, *base, coord_flipped, warnings)?;
+    let (lo, hi) = resolve_log_extent(channel, name, common.domain.is_some(), side, (extent.lo, extent.hi), &tally, *base, names_unflipped, warnings)?;
 
     let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
     let unsided_extent = || Ok((lo, hi));
@@ -1223,12 +1232,14 @@ fn resolve_log_scale(
 /// `coord_flipped` is the warning's own display flag:
 /// `LogScaleRowsLeftOut`'s `Display` un-flips `channel`
 /// through [`prepare::user_facing_channel`](crate::render::prepare::user_facing_channel)
-/// using it, so every caller must pass its OWN real flag, not `false` — a
-/// positional caller under `CoordFlip` (`build_axis_scale`'s `coord_flipped`,
-/// or a composite caller's `LeafResolveInput::coord_flipped()`) passes the
-/// true value; an auxiliary caller (`numeric_aux_scale_kind`'s `Log` arm,
-/// `resolve_group`'s `size` branch) always passes `false` — an aux channel
-/// is never flipped, mirroring the struct's own doc.
+/// using it, so every caller must pass its OWN naming flag, not `false` — a
+/// positional caller under a caller-written `CoordFlip` (`build_axis_scale`'s
+/// `names_unflipped`, or a composite caller's
+/// `LeafResolveInput::names_unflipped()`) passes `true`, while a flip the call
+/// applied itself passes `false` (the resolved token is already the caller's);
+/// an auxiliary caller (`numeric_aux_scale_kind`'s `Log` arm, `resolve_group`'s
+/// `size` branch) always passes `false` — an aux channel is never flipped,
+/// mirroring the struct's own doc.
 /// `name` is the axis's own name for the warning/refusal below, from
 /// [`log_axis_name`]: the caller's own `title=` when the establishing
 /// layer draws a primitive column, the caller field of a demanded
@@ -2092,7 +2103,7 @@ mod tests {
                 )
             })
         };
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), None, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, false, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), None, &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2593,7 +2604,7 @@ mod tests {
         // This harness has no lineage to ask, so it names the axis exactly
         // as a primitive (non-statistic) layer does: the raw field.
         let axis_name = super::log_axis_name(&enc, None);
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), axis_name.as_deref(), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, false, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), axis_name.as_deref(), &mut warnings)
     }
 
     fn resolve_scale(

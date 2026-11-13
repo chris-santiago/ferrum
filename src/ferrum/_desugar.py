@@ -1930,6 +1930,7 @@ def _resolve_pending_as(
             replace(
                 apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs, entry), style_dict),
                 entry=entry,
+                flip_by_call=chart._pending_stat_mark.flip_by_call,
             )
             for lyr in result.layers
         ]

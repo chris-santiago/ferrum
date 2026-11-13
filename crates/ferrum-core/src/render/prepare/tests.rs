@@ -3346,6 +3346,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             reads_chart_data: false,
             coord: None,
             entry: None,
+            flip_by_call: false,
         }]),
         ..Default::default()
     };
@@ -3841,6 +3842,398 @@ fn cross_dimension_orient_fails_loud_names_users_channel_under_flip() {
         "message must name the channel the user wrote ('y'), not the resolved one ('x'), and \
          must explain why 'top'/'bottom' applies to something named 'y'"
     );
+}
+
+/// Prepare `spec` over `batch` at the default viewport, returning the
+/// refusal's text.
+fn refusal_text(spec: &ChartSpec, batch: &RecordBatch) -> String {
+    prepare_render_inputs(
+        spec,
+        batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect_err("the spec must be refused")
+    .to_string()
+}
+
+/// A message names a resolved channel by the one the caller wrote only when
+/// the coord flips AND the call did not apply that flip itself.
+#[test]
+fn names_unflip_only_for_a_flip_the_call_did_not_apply() {
+    use crate::spec::coord::CoordKind;
+    let flip = CoordKind::Flip;
+    assert!(names_unflipped(Some(&flip), false));
+    assert!(!names_unflipped(Some(&flip), true));
+    // No flip means nothing to un-flip, whatever the fact says.
+    assert!(!names_unflipped(None, false));
+    assert!(!names_unflipped(None, true));
+    assert!(!names_unflipped(Some(&CoordKind::default()), true));
+}
+
+/// A layer is flipped by the call when its own fact or the chart's says so (the
+/// two are or-ed: a layer's `false` does not outrank a chart's `true`), a flat
+/// chart reads the chart's, and a layer that carries none on a chart that does
+/// not resolves false.
+#[test]
+fn a_layers_flip_fact_is_its_own_or_the_charts() {
+    use crate::spec::layer::Layer;
+    let flat = ChartSpec { flip_by_call: true, ..single_layer_spec() };
+    assert!(layer_flip_by_call(&flat, 0));
+    assert!(!layer_flip_by_call(&single_layer_spec(), 0));
+
+    let layered = ChartSpec {
+        layers: Some(vec![
+            Layer { flip_by_call: true, ..Default::default() },
+            Layer::default(),
+        ]),
+        ..single_layer_spec()
+    };
+    assert!(layer_flip_by_call(&layered, 0));
+    assert!(!layer_flip_by_call(&layered, 1), "a sibling layer does not inherit another layer's fact");
+
+    // A chart-level fact reaches every layer that states none, and a layer's
+    // own `false` does not outrank it.
+    let chart_true = ChartSpec { flip_by_call: true, ..layered.clone() };
+    assert!(layer_flip_by_call(&chart_true, 0));
+    assert!(layer_flip_by_call(&chart_true, 1), "chart true, layer false: the chart's fact reaches the layer");
+}
+
+/// The fact is omitted from the wire when unset, so every spec that does not
+/// carry it serialises byte-identically, and it round-trips when set.
+#[test]
+fn the_flip_fact_is_omitted_from_the_wire_when_unset() {
+    use crate::spec::layer::Layer;
+    let unset = ChartSpec { layers: Some(vec![Layer::default()]), ..single_layer_spec() };
+    let json = serde_json::to_string(&unset).unwrap();
+    assert!(!json.contains("flip_by_call"), "{json}");
+
+    let set = ChartSpec {
+        flip_by_call: true,
+        layers: Some(vec![Layer { flip_by_call: true, ..Default::default() }]),
+        ..single_layer_spec()
+    };
+    let json = serde_json::to_string(&set).unwrap();
+    assert_eq!(json.matches("\"flip_by_call\":true").count(), 2, "{json}");
+    let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+    assert!(parsed.flip_by_call && parsed.layers.unwrap()[0].flip_by_call);
+}
+
+/// A per-channel `Axis(orient=...)` refusal under a flip the call applied
+/// names the resolved channel (the caller's own), where the same spec under a
+/// flip the caller wrote names the channel un-flipped.
+#[test]
+fn an_orient_refusal_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::coord::CoordKind;
+    let mut spec = single_layer_spec();
+    spec.coord = Some(CoordKind::Flip);
+    spec.encoding.y = Some(enc_with_axis("weight", serde_json::json!({ "orient": "left" })));
+    let batch = price_weight_batch();
+    assert!(refusal_text(&spec, &batch).starts_with("axis orient 'left' is invalid for the y axis"));
+    spec.flip_by_call = true;
+    assert!(refusal_text(&spec, &batch).starts_with("axis orient 'left' is invalid for the x axis"));
+}
+
+/// A `Log` scale whose value axis has no on-side row refuses in the caller's
+/// own channel: `x` under the call's flip, `y` under a flip the caller wrote.
+#[test]
+fn a_log_scale_refusal_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::coord::CoordKind;
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("price", DataType::Float64, false),
+            Field::new("weight", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(Float64Array::from(vec![-1.0, -2.0, -3.0])),
+        ],
+    )
+    .unwrap();
+    let mut spec = single_layer_spec();
+    spec.coord = Some(CoordKind::Flip);
+    spec.encoding.y = Some(EncodingSpec {
+        field: "weight".into(),
+        scale: Some(serde_json::from_value(serde_json::json!({"type": "log", "base": 10.0})).unwrap()),
+        ..Default::default()
+    });
+    let caller_flip = refusal_text(&spec, &batch);
+    assert!(caller_flip.starts_with("y scale: "), "{caller_flip}");
+    spec.flip_by_call = true;
+    let call_flip = refusal_text(&spec, &batch);
+    assert!(call_flip.starts_with("x scale: "), "{call_flip}");
+}
+
+/// A refusal that names a positional channel, read under no flip, a flip the
+/// caller wrote and a flip the call applied: the call's flip names the
+/// resolved channel (the caller's own keyword), the caller's flip the
+/// un-flipped one, and no flip the channel as written.
+#[test]
+fn positional_refusals_name_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::coord::CoordKind;
+    let band = |padding: f64| {
+        serde_json::from_value(serde_json::json!({"type": "band", "paddingInner": padding})).unwrap()
+    };
+    let mut bad_band = single_layer_spec();
+    bad_band.encoding.x = Some(EncodingSpec { field: "price".into(), scale: Some(band(5.0)), ..Default::default() });
+    let mut y_only = single_layer_spec();
+    y_only.encoding.x = None;
+    let band_text = |channel: &str| format!("band scale on {channel}: paddingInner must be a number in [0, 1]; received 5");
+    let unbound_text = |channel: &str, alone: &str| {
+        format!(
+            "mark_point needs both positional channels, but nothing binds '{channel}'. Encode '{channel}' on the \
+             chart to draw it, or draw from '{alone}' alone with mark_tick() or mark_rule()."
+        )
+    };
+    for (name, base, texts) in [
+        ("band padding", bad_band, [band_text("x"), band_text("x"), band_text("y")]),
+        ("unbound channel", y_only, [unbound_text("x", "y"), unbound_text("x", "y"), unbound_text("y", "x")]),
+    ] {
+        for ((coord, by_call), want) in [(None, false), (Some(CoordKind::Flip), false), (Some(CoordKind::Flip), true)]
+            .into_iter()
+            .zip(texts)
+        {
+            let spec = ChartSpec { coord: coord.clone(), flip_by_call: by_call, ..base.clone() };
+            assert_eq!(
+                refusal_text(&spec, &price_weight_batch()),
+                want,
+                "{name}: flip={} flip_by_call={by_call}",
+                coord.is_some()
+            );
+        }
+    }
+}
+
+/// Prepare `spec` and return the refusal's text, or `None` when it is accepted.
+fn prepare_refusal(spec: &ChartSpec) -> Option<String> {
+    prepare_render_inputs(
+        spec,
+        &price_weight_batch(),
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .err()
+    .map(|e| e.to_string())
+}
+
+/// The three ways a chart can be flipped: not at all, by a coord the caller
+/// wrote, and by a flip the call applied on the caller's behalf.
+fn flip_modes() -> [(Option<crate::spec::coord::CoordKind>, bool); 3] {
+    use crate::spec::coord::CoordKind;
+    [(None, false), (Some(CoordKind::Flip), false), (Some(CoordKind::Flip), true)]
+}
+
+/// A `stack=` refusal beside a `position=` names the channel the caller wrote:
+/// as written with no flip, un-flipped under a flip the caller wrote, and the
+/// resolved channel under a flip the call applied.
+#[test]
+fn a_stack_beside_position_refusal_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+    let stack = PositionAdjust::Stack { by: None, offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
+    let mut declined = single_layer_spec();
+    declined.position = Some(stack.clone());
+    declined.encoding.y.as_mut().unwrap().stack = Some("false".into());
+    let mut shorthand = single_layer_spec();
+    shorthand.position = Some(stack);
+    shorthand.encoding.y.as_mut().unwrap().stack = Some("zero".into());
+    for ((coord, by_call), channel) in flip_modes().into_iter().zip(["y", "y", "x"]) {
+        let refusal = |base: &ChartSpec| prepare_refusal(&ChartSpec { coord: coord.clone(), flip_by_call: by_call, ..base.clone() });
+        assert_eq!(
+            refusal(&declined).as_deref(),
+            Some(format!(
+                "mark_point: position=fm.Stack(...) and stack=False on {channel} are both set, but one stacks the \
+                 mark and the other declines it. Keep one: remove stack=False from {channel}, or remove position=."
+            ).as_str()),
+            "declined: flip={} flip_by_call={by_call}", coord.is_some()
+        );
+        assert_eq!(
+            refusal(&shorthand).as_deref(),
+            Some(format!(
+                "mark_point: position=fm.Stack(...) and stack= on {channel} are both set, but a mark draws one \
+                 position adjustment. Keep one: remove stack= from {channel}, or remove position=."
+            ).as_str()),
+            "shorthand: flip={} flip_by_call={by_call}", coord.is_some()
+        );
+    }
+}
+
+/// The category axis's `Axis(orient=...)` refusal: the x axis the caller wrote
+/// under a flip they wrote, the resolved y axis under a flip the call applied.
+/// (The value axis is pinned beside it.)
+#[test]
+fn an_orient_refusal_on_the_category_axis_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::coord::CoordKind;
+    let mut spec = single_layer_spec();
+    spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
+    // 'top' is valid for the horizontal x axis, so no flip accepts it.
+    assert_eq!(prepare_refusal(&spec), None);
+    spec.coord = Some(CoordKind::Flip);
+    assert_eq!(
+        prepare_refusal(&spec).as_deref(),
+        Some("axis orient 'top' is invalid for the x axis (expected 'left' or 'right' — under CoordFlip, x renders as the vertical axis)")
+    );
+    spec.flip_by_call = true;
+    assert_eq!(
+        prepare_refusal(&spec).as_deref(),
+        Some("axis orient 'top' is invalid for the y axis (expected 'left' or 'right')")
+    );
+}
+
+/// A secondary y axis's `Axis(orient=...)` refusal names the channel the
+/// caller wrote, on its own layer's fact.
+#[test]
+fn a_secondary_axis_orient_refusal_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::layer::Layer;
+    let layered = |orient_channel_is_y: bool, flip_by_call: bool| {
+        let axis = Some(enc_with_axis("weight", serde_json::json!({ "orient": "top" })));
+        let encoding = if orient_channel_is_y {
+            Encoding { y: axis, ..Default::default() }
+        } else {
+            Encoding { x: axis, ..Default::default() }
+        };
+        let spec = ChartSpec {
+            layers: Some(vec![
+                Layer { mark: Mark::Point, encoding: single_layer_spec().encoding, ..Default::default() },
+                Layer { mark: Mark::Point, independent_y: true, encoding, flip_by_call, ..Default::default() },
+            ]),
+            ..single_layer_spec()
+        };
+        spec
+    };
+    // No flip: the secondary y axis the caller wrote.
+    assert_eq!(
+        prepare_refusal(&layered(true, false)).as_deref(),
+        Some("axis orient 'top' is invalid for the y axis (expected 'left' or 'right')")
+    );
+    // A flip the caller wrote moves the layer's authored x onto the vertical axis.
+    let flipped = |flip_by_call: bool| ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..layered(false, flip_by_call) };
+    assert_eq!(
+        prepare_refusal(&flipped(false)).as_deref(),
+        Some("axis orient 'top' is invalid for the x axis (expected 'left' or 'right' — under CoordFlip, x renders as the vertical axis)")
+    );
+    assert_eq!(
+        prepare_refusal(&flipped(true)).as_deref(),
+        Some("axis orient 'top' is invalid for the y axis (expected 'left' or 'right')")
+    );
+}
+
+/// A layered spec's layer that leaves one positional channel unbound is
+/// refused naming the channel the caller wrote: as written with no flip,
+/// un-flipped under a flip the caller wrote, and the resolved channel under a
+/// flip the call applied to that layer.
+#[test]
+fn a_layers_unbound_channel_refusal_names_the_callers_channel_under_the_calls_flip() {
+    use crate::spec::layer::Layer;
+    for ((coord, by_call), (unbound, alone)) in flip_modes().into_iter().zip([("x", "y"), ("x", "y"), ("y", "x")]) {
+        let spec = ChartSpec {
+            coord: coord.clone(),
+            layers: Some(vec![Layer {
+                mark: Mark::Point,
+                encoding: Encoding { y: Some(EncodingSpec { field: "weight".into(), ..Default::default() }), ..Default::default() },
+                flip_by_call: by_call,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            prepare_refusal(&spec),
+            Some(format!(
+                "layer 0: mark_point needs both positional channels, but nothing binds '{unbound}'. Encode '{unbound}' \
+                 on the chart to draw it, or draw from '{alone}' alone with mark_tick() or mark_rule()."
+            )),
+            "flip={} flip_by_call={by_call}", coord.is_some()
+        );
+    }
+}
+
+/// When no layer paints, the refusal names layer 0's own mark with both
+/// channels; the text is the same under every flip, so the naming it carries
+/// is what tells a call-applied flip from a caller's.
+#[test]
+fn a_chart_with_no_painting_layer_carries_the_layer_zero_naming() {
+    use crate::render::ChannelNaming;
+    use crate::spec::layer::Layer;
+    for ((coord, by_call), flipped) in flip_modes().into_iter().zip([false, true, false]) {
+        let spec = ChartSpec {
+            coord: coord.clone(),
+            layers: Some(vec![Layer {
+                mark: Mark::Point,
+                mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { opacity: Some(0.0), ..Default::default() }),
+                flip_by_call: by_call,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let err = prepare_render_inputs(
+            &spec,
+            &price_weight_batch(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect_err("nothing binds a channel");
+        let crate::render::RenderError::InLayer { source, .. } = err else { panic!("expected InLayer, got {err:?}") };
+        let crate::render::RenderError::PositionalChannelUnbound { naming, .. } = *source else {
+            panic!("expected PositionalChannelUnbound, got {source:?}")
+        };
+        assert_eq!(naming, ChannelNaming::Cartesian { flipped }, "flip={} flip_by_call={by_call}", coord.is_some());
+    }
+}
+
+/// A malformed `scale=` on the value axis names the channel the caller wrote.
+#[test]
+fn a_scale_domain_refusal_names_the_callers_channel_under_the_calls_flip() {
+    for ((coord, by_call), channel) in flip_modes().into_iter().zip(["y", "y", "x"]) {
+        let mut spec = single_layer_spec();
+        spec.coord = coord.clone();
+        spec.flip_by_call = by_call;
+        spec.encoding.y = Some(EncodingSpec {
+            field: "weight".into(),
+            scale: Some(serde_json::from_value(serde_json::json!({"type": "linear", "domain": [1.0, 2.0, 3.0]})).unwrap()),
+            ..Default::default()
+        });
+        assert_eq!(
+            prepare_refusal(&spec),
+            Some(format!("{channel} scale: domain must have length 2; got 3")),
+            "flip={} flip_by_call={by_call}", coord.is_some()
+        );
+    }
+}
+
+/// A layer naming a column its rows lack is refused in the channel the caller
+/// wrote, per layer: the layer the call stamped names `x`, the one a caller
+/// attached names `y`.
+#[test]
+fn an_unknown_column_refusal_names_the_layers_own_channel() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::layer::Layer;
+    let missing = |flip_by_call: bool| {
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "price".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "absent".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            flip_by_call,
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            coord: Some(CoordKind::Flip),
+            layers: Some(vec![Layer { mark: Mark::Point, ..Default::default() }, layer]),
+            ..single_layer_spec()
+        };
+        refusal_text(&spec, &price_weight_batch())
+    };
+    let attached = missing(false);
+    let stamped = missing(true);
+    assert!(attached.contains("'y'") && !attached.contains("'x'"), "{attached}");
+    assert!(stamped.contains("'x'") && !stamped.contains("'y'"), "{stamped}");
 }
 
 // The chart-level `configure_axis(orient=...)` chain is a documented R3

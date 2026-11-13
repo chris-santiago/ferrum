@@ -101,7 +101,7 @@ pub(crate) enum RuleShape<'a> {
 /// Build the typed refusal for a channel pattern rule cannot draw. Shared by
 /// [`RuleShape::resolve`]'s unsupported arms so the message (which enumerates
 /// the supported set) has exactly one definition.
-fn unsupported_rule_shape(coord_flipped: bool) -> RenderError {
+fn unsupported_rule_shape(names_unflipped: bool) -> RenderError {
     RenderError::UnsupportedChannelCombination {
         mark: "mark_rule",
         channel: "positional",
@@ -109,7 +109,7 @@ fn unsupported_rule_shape(coord_flipped: bool) -> RenderError {
                x=+y=+y2= (ranged vertical segment), y=+x=+x2= (ranged horizontal segment), \
                or x=+y=+x2=+y2= (diagonal segment)",
         hint_alt_channel: None,
-        coord_flipped,
+        coord_flipped: names_unflipped,
     }
 }
 
@@ -135,7 +135,7 @@ impl<'a> RuleShape<'a> {
     /// of this ruling).
     pub(crate) fn resolve(
         encoding: &'a Encoding,
-        coord_flipped: bool,
+        names_unflipped: bool,
     ) -> Result<Self, RenderError> {
         let field = |e: &'a Option<crate::spec::encoding::EncodingSpec>| {
             e.as_ref().map(|s| s.field.as_str())
@@ -166,7 +166,7 @@ impl<'a> RuleShape<'a> {
             | (None, None, None, None)
             | (None, None, Some(_), None)
             | (None, None, None, Some(_))
-            | (None, None, Some(_), Some(_)) => Err(unsupported_rule_shape(coord_flipped)),
+            | (None, None, Some(_), Some(_)) => Err(unsupported_rule_shape(names_unflipped)),
         }
     }
 }
@@ -308,8 +308,9 @@ fn rule_segments(
 pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::Placement<'a>> {
     use crate::render::draw::{channel_read, Placement};
     use crate::spec::layer::PositionalChannel;
-    let coord_flipped = matches!(ctx.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
-    let Ok(shape) = RuleShape::resolve(&ctx.spec.encoding, coord_flipped) else { return Vec::new() };
+    // The refusal is discarded here (the gate that names it ran before any
+    // mark was built), so what it would name is immaterial.
+    let Ok(shape) = RuleShape::resolve(&ctx.spec.encoding, false) else { return Vec::new() };
     match shape {
         RuleShape::Diagonal { x, y, x2, y2 } => vec![
             Placement::new(PositionalChannel::X, x, channel_read(&ctx.scales.x)),
@@ -367,8 +368,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // derivation and refused every unsupported pattern before `build` is
     // called, so the `?` below cannot fire on a chart that renders — the gate
     // and the geometry are one function, not two that could drift.
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
-    let acc = match RuleShape::resolve(&spec.encoding, coord_flipped)? {
+    let names_unflipped = crate::render::prepare::names_unflipped(spec.coord.as_ref(), spec.flip_by_call);
+    let acc = match RuleShape::resolve(&spec.encoding, names_unflipped)? {
         RuleShape::Diagonal { x, y, x2, y2 } => {
             let xs = positional_pixels(ctx, x, &ctx.scales.x)?;
             let ys = positional_pixels(ctx, y, &ctx.scales.y)?;
@@ -608,6 +609,60 @@ mod tests {
                 "a horizontal span must reach the panel's right edge (full panel width), \
                  not the panel's vertical extent a VerticalSpan mutant would produce"
             );
+        }
+    }
+
+    /// A rule shape no mark draws is refused, and the refusal carries the naming
+    /// the layer's spec asks for: the un-flip a caller's flip needs, none for a
+    /// flip the call applied (its channels are already the caller's), none
+    /// without a flip. The text names no channel, so the carried flag is the
+    /// observable.
+    #[test]
+    fn an_unsupported_rule_shape_carries_the_layers_naming() {
+        let drawable = ChartSpec {
+            mark: Mark::Rule,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            Arc::new(Float64Array::from(vec![30.0, 40.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&drawable, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule).unwrap();
+        for (coord, flip_by_call, names_unflipped) in [
+            (None, false, false),
+            (Some(crate::spec::coord::CoordKind::Flip), false, true),
+            (Some(crate::spec::coord::CoordKind::Flip), true, false),
+        ] {
+            // A second endpoint with no anchor to pair it with.
+            let spec = ChartSpec {
+                encoding: Encoding {
+                    x2: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                    ..Default::default()
+                },
+                coord: coord.clone(),
+                flip_by_call,
+                ..drawable.clone()
+            };
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            match super::build(&ctx) {
+                Err(RenderError::UnsupportedChannelCombination { coord_flipped, .. }) => {
+                    assert_eq!(coord_flipped, names_unflipped, "coord={coord:?} flip_by_call={flip_by_call}");
+                }
+                Err(other) => panic!("expected UnsupportedChannelCombination, got {other:?}"),
+                Ok(_) => panic!("an unanchored x2 draws nothing and is refused"),
+            }
         }
     }
 

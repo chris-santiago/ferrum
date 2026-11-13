@@ -2781,12 +2781,13 @@ struct BoundAxes {
 fn unreached_refusal(
     mark: crate::spec::mark::Mark,
     coord: Option<&crate::spec::coord::CoordKind>,
+    names_unflipped: bool,
     reach: BoundAxes,
     bound: BoundAxes,
 ) -> Option<RenderError> {
     use crate::render::PositionalNeed;
     let need = positional_need(mark, coord)?;
-    let naming = crate::render::ChannelNaming::of(coord);
+    let naming = crate::render::ChannelNaming::of(coord, names_unflipped);
     let unreached: Vec<&'static str> = match need {
         PositionalNeed::Both => {
             let mut v = Vec::new();
@@ -2926,7 +2927,8 @@ fn validate_drawing_layers_can_plot(
             drawn.flip_positional();
         }
         let reach = BoundAxes { x: drawn.x.is_some(), y: drawn.y.is_some() };
-        if let Some(err) = unreached_refusal(layer.mark, coord, reach, bound) {
+        let names_unflipped = crate::render::prepare::layer_names_unflipped(spec, index, coord);
+        if let Some(err) = unreached_refusal(layer.mark, coord, names_unflipped, reach, bound) {
             return Err(err.in_layer_context(
                 crate::render::prepare::public_layer(spec, index, layer.mark),
                 &crate::render::prepare::layer_entry(spec, index, layer.mark),
@@ -2944,7 +2946,8 @@ fn validate_drawing_layers_can_plot(
 /// chart speaks as the call that built it, or as its own mark when nothing
 /// named it.
 fn validate_flat_mark_can_plot(spec: &ChartSpec, own: BoundAxes, bound: BoundAxes) -> Result<(), RenderError> {
-    match unreached_refusal(spec.mark, spec.coord.as_ref(), own, bound) {
+    let names_unflipped = crate::render::prepare::layer_names_unflipped(spec, 0, spec.coord.as_ref());
+    match unreached_refusal(spec.mark, spec.coord.as_ref(), names_unflipped, own, bound) {
         Some(err) => Err(err.in_layer_context(
             crate::render::prepare::public_layer(spec, 0, spec.mark),
             &crate::render::prepare::layer_entry(spec, 0, spec.mark),
@@ -3271,7 +3274,8 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 None => (spec.mark, spec.coord.as_ref()),
             };
             let unreachable_both = BoundAxes { x: false, y: false };
-            let err = unreached_refusal(mark, coord, unreachable_both, unreachable_both).unwrap_or_else(|| {
+            let names_unflipped = crate::render::prepare::layer_names_unflipped(spec, 0, coord);
+            let err = unreached_refusal(mark, coord, names_unflipped, unreachable_both, unreachable_both).unwrap_or_else(|| {
                 // `positional_need` answers `None` only for `Geoshape`, so
                 // this fallback is reached only for an invisible `Geoshape`
                 // layer 0 beside other unbound layers — the branch is
@@ -3283,7 +3287,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                     need: crate::render::PositionalNeed::Both,
                     unbound: vec![PositionalChannel::X.name(), PositionalChannel::Y.name()],
                     sibling_bound: Vec::new(),
-                    naming: crate::render::ChannelNaming::of(coord),
+                    naming: crate::render::ChannelNaming::of(coord, names_unflipped),
                 }
             });
             let entry = crate::render::prepare::layer_entry(spec, 0, mark);

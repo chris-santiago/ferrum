@@ -769,6 +769,12 @@ pub struct PreparedInputs {
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
+    /// Whether a message naming a positional channel of the chart's own axes
+    /// un-flips it back to the one the caller wrote: the chart's coord flips
+    /// and the call did not apply that flip itself ([`layer_names_unflipped`]
+    /// for layer 0, which owns the axes). [`Self::coord_flipped`] keeps
+    /// deciding behavior.
+    pub names_unflipped: bool,
     /// D13: all per-encoding legend style overrides extracted from
     /// `encoding.color.legend.*`. Grouped here to keep `PreparedInputs`
     /// flat and to make adding new override fields a one-location change.
@@ -1456,6 +1462,7 @@ pub fn prepare_render_inputs(
     // Build per-layer prepared inputs (swapping x↔y / x2↔y2 for every layer
     // whose own effective coord flips — `#172`(1)).
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+    let names_unflipped = layer_names_unflipped(spec, 0, spec.coord.as_ref());
     let mut layers = build_layers(spec)?;
     refuse_malformed_sort_specs(spec)?;
     refuse_bin_channel_without_binned_color(spec)?;
@@ -1538,7 +1545,7 @@ pub fn prepare_render_inputs(
                 continue;
             }
             let raw = spec.layers.as_ref().and_then(|raw| raw.get(i));
-            let flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
+            let names_unflipped = layer_names_unflipped(spec, i, layer.coord.as_ref());
             let entry = layer_entry(spec, i, layer.mark);
             let voice = public_layer(spec, i, layer.mark).is_none().then(|| entry.clone());
             let dropped = validate_layer_columns(
@@ -1547,7 +1554,7 @@ pub fn prepare_render_inputs(
                 raw,
                 &layer.drawn_encoding(),
                 own_batch,
-                flipped,
+                names_unflipped,
                 &spec.conditionals,
                 &pipeline,
                 voice,
@@ -1812,6 +1819,7 @@ pub fn prepare_render_inputs(
         rendering_encoding: rendering_encoding.clone(),
         layers,
         coord_flipped,
+        names_unflipped,
         legend_overrides,
         aux_legends,
         x_tick_count,
@@ -2879,8 +2887,8 @@ fn refuse_unstackable_shorthands(spec: &ChartSpec, layers: &[LayerPrepared]) -> 
             shorthand.map_err(voiced)?;
             continue;
         };
-        let flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
-        let authored = |channel: StackValueAxis| if (channel == StackValueAxis::X) != flipped { "x" } else { "y" };
+        let names_unflipped = layer_names_unflipped(spec, li, layer.coord.as_ref());
+        let authored = |channel: StackValueAxis| if (channel == StackValueAxis::X) != names_unflipped { "x" } else { "y" };
         let channels = match shorthand {
             Err(_) => "x and y",
             Ok(Some((channel, _))) => authored(channel),
@@ -3005,6 +3013,41 @@ pub(in crate::render) fn layer_entry(spec: &ChartSpec, li: usize, mark: crate::s
         .unwrap_or_else(|| format!("mark_{}", mark.as_str()))
 }
 
+/// Whether the call that built layer `li` of `spec` applied the coordinate
+/// flip it draws under ([`Layer::flip_by_call`](crate::spec::layer::Layer::flip_by_call)):
+/// the layer's own fact or the chart's: either one being `true` makes it so,
+/// since a `false` cannot tell an unset layer fact from a stated one. Python
+/// stamps the chart's slot only on an unlayered chart, so a layered spec it
+/// builds carries the layer's alone.
+pub(in crate::render) fn layer_flip_by_call(spec: &ChartSpec, li: usize) -> bool {
+    spec.layers.as_ref().and_then(|layers| layers.get(li)).is_some_and(|l| l.flip_by_call) || spec.flip_by_call
+}
+
+/// Whether a message about a layer drawn under `coord` names a positional
+/// channel by the one the caller wrote rather than the resolved one
+/// ([`user_facing_channel`]): the coord flips the channels AND the call did
+/// not apply that flip itself (`flip_by_call`). A flip a figure applied on the
+/// caller's behalf leaves the resolved tokens as the caller's own (the value of
+/// a horizontal call is on `x`), so they are not un-flipped. Only the name a
+/// message prints reads this; layout, scales, position adjustment and `sort=`
+/// tokens read the real flip.
+pub(in crate::render) fn names_unflipped(
+    coord: Option<&crate::spec::coord::CoordKind>,
+    flip_by_call: bool,
+) -> bool {
+    crate::spec::coord::flips_positional_channels(coord) && !flip_by_call
+}
+
+/// [`names_unflipped`] for layer `li` of `spec`, drawn under `coord`: the
+/// layer's own [`layer_flip_by_call`] fact.
+pub(in crate::render) fn layer_names_unflipped(
+    spec: &ChartSpec,
+    li: usize,
+    coord: Option<&crate::spec::coord::CoordKind>,
+) -> bool {
+    names_unflipped(coord, layer_flip_by_call(spec, li))
+}
+
 /// The index a layer-voiced message names layer `li` by: `Some(li)` on a
 /// layered spec when [`voiced_layer`] voices it, else `None`.
 pub(in crate::render) fn public_layer(spec: &ChartSpec, li: usize, mark: crate::spec::mark::Mark) -> Option<usize> {
@@ -3116,7 +3159,7 @@ pub(in crate::render) fn validate_layer_columns(
     raw: Option<&crate::spec::layer::Layer>,
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
-    coord_flipped: bool,
+    names_unflipped: bool,
     conditionals: &[crate::spec::chart::ChartConditional],
     pipeline: &PipelineBatches<'_>,
     voice: Option<String>,
@@ -3149,7 +3192,7 @@ pub(in crate::render) fn validate_layer_columns(
             entry: voice.map(String::into_boxed_str),
             channel: read.channel,
             name: read.field.to_string(),
-            coord_flipped,
+            coord_flipped: names_unflipped,
             remedy: missing_column_remedy(read.field, layer, pipeline),
             independent_y: layer.independent_y,
         });
@@ -3495,6 +3538,7 @@ fn build_axes(
     // in here, the boundary that DOES know it, so a rejected orient names the
     // axis the user actually wrote instead of the resolved (post-flip) one.
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+    let names_unflipped = layer_names_unflipped(spec, 0, spec.coord.as_ref());
     let cartesian_axes_suppressed =
         crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
@@ -3569,7 +3613,7 @@ fn build_axes(
             theme,
             x_text_demand,
         )
-        .map_err(|e| e.resolve(coord_flipped))?,
+        .map_err(|e| e.resolve(names_unflipped))?,
         y: build_axis_input(
             Channel::Y,
             rendering_encoding.y.as_ref(),
@@ -3579,7 +3623,7 @@ fn build_axes(
             theme,
             y_text_demand,
         )
-        .map_err(|e| e.resolve(coord_flipped))?,
+        .map_err(|e| e.resolve(names_unflipped))?,
         // `AxesInput::show_x`/`show_y` mean "this Cartesian axis is DRAWN", so
         // this is where both reasons it may not be fold together: the user's
         // `.axis(x=False)` toggle, and a projected coord (`Polar`/`Geo`) that
@@ -3728,10 +3772,10 @@ fn build_secondary_y_axis_inputs(
         // encoding (`build_layers`) — the `EncodingSpec` carrying the user's
         // override traveled through the swap — so the same boundary correction
         // `build_axes` applies is needed here too. `build_axis_input` returns
-        // `UnflippedRenderError`, so this `.resolve(coord_flipped)` is not
+        // `UnflippedRenderError`, so this `.resolve(names_unflipped)` is not
         // optional — the compiler forces it before `?` can propagate a
         // `RenderError`.
-        let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+        let names_unflipped = layer_names_unflipped(spec, layer_idx, spec.coord.as_ref());
         // The secondary axis's own text-edge demand, measured
         // on this layer's REAL batch (unlike the placeholder-range scale
         // resolve above, a row's ink extent does not depend on the pixel
@@ -3754,7 +3798,7 @@ fn build_secondary_y_axis_inputs(
             theme,
             y_text_demand,
         )
-        .map_err(|e| e.resolve(coord_flipped))?;
+        .map_err(|e| e.resolve(names_unflipped))?;
         inputs.push(axis_input);
         scales.push(y_scale);
         tick_counts.push(y_tick_count);

@@ -380,7 +380,7 @@ pub(crate) fn position_preview(
             }
             let stacked = adjusted_across_panels(batch, facet, |rows| {
                 let mut discard_warnings = Vec::new();
-                apply_stack(rows, by.as_deref(), offset, anchor, *value_axis, encoding, None, coord_flipped, &mut discard_warnings)
+                apply_stack(rows, by.as_deref(), offset, anchor, *value_axis, encoding, None, LayerFlip::as_written(coord_flipped), &mut discard_warnings)
             })?;
             Ok(stacked.and_then(with_nonzero_bases))
         }
@@ -420,7 +420,7 @@ pub(crate) fn position_preview(
             let scales = probe_scales(x_is_ordinal, y_is_ordinal, color);
             adjusted_across_panels(batch, facet, |panel| {
                 let mut discard_warnings = Vec::new();
-                apply_dodge(panel, by.as_deref(), *padding, &scales, encoding, coord_flipped, &mut discard_warnings)
+                apply_dodge(panel, by.as_deref(), *padding, &scales, encoding, LayerFlip::as_written(coord_flipped), &mut discard_warnings)
             })
         }
         PositionAdjust::Jitter { axis: jitter_axis, width, seed } => {
@@ -716,7 +716,7 @@ fn effective_position<'a>(
 fn refuse_shorthand_on_a_category(
     encoding: &crate::spec::encoding::Encoding,
     scales: &ResolvedScales,
-    coord_flipped: bool,
+    names_unflipped: bool,
 ) -> Result<(), crate::render::RenderError> {
     let Some((channel, _)) = stack_shorthand(encoding)? else { return Ok(()) };
     let (scale, binding, channel, value_channel) = match channel {
@@ -728,7 +728,7 @@ fn refuse_shorthand_on_a_category(
             channel,
             value_channel,
             field: binding.field.clone(),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }),
         _ => Ok(()),
     }
@@ -767,6 +767,39 @@ pub(crate) fn position_encoding<'a>(
     Cow::Owned(unstacked)
 }
 
+/// A layer's coordinate flip as a position adjustment reads it: whether the
+/// layer's coord flips its positional channels (which decides where the value
+/// and the category sit), and whether a refusal names a channel by the one the
+/// caller wrote rather than the resolved one
+/// ([`crate::render::prepare::layer_names_unflipped`]). The two differ for a
+/// flip a figure applied on the caller's behalf, where the resolved channel is
+/// already the caller's. [`Self::as_written`] is the pair that agree, which is
+/// every layer whose flip the caller wrote (or that has none).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LayerFlip {
+    pub(crate) flipped: bool,
+    pub(crate) names_unflipped: bool,
+}
+
+impl LayerFlip {
+    /// A flip named as it draws: the layer's channels are un-flipped in a
+    /// message exactly when its coord flips them. Right for a flip the caller
+    /// wrote and for a preview whose errors are discarded; a flip a call
+    /// applied names the resolved channel and builds the pair itself.
+    pub(crate) fn as_written(flipped: bool) -> Self {
+        Self { flipped, names_unflipped: flipped }
+    }
+}
+
+/// A test convenience that names as it draws ([`LayerFlip::as_written`]);
+/// production callers build the pair explicitly.
+#[cfg(test)]
+impl From<bool> for LayerFlip {
+    fn from(flipped: bool) -> Self {
+        Self::as_written(flipped)
+    }
+}
+
 /// Apply a position adjustment to a layer batch, returning a new batch with
 /// rewritten coordinate columns (or, for ordinal-x Dodge / Jitter into bands,
 /// with two synthetic `__pos_x_offset__` / `__pos_y_offset__` Float64 columns
@@ -778,26 +811,28 @@ pub(crate) fn apply_position(
     position: Option<&PositionAdjust>,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
-    coord_flipped: bool,
+    flip: impl Into<LayerFlip>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
+    let flip: LayerFlip = flip.into();
+    let LayerFlip { flipped: coord_flipped, names_unflipped } = flip;
     // With no explicit position, the encoding's `stack` shorthand stacks
     // along the channel that declares it (`effective_position`), which must
     // be a value axis.
     if position.is_none() {
-        refuse_shorthand_on_a_category(encoding, scales, coord_flipped)?;
+        refuse_shorthand_on_a_category(encoding, scales, names_unflipped)?;
     }
     let Some(p) = effective_position(position, encoding, coord_flipped)? else { return Ok(batch.clone()); };
     match p.as_ref() {
         PositionAdjust::Identity => Ok(batch.clone()),
         PositionAdjust::Dodge { by, padding } => {
-            apply_dodge(batch, by.as_deref(), *padding, scales, encoding, coord_flipped, warnings)
+            apply_dodge(batch, by.as_deref(), *padding, scales, encoding, flip, warnings)
         }
         PositionAdjust::Jitter { axis, width, seed } => {
             apply_jitter(batch, axis, *width, *seed, scales, encoding, warnings)
         }
         PositionAdjust::Stack { by, offset, anchor, value_axis } => {
-            apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, scales.color.as_ref(), coord_flipped, warnings)
+            apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, scales.color.as_ref(), flip, warnings)
         }
     }
 }
@@ -1083,9 +1118,10 @@ fn apply_dodge(
     padding: f64,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
-    coord_flipped: bool,
+    flip: LayerFlip,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
+    let LayerFlip { flipped: coord_flipped, names_unflipped } = flip;
     // Resolve the `by` grouping channel to per-row category strings under the
     // single uniform policy. `None` = no-op the dodge (warning already pushed
     // when appropriate); return the batch unchanged.
@@ -1142,7 +1178,7 @@ fn apply_dodge(
         crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Dodge",
             reason: crate::render::PositionAdjustReason::Message("band-axis encoding required".into()),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }
     })?;
     let band_col_idx = batch.schema().index_of(&band_field.field).map_err(|_| {
@@ -1152,7 +1188,7 @@ fn apply_dodge(
                 "band column '{}' not found",
                 band_field.field
             )),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }
     })?;
     // GH #184: the branch is decided by the RESOLVED scale kind, never by the
@@ -1366,7 +1402,7 @@ fn apply_dodge(
     RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Dodge",
         reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
-        coord_flipped,
+        coord_flipped: names_unflipped,
     })
 }
 
@@ -1819,8 +1855,8 @@ pub(crate) fn chart_swarms<'a>(
 /// scale kind), which exists only here, beside the band-pixel offsets `Jitter`
 /// computes in [`apply_jitter`]. The placed offsets land in the column of the
 /// axis that carries the category band: the value axis is `y` for a vertical
-/// swarm, `x` for a horizontal one, exchanged when `layer_coord`, the layer's
-/// coord, flips its channels.
+/// swarm, `x` for a horizontal one, exchanged when `flip`, the layer's
+/// coord flip, exchanges its channels.
 ///
 /// The packing places whichever rows the layer draws. When a later transform
 /// dropped the category, value or dodge column it reads, the dots are left
@@ -1832,17 +1868,17 @@ pub(crate) fn apply_swarm(
     batch: &RecordBatch,
     packing: crate::transform::swarm::SwarmPacking<'_>,
     scales: &ResolvedScales,
-    layer_coord: Option<&crate::spec::coord::CoordKind>,
+    flip: LayerFlip,
     entry: &str,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     use crate::transform::swarm::{place_offsets, SwarmOrient};
     let swarm = packing.spec;
-    let coord_flipped = crate::spec::coord::flips_positional_channels(layer_coord);
+    let LayerFlip { flipped: coord_flipped, names_unflipped } = flip;
     let failed = |reason: String| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Swarm",
         reason: crate::render::PositionAdjustReason::Message(reason),
-        coord_flipped,
+        coord_flipped: names_unflipped,
     };
     let named = format!("Swarm(category='{}', value='{}')", swarm.category, swarm.value);
     let read = [Some(swarm.category.as_str()), Some(swarm.value.as_str()), swarm.dodge.as_deref()];
@@ -1992,10 +2028,11 @@ pub(crate) fn apply_stack(
     value_axis: Option<crate::spec::position::StackValueAxis>,
     encoding: &crate::spec::encoding::Encoding,
     color: Option<&crate::render::scale_resolve::ColorScale>,
-    coord_flipped: bool,
+    flip: LayerFlip,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::{StackAnchor, StackOffset};
+    let LayerFlip { flipped: coord_flipped, names_unflipped } = flip;
     use std::collections::BTreeMap;
 
     // Resolve the `by` grouping channel to per-row category strings under the
@@ -2046,12 +2083,12 @@ pub(crate) fn apply_stack(
     let cat_field = cat_enc.ok_or(crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
         reason: crate::render::PositionAdjustReason::MissingEncoding { role: "category", channel: cat_token },
-        coord_flipped,
+        coord_flipped: names_unflipped,
     })?;
     let value_field = value_enc.ok_or(crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
         reason: crate::render::PositionAdjustReason::MissingEncoding { role: "value", channel: value_token },
-        coord_flipped,
+        coord_flipped: names_unflipped,
     })?;
     let xi = batch.schema().index_of(&cat_field.field).map_err(|_| {
         crate::render::RenderError::PositionAdjustFailed {
@@ -2060,7 +2097,7 @@ pub(crate) fn apply_stack(
                 "category col '{}' not found",
                 cat_field.field
             )),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }
     })?;
     let yi = batch.schema().index_of(&value_field.field).map_err(|_| {
@@ -2070,7 +2107,7 @@ pub(crate) fn apply_stack(
                 "value col '{}' not found",
                 value_field.field
             )),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }
     })?;
     // The value column is read through `arrow_cast::col_as_f64`, the same
@@ -2105,7 +2142,7 @@ pub(crate) fn apply_stack(
                     channel: value_token,
                     dtype: format!("{:?}", y_col.data_type()),
                 },
-                coord_flipped,
+                coord_flipped: names_unflipped,
             }
         })?
         .into_iter()
@@ -2173,7 +2210,7 @@ pub(crate) fn apply_stack(
                     channel: cat_token,
                     dtype: format!("{:?}", x_col.data_type()),
                 },
-                coord_flipped,
+                coord_flipped: names_unflipped,
             }
         })?
         .into_iter()
@@ -2322,7 +2359,7 @@ pub(crate) fn apply_stack(
     RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
         reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
-        coord_flipped,
+        coord_flipped: names_unflipped,
     })
 }
 
@@ -2429,9 +2466,8 @@ mod tests {
         };
         // A CoordFlip on a Vertical swarm puts the value on x and the
         // packed offsets into `__pos_y_offset__` — the stale column's name.
-        let flip = crate::spec::coord::CoordKind::Flip;
         let packing = crate::transform::swarm::SwarmPacking { spec: &swarm, diameter_px: swarm.point_size };
-        let out = apply_swarm(&b, packing, &dummy_scales(), Some(&flip), "mark_swarm", &mut Vec::new())
+        let out = apply_swarm(&b, packing, &dummy_scales(), LayerFlip::as_written(true), "mark_swarm", &mut Vec::new())
             .unwrap()
             .unwrap();
         let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
@@ -2651,7 +2687,7 @@ mod tests {
             name: None,
         };
         let packing = SwarmPacking { spec: &swarm, diameter_px: 9.0 };
-        let out = apply_swarm(&b, packing, &dummy_scales(), None, "mark_swarm", &mut Vec::new()).unwrap().unwrap();
+        let out = apply_swarm(&b, packing, &dummy_scales(), LayerFlip::as_written(false), "mark_swarm", &mut Vec::new()).unwrap().unwrap();
         let mut offsets = out
             .column_by_name("__pos_x_offset__")
             .unwrap()
@@ -3462,7 +3498,7 @@ mod tests {
             None,
             &spec.encoding,
             None,
-            false,
+            false.into(),
             &mut Vec::new(),
         );
         assert!(
@@ -3500,7 +3536,7 @@ mod tests {
         let preview = position_preview(&batch, Some(&dodge), &encoding, false, StackValueAxis::X, None, None).unwrap();
         assert!(preview.is_none(), "an adjustment error must resolve to None, not propagate as a ScaleResolutionFailed");
 
-        let direct = apply_dodge(&batch, Some("g"), 0.0, &probe_scales(false, false, None), &encoding, false, &mut Vec::new());
+        let direct = apply_dodge(&batch, Some("g"), 0.0, &probe_scales(false, false, None), &encoding, false.into(), &mut Vec::new());
         assert!(
             matches!(direct, Err(crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", .. })),
             "apply_dodge should fail with its own typed error when the band column is absent: {direct:?}"
@@ -4068,6 +4104,88 @@ mod tests {
             "Stack: category (x) encoding required",
             "post-flip y missing must be reported as the user's own x"
         );
+    }
+
+    /// Under a flip the call applied itself, the resolved slots already are the
+    /// caller's channels, so `Stack`'s missing-encoding messages are not
+    /// un-flipped: a missing post-flip x (the value slot) reads `x`, and a
+    /// missing post-flip y (the category slot) reads `y`, while the flip still
+    /// puts the value on the resolved x.
+    #[test]
+    fn stack_missing_encoding_messages_name_the_resolved_channel_under_the_calls_flip() {
+        let b = batch_xyg();
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let by_call = LayerFlip { flipped: true, names_unflipped: false };
+
+        let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, by_call, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{err}"), "Stack: value (x) encoding required");
+
+        let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, by_call, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{err}"), "Stack: category (y) encoding required");
+    }
+
+    /// The refusals of `Dodge` and `Swarm` name no channel, so their text reads
+    /// no flip, but the error carries the naming the layer asked for: a flip the
+    /// call applied (the layer's coord flips, its channels are already the
+    /// caller's) carries none, where a flip the caller wrote carries it.
+    #[test]
+    fn dodge_and_swarm_refusals_carry_the_layers_naming_not_its_flip() {
+        use crate::render::RenderError;
+        use crate::transform::swarm::{SwarmOrient, SwarmPacking, SwarmSide, SwarmSpec};
+        let naming = |err: RenderError| match err {
+            RenderError::PositionAdjustFailed { coord_flipped, .. } => coord_flipped,
+            other => panic!("expected PositionAdjustFailed, got {other:?}"),
+        };
+        let flips = [
+            (LayerFlip::as_written(false), false),
+            (LayerFlip::as_written(true), true),
+            (LayerFlip { flipped: true, names_unflipped: false }, false),
+        ];
+
+        // Dodge with no band-axis binding: the flipped layer's band is on y.
+        let b = batch_xyg();
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        for (flip, expected) in flips {
+            let band = if flip.flipped { Encoding { y: None, ..enc_xy("x", "y", Some("g")) } } else { Encoding { x: None, ..enc_xy("x", "y", Some("g")) } };
+            let err = apply_position(&b, Some(&pos), &s, &band, flip, &mut Vec::new()).unwrap_err();
+            assert_eq!(format!("{err}"), "Dodge: band-axis encoding required");
+            assert_eq!(naming(err), expected, "dodge {flip:?}");
+        }
+
+        // Swarm over a value column no scale can read.
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 5.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        let text_valued = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Utf8, false),
+            ])),
+            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(StringArray::from(vec!["p", "q"]))],
+        )
+        .unwrap();
+        for (flip, expected) in flips {
+            let packing = SwarmPacking { spec: &swarm, diameter_px: swarm.point_size };
+            let err = apply_swarm(&text_valued, packing, &s, flip, "mark_swarm", &mut Vec::new())
+                .expect_err("a text value column cannot be packed");
+            assert_eq!(naming(err), expected, "swarm {flip:?}");
+        }
     }
 
     /// R3: the Stack dtype-check messages ("{channel} must be a numeric

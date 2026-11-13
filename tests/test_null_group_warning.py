@@ -35,12 +35,10 @@ holds its categories (the caller's, or a boxen's ``color_field=`` column): the
 lowering carries it through the statistic's ``groupby``, except a column named
 like one of its outputs, which cannot be carried and reads ``group``.
 
-One figure is the exception. ``catplot`` lowers a horizontal call
-(``orient="h"``) to ``x=category, y=value`` plus ``CoordFlip``, so it names the
-channels of that lowering: a value the caller bound to ``x`` reads ``y``, as
-its explicit-domain and log-scale warnings already read. The strict
-expected-failure tests that expect the caller's ``x`` keep that gap visible; a
-fix turns them into failures that say to delete their marker.
+A horizontal ``catplot`` (``orient="h"``) lowers to ``x=category, y=value``
+plus ``CoordFlip`` and names the channels its caller wrote: a value bound to
+``x`` reads ``x``, as its explicit-domain and log-scale warnings read. A flip
+the caller wrote keeps the channels the caller wrote.
 """
 
 from __future__ import annotations
@@ -1058,19 +1056,6 @@ _CALL_BUILT_SLOT_MARKS = [
 
 _CATPLOT_KINDS = ["box", "bar", "strip", "point", "violin", "swarm"]
 
-# The tests it marks expect the caller's channel from a horizontal catplot and
-# fail as built: the lowering writes ``x=category, y=value`` plus ``CoordFlip``,
-# and the render names the channels it was given. Strict, so when a fix makes
-# them pass they fail, and the failure says to delete this marker.
-_HORIZONTAL_CATPLOT_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        'catplot lowers orient="h" to x=category, y=value plus CoordFlip, so the render '
-        "names the lowering's channels: a value the caller bound to x reads y"
-    ),
-)
-
 
 @pytest.mark.parametrize("mark_method,encoding,channels", _PLACED_SLOT_MARKS)
 def test_an_ungrouped_band_slot_with_no_placed_row_is_named(
@@ -1143,15 +1128,14 @@ def test_a_catplot_empty_slot_is_named(kind: str, hue: str | None):
     assert ">z<" in svg
 
 
-@_HORIZONTAL_CATPLOT_XFAIL
 @pytest.mark.parametrize("hue", [None, "g"], ids=["no_hue", "hue"])
 @pytest.mark.parametrize("kind", _CATPLOT_KINDS)
 def test_a_horizontal_catplot_names_the_callers_channel_for_an_empty_slot(
     kind: str, hue: str | None
 ):
     """The caller bound the values to ``x`` and the categories to ``y``, so the
-    empty slot ``z`` should read ``x``, as a horizontal composite mark's does.
-    The render names ``y``, the lowering's own channel."""
+    empty slot ``z`` reads ``x``, as a horizontal composite mark's does, though
+    the call lowers the chart to the value on ``y`` under a flip."""
     chart = fm.catplot(_slot_frame(_EMPTY_Z), y="c", x="w", kind=kind, hue=hue, orient="h")
     svg, shown = _render_capturing(chart.to_svg, action="default")
     assert _census(shown) == [_slot_message("catplot", "x")]
@@ -1675,16 +1659,12 @@ def test_a_composites_group_is_named_in_the_callers_channel(build: Callable, ent
     ]
 
 
-@_HORIZONTAL_CATPLOT_XFAIL
 def test_a_horizontal_catplot_names_the_callers_channel_for_an_empty_group():
     """The hue level ``r`` is null throughout; the caller bound the values to
-    ``x``, so the group should read ``x``. The render names ``y``, the
-    lowering's own channel, on the group report as it does on the slot's."""
+    ``x``, so the group reads ``x``, on the group report as on the slot's."""
     chart = fm.catplot(_hue_group_frame(), y="c", x="w", kind="box", hue="g", orient="h")
     _, shown = _render_capturing(chart.to_svg, action="default")
-    assert _census(shown) == [
-        "catplot: every row of g=r has a null or non-finite x, so it draws nothing"
-    ]
+    assert shown == [_slot_message("catplot", "x", "r", "g")]
 
 
 @pytest.mark.parametrize("mark_method", ["mark_ribbon", "mark_rule"])

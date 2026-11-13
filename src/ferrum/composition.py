@@ -4284,9 +4284,10 @@ def _expand_layers(c) -> tuple[list, list]:
     Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
     ``None``) -- their layers are returned as-is. Plain single-mark charts
     wrap into a one-element ``_Layer`` list, and the public entry a flat chart
-    speaks as (``Chart._entry``) moves onto that layer: the caller rebuilding a
-    chart from these layers clears its own ``_entry``, so the entry names this
-    operand's layer and no other.
+    speaks as (``Chart._entry``) moves onto that layer, and so does the fact that
+    its call applied the coordinate flip (``Chart._flip_by_call``): the caller
+    rebuilding a chart from these layers clears its own ``_entry``, so the entry
+    names this operand's layer and no other.
 
     Encoding-implicit ``_PendingAggregate`` and ``_PendingBin`` sentinels
     (added to ``c._transforms`` by ``encode()`` for channels like
@@ -4312,6 +4313,7 @@ def _expand_layers(c) -> tuple[list, list]:
             mark_kwargs=_layer_mark_kwargs(c),
             position=c._position,
             entry=c._entry,
+            flip_by_call=c._flip_by_call,
         )
     ], transforms
 

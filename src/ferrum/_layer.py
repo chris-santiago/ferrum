@@ -149,6 +149,15 @@ class _Layer:
     #: as that primitive itself. Serialized onto the wire
     #: layer dict only when set (``Layer::entry`` in Rust ``spec/layer.rs``).
     entry: Optional[str] = None
+    #: Whether the call that built this layer applied the coordinate flip on
+    #: the caller's behalf (``catplot(orient="h")`` lowers to category on x,
+    #: value on y plus a ``CoordFlip``), so a message about this layer names
+    #: the channels the caller wrote rather than the lowered ones. ``False``
+    #: for every layer the caller placed, including one attached to such a
+    #: call's chart, and for a flip the caller wrote. Serialized onto the
+    #: wire layer dict only when ``True`` (``Layer::flip_by_call`` in Rust
+    #: ``spec/layer.rs``).
+    flip_by_call: bool = False
     #: The positional channels (``"x"``, ``"y"``, ``"x2"``, ``"y2"``) this
     #: layer's ``encoding`` carries because they were copied from its
     #: operand chart's own encoding, not declared on the layer
@@ -709,6 +718,10 @@ class _PendingMark:
     #: this mark emits names it (``_Layer.entry``), and so does every warning
     #: its desugar reports (``MarkDesugarResult.degraded``).
     entry: str | None = None
+    #: Whether the call that queued this mark applied the coordinate flip on
+    #: the caller's behalf; every layer this mark emits carries it
+    #: (``_Layer.flip_by_call``).
+    flip_by_call: bool = False
     #: ``(channel, title)`` pairs a figure titled this mark's legends with
     #: (``ferrum.plots._helpers._title_legend``), applied to the bindings
     #: the desugar emits, whichever columns it chose (:func:`titled_encoding`).

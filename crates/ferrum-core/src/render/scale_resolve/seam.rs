@@ -87,6 +87,15 @@ impl LeafResolveInput<'_> {
     pub(crate) fn coord_flipped(&self) -> bool {
         matches!(self.spec.coord, Some(crate::spec::coord::CoordKind::Flip))
     }
+
+    /// Whether a message about this leaf un-flips a resolved channel token
+    /// back to the one its caller wrote: the leaf flips and the call that built
+    /// it did not apply that flip itself ([`crate::render::prepare::layer_names_unflipped`]
+    /// for the leaf's layer 0, which owns its axes). The naming twin of
+    /// [`Self::coord_flipped`], which keeps deciding behavior.
+    pub(crate) fn names_unflipped(&self) -> bool {
+        crate::render::prepare::layer_names_unflipped(self.spec, 0, self.spec.coord.as_ref())
+    }
 }
 
 /// The auxiliary channels an overlay group leaves to its members: those an

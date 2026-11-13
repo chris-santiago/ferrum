@@ -114,6 +114,19 @@ pub struct ChartSpec {
     /// the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+    /// Whether the call that built this chart applied its [`CoordKind::Flip`]
+    /// on the caller's behalf (`catplot(orient="h")` lowers a horizontal call
+    /// to a vertical encoding under a flip). A message that names a
+    /// positional channel then names the channel the caller wrote, not the
+    /// one the lowering moved it to; the flip itself drives layout, scales and
+    /// position adjustment exactly as a caller-written flip does. A layer's
+    /// own [`Layer::flip_by_call`] is read first, and a layer whose own is
+    /// `false` still reads this slot's `true` (the two are or-ed, since a
+    /// `false` cannot tell an unset layer fact from a stated one); the
+    /// Python layer never writes both. `false` (a caller's flip, or none) is
+    /// omitted from the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip_by_call: bool,
 }
 
 /// One `ChartSpec.conditionals` entry: the conditional the interactive
@@ -187,6 +200,7 @@ impl Default for ChartSpec {
             params: Vec::new(),
             chart_description: None,
             entry: None,
+            flip_by_call: false,
         }
     }
 }
@@ -222,6 +236,7 @@ impl ChartSpec {
         fill_opacity = None,                                      // per-element fill-opacity SVG attribute
         chart_description = None,                                 // G1: chart-level accessibility desc
         entry = None,                                             // public entry named by render refusals
+        flip_by_call = false,                                     // the call applied its CoordFlip (messages name the caller's channels)
     ))]
     fn new(
         mark: &str,
@@ -261,6 +276,7 @@ impl ChartSpec {
         fill_opacity: Option<&Bound<'_, PyAny>>,
         chart_description: Option<String>,
         entry: Option<String>,
+        flip_by_call: bool,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -352,6 +368,7 @@ impl ChartSpec {
             params,
             chart_description,
             entry,
+            flip_by_call,
         })
     }
 

@@ -355,6 +355,17 @@ pub struct Layer {
     /// `mark_{mark}`; the field is omitted from the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+    /// Whether the call that built this layer applied the `CoordKind::Flip`
+    /// it draws under on the caller's behalf (`catplot(orient="h")`). A message
+    /// that names a positional channel for this layer then names the channel
+    /// the caller wrote rather than the one the lowering moved it to; only the
+    /// name a message prints reads this, never layout, scales or position
+    /// adjustment. A layer a caller attached keeps `false`, as does one under
+    /// a caller-written flip. `false` is omitted from the wire; see
+    /// [`crate::render::prepare::layer_names_unflipped`] for the resolution
+    /// that falls back to [`crate::spec::chart::ChartSpec::flip_by_call`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip_by_call: bool,
 }
 
 /// A point layer with every optional field empty, the base test literals
@@ -378,6 +389,7 @@ impl Default for Layer {
             reads_chart_data: false,
             coord: None,
             entry: None,
+            flip_by_call: false,
         }
     }
 }

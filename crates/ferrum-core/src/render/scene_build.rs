@@ -14,7 +14,7 @@ use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
-use super::prepare::{built_by_call, facet_partition_label, layer_entry, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
+use super::prepare::{built_by_call, facet_partition_label, layer_entry, layer_flip_by_call, layer_names_unflipped, public_layer, reads_statistic_output, user_facing_channel, PreparedInputs};
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
@@ -804,7 +804,7 @@ pub fn build_scene(
     break_ledger.flush(warnings);
     // One `TextInkPastFrame` per channel, now that every panel and every
     // secondary y slot has noted its own overrun rows.
-    text_overrun_ledger.flush(prep.coord_flipped, warnings);
+    text_overrun_ledger.flush(prep.names_unflipped, warnings);
     // One `DomainRowsLeftOut` per channel, field, voice and outcome, once
     // every layer in every panel has noted its own left-out rows.
     domain_left_out_ledger.flush(warnings);
@@ -1011,7 +1011,7 @@ fn independent_axis_input(
     scale: &scale_resolve::ScaleKind,
     encoding: Option<&crate::spec::encoding::EncodingSpec>,
     is_y: bool,
-    coord_flipped: bool,
+    names_unflipped: bool,
     text_demand: crate::layout::geometry::TextEdgeDemand,
 ) -> Result<crate::layout::AxisInput, RenderError> {
     let (format, format_type) = super::prepare::resolve_axis_label_format(encoding);
@@ -1026,7 +1026,7 @@ fn independent_axis_input(
         Vec::new(),
         text_demand,
     )
-    .map_err(|e| super::with_coord_flipped(e, coord_flipped))?;
+    .map_err(|e| super::with_coord_flipped(e, names_unflipped))?;
     let mut input = base.clone();
     input.set_ticks(labels, anchors, origin);
     input.tick_projection = projection;
@@ -1130,7 +1130,7 @@ pub(in crate::render) fn independent_panel_axis_inputs(
                         scales.color.as_ref(),
                     );
                     let demand = scales.x.text_edge_demand(applies.then_some(&rows));
-                    independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.coord_flipped, demand)
+                    independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.names_unflipped, demand)
                 })
                 .transpose()?;
             let y = y_independent
@@ -1149,7 +1149,7 @@ pub(in crate::render) fn independent_panel_axis_inputs(
                         scales.color.as_ref(),
                     );
                     let demand = scales.y.text_edge_demand(applies.then_some(&rows));
-                    independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.coord_flipped, demand)
+                    independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.names_unflipped, demand)
                 })
                 .transpose()?;
             Ok(crate::layout::PanelAxisInputs { x, y })
@@ -1990,7 +1990,8 @@ fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLay
 /// The positional channels a null-position report names, in the terms of
 /// whoever wrote them. Each resolved token of `channels` (a
 /// [`draw::GroupWithNoPosition`]'s own) is un-flipped to the channel the
-/// layer's caller wrote ([`user_facing_channel`]). A layer a call built
+/// layer's caller wrote ([`user_facing_channel`], un-flipped only when
+/// `names_unflipped` says the caller's own flip put them there). A layer a call built
 /// ([`built_by_call`]) then names a secondary channel by its primary (`x2`
 /// as `x`, `y2` as `y`, once): the call, not the caller, bound it (a
 /// composite's box spans `y` to `y2`, a channel the caller never wrote), so
@@ -1998,14 +1999,14 @@ fn series_dropped_panel_clause(spec: &ChartSpec, panel: &crate::layout::PanelLay
 /// layer the caller placed keeps every channel it wrote.
 fn caller_channels(
     channels: &[String],
-    layer_flipped: bool,
+    names_unflipped: bool,
     entry: &str,
     mark: crate::spec::mark::Mark,
 ) -> Vec<String> {
     let call_built = built_by_call(entry, mark);
     let mut named: Vec<String> = Vec::with_capacity(channels.len());
     for channel in channels {
-        let channel = match user_facing_channel(channel, layer_flipped) {
+        let channel = match user_facing_channel(channel, names_unflipped) {
             "x2" if call_built => "x",
             "y2" if call_built => "y",
             other => other,
@@ -2128,6 +2129,11 @@ fn build_panel_mark_batches(
         // slot each channel now occupies.
         let layer_coord = layer.coord.clone();
         let layer_flipped = crate::spec::coord::flips_positional_channels(layer_coord.as_ref());
+        // What a message about this layer prints is a separate question from
+        // what its flip does: a flip the call applied itself leaves the
+        // resolved channels as the caller's own. `layer_flipped` keeps
+        // deciding behavior (position adjustment, the exchange gate).
+        let names_unflipped = layer_names_unflipped(spec, li, layer_coord.as_ref());
 
         // Bind this layer to its y-slot (secondary-y-axis, GH #52). Shared layers
         // (and every layer on a chart with no independent slot) draw through the
@@ -2162,7 +2168,7 @@ fn build_panel_mark_batches(
         // one packing diameter for this panel.
         let swarm = swarms[li];
         let swarm_placed: Option<RecordBatch> = match swarm {
-            Some(packing) => position::apply_swarm(layer_batch, packing, scales, layer_coord.as_ref(), &entry, warnings).map_err(name_layer)?,
+            Some(packing) => position::apply_swarm(layer_batch, packing, scales, position::LayerFlip { flipped: layer_flipped, names_unflipped }, &entry, warnings).map_err(name_layer)?,
             None => None,
         };
         let layer_batch: &RecordBatch = swarm_placed.as_ref().unwrap_or(layer_batch);
@@ -2176,7 +2182,7 @@ fn build_panel_mark_batches(
             layer.position.as_ref(),
             scales,
             &position::position_encoding(layer.mark, layer_coord.as_ref(), &layer.encoding),
-            layer_flipped,
+            position::LayerFlip { flipped: layer_flipped, names_unflipped },
             warnings,
         )
         .map_err(name_layer)?;
@@ -2251,6 +2257,7 @@ fn build_panel_mark_batches(
             encoding: layer_spec_encoding,
             coord: layer_coord,
             entry: Some(entry.clone()),
+            flip_by_call: layer_flip_by_call(spec, li),
             conditionals: spec.conditionals.iter().filter(|c| c.declared_by(li)).cloned().collect(),
             ..spec.clone()
         };
@@ -2306,15 +2313,15 @@ fn build_panel_mark_batches(
             scales,
         )
         .map_err(name_layer)?;
-        validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped).map_err(name_layer)?;
+        validate_mark_encoding(&layer.mark, &layer_spec.encoding, names_unflipped).map_err(name_layer)?;
 
         // Tally this layer's own rows an explicit positional domain leaves
         // out, before the builder below draws the rest. `statistic_voice`
         // is `Some` only for a layer whose rows a statistic produced, so a
         // histogram's bar layer speaks as its entry and counts marks, not
         // rows. Each left-out channel is un-flipped to the one THIS
-        // layer's own caller wrote (`layer_flipped`, not the chart's
-        // `prep.coord_flipped`, so a per-layer `CoordFlip` or a composite's
+        // layer's own caller wrote (`names_unflipped`, not the chart's
+        // `prep.names_unflipped`, so a per-layer `CoordFlip` or a composite's
         // mixed-flip leaves never misname a contributor) before it is
         // noted per panel (this function runs once per panel), summed into
         // the render-wide ledger flushed once after the whole panel loop.
@@ -2322,7 +2329,7 @@ fn build_panel_mark_batches(
             .then(|| draw::StatisticVoice { entry: entry.clone() });
         let census = draw::domain_left_out_counts(&ctx, statistic_voice.as_ref()).map_err(name_layer)?;
         for mut left_out in census.left_out {
-            left_out.channel = user_facing_channel(&left_out.channel, layer_flipped).to_string();
+            left_out.channel = user_facing_channel(&left_out.channel, names_unflipped).to_string();
             domain_left_out_ledger.note(left_out);
         }
 
@@ -2341,7 +2348,7 @@ fn build_panel_mark_batches(
             if group_owned_by_its_fit(warnings, layer_lineage, ctx.batch, &group.rows, this_panel_label.as_deref()) {
                 continue;
             }
-            let channels = caller_channels(&group.channels, layer_flipped, &entry, layer.mark);
+            let channels = caller_channels(&group.channels, names_unflipped, &entry, layer.mark);
             let name = match (group.name, series_dropped_panel_clause(spec, panel)) {
                 (Some(name), Some(clause)) => format!("{name}{clause}"),
                 (Some(name), None) => name,
@@ -3669,13 +3676,13 @@ impl TextOverrunLedger {
     /// Push one [`RenderWarning::TextInkPastFrame`] per channel whose tally
     /// is non-empty, naming the channel the user wrote
     /// ([`user_facing_channel`]).
-    fn flush(self, coord_flipped: bool, warnings: &mut Vec<RenderWarning>) {
+    fn flush(self, names_unflipped: bool, warnings: &mut Vec<RenderWarning>) {
         for (is_y, tally) in [(false, self.x), (true, self.y)] {
             let rows = tally.shared.values().map(|set| set.len()).sum::<usize>() + tally.own_sum;
             if rows > 0 {
                 let channel = if is_y { "y" } else { "x" };
                 warnings.push(RenderWarning::TextInkPastFrame {
-                    channel: user_facing_channel(channel, coord_flipped).to_string(),
+                    channel: user_facing_channel(channel, names_unflipped).to_string(),
                     rows,
                 });
             }
@@ -4393,7 +4400,7 @@ fn install_rebuilt_nodes(
 fn validate_mark_encoding(
     mark: &crate::spec::mark::Mark,
     encoding: &crate::spec::encoding::Encoding,
-    coord_flipped: bool,
+    names_unflipped: bool,
 ) -> Result<(), RenderError> {
     use crate::spec::mark::Mark;
     match mark {
@@ -4402,7 +4409,7 @@ fn validate_mark_encoding(
             channel: "x2",
             hint: "use {alt}= for a vertical band area, or use mark_rect for a 2-D extent",
             hint_alt_channel: Some("y2"),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         }),
         Mark::Bar if encoding.x2.is_some() && encoding.y2.is_some() => {
             Err(RenderError::UnsupportedChannelCombination {
@@ -4410,7 +4417,7 @@ fn validate_mark_encoding(
                 channel: "x2 and y2",
                 hint: "a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead",
                 hint_alt_channel: None,
-                coord_flipped,
+                coord_flipped: names_unflipped,
             })
         }
         // Rule's gate IS its geometry derivation: the same
@@ -4420,7 +4427,7 @@ fn validate_mark_encoding(
         // renderer has no branch for — the drift that let a presence-legal
         // shape fall through to a blank panel.
         Mark::Rule => {
-            crate::render::marks::rule::RuleShape::resolve(encoding, coord_flipped)?;
+            crate::render::marks::rule::RuleShape::resolve(encoding, names_unflipped)?;
             Ok(())
         }
         _ => Ok(()),
@@ -16154,6 +16161,227 @@ mod tests {
             null_position_warnings(&warnings),
             ["mark_point: every row of c=z has a null or non-finite y, so it draws nothing"]
         );
+    }
+
+    /// A horizontal call lowers to `x` = category and `y` = value under a
+    /// `CoordFlip` it applied itself (`flip_by_call`): the value the caller
+    /// wrote on `x` is named `x`. The same spec under a flip the caller wrote,
+    /// and under no flip, names `y`, and the fact is inert without a flip.
+    #[test]
+    fn a_flip_the_call_applied_names_the_channel_the_caller_wrote() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", None), ("p", "z", None)]);
+        let slot = |channel: &str| format!("mark_point: every row of c=z has a null or non-finite {channel}, so it draws nothing");
+        for (coord, by_call, named) in [
+            (serde_json::json!(null), false, "y"),
+            (serde_json::json!(null), true, "y"),
+            (serde_json::json!({"kind": "flip"}), false, "y"),
+            (serde_json::json!({"kind": "flip"}), true, "x"),
+        ] {
+            let mut json = serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+            });
+            if !coord.is_null() {
+                json["coord"] = coord.clone();
+            }
+            if by_call {
+                json["flip_by_call"] = serde_json::json!(true);
+            }
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec_from(json), &batch);
+            scene.unwrap();
+            assert_eq!(null_position_warnings(&warnings), [slot(named)], "coord={coord} flip_by_call={by_call}");
+        }
+    }
+
+    /// The fact rides the layer it was stamped on: under one chart-level flip
+    /// a call's own layer names the caller's `x`, a layer the caller attached
+    /// keeps naming the `y` it wrote, and a layer carrying the fact beside a
+    /// chart that does not (and the reverse) resolves layer by layer.
+    #[test]
+    fn the_fact_rides_the_layer_it_was_stamped_on() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(2.0)), ("p", "z", None), ("p", "z", None)]);
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "c"}, "y": {"field": "w"}},
+            "coord": {"kind": "flip"},
+            "layers": [
+                {"mark": "point", "entry": "catplot", "flip_by_call": true,
+                 "encoding": {"x": {"field": "c"}, "y": {"field": "w"}}},
+                {"mark": "point", "entry": "catplot",
+                 "encoding": {"x": {"field": "c"}, "y": {"field": "w"}}},
+            ],
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        scene.unwrap();
+        assert_eq!(
+            null_position_warnings(&warnings),
+            [
+                "catplot: every row of c=z has a null or non-finite x, so it draws nothing",
+                "catplot: every row of c=z has a null or non-finite y, so it draws nothing",
+            ]
+        );
+    }
+
+    /// An explicit positional domain that leaves rows out names the channel
+    /// the caller wrote for the value: `x` under a flip the call applied,
+    /// `y` under one the caller wrote.
+    #[test]
+    fn an_explicit_domain_warning_names_the_callers_channel_under_the_calls_flip() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(50.0)), ("p", "b", Some(2.0))]);
+        for (by_call, named) in [(false, "y"), (true, "x")] {
+            let mut json = serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "c"}, "y": {"field": "w", "scale": {"type": "linear", "domain": [0.0, 10.0]}}},
+                "coord": {"kind": "flip"},
+            });
+            if by_call {
+                json["flip_by_call"] = serde_json::json!(true);
+            }
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec_from(json), &batch);
+            scene.unwrap();
+            let left_out: Vec<String> = warnings
+                .iter()
+                .filter(|w| matches!(w, RenderWarning::DomainRowsLeftOut { .. }))
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(left_out.len(), 1, "flip_by_call={by_call}: {warnings:?}");
+            assert!(left_out[0].starts_with(&format!("{named} scale: ")), "flip_by_call={by_call}: {}", left_out[0]);
+        }
+    }
+
+    /// The off-side-rows warning of a `Log` value axis and the refusal of a
+    /// `stack=` on a category name the channel the caller wrote: the resolved
+    /// one under a flip the call applied, the un-flipped one under a flip the
+    /// caller wrote.
+    #[test]
+    fn log_and_stack_messages_name_the_callers_channel_under_the_calls_flip() {
+        let batch = band_slot_batch(&[("p", "a", Some(1.0)), ("p", "a", Some(-5.0)), ("p", "b", Some(2.0))]);
+        let log = serde_json::json!({"x": {"field": "c"}, "y": {"field": "w", "scale": {"type": "log", "base": 10.0}}});
+        let stack = serde_json::json!({"x": {"field": "w"}, "y": {"field": "c", "stack": "zero"}});
+        let build = |mark: &str, encoding: &serde_json::Value, by_call: bool| {
+            let mut json = serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": mark,
+                "encoding": encoding,
+                "coord": {"kind": "flip"},
+            });
+            if by_call {
+                json["flip_by_call"] = serde_json::json!(true);
+            }
+            try_build_scene_for_capturing_warnings(&spec_from(json), &batch)
+        };
+        for (by_call, channel) in [(false, "y"), (true, "x")] {
+            let (scene, warnings) = build("point", &log, by_call);
+            scene.unwrap();
+            let left_out: Vec<String> = warnings
+                .iter()
+                .filter(|w| matches!(w, RenderWarning::LogScaleRowsLeftOut { .. }))
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(left_out.len(), 1, "flip_by_call={by_call}: {warnings:?}");
+            assert!(left_out[0].starts_with(&format!("{channel} scale: ")), "flip_by_call={by_call}: {}", left_out[0]);
+        }
+        for (by_call, set_on, value) in [(false, "y", "x"), (true, "x", "y")] {
+            let (scene, _) = build("bar", &stack, by_call);
+            assert_eq!(
+                scene.unwrap_err().to_string(),
+                format!(
+                    "mark_bar: stack= is set on {set_on}, whose field 'c' is categorical, so there is no value to \
+                     stack along it. Put stack= on the value channel, {value}."
+                ),
+                "flip_by_call={by_call}"
+            );
+        }
+    }
+
+    /// Mark-shape refusals, the text-overrun warning and the format refusal of
+    /// a facet's axes name the channel the caller wrote: as written
+    /// with no flip, un-flipped under a flip the caller wrote, and the
+    /// resolved channel under a flip the call applied.
+    #[test]
+    fn mark_text_and_independent_axis_messages_name_the_callers_channel_under_the_calls_flip() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("f", DataType::Utf8, false),
+                Field::new("a", DataType::Float64, false),
+                Field::new("b", DataType::Float64, false),
+                Field::new("label", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p", "p", "q", "q"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["W".repeat(80); 4])),
+            ],
+        )
+        .unwrap();
+        let build = |mut json: serde_json::Value, coord: Option<&str>, by_call: bool| {
+            if let Some(coord) = coord {
+                json["coord"] = serde_json::json!({"kind": coord});
+            }
+            if by_call {
+                json["flip_by_call"] = serde_json::json!(true);
+            }
+            try_build_scene_for_capturing_warnings(&spec_from(json), &batch)
+        };
+        let base = |mark: &str, encoding: serde_json::Value| {
+            serde_json::json!({"data": {"kind": "named", "name": "default"}, "mark": mark, "encoding": encoding})
+        };
+        let modes = [(None, false), (Some("flip"), false), (Some("flip"), true)];
+
+        // `mark_area` takes `y2`, not `x2`: the refusal names the channel the caller wrote.
+        let area = base("area", serde_json::json!({"x": {"field": "a"}, "y": {"field": "b"}, "y2": {"field": "b"}}));
+        let (no_flip, _) = build(area.clone(), None, false);
+        no_flip.expect("a vertical band area draws");
+        for ((coord, by_call), (given, alt)) in modes[1..].iter().zip([("y2", "x2"), ("x2", "y2")]) {
+            let (scene, _) = build(area.clone(), *coord, *by_call);
+            assert_eq!(
+                scene.unwrap_err().to_string(),
+                format!("mark_area: channel '{given}' is not supported; use {alt}= for a vertical band area, or use mark_rect for a 2-D extent"),
+                "flip_by_call={by_call}"
+            );
+        }
+
+        // Text that runs past the frame: one warning on the axis the labels overrun.
+        let text = base("text", serde_json::json!({"x": {"field": "a"}, "y": {"field": "b"}, "text": {"field": "label"}}));
+        for ((coord, by_call), channel) in modes.iter().zip(["x", "y", "x"]) {
+            let (scene, warnings) = build(text.clone(), *coord, *by_call);
+            scene.unwrap();
+            let overrun: Vec<String> =
+                warnings.iter().filter(|w| matches!(w, RenderWarning::TextInkPastFrame { .. })).map(ToString::to_string).collect();
+            assert_eq!(
+                overrun,
+                [format!("4 mark_text rows on the {channel} axis still cross the plot frame; the labels may be too wide for the panel")],
+                "coord={coord:?} flip_by_call={by_call}"
+            );
+        }
+
+        // A `time` format on a numeric axis of an independent facet, once per axis:
+        // prepare refuses it before any panel resolves, so this pins its axis builder.
+        for on in ["x", "y"] {
+            let mut encoding = serde_json::json!({"x": {"field": "a"}, "y": {"field": "b"}});
+            encoding[on]["format"] = serde_json::json!("%b");
+            encoding[on]["formatType"] = serde_json::json!("time");
+            let mut faceted = base("point", encoding);
+            faceted["facet"] = serde_json::json!({
+                "field": "f", "mode": {"kind": "wrap", "ncols": 2}, "resolve": {"x": "independent", "y": "independent"},
+            });
+            let other = if on == "x" { "y" } else { "x" };
+            for ((coord, by_call), channel) in modes.iter().zip([on, on, other]) {
+                let (scene, _) = build(faceted.clone(), *coord, *by_call);
+                assert_eq!(
+                    scene.unwrap_err().to_string(),
+                    format!("format \"%b\" is typed \"time\", which on the '{channel}' axis requires a temporal scale, but the resolved scale is not temporal"),
+                    "format on {on}, coord={coord:?} flip_by_call={by_call}"
+                );
+            }
+        }
     }
 
     /// A slot empty in one facet panel names that panel: the same category

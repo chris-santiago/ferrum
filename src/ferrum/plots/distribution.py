@@ -2441,8 +2441,12 @@ def _catplot_build(
     chart = chart.encode(**enc)
 
     # orient="h" → CoordFlip.
+    # The call applies this flip for the caller, who wrote the value on `x`,
+    # so a message about these layers names `x` where the lowering holds `y`.
+    # Recorded before `layers=` attach: a layer the caller places keeps what
+    # its author wrote.
     if horizontal:
-        chart = chart.coord(CoordFlip())
+        chart = chart.coord(CoordFlip())._with_flip_by_call()
 
     # Faceting.
     if col is not None or row is not None:
@@ -2466,15 +2470,16 @@ def _catplot_build(
         theme=theme,
     )
     if kind == "count" and layers:
-        _refuse_count_column_reads(chart, len(layers))
+        _refuse_count_column_reads(chart, len(layers), value_channel="x" if horizontal else "y")
     return chart
 
 
-def _refuse_count_column_reads(chart: Chart, attached: int) -> None:
+def _refuse_count_column_reads(chart: Chart, attached: int, *, value_channel: str) -> None:
     """Refuse a layer of ``catplot(kind="count")`` binding ``n``, a column its rows lack.
 
-    The count plot draws each bar's height as ``y=count()``, an encoding
-    statistic, so no column named ``n`` exists; a layer attached through
+    The count plot draws each bar's height as ``<value_channel>=count()``, an
+    encoding statistic (the channel the caller sees the bars grow along:
+    ``y``, or ``x`` under ``orient="h"``), so no column named ``n`` exists; a layer attached through
     ``layers=`` (the last *attached* layers of the finished *chart*, one per
     argument) labels each bar with its count through its own statistic,
     ``text="count()"``. A binding of ``n`` is refused with that remedy only
@@ -2504,7 +2509,7 @@ def _refuse_count_column_reads(chart: Chart, attached: int) -> None:
                 continue
             raise ValueError(
                 f"catplot(kind='count'): layers= binds {channel}='n', but the count plot "
-                "draws each bar's count as y=count(), so there is no column 'n'; label "
+                f"draws each bar's count as {value_channel}=count(), so there is no column 'n'; label "
                 f"each bar with {channel}='count()' (or fm.{cls.__name__}(aggregate='count')), "
                 "which counts the rows the layer reads as each bar does"
             )

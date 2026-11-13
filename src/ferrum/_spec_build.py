@@ -995,6 +995,10 @@ class SpecBuildMixin:
             # declared directly, so those specs are unchanged.
             if layer.entry is not None:
                 layer_dict["entry"] = layer.entry
+            # A flip the call applied for the caller, so Rust names this
+            # layer's channels as the caller wrote them; absent otherwise.
+            if layer.flip_by_call:
+                layer_dict["flip_by_call"] = True
             # Positional channels copied from the operand chart; absent when
             # none was copied, so every other spec is unchanged on the wire.
             if layer.inherited_positional:

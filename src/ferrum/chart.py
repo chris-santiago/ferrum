@@ -1232,6 +1232,7 @@ class Chart(
         "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
         "_composite_kind",
         "_entry",  # str or None -- the public entry a flat chart's one mark speaks as
+        "_flip_by_call",  # bool -- the call applied the CoordFlip for the caller (flat chart)
         "_selections",
         "_conditionals",
         "_params",  # list[Parameter] — D6 reactive parameters (fm.param / selections)
@@ -1304,6 +1305,7 @@ class Chart(
         self._axis_y: Optional[bool] = None
         self._composite_kind: Optional[str] = None
         self._entry: Optional[str] = None
+        self._flip_by_call: bool = False
         self._selections: list = []
         self._conditionals: list = []
         self._params: list = []
@@ -1447,8 +1449,11 @@ class Chart(
         new._mark_kwargs = {k: v for k, v in m.to_mark_kwargs_dict().items() if k != "zero"}
         new._position = position
         # The mark this call sets speaks as this call, not as whatever entry
-        # built the mark it replaces.
+        # built the mark it replaces, and it is the caller's own layer, so it
+        # keeps the naming of what its author wrote rather than a flip a
+        # figure applied for its caller.
         new._entry = None
+        new._flip_by_call = False
         # A primitive mark call replaces whatever mark came before it,
         # pending composite included: a chart holds one _pending_stat_mark
         # slot, so a queued composite desugar is cleared here, rather than
@@ -1501,6 +1506,7 @@ class Chart(
         new = self._clone()
         new._mark = placeholder
         new._entry = None  # the mark this call sets speaks as this call
+        new._flip_by_call = False  # and is the caller's layer, not the figure's
         if data_transform is not None and new._data is not None:
             # Coerce through the canonical to-polars entry point before
             # applying the row-filter closure, so `data_transform` runs for
@@ -1556,13 +1562,31 @@ class Chart(
         # pending mark resolved later refuses in it too (`_resolve_pending`),
         # and Rust holds every layer's size to the one size rule at render,
         # wrapped in the layer's entry.
+        return self._stamped("entry", entry)
+
+    def _with_flip_by_call(self) -> "Chart":
+        # A clone whose every drawn unit records that the call applying a
+        # `CoordFlip` did so for the caller, so a message about any of them
+        # names the channels the caller wrote (`_Layer.flip_by_call`; the
+        # chart-level `_flip_by_call` is the flat chart's, see `to_spec`).
+        # Called at the line that applies the flip, before a caller's
+        # `layers=` attach, so a layer the caller places keeps the naming of
+        # what its author wrote.
+        return self._stamped("flip_by_call", True)
+
+    def _stamped(self, field: str, value: Any) -> "Chart":
+        # A clone with *field* set to *value* on every drawn unit: each layer
+        # it has, the pending composite mark that emits layers at resolution,
+        # or, when it has neither, the chart's own `_<field>` slot (an
+        # unlayered chart's one mark). `_Layer` and `_PendingMark` carry the
+        # field under its own name.
         new = self._clone()
         if new._layers:
-            new._layers = [replace(layer, entry=entry) for layer in new._layers]
+            new._layers = [replace(layer, **{field: value}) for layer in new._layers]
         if new._pending_stat_mark is not None:
-            new._pending_stat_mark = replace(new._pending_stat_mark, entry=entry)
+            new._pending_stat_mark = replace(new._pending_stat_mark, **{field: value})
         if not new._layers and new._pending_stat_mark is None:
-            new._entry = entry
+            setattr(new, f"_{field}", value)
         return new
 
     def _with_post_build_positional(self, record: Any) -> "Chart":
@@ -3929,6 +3953,10 @@ class Chart(
         # would only be a stale fallback for layers another operand brought.
         if resolved._entry is not None and not resolved._layers:
             kw["entry"] = resolved._entry
+        # The same shape for the call-applied flip: a flat chart's one mark
+        # carries it on the chart, a layered chart's layers carry their own.
+        if resolved._flip_by_call and not resolved._layers:
+            kw["flip_by_call"] = True
 
         # --- Reactive-parameter (D6) params section ---
         # Unified declaration: registered selections (auto-promoted),

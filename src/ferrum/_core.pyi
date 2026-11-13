@@ -160,6 +160,7 @@ class ChartSpec:
         fill_opacity: Union[str, EncodingSpec, None] = None,
         chart_description: Optional[str] = None,
         entry: Optional[str] = None,
+        flip_by_call: bool = False,
     ) -> None: ...
     def to_json(self) -> str: ...
     @classmethod

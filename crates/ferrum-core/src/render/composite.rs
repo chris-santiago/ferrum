@@ -939,8 +939,9 @@ fn sort_member_categories(
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let coord_flipped = leaf.coord_flipped();
+    let names_unflipped = leaf.names_unflipped();
     let rows = establishing_sort_rows(channel.as_str(), leaf.spec, leaf.final_batch, leaf.transform_outputs, leaf.transform_lineages, false)
-        .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped })?
+        .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: names_unflipped })?
         .unwrap_or_else(|| {
             chart_sort_rows(
                 leaf.final_batch,
@@ -958,7 +959,7 @@ fn sort_member_categories(
         coord_flipped,
     };
     apply_sort_to_domain(categories, Some(sort), &sort_ctx, warnings).map_err(|source| {
-        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped }
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: names_unflipped }
     })
 }
 
@@ -980,7 +981,7 @@ fn establishing_categories(
         return Ok(None);
     };
     let mut categories = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
-        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: leaf.coord_flipped() }
+        CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: leaf.names_unflipped() }
     })?;
     if let Some(sort) = enc.sort.as_ref() {
         sort_member_categories(&mut categories, sort, enc, leaf, channel, warnings)?;
@@ -1125,10 +1126,10 @@ fn resolve_caller_scale_group(
             let field = first_member_enc.map(|e| e.field.clone()).unwrap_or_default();
             let stated = common.domain.as_ref().expect("positional_extent confirmed Some above");
             let (lo, hi) = (stated[0], stated[1]);
-            let coord_flipped = members.first().is_some_and(|&idx| leaves[idx].coord_flipped());
+            let names_unflipped = members.first().is_some_and(|&idx| leaves[idx].names_unflipped());
             let axis_name = members.first().and_then(|&idx| overlay_log_axis_name(&leaves[idx], channel));
-            resolve_log_extent(channel.as_str(), axis_name.as_deref(), true, side, (lo, hi), &tally, *base, coord_flipped, warnings)
-                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
+            resolve_log_extent(channel.as_str(), axis_name.as_deref(), true, side, (lo, hi), &tally, *base, names_unflipped, warnings)
+                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped: names_unflipped })?;
             for &idx in &members {
                 out[idx].set(channel, SharedDomain::Numeric { lo, hi });
             }
@@ -1165,10 +1166,10 @@ fn resolve_caller_scale_group(
             }
             let first_member_enc = domains.first().and_then(|&(idx, _)| leaf_post_flip_encoding(&leaves[idx], channel));
             let field = first_member_enc.map(|e| e.field.clone()).unwrap_or_default();
-            let coord_flipped = domains.first().is_some_and(|&(idx, _)| leaves[idx].coord_flipped());
+            let names_unflipped = domains.first().is_some_and(|&(idx, _)| leaves[idx].names_unflipped());
             let axis_name = domains.first().and_then(|&(idx, _)| overlay_log_axis_name(&leaves[idx], channel));
-            let (lo, hi) = resolve_log_extent(channel.as_str(), axis_name.as_deref(), common.domain.is_some(), side, (lo, hi), &tally, *base, coord_flipped, warnings)
-                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped })?;
+            let (lo, hi) = resolve_log_extent(channel.as_str(), axis_name.as_deref(), common.domain.is_some(), side, (lo, hi), &tally, *base, names_unflipped, warnings)
+                .map_err(|source| CompositeResolveError::DomainResolve { channel: channel.as_str(), field, source, coord_flipped: names_unflipped })?;
             for (idx, _) in &domains {
                 out[*idx].set(channel, SharedDomain::Numeric { lo, hi });
             }
@@ -1414,8 +1415,10 @@ fn leaf_positional_domain(
     // `prepare::build_layers`'s encoding swap), while `leaf.encoding` is
     // already the RESOLVED (post-flip) rendering encoding (see
     // `LeafResolveInput`'s doc) — so `leaf.spec.coord` still tells us whether
-    // this leaf is flipped, for un-flipping `channel` in any error below.
-    let coord_flipped = leaf.coord_flipped();
+    // this leaf is flipped; `names_unflipped` is whether an error below
+    // un-flips `channel` back to the one its caller wrote (a flip the call
+    // applied itself is not un-flipped).
+    let names_unflipped = leaf.names_unflipped();
     let enc = match channel {
         Channel::X => leaf.encoding.x.as_ref(),
         Channel::Y => leaf.encoding.y.as_ref(),
@@ -1459,7 +1462,7 @@ fn leaf_positional_domain(
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: channel.as_str(),
             field: enc.field.clone(),
-            coord_flipped,
+            coord_flipped: names_unflipped,
         })?;
     let dtype = match selection {
         LayerUnion::CarryingScale(_) => SpecDataType::Quantitative,
@@ -1518,7 +1521,7 @@ fn leaf_positional_domain(
                             source,
                             channel: channel.as_str(),
                             field: enc.field.clone(),
-                            coord_flipped,
+                            coord_flipped: names_unflipped,
                         },
                     }
                 })?,
@@ -1544,7 +1547,7 @@ fn leaf_positional_domain(
                 source,
                 channel: channel.as_str(),
                 field: enc.field.clone(),
-                coord_flipped,
+                coord_flipped: names_unflipped,
             })?;
             // A `Log` caller scale reads only its side's rows, exactly as
             // the flat/layered route does (`positional::resolve_log_scale`);
@@ -1573,7 +1576,7 @@ fn leaf_positional_domain(
                 channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
-                coord_flipped,
+                coord_flipped: names_unflipped,
             })?;
             // A `Log` member's off-side rows feed the GROUP's whole-frame
             // tally: this leaf merges its own tally in, after also folding
@@ -1601,7 +1604,7 @@ fn leaf_positional_domain(
                         channel: channel.as_str(),
                         field: enc.field.clone(),
                         source,
-                        coord_flipped,
+                        coord_flipped: names_unflipped,
                     })?;
                 tally.merge(leaf_tally);
             }
@@ -1666,7 +1669,7 @@ fn leaf_positional_domain(
                 channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
-                coord_flipped,
+                coord_flipped: names_unflipped,
             })?;
             Ok(Some(SharedDomain::Ordinal(cats)))
         }
@@ -2497,6 +2500,34 @@ mod tests {
             "shared x channel references unknown field 'v'",
             "message must name the leaf's own channel ('x'), not the resolved one ('y')"
         );
+    }
+
+    /// A leaf whose flip the call applied itself names the resolved channel,
+    /// which is already the one its caller wrote: the same shared-channel
+    /// refusal as above, read as `y`, and a caller-written flip still reads `x`.
+    #[test]
+    fn unknown_field_errors_name_the_resolved_channel_under_the_calls_flip() {
+        use crate::spec::coord::CoordKind;
+        let mut flipped_encoding = Encoding::default();
+        flipped_encoding.y = Some(enc("v"));
+        let leaf_for = |flip_by_call: bool| LeafOwned {
+            encoding: flipped_encoding.clone(),
+            spec: ChartSpec { coord: Some(CoordKind::Flip), flip_by_call, ..spec_with(flipped_encoding.clone()) },
+            batch: num_batch("w", &[0.0, 10.0]),
+            outputs: outputs(&num_batch("w", &[0.0, 10.0])),
+        };
+        let refusal = |flip_by_call: bool| {
+            let (l0, l1) = (leaf_for(flip_by_call), leaf_for(flip_by_call));
+            let tree = composite(
+                CompositeLayout::Hconcat,
+                vec![leaf_node(None, Some("v")), leaf_node(None, Some("v"))],
+                shared_both(),
+            );
+            let inputs = [input(&l0), input(&l1)];
+            resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap_err().to_string()
+        };
+        assert_eq!(refusal(false), "shared x channel references unknown field 'v'");
+        assert_eq!(refusal(true), "shared y channel references unknown field 'v'");
     }
 
     #[test]
@@ -3539,16 +3570,30 @@ mod tests {
     /// the AUTHORED x field ("v") the way `overlay_flipped_leaf` carries a
     /// plain field: after the flip, `v` renders on y.
     fn overlay_flipped_log_x_leaf(v_values: &[f64]) -> LeafOwned {
+        overlay_flipped_log_leaf(v_values, None, false)
+    }
+
+    /// [`overlay_flipped_log_x_leaf`] with an optional stated domain on its
+    /// Log scale and the fact that a call, not the caller, applied its flip.
+    fn overlay_flipped_log_leaf(v_values: &[f64], domain: Option<[f64; 2]>, flip_by_call: bool) -> LeafOwned {
         let log_scale = crate::spec::encoding::ScaleSpec::Log {
             base: 10.0,
-            common: no_domain_common(),
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: domain.map(|d| d.to_vec()),
+                ..no_domain_common()
+            },
             nice: false,
         };
         let v_enc = EncodingSpec { field: "v".to_string(), scale: Some(log_scale), ..Default::default() };
         let mut authored = Encoding::default();
         authored.x = Some(v_enc.clone());
         authored.y = Some(enc("y"));
-        let spec = ChartSpec { encoding: authored, coord: Some(crate::spec::coord::CoordKind::Flip), ..base_spec() };
+        let spec = ChartSpec {
+            encoding: authored,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            flip_by_call,
+            ..base_spec()
+        };
         let mut rendering = Encoding::default();
         rendering.x = Some(enc("y"));
         rendering.y = Some(v_enc);
@@ -3565,6 +3610,47 @@ mod tests {
         .unwrap();
         let outs = outputs(&batch);
         LeafOwned { spec, encoding: rendering, batch, outputs: outs }
+    }
+
+    /// An overlay group's Log channel over rows an off-side value leaves out,
+    /// with and without a stated domain, names the channel the caller wrote:
+    /// the resolved one under a flip the call applied, the un-flipped one under
+    /// a flip the caller wrote. Each domain shape is its own resolve site.
+    #[test]
+    fn an_overlay_groups_log_warning_and_refusal_name_the_callers_channel_under_the_calls_flip() {
+        let group = |domain: Option<[f64; 2]>, flip_by_call: bool, values: &[f64]| {
+            let leaves = [
+                overlay_flipped_log_leaf(values, domain, flip_by_call),
+                overlay_flipped_log_leaf(values, domain, flip_by_call),
+            ];
+            let tree = composite(
+                CompositeLayout::Overlay,
+                vec![leaf_node(Some("y"), Some("v")), leaf_node(Some("y"), Some("v"))],
+                shared_both(),
+            );
+            let inputs = [input(&leaves[0]), input(&leaves[1])];
+            let mut warnings = Vec::new();
+            let result = resolve_composite_scales(&tree, &inputs, &mut warnings);
+            (result.err().map(|e| e.to_string()), warnings.iter().map(ToString::to_string).collect::<Vec<_>>())
+        };
+        for (domain, name) in [(None, "auto domain"), (Some([1.0, 100.0]), "stated domain")] {
+            // Some rows off the positive side: one warning per group.
+            for (by_call, channel) in [(false, "x"), (true, "y")] {
+                let (refusal, warnings) = group(domain, by_call, &[-5.0, 10.0, 20.0]);
+                assert_eq!(refusal, None, "{name} flip_by_call={by_call}");
+                assert_eq!(warnings.len(), 1, "{name} flip_by_call={by_call}: {warnings:?}");
+                assert!(warnings[0].starts_with(&format!("{channel} scale: ")), "{name} flip_by_call={by_call}: {}", warnings[0]);
+            }
+        }
+        // Every row off the positive side with no stated domain refuses.
+        for (by_call, channel) in [(false, "x"), (true, "y")] {
+            let (refusal, _) = group(None, by_call, &[-5.0, -7.0]);
+            let refusal = refusal.expect("an all-off-side Log channel refuses");
+            assert!(
+                refusal.starts_with(&format!("failed to resolve shared {channel} domain for field 'v'")),
+                "flip_by_call={by_call}: {refusal}"
+            );
+        }
     }
 
     #[test]
@@ -3617,6 +3703,44 @@ mod tests {
             .expect_err("a Date32 column cannot enumerate distinct values");
         let CompositeResolveError::DomainResolve { coord_flipped: true, .. } = &err else {
             panic!("expected coord_flipped: true, got {err:?}");
+        };
+    }
+
+    /// The enumeration refusal of a member whose flip the call applied itself
+    /// carries no un-flip, so it names the resolved channel (the caller's own).
+    #[test]
+    fn an_overlay_categorys_refusal_names_the_resolved_channel_under_the_calls_flip() {
+        let mut authored = Encoding::default();
+        authored.x = Some(enc("d"));
+        authored.y = Some(enc("y"));
+        let spec = ChartSpec {
+            encoding: authored,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            flip_by_call: true,
+            ..base_spec()
+        };
+        let mut rendering = Encoding::default();
+        rendering.x = Some(enc("y"));
+        rendering.y = Some(enc("d"));
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("d", DataType::Date32, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(arrow::array::Date32Array::from(vec![0, 1])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let outs = outputs(&batch);
+        let owned = LeafOwned { spec, encoding: rendering, batch, outputs: outs };
+        let leaf = input(&owned);
+        let enc_y = owned.encoding.y.clone().expect("rendering.y is bound");
+        let err = establishing_categories(&leaf, Channel::Y, &enc_y, &mut Vec::new())
+            .expect_err("a Date32 column cannot enumerate distinct values");
+        let CompositeResolveError::DomainResolve { coord_flipped: false, .. } = &err else {
+            panic!("expected coord_flipped: false, got {err:?}");
         };
     }
 
@@ -5414,6 +5538,50 @@ mod tests {
         let order = SharedDomain::Ordinal(["c", "b", "a"].iter().map(|s| s.to_string()).collect());
         assert_eq!(ctx[1].x.as_ref(), Some(&order), "the bars' own w orders them");
         assert_eq!(ctx[0].imposed(Channel::X).and_then(|(_, domain)| domain), Some(&order));
+    }
+
+    /// A refusal of the establishing member's own `sort=` (a malformed
+    /// sort-field object) names the shared channel the caller wrote: written
+    /// as authored with no flip, un-flipped under a flip the caller wrote, and
+    /// the resolved channel under a flip the call applied.
+    #[test]
+    fn an_overlay_sort_refusal_names_the_callers_channel_under_the_calls_flip() {
+        for (flip, by_call, channel) in [(false, false, "x"), (true, false, "y"), (true, true, "x")] {
+            let mut rule_spec = spec_with(Encoding { y: Some(enc("v")), ..Encoding::default() });
+            rule_spec.mark = Mark::Rule;
+            let rule = owned(rule_spec, num_batch("v", &[1.0, 2.0]));
+            let malformed = EncodingSpec { sort: Some(serde_json::json!({"op": "mean"})), ..enc("g") };
+            let bars_encoding = Encoding { x: Some(malformed), y: Some(enc("w")), ..Encoding::default() };
+            let mut bars_spec = spec_with(bars_encoding);
+            if flip {
+                bars_spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+            }
+            bars_spec.flip_by_call = by_call;
+            let bars = owned(
+                bars_spec,
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![
+                        Field::new("g", DataType::Utf8, false),
+                        Field::new("w", DataType::Float64, false),
+                    ])),
+                    vec![Arc::new(StringArray::from(vec!["a", "b", "c"])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))],
+                )
+                .unwrap(),
+            );
+            let tree = composite(
+                CompositeLayout::Overlay,
+                vec![leaf_node(None, Some("v")), CompositeNode::Leaf { spec: Box::new(bars.spec.clone()), data: 0, label: None }],
+                shared_both(),
+            );
+            let inputs = [input(&rule), input(&bars)];
+            let refusal = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
+                .expect_err("a malformed sort-field object refuses")
+                .to_string();
+            assert!(
+                refusal.starts_with(&format!("failed to resolve shared {channel} domain for field 'g'")),
+                "flip={flip} flip_by_call={by_call}: {refusal}"
+            );
+        }
     }
 
     /// An `Overlay` group whose drawing member carries its own categorical

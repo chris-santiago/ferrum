@@ -311,7 +311,11 @@ pub(crate) enum ChannelNaming {
 }
 
 impl ChannelNaming {
-    pub(crate) fn of(coord: Option<&crate::spec::coord::CoordKind>) -> Self {
+    /// The naming for a message about a layer drawn under `coord`.
+    /// `names_unflipped` is [`prepare::layer_names_unflipped`]'s answer for
+    /// that layer (a flip the call applied itself is not un-flipped); a
+    /// `CoordPolar` coord ignores it.
+    pub(crate) fn of(coord: Option<&crate::spec::coord::CoordKind>, names_unflipped: bool) -> Self {
         match coord {
             Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => Self::Polar {
                 theta: match theta {
@@ -319,7 +323,7 @@ impl ChannelNaming {
                     ferrum_scene::PolarThetaChannel::Y => "y",
                 },
             },
-            _ => Self::Cartesian { flipped: crate::spec::coord::flips_positional_channels(coord) },
+            _ => Self::Cartesian { flipped: names_unflipped },
         }
     }
 
@@ -3015,12 +3019,11 @@ pub enum RenderWarning {
     /// (`prepare::built_by_call`), a secondary channel (`x2`, `y2`) named by
     /// its primary (`x`, `y`, once), so every sub-layer of one composite
     /// raises the same text; a layer the caller placed keeps every channel
-    /// it wrote. A figure that lowers a horizontal call to a vertical
-    /// encoding under `CoordFlip` (`catplot` with `orient="h"`) names the
-    /// channels of that lowering, so a value the caller bound to `x` reads
-    /// `y`, as its explicit-domain and log-scale warnings already do: the
-    /// render receives nothing that tells that flip from one the caller
-    /// applied. `groups` is each null-blocked group's or slot's own name
+    /// it wrote. A flip a call applied on the caller's behalf
+    /// (`catplot` with `orient="h"`, which sets
+    /// [`Layer::flip_by_call`](crate::spec::layer::Layer::flip_by_call)) is
+    /// not un-flipped (`prepare::layer_names_unflipped`), so a value the
+    /// caller bound to `x` reads `x`. `groups` is each null-blocked group's or slot's own name
     /// (`transform::context::describe_group_row` over
     /// `render::draw::dispatch_mark_groups`'s own naming fields, or over a
     /// slot's category column), with its
