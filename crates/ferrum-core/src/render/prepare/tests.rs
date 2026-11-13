@@ -13999,8 +13999,7 @@ const NULL_KEY_TRANSFORMS: [(&str, &str); 2] = [
 ];
 
 /// A facet panel whose every `h` key is null is emptied by the null-key drop
-/// and degrades to an empty panel, warned, while the other panel renders: the
-/// refusal belongs to the whole chart left with nothing, not to one panel.
+/// and degrades to an empty panel, warned, while the other panel renders.
 #[test]
 fn a_facet_panel_emptied_by_the_null_key_drop_degrades_and_warns() {
     for (name, transform) in NULL_KEY_TRANSFORMS {
@@ -14054,43 +14053,31 @@ fn the_null_key_drop_count_sums_across_facet_panels() {
     }
 }
 
-/// When the null-key drop empties every panel, a faceted `LetterValue`
-/// refuses with its own empty-input refusal, exactly as the unfaceted chart
-/// does, and the refusal carries the drop's warning with the whole frame's
-/// count. The rejected alternative renders a chart with no panel.
+/// When the null-key drop empties every panel, a faceted step does not
+/// refuse: the whole frame's all-null-key warning is reported once, in place
+/// of the per-panel counts, and every panel is emptied by the drop and keeps
+/// its place, as the unfaceted chart draws its one panel empty.
 #[test]
-fn the_null_key_drop_emptying_every_panel_refuses_a_letter_value_with_the_drop_warning() {
-    let (name, transform) = NULL_KEY_TRANSFORMS[0];
-    let err = null_key_facet_run(transform, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
-        .err()
-        .unwrap_or_else(|| panic!("{name}: a chart the drop emptied refuses"));
-    assert_eq!(err.to_string(), "transform failed: ValueError: stat_letter_value: empty input after filter");
-    assert_eq!(
-        err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
-        ["LetterValue: 3 rows have a null 'h' and belong to no group, so they were dropped; \
-          fill or filter the nulls in 'h'"],
-        "the refusal keeps the drop warning"
-    );
-}
-
-/// The same faceted call over a `QQ` does not refuse: the whole frame's
-/// all-null-key warning is reported once, in place of the per-panel counts,
-/// and every panel is emptied by the drop and keeps its place, as `Kde` does.
-#[test]
-fn the_null_key_drop_emptying_every_panel_warns_once_for_a_qq_and_empties_every_panel() {
-    let (outputs, warnings, _, partitions) =
-        null_key_facet_run(NULL_KEY_TRANSFORMS[1].1, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
-            .unwrap_or_else(|e| panic!("a QQ the drop emptied must not fail the chart: {e}"));
-    assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0);
-    assert_eq!(
-        partitions.emptied_by_drop,
-        HashSet::from([("p".to_string(), None), ("q".to_string(), None)])
-    );
-    assert_eq!(
-        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
-        ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
-          the grouped output is empty"]
-    );
+fn the_null_key_drop_emptying_every_panel_warns_once_and_empties_every_panel() {
+    for (name, transform) in NULL_KEY_TRANSFORMS {
+        let (outputs, warnings, _, partitions) =
+            null_key_facet_run(transform, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
+                .unwrap_or_else(|e| panic!("{name}: a step the drop emptied must not fail the chart: {e}"));
+        assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0, "{name}");
+        assert_eq!(
+            partitions.emptied_by_drop,
+            HashSet::from([("p".to_string(), None), ("q".to_string(), None)]),
+            "{name}"
+        );
+        assert_eq!(
+            warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: every row has a null in its groupby key (h), so the data could not be split into groups; \
+                 the grouped output is empty"
+            )],
+            "{name}"
+        );
+    }
 }
 
 /// A frame of two rows whose `h` key is null on both, as a single unfaceted
@@ -14111,27 +14098,23 @@ fn run_unfaceted_all_null_keys(transform: &str) -> Result<TransformRun, RenderEr
     run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
 }
 
-/// The unfaceted `LetterValue` the drop empties refuses in the same words and
-/// carries the same warning, so the facet changes neither.
+/// The unfaceted step the drop empties runs and reports the all-null-key
+/// warning, with no row, as `Kde` does, and the facet changes neither.
 #[test]
-fn an_unfaceted_letter_value_the_null_key_drop_empties_refuses_with_the_drop_warning() {
-    let err = run_unfaceted_all_null_keys(NULL_KEY_TRANSFORMS[0].1).err().expect("refuses");
-    assert_eq!(err.to_string(), "transform failed: ValueError: stat_letter_value: empty input after filter");
-    assert_eq!(err.carried_warnings().len(), 1, "{:?}", err.carried_warnings());
-}
-
-/// The unfaceted `QQ` the drop empties runs and reports the all-null-key
-/// warning, with no row, as `Kde` does.
-#[test]
-fn an_unfaceted_qq_the_null_key_drop_empties_warns_and_emits_no_row() {
-    let (outputs, warnings, _, _) = run_unfaceted_all_null_keys(NULL_KEY_TRANSFORMS[1].1)
-        .unwrap_or_else(|e| panic!("a QQ the drop emptied must not fail the chart: {e}"));
-    assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0);
-    assert_eq!(
-        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
-        ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
-          the grouped output is empty"]
-    );
+fn an_unfaceted_step_the_null_key_drop_empties_warns_and_emits_no_row() {
+    for (name, transform) in NULL_KEY_TRANSFORMS {
+        let (outputs, warnings, _, _) = run_unfaceted_all_null_keys(transform)
+            .unwrap_or_else(|e| panic!("{name}: a step the drop emptied must not fail the chart: {e}"));
+        assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0, "{name}");
+        assert_eq!(
+            warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+            [format!(
+                "{name}: every row has a null in its groupby key (h), so the data could not be split into groups; \
+                 the grouped output is empty"
+            )],
+            "{name}"
+        );
+    }
 }
 
 /// Two named steps that read the SAME rows under the SAME key, with no

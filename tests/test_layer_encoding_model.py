@@ -65,7 +65,6 @@ from tests.test_null_group_warning import (
     _all_keys_null_fallback_message,
     _all_keys_null_message,
     _facet_key_dropped_message,
-    _null_key_dropped_message,
     _panel_key_fallback_message,
 )
 from tests._wire_steps import all_steps, operand_branches
@@ -13922,23 +13921,29 @@ def test_a_faceted_panel_the_null_key_drop_emptied_draws_empty_beside_the_drop_w
 
 
 @pytest.mark.parametrize("facet", [True, False], ids=["faceted", "unfaceted"])
-def test_a_null_key_drop_that_empties_every_panel_refuses_a_boxen_beside_the_drop_warning(facet):
-    """Every hue null: the boxen refuses with its statistic's empty-input refusal, and the drop warns.
+def test_a_null_key_drop_that_empties_every_panel_draws_a_boxen_empty_as_a_density_does(facet):
+    """Every hue null: the boxen keeps its chart, as ``Kde`` does, and says the grouped output is empty.
 
-    Faceted and unfaceted refuse alike. Rejects the faceted chart rendering
-    with no panel (a ``NoRowsToDraw`` warning), and a refusal that hides the
-    drop that caused it.
+    Unfaceted the chart then reports it has no rows to draw; faceted every panel is drawn
+    empty. The null-key count warning is not repeated beside the empty-split sentence. The empty
+    frame itself (axes, plot area, no band, no legend) is pinned per door in
+    ``tests/marks/test_boxen_null_keys.py``; this pins the facet-fixture outcome alone.
     """
     all_null = _NULL_PANEL.with_columns(pl.lit(None, dtype=pl.Utf8).alias("h"))
-    chart = lambda: fm.Chart(all_null).mark_boxen().encode(x="cat", y="val", color="h")  # noqa: E731
-    refused, dropped = _drop_warnings(
-        lambda: chart().facet("f") if facet else chart(), lambda c: c.to_svg()
+    chart = fm.Chart(all_null).mark_boxen().encode(x="cat", y="val", color="h")
+    chart = chart.facet("f") if facet else chart
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    shown = [str(w.message) for w in caught]
+    assert shown == [_all_keys_null_message("LetterValue", "h")] + (
+        [] if facet else [_NO_ROWS_TO_DRAW]
     )
-    assert isinstance(refused, ValueError)
-    assert (
-        str(refused) == "transform failed: ValueError: stat_letter_value: empty input after filter"
-    )
-    assert dropped == [_null_key_dropped_message("LetterValue", 20, "h")]
+    panels = panel_census(svg)
+    assert len(panels) == (2 if facet else 1) and not any(panels)
+    assert {"cat", "val"} <= set(axis_titles(svg))
+    if facet:
+        assert ">F1<" in svg and ">F2<" in svg
 
 
 @pytest.mark.parametrize("facet", [True, False], ids=["faceted", "unfaceted"])

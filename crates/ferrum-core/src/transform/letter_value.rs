@@ -21,12 +21,14 @@
 //! appends nothing. A row with a null on a `groupby` field belongs to no
 //! combination and is dropped, with one warning per field naming the
 //! dropped-row count; a `groupby` field equal to `group` is `group`'s own
-//! dimension and keeps its pooling. A whole-frame call whose drop removed at
-//! least one row and left no plottable value refuses; inside a facet panel
-//! that drop empties the panel instead
-//! (`TransformContext::refuse_unless_partition`).
-//! A call that dropped nothing returns whatever it computes, an empty batch
-//! included, exactly as the ungrouped call does.
+//! dimension and keeps its pooling. The drop is reported through the shared
+//! null-key reporter under [`NullKeyPolicy::Skip`]
+//! ([`report_skipped_null_keys`]), so a call whose drop removed every row
+//! warns that the data could not be split into groups and returns no rows,
+//! and a facet partition it empties is recorded for the facet run to draw
+//! empty, as every other grouped transform's drop is. A call that dropped
+//! nothing returns whatever it computes, an empty batch included, exactly as
+//! the ungrouped call does.
 //!
 //! A group (or combination) whose rows hold no usable value, every one null
 //! or NaN, keeps its key as one placeholder row: depth 1, the median's
@@ -58,8 +60,15 @@ use crate::transform::context::{describe_group_keys, TransformContext, Transform
 use crate::transform::group_key::{
     batch_with_groupby_columns, deserialize_groupby_vec, group_partition_multi, groupby_key_at,
     materialize_groupby_col, refuse_groupby_output_collision, refuse_repeated_groupby_names,
-    warn_null_groupby_rows_dropped, GroupKeyReader, KeyValue, NullKeyPolicy,
+    report_skipped_null_keys, GroupKeyReader, KeyValue, NullKeyCounts, NullKeyPolicy,
 };
+
+/// The policy [`report_skipped_null_keys`] reports the null-key drop under:
+/// the rows holding a null on a dropping field belong to no group, as under
+/// every other grouped transform's `Skip`. The partition itself pools `group`
+/// ([`NullKeyPolicy::Pool`]), so this is the policy of the drop, not of the
+/// partition.
+const DROPPED_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
 
 /// Maximum depth for per-depth named outputs.
 pub(crate) const K_MAX_NAMED: usize = 12;
@@ -509,9 +518,10 @@ fn group_order(
 ///
 /// `Pool` covers `group` only. The partition runs over `group` and the
 /// `groupby` fields under the one policy, and the combinations holding a null
-/// on a [`KeyColumns::dropping_fields`] dimension are then dropped here, with
-/// [`warn_null_groupby_rows_dropped`]'s per-field warning: a null `groupby`
-/// key, unlike a null `group`, is not drawn as its own combination.
+/// on a [`KeyColumns::dropping_fields`] dimension are then dropped here and
+/// reported through [`report_skipped_null_keys`] under [`DROPPED_KEYS`]: a
+/// null `groupby` key, unlike a null `group`, is not drawn as its own
+/// combination. A drop that removes every row warns and returns no rows.
 fn compute_depths(
     spec: &LetterValueSpec,
     batch: &RecordBatch,
@@ -528,8 +538,8 @@ fn compute_depths(
     let dropping_fields = key_columns.dropping_fields(spec);
     // With a dropping field, the partition's all-null warning could only
     // fire when that field is null on every row, where it would claim the
-    // rows were pooled; they are dropped instead, and the per-field drop
-    // warning below says so. Without one, the partition reports for `group`.
+    // rows were pooled; they are dropped instead, and the drop report below
+    // says so. Without one, the partition reports for `group`.
     let quiet = TransformContext::default();
     let partition_ctx = if dropping_fields.is_empty() { ctx } else { &quiet };
     let partition = group_partition_multi(
@@ -560,7 +570,6 @@ fn compute_depths(
     // placeholder row after every group with values (spec's all-null rule,
     // as `Aggregate` and `BoxStats` keep an all-null group), so its band
     // slot, legend entry and facet panel stay and the render can name it.
-    warn_null_groupby_rows_dropped(batch, &dropping_fields, "stat_letter_value", ctx);
     let mut groups: BTreeMap<ComboKey, Vec<f64>> = BTreeMap::new();
     let mut emptied: Vec<ComboKey> = Vec::new();
     let mut dropped_rows = 0_usize;
@@ -583,13 +592,16 @@ fn compute_depths(
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         groups.insert(g, vs);
     }
-    // Only the null-key drop refuses, and only when it leaves no group with
-    // values: a call that dropped nothing returns what it computed (an
-    // emptied group's placeholder, or an empty batch for a frame with no
-    // rows), as the ungrouped call does.
-    if dropped_rows > 0 && groups.is_empty() {
-        ctx.refuse_unless_partition(PyValueError::new_err("stat_letter_value: empty input after filter"))?;
-    }
+    // Under `Pool` every row is in some partition group, and the groups the
+    // loop skipped are exactly the rows a dropping field's null removed.
+    report_skipped_null_keys(
+        batch,
+        &dropping_fields,
+        "stat_letter_value",
+        DROPPED_KEYS,
+        NullKeyCounts { any_null: dropped_rows, fully_null: 0, n_rows: batch.num_rows() },
+        ctx,
+    );
     let order = group_order(&spec.sort, &groups);
 
     let mut rows = Vec::new();
@@ -1004,7 +1016,8 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 ///     ``group`` and these, and every output carries one column per field,
 ///     named and typed as its input column. A row with a null on a
 ///     ``groupby`` field is dropped, with one warning per field naming the
-///     dropped-row count, and a call left with no plottable value raises. A
+///     dropped-row count, and a call whose every row the drop removes warns
+///     that its grouped output is empty and returns no rows. A
 ///     field may equal ``group``; it then keeps ``group``'s rule, where null
 ///     ``group`` rows form their own combination.
 /// k_depth : {"tukey", "proportion", "trustworthy", "full"}, \
@@ -1120,6 +1133,7 @@ impl PyLetterValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::context::{AllNullOutcome, StepInstance};
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::Schema;
 
@@ -2113,12 +2127,11 @@ mod tests {
         assert!(floats(&out, "lower").last().unwrap().is_nan());
     }
 
-    /// A null `groupby` key still refuses a whole-frame call the drop leaves
-    /// with no group that has values, even when an all-NaN combination keeps
-    /// its placeholder: only the null-key drop makes the call refuse.
+    /// A null `groupby` key whose drop leaves only emptied combinations is not
+    /// an every-row drop: the count warns, and the all-NaN combination keeps
+    /// its placeholder row.
     #[test]
-    fn a_null_key_drop_that_leaves_only_emptied_combinations_still_refuses() {
-        pyo3::Python::initialize();
+    fn a_null_key_drop_that_leaves_only_emptied_combinations_warns_the_count_and_keeps_the_placeholder() {
         let batch = keyed_batch(
             &[("g", vec![Some("a"); 3]), ("h", vec![None, Some("x"), Some("x")])],
             vec![1.0, f64::NAN, f64::NAN],
@@ -2126,8 +2139,16 @@ mod tests {
         let spec = lv_spec(serde_json::json!({
             "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
-        let err = apply(&spec, &batch).unwrap_err().to_string();
-        assert_eq!(err, "ValueError: stat_letter_value: empty input after filter");
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).expect("a drop that leaves a placeholder does not refuse");
+        assert_eq!(strs(&out, "h"), some(&["x"]));
+        assert!(floats(&out, "lower")[0].is_nan(), "the emptied combination carries NaN");
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["LetterValue: 1 row has a null 'h' and belongs to no group, so it was dropped; \
+              fill or filter the nulls in 'h'"]
+        );
     }
 
     // ── default fence (outlier_threshold = 0.0) ───────────────────────────
@@ -2432,11 +2453,12 @@ mod tests {
         assert_eq!(floats(depth_1, "lower"), vec![2.0]);
     }
 
-    /// Dropping every row's null `groupby` key leaves nothing to plot, which
-    /// refuses rather than drawing an empty chart.
+    /// Every row's null `groupby` key dropped: the call warns that the data
+    /// could not be split into groups and returns no rows, whole frame or
+    /// facet partition, with every secondary batch published empty so each
+    /// boxen layer still finds its `data_source`.
     #[test]
-    fn letter_value_groupby_all_null_keys_refuse() {
-        pyo3::Python::initialize();
+    fn letter_value_groupby_all_null_keys_warn_and_return_no_rows() {
         let batch = keyed_batch(
             &[("g", vec![Some("a"), Some("a")]), ("h", vec![None, None])],
             vec![1.0, 2.0],
@@ -2444,15 +2466,147 @@ mod tests {
         let spec = lv_spec(serde_json::json!({
             "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
-        let err = apply(&spec, &batch).unwrap_err().to_string();
-        assert_eq!(err, "ValueError: stat_letter_value: empty input after filter");
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied call does not refuse");
+        assert_eq!(out.num_rows(), 0);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(warnings, [all_null_warning("h")]);
+        assert!(ctx.all_null_partitions.borrow().is_empty(), "a whole frame records no partition");
+
+        let outs = secondary_outputs(&spec, &batch, &out, &TransformContext::default()).unwrap();
+        assert_eq!(secondary(&outs, OUTLIERS_KEY).num_rows(), 0);
+        for depth in 1..=K_MAX_NAMED {
+            assert_eq!(secondary(&outs, &depth_key(depth)).num_rows(), 0, "depth_{depth}");
+        }
+    }
+
+    /// The text every all-null drop reports, naming `columns`.
+    fn all_null_warning(columns: &str) -> String {
+        format!(
+            "LetterValue: every row has a null in its groupby key ({columns}), so the data could not be \
+             split into groups; the grouped output is empty"
+        )
+    }
+
+    /// A facet partition whose every row the drop removed reports the count
+    /// and records the all-null case as `Emptied`, so the facet run decides
+    /// once per step; it pushes no all-null warning of its own.
+    #[test]
+    fn a_facet_partition_the_null_key_drop_empties_records_emptied_beside_the_count() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"), Some("a")]), ("h", vec![None, None])],
+            vec![1.0, 2.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext { is_partition: true, step: StepInstance::Chain(vec![1]), ..TransformContext::default() };
+        let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied panel does not refuse");
+        assert_eq!(out.num_rows(), 0);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["LetterValue: 2 rows have a null 'h' and belong to no group, so they were dropped; \
+              fill or filter the nulls in 'h'"]
+        );
+        let recorded = ctx.all_null_partitions.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
+        match &recorded[0].outcome {
+            AllNullOutcome::Emptied(warning) => assert_eq!(warning.to_string(), all_null_warning("h")),
+            other => panic!("expected the emptied outcome, got {other:?}"),
+        }
+    }
+
+    /// A facet partition holding a usable row drops its null rows with the
+    /// count and records nothing: it is not emptied.
+    #[test]
+    fn a_facet_partition_the_null_key_drop_leaves_groups_in_records_nothing() {
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"); 3]), ("h", vec![None, Some("x"), Some("x")])],
+            vec![1.0, 2.0, 3.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(strs(&out, "h"), some(&["x"]));
+        assert!(ctx.all_null_partitions.borrow().is_empty());
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["LetterValue: 1 row has a null 'h' and belongs to no group, so it was dropped; \
+              fill or filter the nulls in 'h'"]
+        );
+    }
+
+    /// Two dropping fields whose nulls together cover every row name both
+    /// columns in the one all-null warning, in place of the per-field counts.
+    #[test]
+    fn two_dropping_fields_that_together_cover_every_row_name_both_columns() {
+        let batch = keyed_batch(
+            &[
+                ("g", vec![Some("a"); 4]),
+                ("h", vec![None, None, Some("x"), Some("x")]),
+                ("d", vec![Some("p"), Some("p"), None, None]),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h", "d"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied call does not refuse");
+        assert_eq!(out.num_rows(), 0);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(warnings, [all_null_warning("h, d")]);
+    }
+
+    /// A null `group` with a usable `groupby` field is no drop: the null
+    /// category pools into its own combination and nothing is reported.
+    #[test]
+    fn a_null_group_with_a_usable_groupby_field_pools_and_warns_nothing() {
+        let batch = keyed_batch(
+            &[("g", vec![None, None]), ("h", vec![Some("x"), Some("x")])],
+            vec![1.0, 2.0],
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(strs(&out, "group"), vec![None]);
+        assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
+        assert!(ctx.all_null_partitions.borrow().is_empty());
+    }
+
+    /// The null-key drop reports through the shared reporter before the
+    /// depth cap, so a call that drops rows and clamps a depth warns the count
+    /// first, as it always has.
+    #[test]
+    fn the_null_key_drop_reports_before_the_depth_cap() {
+        let n = 30_000_usize;
+        let mut h: Vec<Option<&str>> = vec![Some("x"); n];
+        h[0] = None;
+        let batch = keyed_batch(
+            &[("g", vec![Some("a"); n]), ("h", h)],
+            (0..n).map(|i| i as f64).collect(),
+        );
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
+        }));
+        let ctx = TransformContext::default();
+        apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx_warnings(&ctx);
+        assert!(matches!(warnings[0], TransformWarning::NullKeyRowsDropped { .. }), "got {warnings:?}");
+        assert!(matches!(warnings[1], TransformWarning::ParameterClamped { .. }), "got {warnings:?}");
     }
 
     /// A grouped call that drops nothing behaves exactly like the ungrouped
     /// call: all-NaN values keep one placeholder row per combination (per
     /// group, ungrouped), and no rows at all return an empty batch; neither
-    /// refuses nor warns. Only rows removed by the null-key drop can make it
-    /// refuse.
+    /// refuses nor warns.
     #[test]
     fn letter_value_groupby_without_null_keys_never_refuses_like_ungrouped() {
         let all_nan = keyed_batch(

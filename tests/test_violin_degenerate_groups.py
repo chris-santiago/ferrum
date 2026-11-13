@@ -751,16 +751,6 @@ def test_an_all_null_qq_gives_the_interactive_route_what_its_sibling_statistic_g
     assert route(_qq_chart(df)) == expected
 
 
-def test_a_boxen_with_every_key_null_still_refuses_as_the_boxen_statistic_does():
-    """The boxen statistic keeps its own null-key refusal; only ``QQ`` moved to the draw-empty rule."""
-    df = pl.DataFrame(
-        {"c": ["a", "b"] * 2, "w": [1.0, 2.0, 3.0, 4.0], "g": [None] * 4},
-        schema={"c": pl.Utf8, "w": pl.Float64, "g": pl.Utf8},
-    )
-    with pytest.raises(ValueError, match="stat_letter_value: empty input after filter"):
-        fm.Chart(df).mark_boxen().encode(x="c", y="w", color="g").to_svg()
-
-
 def _filtered_panel_frame() -> pl.DataFrame:
     """Panels ``p`` and ``q`` of six rows each, of which the filter ``k > 0`` keeps panel ``p``'s."""
     return pl.DataFrame(

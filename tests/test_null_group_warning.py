@@ -1029,6 +1029,12 @@ def _all_keys_null_fallback_message(statistic: str, column: str) -> str:
     )
 
 
+def _all_keys_null_pooled_message(statistic: str, column: str) -> str:
+    """The sentence a statistic that pools a null key warns when ``column`` is null on every row:
+    the rows are one group with no label, so the chart keeps one ``null`` band."""
+    return _all_keys_null_prefix(statistic, column) + "all rows were treated as one unlabeled group"
+
+
 def _all_keys_null_prefix(statistic: str, column: str) -> str:
     return (
         f"{statistic}: every row has a null in its groupby key ({column}), so the data could "

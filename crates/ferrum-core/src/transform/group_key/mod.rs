@@ -708,9 +708,13 @@ pub(crate) fn group_partition_multi(
 ///   [`NullKeyPolicy::Skip`] the partition is emptied (counted, and drawn
 ///   empty); under [`NullKeyPolicy::SkipWithWholeBatchFallback`] and
 ///   [`NullKeyPolicy::FillFromWholeBatch`] its rows are fit (or filled)
-///   pooled, not dropped, so they are not counted. A refusing transform
-///   records its own refusal.
-fn report_skipped_null_keys(
+///   pooled, not dropped, so they are not counted.
+///
+/// Called by [`group_partition_multi`] for every skipping policy, and by
+/// `LetterValue`, whose partition pools a null `group` and drops the
+/// combinations holding a null on its `groupby` fields itself, reporting them
+/// here with its own counts under [`NullKeyPolicy::Skip`].
+pub(crate) fn report_skipped_null_keys(
     batch: &RecordBatch,
     group_cols: &[String],
     label: &str,
@@ -719,8 +723,11 @@ fn report_skipped_null_keys(
     warn_ctx: &TransformContext,
 ) {
     use crate::transform::context::AllNullOutcome;
+    if counts.any_null == 0 {
+        return;
+    }
     let reported: Vec<String> = group_cols.iter().filter(|field| !warn_ctx.facet_fields.contains(field)).cloned().collect();
-    if reported.is_empty() || counts.any_null == 0 {
+    if reported.is_empty() {
         return;
     }
     let all_null = counts.any_null == counts.n_rows;
@@ -933,17 +940,14 @@ pub(crate) fn warn_if_group_keys_all_null(
 /// that field dropped from every group, as
 /// [`TransformWarning::NullKeyRowsDropped`] in the `groupby` scope: the same
 /// warning, in the same words, the facet partition gives a null facet value.
-/// Called by the shared partitioner for every skipping policy
-/// ([`report_skipped_null_keys`]), and by `LetterValue`, whose partition
-/// pools a null `group` and drops the combinations holding a null on its
-/// `groupby` fields itself; call it with the fields whose null rows the
+/// Called by [`report_skipped_null_keys`] with the fields whose null rows the
 /// transform actually drops. A field absent from `batch` counts nothing: the
 /// partition has already refused it. `fields` is also the scope's `key`
 /// (the full `groupby` field list the caller is reporting against), read
 /// by [`crate::transform::context::merge_null_key_reports`]'s cross-step
 /// dedup together with [`TransformContext::rows`], so a composite's own
 /// several lowered steps over the same rows and key report once.
-pub(crate) fn warn_null_groupby_rows_dropped(
+fn warn_null_groupby_rows_dropped(
     batch: &RecordBatch,
     fields: &[String],
     label: &str,

@@ -157,10 +157,9 @@ pub(crate) enum TransformWarning {
     /// the field are not counted, since they repeat in every panel instead
     /// (`layout::FacetRepeat`). For [`NullKeyScope::Groupby`], pushed once
     /// per `groupby` field by
-    /// [`crate::transform::group_key::warn_null_groupby_rows_dropped`], for
-    /// every grouped transform whose null-key policy drops a row (`Skip`,
-    /// `SkipWithWholeBatchFallback`), plus `LetterValue`'s
-    /// own call.
+    /// [`crate::transform::group_key::report_skipped_null_keys`], for every
+    /// grouped transform whose null-key policy drops a row (`Skip`,
+    /// `SkipWithWholeBatchFallback`), `LetterValue`'s drop included.
     NullKeyRowsDropped {
         scope: NullKeyScope,
         field: String,
@@ -404,9 +403,9 @@ pub(crate) struct RowsOrigin {
 
 /// A facet partition in which a step's every `groupby` key was null, so its
 /// null-key drop left no group: the step, and what the same drop gives the
-/// whole frame ([`AllNullOutcome`]). Recorded by the shared partitioner
-/// (`group_key::group_partition_multi`) and by
-/// [`TransformContext::refuse_unless_partition`]; read back by
+/// whole frame ([`AllNullOutcome`]). Recorded by the shared reporter
+/// (`group_key::report_skipped_null_keys`, which the partitioner and
+/// `LetterValue` both call); read back by
 /// `render::prepare::run_transforms_with_facet`.
 #[derive(Debug)]
 pub(crate) struct AllNullPartition {
@@ -459,9 +458,6 @@ impl From<Unfittable> for pyo3::PyErr {
 /// What a step whose every `groupby` key is null gives the whole frame.
 #[derive(Debug)]
 pub(crate) enum AllNullOutcome {
-    /// The transform refuses (LetterValue): the panel draws empty, and
-    /// the facet run raises the refusal when every panel was emptied.
-    Refused(pyo3::PyErr),
     /// The grouped output is empty: the panel draws empty, and the facet
     /// run reports the warning once when every panel was emptied.
     Emptied(TransformWarning),
@@ -934,20 +930,6 @@ impl TransformContext {
     /// ([`LogEmptied`]).
     pub(crate) fn note_log_emptied(&self, groups: Option<Vec<String>>) {
         self.log_emptied.borrow_mut().push(LogEmptied { panel: None, groups });
-    }
-
-    /// Raise `refusal`, the refusal a `groupby` null-key drop that left
-    /// nothing to draw gives the whole frame. Inside a facet partition
-    /// ([`Self::is_partition`]) the call instead records that the drop
-    /// emptied this panel and returns `Ok`, so the step returns its empty
-    /// output: the panel draws empty, and the facet run raises `refusal`
-    /// itself when the step's drop emptied every panel.
-    pub(crate) fn refuse_unless_partition(&self, refusal: pyo3::PyErr) -> pyo3::PyResult<()> {
-        if !self.is_partition {
-            return Err(refusal);
-        }
-        self.record_all_null(AllNullOutcome::Refused(refusal));
-        Ok(())
     }
 
     /// One fit's rows cannot be fit ([`Unfittable`]). The whole frame
@@ -1460,29 +1442,6 @@ mod tests {
         let e = dropped("QQ", 1, None);
         let f = dropped("QQ", 2, None);
         assert_eq!(merge_null_key_reports(vec![e.clone(), f.clone()]), [e, f], "no lowering: never collapsed");
-    }
-
-    /// A whole-frame call raises the refusal; a facet partition records the
-    /// step whose drop emptied it and carries on.
-    #[test]
-    fn refuse_unless_partition_refuses_the_whole_frame_and_records_a_partition() {
-        pyo3::Python::initialize();
-        let refusal = || pyo3::exceptions::PyValueError::new_err("stat_letter_value: empty input after filter");
-        let whole = TransformContext::default();
-        assert!(whole.refuse_unless_partition(refusal()).is_err());
-        assert!(whole.all_null_partitions.borrow().is_empty());
-
-        let panel = TransformContext { is_partition: true, step: StepInstance::Chain(vec![1]), ..TransformContext::default() };
-        assert!(panel.refuse_unless_partition(refusal()).is_ok());
-        let recorded = panel.all_null_partitions.borrow();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
-        match &recorded[0].outcome {
-            AllNullOutcome::Refused(refusal) => {
-                assert_eq!(refusal.to_string(), "ValueError: stat_letter_value: empty input after filter");
-            }
-            other => panic!("expected the refusal, got {other:?}"),
-        }
     }
 
     fn make_batch_with_group_cols() -> (RecordBatch, Vec<String>) {

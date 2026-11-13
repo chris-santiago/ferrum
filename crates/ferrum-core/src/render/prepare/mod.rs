@@ -2140,8 +2140,7 @@ type TransformRun = (
 /// A faceted run's partitions: every key in the order the run partitioned
 /// the facet's input, and the keys a step left with nothing to draw: its
 /// `groupby` null-key drop emptied them
-/// ([`crate::transform::context::TransformContext::refuse_unless_partition`]),
-/// or the log axis left an ungrouped step no value on its side
+/// ([`AllNullOutcome::Emptied`]), or the log axis left an ungrouped step no value on its side
 /// ([`AllNullOutcome::OffSide`]). Their panels draw empty rather than vanish.
 #[derive(Debug, Default)]
 pub(super) struct FacetPartitions {
@@ -2442,7 +2441,7 @@ fn run_transforms_with_facet(
     }
     let order: Vec<FacetPartitionKey> = partitions.iter().map(|(key, _)| key.clone()).collect();
     let AllNullSettled { emptied_by_drop, replaced_counts, warnings: all_null_warnings } =
-        settle_all_null_partitions(all_null_steps, &order, fspec, &ctx)?;
+        settle_all_null_partitions(all_null_steps, &order, fspec);
     // #162: `ctx` is the SAME context across every partition in the loop
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
@@ -2509,8 +2508,6 @@ struct AllNullSettled {
 /// Settle each step's all-null facet partitions as the whole frame settles
 /// a step whose every key is null:
 ///
-/// - a refusing step that emptied every panel raises its refusal, with the
-///   run's warnings ([`transform_refusal`]);
 /// - a step whose grouped output is empty in every panel reports its
 ///   all-null warning once, in place of its counts, and every panel draws
 ///   empty, as the unfaceted chart draws its one panel empty;
@@ -2524,8 +2521,7 @@ fn settle_all_null_partitions(
     steps: Vec<StepAllNull<'_>>,
     order: &[FacetPartitionKey],
     fspec: &crate::layout::FacetSpec,
-    ctx: &TransformContext,
-) -> Result<AllNullSettled, RenderError> {
+) -> AllNullSettled {
     let mut settled = AllNullSettled { emptied_by_drop: HashSet::new(), replaced_counts: Vec::new(), warnings: Vec::new() };
     for StepAllNull { step, outcome, partitions } in steps {
         let every_panel = partitions.len() == order.len();
@@ -2533,10 +2529,7 @@ fn settle_all_null_partitions(
             settled.emptied_by_drop.extend(partitions.iter().map(|key| (*key).clone()));
         }
         match outcome {
-            AllNullOutcome::Refused(refusal) if every_panel => {
-                return Err(transform_refusal(refusal.to_string(), ctx));
-            }
-            AllNullOutcome::Refused(_) | AllNullOutcome::OffSide => {}
+            AllNullOutcome::OffSide => {}
             AllNullOutcome::Emptied(warning) if every_panel => {
                 settled.replaced_counts.push(step);
                 settled.warnings.push(warning);
@@ -2556,7 +2549,7 @@ fn settle_all_null_partitions(
             }
         }
     }
-    Ok(settled)
+    settled
 }
 
 /// One pooled partition's label for [`TransformWarning::GroupKeyAllNull`]'s
@@ -2595,8 +2588,8 @@ fn stamp_facet_panel(
 
 /// The refusal a transform run raises, `refusal` as
 /// [`RenderError::TransformFailed`], carrying the warnings the run reported
-/// before it ([`RenderError::Warned`]): the null-key drop that left a
-/// statistic nothing to draw is reported beside the refusal it caused.
+/// before it ([`RenderError::Warned`]), so a caller sees what the run said
+/// ahead of the failure.
 fn transform_refusal(refusal: String, ctx: &TransformContext) -> RenderError {
     let source = RenderError::TransformFailed(refusal);
     let warnings: Vec<RenderWarning> =
