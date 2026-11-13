@@ -700,8 +700,11 @@ def desugar_qq(
     When ``line=True``, ``QQ`` also emits a secondary named output, published
     under ``"qq_main_qq_line"`` (the spec's ``name="qq_main"`` prefixes the
     registry's default ``"qq_line"`` key, like every other named secondary
-    output), a single-row batch with columns:
+    output), one row per group whose values fit a line (a single row for an ungrouped call),
+    with columns:
     ``[qq_line_x_start, qq_line_x_end, qq_line_y_start, qq_line_y_end]``
+    The batch is always published, with no rows when no group has a usable value, so the
+    reference layer draws nothing instead of failing to find its source.
 
     Layers emitted
     --------------

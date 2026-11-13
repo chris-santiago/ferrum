@@ -3,9 +3,12 @@
 //! Primary output: per-row points with `theoretical: f64, sample: f64` over
 //! the non-null/non-NaN values of `field`, sorted ascending by sample value.
 //!
-//! Secondary output (`qq_line`, when `emit_line=true`): a single-row batch with
-//! columns `qq_line_x_start, qq_line_x_end, qq_line_y_start, qq_line_y_end`
-//! describing a robust quartile-fit reference line.
+//! Secondary output (`qq_line`, when `emit_line=true`): a batch with one row per
+//! fitted group (one row ungrouped) and columns
+//! `qq_line_x_start, qq_line_x_end, qq_line_y_start, qq_line_y_end`
+//! describing a robust quartile-fit reference line. It is always published,
+//! with zero rows when no group has a line, so a layer reading it draws
+//! nothing rather than missing its source.
 //!
 //! With a non-empty `groupby`, both are computed per group (groups in
 //! first-appearance order, each group's points sorted by sample value), the
@@ -251,6 +254,9 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
+/// Reason a group with no value to plot is named.
+const NO_USABLE_VALUES: &str = "no usable (non-null/non-NaN) values";
+
 /// The primary batch's own column names, before any `groupby` column.
 const POINT_COLUMNS: [&str; 2] = ["theoretical", "sample"];
 
@@ -271,15 +277,12 @@ fn output_column_names() -> Vec<String> {
 /// count.
 ///
 /// An empty `groupby` partitions every row into one group, so the ungrouped
-/// call computes exactly the one whole-column statistic it always has. A field
-/// with no plottable value refuses, grouped or not, except inside a facet
-/// panel; so does a whole-frame call
-/// whose null-key drop removed at least one row and left no plottable value;
-/// inside a facet panel that drop empties the panel instead
-/// ([`TransformContext::refuse_unless_partition`]). A group with no plottable
-/// value (a hue group, or a facet panel's whole frame) is named by a
-/// [`TransformWarning::DegenerateFit`] and keeps one NaN row, so its key
-/// survives and it draws no point.
+/// call computes exactly the one whole-column statistic it always has. A group
+/// with no plottable value (a hue group, a facet panel's whole frame, or the
+/// whole call) is named by a [`TransformWarning::DegenerateFit`] and keeps one
+/// NaN row, so its key survives and it draws no point. A frame with no row,
+/// or whose every group key is null, has no group and so no row; so does a
+/// facet panel the chart's filter left with no row, as every plain mark's.
 pub(crate) fn apply_with_context(
     spec: &QQSpec,
     batch: &RecordBatch,
@@ -301,12 +304,8 @@ pub(crate) fn apply_with_context(
     let v_arr = coerce_to_float64(batch.column(v_idx), "stat_qq", &spec.field)?;
 
     refuse_groupby_output_collision("stat_qq", &spec.groupby, &output_column_names())?;
-    // The partition counts the null-key rows it drops, per field; a batch
-    // the drop leaves with nothing to plot is refused below, which those
-    // counts explain.
     let partition =
-        group_partition_multi(batch, &spec.groupby, "stat_qq", NullKeyPolicy::SkipRefusingEmpty, ctx)?;
-
+        group_partition_multi(batch, &spec.groupby, "stat_qq", NullKeyPolicy::Skip, ctx)?;
     // Null/NaN sample values are not plotted.
     let clean = |i: usize| -> Option<f64> {
         if v_arr.is_null(i) {
@@ -315,22 +314,6 @@ pub(crate) fn apply_with_context(
         let v = v_arr.value(i);
         (!v.is_nan()).then_some(v)
     };
-    // A frame with no plottable value refuses. Inside a facet panel the
-    // refusal is recorded instead: the panel draws empty and is named by the
-    // group loop below, and the facet run raises the refusal when every panel
-    // was emptied.
-    let any_plottable = (0..v_arr.len()).any(|i| clean(i).is_some());
-    if !any_plottable {
-        ctx.refuse_unless_partition(PyValueError::new_err("stat_qq: empty input after filter"))?;
-    }
-    let kept_rows: usize = partition.groups.iter().map(|(_, rows)| rows.len()).sum();
-    let dropped_rows = batch.num_rows().saturating_sub(kept_rows);
-    let plottable_kept =
-        partition.groups.iter().flat_map(|(_, rows)| rows).any(|&i| clean(i).is_some());
-    if any_plottable && dropped_rows > 0 && !plottable_kept {
-        ctx.refuse_unless_partition(PyValueError::new_err("stat_qq: empty input after filter"))?;
-    }
-
     let mut theoretical: Vec<f64> = Vec::new();
     let mut samples: Vec<f64> = Vec::new();
     let mut keys: Vec<Vec<KeyValue>> = Vec::new();
@@ -343,7 +326,7 @@ pub(crate) fn apply_with_context(
             ctx.warn(TransformWarning::DegenerateFit {
                 transform: "QQ".into(),
                 group: (!spec.groupby.is_empty()).then(|| describe_group_keys(&spec.groupby, key)),
-                reason: "no usable (non-null/non-NaN) values".into(),
+                reason: NO_USABLE_VALUES.into(),
                 panel: None,
                 step: ctx.step.clone(),
             });
@@ -388,16 +371,15 @@ pub(crate) const QQ_LINE_COLUMNS: &[(&str, DataType)] = &[
 /// Compute the secondary `qq_line` named output from the primary points batch.
 ///
 /// Returns `vec![("qq_line", line_batch)]` when `emit_line=true`, else empty.
+/// The batch is published even when no group has a line (zero rows, the full
+/// schema), so a layer reading it draws nothing rather than missing its source.
 /// The line is a robust quartile fit:
 ///   slope     = (sample_q3 - sample_q1) / (theo_q3 - theo_q1)
 ///   intercept = sample_q2 - slope * theo_q2
 /// Endpoints span the theoretical-x range.
 ///
 /// With a `groupby`, the batch has one line per group (read back off the
-/// primary batch's `groupby` columns, in its group order) and is published
-/// even when no group has a line, so a layer reading it draws nothing rather
-/// than missing its source. Without one, a primary batch with no line to fit
-/// publishes no batch, as it always has.
+/// primary batch's `groupby` columns, in its group order).
 pub(crate) fn secondary_outputs(
     spec: &QQSpec,
     primary: &RecordBatch,
@@ -436,9 +418,6 @@ pub(crate) fn secondary_outputs(
                 column.push(value);
             }
         }
-    }
-    if spec.groupby.is_empty() && keys.is_empty() {
-        return Ok(Vec::new());
     }
 
     let fields: Vec<Field> = QQ_LINE_COLUMNS
@@ -1193,44 +1172,58 @@ mod tests {
         assert_close(&col(&line, "qq_line_y_end"), &[2.0]);
     }
 
-    /// Every key null: nothing is left to plot, so the call refuses with the
-    /// transform's empty-input error.
+    /// Every key null: no row belongs to a group, so the output has no row and
+    /// the all-null-key warning says why, as it does for every sibling.
     #[test]
-    fn qq_groupby_all_null_keys_refuse() {
+    fn qq_groupby_all_null_keys_warn_and_emit_no_row() {
         pyo3::Python::initialize();
         let batch = keyed_batch(&[("h", vec![None, None])], vec![1.0, 2.0]);
         let spec = qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]}));
-        let (out, _) = apply_warned(&spec, &batch);
-        assert_eq!(out.unwrap_err().to_string(), "ValueError: stat_qq: empty input after filter");
+        let (out, warnings) = apply_warned(&spec, &batch);
+        assert_eq!(out.unwrap().num_rows(), 0);
+        assert_eq!(
+            warnings,
+            ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
+              the grouped output is empty"]
+        );
     }
 
     /// The only plottable value sits on a null-keyed row: once that row is
-    /// dropped nothing is left, which refuses rather than returning no
-    /// points silently.
+    /// dropped each remaining group has nothing to plot, so the drop is
+    /// warned and each group is named, keeping its key.
     #[test]
-    fn qq_groupby_plottable_values_only_on_null_keys_refuse() {
+    fn qq_groupby_plottable_values_only_on_null_keys_name_each_remaining_group() {
         pyo3::Python::initialize();
         let batch = keyed_batch(&[("h", vec![Some("x"), None])], vec![f64::NAN, 5.0]);
         let spec = qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]}));
-        let (out, warnings) = apply_warned(&spec, &batch);
-        assert_eq!(out.unwrap_err().to_string(), "ValueError: stat_qq: empty input after filter");
-        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(strs(&out, "h"), some(&["x"]));
+        assert!(col(&out, "sample")[0].is_nan());
+        assert_eq!(
+            ctx.degenerate_fits(),
+            vec![("QQ".to_string(), Some("h=x".to_string()), NO_USABLE_VALUES.to_string())]
+        );
+        assert_eq!(ctx.warnings.borrow().len(), 2, "the drop and the group");
     }
 
-    /// A grouped call that drops nothing refuses an all-NaN field exactly as
-    /// the ungrouped call does, with the same error and no drop warning.
+    /// A grouped call that drops nothing names each all-NaN group, where the
+    /// ungrouped call names the whole call, with no drop warning.
     #[test]
-    fn qq_groupby_without_null_keys_refuses_all_nan_like_ungrouped() {
+    fn qq_groupby_without_null_keys_names_each_all_nan_group() {
         pyo3::Python::initialize();
         let batch = keyed_batch(&[("h", vec![Some("x"), Some("y")])], vec![f64::NAN, f64::NAN]);
         let grouped = qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]}));
-        let ungrouped = qq_spec(serde_json::json!({"field": "v"}));
-        let (out, warnings) = apply_warned(&grouped, &batch);
+        let ctx = TransformContext::default();
+        apply_with_context(&grouped, &batch, &ctx).unwrap();
         assert_eq!(
-            out.unwrap_err().to_string(),
-            apply(&ungrouped, &batch).unwrap_err().to_string()
+            ctx.degenerate_fits(),
+            vec![
+                ("QQ".to_string(), Some("h=x".to_string()), NO_USABLE_VALUES.to_string()),
+                ("QQ".to_string(), Some("h=y".to_string()), NO_USABLE_VALUES.to_string()),
+            ]
         );
-        assert!(warnings.is_empty(), "got {warnings:?}");
+        assert_eq!(ctx.warnings.borrow().len(), 2);
     }
 
     /// A non-text groupby key keeps its input type on the points and the
@@ -1320,8 +1313,6 @@ mod tests {
         assert!(err.contains("QQ: groupby column 'h' is repeated"), "{err}");
     }
 
-    const NO_USABLE: &str = "no usable (non-null/non-NaN) values";
-
     /// A hue group with no plottable value is named once and keeps a NaN row,
     /// so its key survives; the other group is exactly as it would be alone.
     #[test]
@@ -1336,7 +1327,7 @@ mod tests {
         let out = apply_with_context(&spec, &batch, &ctx).unwrap();
         assert_eq!(
             ctx.degenerate_fits(),
-            vec![("QQ".to_string(), Some("h=c".to_string()), NO_USABLE.to_string())]
+            vec![("QQ".to_string(), Some("h=c".to_string()), NO_USABLE_VALUES.to_string())]
         );
         assert_eq!(strs(&out, "h"), some(&["a", "a", "c"]));
         let theo = col(&out, "theoretical");
@@ -1347,40 +1338,81 @@ mod tests {
         assert_eq!(strs(&line, "h"), some(&["a"]));
     }
 
-    /// Inside a facet partition an all-null panel is named and draws empty
-    /// instead of failing on the spot, and an ungrouped call names no group.
-    /// The refusal is recorded for the facet run, which raises it only when
-    /// every panel was emptied.
+    /// An all-null call, whole or one facet panel, names itself once with no
+    /// group, keeps one NaN row and records no refusal; the reference line is
+    /// still published, with no row.
     #[test]
-    fn qq_all_null_panel_is_named_not_refused() {
+    fn qq_all_null_call_is_named_and_publishes_an_empty_line() {
         pyo3::Python::initialize();
-        let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
         let spec = qq_spec(serde_json::json!({"field": "v"}));
-        let out = apply_with_context(&spec, &batch_field("v", vec![f64::NAN, f64::NAN]), &ctx).unwrap();
-        assert_eq!(out.num_rows(), 1);
-        assert!(col(&out, "sample")[0].is_nan());
-        assert_eq!(ctx.degenerate_fits(), vec![("QQ".to_string(), None, NO_USABLE.to_string())]);
-        let recorded = ctx.all_null_partitions.borrow();
-        assert_eq!(recorded.len(), 1);
-        match &recorded[0].outcome {
-            crate::transform::context::AllNullOutcome::Refused(refusal) => {
-                assert_eq!(refusal.to_string(), "ValueError: stat_qq: empty input after filter");
-            }
-            other => panic!("expected a recorded refusal, got {other:?}"),
+        for is_partition in [false, true] {
+            let ctx = TransformContext { is_partition, ..TransformContext::default() };
+            let out = apply_with_context(&spec, &batch_field("v", vec![f64::NAN, f64::NAN]), &ctx).unwrap();
+            assert_eq!(out.num_rows(), 1, "{is_partition}");
+            assert!(col(&out, "sample")[0].is_nan());
+            assert_eq!(ctx.degenerate_fits(), vec![("QQ".to_string(), None, NO_USABLE_VALUES.to_string())]);
+            assert!(ctx.all_null_partitions.borrow().is_empty(), "no outcome is recorded");
+            let line = line_of(&spec, &out);
+            assert_eq!(line.num_rows(), 0);
+            let names: Vec<String> = line.schema().fields().iter().map(|f| f.name().clone()).collect();
+            assert_eq!(names, QQ_LINE_COLUMNS.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>());
         }
     }
 
     /// A grouped panel with no usable value anywhere names each group and
-    /// records the same refusal.
+    /// records no refusal.
     #[test]
-    fn qq_grouped_panel_with_no_usable_value_records_the_refusal() {
+    fn qq_grouped_panel_with_no_usable_value_names_each_group() {
         pyo3::Python::initialize();
         let batch = keyed_batch(&[("h", vec![Some("a"), Some("b")])], vec![f64::NAN, f64::NAN]);
         let spec = qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]}));
         let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
         apply_with_context(&spec, &batch, &ctx).unwrap();
         assert_eq!(ctx.degenerate_fits().len(), 2);
-        assert_eq!(ctx.all_null_partitions.borrow().len(), 1);
+        assert!(ctx.all_null_partitions.borrow().is_empty());
+    }
+
+    /// A zero-row frame has no group: no point row, no warning (the render
+    /// names the empty chart), and the reference line is still published.
+    #[test]
+    fn qq_zero_row_frame_has_no_group_and_still_publishes_the_line() {
+        pyo3::Python::initialize();
+        for groupby in [serde_json::json!([]), serde_json::json!(["h"])] {
+            let batch = keyed_batch(&[("h", vec![])], vec![]);
+            let spec = qq_spec(serde_json::json!({"field": "v", "groupby": groupby}));
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+            assert_eq!(out.num_rows(), 0, "{groupby}");
+            assert!(ctx.warnings.borrow().is_empty(), "{groupby}");
+            assert_eq!(line_of(&spec, &out).num_rows(), 0, "{groupby}");
+        }
+    }
+
+    /// A facet panel with no row has no group, grouped or not: nothing is
+    /// named and no point row is kept, as every plain mark leaves it.
+    #[test]
+    fn qq_facet_panel_with_no_row_has_no_group() {
+        pyo3::Python::initialize();
+        let panel = || TransformContext { is_partition: true, ..TransformContext::default() };
+        for spec in [
+            qq_spec(serde_json::json!({"field": "v"})),
+            qq_spec(serde_json::json!({"field": "v", "groupby": ["h"]})),
+        ] {
+            let ctx = panel();
+            let out = apply_with_context(&spec, &keyed_batch(&[("h", vec![])], vec![]), &ctx).unwrap();
+            assert_eq!(out.num_rows(), 0);
+            assert!(ctx.warnings.borrow().is_empty());
+            assert_eq!(line_of(&spec, &out).num_rows(), 0, "the line source is still published");
+        }
+    }
+
+    /// With the line switched off nothing is published beyond the points.
+    #[test]
+    fn qq_without_a_line_publishes_nothing_secondary() {
+        pyo3::Python::initialize();
+        let spec = qq_spec(serde_json::json!({"field": "v", "emit_line": false}));
+        let out = apply(&spec, &batch_field("v", vec![f64::NAN])).unwrap();
+        assert!(secondary_outputs(&spec, &out).unwrap().is_empty());
     }
 
     /// A well-formed grouped call warns nothing.

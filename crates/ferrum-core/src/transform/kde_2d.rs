@@ -45,6 +45,13 @@ const LABEL: &str = "stat_kde_2d";
 /// Reason a 2-D group with fewer than two usable points cannot be estimated.
 /// Its bandwidth reason is `Kde`'s own, [`kde::BANDWIDTH_NOT_USABLE`].
 const FEWER_THAN_TWO_USABLE_POINTS: &str = "fewer than 2 usable (non-null/non-NaN) points";
+/// Reasons a group of two or more points cannot be estimated because they are
+/// tied: every point identical, or all equal on one axis. The points-worded
+/// siblings of [`kde::ALL_VALUES_EQUAL`], naming the axis as `Smooth`'s
+/// `zero x variance` does.
+const ALL_POINTS_EQUAL: &str = "its usable points are all equal";
+const ALL_X_VALUES_EQUAL: &str = "its usable x values are all equal";
+const ALL_Y_VALUES_EQUAL: &str = "its usable y values are all equal";
 /// Reason an estimable group still has no density to draw: every grid node is
 /// zero. The grid-worded sibling of `Violin`'s evaluation-range text.
 const DENSITY_ZERO_ON_GRID: &str = "its density is zero across the evaluation grid";
@@ -178,6 +185,7 @@ pub(crate) fn apply_with_context(
     if spec.n == 0 {
         return Err(PyValueError::new_err("stat_kde_2d: n must be > 0"));
     }
+    refuse_malformed_extent(spec.extent)?;
     let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
     let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
     if x_slot.is_none() && y_slot.is_none() {
@@ -393,8 +401,12 @@ fn apply_one_group(
     } else {
         let hx = kde::bandwidth(&xs, &spec.bandwidth)?;
         let hy = kde::bandwidth(&ys, &spec.bandwidth)?;
-        if hx <= 0.0 || hy <= 0.0 || !hx.is_finite() || !hy.is_finite() {
-            degrade(kde::BANDWIDTH_NOT_USABLE);
+        // The surface is drawn only with a usable bandwidth on both axes and
+        // an evaluation range on both that is finite and has width.
+        let range_usable = xmin.is_finite() && xmax.is_finite() && xmin < xmax
+            && ymin.is_finite() && ymax.is_finite() && ymin < ymax;
+        if hx <= 0.0 || hy <= 0.0 || !hx.is_finite() || !hy.is_finite() || !range_usable {
+            degrade(unestimable_points_cause(&xs, &ys).unwrap_or(kde::BANDWIDTH_NOT_USABLE));
             vec![0.0; n * n]
         } else {
             let n_pts = xs.len() as f64;
@@ -423,6 +435,41 @@ fn apply_one_group(
     };
 
     build_surface_batch(&grid_x, &grid_y, &density, n, (xmin, xmax, ymin, ymax))
+}
+
+/// Refuse a reversed, zero-width or non-finite extent on either axis in this
+/// transform's voice: `PyKde2D::new` checks it for the Python constructor, and
+/// a spec read from the wire reaches the transform unchecked.
+fn refuse_malformed_extent(extent: Option<(f64, f64, f64, f64)>) -> PyResult<()> {
+    match extent {
+        Some((xmin, xmax, ymin, ymax))
+            if !(xmin.is_finite() && xmax.is_finite() && ymin.is_finite() && ymax.is_finite())
+                || xmin >= xmax
+                || ymin >= ymax =>
+        {
+            Err(PyValueError::new_err(format!(
+                "stat_kde_2d: extent must satisfy xmin < xmax and ymin < ymax with all finite; \
+                 got ({xmin}, {xmax}, {ymin}, {ymax})"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The reason a 2-D group of two or more points cannot be estimated, read per
+/// axis from [`kde::unestimable_cause`]: an infinity on either axis first,
+/// then points tied on both axes, then on `x` alone, then on `y` alone.
+/// `None` when neither axis shows a cause.
+fn unestimable_points_cause(xs: &[f64], ys: &[f64]) -> Option<&'static str> {
+    match (kde::unestimable_cause(xs), kde::unestimable_cause(ys)) {
+        (Some(kde::BANDWIDTH_NOT_USABLE), _) | (_, Some(kde::BANDWIDTH_NOT_USABLE)) => {
+            Some(kde::BANDWIDTH_NOT_USABLE)
+        }
+        (Some(_), Some(_)) => Some(ALL_POINTS_EQUAL),
+        (Some(_), None) => Some(ALL_X_VALUES_EQUAL),
+        (None, Some(_)) => Some(ALL_Y_VALUES_EQUAL),
+        (None, None) => None,
+    }
 }
 
 /// Assemble the 6-column single-row RecordBatch for one 2-D KDE surface.
@@ -1617,7 +1664,7 @@ pub(crate) mod tests {
             vec![
                 ("Kde2D".to_string(), Some("g=none".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
                 ("Kde2D".to_string(), Some("g=one".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
-                ("Kde2D".to_string(), Some("g=tied".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
+                ("Kde2D".to_string(), Some("g=tied".to_string()), ALL_POINTS_EQUAL.to_string()),
             ]
         );
         for (row, flat) in [(0, true), (1, true), (2, true), (3, false)] {
@@ -1626,8 +1673,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// An ungrouped call names the whole fit, with no group, once; a bandwidth
-    /// that collapses on one axis alone is named too.
+    /// An ungrouped call names the whole fit, with no group, once; points tied
+    /// on one axis alone are named with that axis.
     #[test]
     fn an_ungrouped_unestimable_fit_is_named_without_a_group() {
         pyo3::Python::initialize();
@@ -1639,8 +1686,48 @@ pub(crate) mod tests {
         let flat_y = batch_xy(vec![0.0, 1.0, 2.0], vec![4.0, 4.0, 4.0]);
         let ctx = TransformContext::default();
         let out = apply_with_context(&spec_for(vec![]), &flat_y, &ctx).unwrap();
-        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, kde::BANDWIDTH_NOT_USABLE.to_string())]);
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, ALL_Y_VALUES_EQUAL.to_string())]);
         assert!(list_f64_at(&out, "density").iter().all(|d| *d == 0.0));
+
+        let flat_x = batch_xy(vec![4.0, 4.0, 4.0], vec![0.0, 1.0, 2.0]);
+        let ctx = TransformContext::default();
+        apply_with_context(&spec_for(vec![]), &flat_x, &ctx).unwrap();
+        assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, ALL_X_VALUES_EQUAL.to_string())]);
+    }
+
+    fn fixed_spec(value: f64, extent: Option<(f64, f64, f64, f64)>) -> Kde2DSpec {
+        Kde2DSpec { bandwidth: BandwidthSpec::Fixed { value }, extent, ..spec_for(vec![]) }
+    }
+
+    /// A fixed bandwidth is always usable, so tied points are named through
+    /// the evaluation range they leave with no width, with the same texts as
+    /// under a computed bandwidth, and an infinity keeps the bandwidth text.
+    #[test]
+    fn tied_points_under_a_fixed_bandwidth_are_named_with_their_tied_reason() {
+        pyo3::Python::initialize();
+        let cases = [
+            (vec![2.0, 2.0, 2.0], vec![5.0, 5.0, 5.0], ALL_POINTS_EQUAL),
+            (vec![0.0, 1.0, 2.0], vec![5.0, 5.0, 5.0], ALL_Y_VALUES_EQUAL),
+            (vec![2.0, 2.0, 2.0], vec![0.0, 1.0, 2.0], ALL_X_VALUES_EQUAL),
+            (vec![0.0, 1.0, f64::INFINITY], vec![0.0, 1.0, 2.0], kde::BANDWIDTH_NOT_USABLE),
+        ];
+        for (xs, ys, reason) in cases {
+            let ctx = TransformContext::default();
+            apply_with_context(&fixed_spec(0.5, None), &batch_xy(xs, ys), &ctx).unwrap();
+            assert_eq!(ctx.degenerate_fits(), vec![("Kde2D".to_string(), None, reason.to_string())], "{reason}");
+        }
+    }
+
+    /// Tied points under a fixed bandwidth and a pinned extent with width on
+    /// both axes still draw their bump: nothing is named.
+    #[test]
+    fn tied_points_under_a_fixed_bandwidth_and_a_wide_extent_draw_without_a_warning() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let b = batch_xy(vec![2.0, 2.0, 2.0], vec![5.0, 5.0, 5.0]);
+        let out = apply_with_context(&fixed_spec(0.5, Some((0.0, 4.0, 3.0, 7.0))), &b, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
+        assert!(list_f64_at(&out, "density").iter().any(|d| *d > 0.0));
     }
 
     /// A well-formed surface warns nothing, grouped or not.
@@ -1668,6 +1755,29 @@ pub(crate) mod tests {
         }
         let ungrouped = apply(&spec_for(vec![]), &batch_xy(vec![], vec![])).unwrap();
         assert_eq!(ungrouped.schema().fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), OUTPUT_FIELDS);
+    }
+
+    /// A wire-built `extent` that is reversed, zero-width or not finite on
+    /// either axis is refused in this transform's voice whatever the data.
+    #[test]
+    fn a_malformed_extent_is_refused_whatever_the_data() {
+        pyo3::Python::initialize();
+        let bad = [
+            (4.0, 0.0, 0.0, 4.0),
+            (0.0, 4.0, 3.0, 3.0),
+            (0.0, f64::INFINITY, 0.0, 4.0),
+            (0.0, 4.0, f64::NAN, 4.0),
+        ];
+        for extent in bad {
+            let spec = Kde2DSpec { extent: Some(extent), ..spec_for(vec![]) };
+            for b in [batch_xy(vec![0.0, 1.0, 3.0], vec![0.0, 2.0, 1.0]), batch_xy(vec![1.0], vec![1.0])] {
+                let err = apply(&spec, &b).expect_err("refuses").to_string();
+                assert!(
+                    err.contains("stat_kde_2d: extent must satisfy xmin < xmax and ymin < ymax with all finite"),
+                    "{extent:?}: {err}"
+                );
+            }
+        }
     }
 
     fn pinned_spec(groupby: Vec<String>) -> Kde2DSpec {

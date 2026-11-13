@@ -14054,49 +14054,84 @@ fn the_null_key_drop_count_sums_across_facet_panels() {
     }
 }
 
-/// When the null-key drop empties every panel, the faceted chart refuses
-/// with the statistic's own empty-input refusal, exactly as the unfaceted
-/// chart does, and the refusal carries the drop's warning with the whole
-/// frame's count. The rejected alternative renders a chart with no panel.
+/// When the null-key drop empties every panel, a faceted `LetterValue`
+/// refuses with its own empty-input refusal, exactly as the unfaceted chart
+/// does, and the refusal carries the drop's warning with the whole frame's
+/// count. The rejected alternative renders a chart with no panel.
 #[test]
-fn the_null_key_drop_emptying_every_panel_refuses_with_the_drop_warning() {
-    for ((name, transform), refusal) in NULL_KEY_TRANSFORMS.into_iter().zip(["stat_letter_value", "stat_qq"]) {
-        let err = null_key_facet_run(transform, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
-            .err()
-            .unwrap_or_else(|| panic!("{name}: a chart the drop emptied refuses"));
-        assert_eq!(err.to_string(), format!("transform failed: ValueError: {refusal}: empty input after filter"), "{name}");
-        assert_eq!(
-            err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
-            [format!(
-                "{name}: 3 rows have a null 'h' and belong to no group, so they were dropped; \
-                 fill or filter the nulls in 'h'"
-            )],
-            "{name}: the refusal keeps the drop warning"
-        );
-    }
+fn the_null_key_drop_emptying_every_panel_refuses_a_letter_value_with_the_drop_warning() {
+    let (name, transform) = NULL_KEY_TRANSFORMS[0];
+    let err = null_key_facet_run(transform, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
+        .err()
+        .unwrap_or_else(|| panic!("{name}: a chart the drop emptied refuses"));
+    assert_eq!(err.to_string(), "transform failed: ValueError: stat_letter_value: empty input after filter");
+    assert_eq!(
+        err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["LetterValue: 3 rows have a null 'h' and belong to no group, so they were dropped; \
+          fill or filter the nulls in 'h'"],
+        "the refusal keeps the drop warning"
+    );
 }
 
-/// The unfaceted chart the drop empties refuses in the same words and
+/// The same faceted call over a `QQ` does not refuse: the whole frame's
+/// all-null-key warning is reported once, in place of the per-panel counts,
+/// and every panel is emptied by the drop and keeps its place, as `Kde` does.
+#[test]
+fn the_null_key_drop_emptying_every_panel_warns_once_for_a_qq_and_empties_every_panel() {
+    let (outputs, warnings, _, partitions) =
+        null_key_facet_run(NULL_KEY_TRANSFORMS[1].1, vec!["p", "p", "q"], vec![None, None, None], vec![1.0, 2.0, 3.0])
+            .unwrap_or_else(|e| panic!("a QQ the drop emptied must not fail the chart: {e}"));
+    assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0);
+    assert_eq!(
+        partitions.emptied_by_drop,
+        HashSet::from([("p".to_string(), None), ("q".to_string(), None)])
+    );
+    assert_eq!(
+        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
+          the grouped output is empty"]
+    );
+}
+
+/// A frame of two rows whose `h` key is null on both, as a single unfaceted
+/// chart over `transform`.
+fn run_unfaceted_all_null_keys(transform: &str) -> Result<TransformRun, RenderError> {
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},"transforms":[{transform}]}}"#
+    );
+    let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    pyo3::Python::initialize();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("h", DataType::Utf8, true), Field::new("v", DataType::Float64, true)])),
+        vec![Arc::new(StringArray::from(vec![None::<&str>, None])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+    )
+    .expect("schema and columns agree");
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    run_transforms_with_facet(&spec, &batch, viewport, &theme, None)
+}
+
+/// The unfaceted `LetterValue` the drop empties refuses in the same words and
 /// carries the same warning, so the facet changes neither.
 #[test]
-fn an_unfaceted_chart_the_null_key_drop_empties_refuses_with_the_drop_warning() {
-    for ((name, transform), refusal) in NULL_KEY_TRANSFORMS.into_iter().zip(["stat_letter_value", "stat_qq"]) {
-        let json = format!(
-            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"point","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},"transforms":[{transform}]}}"#
-        );
-        let spec: ChartSpec = serde_json::from_str(&json).expect("valid spec");
-        pyo3::Python::initialize();
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("h", DataType::Utf8, true), Field::new("v", DataType::Float64, true)])),
-            vec![Arc::new(StringArray::from(vec![None::<&str>, None])), Arc::new(Float64Array::from(vec![1.0, 2.0]))],
-        )
-        .expect("schema and columns agree");
-        let theme = crate::layout::ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
-        let err = run_transforms_with_facet(&spec, &batch, viewport, &theme, None).err().expect("refuses");
-        assert_eq!(err.to_string(), format!("transform failed: ValueError: {refusal}: empty input after filter"), "{name}");
-        assert_eq!(err.carried_warnings().len(), 1, "{name}: {:?}", err.carried_warnings());
-    }
+fn an_unfaceted_letter_value_the_null_key_drop_empties_refuses_with_the_drop_warning() {
+    let err = run_unfaceted_all_null_keys(NULL_KEY_TRANSFORMS[0].1).err().expect("refuses");
+    assert_eq!(err.to_string(), "transform failed: ValueError: stat_letter_value: empty input after filter");
+    assert_eq!(err.carried_warnings().len(), 1, "{:?}", err.carried_warnings());
+}
+
+/// The unfaceted `QQ` the drop empties runs and reports the all-null-key
+/// warning, with no row, as `Kde` does.
+#[test]
+fn an_unfaceted_qq_the_null_key_drop_empties_warns_and_emits_no_row() {
+    let (outputs, warnings, _, _) = run_unfaceted_all_null_keys(NULL_KEY_TRANSFORMS[1].1)
+        .unwrap_or_else(|e| panic!("a QQ the drop emptied must not fail the chart: {e}"));
+    assert_eq!(outputs.get(FINAL_OUTPUT_KEY).expect("the tail is published").num_rows(), 0);
+    assert_eq!(
+        warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
+          the grouped output is empty"]
+    );
 }
 
 /// Two named steps that read the SAME rows under the SAME key, with no
@@ -14547,9 +14582,10 @@ fn faceted_hue_rows(h: Vec<Option<&str>>) -> RecordBatch {
 
 /// A grouped qq panel whose every hue is null draws empty beside the drawn
 /// panel, with the drop warning, and the scene draws both panels; when
-/// every panel's hue is null the chart refuses with the drop warning.
+/// every panel's hue is null the chart still renders, with the all-null-key
+/// warning once.
 #[test]
-fn a_grouped_qq_facet_panel_the_drop_emptied_draws_empty_and_all_emptied_refuses() {
+fn a_grouped_qq_facet_panel_the_drop_emptied_draws_empty_and_all_emptied_warns_once() {
     pyo3::Python::initialize();
     let spec: ChartSpec = serde_json::from_str(FACETED_GROUPED_QQ).expect("the qq wire deserializes");
     let rows = faceted_hue_rows(vec![Some("a"), Some("b"), Some("a"), Some("b"), None, None, None, None]);
@@ -14562,12 +14598,15 @@ fn a_grouped_qq_facet_panel_the_drop_emptied_draws_empty_and_all_emptied_refuses
     let (scene, _) = gate_render(&spec, &rows);
     assert_eq!(scene.expect("renders").panels.len(), 2, "both panels are drawn");
 
-    let err = prepare_with(&spec, &faceted_hue_rows(vec![None; 8])).err().expect("every panel emptied refuses");
-    assert_eq!(err.to_string(), "transform failed: ValueError: stat_qq: empty input after filter");
+    let all_null = faceted_hue_rows(vec![None; 8]);
+    let p = prep(&spec, &all_null);
     assert_eq!(
-        err.carried_warnings().iter().map(|w| w.to_string()).collect::<Vec<_>>(),
-        ["QQ: 8 rows have a null 'h' and belong to no group, so they were dropped; fill or filter the nulls in 'h'"]
+        p.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        ["QQ: every row has a null in its groupby key (h), so the data could not be split into groups; \
+          the grouped output is empty"]
     );
+    let (scene, _) = gate_render(&spec, &all_null);
+    assert_eq!(scene.expect("renders").panels.len(), 2, "every emptied panel is drawn");
 }
 
 /// Eight rows over facet panels `F1`/`F2` and hue `h` (a, b, a, b, ...),
@@ -14588,12 +14627,12 @@ fn faceted_valued_rows(val: Vec<Option<f64>>) -> RecordBatch {
     .expect("schema and columns agree")
 }
 
-/// A faceted qq with no usable value in any panel refuses as the whole frame
-/// does, and carries no warning that says a panel or group degraded instead
-/// of failing; with a usable value in one panel the chart draws and the
-/// emptied panel's groups are each named once.
+/// A faceted qq with no usable value in any panel renders: each panel's
+/// groups are named once (the ungrouped wire names each panel), every panel
+/// stays, and the reference-line source is still published. With a usable
+/// value in one panel only the emptied panel's groups are named.
 #[test]
-fn a_faceted_qq_with_no_usable_value_in_any_panel_refuses_without_a_degrade_warning() {
+fn a_faceted_qq_with_no_usable_value_in_any_panel_names_every_panel_and_keeps_the_line_source() {
     pyo3::Python::initialize();
     let grouped: ChartSpec = serde_json::from_str(FACETED_GROUPED_QQ).expect("the qq wire deserializes");
     let ungrouped: ChartSpec = serde_json::from_str(
@@ -14602,20 +14641,24 @@ fn a_faceted_qq_with_no_usable_value_in_any_panel_refuses_without_a_degrade_warn
             .replace(r#""groupby":["h","f"]"#, r#""groupby":["f"]"#),
     )
     .expect("the ungrouped qq wire deserializes");
-    for (name, spec) in [("grouped", &grouped), ("ungrouped", &ungrouped)] {
-        let err = prepare_with(spec, &faceted_valued_rows(vec![None; 8])).err().expect("every panel emptied refuses");
-        assert_eq!(err.to_string(), "transform failed: ValueError: stat_qq: empty input after filter", "{name}");
-        assert!(err.carried_warnings().is_empty(), "{name}: {:?}", err.carried_warnings());
+    let degraded = |p: &PreparedInputs| -> Vec<String> {
+        p.warnings
+            .iter()
+            .map(|w| w.to_string())
+            .filter(|w| w.contains("degraded to an empty/flat output"))
+            .collect()
+    };
+    for (name, spec, named) in [("grouped", &grouped, 4), ("ungrouped", &ungrouped, 2)] {
+        let rows = faceted_valued_rows(vec![None; 8]);
+        let p = prep(spec, &rows);
+        assert_eq!(degraded(&p).len(), named, "{name}: every emptied unit is named once: {:?}", degraded(&p));
+        assert_eq!(p.facet_groups.len(), 2, "{name}: both panels stay");
+        let (scene, _) = gate_render(spec, &rows);
+        assert_eq!(scene.expect("renders").panels.len(), 2, "{name}");
     }
     let mixed = faceted_valued_rows(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), None, None, None, None]);
     let p = prep(&grouped, &mixed);
-    let degraded: Vec<String> = p
-        .warnings
-        .iter()
-        .map(|w| w.to_string())
-        .filter(|w| w.contains("degraded to an empty/flat output"))
-        .collect();
-    assert_eq!(degraded.len(), 2, "each emptied group of the emptied panel is named once: {degraded:?}");
+    assert_eq!(degraded(&p).len(), 2, "each emptied group of the emptied panel is named once: {:?}", degraded(&p));
 }
 
 /// Thirty rows over three interleaved `c` groups (`a`, `b`, `c` in turn),

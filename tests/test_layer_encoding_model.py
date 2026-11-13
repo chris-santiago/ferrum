@@ -59,7 +59,15 @@ from tests._legends import svg_root as _svg_root
 from tests._legends import tag as _tag
 from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
-from tests.test_null_group_warning import _NO_FACET_ROWS_WARNING
+from tests.test_null_group_warning import (
+    _NO_FACET_ROWS_WARNING,
+    _NO_ROWS_TO_DRAW,
+    _all_keys_null_fallback_message,
+    _all_keys_null_message,
+    _facet_key_dropped_message,
+    _null_key_dropped_message,
+    _panel_key_fallback_message,
+)
 from tests._wire_steps import all_steps, operand_branches
 
 SY = fm.SecondaryY
@@ -6368,10 +6376,7 @@ def test_the_static_overlay_of_a_faceted_member_draws_what_its_merged_chart_draw
 # A frame holding ``c`` with nulls: rows 7 and 8 of df, rows 2 and 4 of df2.
 _DF_NULL_C = df.with_columns(c=pl.Series(["p", "p", "q", "q", "p", "p", None, None], dtype=pl.Utf8))
 _DF2_NULL_C = df2.with_columns(c=pl.Series(["p", None, "q", None, "p", "q"], dtype=pl.Utf8))
-_TWO_NULL_ROWS = (
-    "facet 'c': 2 rows have a null 'c' and belong to no panel, so they were dropped; "
-    "fill or filter the nulls in 'c'"
-)
+_TWO_NULL_ROWS = _facet_key_dropped_message(2, "c")
 
 # Each door: the chart, its per-panel marks, and the one warning it raises.
 _FACET_NULLS: dict[str, tuple[Callable[[], Any], list[dict[str, int]]]] = {
@@ -13917,30 +13922,42 @@ def test_a_faceted_panel_the_null_key_drop_emptied_draws_empty_beside_the_drop_w
 
 
 @pytest.mark.parametrize("facet", [True, False], ids=["faceted", "unfaceted"])
-@pytest.mark.parametrize("kind", sorted(_NULL_PANEL_CHARTS))
-def test_a_null_key_drop_that_empties_every_panel_refuses_beside_the_drop_warning(kind, facet):
-    """Every hue null: the chart refuses with the statistic's empty-input refusal, and the drop warns.
+def test_a_null_key_drop_that_empties_every_panel_refuses_a_boxen_beside_the_drop_warning(facet):
+    """Every hue null: the boxen refuses with its statistic's empty-input refusal, and the drop warns.
 
     Faceted and unfaceted refuse alike. Rejects the faceted chart rendering
     with no panel (a ``NoRowsToDraw`` warning), and a refusal that hides the
     drop that caused it.
     """
-    build, label = _NULL_PANEL_CHARTS[kind]
-    refusal = {"boxen": "stat_letter_value", "qq": "stat_qq"}[kind]
     all_null = _NULL_PANEL.with_columns(pl.lit(None, dtype=pl.Utf8).alias("h"))
-    chart = {
-        "boxen": lambda: fm.Chart(all_null).mark_boxen().encode(x="cat", y="val", color="h"),
-        "qq": lambda: fm.Chart(all_null).mark_qq().encode(x="val", color="h"),
-    }[kind]
+    chart = lambda: fm.Chart(all_null).mark_boxen().encode(x="cat", y="val", color="h")  # noqa: E731
     refused, dropped = _drop_warnings(
         lambda: chart().facet("f") if facet else chart(), lambda c: c.to_svg()
     )
     assert isinstance(refused, ValueError)
-    assert str(refused) == f"transform failed: ValueError: {refusal}: empty input after filter"
-    assert dropped == [
-        f"{label}: 20 rows have a null 'h' and belong to no group, so they were dropped; "
-        "fill or filter the nulls in 'h'"
-    ]
+    assert (
+        str(refused) == "transform failed: ValueError: stat_letter_value: empty input after filter"
+    )
+    assert dropped == [_null_key_dropped_message("LetterValue", 20, "h")]
+
+
+@pytest.mark.parametrize("facet", [True, False], ids=["faceted", "unfaceted"])
+def test_a_null_key_drop_that_empties_every_panel_draws_a_qq_empty_as_a_density_does(facet):
+    """Every hue null: the QQ keeps its chart, as ``Kde`` does, and says the grouped output is empty.
+
+    Unfaceted the chart then reports it has no rows to draw; faceted every panel is drawn
+    empty. The null-key count warning is not repeated beside the empty-split sentence.
+    """
+    all_null = _NULL_PANEL.with_columns(pl.lit(None, dtype=pl.Utf8).alias("h"))
+    chart = fm.Chart(all_null).mark_qq().encode(x="val", color="h")
+    chart = chart.facet("f") if facet else chart
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    shown = [str(w.message) for w in caught]
+    assert shown == [_all_keys_null_message("QQ", "h")] + ([] if facet else [_NO_ROWS_TO_DRAW])
+    if facet:
+        assert ">F1<" in svg and ">F2<" in svg
 
 
 def test_two_grouped_steps_of_one_kind_count_their_null_key_drops_apart_under_a_facet():
@@ -14679,10 +14696,7 @@ def test_mark_smooth_with_an_all_null_hue_renders_one_pooled_fit(method, output)
         warnings.simplefilter("always")
         drawn = chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught]
-    assert said == [
-        "Smooth: every row has a null in its groupby key (h), so the data could not be "
-        "split into groups; the whole batch was used as one ungrouped computation instead"
-    ]
+    assert said == [_all_keys_null_fallback_message("Smooth", "h")]
     if output == "static":
         assert tag_counts(drawn).get("polyline", 0) == 1
     else:
@@ -14709,10 +14723,7 @@ def test_lmplot_with_an_all_null_hue_warns_the_all_null_text_alone_and_draws_one
         warnings.simplefilter("always")
         drawn = chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught]
-    assert said == [
-        f"{transform}: every row has a null in its groupby key (h), so the data could not "
-        "be split into groups; the whole batch was used as one ungrouped computation instead"
-    ]
+    assert said == [_all_keys_null_fallback_message(transform, "h")]
     if output == "static":
         assert tag_counts(drawn).get("polyline", 0) == 1
     else:
@@ -14743,10 +14754,7 @@ def test_mark_smooth_faceted_with_an_all_null_hue_pools_one_fit_per_panel(method
         warnings.simplefilter("always")
         drawn = chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught]
-    assert said == [
-        "Smooth: every row has a null in its groupby key (h), so the data could not be "
-        "split into groups; the whole batch was used as one ungrouped computation instead"
-    ]
+    assert said == [_all_keys_null_fallback_message("Smooth", "h")]
     if output == "static":
         panels = panel_census(drawn)
         assert len(panels) == 2
@@ -14778,10 +14786,7 @@ def test_lmplot_faceted_with_an_all_null_hue_pools_one_fit_per_panel(output):
         warnings.simplefilter("always")
         drawn = chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught]
-    assert said == [
-        "Logistic: every row has a null in its groupby key (h), so the data could not be "
-        "split into groups; the whole batch was used as one ungrouped computation instead"
-    ]
+    assert said == [_all_keys_null_fallback_message("Logistic", "h")]
     if output == "static":
         panels = panel_census(drawn)
         assert len(panels) == 2
@@ -14829,10 +14834,7 @@ def test_a_pooled_fit_nulls_a_groupby_column_that_varies_not_just_the_all_null_o
             assert drawn["legend"] == []
             assert _scene_line_counts(drawn) == [1]
     said = [str(w.message) for w in caught]
-    assert said == [
-        "Smooth: every row has a null in its groupby key (g, h), so the data could not be "
-        "split into groups; the whole batch was used as one ungrouped computation instead"
-    ]
+    assert said == [_all_keys_null_fallback_message("Smooth", "g, h")]
 
 
 @pytest.mark.parametrize("output", ["static", "interactive"])
@@ -14920,11 +14922,7 @@ def test_lmplot_faceted_with_a_hue_null_in_one_panel_names_that_panel_and_fits_t
         chart = build()
         drawn = chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught if "groupby key" in str(w.message)]
-    assert said == [
-        "Smooth: every row in facet panel f=F2 has a null in its groupby key (h), so that "
-        "panel's rows could not be split into groups; in that panel, the whole batch was "
-        "used as one ungrouped computation instead"
-    ]
+    assert said == [_panel_key_fallback_message("Smooth", "h", "f=F2")]
     if output == "static":
         panels = panel_census(drawn)
         assert len(panels) == 2
@@ -14977,11 +14975,7 @@ def test_a_whole_batch_fallback_pooled_in_one_facet_panel_names_it(method, outpu
         warnings.simplefilter("always")
         drawn = chart.to_svg() if output == "static" else chart.interactive().scene_json
     said = [str(w.message) for w in caught if "groupby key" in str(w.message)]
-    assert said == [
-        "Smooth: every row in facet panel f=F2 has a null in its groupby key (h), so that "
-        "panel's rows could not be split into groups; in that panel, the whole batch was "
-        "used as one ungrouped computation instead"
-    ]
+    assert said == [_panel_key_fallback_message("Smooth", "h", "f=F2")]
     svg_digest, scene_digest = _FACET_PARTIAL_ALL_NULL_DIGESTS[method]
     expected = svg_digest if output == "static" else scene_digest
     assert hashlib.sha256(drawn.encode()).hexdigest() == expected
@@ -15024,9 +15018,7 @@ def test_grouped_impute_faceted_with_every_key_null_in_one_panel_names_it_and_pu
         chart.to_svg() if output == "static" else _scene(chart)
     said = [str(w.message) for w in caught]
     assert [m for m in said if "groupby key" in m] == [
-        "Impute: every row in facet panel f=F2 has a null in its groupby key (h), so that "
-        "panel's rows could not be split into groups; in that panel, the whole batch was "
-        "used as one ungrouped computation instead"
+        _panel_key_fallback_message("Impute", "h", "f=F2")
     ]
     assert [m for m in said if "belong to no group" in m] == []
 

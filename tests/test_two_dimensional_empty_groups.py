@@ -2,8 +2,8 @@
 
 A contour (``Kde2D`` then ``Contour``), a 2-D density figure, a hexbin or a raster whose points
 cannot be estimated or placed keeps its legend entry or facet panel and is named once, by its
-statistic's ``DegenerateFit``. ``Kde2D`` names a group or panel with fewer than two points, an
-unusable bandwidth, or a density that is zero at every grid point; ``Hex`` and ``Raster`` name a
+statistic's ``DegenerateFit``. ``Kde2D`` names a group or panel with fewer than two points, identical points, points tied on
+one axis (under any bandwidth), an infinite coordinate, or a density that is zero at every grid point; ``Hex`` and ``Raster`` name a
 panel or call with rows and no non-null, finite point (or, for an aggregate that reads one, no
 usable ``field=`` value). The render's census defers to the statistic that named the unit, so every
 chart here raises exactly the listed messages. A frame with no rows reports that the chart has no
@@ -22,8 +22,12 @@ import ferrum as fm
 from tests.test_null_group_warning import (
     FIT_BANDWIDTH,
     FIT_FEW_PAIRS,
+    FIT_TIED_POINTS,
+    FIT_TIED_X,
+    FIT_TIED_Y,
     _NO_FACET_ROWS_WARNING,
     _NO_ROWS_TO_DRAW,
+    _facet_key_dropped_message,
     _fit_message,
     _panel_fit_message,
     _render_capturing,
@@ -43,8 +47,9 @@ _C_CASES = [
     pytest.param([(None, None)] * 4, _FEW_POINTS, id="all-null"),
     pytest.param([(_NAN, _NAN)] * 4, _FEW_POINTS, id="nan"),
     pytest.param([(1.0, 1.0)], _FEW_POINTS, id="one"),
-    pytest.param([(1.0, 2.0)] * 4, FIT_BANDWIDTH, id="tied"),
-    pytest.param([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)], FIT_BANDWIDTH, id="tied-y"),
+    pytest.param([(1.0, 2.0)] * 4, FIT_TIED_POINTS, id="tied"),
+    pytest.param([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)], FIT_TIED_Y, id="tied-y"),
+    pytest.param([(2.0, 0.0), (2.0, 1.0), (2.0, 2.0), (2.0, 3.0)], FIT_TIED_X, id="tied-x"),
     pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (_INF, 3.0)], FIT_BANDWIDTH, id="inf-x"),
 ]
 _CONTOUR_FILLS = [pytest.param(False, id="isoline"), pytest.param(True, id="isoband")]
@@ -181,6 +186,27 @@ def test_a_contour_group_it_cannot_estimate_is_named(
     assert ">c<" in svg
 
 
+_FIXED_BANDWIDTH_TIED_CASES = [
+    pytest.param([(1.0, 2.0)] * 4, FIT_TIED_POINTS, id="tied"),
+    pytest.param([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)], FIT_TIED_Y, id="tied-y"),
+    pytest.param([(2.0, 0.0), (2.0, 1.0), (2.0, 2.0), (2.0, 3.0)], FIT_TIED_X, id="tied-x"),
+    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (_INF, 3.0)], FIT_BANDWIDTH, id="inf-x"),
+]
+
+
+@pytest.mark.parametrize("points,reason", _FIXED_BANDWIDTH_TIED_CASES)
+def test_a_contour_group_it_cannot_estimate_under_a_fixed_bandwidth_names_its_cause(
+    points: list[tuple[float | None, float | None]], reason: str
+):
+    """A caller's bandwidth is always usable, so the data is the cause: the group is named with
+    the tied (or infinite-coordinate) reason, instead of the census blaming null x and y (identical
+    points, an infinity) or nothing being said for a body that draws nothing (a tie on one axis)."""
+    chart = fm.Chart(_hue_frame(points)).mark_contour(bandwidth=0.5).encode(x="x", y="y", color="g")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == [_fit_message("Kde2D", "g=c", reason)]
+    assert ">c<" in svg
+
+
 def test_a_contour_group_with_a_null_row_and_enough_points_stays_silent():
     """A null row in a group that still has distinct points to estimate from is no degenerate
     group: nothing is named and the level stays in the legend."""
@@ -311,8 +337,9 @@ def test_an_all_null_contour_names_its_cause_not_the_empty_chart(blank: str, fil
     "x,y,reason",
     [
         pytest.param([1.0], [1.0], _FEW_POINTS, id="one"),
-        pytest.param([1.0] * 4, [2.0] * 4, FIT_BANDWIDTH, id="tied"),
-        pytest.param([0.0, 1.0, 2.0, 3.0], [4.0] * 4, FIT_BANDWIDTH, id="tied-y"),
+        pytest.param([1.0] * 4, [2.0] * 4, FIT_TIED_POINTS, id="tied"),
+        pytest.param([0.0, 1.0, 2.0, 3.0], [4.0] * 4, FIT_TIED_Y, id="tied-y"),
+        pytest.param([4.0] * 4, [0.0, 1.0, 2.0, 3.0], FIT_TIED_X, id="tied-x"),
     ],
 )
 def test_a_contour_of_one_point_or_identical_points_names_its_cause(
@@ -351,8 +378,7 @@ def test_a_frame_whose_facet_key_is_all_null_draws_no_panel(mark_method: str):
     )
     _, shown = _render_capturing(_chart(mark_method, df).facet(col="f").to_svg)
     assert shown == [
-        "facet 'f': 20 rows have a null 'f' and belong to no panel, so they were dropped; "
-        "fill or filter the nulls in 'f'",
+        _facet_key_dropped_message(20, "f"),
         _NO_FACET_ROWS_WARNING,
     ]
 

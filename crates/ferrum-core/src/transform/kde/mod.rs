@@ -139,6 +139,28 @@ pub(crate) const FEWER_THAN_TWO_USABLE_VALUES: &str = "fewer than 2 usable (non-
 /// statistic that fits a kernel bandwidth.
 pub(crate) const BANDWIDTH_NOT_USABLE: &str = "the bandwidth resolved to a non-positive or non-finite value";
 
+/// Reason a group whose usable values are all one value cannot be estimated.
+/// Shared by every 1-D density statistic.
+pub(crate) const ALL_VALUES_EQUAL: &str = "its usable values are all equal";
+
+/// The reason a density cannot be estimated from `values` (already stripped
+/// of nulls and NaNs), or `None` when they can be. The one place the order of
+/// causes lives, read by every 1-D density statistic: fewer than two values,
+/// then an infinity among them (its extent is not finite, so no bandwidth
+/// resolves), then all values equal.
+pub(crate) fn unestimable_cause(values: &[f64]) -> Option<&'static str> {
+    if values.len() < 2 {
+        return Some(FEWER_THAN_TWO_USABLE_VALUES);
+    }
+    let (lo, hi) = values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    if !(lo.is_finite() && hi.is_finite()) {
+        return Some(BANDWIDTH_NOT_USABLE);
+    }
+    (lo >= hi).then_some(ALL_VALUES_EQUAL)
+}
+
 pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
@@ -274,15 +296,31 @@ enum CountScaleBins {
 /// constructor checks it for `extent`, and this slot has no constructor to
 /// check it anywhere else.
 fn validate_count_scale_extent(spec: &KdeSpec) -> PyResult<()> {
-    if let Some((lo, hi)) = spec.count_scale_extent {
-        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
-            return Err(PyValueError::new_err(format!(
-                "stat_kde: count_scale_extent must satisfy lo < hi with both finite; \
-                 got ({lo}, {hi})"
-            )));
+    refuse_malformed_extent(LABEL, "count_scale_extent", spec.count_scale_extent)
+}
+
+/// Refuse a malformed [`KdeSpec::extent`] at the same boundary, in the same
+/// words. `PyKde::new` checks it for the Python constructor, but a spec read
+/// from the wire reaches the transform unchecked, and a reversed or
+/// zero-width grid is not a fit the data could not support: it is a request
+/// the transform cannot honor.
+fn validate_extent(spec: &KdeSpec) -> PyResult<()> {
+    refuse_malformed_extent(LABEL, "extent", spec.extent)
+}
+
+/// Refuse a reversed, zero-width or non-finite 1-D extent in `voice`, the
+/// refusing transform's own prefix. Read by `Kde` for its two extent slots and
+/// by `Violin` for its own, so every statistic that reads a caller extent
+/// refuses it by what it is, at its own entry, whatever the data.
+pub(crate) fn refuse_malformed_extent(voice: &str, slot: &str, extent: Option<(f64, f64)>) -> PyResult<()> {
+    match extent {
+        Some((lo, hi)) if !lo.is_finite() || !hi.is_finite() || lo >= hi => {
+            Err(PyValueError::new_err(format!(
+                "{voice}: {slot} must satisfy lo < hi with both finite; got ({lo}, {hi})"
+            )))
         }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -290,9 +328,8 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 }
 
 /// Context-aware entry point (#162): identical dispatch to [`apply`], plus
-/// `ctx.warnings` as the sink for this transform's own degrade sites (see
-/// [`apply_one_group`]'s `clean.len() < 2` and non-finite-bandwidth
-/// branches), and, when a drawn log axis demands this `Kde`
+/// `ctx.warnings` as the sink for this transform's degrade site (see
+/// [`compute_one_group`]'s drawable-fit check), and, when a drawn log axis demands this `Kde`
 /// (`ctx.log_space`), as the caller-column sink
 /// ([`TransformContext::note_log_input`]).
 pub(crate) fn apply_with_context(
@@ -301,6 +338,7 @@ pub(crate) fn apply_with_context(
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     crate::transform::vocabulary::check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
+    validate_extent(spec)?;
     validate_count_scale_extent(spec)?;
     match ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Field)) {
         Some(slot) => apply_in_log_space(spec, batch, ctx, slot),
@@ -461,9 +499,12 @@ fn apply_one_group(
 /// extends its own accumulator `Vec`s from the typed result.
 ///
 /// **Null-to-NaN rule:** `density` never carries an Arrow null — a
-/// degenerate fit (fewer than 2 clean values, or a non-positive/non-finite
-/// bandwidth) reports a [`TransformWarning::DegenerateFit`] and fills every
-/// grid point with `f64::NAN`, the real float value, not an absent one. This
+/// degenerate fit (fewer than 2 clean values, a non-positive/non-finite
+/// bandwidth, or an evaluation range that is not finite or has no width)
+/// reports a [`TransformWarning::DegenerateFit`] and fills every grid point
+/// with `f64::NAN`, the real float value, not an absent one. A group with no
+/// usable value and no pinned extent also takes a NaN grid, so it adds no
+/// position to the axis. This
 /// is decided HERE, at the compute step, once; nothing downstream (the
 /// schema, the grouped accumulator, or a caller) needs to translate between
 /// an Arrow null and a NaN sentinel for this transform's output.
@@ -486,11 +527,13 @@ fn compute_one_group(
     )?;
     let clean = crate::transform::numeric_util::clean_float64_values(&arr, only_indices);
 
+    // A group with no usable value and no pinned extent has no position: its
+    // grid is NaN, so the scale reads nothing from it.
     let (lo, hi) = match spec.extent {
         Some((a, b)) => (a, b),
         None => {
             if clean.is_empty() {
-                (0.0, 0.0)
+                (f64::NAN, f64::NAN)
             } else {
                 clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
                     (a.min(v), b.max(v))
@@ -509,29 +552,31 @@ fn compute_one_group(
         })
         .collect();
 
-    let density: Vec<f64> = if clean.len() < 2 {
+    // The fit is drawn only with two or more values, a usable bandwidth and
+    // an evaluation range that is finite and has width. Anything else is
+    // named once, with the cause the data shows.
+    let h = if clean.len() >= 2 {
+        bandwidth(&clean, &spec.bandwidth)? * spec.bw_adjust
+    } else {
+        f64::NAN
+    };
+    let drawable = clean.len() >= 2
+        && h > 0.0
+        && h.is_finite()
+        && lo.is_finite()
+        && hi.is_finite()
+        && lo < hi;
+    let density: Vec<f64> = if drawable {
+        kernel_density_at_grid(&clean, h, &grid, &spec.kernel)?
+    } else {
         warn_ctx.warn(TransformWarning::DegenerateFit {
             transform: "Kde".into(),
             group: group.map(str::to_string),
-            reason: FEWER_THAN_TWO_USABLE_VALUES.into(),
+            reason: unestimable_cause(&clean).unwrap_or(BANDWIDTH_NOT_USABLE).into(),
             panel: None,
             step: warn_ctx.step.clone(),
         });
         vec![f64::NAN; spec.n]
-    } else {
-        let h = bandwidth(&clean, &spec.bandwidth)? * spec.bw_adjust;
-        if h <= 0.0 || !h.is_finite() {
-            warn_ctx.warn(TransformWarning::DegenerateFit {
-                transform: "Kde".into(),
-                group: group.map(str::to_string),
-                reason: BANDWIDTH_NOT_USABLE.into(),
-                panel: None,
-                step: warn_ctx.step.clone(),
-            });
-            vec![f64::NAN; spec.n]
-        } else {
-            kernel_density_at_grid(&clean, h, &grid, &spec.kernel)?
-        }
     };
 
     let mut density = if spec.cumulative {

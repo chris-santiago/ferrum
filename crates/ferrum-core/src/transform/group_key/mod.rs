@@ -389,11 +389,6 @@ pub(crate) enum NullKeyPolicy {
     /// [`NullKeyPolicy::SkipWithWholeBatchFallback`]: every row still gets
     /// the whole-column statistic, and the warning says so.
     FillFromWholeBatch,
-    /// Drop them as [`NullKeyPolicy::Skip`] does, for a transform that
-    /// refuses the input a drop leaves with nothing to compute (`QQ`): the
-    /// drop's per-field counts explain that refusal, so no all-null warning
-    /// is pushed beside it.
-    SkipRefusingEmpty,
     /// Keep null-keyed rows as one pooled null-keyed group. For the transforms
     /// whose contract is one output value per INPUT row (`data_stack`,
     /// `data_join_aggregate`) and which therefore append no group column:
@@ -434,7 +429,6 @@ impl NullKeyPolicy {
         match self {
             NullKeyPolicy::Skip
             | NullKeyPolicy::SkipWithWholeBatchFallback
-            | NullKeyPolicy::SkipRefusingEmpty
             | NullKeyPolicy::FillFromWholeBatch => any_null == n_rows,
             NullKeyPolicy::Pool => fully_null == n_rows,
         }
@@ -445,7 +439,6 @@ impl NullKeyPolicy {
     fn all_null_disposition(self) -> &'static str {
         match self {
             NullKeyPolicy::Skip => "the grouped output is empty",
-            NullKeyPolicy::SkipRefusingEmpty => "the transform refuses its empty input",
             NullKeyPolicy::SkipWithWholeBatchFallback | NullKeyPolicy::FillFromWholeBatch => {
                 "the whole batch was used as one ungrouped computation instead"
             }
@@ -708,9 +701,7 @@ pub(crate) fn group_partition_multi(
 ///   drops no row at all (`Impute` keeps and fills a null-keyed row from the
 ///   whole column, and says so itself), so it counts none.
 /// - A whole frame whose every row was null-keyed reports
-///   [`TransformWarning::GroupKeyAllNull`] in place of the counts (no
-///   warning under [`NullKeyPolicy::SkipRefusingEmpty`], whose refusal the
-///   counts explain).
+///   [`TransformWarning::GroupKeyAllNull`] in place of the counts.
 /// - A facet partition whose every row was null-keyed pushes no per-panel
 ///   all-null warning: it records the case ([`TransformContext::record_all_null`])
 ///   so the facet run decides once per step. Under

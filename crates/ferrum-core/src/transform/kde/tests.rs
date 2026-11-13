@@ -2418,3 +2418,219 @@ fn a_log_kde_over_a_missing_field_refuses_in_its_own_voice() {
     let err = apply_with_context(&spec, &batch_with("x", vec![1.0, 2.0]), &ctx_demanding_x(positive_space())).unwrap_err().to_string();
     assert!(err.contains("stat_kde: column 'absent' not found"), "{err}");
 }
+
+// ---- Reasons a group cannot be estimated, and where an empty group sits ----
+
+fn batch_x_g(values: Vec<Option<f64>>, groups: Vec<&str>) -> RecordBatch {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Float64Array::from(values)), Arc::new(StringArray::from(groups))],
+    )
+    .unwrap()
+}
+
+fn fit_reasons(ctx: &TransformContext) -> Vec<(Option<String>, String)> {
+    ctx.degenerate_fits().into_iter().map(|(_, group, reason)| (group, reason)).collect()
+}
+
+fn spec_with(bandwidth: BandwidthSpec, extent: Option<(f64, f64)>, groupby: Vec<String>) -> KdeSpec {
+    KdeSpec { bandwidth, extent, n: 8, ..minimal_spec(groupby) }
+}
+
+/// The cause order every 1-D density statistic reads: too few, then an
+/// infinity, then a tie; `None` for values that can be estimated.
+#[test]
+fn unestimable_cause_names_fewer_than_two_then_an_infinity_then_a_tie() {
+    assert_eq!(unestimable_cause(&[]), Some(FEWER_THAN_TWO_USABLE_VALUES));
+    assert_eq!(unestimable_cause(&[3.0]), Some(FEWER_THAN_TWO_USABLE_VALUES));
+    assert_eq!(unestimable_cause(&[f64::INFINITY]), Some(FEWER_THAN_TWO_USABLE_VALUES));
+    assert_eq!(unestimable_cause(&[1.0, f64::INFINITY]), Some(BANDWIDTH_NOT_USABLE));
+    assert_eq!(unestimable_cause(&[f64::NEG_INFINITY, 2.0, 2.0]), Some(BANDWIDTH_NOT_USABLE));
+    assert_eq!(unestimable_cause(&[f64::INFINITY, f64::INFINITY]), Some(BANDWIDTH_NOT_USABLE));
+    assert_eq!(unestimable_cause(&[4.0, 4.0, 4.0]), Some(ALL_VALUES_EQUAL));
+    assert_eq!(unestimable_cause(&[1.0, 2.0]), None);
+}
+
+/// Tied values under a computed bandwidth are named as tied, not as a
+/// bandwidth that failed to resolve, grouped or not.
+#[test]
+fn tied_values_under_a_computed_bandwidth_are_named_as_tied() {
+    pyo3::Python::initialize();
+    for bandwidth in [BandwidthSpec::Scott, BandwidthSpec::Silverman] {
+        let ctx = TransformContext::default();
+        let batch = batch_x_g(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(4.0), Some(4.0)], vec!["a", "a", "a", "b", "b", "b"]);
+        let out = apply_with_context(&spec_with(bandwidth.clone(), None, vec!["g".into()]), &batch, &ctx).unwrap();
+        assert_eq!(fit_reasons(&ctx), vec![(Some("g=b".to_string()), ALL_VALUES_EQUAL.to_string())]);
+        assert_eq!(out.num_rows(), 16, "both groups keep their rows");
+
+        let ctx = TransformContext::default();
+        apply_with_context(&spec_with(bandwidth, None, vec![]), &batch_with("x", vec![4.0; 5]), &ctx).unwrap();
+        assert_eq!(fit_reasons(&ctx), vec![(None, ALL_VALUES_EQUAL.to_string())]);
+    }
+}
+
+/// A fixed bandwidth over tied values leaves the group's own range with no
+/// width, so nothing can be drawn and the group is named as tied.
+#[test]
+fn tied_values_under_a_fixed_bandwidth_and_a_range_from_the_data_are_named() {
+    pyo3::Python::initialize();
+    let ctx = TransformContext::default();
+    let out = apply_with_context(
+        &spec_with(BandwidthSpec::Fixed { value: 0.5 }, None, vec![]),
+        &batch_with("x", vec![3.0; 4]),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(fit_reasons(&ctx), vec![(None, ALL_VALUES_EQUAL.to_string())]);
+    assert!(col(&out, "density").iter().all(|d| d.is_nan()));
+}
+
+/// The same tied values under a fixed bandwidth and an extent with width draw
+/// their bump: the fit can be drawn, so nothing is named. A shared extent
+/// wider than the tie (pinned from the whole frame) does the same per group.
+#[test]
+fn tied_values_under_a_fixed_bandwidth_and_a_wide_extent_draw_without_a_warning() {
+    pyo3::Python::initialize();
+    let ctx = TransformContext::default();
+    let out = apply_with_context(
+        &spec_with(BandwidthSpec::Fixed { value: 0.5 }, Some((0.0, 6.0)), vec![]),
+        &batch_with("x", vec![3.0; 4]),
+        &ctx,
+    )
+    .unwrap();
+    assert!(ctx.warnings.borrow().is_empty());
+    assert!(col(&out, "density").iter().any(|d| *d > 0.0));
+
+    let ctx = TransformContext::default();
+    let batch = batch_x_g(vec![Some(1.0), Some(5.0), Some(3.0), Some(3.0)], vec!["a", "a", "b", "b"]);
+    let spec = KdeSpec { shared_extent: true, ..spec_with(BandwidthSpec::Fixed { value: 0.5 }, None, vec!["g".into()]) };
+    let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+    assert!(ctx.warnings.borrow().is_empty(), "{:?}", fit_reasons(&ctx));
+    assert!(col(&out, "density").iter().skip(8).any(|d| *d > 0.0), "the tied group b draws over the shared extent");
+}
+
+/// An infinity among a group's values is named with the bandwidth reason
+/// under a fixed bandwidth as under a computed one, instead of reaching the
+/// render as an unplaced group.
+#[test]
+fn an_infinity_among_the_values_keeps_the_bandwidth_reason_under_any_bandwidth() {
+    pyo3::Python::initialize();
+    for bandwidth in [BandwidthSpec::Fixed { value: 0.5 }, BandwidthSpec::Scott] {
+        let ctx = TransformContext::default();
+        apply_with_context(
+            &spec_with(bandwidth, None, vec![]),
+            &batch_with("x", vec![1.0, 2.0, f64::INFINITY]),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(fit_reasons(&ctx), vec![(None, BANDWIDTH_NOT_USABLE.to_string())]);
+    }
+}
+
+/// A bandwidth that resolves to zero, a negative number, NaN or infinity over
+/// values that are not tied has no data cause, so it keeps the bandwidth
+/// reason. A fixed one is reachable only from a hand-written spec; an adjusted
+/// one that overflows to infinity (`bw_adjust` of `1e308`) is reachable from
+/// the public call.
+#[test]
+fn an_unusable_bandwidth_over_untied_values_keeps_the_bandwidth_reason() {
+    pyo3::Python::initialize();
+    let fixed = |value: f64| (BandwidthSpec::Fixed { value }, 1.0);
+    let cases = [
+        ("zero", fixed(0.0)),
+        ("negative", fixed(-1.0)),
+        ("infinite", fixed(f64::INFINITY)),
+        ("nan", fixed(f64::NAN)),
+        ("adjust overflow", (BandwidthSpec::Scott, 1e308)),
+    ];
+    for (name, (bandwidth, bw_adjust)) in cases {
+        let ctx = TransformContext::default();
+        let spec = KdeSpec { bw_adjust, ..spec_with(bandwidth, None, vec![]) };
+        let out = apply_with_context(&spec, &batch_with("x", vec![0.0, 100.0, 200.0, 300.0]), &ctx).unwrap();
+        assert_eq!(fit_reasons(&ctx), vec![(None, BANDWIDTH_NOT_USABLE.to_string())], "{name}");
+        assert!(col(&out, "density").iter().all(|d| d.is_nan()), "{name}");
+    }
+}
+
+/// An `extent` that is reversed, zero-width or not finite is refused in this
+/// transform's voice, as `count_scale_extent` is, instead of drawing over a
+/// reversed grid or degrading with a reason that names another cause.
+#[test]
+fn a_malformed_extent_is_refused() {
+    pyo3::Python::initialize();
+    for extent in [(9.0, 5.0), (5.0, 5.0), (0.0, f64::INFINITY), (f64::NAN, 1.0)] {
+        let err = apply(
+            &spec_with(BandwidthSpec::Scott, Some(extent), vec![]),
+            &batch_with("x", vec![1.0, 2.0, 4.0]),
+        )
+        .expect_err("a malformed extent refuses")
+        .to_string();
+        assert!(err.contains("stat_kde: extent must satisfy lo < hi with both finite"), "{extent:?}: {err}");
+    }
+}
+
+/// A group with no usable value and no pinned extent keeps its `spec.n` rows
+/// and its key but takes no position: its `value` column is NaN, so it adds
+/// nothing to an axis, beside a group with values that keeps its own grid.
+#[test]
+fn an_empty_group_keeps_its_rows_and_key_but_takes_no_position() {
+    pyo3::Python::initialize();
+    let ctx = TransformContext::default();
+    let batch = batch_x_g(vec![Some(100.0), Some(103.0), Some(106.0), None, None], vec!["a", "a", "a", "z", "z"]);
+    let out = apply_with_context(&spec_with(BandwidthSpec::Scott, None, vec!["g".into()]), &batch, &ctx).unwrap();
+    assert_eq!(fit_reasons(&ctx), vec![(Some("g=z".to_string()), FEWER_THAN_TWO_USABLE_VALUES.to_string())]);
+    assert_eq!(out.num_rows(), 16);
+    let value = col(&out, "value");
+    let density = col(&out, "density");
+    assert_eq!((value[0], value[7]), (100.0, 106.0));
+    assert!(value[8..].iter().all(|v| v.is_nan()), "{value:?}");
+    assert!(density[8..].iter().all(|d| d.is_nan()));
+    use arrow::array::StringArray;
+    let keys = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+    assert!((8..16).all(|i| keys.value(i) == "z"));
+
+    // Ungrouped, the whole call is the empty group.
+    let ctx = TransformContext::default();
+    let out = apply_with_context(&spec_with(BandwidthSpec::Scott, None, vec![]), &batch_with("x", vec![f64::NAN, f64::NAN]), &ctx).unwrap();
+    assert_eq!(out.num_rows(), 8);
+    assert!(col(&out, "value").iter().all(|v| v.is_nan()));
+    assert_eq!(fit_reasons(&ctx), vec![(None, FEWER_THAN_TWO_USABLE_VALUES.to_string())]);
+}
+
+/// A pinned extent still gives an empty group the pinned grid (the facet pin
+/// and a caller's extent are positions the caller chose), and a one-value
+/// group keeps its range at that value.
+#[test]
+fn a_pinned_extent_still_places_an_empty_group_and_a_one_value_group_sits_at_its_value() {
+    pyo3::Python::initialize();
+    let ctx = TransformContext::default();
+    let out = apply_with_context(
+        &spec_with(BandwidthSpec::Scott, Some((0.0, 7.0)), vec![]),
+        &batch_with("x", vec![f64::NAN]),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(col(&out, "value"), (0..8).map(f64::from).collect::<Vec<_>>());
+    assert!(col(&out, "density").iter().all(|d| d.is_nan()));
+
+    let ctx = TransformContext::default();
+    let out = apply_with_context(&spec_with(BandwidthSpec::Scott, None, vec![]), &batch_with("x", vec![500.0]), &ctx).unwrap();
+    assert!(col(&out, "value").iter().all(|v| *v == 500.0));
+    assert_eq!(fit_reasons(&ctx), vec![(None, FEWER_THAN_TWO_USABLE_VALUES.to_string())]);
+}
+
+/// A well-formed group warns nothing and its grid spans its own range.
+#[test]
+fn an_estimable_group_warns_nothing_and_spans_its_range() {
+    pyo3::Python::initialize();
+    let ctx = TransformContext::default();
+    let out = apply_with_context(&spec_with(BandwidthSpec::Scott, None, vec![]), &batch_with("x", vec![1.0, 2.0, 4.0]), &ctx).unwrap();
+    assert!(ctx.warnings.borrow().is_empty());
+    let value = col(&out, "value");
+    assert_eq!((value[0], value[7]), (1.0, 4.0));
+}

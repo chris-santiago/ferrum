@@ -808,8 +808,7 @@ def test_a_user_written_fit_step_owns_its_degenerate_group():
     )
     _, messages = _render_capturing(chart.to_svg)
     assert messages == [
-        "Smooth: every row has a null in its groupby key (gi), so the data could not be split "
-        "into groups; the whole batch was used as one ungrouped computation instead",
+        _all_keys_null_fallback_message("Smooth", "gi"),
         _whole_fit_message("Smooth", FIT_FEW_POINTS),
     ]
 
@@ -828,8 +827,7 @@ def test_an_ungrouped_fallback_fit_owns_its_null_keyed_group():
     )
     _, messages = _render_capturing(chart.to_svg)
     assert messages == [
-        "Smooth: every row has a null in its groupby key (gi), so the data could not be split "
-        "into groups; the whole batch was used as one ungrouped computation instead",
+        _all_keys_null_fallback_message("Smooth", "gi"),
         "Smooth: the ci=0.95 band is undefined (2 points leave no residual degrees of freedom "
         "for a 2-parameter fit; the band needs at least 3); the fit line is drawn without it",
     ]
@@ -869,9 +867,7 @@ def test_a_fit_owns_every_layer_drawn_from_its_degraded_groups():
         f"could not be computed for this data); {_FIT_DEGRADED}",
         "Smooth: could not fit group gi=2 in facet panel sp=p2 (the poly(degree=3) fit "
         f"could not be computed for this data); {_FIT_DEGRADED}",
-        "Smooth: every row in facet panel sp=p1 has a null in its groupby key (gi), so "
-        "that panel's rows could not be split into groups; in that panel, the whole "
-        "batch was used as one ungrouped computation instead",
+        _panel_key_fallback_message("Smooth", "gi", "sp=p1"),
     ]
 
 
@@ -984,6 +980,11 @@ FIT_NONE = "no usable (non-null/non-NaN) values"
 FIT_FEW_POINTS = "fewer than 2 usable (non-null/non-NaN) x/y points"
 FIT_FEW_PAIRS = "fewer than 2 usable (non-null/non-NaN) points"
 FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
+# The tied-value reasons: Kde and Violin share one for values, Kde2D names points and each axis.
+FIT_TIED = "its usable values are all equal"
+FIT_TIED_POINTS = "its usable points are all equal"
+FIT_TIED_X = "its usable x values are all equal"
+FIT_TIED_Y = "its usable y values are all equal"
 
 
 def _fit_message(statistic: str, group: str, reason: str, *, panel: str | None = None) -> str:
@@ -1010,6 +1011,37 @@ def _null_key_dropped_message(statistic: str, rows: int, column: str) -> str:
     return (
         f"{statistic}: {rows} rows have a null '{column}' and belong to no group, so they were "
         f"dropped; fill or filter the nulls in '{column}'"
+    )
+
+
+def _all_keys_null_message(statistic: str, column: str) -> str:
+    """The sentence a grouped statistic warns when ``column`` is null on every row, so the data
+    splits into no group and the grouped output is empty."""
+    return _all_keys_null_prefix(statistic, column) + "the grouped output is empty"
+
+
+def _all_keys_null_fallback_message(statistic: str, column: str) -> str:
+    """The sentence a fit statistic warns when ``column`` is null on every row: the whole batch is
+    one ungrouped computation instead."""
+    return (
+        _all_keys_null_prefix(statistic, column)
+        + "the whole batch was used as one ungrouped computation instead"
+    )
+
+
+def _all_keys_null_prefix(statistic: str, column: str) -> str:
+    return (
+        f"{statistic}: every row has a null in its groupby key ({column}), so the data could "
+        "not be split into groups; "
+    )
+
+
+def _facet_key_dropped_message(rows: int, column: str) -> str:
+    """The sentence a facet warns for ``rows`` rows whose facet ``column`` is null, which belong to
+    no panel and are dropped."""
+    return (
+        f"facet '{column}': {rows} rows have a null '{column}' and belong to no panel, so they "
+        f"were dropped; fill or filter the nulls in '{column}'"
     )
 
 

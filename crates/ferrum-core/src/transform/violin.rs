@@ -104,14 +104,7 @@ fn output_field_names(offset_col_name: &str) -> [String; 4] {
     ]
 }
 
-/// Reason a group with fewer than two usable values cannot be estimated, in
-/// `Kde`'s own wording.
-const FEWER_THAN_TWO_USABLE: &str = "fewer than 2 usable (non-null/non-NaN) values";
-const ALL_VALUES_EQUAL: &str = "its usable values are all equal";
 const DENSITY_ZERO: &str = "its density is zero across the evaluation range";
-/// A group whose values reach an infinite extent: `Kde` reports the same
-/// cause as its bandwidth failing to resolve.
-const EXTENT_NOT_FINITE: &str = "the bandwidth resolved to a non-positive or non-finite value";
 
 /// Number of vertices in the placeholder ring a group the statistic cannot
 /// estimate keeps, so its key, slot and legend entry survive.
@@ -154,6 +147,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    kde::refuse_malformed_extent("stat_violin", "extent", spec.extent)?;
     let schema = batch.schema();
 
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
@@ -285,36 +279,22 @@ pub(crate) fn apply_with_context(
             });
         };
 
-        // No usable value, or one (finite or not), is `Kde`'s own `fewer than
-        // 2` case. A finite single value keeps its ring at that value, so the
-        // scale still sees it; otherwise the ring has no position.
-        if vals.len() < 2 {
-            degrade(FEWER_THAN_TWO_USABLE);
-            let at = vals.first().copied().filter(|v| v.is_finite()).unwrap_or(f64::NAN);
-            rings.push_placeholder(gid, key, at);
-            continue;
-        }
-
         let (lo, hi) = vals
             .iter()
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
                 (a.min(v), b.max(v))
             });
-        if !(lo.is_finite() && hi.is_finite()) {
-            degrade(EXTENT_NOT_FINITE);
-            rings.push_placeholder(gid, key, f64::NAN);
-            continue;
-        }
-        // Degenerate group: a single observation or all-equal values produce
-        // lo == hi (zero-width KDE domain). Emit a minimal zero-width ring
-        // (4 vertices at violin_x=0, violin_y=lo) so the output batch is
-        // non-empty and scale_resolve can find finite values in violin_y. The
-        // four vertices clear the polygon mark's three-vertex minimum but are
-        // collinear, so the ring encloses no area and paints nothing: the
-        // warning is what names the missing body.
-        if lo >= hi {
-            degrade(ALL_VALUES_EQUAL);
-            rings.push_placeholder(gid, key, lo);
+        // The cause, and its order, are `Kde`'s own (`kde::unestimable_cause`).
+        // A group with a single finite value or with all values equal keeps
+        // a zero-width ring at that value (four vertices at violin_x=0,
+        // violin_y=lo, which clear the polygon mark's three-vertex minimum
+        // but are collinear, so the ring paints nothing and the warning names
+        // the missing body), so the scale still sees it; any other cause has
+        // no position.
+        if let Some(reason) = kde::unestimable_cause(&vals) {
+            degrade(reason);
+            let at = if lo == hi && lo.is_finite() { lo } else { f64::NAN };
+            rings.push_placeholder(gid, key, at);
             continue;
         }
 
@@ -2122,9 +2102,9 @@ mod tests {
         assert_eq!(
             degenerate_fits(&ctx),
             vec![
-                ("Violin".to_string(), Some("group=one".to_string()), FEWER_THAN_TWO_USABLE.to_string()),
-                ("Violin".to_string(), Some("group=tied".to_string()), ALL_VALUES_EQUAL.to_string()),
-                ("Violin".to_string(), Some("group=none".to_string()), FEWER_THAN_TWO_USABLE.to_string()),
+                ("Violin".to_string(), Some("group=one".to_string()), kde::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
+                ("Violin".to_string(), Some("group=tied".to_string()), kde::ALL_VALUES_EQUAL.to_string()),
+                ("Violin".to_string(), Some("group=none".to_string()), kde::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
             ]
         );
         // Every group keeps rows: the well-formed body plus a ring each.
@@ -2178,6 +2158,24 @@ mod tests {
         assert_eq!(group_rows(&with, 0), group_rows(&alone, 0));
     }
 
+    /// A malformed `extent` on the spec is refused in this transform's voice
+    /// before any group is read, whatever the data: an estimable group and a
+    /// frame whose every group degrades are refused alike.
+    #[test]
+    fn violin_with_a_malformed_extent_refuses_whatever_the_data() {
+        pyo3::Python::initialize();
+        for extent in [(9.0, 5.0), (5.0, 5.0), (0.0, f64::INFINITY), (f64::NAN, 1.0)] {
+            let spec = ViolinSpec { extent: Some(extent), ..spec_for(&[], 32) };
+            for values in [vec![1.0, 2.0, 4.0], vec![3.0], vec![]] {
+                let err = apply(&spec, &batch("v", values.clone())).expect_err("refuses").to_string();
+                assert!(
+                    err.contains("stat_violin: extent must satisfy lo < hi with both finite"),
+                    "{extent:?} over {values:?}: {err}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn violin_ungrouped_degenerate_call_names_no_group() {
         pyo3::Python::initialize();
@@ -2185,7 +2183,7 @@ mod tests {
         apply_with_context(&spec_for(&[], 32), &batch("v", vec![3.0]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, FEWER_THAN_TWO_USABLE.to_string())]
+            vec![("Violin".to_string(), None, kde::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
         );
     }
 
@@ -2217,7 +2215,7 @@ mod tests {
             apply_with_context(&spec_for(&[], 16), &batch("v", vec![1.0, f64::INFINITY]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, EXTENT_NOT_FINITE.to_string())]
+            vec![("Violin".to_string(), None, kde::BANDWIDTH_NOT_USABLE.to_string())]
         );
         assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
     }
@@ -2232,7 +2230,7 @@ mod tests {
             apply_with_context(&spec_for(&[], 16), &batch("v", vec![f64::INFINITY]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, FEWER_THAN_TWO_USABLE.to_string())]
+            vec![("Violin".to_string(), None, kde::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
         );
         assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
     }

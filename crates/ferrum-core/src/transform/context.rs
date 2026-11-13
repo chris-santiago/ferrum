@@ -159,7 +159,7 @@ pub(crate) enum TransformWarning {
     /// per `groupby` field by
     /// [`crate::transform::group_key::warn_null_groupby_rows_dropped`], for
     /// every grouped transform whose null-key policy drops a row (`Skip`,
-    /// `SkipWithWholeBatchFallback`, `SkipRefusingEmpty`), plus `LetterValue`'s
+    /// `SkipWithWholeBatchFallback`), plus `LetterValue`'s
     /// own call.
     NullKeyRowsDropped {
         scope: NullKeyScope,
@@ -459,7 +459,7 @@ impl From<Unfittable> for pyo3::PyErr {
 /// What a step whose every `groupby` key is null gives the whole frame.
 #[derive(Debug)]
 pub(crate) enum AllNullOutcome {
-    /// The transform refuses (QQ, LetterValue): the panel draws empty, and
+    /// The transform refuses (LetterValue): the panel draws empty, and
     /// the facet run raises the refusal when every panel was emptied.
     Refused(pyo3::PyErr),
     /// The grouped output is empty: the panel draws empty, and the facet
@@ -1467,7 +1467,7 @@ mod tests {
     #[test]
     fn refuse_unless_partition_refuses_the_whole_frame_and_records_a_partition() {
         pyo3::Python::initialize();
-        let refusal = || pyo3::exceptions::PyValueError::new_err("stat_qq: empty input after filter");
+        let refusal = || pyo3::exceptions::PyValueError::new_err("stat_letter_value: empty input after filter");
         let whole = TransformContext::default();
         assert!(whole.refuse_unless_partition(refusal()).is_err());
         assert!(whole.all_null_partitions.borrow().is_empty());
@@ -1479,7 +1479,7 @@ mod tests {
         assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
         match &recorded[0].outcome {
             AllNullOutcome::Refused(refusal) => {
-                assert_eq!(refusal.to_string(), "ValueError: stat_qq: empty input after filter");
+                assert_eq!(refusal.to_string(), "ValueError: stat_letter_value: empty input after filter");
             }
             other => panic!("expected the refusal, got {other:?}"),
         }
