@@ -42,7 +42,7 @@ use crate::transform::group_key::{
 };
 use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::logistic::inv_normal_cdf;
-use crate::transform::numeric_util::coerce_xy_pairs_at_indexed;
+use crate::transform::numeric_util::{coerce_xy_pairs_at_indexed, FEWER_THAN_TWO_USABLE_XY_POINTS};
 use crate::transform::residuals::{self, ResidualCarry, ResidualColumns};
 use crate::transform::smooth::SmoothOutput;
 
@@ -214,7 +214,7 @@ fn apply_one_group(
         ctx.warn(TransformWarning::DegenerateFit {
             transform: "Robust".into(),
             group: group.map(str::to_string),
-            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
             panel: None,
             step: ctx.step.clone(),
         });
@@ -2421,5 +2421,40 @@ mod tests {
             close(grid.iter().cloned().reduce(f64::max).unwrap(), expected_hi),
             "expected the padded high end {expected_hi}, got {grid:?}"
         );
+    }
+
+    /// Two frames of one fit: the first eight rows are the points, then a row
+    /// whose `x` is `inf_x` and a row whose `y` is `inf_y`. `None` is the null
+    /// twin and an infinity is the value the twin stands in for.
+    fn frame_with_unusable(inf_x: Option<f64>, inf_y: Option<f64>, ys: [f64; 8]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let mut xs: Vec<Option<f64>> = (1..=8).map(|i| Some(i as f64)).collect();
+        let mut ys: Vec<Option<f64>> = ys.iter().map(|&y| Some(y)).collect();
+        xs.extend([inf_x, Some(9.0)]);
+        ys.extend([Some(1.0), inf_y]);
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys))],
+        )
+        .unwrap()
+    }
+
+    /// A point with an infinite `x` or `y` is skipped as a null point is: the
+    /// fit, in both outputs, is the null twin's.
+    #[test]
+    fn an_infinite_coordinate_is_skipped_as_a_null_one_is() {
+        pyo3::Python::initialize();
+        let ys = [2.0, 4.1, 5.9, 8.2, 10.0, 12.1, 13.8, 16.0];
+        for output in [SmoothOutput::Fitted, SmoothOutput::Residuals] {
+            let fit = |inf_x, inf_y| apply(&spec(20, None, 1.345, output), &frame_with_unusable(inf_x, inf_y, ys)).unwrap();
+            let twin = fit(None, None);
+            for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(fit(Some(infinite), Some(infinite)), twin);
+            }
+            assert!(col(&twin, if output == SmoothOutput::Fitted { "y" } else { "residual" }).iter().all(|v| v.is_finite()));
+        }
     }
 }

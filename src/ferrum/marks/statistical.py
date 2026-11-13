@@ -605,8 +605,9 @@ def desugar_smooth(
           real polynomial fit (``degree=2`` is byte-equal to
           ``method="quadratic"``). ``degree=0`` raises. A degree that
           leaves the design rank-deficient for the data at hand (fewer
-          usable points than ``degree + 1`` after dropping null/NaN rows
-          and any ``x_bins`` aggregation) also raises, but only for a
+          usable points than ``degree + 1`` after dropping rows with a null,
+          NaN or infinite x or y and any ``x_bins`` aggregation) also
+          raises, but only for a
           whole-frame fit; inside one group of a ``groupby`` fit, or one
           panel of a faceted chart, that slice's output degrades to NaN
           instead.

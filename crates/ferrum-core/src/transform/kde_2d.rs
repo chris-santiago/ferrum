@@ -29,6 +29,7 @@ use crate::transform::group_key::{
     NullKeyPolicy,
 };
 use crate::transform::kde::{self, BandwidthSpec};
+use crate::transform::numeric_util::{usable_at, FEWER_THAN_TWO_USABLE_POINTS};
 
 /// The surface columns every `stat_kde_2d` output batch carries, in schema
 /// order. Read by the `groupby` output-collision guard (GH #179); pinned
@@ -42,9 +43,6 @@ const OUTPUT_FIELDS: [&str; 6] = ["grid_x", "grid_y", "density", "nx", "ny", "ex
 /// `Bin`'s or `Kde`'s.
 const LABEL: &str = "stat_kde_2d";
 
-/// Reason a 2-D group with fewer than two usable points cannot be estimated.
-/// Its bandwidth reason is `Kde`'s own, [`kde::BANDWIDTH_NOT_USABLE`].
-const FEWER_THAN_TWO_USABLE_POINTS: &str = "fewer than 2 usable (non-null/non-NaN) points";
 /// Reasons a group of two or more points cannot be estimated because they are
 /// tied: every point identical, or all equal on one axis. The points-worded
 /// siblings of [`kde::ALL_VALUES_EQUAL`], naming the axis as `Smooth`'s
@@ -70,7 +68,7 @@ fn default_kde2d_n() -> usize {
 /// Returns the RAW per-axis `(min, max)` (no nicing — a KDE surface has no bin
 /// edges to align), matching the data-derived extent `apply_one_group` computes
 /// when `spec.extent` is `None`. Returns `None` when either field is missing,
-/// non-numeric, all values are null/NaN, or an axis range is degenerate
+/// non-numeric, no value is usable (non-null, finite), or an axis range is degenerate
 /// (`lo >= hi` or non-finite).
 ///
 /// When `spec.extent` is already set (user-provided), it is returned unchanged so
@@ -321,12 +319,7 @@ fn apply_one_group(
     let mut xs: Vec<f64> = Vec::with_capacity(xa.len());
     let mut ys: Vec<f64> = Vec::with_capacity(ya.len());
     let push = |i: usize, xs: &mut Vec<f64>, ys: &mut Vec<f64>| {
-        if xa.is_null(i) || ya.is_null(i) {
-            return;
-        }
-        let xv = xa.value(i);
-        let yv = ya.value(i);
-        if !xv.is_nan() && !yv.is_nan() {
+        if let (Some(xv), Some(yv)) = (usable_at(&xa, i), usable_at(&ya, i)) {
             xs.push(xv);
             ys.push(yv);
         }
@@ -457,14 +450,10 @@ fn refuse_malformed_extent(extent: Option<(f64, f64, f64, f64)>) -> PyResult<()>
 }
 
 /// The reason a 2-D group of two or more points cannot be estimated, read per
-/// axis from [`kde::unestimable_cause`]: an infinity on either axis first,
-/// then points tied on both axes, then on `x` alone, then on `y` alone.
-/// `None` when neither axis shows a cause.
+/// axis from [`kde::unestimable_cause`]: points tied on both axes, then on `x`
+/// alone, then on `y` alone. `None` when neither axis shows a cause.
 fn unestimable_points_cause(xs: &[f64], ys: &[f64]) -> Option<&'static str> {
     match (kde::unestimable_cause(xs), kde::unestimable_cause(ys)) {
-        (Some(kde::BANDWIDTH_NOT_USABLE), _) | (_, Some(kde::BANDWIDTH_NOT_USABLE)) => {
-            Some(kde::BANDWIDTH_NOT_USABLE)
-        }
         (Some(_), Some(_)) => Some(ALL_POINTS_EQUAL),
         (Some(_), None) => Some(ALL_X_VALUES_EQUAL),
         (None, Some(_)) => Some(ALL_Y_VALUES_EQUAL),
@@ -1701,7 +1690,7 @@ pub(crate) mod tests {
 
     /// A fixed bandwidth is always usable, so tied points are named through
     /// the evaluation range they leave with no width, with the same texts as
-    /// under a computed bandwidth, and an infinity keeps the bandwidth text.
+    /// under a computed bandwidth.
     #[test]
     fn tied_points_under_a_fixed_bandwidth_are_named_with_their_tied_reason() {
         pyo3::Python::initialize();
@@ -1709,7 +1698,6 @@ pub(crate) mod tests {
             (vec![2.0, 2.0, 2.0], vec![5.0, 5.0, 5.0], ALL_POINTS_EQUAL),
             (vec![0.0, 1.0, 2.0], vec![5.0, 5.0, 5.0], ALL_Y_VALUES_EQUAL),
             (vec![2.0, 2.0, 2.0], vec![0.0, 1.0, 2.0], ALL_X_VALUES_EQUAL),
-            (vec![0.0, 1.0, f64::INFINITY], vec![0.0, 1.0, 2.0], kde::BANDWIDTH_NOT_USABLE),
         ];
         for (xs, ys, reason) in cases {
             let ctx = TransformContext::default();
@@ -1810,24 +1798,50 @@ pub(crate) mod tests {
         assert!(list_f64_at(&ungrouped, "density").iter().all(|d| *d == 0.0));
     }
 
-    /// A bandwidth that is not finite on either axis alone is named with
-    /// `Kde`'s reason and keeps an all-zero surface, never also the zero-grid
-    /// text.
+    /// A point with an infinite coordinate on either axis is skipped as a null
+    /// point is: the surface is the finite points' own, nothing is named, and
+    /// it equals the surface of the same frame with those points removed.
     #[test]
-    fn a_non_finite_bandwidth_on_either_axis_is_named() {
+    fn a_point_with_an_infinite_coordinate_is_skipped_on_either_axis() {
+        pyo3::Python::initialize();
+        let with_infinity = batch_xy_g(
+            vec![0.0, 1.0, f64::INFINITY, 0.0, 1.0, 2.0, 3.0, f64::NEG_INFINITY],
+            vec![0.0, 1.0, 2.0, 0.0, f64::INFINITY, 1.0, 4.0, 1.0],
+            vec!["x_inf", "x_inf", "x_inf", "y_inf", "y_inf", "y_inf", "y_inf", "x_inf"],
+        );
+        let twin = batch_xy_g(
+            vec![0.0, 1.0, 0.0, 2.0, 3.0],
+            vec![0.0, 1.0, 0.0, 1.0, 4.0],
+            vec!["x_inf", "x_inf", "y_inf", "y_inf", "y_inf"],
+        );
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec_for(vec!["g".into()]), &with_infinity, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty(), "{:?}", ctx.degenerate_fits());
+        let twin_ctx = TransformContext::default();
+        let expected = apply_with_context(&spec_for(vec!["g".into()]), &twin, &twin_ctx).unwrap();
+        for row in 0..2 {
+            assert_eq!(list_f64_row(&out, "density", row), list_f64_row(&expected, "density", row), "row {row}");
+            assert!(list_f64_row(&out, "density", row).iter().any(|d| *d > 0.0), "row {row}");
+        }
+    }
+
+    /// A group left with fewer than two points with a finite coordinate on
+    /// both axes is named with the count reason and keeps an all-zero surface.
+    #[test]
+    fn a_group_left_with_one_finite_point_is_named_with_the_count_reason() {
         pyo3::Python::initialize();
         let b = batch_xy_g(
-            vec![0.0, 1.0, f64::INFINITY, 0.0, 1.0, 2.0],
-            vec![0.0, 1.0, 2.0, 0.0, f64::INFINITY, 1.0],
-            vec!["x_inf", "x_inf", "x_inf", "y_inf", "y_inf", "y_inf"],
+            vec![0.0, f64::INFINITY, 5.0, f64::NEG_INFINITY],
+            vec![0.0, 1.0, f64::INFINITY, 2.0],
+            vec!["one", "one", "none", "none"],
         );
         let ctx = TransformContext::default();
         let out = apply_with_context(&spec_for(vec!["g".into()]), &b, &ctx).unwrap();
         assert_eq!(
             ctx.degenerate_fits(),
             vec![
-                ("Kde2D".to_string(), Some("g=x_inf".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
-                ("Kde2D".to_string(), Some("g=y_inf".to_string()), kde::BANDWIDTH_NOT_USABLE.to_string()),
+                ("Kde2D".to_string(), Some("g=one".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
+                ("Kde2D".to_string(), Some("g=none".to_string()), FEWER_THAN_TWO_USABLE_POINTS.to_string()),
             ]
         );
         for row in 0..2 {

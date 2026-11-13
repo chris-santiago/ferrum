@@ -1656,8 +1656,13 @@ class StatisticalMarksMixin:
             1-D array of y values.
         domain : list of float or None, optional
             ``[x_min, x_max]`` evaluation range.  ``None`` (default) infers
-            the range from the parent chart's ``x`` column if available,
-            otherwise raises ``ValueError``.
+            the range from the usable values (null, NaN and infinite values
+            skipped) of the parent chart's ``x`` column: a numeric column in
+            its own units, a temporal column in epoch milliseconds, the units
+            a temporal axis and ``TimeScale(domain=)`` read, so ``fn``
+            receives epoch-millisecond floats there. A parent ``x`` column of
+            any other type (text, boolean) raises ``ValueError``, as a chart
+            with no parent ``x`` column does.
         n : int, optional
             Number of evaluation points.  Default is ``200``.
         clip : bool, optional
@@ -1687,7 +1692,8 @@ class StatisticalMarksMixin:
         ------
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
-            inferred, when ``clip`` is not ``True`` or ``False``, when a style
+            inferred or the parent ``x`` column holds neither numbers nor
+            times, when ``clip`` is not ``True`` or ``False``, when a style
             kwarg is not one the line honors, when ``size`` is not a finite
             number above zero, or when this chart has a pending composite
             mark (use ``+`` instead).
@@ -1716,7 +1722,7 @@ class StatisticalMarksMixin:
             refuse_style_no_layer_draws,
             resolve_method_bool,
         )
-        from ferrum.marks.heavy_stat import desugar_function
+        from ferrum.marks.heavy_stat import _parent_axis_values, desugar_function
 
         clip = resolve_method_bool("mark_function", "clip", clip, True)
         style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
@@ -1738,6 +1744,7 @@ class StatisticalMarksMixin:
         # For multi-layer charts, try the first layer's data; for single-chart,
         # use self._data.
         parent_x_data = None
+        parent_x_name = "x"
         x_enc = self._encoding.get("x")
         data_source = self._data
         if data_source is None and self._layers:
@@ -1748,12 +1755,13 @@ class StatisticalMarksMixin:
                     break
         if x_enc is not None and data_source is not None:
             try:
-                from ferrum._coerce import to_arrow_table
+                from ferrum._coerce import normalize_for_rust, to_arrow_table
 
                 x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-                tbl = to_arrow_table(data_source)
+                tbl = normalize_for_rust(to_arrow_table(data_source))
                 if x_field_name in tbl.column_names:
                     parent_x_data = tbl[x_field_name]
+                    parent_x_name = x_field_name
             except (ImportError, TypeError, ValueError, KeyError):
                 pass
         elif x_enc is None and data_source is not None and domain is None:
@@ -1761,16 +1769,22 @@ class StatisticalMarksMixin:
             # Infer domain from the first numeric column in the chart's data.
             try:
                 import pyarrow as pa
-                from ferrum._coerce import to_arrow_table
+                from ferrum._coerce import normalize_for_rust, to_arrow_table
 
-                tbl = to_arrow_table(data_source)
+                tbl = normalize_for_rust(to_arrow_table(data_source))
                 for _col_name in tbl.column_names:
                     _col = tbl[_col_name]
                     if pa.types.is_floating(_col.type) or pa.types.is_integer(_col.type):
                         parent_x_data = _col
+                        parent_x_name = _col_name
                         break
             except (ImportError, TypeError, ValueError, KeyError):
                 pass
+
+        # Outside the try blocks above, so the refusal is never swallowed; only when the domain
+        # is inferred.
+        if domain is None and parent_x_data is not None:
+            parent_x_data = _parent_axis_values(parent_x_data, parent_x_name)
 
         result = desugar_function(
             fn,

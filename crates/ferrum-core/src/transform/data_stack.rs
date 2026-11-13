@@ -4,7 +4,7 @@
 //! `groupby`, sorts within each group, and accumulates field values.
 //! Supports offset modes: "zero" (default), "normalize", "center".
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -15,7 +15,7 @@ use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     group_partition_multi, refuse_groupby_output_collision, NullKeyPolicy,
 };
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, usable_at};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -97,12 +97,7 @@ pub(crate) fn apply_with_context(
         // Accumulate.
         let mut cumsum = 0.0;
         for &row in rows {
-            let val = if field_col.is_null(row) {
-                0.0
-            } else {
-                let v = field_col.value(row);
-                if v.is_nan() { 0.0 } else { v }
-            };
+            let val = usable_at(&field_col, row).unwrap_or(0.0);
             y0[row] = cumsum;
             y1[row] = cumsum + val;
             cumsum += val;
@@ -427,4 +422,51 @@ mod tests {
         );
     }
 
+    /// An infinite value stacks as 0, as a null value does: the rows above it
+    /// keep their offsets and the stack's totals stay finite.
+    #[test]
+    fn an_infinite_value_stacks_as_zero_as_a_null_value_does() {
+        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, true)]));
+        let frame_of = |second: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Float64Array::from(vec![Some(1.0), second, Some(3.0)]))],
+            )
+            .unwrap()
+        };
+        for offset in ["zero", "normalize", "center"] {
+            let spec = DataStackSpec {
+                field: "val".into(),
+                groupby: vec![],
+                sort: None,
+                as_: ("y0".into(), "y1".into()),
+                offset: offset.into(),
+                name: None,
+            };
+            let ends = |batch: &RecordBatch| -> Vec<Vec<f64>> {
+                let out = apply(&spec, batch).unwrap();
+                (1..=2)
+                    .map(|at| {
+                        let col = out.column(at).as_any().downcast_ref::<Float64Array>().unwrap();
+                        (0..col.len()).map(|i| col.value(i)).collect()
+                    })
+                    .collect()
+            };
+            let twin = ends(&frame_of(None));
+            for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(ends(&frame_of(Some(infinite))), twin, "offset {offset}");
+            }
+        }
+        let spec = DataStackSpec {
+            field: "val".into(),
+            groupby: vec![],
+            sort: None,
+            as_: ("y0".into(), "y1".into()),
+            offset: "zero".into(),
+            name: None,
+        };
+        let out = apply(&spec, &frame_of(Some(f64::INFINITY))).unwrap();
+        let y1 = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((y1.value(0), y1.value(1), y1.value(2)), (1.0, 1.0, 4.0));
+    }
 }

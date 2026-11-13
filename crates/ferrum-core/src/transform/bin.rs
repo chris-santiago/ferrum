@@ -174,10 +174,11 @@ pub(crate) struct BinSpec {
     /// canonical fn, as `AggregateOp.fn_` is). When set (together
     /// with `agg_field`), the output batch gains an `agg_value: Float64`
     /// column: the aggregate of `agg_field`'s values over the rows in each
-    /// bin, using the same null/NaN-drop policy `Aggregate` uses. A
+    /// bin, using the same usable-value policy `Aggregate` uses (a null, NaN or infinite
+    /// value is skipped). A
     /// structurally empty bin (no rows fall in its range) yields a null
     /// `agg_value` — not `NaN`, not `0` — distinct from a non-empty bin whose
-    /// `agg_field` values are all null/NaN, which yields `Aggregate`'s own
+    /// `agg_field` values are all unusable, which yields `Aggregate`'s own
     /// all-null convention (`NaN`, or `0` for `count`/`distinct`).
     /// Unaffected by `cumulative`: a per-bin aggregate like `median` has no
     /// well-defined running-total form, so `agg_value` is always the
@@ -194,8 +195,9 @@ pub(crate) struct BinSpec {
     /// Several named per-bin aggregates: each entry adds a nullable Float64
     /// column named by its `as_`, after `density` and in entry order, holding
     /// the entry's fn over its field's values in each (bin, group), with the
-    /// null/NaN policy and empty-bin null that `agg` documents. A `count`
-    /// entry on a field counts the field's non-null values; on `"*"` it
+    /// usable-value policy and empty-bin null that `agg` documents. A `count`
+    /// entry on a field counts the field's usable values (non-null, and finite on a
+    /// numeric column); on `"*"` it
     /// counts the bin's rows. Refused with `agg_field`/`agg`, and when empty
     /// or when an output name repeats or collides ([`check_aggregates`]).
     pub aggregates: Option<Vec<AggregateOp>>,
@@ -420,8 +422,8 @@ pub(crate) fn global_extent_in_space(spec: &BinSpec, batch: &RecordBatch, space:
 /// Compute the global (optionally niced) `(lo, hi)` extent of `spec.field`
 /// over the full `batch`.
 ///
-/// Returns `None` when the field is missing, non-numeric, or all values are
-/// null/NaN. When `spec.nice` is true and `spec.extent` is `None`, applies the
+/// Returns `None` when the field is missing, non-numeric, or no value is
+/// usable (non-null, finite). When `spec.nice` is true and `spec.extent` is `None`, applies the
 /// same nicing logic as `apply_one_group` so that panels aligned to this extent
 /// will produce the same bin edges as the grouped path would compute.
 ///
@@ -874,7 +876,7 @@ fn compute_one_group(
 ) -> PyResult<BinColumns> {
     let arr = binned_column(spec, batch)?;
 
-    // Drop nulls and NaN; optionally restrict to a subset of row indices (for
+    // Drop unusable values (null, NaN or infinite); optionally restrict to a subset of row indices (for
     // groupby). `row_idx[i]` is `clean[i]`'s ORIGINAL row index, needed to
     // look up each aggregate's value for exactly the same rows a bin counts.
     let (clean, row_idx) = clean_float64_values_indexed(&arr, only_indices);
@@ -921,7 +923,7 @@ fn compute_one_group(
     // doc comment. A structurally empty bin (no rows landed in its range)
     // yields `None` (Arrow null), never `Aggregate`'s own all-null convention
     // (`NaN`/`0`), which only applies to a NON-empty bin whose field values
-    // are all null/NaN.
+    // are all unusable.
     let agg_values: Vec<Vec<Option<f64>>> = aggs
         .iter()
         .map(|a| {
@@ -1210,7 +1212,7 @@ use crate::transform::core::TransformSpec;
 /// output is instead every input row with ``bin_start``/``bin_end`` appended.
 ///
 /// A group (or, ungrouped, a batch) that has rows but no usable value, every
-/// one null or NaN, keeps one placeholder row carrying its group key:
+/// one null, NaN or infinite, keeps one placeholder row carrying its group key:
 /// ``bin_start`` and ``bin_end`` NaN, ``count`` and ``density`` 0, and a null
 /// in every aggregate column. A batch with no rows at all stays empty.
 ///
@@ -1249,13 +1251,14 @@ use crate::transform::core::TransformSpec;
 ///     ``"q1"``, ``"q3"``, ``"distinct"`` — the same vocabulary
 ///     ``Aggregate`` accepts. When set, the output gains ``agg_value``:
 ///     the aggregate of ``agg_field``'s values over each bin's rows, with
-///     ``Aggregate``'s own null/NaN-drop policy. A bin with no rows in its
+///     ``Aggregate``'s own usable-value policy (a null, NaN or infinite value is
+///     skipped). A bin with no rows in its
 ///     range yields a null ``agg_value`` (not ``NaN``, not ``0``).
 /// per_row : bool, default False
 ///     When True, return every input row, in order and with every input
 ///     column, plus ``bin_start``/``bin_end``: the edges of the bin the
 ///     aggregating ``Bin`` (same data and parameters) counts the row into.
-///     A null or NaN value, or a value outside ``extent``, gets null edges.
+///     A null, NaN or infinite value, or a value outside ``extent``, gets null edges.
 ///     Refused with ``groupby``, ``agg_field``/``agg``, ``aggregates`` or
 ///     ``cumulative``, and when the input already has a ``bin_start`` or
 ///     ``bin_end`` column.
@@ -1263,7 +1266,7 @@ use crate::transform::core::TransformSpec;
 ///     ``AggregateOp(field, fn_, as_)`` entries, as ``Aggregate(ops=)`` takes
 ///     them, each adding a column ``as_``: ``fn_`` over ``field``'s values in
 ///     each (bin, group), with ``agg``'s vocabulary and null policy.
-///     ``count`` on a field counts its non-null values; on ``"*"`` it counts
+///     ``count`` on a field counts its usable values (non-null, and finite on a numeric column); on ``"*"`` it counts
 ///     the bin's rows. Refused with ``agg_field``/``agg``, when empty, and
 ///     when an ``as_`` repeats or names a ``groupby`` column or one of
 ///     ``bin_start``, ``bin_end``, ``count``, ``density``.
@@ -3256,7 +3259,7 @@ mod tests {
         arrow::compute::filter_record_batch(out, &arrow::array::BooleanArray::from(keep)).unwrap()
     }
 
-    /// A group whose rows hold no usable (non-null, non-NaN) value keeps one
+    /// A group whose rows hold no usable (non-null, finite) value keeps one
     /// placeholder row carrying its key, where the group first appears: NaN
     /// edges, count 0, density 0 and a null for every aggregate. The groups
     /// with values bin exactly as they do without it.
@@ -3401,11 +3404,11 @@ mod tests {
         assert_eq!(col_f64_opt(&out, "agg_value")[c], Some(4.0));
     }
 
-    /// An infinity is a usable value (only a null or NaN is not), so a group
-    /// of infinities bins as it always has and is not replaced by the
-    /// placeholder, whose count is 0.
+    /// An infinity is not usable, as a null is not, so a group of infinities
+    /// keeps the placeholder row an all-null group keeps (count 0) and its
+    /// infinite values are not counted.
     #[test]
-    fn a_group_of_infinite_values_is_binned_not_replaced_by_the_placeholder() {
+    fn a_group_of_infinite_values_keeps_the_placeholder_row() {
         let rows = [
             (Some(1.0), 1.0, "a"), (Some(2.0), 2.0, "a"),
             (Some(f64::INFINITY), 3.0, "c"), (Some(f64::INFINITY), 4.0, "c"),
@@ -3418,7 +3421,52 @@ mod tests {
         let keys = col_str(&out, "g");
         let c_rows: Vec<usize> = (0..out.num_rows()).filter(|&i| keys.value(i) == "c").collect();
         assert_eq!(c_rows.len(), 1);
-        assert_eq!(col_u64(&out, "count").value(c_rows[0]), 2, "both infinite values are counted");
+        assert_placeholder_row(&out, c_rows[0], &["agg_value"]);
+        let twin_rows = [
+            (Some(1.0), 1.0, "a"), (Some(2.0), 2.0, "a"),
+            (None, 3.0, "c"), (None, 4.0, "c"),
+        ];
+        let twin = apply(&spec, &rows_x_w_g(&twin_rows)).unwrap();
+        assert_eq!(out, twin, "a group of infinities is its all-null twin");
+    }
+
+    /// An infinity among finite values is skipped as a null is: the bins hold
+    /// the finite values alone, for either sign, and the output is the null
+    /// twin's.
+    #[test]
+    fn an_infinity_among_finite_values_bins_as_the_finite_values_alone() {
+        let finite = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let spec = agg_spec("x", BinMode::Fixed { n: 3 }, None, "w", "mean");
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let mut with_infinity: Vec<(Option<f64>, f64, &str)> =
+                finite.iter().map(|&v| (Some(v), v * 10.0, "a")).collect();
+            with_infinity.push((Some(infinite), 70.0, "a"));
+            let mut twin_rows = with_infinity.clone();
+            let last = twin_rows.len() - 1;
+            twin_rows[last].0 = None;
+            let out = apply(&spec, &rows_x_w_g(&with_infinity)).unwrap();
+            let twin = apply(&spec, &rows_x_w_g(&twin_rows)).unwrap();
+            assert_eq!(out, twin);
+            let counted: u64 = (0..out.num_rows()).map(|i| col_u64(&out, "count").value(i)).sum();
+            assert_eq!(counted, 6, "only the finite values are counted");
+        }
+    }
+
+    /// A per-bin aggregate skips an infinite `agg_field` value as a null one:
+    /// the bin's mean is the mean of its other rows.
+    #[test]
+    fn a_per_bin_aggregate_skips_an_infinite_agg_field_value() {
+        let spec = agg_spec("x", BinMode::Fixed { n: 2 }, None, "w", "mean");
+        let rows = |w: f64| {
+            [
+                (Some(1.0), 10.0, "a"), (Some(2.0), w, "a"), (Some(3.0), 30.0, "a"),
+                (Some(4.0), 40.0, "a"), (Some(5.0), 50.0, "a"), (Some(6.0), 60.0, "a"),
+            ]
+        };
+        let out = apply(&spec, &rows_x_w_g(&rows(f64::INFINITY))).unwrap();
+        let twin = apply(&spec, &rows_x_w_g(&rows(f64::NAN))).unwrap();
+        assert_eq!(out, twin);
+        assert_eq!(col_f64_opt(&out, "agg_value")[0], Some(20.0), "mean of 10 and 30");
     }
 
     /// An integer column is widened before binning, so an integer group of
@@ -3955,10 +4003,10 @@ mod tests {
         assert_eq!(col_f64_opt(&out, "c"), vec![Some(1.0), None, Some(1.0)]);
     }
 
-    /// `count` on a field counts the field's non-null values in each bin, at
-    /// any dtype; `count` on `"*"` counts the bin's rows.
+    /// `count` on a field counts the field's usable values in each bin (a text
+    /// field's non-null values); `count` on `"*"` counts the bin's rows.
     #[test]
-    fn aggregates_count_on_a_field_counts_its_non_null_values() {
+    fn aggregates_count_on_a_field_counts_its_usable_values() {
         use arrow::array::StringArray;
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4562,4 +4610,38 @@ mod tests {
         assert_eq!(total, 4);
     }
 
+    /// A per-bin `count` of a Float32 field skips an infinity and a NaN as it
+    /// skips a null, for the single `agg` and for `aggregates=`.
+    #[test]
+    fn a_per_bin_count_of_a_float32_field_equals_its_null_twin() {
+        let frame_of = |bad: Option<f64>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("w", DataType::Float32, true),
+            ]));
+            let wide: arrow::array::ArrayRef =
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), bad, Some(7.0), bad, Some(9.0)]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 7.0, 8.0, 9.0])),
+                    arrow::compute::cast(&wide, &DataType::Float32).unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = bin_json(
+            r#"{"field":"x","bin_count":2,"extent":[1.0,9.0],"nice":false,"aggregates":[{"field":"w","fn":"count","as":"nw"}]}"#,
+        );
+        let twin = apply(&spec, &frame_of(None)).unwrap();
+        assert_eq!(col_f64_opt(&twin, "nw"), vec![Some(2.0), Some(2.0)]);
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(apply(&spec, &frame_of(Some(bad))).unwrap(), twin);
+        }
+        let single = bin_json(
+            r#"{"field":"x","bin_count":2,"extent":[1.0,9.0],"nice":false,"agg_field":"w","agg":"count"}"#,
+        );
+        let single_twin = apply(&single, &frame_of(None)).unwrap();
+        assert_eq!(apply(&single, &frame_of(Some(f64::INFINITY))).unwrap(), single_twin);
+    }
 }

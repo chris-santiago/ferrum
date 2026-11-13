@@ -28,8 +28,8 @@
 //! transform's drop is. A call that dropped nothing returns whatever it
 //! computes, an empty batch included, exactly as the ungrouped call does.
 //!
-//! A group (or combination) whose rows hold no usable value, every one null
-//! or NaN, keeps its key as one placeholder row: depth 1, the median's
+//! A group (or combination) whose rows hold no usable value, every one null,
+//! NaN or infinite, keeps its key as one placeholder row: depth 1, the median's
 //! letter, NaN `lower` and `upper`. Placeholders follow every group with
 //! values, in input order, so the order of the groups with values (and any
 //! `sort`) is what it is without them. The `depth_1` output carries the
@@ -189,7 +189,7 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
     k_for_depth_uncapped(strategy, n).min(K_MAX_NAMED)
 }
 
-use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
+use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted, usable_at};
 
 /// One letter-value combination: its `group` value (null when the call has
 /// no `group`) and its `groupby` values, in `spec.groupby` order. Ordered by
@@ -291,7 +291,7 @@ struct DepthRow {
 }
 
 /// Extract `(combination key, value)` pairs in input row order (dropping
-/// null/NaN values).
+/// null, NaN or infinite values).
 ///
 /// The key columns ([`KeyColumns`]) are resolved, dtype-checked and read
 /// through the shared [`GroupKeyReader`] (the reader `group_partition_multi`
@@ -311,9 +311,7 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch, ctx: &TransformCo
 
     let mut out = Vec::with_capacity(varr.len());
     for i in 0..varr.len() {
-        if varr.is_null(i) { continue; }
-        let v = varr.value(i);
-        if v.is_nan() { continue; }
+        let Some(v) = usable_at(&varr, i) else { continue };
         let key = (0..reader.len())
             .map(|column| {
                 reader.key_at(column, i).ok_or_else(|| {
@@ -358,7 +356,7 @@ pub(crate) fn apply_with_context(
 /// (`group` first, then the `groupby` values) — identical to the historical
 /// `BTreeMap` iteration order. With `sort = Some`, the CATEGORIES (the
 /// `group` values that make the categorical axis) are ranked by the requested
-/// aggregate over the non-null, non-NaN value rows [`compute_depths`] assigns
+/// aggregate over the usable (non-null, finite) value rows [`compute_depths`] assigns
 /// to all of the category's combinations (so `count` counts only the rows
 /// that boxen actually plots), and each category's combinations follow in
 /// key order. Ranking each combination on its own would order the axis by a
@@ -468,13 +466,13 @@ fn compute_depths(
     )?;
     let dtypes = key_columns.split(&partition.dtypes, DataType::Utf8)?;
 
-    // Per-group (non-null, non-NaN) sorted values. The partitioner decides
+    // Per-group usable (non-null, finite) sorted values. The partitioner decides
     // WHICH rows belong to which group; filtering by the VALUE column's own
-    // null/NaN rows is this transform's job, same shape as
+    // unusable rows is this transform's job, same shape as
     // `box_stats::apply_with_context`'s per-group `filter_map` over its
     // partition's row indices.
     //
-    // A group whose rows are ALL null/NaN filters down to an empty `vs`
+    // A group whose rows are ALL unusable filters down to an empty `vs`
     // here. Such a group must NOT be inserted into `groups`:
     // `group_order`'s `sort=Some(mean|median)` aggregate over an empty slice
     // is `NaN`, and `NaN.partial_cmp(_)` is `None`, which the comparator
@@ -491,12 +489,7 @@ fn compute_depths(
     let mut emptied: Vec<ComboKey> = Vec::new();
     for (key, rows) in &partition.groups {
         let g = key_columns.combo(key)?;
-        let mut vs: Vec<f64> = rows.iter().filter_map(|&r| {
-            if varr.is_null(r) { return None; }
-            let v = varr.value(r);
-            if v.is_nan() { return None; }
-            Some(v)
-        }).collect();
+        let mut vs: Vec<f64> = rows.iter().filter_map(|&r| usable_at(&varr, r)).collect();
         if vs.is_empty() {
             emptied.push(g);
             continue;
@@ -729,7 +722,7 @@ pub(crate) fn secondary_outputs(
     }
 
     // ---- outliers output ----
-    // For each non-null input row: classify as outlier if value falls outside
+    // For each input row with a usable value: classify as outlier if value falls outside
     //   [lower_K - threshold*(upper_K - lower_K), upper_K + threshold*(upper_K - lower_K)]
     // of its own combination's outermost letter values.
     // Only rows that ARE outliers are emitted (schema unchanged: `is_outlier`
@@ -897,8 +890,8 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// ``level`` for that depth's rows (empty past the deepest depth). Each also
 /// ends with the ``groupby`` columns.
 ///
-/// A group (or combination) whose rows hold no usable value, every one null
-/// or NaN, keeps its key as one placeholder row at depth 1 with NaN
+/// A group (or combination) whose rows hold no usable value, every one null,
+/// NaN or infinite, keeps its key as one placeholder row at depth 1 with NaN
 /// ``lower`` and ``upper``, after every group with values, in input order.
 /// The placeholder appears in ``depth_1`` and in no outlier row, so the
 /// group keeps its place on a categorical axis and in a legend while nothing
@@ -945,7 +938,7 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 ///     ...}``. ``op`` is one of ``"sum" | "mean" | "max" | "min" | "count" |
 ///     "median"`` and ``order`` is ``"ascending" | "descending"`` (``"asc"``
 ///     / ``"desc"`` also accepted). The aggregate is computed over the value
-///     column per group; ``count`` counts non-null value rows. Groups are then
+///     column per group; ``count`` counts the usable (non-null, finite) values. Groups are then
 ///     emitted in ranked order (ties broken lexicographically), which sets the
 ///     boxen categorical axis domain directly. When omitted, groups are emitted
 ///     in lexicographic order.
@@ -2774,5 +2767,50 @@ mod tests {
             .expect("a repeated groupby name refuses")
             .to_string();
         assert!(err.contains("LetterValue: groupby column 'h' is repeated"), "{err}");
+    }
+
+    /// A value that is infinite is skipped as a null value is: the letter
+    /// values, the outlier rows and the all-unusable group's placeholder are
+    /// the null twin's, so one boxen outlier is not lost to the extra count.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        pyo3::Python::initialize();
+        let frame = |last: Option<f64>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("v", DataType::Float64, true),
+            ]));
+            let mut values: Vec<Option<f64>> = (1..=40).map(|i| Some(i as f64)).collect();
+            values.extend([Some(-1000.0), Some(1000.0), last]);
+            let mut groups = vec!["a"; 43];
+            values.push(last);
+            groups.push("b");
+            RecordBatch::try_new(
+                schema,
+                vec![Arc::new(StringArray::from(groups)), Arc::new(Float64Array::from(values))],
+            )
+            .unwrap()
+        };
+        let spec = LetterValueSpec {
+            groupby: Vec::new(),
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let run = |batch: &RecordBatch| {
+            let ctx = TransformContext::default();
+            let primary = apply_with_context(&spec, batch, &ctx).unwrap();
+            let secondary = secondary_outputs(&spec, batch, &primary, &ctx).unwrap();
+            (primary, secondary)
+        };
+        let twin = run(&frame(None));
+        let outliers = twin.1.iter().find(|(k, _)| k == "outliers").expect("an outliers batch");
+        assert_eq!(outliers.1.num_rows(), 2, "twin sanity: the two extremes are its outliers");
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(run(&frame(Some(infinite))), twin);
+        }
     }
 }

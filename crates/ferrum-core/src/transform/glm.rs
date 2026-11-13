@@ -40,7 +40,7 @@ use crate::transform::group_key::{
     FIT_NULL_KEYS,
 };
 use crate::transform::log_space::run_fit_in_log_space;
-use crate::transform::numeric_util::coerce_xy_pairs_at;
+use crate::transform::numeric_util::{coerce_xy_pairs_at, FEWER_THAN_TWO_USABLE_XY_POINTS};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -366,7 +366,7 @@ fn fit(
 
     if xs.len() < 2 {
         return unfittable(Unfittable {
-            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
             refusal: "Glm: need at least 2 non-null observations".into(),
         });
     }
@@ -1132,7 +1132,7 @@ mod tests {
         let mut grouped = spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None);
         grouped.groupby = vec!["g".into()];
         let cases: Vec<(&str, Vec<f64>, Vec<f64>, &str)> = vec![
-            ("one point", vec![1.0], vec![gy[0]], "fewer than 2 usable (non-null/non-NaN) x/y points"),
+            ("one point", vec![1.0], vec![gy[0]], FEWER_THAN_TWO_USABLE_XY_POINTS),
             ("constant x", vec![2.0, 2.0, 2.0], vec![gy[0], gy[1], gy[2]], "zero x variance"),
             
         ];
@@ -1231,5 +1231,44 @@ mod tests {
             let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
             assert_eq!(refused, format!("ValueError: Glm: {reason}"), "{label}: ungrouped refuses");
         }
+    }
+
+    /// Two frames of one fit: the first eight rows are the points, then a row
+    /// whose `x` is `inf_x` and a row whose `y` is `inf_y`. `None` is the null
+    /// twin and an infinity is the value the twin stands in for.
+    fn frame_with_unusable(inf_x: Option<f64>, inf_y: Option<f64>, ys: [f64; 8]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let mut xs: Vec<Option<f64>> = (1..=8).map(|i| Some(i as f64)).collect();
+        let mut ys: Vec<Option<f64>> = ys.iter().map(|&y| Some(y)).collect();
+        xs.extend([inf_x, Some(9.0)]);
+        ys.extend([Some(1.0), inf_y]);
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys))],
+        )
+        .unwrap()
+    }
+
+    /// A point with an infinite `x` or `y` is skipped as a null point is: the
+    /// fit is the null twin's.
+    #[test]
+    fn an_infinite_coordinate_is_skipped_as_a_null_one_is() {
+        pyo3::Python::initialize();
+        let ys = [0.0, 1.0, 1.0, 3.0, 4.0, 4.0, 6.0, 9.0];
+        let fit = |inf_x, inf_y| {
+            apply(
+                &spec(GlmFamily::Poisson, GlmLink::Log, 20, None),
+                &frame_with_unusable(inf_x, inf_y, ys),
+            )
+            .unwrap()
+        };
+        let twin = fit(None, None);
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(fit(Some(infinite), Some(infinite)), twin);
+        }
+        assert!(col(&twin, "y").iter().all(|v| v.is_finite()));
     }
 }

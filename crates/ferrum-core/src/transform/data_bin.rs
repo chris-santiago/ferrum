@@ -4,12 +4,14 @@
 //! to bin counts). Output is the original batch plus a "{field}_bin" column
 //! containing the bin start value for each row.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::numeric_util::usable_at;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -67,9 +69,7 @@ pub(crate) fn apply(spec: &DataBinSpec, batch: &RecordBatch) -> PyResult<RecordB
         None => {
             let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
             for i in 0..n_rows {
-                if col.is_null(i) { continue; }
-                let v = col.value(i);
-                if v.is_nan() { continue; }
+                let Some(v) = usable_at(&col, i) else { continue };
                 if v < lo { lo = v; }
                 if v > hi { hi = v; }
             }
@@ -78,7 +78,7 @@ pub(crate) fn apply(spec: &DataBinSpec, batch: &RecordBatch) -> PyResult<RecordB
     };
 
     if data_min > data_max {
-        // All null/NaN — produce NaN bin column.
+        // No usable value: produce a NaN bin column.
         let bin_values = vec![f64::NAN; n_rows];
         return build_output(spec, batch, bin_values);
     }
@@ -111,13 +111,9 @@ pub(crate) fn apply(spec: &DataBinSpec, batch: &RecordBatch) -> PyResult<RecordB
     // Assign each row to a bin.
     let mut bin_values: Vec<f64> = Vec::with_capacity(n_rows);
     for i in 0..n_rows {
-        if col.is_null(i) {
-            bin_values.push(f64::NAN);
-        } else {
-            let v = col.value(i);
-            if v.is_nan() {
-                bin_values.push(f64::NAN);
-            } else {
+        match usable_at(&col, i) {
+            None => bin_values.push(f64::NAN),
+            Some(v) => {
                 let bin_idx = ((v - bin_start) / bin_width).floor();
                 bin_values.push(bin_start + bin_idx * bin_width);
             }
@@ -135,7 +131,7 @@ pub(crate) fn apply(spec: &DataBinSpec, batch: &RecordBatch) -> PyResult<RecordB
 /// Returns the RAW `(min, max)` — NOT niced. Nicing happens inside `apply`
 /// from the pinned range, guaranteeing every panel produces the same
 /// bin_width and the same niced bin_start. Returns `None` when the field is
-/// missing, non-numeric, all values are null/NaN, or the range is degenerate.
+/// missing, non-numeric, no value is usable (non-null, finite), or the range is degenerate.
 ///
 /// When `spec.extent` is already set, it is returned unchanged.
 pub(crate) fn global_extent(
@@ -393,5 +389,40 @@ mod tests {
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("extent"), "extent must not appear when None: {json}");
+    }
+
+    /// An infinite value is skipped as a null one is: the bin edges derive from
+    /// the finite values, and the infinite row gets a NaN bin as a null row does.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let frame_of = |last: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Float64Array::from(vec![Some(0.5), Some(2.5), Some(4.5), Some(9.5), last]))],
+            )
+            .unwrap()
+        };
+        let spec = DataBinSpec {
+            field: "x".into(),
+            as_: Some("x_bin".into()),
+            maxbins: Some(5),
+            step: None,
+            nice: true,
+            name: None,
+            extent: None,
+        };
+        let bins = |batch: &RecordBatch| -> Vec<f64> {
+            let out = apply(&spec, batch).unwrap();
+            let col = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+            (0..col.len()).map(|i| col.value(i)).collect()
+        };
+        let twin = bins(&frame_of(None));
+        assert!(twin[4].is_nan() && twin[..4].iter().all(|b| b.is_finite()));
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let got = bins(&frame_of(Some(infinite)));
+            assert_eq!(got[..4], twin[..4]);
+            assert!(got[4].is_nan());
+        }
     }
 }

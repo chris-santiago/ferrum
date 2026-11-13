@@ -1,7 +1,7 @@
 //! QQ (quantile-quantile) transform.
 //!
 //! Primary output: per-row points with `theoretical: f64, sample: f64` over
-//! the non-null/non-NaN values of `field`, sorted ascending by sample value.
+//! the usable (non-null, finite) values of `field`, sorted ascending by sample value.
 //!
 //! Secondary output (`qq_line`, when `emit_line=true`): a batch with one row per
 //! fitted group (one row ungrouped) and columns
@@ -254,9 +254,6 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
-/// Reason a group with no value to plot is named.
-const NO_USABLE_VALUES: &str = "no usable (non-null/non-NaN) values";
-
 /// The primary batch's own column names, before any `groupby` column.
 const POINT_COLUMNS: [&str; 2] = ["theoretical", "sample"];
 
@@ -306,14 +303,8 @@ pub(crate) fn apply_with_context(
     refuse_groupby_output_collision("stat_qq", &spec.groupby, &output_column_names())?;
     let partition =
         group_partition_multi(batch, &spec.groupby, "stat_qq", NullKeyPolicy::Skip, ctx)?;
-    // Null/NaN sample values are not plotted.
-    let clean = |i: usize| -> Option<f64> {
-        if v_arr.is_null(i) {
-            return None;
-        }
-        let v = v_arr.value(i);
-        (!v.is_nan()).then_some(v)
-    };
+    // A null, NaN or infinite sample value is not plotted.
+    let clean = |i: usize| usable_at(&v_arr, i);
     let mut theoretical: Vec<f64> = Vec::new();
     let mut samples: Vec<f64> = Vec::new();
     let mut keys: Vec<Vec<KeyValue>> = Vec::new();
@@ -475,7 +466,7 @@ fn quartile_fit_line(points: &[(f64, f64)]) -> Option<[f64; 4]> {
     Some([theo_min, theo_max, y_min, y_max])
 }
 
-use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
+use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted, usable_at, NO_USABLE_VALUES};
 
 // ---------- PyO3 wrapper ----------
 
@@ -1424,5 +1415,53 @@ mod tests {
         let ctx = TransformContext::default();
         apply_with_context(&spec, &batch, &ctx).unwrap();
         assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// An infinite sample value is skipped as a null one is: the plotting
+    /// positions and the quantile line are the finite values', and a group of
+    /// infinities is named as a group of nulls is.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let frame_of = |last: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(vec![Some(3.0), Some(1.0), Some(2.0), last, last])),
+                    Arc::new(arrow::array::StringArray::from(vec!["a", "a", "a", "a", "b"])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = QQSpec {
+            groupby: vec!["g".into()],
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: None,
+        };
+        let run = |last: Option<f64>| {
+            let ctx = TransformContext::default();
+            let batch = frame_of(last);
+            let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+            (out, ctx.degenerate_fits())
+        };
+        let (twin, twin_fits) = run(None);
+        assert_eq!(twin_fits, vec![("QQ".to_string(), Some("g=b".to_string()), NO_USABLE_VALUES.to_string())]);
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let (out, fits) = run(Some(infinite));
+            assert_eq!(fits, twin_fits);
+            assert_eq!(col(&out, "sample").iter().filter(|v| !v.is_nan()).count(), 3);
+            for name in ["theoretical", "sample"] {
+                let bits = |b: &RecordBatch| -> Vec<u64> { col(b, name).iter().map(|v| v.to_bits()).collect() };
+                assert_eq!(bits(&out), bits(&twin), "{name}");
+            }
+        }
     }
 }

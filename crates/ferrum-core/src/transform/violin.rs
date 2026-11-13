@@ -21,6 +21,7 @@ use crate::transform::group_key::{
 };
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::kde::{self, BandwidthSpec, KdeSpec};
+use crate::transform::numeric_util::usable_at;
 
 fn default_bandwidth() -> BandwidthSpec {
     BandwidthSpec::Scott
@@ -69,8 +70,8 @@ pub(crate) struct ViolinSpec {
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
 ///
-/// Returns `None` when the field is missing, non-numeric, or all values are
-/// null/NaN. This is the pre-facet extent that `render::prepare` uses to pin the
+/// Returns `None` when the field is missing, non-numeric, or no value is
+/// usable (non-null, finite). This is the pre-facet extent that `render::prepare` uses to pin the
 /// value axis before partitioning, so every facet panel shares the same KDE grid
 /// range (see `fix_transform_extents_for_facet`).
 ///
@@ -251,19 +252,7 @@ pub(crate) fn apply_with_context(
     let mut rings = RingRows::default();
 
     for (gid, (key, rows)) in partition.groups.iter().enumerate() {
-        let vals: Vec<f64> = rows
-            .iter()
-            .filter_map(|&r| {
-                if v_arr.is_null(r) {
-                    return None;
-                }
-                let v = v_arr.value(r);
-                if v.is_nan() {
-                    return None;
-                }
-                Some(v)
-            })
-            .collect();
+        let vals: Vec<f64> = rows.iter().filter_map(|&r| usable_at(&v_arr, r)).collect();
 
         // A group the statistic cannot estimate is named once, as `Kde` names
         // the same data, and keeps a placeholder ring so its key, slot and
@@ -293,7 +282,7 @@ pub(crate) fn apply_with_context(
         // no position.
         if let Some(reason) = kde::unestimable_cause(&vals) {
             degrade(reason);
-            let at = if lo == hi && lo.is_finite() { lo } else { f64::NAN };
+            let at = if lo == hi { lo } else { f64::NAN };
             rings.push_placeholder(gid, key, at);
             continue;
         }
@@ -2102,9 +2091,9 @@ mod tests {
         assert_eq!(
             degenerate_fits(&ctx),
             vec![
-                ("Violin".to_string(), Some("group=one".to_string()), kde::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
+                ("Violin".to_string(), Some("group=one".to_string()), crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
                 ("Violin".to_string(), Some("group=tied".to_string()), kde::ALL_VALUES_EQUAL.to_string()),
-                ("Violin".to_string(), Some("group=none".to_string()), kde::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
+                ("Violin".to_string(), Some("group=none".to_string()), crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES.to_string()),
             ]
         );
         // Every group keeps rows: the well-formed body plus a ring each.
@@ -2183,7 +2172,7 @@ mod tests {
         apply_with_context(&spec_for(&[], 32), &batch("v", vec![3.0]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, kde::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
+            vec![("Violin".to_string(), None, crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
         );
     }
 
@@ -2207,30 +2196,60 @@ mod tests {
         assert!(rows.iter().all(|&(x, y)| x == 0.0 && y == 0.0), "{rows:?}");
     }
 
+    /// An infinity is skipped as a null is, so a group of one finite value and
+    /// an infinity is a one-value group: named with the count reason and kept
+    /// as a zero-width ring at the finite value, never with the bandwidth text.
     #[test]
-    fn violin_infinite_values_are_named_with_a_nan_ring() {
+    fn violin_one_finite_value_beside_an_infinity_keeps_a_zero_width_ring() {
         pyo3::Python::initialize();
         let ctx = TransformContext::default();
         let out =
             apply_with_context(&spec_for(&[], 16), &batch("v", vec![1.0, f64::INFINITY]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, kde::BANDWIDTH_NOT_USABLE.to_string())]
+            vec![("Violin".to_string(), None, crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
         );
-        assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
+        let rows = group_rows(&out, 0);
+        assert_eq!(rows.len(), PLACEHOLDER_RING_VERTICES);
+        assert!(rows.iter().all(|&(x, y)| x == 0.0 && y == 1.0), "{rows:?}");
     }
 
-    /// One infinite value is a single usable value: it is named as `Kde`
-    /// names the same data, not as a failed bandwidth.
+    /// An infinity among a group's finite values is skipped: the ring is the
+    /// finite values' own, for either sign, and nothing is named.
     #[test]
-    fn violin_one_infinite_value_is_named_as_a_single_value() {
+    fn violin_an_infinity_among_finite_values_is_skipped() {
+        pyo3::Python::initialize();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let ctx = TransformContext::default();
+            let out = apply_with_context(
+                &spec_for(&[], 16),
+                &batch("v", vec![1.0, 2.0, 4.0, 8.0, infinite]),
+                &ctx,
+            )
+            .unwrap();
+            assert!(ctx.warnings.borrow().is_empty(), "{:?}", degenerate_fits(&ctx));
+            let twin = apply_with_context(
+                &spec_for(&[], 16),
+                &batch("v", vec![1.0, 2.0, 4.0, 8.0]),
+                &TransformContext::default(),
+            )
+            .unwrap();
+            assert_eq!(group_rows(&out, 0), group_rows(&twin, 0));
+            assert!(group_rows(&out, 0).iter().any(|&(x, _)| x != 0.0));
+        }
+    }
+
+    /// An infinity alone is no usable value: the group is named as a group of
+    /// nulls is, with the count reason and a ring that has no position.
+    #[test]
+    fn violin_a_group_of_infinities_is_named_as_a_group_of_nulls_is() {
         pyo3::Python::initialize();
         let ctx = TransformContext::default();
         let out =
             apply_with_context(&spec_for(&[], 16), &batch("v", vec![f64::INFINITY]), &ctx).unwrap();
         assert_eq!(
             degenerate_fits(&ctx),
-            vec![("Violin".to_string(), None, kde::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
+            vec![("Violin".to_string(), None, crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES.to_string())]
         );
         assert!(group_rows(&out, 0).iter().all(|&(x, y)| x.is_nan() && y.is_nan()));
     }

@@ -78,6 +78,7 @@ from typing import Any, Callable, ClassVar, Literal, NamedTuple, Optional
 
 import polars as pl
 
+from ferrum._usable import usable, usable_values
 from ferrum._validate import validate_choice
 from ferrum.encoding._aliases import resolve_channel_alias
 
@@ -211,6 +212,9 @@ def _curve_metric(df: pl.DataFrame, *, kind: str, x_col: str, y_col: str, where:
     2026-09-13). ``where`` is that surface's user-facing name
     (``"BrierLabel"``, ``"mark_roc"``) -- required, so a new caller has to
     decide what a reader would recognise rather than inherit a generic one.
+
+    The integration reads the curve's usable points: a row whose x or y is null, NaN or infinite
+    is left out, and a curve with none has no metric (NaN).
     """
     validate_choice("_curve_metric", "kind", kind, _METRIC_LABEL_SPECS)
     value = _broadcast_metric(df, kind)
@@ -245,10 +249,13 @@ def _curve_metric(df: pl.DataFrame, *, kind: str, x_col: str, y_col: str, where:
 
     import numpy as np
 
+    pairs = df.filter(usable(x_col, df.schema[x_col]) & usable(y_col, df.schema[y_col]))
+    if pairs.is_empty():
+        return float("nan")
     return float(
         spec.value_fn(
-            np.asarray(df[x_col].to_list(), dtype=float),
-            np.asarray(df[y_col].to_list(), dtype=float),
+            np.asarray(pairs[x_col].to_list(), dtype=float),
+            np.asarray(pairs[y_col].to_list(), dtype=float),
         )
     )
 
@@ -576,10 +583,11 @@ def _apply_metric_label(
     n = df.height
     labels_col: list[Optional[str]] = [None] * n
 
-    y_range = float(df[y_col].max() - df[y_col].min()) if n > 0 else 1.0
-    y_top = float(df[y_col].max()) if n > 0 else 1.0
-    x_col_max = df[x_col].max() if n > 0 else None
-    x_top = float(x_col_max) if x_col_max is not None else 0.0
+    y_values = usable_values(df[y_col])
+    x_values = usable_values(df[x_col])
+    y_range = float(y_values.max()) - float(y_values.min()) if len(y_values) else 1.0
+    y_top = float(y_values.max()) if len(y_values) else 1.0
+    x_top = float(x_values.max()) if len(x_values) else 0.0
     stagger_step = max(y_range * 0.06, 1e-9)
     label_y_col: list[Optional[float]] = [None] * n
     label_x_col: list[Optional[float]] = [None] * n
@@ -605,36 +613,35 @@ def _apply_metric_label(
                 group.drop("_idx"), kind=kind, x_col=x_col, y_col=y_col, where=type(label).__name__
             )
             text = _render_metric(kind, metric, prefix=label.prefix, fmt=label.format)
-            # nulls_last=True so a null x (which polars' default descending
-            # sort places FIRST) never becomes the selected "endpoint" row;
-            # the endpoint is the group's highest *non-null* x, matching what
-            # the pre-fix code rendered for this data (the label text/metric
-            # already reflects any null via the kind's value-function NaN
-            # propagation
-            # above -- only the label's x-position selection is guarded
-            # here). Only an entirely-null-x group falls through with the
-            # null row still selected; that case is caught explicitly below.
-            endpoint_row = group.sort(x_col, descending=True, nulls_last=True).row(0, named=True)
+            # The endpoint is the group's largest usable x (a null, NaN or infinite x is
+            # none); a group with no usable x anchors at the frame's right edge, x_top.
+            ends = group.filter(usable(x_col, df.schema[x_col]))
+            endpoint_row = (
+                (ends if not ends.is_empty() else group)
+                .sort(x_col, descending=True, nulls_last=True)
+                .row(0, named=True)
+            )
             global_idx = int(endpoint_row["_idx"])
-            endpoint_x = endpoint_row[x_col]
             labels_col[global_idx] = text
             label_y_col[global_idx] = y_top - stack_i * stagger_step
-            if corner:
+            if corner or ends.is_empty():
                 label_x_col[global_idx] = x_top
             else:
-                label_x_col[global_idx] = float(endpoint_x) if endpoint_x is not None else x_top
+                label_x_col[global_idx] = float(endpoint_row[x_col])
     else:
         metric = _curve_metric(
             df.drop("_idx"), kind=kind, x_col=x_col, y_col=y_col, where=type(label).__name__
         )
         text = _render_metric(kind, metric, prefix=label.prefix, fmt=label.format)
-        global_idx = df[x_col].arg_max()
-        # arg_max() returns None (not an int index) for an empty or
-        # entirely-null x column -- pre-existing edge case, not introduced
-        # by this change, but reachable via the same empty/null-input
-        # scenarios this fix now covers. No non-null row exists to anchor a
-        # label, so skip emission entirely (mirrors the grouped branch's
-        # own `if group.is_empty(): continue`); the base chart still renders.
+        # The anchor is the first row of the largest usable x. A curve with no usable x anchors
+        # its label at its first row, at (x_top, y_top), as the grouped branch anchors such a
+        # group, so the label still reads its metric (nan); only a frame with no rows has no
+        # row to anchor one on.
+        global_idx = df.select(
+            pl.when(usable(x_col, df.schema[x_col])).then(pl.col(x_col)).alias("_usable_x")
+        )["_usable_x"].arg_max()
+        if global_idx is None and n > 0:
+            global_idx = 0
         if global_idx is not None:
             labels_col[global_idx] = text
             label_y_col[global_idx] = y_top
@@ -850,9 +857,20 @@ class OutlierLabel:
             raise ValueError(f"OutlierLabel: cannot locate field {field!r}")
         base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
         df = base_pl.with_row_index("_idx")
-        mu = float(df[field].mean())
-        sigma = float(df[field].std(ddof=1)) or 1.0
-        df = df.with_columns(((pl.col(field) - mu).abs() / sigma).alias("_z"))
+        # A usable value is present and finite (``ferrum._usable``): the mean and deviation
+        # read only those, and an unusable row gets no z-score, so it is never labeled.
+        mask = usable(field, df.schema[field])
+        values = usable_values(df[field])
+        if values.is_empty():
+            return base
+        mu = float(values.mean())
+        deviation = values.std(ddof=1)
+        # One usable value has no deviation (None) and tied values have zero; either reads as
+        # 1.0, so no row scores above a positive threshold.
+        sigma = float(deviation) if deviation else 1.0
+        df = df.with_columns(
+            pl.when(mask).then((pl.col(field) - mu).abs() / sigma).otherwise(None).alias("_z")
+        )
         outliers = (
             df.filter(pl.col("_z") > self.threshold)
             .sort("_z", descending=True)

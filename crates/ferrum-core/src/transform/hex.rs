@@ -24,7 +24,7 @@
 //! hexagon and warns `DegenerateFit`: the statistic names the partition, since
 //! only it knows which input emptied it. A zero-row partition emits no rows.
 
-use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -35,7 +35,7 @@ use std::sync::Arc;
 use crate::transform::aggregate::HexAggregate;
 use crate::transform::context::{TransformContext, TransformWarning};
 use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
-use crate::transform::numeric_util::{coerce_to_float64, column_extent};
+use crate::transform::numeric_util::{coerce_to_float64, column_extent, usable_at, NO_USABLE_VALUES};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -149,34 +149,16 @@ pub(crate) fn apply_with_context(spec: &HexSpec, batch: &RecordBatch, ctx: &Tran
     let mut ys: Vec<f64> = Vec::with_capacity(n_rows);
     let mut fs: Vec<f64> = Vec::with_capacity(n_rows);
     for i in 0..n_rows {
-        if xa.is_null(i) || ya.is_null(i) {
+        let (Some(xv), Some(yv)) = (usable_at(&xa, i), usable_at(&ya, i)) else {
             continue;
-        }
-        let xv = xa.value(i);
-        let yv = ya.value(i);
-        if !xv.is_finite() || !yv.is_finite() {
-            continue;
-        }
+        };
         let fv = match &field_arr {
             None => 0.0,
-            Some(fa) => {
-                if fa.is_null(i) {
-                    if needs_field {
-                        continue;
-                    }
-                    0.0
-                } else {
-                    let v = fa.value(i);
-                    if !v.is_finite() {
-                        if needs_field {
-                            continue;
-                        }
-                        0.0
-                    } else {
-                        v
-                    }
-                }
-            }
+            Some(fa) => match usable_at(fa, i) {
+                Some(v) => v,
+                None if needs_field => continue,
+                None => 0.0,
+            },
         };
         xs.push(xv);
         ys.push(yv);
@@ -195,7 +177,7 @@ pub(crate) fn apply_with_context(spec: &HexSpec, batch: &RecordBatch, ctx: &Tran
         ctx.warn(TransformWarning::DegenerateFit {
             transform: "Hex".into(),
             group: None,
-            reason: crate::transform::raster::NO_USABLE_VALUES.into(),
+            reason: NO_USABLE_VALUES.into(),
             panel: None,
             step: ctx.step.clone(),
         });
@@ -343,7 +325,7 @@ pub(crate) fn apply_with_context(spec: &HexSpec, batch: &RecordBatch, ctx: &Tran
 /// nicing), like the other 2-D pins and unlike 1-D `Bin`. Nicing and auto
 /// bin_size derive inside `apply` from the pinned range, so every panel derives
 /// them identically. Returns `None` when either field is missing, non-numeric,
-/// all values are null/NaN, or an axis range is degenerate. Each axis uses the
+/// no value is usable (non-null, finite), or an axis range is degenerate. Each axis uses the
 /// shared `column_extent` helper (coerces integer columns to Float64).
 ///
 /// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
@@ -1046,7 +1028,7 @@ mod tests {
     }
 
     fn no_usable() -> Vec<(String, Option<String>, String)> {
-        vec![("Hex".to_string(), None, crate::transform::raster::NO_USABLE_VALUES.to_string())]
+        vec![("Hex".to_string(), None, NO_USABLE_VALUES.to_string())]
     }
 
     /// A partition with rows but no usable point keeps one placeholder

@@ -22,7 +22,7 @@
 //! when no context is provided (apply() default), it falls back to 256x256.
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array,
+    ArrayRef, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -31,12 +31,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::context::{TransformContext, TransformWarning};
-use crate::transform::numeric_util::{coerce_to_float64, column_extent};
+use crate::transform::numeric_util::{coerce_to_float64, column_extent, usable_at, NO_USABLE_VALUES};
 use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
-
-/// Reason a 2-D binning partition (`Raster`, `Hex`) has rows and no row with
-/// a non-null, finite x, y and, where the aggregate reads it, field.
-pub(crate) const NO_USABLE_VALUES: &str = "no usable (non-null, finite) values";
 
 /// The raster batch's one-row Utf8 column naming the field its cells hold:
 /// the aggregated `field=` column, else the aggregate's own name (`count`,
@@ -159,7 +155,7 @@ pub(crate) struct RasterSpec {
 ///
 /// Returns the RAW per-axis `(min, max)` (no nicing). Raster does not nice its
 /// extent — the raw range drives the grid directly. Returns `None` when either
-/// field is missing, non-Float64, all values are null/NaN, or a range is
+/// field is missing, non-Float64, no value is usable (non-null, finite), or a range is
 /// degenerate.
 ///
 /// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
@@ -289,26 +285,15 @@ pub(crate) fn apply_with_context(
     let mut ys: Vec<f64> = Vec::with_capacity(n_rows);
     let mut fs: Vec<f64> = Vec::with_capacity(n_rows);
     for i in 0..n_rows {
-        if xa.is_null(i) || ya.is_null(i) {
+        let (Some(xv), Some(yv)) = (usable_at(&xa, i), usable_at(&ya, i)) else {
             continue;
-        }
-        let xv = xa.value(i);
-        let yv = ya.value(i);
-        if !xv.is_finite() || !yv.is_finite() {
-            continue;
-        }
+        };
         let fv = match field_arr.as_ref() {
             None => 0.0,
-            Some(fa) => {
-                if fa.is_null(i) {
-                    continue;
-                }
-                let v = fa.value(i);
-                if !v.is_finite() {
-                    continue;
-                }
-                v
-            }
+            Some(fa) => match usable_at(fa, i) {
+                Some(v) => v,
+                None => continue,
+            },
         };
         xs.push(xv);
         ys.push(yv);

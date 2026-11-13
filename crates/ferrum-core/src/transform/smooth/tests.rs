@@ -3724,3 +3724,49 @@ fn with_residual_columns_on_a_non_smooth_spec_is_a_typed_error_not_a_panic() {
         .expect_err("a non-Smooth spec must be refused, not panic");
     assert!(err.to_string().contains("Smooth"), "{err}");
 }
+
+/// A row with an infinite `x` or `y` is skipped as a null row is: the fitted
+/// line, with its band, and the residual rows equal the null twin's.
+#[test]
+fn an_infinite_coordinate_is_skipped_as_a_null_one_is() {
+    pyo3::Python::initialize();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+    ]));
+    let frame_of = |bad_x: Option<f64>, bad_y: Option<f64>| {
+        let mut xs: Vec<Option<f64>> = (0..8).map(|i| Some(i as f64)).collect();
+        let mut ys: Vec<Option<f64>> =
+            [1.0, 3.2, 4.9, 7.1, 9.0, 11.2, 12.8, 15.1].iter().map(|&y| Some(y)).collect();
+        xs.extend([bad_x, Some(8.0)]);
+        ys.extend([Some(5.0), bad_y]);
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Float64Array::from(xs)), Arc::new(Float64Array::from(ys))],
+        )
+        .unwrap()
+    };
+    for output in [SmoothOutput::Fitted, SmoothOutput::Residuals] {
+        let spec = SmoothSpec {
+            residual_columns: Default::default(),
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: Some(0.95),
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            x_range: None, x_range_pad: None,
+            groupby: vec![],
+            name: None,
+        };
+        let twin = apply(&spec, &frame_of(None, None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&spec, &frame_of(Some(infinite), Some(infinite)), &ctx).unwrap();
+            assert_eq!(out, twin);
+            assert!(ctx.warnings.borrow().is_empty());
+        }
+        assert!(twin.num_rows() > 0);
+    }
+}

@@ -1,7 +1,7 @@
 //! Outliers: per-group IQR row filter.
 //! Output schema = input schema, filtered to outlier rows.
 
-use arrow::array::{Array, BooleanArray, RecordBatch};
+use arrow::array::{BooleanArray, RecordBatch};
 use arrow::compute::filter_record_batch;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transform::context::TransformContext;
 use crate::transform::group_key::{group_partition_multi, NullKeyPolicy};
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, usable_at};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -64,19 +64,10 @@ pub(crate) fn apply_with_context(
     // Compute mask: true = outlier (keep).
     let mut mask = vec![false; n];
     for (_, indices) in &partition.groups {
-        // Collect non-NaN, non-null values for quartile computation.
+        // Collect the usable (non-null, finite) values for quartile computation.
         let group_values: Vec<f64> = indices
             .iter()
-            .filter_map(|&i| {
-                if values_arr.is_null(i) {
-                    return None;
-                }
-                let v = values_arr.value(i);
-                if v.is_nan() {
-                    return None;
-                }
-                Some(v)
-            })
+            .filter_map(|&i| usable_at(&values_arr, i))
             .collect();
         if group_values.len() < 2 {
             continue; // no IQR with <2 values
@@ -86,13 +77,9 @@ pub(crate) fn apply_with_context(
         let lo = q1 - spec.extent * iqr;
         let hi = q3 + spec.extent * iqr;
         for &i in indices {
-            if values_arr.is_null(i) {
+            let Some(v) = usable_at(&values_arr, i) else {
                 continue;
-            }
-            let v = values_arr.value(i);
-            if v.is_nan() {
-                continue;
-            }
+            };
             if v < lo || v > hi {
                 mask[i] = true;
             }
@@ -309,6 +296,25 @@ mod tests {
         let g_arr = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(v_arr.value(0), 1050.0);
         assert_eq!(g_arr.value(0), 2);
+    }
+
+    /// A value that is infinite is skipped as a null value is: the quartiles
+    /// are the finite values', and the infinite row is not an outlier row.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        pyo3::Python::initialize();
+        let frame = |last: Option<f64>| {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+            let mut values: Vec<Option<f64>> = (1..=9).map(|i| Some(i as f64)).collect();
+            values.extend([Some(1000.0), last]);
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+        };
+        let spec = OutliersSpec { field: "v".into(), groupby: vec![], extent: 1.5, name: None };
+        let twin = apply(&spec, &frame(None)).unwrap();
+        assert_eq!(twin.num_rows(), 1);
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame(Some(infinite))).unwrap(), twin);
+        }
     }
 }
 

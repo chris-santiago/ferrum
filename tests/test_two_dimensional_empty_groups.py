@@ -2,9 +2,10 @@
 
 A contour (``Kde2D`` then ``Contour``), a 2-D density figure, a hexbin or a raster whose points
 cannot be estimated or placed keeps its legend entry or facet panel and is named once, by its
-statistic's ``DegenerateFit``. ``Kde2D`` names a group or panel with fewer than two points, identical points, points tied on
-one axis (under any bandwidth), an infinite coordinate, or a density that is zero at every grid point; ``Hex`` and ``Raster`` name a
-panel or call with rows and no non-null, finite point (or, for an aggregate that reads one, no
+statistic's ``DegenerateFit``. ``Kde2D`` names a group or panel with fewer than two usable points
+(a row with a null, NaN or infinite coordinate is no point), identical points, points tied on one
+axis (under any bandwidth), or a density that is zero at every grid point; ``Hex`` and ``Raster``
+name a panel or call with rows and no non-null, finite point (or, for an aggregate that reads one, no
 usable ``field=`` value). The render's census defers to the statistic that named the unit, so every
 chart here raises exactly the listed messages. A frame with no rows reports that the chart has no
 rows to draw, and a well-formed 2-D chart warns nothing.
@@ -20,7 +21,6 @@ import pytest
 
 import ferrum as fm
 from tests.test_null_group_warning import (
-    FIT_BANDWIDTH,
     FIT_FEW_PAIRS,
     FIT_TIED_POINTS,
     FIT_TIED_X,
@@ -50,7 +50,10 @@ _C_CASES = [
     pytest.param([(1.0, 2.0)] * 4, FIT_TIED_POINTS, id="tied"),
     pytest.param([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)], FIT_TIED_Y, id="tied-y"),
     pytest.param([(2.0, 0.0), (2.0, 1.0), (2.0, 2.0), (2.0, 3.0)], FIT_TIED_X, id="tied-x"),
-    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (_INF, 3.0)], FIT_BANDWIDTH, id="inf-x"),
+    pytest.param([(_INF, _INF), (-_INF, 1.0), (2.0, _INF), (_INF, 3.0)], _FEW_POINTS, id="all-inf"),
+    pytest.param(
+        [(0.0, 0.0), (_INF, 1.0), (_INF, 2.0), (-_INF, 3.0)], _FEW_POINTS, id="one-finite"
+    ),
 ]
 _CONTOUR_FILLS = [pytest.param(False, id="isoline"), pytest.param(True, id="isoband")]
 
@@ -190,7 +193,6 @@ _FIXED_BANDWIDTH_TIED_CASES = [
     pytest.param([(1.0, 2.0)] * 4, FIT_TIED_POINTS, id="tied"),
     pytest.param([(0.0, 2.0), (1.0, 2.0), (2.0, 2.0), (3.0, 2.0)], FIT_TIED_Y, id="tied-y"),
     pytest.param([(2.0, 0.0), (2.0, 1.0), (2.0, 2.0), (2.0, 3.0)], FIT_TIED_X, id="tied-x"),
-    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (_INF, 3.0)], FIT_BANDWIDTH, id="inf-x"),
 ]
 
 
@@ -199,11 +201,51 @@ def test_a_contour_group_it_cannot_estimate_under_a_fixed_bandwidth_names_its_ca
     points: list[tuple[float | None, float | None]], reason: str
 ):
     """A caller's bandwidth is always usable, so the data is the cause: the group is named with
-    the tied (or infinite-coordinate) reason, instead of the census blaming null x and y (identical
-    points, an infinity) or nothing being said for a body that draws nothing (a tie on one axis)."""
+    the tied reason, instead of the census blaming null x and y (identical points) or nothing
+    being said for a body that draws nothing (a tie on one axis)."""
     chart = fm.Chart(_hue_frame(points)).mark_contour(bandwidth=0.5).encode(x="x", y="y", color="g")
     svg, shown = _render_capturing(chart.to_svg)
     assert shown == [_fit_message("Kde2D", "g=c", reason)]
+    assert ">c<" in svg
+
+
+_INFINITE_COORDINATE_ROWS = [
+    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.5), (_INF, 3.0)], id="inf-x"),
+    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.5), (3.0, -_INF)], id="inf-y"),
+    pytest.param([(0.0, 0.0), (1.0, 1.0), (2.0, 2.5), (_INF, -_INF)], id="inf-both"),
+]
+
+
+def _nullified(points: list[tuple[float, float]]) -> list[tuple[float | None, float | None]]:
+    """``points`` with every infinite coordinate replaced by a null."""
+    return [tuple(None if abs(v) == _INF else v for v in p) for p in points]
+
+
+def _density_door_at(door: str, bandwidth: float | None, df: pl.DataFrame) -> fm.Chart:
+    """``_density_door``, or a contour under the fixed ``bandwidth`` when one is given."""
+    if bandwidth is None:
+        return _density_door(door, df)
+    return fm.Chart(df).mark_contour(bandwidth=bandwidth).encode(x="x", y="y", color="g")
+
+
+@pytest.mark.parametrize(
+    "door,bandwidth",
+    [*((door, None) for door in _DENSITY_DOORS), ("mark_contour", 0.5)],
+    ids=[*_DENSITY_DOORS, "mark_contour-fixed-bandwidth"],
+)
+@pytest.mark.parametrize("points", _INFINITE_COORDINATE_ROWS)
+def test_a_contour_group_with_an_infinite_coordinate_draws_from_its_finite_points(
+    points: list[tuple[float, float]], door: str, bandwidth: float | None
+):
+    """A row with an infinite coordinate is skipped as one with a null coordinate is: the group
+    keeps three usable points, draws as its null twin does and warns nothing, under the default
+    bandwidth and a fixed one."""
+    svg, shown = _render_capturing(_density_door_at(door, bandwidth, _hue_frame(points)).to_svg)
+    twin_svg, twin_shown = _render_capturing(
+        _density_door_at(door, bandwidth, _hue_frame(_nullified(points))).to_svg
+    )
+    assert shown == [] and twin_shown == []
+    assert svg == twin_svg
     assert ">c<" in svg
 
 

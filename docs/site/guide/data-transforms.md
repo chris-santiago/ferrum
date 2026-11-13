@@ -506,7 +506,7 @@ chart = (
 
 Methods: `"value"` (constant, set `value=`), `"mean"`, `"median"`, `"min"`, `"max"`. `groupby=` computes each group's fill value from that group's own rows (not the whole column), and fills only that group's null/NaN rows.
 
-If a group has *no* non-null values to compute a statistic from, it falls back to the whole column's statistic instead of degrading to `0.0` (which would silently distort the domain) or `±inf` (which would drop the group's rows from the render entirely).
+If a group has *no* usable (non-null, finite) values to compute a statistic from, it falls back to the whole column's statistic instead of degrading to `0.0` (which would silently distort the domain) or `±inf` (which would drop the group's rows from the render entirely).
 
 #### `key=` / `keyvals=` — filling in missing rows, not just missing values
 

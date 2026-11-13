@@ -18,7 +18,7 @@
 //!
 //! - **Parameter absurdity, on a genuine whole-frame call.** The caller
 //!   asked for a polynomial `degree` the input cannot determine —
-//!   `degree >=` the number of usable (non-null, post-`x_bins`-aggregation) points,
+//!   `degree >=` the number of usable (non-null, finite) points left after any `x_bins` aggregation,
 //!   i.e. the Vandermonde design is rank-deficient (`poly_ols`'s `n < p`
 //!   case). This refuses with a typed `PyValueError` naming the point count
 //!   needed — the same refusal class as `degree=0` — instead of silently
@@ -32,7 +32,7 @@
 //!   failing the whole render:
 //!   - A per-group rank-deficient design under `groupby` (T6's contract —
 //!     zero-variance x, non-convergent IRLS, too few points after that
-//!     group's own null/NaN drop). A grouped batch keeps succeeding even
+//!     group's own unusable-row drop). A grouped batch keeps succeeding even
 //!     when one group can't be fit, rather than one bad group failing the
 //!     whole chart.
 //!   - An UNGROUPED batch that is itself one partition of a larger frame —
@@ -129,7 +129,7 @@ use crate::transform::group_key::{
     KeyValue,
 };
 use crate::transform::log_space::run_fit_in_log_space;
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, FEWER_THAN_TWO_USABLE_XY_POINTS};
 use crate::transform::residuals::{self, ResidualCarry, ResidualColumns};
 use fits::{
     build_degenerate_smooth_batch, build_predictor, build_residuals_batch, gam_fit,
@@ -465,7 +465,7 @@ fn apply_one_group(
         ctx.warn(TransformWarning::DegenerateFit {
             transform: "Smooth".into(),
             group: group.map(str::to_string),
-            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
             panel: None,
             step: ctx.step.clone(),
         });
@@ -508,10 +508,11 @@ fn apply_one_group(
                 return Err(PyValueError::new_err(format!(
                     "Smooth: degree={degree} needs at least {min_points} data points to \
                      fit a degree-{degree} polynomial; only {} remain after dropping \
-                     null/NaN x/y rows (and any x_bins aggregation). A degree this high \
+                     rows with no {usable} x/y (and any x_bins aggregation). A degree this high \
                      relative to the data is a rank-deficient design, not a valid fit — \
                      lower degree or provide more data",
                     xs.len(),
+                    usable = crate::transform::numeric_util::USABLE,
                 )));
             }
         }
@@ -756,7 +757,7 @@ fn pre_aggregate_xy(
     (out_x, out_y)
 }
 
-/// `(xs, ys, row_idx)`: the jointly non-null/non-NaN `x`/`y` pairs, and the
+/// `(xs, ys, row_idx)`: the jointly usable (non-null, finite) `x`/`y` pairs, and the
 /// ORIGINAL row position in `batch` each pair came from, in order — the
 /// positions a residuals-mode fit's carried columns are read at
 /// ([`fits::build_residuals_batch`]), since a residual is only ever
@@ -769,24 +770,20 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
         .map_err(|_| PyValueError::new_err(format!("stat_smooth: column '{}' not found", spec.y)))?;
     let xa = coerce_to_float64(batch.column(xi), "stat_smooth", &spec.x)?;
     let ya = coerce_to_float64(batch.column(yi), "stat_smooth", &spec.y)?;
-    // Collect row indices that are valid in BOTH arrays (non-null, non-NaN).
-    // Uses the same null+NaN predicate as clean_float64_values in numeric_util,
-    // but applied to paired columns so only jointly-clean rows are kept.
-    use crate::transform::numeric_util::clean_float64_values;
+    // Collect row indices that are usable in BOTH arrays. Uses the same
+    // `usable_at` predicate as clean_float64_values in numeric_util, applied to
+    // paired columns so only jointly-usable rows are kept.
+    use crate::transform::numeric_util::{clean_float64_values, usable_at};
     let candidate_iter: Box<dyn Iterator<Item = usize>> = match only_indices {
         Some(ixs) => Box::new(ixs.iter().copied()),
         None => Box::new(0..xa.len()),
     };
     let valid_indices: Vec<usize> = candidate_iter
-        .filter(|&i| {
-            !xa.is_null(i) && !ya.is_null(i)
-                && !xa.value(i).is_nan()
-                && !ya.value(i).is_nan()
-        })
+        .filter(|&i| usable_at(&xa, i).is_some() && usable_at(&ya, i).is_some())
         .collect();
 
     // Extract each column at the valid indices via the shared cleaner.
-    // This reuses the same null+NaN drop logic across all transform callers.
+    // This reuses the same usable-value drop logic across all transform callers.
     let xs = clean_float64_values(&xa, Some(&valid_indices));
     let ys = clean_float64_values(&ya, Some(&valid_indices));
     Ok((xs, ys, valid_indices))

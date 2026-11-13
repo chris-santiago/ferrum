@@ -219,6 +219,23 @@ def test_boxen_materialized_depth_drops_nan_values_like_extract_values():
     assert len(_rendered_opacities(svg)) == 4
 
 
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["pos-inf", "neg-inf"])
+def test_boxen_materialized_depth_skips_infinite_values_like_extract_values(value: float):
+    """400 rows, 200 of which are infinite in the value column: the real transform skips an
+    infinite value as it skips a null or NaN one, so the real group size is 200 and estimated and
+    rendered depth are both 4, not the 5 a count of all 400 rows would predict."""
+    values = [float(i) for i in range(200)] + [value] * 200
+    df = pl.DataFrame({"g": ["a"] * 400, "v": values})
+
+    estimated = _boxen_materialized_depth(
+        df, value_field="v", group_field="g", k_depth="tukey", k_proportion=0.007
+    )
+    assert estimated == 4
+
+    svg = fm.Chart(df).mark_boxen().encode(x="g", y="v").to_svg()
+    assert len(_rendered_opacities(svg)) == 4
+
+
 def test_boxen_materialized_depth_does_not_count_a_null_group():
     """A null in the GROUP column belongs to no group (`letter_value.rs` drops the row), so the
     estimator counts only the groups the statistic draws: a large run of null-group rows does not

@@ -7,6 +7,56 @@ use arrow::datatypes::{DataType, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 
+/// The words every reason uses for a usable value. A macro (not only a const)
+/// because `concat!` takes literals, so a `const` reason spells itself from
+/// it; [`USABLE`] is the same text as a `&str` for a runtime message.
+macro_rules! usable_words {
+    () => {
+        "usable (non-null, finite)"
+    };
+}
+
+/// A usable value, as the words a reason says it: present and finite. A null, a
+/// NaN, `+inf` and `-inf` are not usable.
+pub(crate) const USABLE: &str = usable_words!();
+
+/// A group, panel or call with fewer than two [`USABLE`] values (`Kde`, `Violin`).
+pub(crate) const FEWER_THAN_TWO_USABLE_VALUES: &str =
+    concat!("fewer than 2 ", usable_words!(), " values");
+/// A group with fewer than two [`USABLE`] points (`Kde2D`).
+pub(crate) const FEWER_THAN_TWO_USABLE_POINTS: &str =
+    concat!("fewer than 2 ", usable_words!(), " points");
+/// A group with fewer than two [`USABLE`] x/y points (`Smooth`, `Robust`,
+/// `Logistic`, `Glm`, `transform_regression`).
+pub(crate) const FEWER_THAN_TWO_USABLE_XY_POINTS: &str =
+    concat!("fewer than 2 ", usable_words!(), " x/y points");
+/// A group with fewer than three [`USABLE`] x/y points (`transform_loess`).
+pub(crate) const FEWER_THAN_THREE_USABLE_XY_POINTS: &str =
+    concat!("fewer than 3 ", usable_words!(), " x/y points");
+/// A group with no [`USABLE`] value at all (`QQ`, `Hex`, `Raster`).
+pub(crate) const NO_USABLE_VALUES: &str = concat!("no ", usable_words!(), " values");
+
+/// The one definition of a usable value: `Some(value)` when row `row` of `arr`
+/// is present and finite, `None` for a null, a NaN, `+inf` and `-inf`. Every
+/// statistic and data transform that computes a number from a column's values
+/// reads the column through this (directly, or through [`clean_float64_values`],
+/// [`coerce_xy_pairs_at`] and [`finite_extent`]), so an infinity is skipped
+/// exactly as a null is.
+#[inline]
+pub(crate) fn usable_at(arr: &Float64Array, row: usize) -> Option<f64> {
+    if arr.is_null(row) {
+        return None;
+    }
+    usable_value(arr.value(row))
+}
+
+/// [`usable_at`] for a value already read from its column (a nullable value
+/// converted from another dtype): `Some(v)` when `v` is finite.
+#[inline]
+pub(crate) fn usable_value(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
+}
+
 /// Coerce a numeric Arrow column to a `Float64Array`.
 ///
 /// - If the column is already Float64, it is downcast and cloned.
@@ -145,7 +195,7 @@ pub(crate) fn numeric_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyRe
 ///
 /// Both columns are resolved by name, coerced through [`coerce_to_float64`] (so
 /// any integer/unsigned/float dtype is accepted and anything else raises), then
-/// walked once keeping only the rows that are non-null and non-NaN in *both*
+/// walked once keeping only the rows that are usable (non-null, finite) in *both*
 /// columns — paired listwise deletion, since a row missing either coordinate
 /// cannot contribute to a fit.
 ///
@@ -153,7 +203,7 @@ pub(crate) fn numeric_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyRe
 /// caller keeps its own error voice. This is the single ingestion path for the
 /// two-column fit family (`logistic`, `glm`, `robust`), grouped or not.
 /// `smooth.rs::extract_xy` remains a separate walk — it isn't routed through
-/// this helper. Mirrors the `only_indices` pattern already established by
+/// this helper, but reads the same [`usable_at`]. Mirrors the `only_indices` pattern already established by
 /// [`clean_float64_values`] in this module.
 pub(crate) fn coerce_xy_pairs_at(
     batch: &RecordBatch,
@@ -198,13 +248,9 @@ pub(crate) fn coerce_xy_pairs_at_indexed(
     let mut ys = Vec::with_capacity(cap);
     let mut idxs = Vec::with_capacity(cap);
     for i in candidate_iter {
-        if xa.is_null(i) || ya.is_null(i) {
+        let (Some(xv), Some(yv)) = (usable_at(&xa, i), usable_at(&ya, i)) else {
             continue;
-        }
-        let (xv, yv) = (xa.value(i), ya.value(i));
-        if xv.is_nan() || yv.is_nan() {
-            continue;
-        }
+        };
         xs.push(xv);
         ys.push(yv);
         idxs.push(i);
@@ -212,7 +258,8 @@ pub(crate) fn coerce_xy_pairs_at_indexed(
     Ok((xs, ys, idxs))
 }
 
-/// Extract clean `f64` values from a Float64Array, dropping null and NaN entries.
+/// Extract the usable (non-null, finite) `f64` values from a Float64Array,
+/// dropping null, NaN and infinite entries.
 ///
 /// When `only_indices` is `Some(ixs)`, only the rows at those positions are
 /// considered (used by groupby partitioning in bin/kde).  When it is `None`,
@@ -226,7 +273,7 @@ pub(crate) fn clean_float64_values(
 
 /// Like [`clean_float64_values`], but also returns the ORIGINAL row index of
 /// each surviving value, in the same order. Used where a caller needs to look
-/// up other columns for exactly the rows that survived a null/NaN filter —
+/// up other columns for exactly the rows that survived the usable-value filter —
 /// e.g. `Bin`'s optional per-bin aggregate (batch-E T7), which must aggregate
 /// `agg_field` over precisely the rows counted in each bin.
 pub(crate) fn clean_float64_values_indexed(
@@ -234,13 +281,9 @@ pub(crate) fn clean_float64_values_indexed(
     only_indices: Option<&[usize]>,
 ) -> (Vec<f64>, Vec<usize>) {
     let push = |i: usize, vals: &mut Vec<f64>, idxs: &mut Vec<usize>| {
-        if arr.is_null(i) {
+        let Some(v) = usable_at(arr, i) else {
             return;
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return;
-        }
+        };
         vals.push(v);
         idxs.push(i);
     };
@@ -265,11 +308,12 @@ pub(crate) fn clean_float64_values_indexed(
     }
 }
 
-/// Finite `(lo, hi)` extent of a `Float64Array`, skipping null and NaN entries.
+/// Finite `(lo, hi)` extent of a `Float64Array`, skipping every unusable
+/// (null, NaN or infinite) entry.
 ///
-/// Folds the non-null, non-NaN values to their min/max. Returns `None` when the
+/// Folds the usable values to their min/max. Returns `None` when the
 /// array has no finite values, or when the resulting extent is degenerate
-/// (`lo >= hi` or non-finite). This is the canonical null/NaN-skipping fold plus
+/// (`lo >= hi` or non-finite). This is the canonical usable-value fold plus
 /// `lo < hi` guard that every faceted-pin transform's per-axis extent needs.
 ///
 /// [`column_extent`] is the batch-level wrapper (index_of + coerce_to_float64 +
@@ -278,20 +322,16 @@ pub(crate) fn finite_extent(arr: &Float64Array) -> Option<(f64, f64)> {
     finite_extent_where(arr, |_| true)
 }
 
-/// [`finite_extent`] over a subset of rows: same null/NaN skip, same fold, same
+/// [`finite_extent`] over a subset of rows: same usable-value skip, same fold, same
 /// `lo < hi` guard, restricted to the rows `keep` accepts. One fold body serves
 /// both so a whole-column extent and a row-restricted one can never disagree
 /// about what "finite extent" means.
 fn finite_extent_where(arr: &Float64Array, keep: impl Fn(usize) -> bool) -> Option<(f64, f64)> {
     let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if !keep(i) || arr.is_null(i) {
-            return (lo, hi);
+        match usable_at(arr, i) {
+            Some(v) if keep(i) => (lo.min(v), hi.max(v)),
+            _ => (lo, hi),
         }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
     });
     if lo.is_finite() && hi.is_finite() && lo < hi {
         Some((lo, hi))
@@ -417,7 +457,7 @@ pub(crate) fn grouped_column_extent(
     }
 }
 
-/// The clean (non-null, non-NaN) values of `field` over the rows a GROUPED
+/// The clean (usable: non-null, finite) values of `field` over the rows a GROUPED
 /// transform draws: the same rows [`grouped_column_extent`] folds, so a
 /// statistic of the pooled values (a bin count over them) and the pooled
 /// extent describe one set of rows. `None` when the field is missing or
@@ -958,12 +998,55 @@ mod tests {
     }
 
     #[test]
-    fn clean_keeps_infinity_drops_null_and_nan() {
-        // Infinity is NOT NaN, so it survives cleaning — a value that then
-        // poisons downstream sum/mean. Documents that clean keeps ±inf.
-        let arr = arr_from_options(vec![Some(1.0), None, Some(f64::NAN), Some(f64::INFINITY)]);
-        let result = clean_float64_values(&arr, None);
-        assert_eq!(result, vec![1.0, f64::INFINITY]);
+    fn usable_at_reads_only_a_present_finite_value() {
+        let arr = arr_from_options(vec![
+            Some(1.5),
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(-0.0),
+        ]);
+        let read: Vec<Option<f64>> = (0..arr.len()).map(|i| usable_at(&arr, i)).collect();
+        assert_eq!(read, vec![Some(1.5), None, None, None, None, Some(-0.0)]);
+    }
+
+    #[test]
+    fn clean_drops_null_nan_and_both_infinities() {
+        let arr = arr_from_options(vec![
+            Some(1.0),
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(2.0),
+            Some(f64::NEG_INFINITY),
+        ]);
+        assert_eq!(clean_float64_values(&arr, None), vec![1.0, 2.0]);
+        let (values, rows) = clean_float64_values_indexed(&arr, None);
+        assert_eq!((values, rows), (vec![1.0, 2.0], vec![0, 4]));
+        assert_eq!(clean_float64_values(&arr, Some(&[3, 4, 5])), vec![2.0]);
+    }
+
+    #[test]
+    fn xy_pairs_drop_a_row_with_an_infinity_in_either_column() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![1.0, f64::INFINITY, 3.0, 4.0, 5.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, f64::NEG_INFINITY, 40.0, 50.0])),
+        );
+        let (xs, ys) = coerce_xy_pairs_at(&b, "x", "y", "Test", None).unwrap();
+        assert_eq!((xs, ys), (vec![1.0, 4.0, 5.0], vec![10.0, 40.0, 50.0]));
+        let (xs, _, rows) = coerce_xy_pairs_at_indexed(&b, "x", "y", "Test", Some(&[1, 3, 4])).unwrap();
+        assert_eq!((xs, rows), (vec![4.0, 5.0], vec![3, 4]));
+    }
+
+    #[test]
+    fn finite_extent_keeps_the_extent_with_an_infinity_present() {
+        let arr = arr_from_options(vec![Some(3.0), Some(f64::INFINITY), Some(1.0), Some(f64::NEG_INFINITY)]);
+        assert_eq!(finite_extent(&arr), Some((1.0, 3.0)));
+        let b = one_col_batch("x", Arc::new(arr));
+        assert_eq!(column_extent(&b, "x"), Some((1.0, 3.0)));
+        let only = Float64Array::from(vec![f64::INFINITY, f64::NEG_INFINITY]);
+        assert_eq!(finite_extent(&only), None);
     }
 
     #[test]

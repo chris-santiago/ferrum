@@ -101,8 +101,8 @@ pub(crate) enum TransformWarning {
     /// that group's own data and fell back to a wider one instead of the
     /// method's own degenerate default — e.g. `Impute`'s whole-column
     /// statistic standing in for an all-null group or a null-keyed row.
-    /// `reason` names what fell back and to what (e.g. `"group has no
-    /// non-null values; used the whole column's mean instead"`).
+    /// `reason` names what fell back and to what (e.g. `"has no usable
+    /// (non-null, finite) values; the whole column's mean was used instead"`).
     FallbackApplied {
         transform: String,
         group: Option<String>,
@@ -1256,9 +1256,10 @@ mod tests {
         let w = TransformWarning::FallbackApplied {
             transform: "Impute".into(),
             group: Some("g=b".into()),
-            reason: "has no non-null/non-NaN values; the whole column's statistic was used \
-                     instead"
-                .into(),
+            reason: format!(
+                "has no {} values; the whole column's statistic was used instead",
+                crate::transform::numeric_util::USABLE
+            ),
         };
         let text = w.to_string();
         assert_eq!(

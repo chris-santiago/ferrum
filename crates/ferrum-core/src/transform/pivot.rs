@@ -16,7 +16,7 @@ use crate::transform::group_key::{
     group_partition_multi, groupby_field_nullable, materialize_groupby_col,
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, usable_at};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -145,11 +145,9 @@ pub(crate) fn apply_with_context(
             let Some(&pv) = kept_pivot_values.get(field_col.value(row)) else {
                 continue; // Pruned by `limit`; the group still counts above.
             };
-            let val = if value_col.is_null(row) {
-                f64::NAN
-            } else {
-                value_col.value(row)
-            };
+            // An unusable value (null, NaN or infinite) is a NaN cell entry,
+            // which the cell's aggregate skips.
+            let val = usable_at(&value_col, row).unwrap_or(f64::NAN);
             cells.entry(pv).or_default().push(val);
         }
         if !has_field_row {
@@ -414,4 +412,39 @@ mod tests {
         assert!(x.value(1).is_nan(), "group 'b' has no cell in the kept column");
     }
 
+    /// A cell's aggregate skips an infinite value as it skips a null one, for
+    /// every op, so the pivoted columns are the null twin's.
+    #[test]
+    fn a_cell_aggregate_skips_an_infinite_value_as_a_null_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("group", DataType::Utf8, false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let frame_of = |third: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b"])),
+                    Arc::new(StringArray::from(vec!["x", "x", "x", "x", "y"])),
+                    Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), third, Some(5.0), third])),
+                ],
+            )
+            .unwrap()
+        };
+        for op in OPS {
+            let spec = PivotSpec {
+                field: "key".into(),
+                value: "val".into(),
+                groupby: Some(vec!["group".into()]),
+                limit: None,
+                op: (*op).into(),
+                name: None,
+            };
+            let twin = apply(&spec, &frame_of(None)).unwrap();
+            for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(apply(&spec, &frame_of(Some(infinite))).unwrap(), twin, "op {op}");
+            }
+        }
+    }
 }

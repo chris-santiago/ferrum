@@ -2442,18 +2442,17 @@ fn spec_with(bandwidth: BandwidthSpec, extent: Option<(f64, f64)>, groupby: Vec<
     KdeSpec { bandwidth, extent, n: 8, ..minimal_spec(groupby) }
 }
 
-/// The cause order every 1-D density statistic reads: too few, then an
-/// infinity, then a tie; `None` for values that can be estimated.
+/// The cause order every 1-D density statistic reads over its usable values:
+/// too few, then a tie; `None` for values that can be estimated, a spread that
+/// overflows included (the bandwidth reason is the fit's own fallback, never
+/// this function's answer).
 #[test]
-fn unestimable_cause_names_fewer_than_two_then_an_infinity_then_a_tie() {
+fn unestimable_cause_names_fewer_than_two_then_a_tie() {
     assert_eq!(unestimable_cause(&[]), Some(FEWER_THAN_TWO_USABLE_VALUES));
     assert_eq!(unestimable_cause(&[3.0]), Some(FEWER_THAN_TWO_USABLE_VALUES));
-    assert_eq!(unestimable_cause(&[f64::INFINITY]), Some(FEWER_THAN_TWO_USABLE_VALUES));
-    assert_eq!(unestimable_cause(&[1.0, f64::INFINITY]), Some(BANDWIDTH_NOT_USABLE));
-    assert_eq!(unestimable_cause(&[f64::NEG_INFINITY, 2.0, 2.0]), Some(BANDWIDTH_NOT_USABLE));
-    assert_eq!(unestimable_cause(&[f64::INFINITY, f64::INFINITY]), Some(BANDWIDTH_NOT_USABLE));
     assert_eq!(unestimable_cause(&[4.0, 4.0, 4.0]), Some(ALL_VALUES_EQUAL));
     assert_eq!(unestimable_cause(&[1.0, 2.0]), None);
+    assert_eq!(unestimable_cause(&[-1e308, 0.0, 1e308]), None);
 }
 
 /// Tied values under a computed bandwidth are named as tied, not as a
@@ -2514,22 +2513,51 @@ fn tied_values_under_a_fixed_bandwidth_and_a_wide_extent_draw_without_a_warning(
     assert!(col(&out, "density").iter().skip(8).any(|d| *d > 0.0), "the tied group b draws over the shared extent");
 }
 
-/// An infinity among a group's values is named with the bandwidth reason
-/// under a fixed bandwidth as under a computed one, instead of reaching the
-/// render as an unplaced group.
+/// An infinity among a group's values is skipped as a null is, under a fixed
+/// bandwidth as under a computed one: the density is the finite values' own and
+/// nothing is named. A group of infinities alone has no usable value and is
+/// named with the count reason; finite values whose spread overflows keep the
+/// bandwidth reason, which is true there.
 #[test]
-fn an_infinity_among_the_values_keeps_the_bandwidth_reason_under_any_bandwidth() {
+fn an_infinity_among_the_values_is_skipped_under_any_bandwidth() {
     pyo3::Python::initialize();
     for bandwidth in [BandwidthSpec::Fixed { value: 0.5 }, BandwidthSpec::Scott] {
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let with_infinity = TransformContext::default();
+            let out = apply_with_context(
+                &spec_with(bandwidth.clone(), None, vec![]),
+                &batch_with("x", vec![1.0, 2.0, 4.0, infinite]),
+                &with_infinity,
+            )
+            .unwrap();
+            let without = TransformContext::default();
+            let twin = apply_with_context(
+                &spec_with(bandwidth.clone(), None, vec![]),
+                &batch_with("x", vec![1.0, 2.0, 4.0]),
+                &without,
+            )
+            .unwrap();
+            assert!(with_infinity.warnings.borrow().is_empty(), "{:?}", fit_reasons(&with_infinity));
+            assert_eq!(col(&out, "density"), col(&twin, "density"));
+            assert!(col(&out, "density").iter().any(|d| *d > 0.0));
+        }
         let ctx = TransformContext::default();
         apply_with_context(
             &spec_with(bandwidth, None, vec![]),
-            &batch_with("x", vec![1.0, 2.0, f64::INFINITY]),
+            &batch_with("x", vec![f64::INFINITY, f64::NEG_INFINITY]),
             &ctx,
         )
         .unwrap();
-        assert_eq!(fit_reasons(&ctx), vec![(None, BANDWIDTH_NOT_USABLE.to_string())]);
+        assert_eq!(fit_reasons(&ctx), vec![(None, FEWER_THAN_TWO_USABLE_VALUES.to_string())]);
     }
+    let ctx = TransformContext::default();
+    apply_with_context(
+        &spec_with(BandwidthSpec::Scott, None, vec![]),
+        &batch_with("x", vec![-1e308, 0.0, 1e308]),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(fit_reasons(&ctx), vec![(None, BANDWIDTH_NOT_USABLE.to_string())]);
 }
 
 /// A bandwidth that resolves to zero, a negative number, NaN or infinity over

@@ -864,7 +864,7 @@ mod tests {
             for name in &seen {
                 let label = format!("g={name}");
                 if degraded.contains(&name.as_str()) {
-                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", "fewer than 2 usable (non-null/non-NaN) values"))?;
+                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES))?;
                 }
                 if interval.contains(&name.as_str()) {
                     ctx.warn(TransformWarning::IntervalUndefined {

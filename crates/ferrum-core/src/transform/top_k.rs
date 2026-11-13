@@ -15,6 +15,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 use crate::transform::context::TransformContext;
+use crate::transform::numeric_util::usable_value;
 use crate::transform::group_key::{
     group_partition_multi, parse_groupby_pyany, NullKeyPolicy,
 };
@@ -203,8 +204,7 @@ fn apply_ungrouped(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch
                     let col_vals: Vec<f64> = rows
                         .iter()
                         .filter_map(|&r| {
-                            let v = vals[r]?;
-                            if v.is_nan() { None } else { Some(v) }
+                            vals[r].and_then(usable_value)
                         })
                         .collect();
                     compute_agg(&col_vals, &spec.op)?
@@ -317,8 +317,7 @@ fn apply_grouped(
                     let col_vals: Vec<f64> = rows
                         .iter()
                         .filter_map(|&r| {
-                            let v = vals[r]?;
-                            if v.is_nan() { None } else { Some(v) }
+                            vals[r].and_then(usable_value)
                         })
                         .collect();
                     compute_agg(&col_vals, &spec.op)?
@@ -1020,5 +1019,110 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("data_top_k"), "err: {msg}");
         assert!(msg.contains("nonexistent"), "err must name the missing column: {msg}");
+    }
+
+    /// A grouped ranking skips an infinite value as a null one: a category
+    /// whose sum would be infinite ranks by its finite values, so it does not
+    /// take the top slot.
+    #[test]
+    fn a_grouped_ranking_skips_an_infinite_value_as_a_null_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let frame_of = |bad: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
+                    Arc::new(Float64Array::from(vec![Some(20.0), Some(30.0), Some(10.0), bad, Some(40.0), Some(1.0)])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = TopKSpec {
+            n: 1,
+            field: "val".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["cat".into()]),
+            name: None,
+        };
+        let kept = |batch: &RecordBatch| -> Vec<String> {
+            let out = apply(&spec, batch).unwrap();
+            let cat = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            (0..cat.len()).map(|i| cat.value(i).to_string()).collect()
+        };
+        let twin = kept(&frame_of(None));
+        assert_eq!(twin, vec!["a", "a"], "a (50) outranks c (41) and b (10)");
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(kept(&frame_of(Some(infinite))), twin);
+        }
+    }
+
+    /// An ungrouped ranking, where the field is also the category, skips an
+    /// infinite value as a null one: its own category has no usable value to
+    /// sum, so it does not outrank a finite one.
+    #[test]
+    fn an_ungrouped_ranking_skips_an_infinite_value_as_a_null_value() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, true)])),
+            vec![Arc::new(Float64Array::from(vec![
+                Some(1.0), Some(1.0), Some(5.0), Some(f64::INFINITY), Some(f64::INFINITY),
+            ]))],
+        )
+        .unwrap();
+        let spec = TopKSpec {
+            n: 1,
+            field: "val".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let val = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((0..val.len()).map(|i| val.value(i)).collect::<Vec<_>>(), vec![5.0]);
+    }
+
+    /// A grouped ranking over a Float32 value column skips an infinity and a
+    /// NaN as a null one: the column is read through this module's own
+    /// per-width dispatch, so the kept groups equal the Float32 null twin's.
+    #[test]
+    fn a_grouped_ranking_over_a_float32_column_skips_an_infinity_and_a_nan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float32, true),
+        ]));
+        let frame_of = |bad: Option<f32>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
+                    Arc::new(Float32Array::from(vec![
+                        Some(20.0), Some(30.0), Some(10.0), bad, Some(40.0), Some(1.0),
+                    ])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = TopKSpec {
+            n: 1,
+            field: "val".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["cat".into()]),
+            name: None,
+        };
+        let kept = |batch: &RecordBatch| -> Vec<String> {
+            let out = apply(&spec, batch).unwrap();
+            let cat = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            (0..cat.len()).map(|i| cat.value(i).to_string()).collect()
+        };
+        let twin = kept(&frame_of(None));
+        assert_eq!(twin, vec!["a", "a"], "a (50) outranks c (41) and b (10)");
+        for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(kept(&frame_of(Some(bad))), twin, "{bad}");
+        }
     }
 }

@@ -1,4 +1,5 @@
-//! Data transform: Impute — fill missing (null/NaN) values.
+//! Data transform: Impute — fill missing (null/NaN) values. An infinite cell
+//! is the caller's value and is kept; the fill statistic skips it.
 //!
 //! Supports imputation methods: value (constant), mean, median, min, max.
 //!
@@ -21,7 +22,7 @@
 //! dropping it, so the all-null warning names THIS disposition rather than
 //! claiming an empty output this transform can never produce.
 //! The same whole-column statistic is also the fallback for a group whose
-//! own cleaned value set is empty (every value in that group is null/NaN):
+//! own cleaned value set is empty (every value in that group is unusable: null, NaN or infinite):
 //! without it, `mean`/`median` would silently fill with `0.0` and `min`/`max`
 //! would fill with `±f64::INFINITY`, either of which is worse than falling
 //! back to a wider window — `0.0` is a real plottable value and `±inf`
@@ -52,7 +53,7 @@ use crate::transform::group_key::{
     group_partition_multi, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     GroupPartition, KeyValue, NullKeyPolicy,
 };
-use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64};
+use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64, USABLE};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -194,7 +195,7 @@ pub(crate) fn apply_with_context(
             transform: "Impute".into(),
             group: None,
             reason: format!(
-                "the column has no non-null/non-NaN values at all; used the {} method's \
+                "the column has no {USABLE} values at all; used the {} method's \
                  degenerate default instead",
                 spec.method
             ),
@@ -206,8 +207,8 @@ pub(crate) fn apply_with_context(
     let mut assigned = vec![false; n_rows];
     let mut group_fill_values: Vec<f64> = Vec::with_capacity(partition.groups.len());
     for (key, rows) in &partition.groups {
-        // A group whose own cleaned value set is empty (every value in the
-        // group is null/NaN) falls back to the whole-column statistic
+        // A group whose own cleaned value set is empty (no value in the
+        // group is usable: each is null, NaN or infinite) falls back to the whole-column statistic
         // instead of `fill_value_for`'s degenerate return — see the module
         // doc. Appended key rows for this group read the same value via
         // `group_fill_values`/`groups.fill_values`.
@@ -232,9 +233,9 @@ pub(crate) fn apply_with_context(
                 // ahead of this text (`"{transform}: group {g} {reason}"`),
                 // so this clause must not repeat "group" itself — it did
                 // ("group g=b the group has no ...") until this fix.
-                reason: "has no non-null/non-NaN values; the whole column's statistic was \
-                         used instead"
-                    .into(),
+                reason: format!(
+                    "has no {USABLE} values; the whole column's statistic was used instead"
+                ),
             });
         }
         let fv = group_fv.unwrap_or(whole_column_fill);
@@ -358,7 +359,7 @@ fn validate_method(method: &str) -> PyResult<()> {
 /// summation order for `mean` — is unchanged.
 ///
 /// Returns `None` when `method` is `mean`/`median`/`min`/`max` and the
-/// restricted value set is empty (every value at `rows` is null/NaN) — the
+/// restricted value set is empty (no value at `rows` is usable: each is null, NaN or infinite) — the
 /// caller is expected to fall back to a wider window (see `apply`'s
 /// `whole_column_fill`) rather than accept this function's own degenerate
 /// default. `method = "value"` never returns `None`, since the constant
@@ -1719,4 +1720,75 @@ mod tests {
     // not every row) — the all-null fix just above must not touch that path,
     // since `null_keyed_rows < n_rows` there keeps the rollup's own warning
     // live.
+
+    /// The fill statistic skips an infinite value as it skips a null one, and
+    /// the infinite cell itself is the caller's value: kept, never filled.
+    #[test]
+    fn the_fill_statistic_skips_an_infinity_and_an_infinite_cell_is_kept() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let frame_of = |third: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Float64Array::from(vec![Some(1.0), Some(3.0), third, None, Some(5.0)]))],
+            )
+            .unwrap()
+        };
+        for method in ["mean", "median", "min", "max"] {
+            let fill_of = |batch: &RecordBatch| {
+                let out = apply(&spec("x", method, None, None, None, None), batch).unwrap();
+                let x = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+                x.value(3)
+            };
+            let twin = fill_of(&frame_of(None));
+            for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(fill_of(&frame_of(Some(infinite))), twin, "{method}");
+            }
+        }
+        let out = apply(&spec("x", "mean", None, None, None, None), &frame_of(Some(f64::INFINITY))).unwrap();
+        let x = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((x.value(2), x.value(3)), (f64::INFINITY, 3.0), "the infinite cell is kept, the null cell filled");
+    }
+
+    /// A column with no usable value says so in the words every reason uses:
+    /// an infinity is not a value the statistic could be read from.
+    #[test]
+    fn a_column_with_no_usable_value_names_usable_in_its_fallback() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(f64::INFINITY), None]))],
+        )
+        .unwrap();
+        let ctx = TransformContext::default();
+        apply_with_context(&spec("x", "mean", None, None, None, None), &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        let text = warnings.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("the column has no usable (non-null, finite) values at all"), "{text}");
+    }
+
+    /// A group whose only values are infinite has no usable value, so it falls
+    /// back to the whole column's statistic and says so in the shared words;
+    /// its null cell is filled and its infinite cell is kept.
+    #[test]
+    fn a_group_of_infinities_falls_back_to_the_whole_column_in_the_usable_words() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(2.0), Some(4.0), Some(f64::INFINITY), None])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            ],
+        )
+        .unwrap();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec("v", "mean", None, Some(vec!["g"]), None, None), &batch, &ctx).unwrap();
+        let v = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((v.value(2), v.value(3)), (f64::INFINITY, 3.0));
+        let warnings = ctx.warnings.borrow();
+        let text = warnings.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("group g=b has no usable (non-null, finite) values; the whole column's statistic was used instead"), "{text}");
+    }
 }

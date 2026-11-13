@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import warnings
 
 import numpy as np
 import polars as pl
@@ -61,6 +62,8 @@ from ferrum.annotation.primitives import (
     AnnotationText,
 )
 from ferrum.coord import CoordGeo, CoordPolar
+from tests._svg_extents import text_elements
+from tests.test_null_group_warning import _layer_message
 
 
 def _roc_data(label: str = "c0", scale: float = 1.0, n: int = 50) -> pl.DataFrame:
@@ -671,7 +674,8 @@ def test_empty_dataframe_does_not_crash():
     empty-input case this fix was asked to cover. Fixed alongside: label
     emission is skipped (no non-null row exists to anchor one) and the base
     chart still renders, mirroring the grouped branch's own
-    ``if group.is_empty(): continue``."""
+    ``if group.is_empty(): continue``. A zero-row curve differs from one whose every x is null: it
+    has no row to carry a label at all, where the null-x curve's rows carry one reading ``nan``."""
     df = pl.DataFrame(
         {"fpr": pl.Series([], dtype=pl.Float64), "tpr": pl.Series([], dtype=pl.Float64)}
     )
@@ -682,14 +686,19 @@ def test_empty_dataframe_does_not_crash():
 
 
 def test_all_null_x_no_color_group_does_not_crash():
-    """Same pre-existing ``arg_max() -> None`` bug as the empty-dataframe
-    case above, triggered by an all-null (rather than zero-length) x
-    column."""
+    """A curve whose every x is null has rows to carry a label but no usable point to integrate:
+    the render does not crash, and the label reads ``AUC = nan`` once, at the anchor of an
+    unplaced curve, beside the curve's own census as the only message."""
     df = pl.DataFrame({"fpr": [None, None, None], "tpr": [0.1, 0.2, 0.3]})
     base = Chart(df).encode(x="fpr", y="tpr").mark_line()
-    svg = (base + AUCLabel()).to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = (base + AUCLabel()).to_svg()
     assert "<svg" in svg
-    assert "AUC = " not in svg
+    labels = [(attrs, text) for attrs, text in text_elements(svg) if "AUC = " in text]
+    assert [text for _, text in labels] == ["AUC = nan"]
+    assert 'x="342.826" y="28"' in labels[0][0]
+    assert [str(w.message) for w in caught] == [_layer_message("layer 0: mark_line", "x")]
 
 
 # ---------------------------------------------------------------------------

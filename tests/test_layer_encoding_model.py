@@ -60,6 +60,7 @@ from tests._legends import tag as _tag
 from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
 from tests.test_null_group_warning import (
+    FIT_FEW_POINTS,
     _NO_FACET_ROWS_WARNING,
     _NO_ROWS_TO_DRAW,
     _all_keys_null_fallback_message,
@@ -15093,8 +15094,8 @@ def test_a_logistic_or_glm_group_that_cannot_be_fit_draws_none_and_warns(fit, ou
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         drawn = render(chart)
-    assert [str(w.message) for w in caught if "could not fit" in str(w.message)] == [
-        f"{fit}: could not fit group c=r (fewer than 2 usable (non-null/non-NaN) x/y points); "
+    assert [str(w.message) for w in caught] == [
+        f"{fit}: could not fit group c=r ({FIT_FEW_POINTS}); "
         "it degraded to an empty/flat output instead of failing the whole chart"
     ]
     if output == "static":

@@ -131,8 +131,7 @@ pub(crate) struct KdeSpec {
 /// `Bin`'s (`"stat_bin"`'s own `LABEL`, mirrored here).
 const LABEL: &str = "stat_kde";
 
-/// Reason a 1-D group with fewer than two usable values cannot be estimated.
-pub(crate) const FEWER_THAN_TWO_USABLE_VALUES: &str = "fewer than 2 usable (non-null/non-NaN) values";
+use crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES;
 
 /// Reason a density estimate cannot be evaluated: the bandwidth resolved to
 /// zero, a negative number or a non-finite one. Shared by every density
@@ -143,11 +142,10 @@ pub(crate) const BANDWIDTH_NOT_USABLE: &str = "the bandwidth resolved to a non-p
 /// Shared by every 1-D density statistic.
 pub(crate) const ALL_VALUES_EQUAL: &str = "its usable values are all equal";
 
-/// The reason a density cannot be estimated from `values` (already stripped
-/// of nulls and NaNs), or `None` when they can be. The one place the order of
-/// causes lives, read by every 1-D density statistic: fewer than two values,
-/// then an infinity among them (its extent is not finite, so no bandwidth
-/// resolves), then all values equal.
+/// The reason a density cannot be estimated from `values` (already reduced to
+/// the usable ones: no null, NaN or infinity), or `None` when they can be. The
+/// one place the order of causes lives, read by every 1-D density statistic:
+/// fewer than two values, then all values equal.
 pub(crate) fn unestimable_cause(values: &[f64]) -> Option<&'static str> {
     if values.len() < 2 {
         return Some(FEWER_THAN_TWO_USABLE_VALUES);
@@ -155,9 +153,6 @@ pub(crate) fn unestimable_cause(values: &[f64]) -> Option<&'static str> {
     let (lo, hi) = values
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-    if !(lo.is_finite() && hi.is_finite()) {
-        return Some(BANDWIDTH_NOT_USABLE);
-    }
     (lo >= hi).then_some(ALL_VALUES_EQUAL)
 }
 
@@ -165,8 +160,8 @@ pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
 ///
-/// Returns `None` when the field is missing, non-numeric, or all values are
-/// null/NaN. This is the pre-facet extent that `render::prepare` uses to pin the
+/// Returns `None` when the field is missing, non-numeric, or no value is
+/// usable (non-null, finite). This is the pre-facet extent that `render::prepare` uses to pin the
 /// value axis before partitioning, so every facet panel shares the same KDE grid
 /// range (see `fix_transform_extents_for_facet`).
 ///
@@ -588,7 +583,7 @@ fn compute_one_group(
     // Batch-F count-scale (F-L09-10): non-cumulative density scales by
     // n_group × bin_width; cumulative CDF scales by n_group alone (see
     // `KdeSpec::count_scale`'s doc for the normative semantics). `n_group`
-    // is this group's own clean (non-null/non-NaN) count — the same
+    // is this group's own usable (non-null, finite) count — the same
     // null-drop policy `Bin` applies — so it matches the bar-height total a
     // per-hue histogram would show for this group. `bin_width` is the width
     // the mirrored `Bin` renders for THIS group (see
@@ -940,7 +935,7 @@ use crate::transform::core::TransformSpec;
 ///       carried over; ``count_scale`` derives its own extent per group
 ///       (or from the facet pin). Only the facet-pinned extent is shared.
 ///     * ``Bin``'s exclusion of rows outside ``[lo, hi]`` from its counts —
-///       ``count_scale`` scales by the group's full non-null count, so a
+///       ``count_scale`` scales by the group's full count of usable values, so a
 ///       ``Bin(extent=)`` that clips rows shows fewer counts than the
 ///       overlay assumes.
 ///

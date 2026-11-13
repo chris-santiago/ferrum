@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::transform::context::{describe_group_row, TransformContext, TransformWarning};
 use crate::transform::group_key::grouped_two_column_fit;
-use crate::transform::numeric_util::coerce_xy_pairs_at;
+use crate::transform::numeric_util::{coerce_xy_pairs_at, FEWER_THAN_TWO_USABLE_XY_POINTS};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -91,7 +91,7 @@ fn apply_one_group(
         ctx.warn(TransformWarning::DegenerateFit {
             transform: "RegressionData".into(),
             group: group.map(str::to_string),
-            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
             panel: None,
             step: ctx.step.clone(),
         });
@@ -152,7 +152,7 @@ fn apply_one_group(
 /// the group-restricted `xs`), so a per-group fit line only ever draws over
 /// the x-values that group actually has.
 ///
-/// A group with fewer than 2 usable (non-null, non-NaN) rows cannot support a
+/// A group with fewer than 2 usable (non-null, finite) rows cannot support a
 /// fit; `apply_one_group` returns [`all_nan_output`] for it rather than an
 /// empty batch, so that group still contributes [`N_OUT`] rows and keeps its
 /// group key in the concatenated output — the same choice `smooth.rs` makes
@@ -787,4 +787,30 @@ mod tests {
         assert!(err.to_string().contains("data_regression"), "{err}");
     }
 
+    /// A point with an infinite `x` or `y` is skipped as a null point is: the
+    /// fitted line is the null twin's, for either sign.
+    #[test]
+    fn an_infinite_coordinate_is_skipped_as_a_null_one_is() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let frame_of = |bad_x: Option<f64>, bad_y: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0), Some(4.0), bad_x, Some(5.0)])),
+                    Arc::new(Float64Array::from(vec![Some(1.0), Some(3.0), Some(5.0), Some(7.0), Some(9.0), Some(2.0), bad_y])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = spec_with_groupby(None);
+        let twin = apply(&spec, &frame_of(None, None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame_of(Some(infinite), Some(infinite))).unwrap(), twin);
+        }
+        let ys = twin.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((0..ys.len()).all(|i| ys.value(i).is_finite()));
+    }
 }

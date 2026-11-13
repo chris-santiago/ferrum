@@ -49,7 +49,7 @@ use crate::transform::group_key::{
     groupby_key_at, refuse_groupby_output_collision, validate_groupby_columns,
     warn_if_group_keys_all_null, KeyValue, NullKeyCounts, NullKeyPolicy,
 };
-use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
+use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype, usable_at};
 
 /// The single source of truth for `DataWindow`'s free-string `op`
 /// vocabulary. Read by [`compute_window_op`]'s unknown-op error message and
@@ -794,8 +794,7 @@ fn compute_window_op(
                     let (start, end) =
                         units.expand(frame_range((unit_start, unit_end - 1), frame, len));
                     let vals: Vec<f64> = (start..end)
-                        .map(|pos| f64_at(values, partition[pos]))
-                        .filter(|v| !v.is_nan())
+                        .filter_map(|pos| usable_at(values, partition[pos]))
                         .collect();
                     let agg = rolling_agg(&vals, &op.op);
                     for pos in unit_start..unit_end {
@@ -1874,5 +1873,39 @@ mod tests {
     fn batch_with_x(values: Vec<f64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    /// A rolling aggregate skips an infinite value as it skips a null one, so
+    /// the running `sum`, `mean`, `count`, `min` and `max` of a column holding
+    /// an infinity are the null twin's, and the rows after it stay drawn.
+    #[test]
+    fn rolling_aggregates_skip_an_infinite_value_as_a_null_value() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let frame_of = |second: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Float64Array::from(vec![Some(1.0), second, Some(3.0), Some(4.0)]))],
+            )
+            .unwrap()
+        };
+        let spec = DataWindowSpec {
+            frame: Some((None, Some(0))),
+            ..window_spec(vec![
+                op("sum", Some("x"), "sum"),
+                op("mean", Some("x"), "mean"),
+                op("count", Some("x"), "count"),
+                op("min", Some("x"), "min"),
+                op("max", Some("x"), "max"),
+            ])
+        };
+        let twin = apply(&spec, &frame_of(None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            let out = apply(&spec, &frame_of(Some(infinite))).unwrap();
+            for at in 1..=5 {
+                assert_eq!(col_values(&out, at), col_values(&twin, at), "output column {at}");
+            }
+        }
+        assert_eq!(col_values(&twin, 1), vec![1.0, 1.0, 4.0, 8.0], "the running sum of the finite values");
+        assert_eq!(col_values(&twin, 3), vec![1.0, 1.0, 2.0, 3.0], "the running count of the finite values");
     }
 }

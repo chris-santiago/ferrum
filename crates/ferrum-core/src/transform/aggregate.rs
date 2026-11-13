@@ -10,7 +10,7 @@ use crate::transform::group_key::{
     ensure_ungrouped_whole_batch_group, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype, usable_at};
 use crate::transform::vocabulary::{FieldOperand, Vocabulary};
 
 /// The aggregate-function vocabulary shared by `Aggregate`, `JoinAggregate`,
@@ -219,8 +219,9 @@ pub(crate) fn x_estimator_accepted_values() -> Vec<String> {
 ///
 /// Batch-D dtype policy (spec §4.1): a numeric op accepts every integer /
 /// unsigned / float dtype by widening to Float64, and refuses anything else by
-/// name. `Count` is the documented exception — it counts non-null rows at any
-/// dtype, so a non-Float64 column under `Count` is kept in its original form.
+/// name. `Count` reads a numeric column the same way and counts its usable
+/// values; over any other column (text, boolean, temporal, decimal), which
+/// holds no NaN or infinity, it counts the non-null rows as-is.
 ///
 /// Shared by `stat_aggregate`, `data_aggregate`, and `data_join_aggregate`,
 /// which previously carried three drifted copies of this dispatch (one silently
@@ -234,7 +235,7 @@ pub(crate) fn x_estimator_accepted_values() -> Vec<String> {
 pub(crate) enum AggColumn {
     /// Numeric source, widened to Float64.
     Numeric { arr: Float64Array, fn_: AggFn },
-    /// `Count` over a non-Float64 column: non-null rows are counted as-is.
+    /// `Count` over a column [`is_numeric_dtype`] rejects: its non-null rows are counted as-is.
     NonNullCount(ArrayRef),
 }
 
@@ -242,13 +243,13 @@ impl AggColumn {
     /// Resolve `col` for `fn_`, raising when a numeric op meets a non-numeric
     /// column. `ctx` is the calling transform's error-message prefix.
     pub(crate) fn resolve(col: &ArrayRef, field: &str, fn_: AggFn, ctx: &str) -> PyResult<Self> {
-        if fn_ == AggFn::Count && col.data_type() != &DataType::Float64 {
+        if fn_ == AggFn::Count && !is_numeric_dtype(col.data_type()) {
             return Ok(AggColumn::NonNullCount(col.clone()));
         }
         Ok(AggColumn::Numeric { arr: coerce_to_float64(col, ctx, field)?, fn_ })
     }
 
-    /// Aggregate one group's rows, dropping null and NaN entries, using the
+    /// Aggregate one group's rows, dropping every unusable (null, NaN or infinite) entry, using the
     /// `AggFn` captured at `resolve` time.
     pub(crate) fn aggregate_rows(&self, rows: &[usize]) -> f64 {
         match self {
@@ -256,19 +257,7 @@ impl AggColumn {
                 rows.iter().filter(|&&r| !col.is_null(r)).count() as f64
             }
             AggColumn::Numeric { arr, fn_ } => {
-                let vals: Vec<f64> = rows
-                    .iter()
-                    .filter_map(|&r| {
-                        if arr.is_null(r) {
-                            return None;
-                        }
-                        let v = arr.value(r);
-                        if v.is_nan() {
-                            return None;
-                        }
-                        Some(v)
-                    })
-                    .collect();
+                let vals: Vec<f64> = rows.iter().filter_map(|&r| usable_at(arr, r)).collect();
                 aggregate(&vals, *fn_, rows.len())
             }
         }
@@ -1500,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_count_still_counts_non_null_rows_at_any_dtype() {
+    fn aggregate_count_counts_the_non_null_rows_of_a_text_column() {
         let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1652,4 +1641,103 @@ mod tests {
         });
     }
 
+    /// Group `a` of six values, group `b` of three and group `c` of one, with
+    /// `last` standing in the final row of each.
+    fn frame_with(last: Option<f64>) -> RecordBatch {
+        batch_value_group(
+            vec![
+                Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0), last,
+                Some(10.0), Some(20.0), last,
+                last,
+            ],
+            vec!["a", "a", "a", "a", "a", "a", "b", "b", "b", "c"],
+        )
+    }
+
+    /// Every aggregate function skips an infinite value as it skips a null one:
+    /// the outputs are the null twin's, `count` of the field included.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        let op = |fn_: AggFn, as_: &str| AggregateOp { field: "v".into(), fn_, as_: as_.into() };
+        let spec = AggregateSpec {
+            ops: vec![
+                op(AggFn::Mean, "mean"), op(AggFn::Sum, "sum"), op(AggFn::Count, "count"),
+                op(AggFn::Min, "min"), op(AggFn::Max, "max"), op(AggFn::Median, "median"),
+            ],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let twin = apply(&spec, &frame_with(None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame_with(Some(infinite))).unwrap(), twin);
+        }
+        assert_eq!(col_f64(&twin, "sum")[0], 15.0);
+        assert_eq!(col_f64(&twin, "count")[0], 5.0, "the infinite row is not counted");
+    }
+
+    /// A column of `values` at `dtype`, cast from Float64 so every width the
+    /// engine reads is built the same way.
+    fn column_of(values: Vec<Option<f64>>, dtype: &DataType) -> ArrayRef {
+        let wide: ArrayRef = Arc::new(Float64Array::from(values));
+        arrow::compute::cast(&wide, dtype).unwrap()
+    }
+
+    /// `count` of a numeric column skips an infinity and a NaN as it skips a
+    /// null, at every float width: the count equals the null twin's.
+    #[test]
+    fn count_of_a_float_column_skips_an_infinity_and_a_nan_as_a_null() {
+        let rows: Vec<usize> = (0..6).collect();
+        for dtype in [DataType::Float16, DataType::Float32, DataType::Float64] {
+            let unusable = column_of(
+                vec![Some(1.0), Some(2.0), Some(f64::INFINITY), Some(f64::NEG_INFINITY), Some(f64::NAN), None],
+                &dtype,
+            );
+            let twin = column_of(vec![Some(1.0), Some(2.0), None, None, None, None], &dtype);
+            let count = |col: &ArrayRef| {
+                AggColumn::resolve(col, "v", AggFn::Count, "test").unwrap().aggregate_rows(&rows)
+            };
+            assert_eq!(count(&twin), 2.0, "{dtype:?} twin");
+            assert_eq!(count(&unusable), 2.0, "{dtype:?}");
+        }
+    }
+
+    /// An integer column holds no NaN or infinity, so its count is its
+    /// non-null count, now read through the numeric arm.
+    #[test]
+    fn count_of_an_integer_column_counts_its_non_null_values() {
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None, Some(3)]));
+        let rows: Vec<usize> = (0..3).collect();
+        let count = AggColumn::resolve(&col, "v", AggFn::Count, "test").unwrap().aggregate_rows(&rows);
+        assert_eq!(count, 2.0);
+    }
+
+    /// `Aggregate` itself: a Float32 `count` of a group holding an infinity is
+    /// the null twin's, grouped.
+    #[test]
+    fn aggregate_count_over_a_float32_column_equals_its_null_twin() {
+        let frame_of = |bad: Option<f64>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float32, true),
+                Field::new("group", DataType::Utf8, true),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    column_of(vec![Some(1.0), Some(2.0), bad, Some(4.0), bad], &DataType::Float32),
+                    Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b"])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Count, as_: "n".into() }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let twin = apply(&spec, &frame_of(None)).unwrap();
+        assert_eq!(col_f64(&twin, "n"), vec![2.0, 1.0]);
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(apply(&spec, &frame_of(Some(bad))).unwrap(), twin);
+        }
+    }
 }

@@ -26,6 +26,7 @@ from ferrum._registry import (
     registry_secondary_columns,
     require_aggregate_field,
 )
+from ferrum._usable import usable_values
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
@@ -1362,6 +1363,32 @@ register_layer_names(
 )
 
 
+def _parent_axis_values(column, field: str):
+    """Return the parent x *column*'s values as float64 in the units its axis reads.
+
+    A floating, integer or decimal column is cast to float64. A timestamp column (a date or
+    duration column arrives as one after ``normalize_for_rust``) is read in epoch milliseconds,
+    the units a temporal axis and ``TimeScale(domain=)`` read.
+
+    Raises
+    ------
+    ValueError
+        If the column holds neither numbers nor times (text, boolean), so no domain can be read
+        from it.
+    """
+    import pyarrow as pa
+
+    kind = column.type
+    if pa.types.is_floating(kind) or pa.types.is_integer(kind) or pa.types.is_decimal(kind):
+        return column.cast(pa.float64())
+    if pa.types.is_timestamp(kind):
+        return column.cast(pa.timestamp("ms")).cast(pa.int64()).cast(pa.float64())
+    raise ValueError(
+        f"mark_function: x column {field!r} holds neither numbers nor times, so no domain can "
+        "be read from it; pass domain=(x_min, x_max)"
+    )
+
+
 def desugar_function(
     fn,
     parent_chart_x_data=None,
@@ -1379,8 +1406,8 @@ def desugar_function(
     Data contract
     -------------
     Input: no input DataFrame required.  If ``domain`` is ``None``, the
-    x-range is inferred from ``parent_chart_x_data`` (a numpy array of the
-    parent chart's x-column values).
+    x-range is inferred from ``parent_chart_x_data`` (the parent chart's x column as a
+    float64 pyarrow ChunkedArray in its axis's units; see :func:`_parent_axis_values`).
 
     Output (synthetic table): columns ``x`` (Float64), ``y`` (Float64)
     with ``n`` rows.
@@ -1442,12 +1469,21 @@ def desugar_function(
     200
     """
     import numpy as np
+    import polars as pl
     import pyarrow as pa
 
     if domain is not None:
         d = domain
     elif parent_chart_x_data is not None and len(parent_chart_x_data) > 0:
-        d = (float(np.nanmin(parent_chart_x_data)), float(np.nanmax(parent_chart_x_data)))
+        # The parent's usable values (present and finite), as every statistic reads them; a
+        # parent with none has no domain, so the curve draws nothing, as an all-null parent's
+        # does.
+        finite = usable_values(pl.from_arrow(parent_chart_x_data))
+        d = (
+            (float(finite.min()), float(finite.max()))
+            if len(finite)
+            else (float("nan"), float("nan"))
+        )
     else:
         raise ValueError(
             "mark_function requires explicit domain when chart has no other data layers"

@@ -3,7 +3,7 @@
 //! Produces a two-column output (x-grid, density) similar to the stat KDE
 //! transform but exposed as a data transform with different parameters.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -56,7 +56,7 @@ fn is_default_kernel(k: &str) -> bool {
 }
 
 /// Compute the global (pre-facet) raw min/max of the density field over the full
-/// batch. Returns `None` when the column is absent or all values are null/NaN.
+/// batch. Returns `None` when the column is absent or no value is usable (non-null, finite).
 ///
 /// DensityData does **not** nice its extent (unlike `bin::global_extent`), because
 /// it controls the KDE grid start and end, not discrete bin edges. This mirrors
@@ -207,30 +207,8 @@ fn compute_one_group(
         &spec.field,
     )?;
 
-    // Extract clean values.
-    let mut data: Vec<f64> = Vec::new();
-    match only_rows {
-        Some(rows) => {
-            for &r in rows {
-                if !col.is_null(r) {
-                    let v = col.value(r);
-                    if !v.is_nan() {
-                        data.push(v);
-                    }
-                }
-            }
-        }
-        None => {
-            for i in 0..col.len() {
-                if !col.is_null(i) {
-                    let v = col.value(i);
-                    if !v.is_nan() {
-                        data.push(v);
-                    }
-                }
-            }
-        }
-    }
+    // Extract the usable (non-null, finite) values.
+    let data: Vec<f64> = crate::transform::numeric_util::clean_float64_values(&col, only_rows);
 
     if data.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -398,7 +376,7 @@ mod tests {
         assert_eq!(global_extent(&spec, &batch), None);
     }
 
-    /// `global_extent` returns `None` when all values are null or NaN.
+    /// `global_extent` returns `None` when no value is usable (non-null, finite).
     #[test]
     fn global_extent_all_null_returns_none() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
@@ -773,5 +751,35 @@ mod tests {
         use arrow::array::StringArray;
         let a = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(a.value(0), "q", "first-appearance order, not sorted");
+    }
+
+    /// An infinite value is skipped as a null one is: the density is the finite
+    /// values' own, for either sign, and equals the null twin's.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let frame_of = |last: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(4.0), last]))],
+            )
+            .unwrap()
+        };
+        let spec = DensityDataSpec {
+            field: "x".into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: Some(20),
+            cumulative: false,
+            kernel: crate::transform::kde::default_kernel(),
+            as_: ("value".into(), "density".into()),
+            name: None,
+        };
+        let twin = apply(&spec, &frame_of(None)).unwrap();
+        assert!(twin.column(1).as_any().downcast_ref::<Float64Array>().unwrap().iter().flatten().any(|d| d > 0.0));
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame_of(Some(infinite))).unwrap(), twin);
+        }
     }
 }

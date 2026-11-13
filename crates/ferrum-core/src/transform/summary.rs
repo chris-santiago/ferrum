@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -10,7 +10,7 @@ use crate::transform::group_key::{
     group_partition_multi, groupby_field_nullable, materialize_groupby_col,
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, usable_at};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -91,19 +91,7 @@ pub(crate) fn apply_with_context(
 
     for (key, rows) in &partition.groups {
         group_keys_out.push(key.clone());
-        let vals: Vec<f64> = rows
-            .iter()
-            .filter_map(|&r| {
-                if v_arr.is_null(r) {
-                    return None;
-                }
-                let v = v_arr.value(r);
-                if v.is_nan() {
-                    return None;
-                }
-                Some(v)
-            })
-            .collect();
+        let vals: Vec<f64> = rows.iter().filter_map(|&r| usable_at(&v_arr, r)).collect();
         if vals.len() == 1 {
             undefined_any = true;
             if !spec.groupby.is_empty() {
@@ -874,4 +862,37 @@ mod tests {
         assert!(err.to_string().contains("repeated"), "{err}");
     }
 
+    /// Group `a` of six values, group `b` of three and group `c` of one, with
+    /// `last` standing in the final row of each.
+    fn frame_with(last: Option<f64>) -> RecordBatch {
+        batch_value_group(
+            vec![
+                Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0), last,
+                Some(10.0), Some(20.0), last,
+                last,
+            ],
+            vec!["a", "a", "a", "a", "a", "a", "b", "b", "b", "c"],
+        )
+    }
+
+    /// A value that is infinite is skipped as a null value is: every group's
+    /// mean and extent are the null twin's.
+    #[test]
+    fn an_infinite_value_is_skipped_as_a_null_value_is() {
+        pyo3::Python::initialize();
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        let twin = apply(&spec, &frame_with(None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame_with(Some(infinite))).unwrap(), twin);
+        }
+        assert_eq!(col_f64(&twin, "mean")[0], 3.0, "group a is the mean of its five finite values");
+    }
 }

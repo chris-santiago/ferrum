@@ -6,7 +6,7 @@
 //! Non-empty cells only when `cumulative=false`; all cells when `cumulative=true`.
 //! Used by `jointplot(kind="hist")`.
 
-use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::bin_mode::{parse_bin_axis, resolve_bin_count, BinMode};
-use crate::transform::numeric_util::{coerce_to_float64, column_extent};
+use crate::transform::numeric_util::{coerce_to_float64, column_extent, usable_at};
 
 // ---------------------------------------------------------------------------
 // Spec types
@@ -47,7 +47,7 @@ pub(crate) struct Bin2DSpec {
 /// `bin_count` equal cells with no nicing step, so the extent that reproduces its
 /// bin edges is the raw range. Pinning the raw global range therefore makes every
 /// panel land identical bin edges. Returns `None` when either field is missing,
-/// non-numeric, all values are null/NaN, or an axis range is degenerate.
+/// non-numeric, no value is usable (non-null, finite), or an axis range is degenerate.
 ///
 /// When `spec.extent_x`/`spec.extent_y` are already set (user-provided), each is
 /// returned unchanged so the faceted pin never clobbers an explicit extent.
@@ -125,18 +125,13 @@ pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
     let xa = coerce_to_float64(batch.column(xi), "stat_bin_2d", &spec.x)?;
     let ya = coerce_to_float64(batch.column(yi), "stat_bin_2d", &spec.y)?;
 
-    // Drop rows where either x or y is null or NaN.
+    // Drop rows where either x or y is unusable (null, NaN or infinite).
     let mut xs: Vec<f64> = Vec::with_capacity(xa.len());
     let mut ys: Vec<f64> = Vec::with_capacity(ya.len());
     for i in 0..xa.len() {
-        if xa.is_null(i) || ya.is_null(i) {
+        let (Some(xv), Some(yv)) = (usable_at(&xa, i), usable_at(&ya, i)) else {
             continue;
-        }
-        let xv = xa.value(i);
-        let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() {
-            continue;
-        }
+        };
         // If extents are provided, clamp rows outside to dropped.
         if let Some((x_lo, x_hi)) = spec.extent_x {
             if xv < x_lo || xv > x_hi {
@@ -904,5 +899,40 @@ mod tests {
         assert_eq!(schema.field(0).name(), "x_lo");
         assert_eq!(schema.field(4).name(), "count");
         assert_eq!(schema.field(4).data_type(), &DataType::Int64);
+    }
+
+    /// A point with an infinite coordinate is skipped as a null point is, so
+    /// the cells are the finite points' own.
+    #[test]
+    fn a_point_with_an_infinite_coordinate_is_skipped_as_a_null_point_is() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let frame_of = |x: Option<f64>, y: Option<f64>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0), x, Some(1.5)])),
+                    Arc::new(Float64Array::from(vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0), Some(1.0), y])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = Bin2DSpec {
+            x: "x".into(), y: "y".into(),
+            bins_x: BinMode::Fixed { n: 3 },
+            bins_y: BinMode::Fixed { n: 3 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let twin = apply(&spec, &frame_of(None, None)).unwrap();
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(apply(&spec, &frame_of(Some(infinite), Some(infinite))).unwrap(), twin);
+        }
+        let counted: i64 = col_i64(&twin, "count").iter().flatten().sum();
+        assert_eq!(counted, 4, "only the four finite points are counted");
     }
 }

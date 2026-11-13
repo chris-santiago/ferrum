@@ -51,6 +51,7 @@ import pytest
 import ferrum as fm
 from ferrum._scene import _render_scene
 from ferrum._warn import reset_warnings
+from tests.test_null_group_warning import _FIT_DEGRADED, FIT_FEW_POINTS
 
 # ---------------------------------------------------------------------------
 # Fixtures and scene-reading helpers
@@ -825,13 +826,11 @@ def test_zero_row_data_resolves_a_value_channel_without_a_new_refusal():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         fm.residplot(frame, x="v", y="w", **_flat_kwargs(), size="s").to_svg()
-    messages = {str(w.message) for w in caught if issubclass(w.category, UserWarning)}
-    assert messages == {
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
-        "x/y points); it degraded to an empty/flat output instead of failing "
-        "the whole chart",
+    messages = [str(w.message) for w in caught]
+    assert messages == [
+        f"Smooth: could not fit the data ({FIT_FEW_POINTS}); {_FIT_DEGRADED}",
         "the chart has no rows to draw after its transforms; its panel is drawn empty",
-    }
+    ]
 
 
 def test_one_row_data_keeps_the_degenerate_fit_path_with_a_value_channel():
@@ -840,13 +839,11 @@ def test_one_row_data_keeps_the_degenerate_fit_path_with_a_value_channel():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         fm.residplot(frame, x="v", y="w", **_flat_kwargs(), size="s").to_svg()
-    messages = {str(w.message) for w in caught if issubclass(w.category, UserWarning)}
-    assert messages == {
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
-        "x/y points); it degraded to an empty/flat output instead of failing "
-        "the whole chart",
+    messages = [str(w.message) for w in caught]
+    assert messages == [
+        f"Smooth: could not fit the data ({FIT_FEW_POINTS}); {_FIT_DEGRADED}",
         "the chart has no rows to draw after its transforms; its panel is drawn empty",
-    }
+    ]
 
 
 # ---------------------------------------------------------------------------

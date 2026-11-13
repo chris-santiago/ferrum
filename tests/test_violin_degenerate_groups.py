@@ -1,10 +1,11 @@
 """A density statistic names a group it cannot estimate: ``Kde``, ``Violin`` and ``QQ``.
 
 A density or violin group, hue level or facet panel whose values cannot be estimated (no usable
-value, one value or an infinite one, tied values, a zero density) has no body to draw. The
-statistic keeps its slot, legend entry or panel and names it once through ``DegenerateFit``.
-``Kde`` and ``Violin`` give one reason for one cause, in one order: fewer than two usable values,
-an infinity, tied values. A ``Kde`` group with no usable value takes no position, so it never
+value, one usable value, tied values, a zero density) has no body to draw. The statistic keeps
+its slot, legend entry or panel and names it once through ``DegenerateFit``. An infinite value is
+no usable value, as a null is none: it is skipped, so the group draws from its finite values and
+only a group left with fewer than two is named. ``Kde`` and ``Violin`` give one reason for one
+cause, in one order: fewer than two usable values, tied values. A ``Kde`` group with no usable value takes no position, so it never
 widens the axis. ``QQ`` does the same for an all-null group or facet panel, and for a call with
 no usable value at all: it warns and draws its empty frame on every door. A chart that estimates
 every group is byte-identical and warns nothing. Rows for a report shared with the render's census
@@ -234,20 +235,30 @@ def test_a_well_formed_qq_warns_nothing():
     assert _render_capturing(chart, action="always")[1] == []
 
 
-def test_a_violin_group_holding_an_infinity_is_named_in_kdes_non_finite_wording():
-    """An infinite value leaves a group with no finite extent to estimate over. The category keeps
-    its slot and the statistic names it, with the cause ``Kde`` gives the same data."""
-    df = pl.DataFrame(
-        {"c": ["a"] * 4 + ["z"] * 4, "w": [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, float("inf"), 3.0]}
+def test_a_violin_group_holding_an_infinity_draws_from_its_finite_values():
+    """An infinite value is skipped as a null one is: the group's body is estimated from its
+    finite values, nothing is warned, and the violin and the density read the frame the same."""
+    values = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, float("inf"), 3.0]
+    infinite = pl.DataFrame({"c": ["a"] * 4 + ["z"] * 4, "w": values})
+    null_twin = pl.DataFrame(
+        {"c": ["a"] * 4 + ["z"] * 4, "w": values[:6] + [None, 3.0]},
+        schema={"c": pl.Utf8, "w": pl.Float64},
     )
-    reason = FIT_BANDWIDTH
-    svg, shown = _render_capturing(_violin_door("mark", df, "none").to_svg, action="always")
-    assert shown == [_fit_message("Violin", "c=z", reason)]
-    assert ">z<" in svg
-    _, kde = _render_capturing(
-        fm.Chart(df).mark_density().encode(x="w", color="c").to_svg, action="always"
+    svg, shown = _render_capturing(_violin_door("mark", infinite, "none").to_svg, action="always")
+    twin_svg, twin_shown = _render_capturing(
+        _violin_door("mark", null_twin, "none").to_svg, action="always"
     )
-    assert kde == [_fit_message("Kde", "c=z", reason)]
+    assert shown == [] and twin_shown == []
+    assert svg == twin_svg
+    assert len(_body_widths(svg)) == 2
+    kde_svg, kde = _render_capturing(
+        fm.Chart(infinite).mark_density().encode(x="w", color="c").to_svg, action="always"
+    )
+    twin_kde_svg, twin_kde = _render_capturing(
+        fm.Chart(null_twin).mark_density().encode(x="w", color="c").to_svg, action="always"
+    )
+    assert kde == [] and twin_kde == []
+    assert kde_svg == twin_kde_svg
 
 
 def test_a_qq_facet_panel_that_is_emptied_in_every_group_names_each_group():
@@ -287,17 +298,41 @@ def test_a_violin_whose_density_is_zero_everywhere_names_each_group():
     assert ">a<" in svg and ">b<" in svg
 
 
-def test_a_violin_group_of_one_infinite_value_is_named_with_the_reason_kde_gives():
-    """One infinite value is one value, not a degenerate bandwidth: the count is the cause,
-    as ``Kde`` reads the same data."""
+def test_a_violin_group_of_one_infinite_value_is_named_as_an_all_null_group_is():
+    """One infinite value leaves a group with no usable value, so it takes the outcome a group of
+    one null takes: the count is the cause, as ``Kde`` reads the same data."""
     df = pl.DataFrame({"c": ["a"] * 4 + ["z"], "w": [1.0, 2.0, 3.0, 4.0, float("inf")]})
+    null_twin = pl.DataFrame(
+        {"c": ["a"] * 4 + ["z"], "w": [1.0, 2.0, 3.0, 4.0, None]},
+        schema={"c": pl.Utf8, "w": pl.Float64},
+    )
     svg, shown = _render_capturing(_violin_door("mark", df, "none").to_svg, action="always")
-    assert shown == [_fit_message("Violin", "c=z", FIT_FEW)]
+    twin_svg, twin_shown = _render_capturing(
+        _violin_door("mark", null_twin, "none").to_svg, action="always"
+    )
+    assert shown == twin_shown == [_fit_message("Violin", "c=z", FIT_FEW)]
+    assert svg == twin_svg
     assert ">z<" in svg
     _, kde = _render_capturing(
         fm.Chart(df).mark_density().encode(x="w", color="c").to_svg, action="always"
     )
     assert kde == [_fit_message("Kde", "c=z", FIT_FEW)]
+
+
+def test_a_violin_group_of_an_infinity_beside_one_finite_value_is_named_as_a_single_value():
+    """A finite value and an infinity leave one usable value, which no body is estimated from:
+    the group is named with the count, as a group of one finite value and a null is."""
+    df = pl.DataFrame({"c": ["a"] * 4 + ["z"] * 2, "w": [1.0, 2.0, 3.0, 4.0, 5.0, float("inf")]})
+    null_twin = pl.DataFrame(
+        {"c": ["a"] * 4 + ["z"] * 2, "w": [1.0, 2.0, 3.0, 4.0, 5.0, None]},
+        schema={"c": pl.Utf8, "w": pl.Float64},
+    )
+    svg, shown = _render_capturing(_violin_door("mark", df, "none").to_svg, action="always")
+    twin_svg, twin_shown = _render_capturing(
+        _violin_door("mark", null_twin, "none").to_svg, action="always"
+    )
+    assert shown == twin_shown == [_fit_message("Violin", "c=z", FIT_FEW)]
+    assert svg == twin_svg
 
 
 def test_a_qq_hue_group_of_nan_values_is_named_like_a_null_one():
@@ -418,16 +453,23 @@ def test_a_tied_facet_panel_under_a_fixed_bandwidth_draws_on_the_frames_extent()
     assert len(_body_widths(svg)) == 2 and min(_body_widths(svg)) > 50.0
 
 
-def test_a_displot_group_holding_an_infinity_is_named_with_the_non_finite_reason():
-    """``displot(kind='kde')`` reads the same statistic: an infinite value in a group names the
-    bandwidth reason through the figure too."""
-    df = pl.DataFrame(
-        {"c": ["a"] * 4 + ["z"] * 4, "w": [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, float("inf"), 3.0]}
+def test_a_displot_group_holding_an_infinity_draws_from_its_finite_values():
+    """``displot(kind='kde')`` reads the same statistic: an infinite value in a group is skipped
+    as a null one is, so the group draws and nothing is warned."""
+    values = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, float("inf"), 3.0]
+    df = pl.DataFrame({"c": ["a"] * 4 + ["z"] * 4, "w": values})
+    null_twin = pl.DataFrame(
+        {"c": ["a"] * 4 + ["z"] * 4, "w": values[:6] + [None, 3.0]},
+        schema={"c": pl.Utf8, "w": pl.Float64},
     )
     svg, shown = _render_capturing(
         fm.displot(df, x="w", hue="c", kind="kde").to_svg, action="always"
     )
-    assert shown == [_fit_message("Kde", "c=z", FIT_BANDWIDTH)]
+    twin_svg, twin_shown = _render_capturing(
+        fm.displot(null_twin, x="w", hue="c", kind="kde").to_svg, action="always"
+    )
+    assert shown == [] and twin_shown == []
+    assert svg == twin_svg
     assert ">z<" in svg
 
 
@@ -441,17 +483,23 @@ def test_a_bandwidth_that_overflows_to_infinity_is_named_with_the_bandwidth_reas
     assert shown == [_whole_fit_message("Kde", FIT_BANDWIDTH)]
 
 
-def test_a_group_holding_an_infinity_under_a_fixed_bandwidth_is_named_not_left_to_the_census():
-    """The bandwidth resolved fine and the range did not: the statistic names the group (with the
-    wording an infinite value has under the default bandwidth) instead of the census blaming null
-    or non-finite x."""
+def test_a_group_holding_an_infinity_under_a_fixed_bandwidth_draws_from_its_finite_values():
+    """A fixed bandwidth needs a usable range to evaluate over, and the finite values give one:
+    the group draws as its null twin does, with nothing warned."""
     chart = (
         fm.Chart(_level_frame([102.0, float("inf"), 103.0, 104.0]))
         .mark_density(bandwidth=0.5)
         .encode(x="v", color="g")
     )
+    twin = (
+        fm.Chart(_level_frame([102.0, None, 103.0, 104.0]))
+        .mark_density(bandwidth=0.5)
+        .encode(x="v", color="g")
+    )
     svg, shown = _render_capturing(chart.to_svg, action="always")
-    assert shown == [_fit_message("Kde", "g=z", FIT_BANDWIDTH)]
+    twin_svg, twin_shown = _render_capturing(twin.to_svg, action="always")
+    assert shown == [] and twin_shown == []
+    assert svg == twin_svg
     assert ">z<" in svg
 
 
@@ -516,18 +564,18 @@ def test_an_all_null_density_layered_with_a_point_leaves_the_axis_to_the_points(
     "z_values,reason",
     [
         pytest.param([102.0] * 4, FIT_TIED, id="tied"),
-        pytest.param([102.0, float("inf"), 103.0], FIT_BANDWIDTH, id="infinity"),
+        pytest.param([102.0, float("inf"), 103.0], None, id="infinity"),
         pytest.param([102.0], FIT_FEW, id="one-value"),
     ],
 )
 def test_a_degraded_density_group_with_a_value_stays_inside_the_data(
-    z_values: list[float | None], reason: str
+    z_values: list[float | None], reason: str | None
 ):
     """Only a group with no usable value invents no position; a tied group, one with an infinity
-    and a one-value group keep the data's own ticks."""
+    (skipped as a null is, so it warns nothing) and a one-value group keep the data's own ticks."""
     chart = fm.Chart(_level_frame(z_values)).mark_density().encode(x="v", color="g")
     svg, shown = _render_capturing(chart.to_svg, action="always")
-    assert shown == [_fit_message("Kde", "g=z", reason)]
+    assert shown == ([] if reason is None else [_fit_message("Kde", "g=z", reason)])
     assert _x_ticks(svg) == _x_ticks(
         fm.Chart(_level_frame([])).mark_density().encode(x="v", color="g").to_svg()
     )

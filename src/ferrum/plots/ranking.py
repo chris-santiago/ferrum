@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum._coerce import to_polars
+from ferrum._usable import usable_values
 from ferrum._validate import validate_choice
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
@@ -920,13 +921,13 @@ def _apply_pc_rescale(
     features: list[str],
     rescale: str | None,
 ) -> pl.DataFrame:
-    """Apply per-feature minmax / zscore rescale (or pass through on None)."""
+    """Apply per-feature minmax / zscore rescale over each feature's usable values (or pass through on None)."""
     validate_choice("parallel_coordinates", "rescale", rescale, ("minmax", "zscore", None))
     if rescale is None:
         return df
     if rescale == "minmax":
         for c in features:
-            col = df[c]
+            col = usable_values(df[c])
             vmin = col.min()
             vmax = col.max()
             if vmin is None or vmax is None or vmin == vmax:
@@ -937,7 +938,7 @@ def _apply_pc_rescale(
         return df
     # rescale == "zscore" (validated above)
     for c in features:
-        col = df[c]
+        col = usable_values(df[c])
         mu = col.mean()
         sd = col.std()
         if sd is None or sd == 0.0:

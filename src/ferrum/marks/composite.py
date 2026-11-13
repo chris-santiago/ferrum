@@ -1039,6 +1039,8 @@ def _boxen_materialized_depth(
         return None
     import polars as pl
 
+    from ferrum._usable import usable
+
     try:
         from ferrum._coerce import to_polars
 
@@ -1065,15 +1067,12 @@ def _boxen_materialized_depth(
         dict.fromkeys([group_field, *(f for f in extra_groupby_fields if f in frame.columns)])
     )
 
-    # Mirror `letter_value::extract_values`: a row whose VALUE is null or NaN
-    # is dropped, and so is a row with a null in any group column (the
+    # Mirror `letter_value::extract_values`: a row whose VALUE is not usable (null, NaN
+    # or infinite) is dropped, and so is a row with a null in any group column (the
     # category or a facet field), which belongs to no group. A NaN group key
     # is not null, so it stays a group of its own. Counting a null-keyed row
     # would size a group the transform never draws and flatten the ramp.
-    value_col = pl.col(value_field)
-    valid = value_col.is_not_null()
-    if frame.schema[value_field] in (pl.Float32, pl.Float64):
-        valid = valid & value_col.is_not_nan()
+    valid = usable(value_field, frame.schema[value_field])
     valid = valid & pl.all_horizontal([pl.col(name).is_not_null() for name in group_cols])
     try:
         sizes = (

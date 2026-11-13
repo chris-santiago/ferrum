@@ -1055,8 +1055,8 @@ def transform_impute(
     groupby : list of str, optional
         Impute within groups: the fill value (per ``method``) is computed
         separately for each group, not once across the whole column. A
-        group with no non-null values of its own to compute a statistic
-        from falls back to the whole column's statistic, rather than
+        group with no usable (non-null, finite) values of its own to compute
+        a statistic from falls back to the whole column's statistic, rather than
         degrading to ``0.0`` or an infinite fill value (unless the column
         as a whole has no usable values either).
     key : str, optional

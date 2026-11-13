@@ -58,6 +58,23 @@ from tests._svg_rects import data_bar_rects, mark_groups, mark_layer, svg_elemen
 # The tail every degenerate-fit sentence ends with.
 _FIT_DEGRADED = "it degraded to an empty/flat output instead of failing the whole chart"
 
+# The reasons a density statistic gives for a group it cannot estimate (the sentence's tail is
+# ``_FIT_DEGRADED``, above). A usable value is non-null and finite, so each reason says so.
+FIT_FEW = "fewer than 2 usable (non-null, finite) values"
+FIT_NONE = "no usable (non-null, finite) values"
+# A fit over x and y counts points where Kde counts values, and a bivariate density counts
+# points without the x/y.
+FIT_FEW_POINTS = "fewer than 2 usable (non-null, finite) x/y points"
+FIT_FEW_PAIRS = "fewer than 2 usable (non-null, finite) points"
+# A local regression needs three points.
+FIT_FEW_LOESS_POINTS = "fewer than 3 usable (non-null, finite) x/y points"
+FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
+# The tied-value reasons: Kde and Violin share one for values, Kde2D names points and each axis.
+FIT_TIED = "its usable values are all equal"
+FIT_TIED_POINTS = "its usable points are all equal"
+FIT_TIED_X = "its usable x values are all equal"
+FIT_TIED_Y = "its usable y values are all equal"
+
 _TWO_GROUP_ONE_NULL = pl.DataFrame(
     {
         "x": [1.0, 2.0, 3.0, 4.0],
@@ -611,10 +628,7 @@ def test_a_kde_hue_group_with_no_usable_values_is_reported_by_degenerate_fit_onl
         }
     )
     svg, messages = _render_capturing(lambda: fm.displot(df, x="v", kind="kde", hue="h").to_svg())
-    assert messages == [
-        "Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); "
-        f"{_FIT_DEGRADED}"
-    ]
+    assert messages == [f"Kde: could not fit group h=c ({FIT_FEW}); {_FIT_DEGRADED}"]
     assert ">c<" in svg
 
 
@@ -790,7 +804,7 @@ def _kde_and_ecdf_charts() -> tuple["fm.Chart", "fm.Chart"]:
         (
             _kde_and_ecdf_charts,
             [
-                f"Kde: could not fit group h=c (fewer than 2 usable (non-null/non-NaN) values); {_FIT_DEGRADED}",
+                f"Kde: could not fit group h=c ({FIT_FEW}); {_FIT_DEGRADED}",
                 "displot: every row of h=c has a null or non-finite x, so it draws nothing",
             ],
         ),
@@ -984,22 +998,6 @@ def _census(messages: list[str]) -> list[str]:
     """The null-position messages among ``messages`` (each carries ``null or
     non-finite``), leaving out an unrelated notice a figure raises beside them."""
     return [m for m in messages if "null or non-finite" in m]
-
-
-# The reasons a density statistic gives for a group it cannot estimate (the sentence's tail,
-# ``_FIT_DEGRADED``, is defined at the top of the module).
-FIT_FEW = "fewer than 2 usable (non-null/non-NaN) values"
-FIT_NONE = "no usable (non-null/non-NaN) values"
-# A fit over x and y counts points where Kde counts values, and a bivariate density counts
-# points without the x/y.
-FIT_FEW_POINTS = "fewer than 2 usable (non-null/non-NaN) x/y points"
-FIT_FEW_PAIRS = "fewer than 2 usable (non-null/non-NaN) points"
-FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
-# The tied-value reasons: Kde and Violin share one for values, Kde2D names points and each axis.
-FIT_TIED = "its usable values are all equal"
-FIT_TIED_POINTS = "its usable points are all equal"
-FIT_TIED_X = "its usable x values are all equal"
-FIT_TIED_Y = "its usable y values are all equal"
 
 
 def _fit_message(statistic: str, group: str, reason: str, *, panel: str | None = None) -> str:
@@ -3086,8 +3084,8 @@ def test_a_boxen_draws_and_warns_the_same_whether_or_not_its_category_is_carried
 @pytest.mark.parametrize("value", _UNDRAWABLE[2:])
 @pytest.mark.parametrize("door", _BOXEN_DOORS)
 def test_a_boxen_category_of_only_infinities_is_named_in_the_callers_terms(door: str, value: float):
-    """An infinity is a value the statistic keeps, so the category has rows and nothing to place:
-    it is named, in the caller's column, as the same category of nulls is."""
+    """An infinity is no usable value, as a null is none: the category has rows and nothing to
+    place, so it is named, in the caller's column, as the same category of nulls is."""
     svg, shown = _render_capturing(
         _BOXEN_DOORS[door](_slot_frame([value] * 6)).to_svg, action="default"
     )
