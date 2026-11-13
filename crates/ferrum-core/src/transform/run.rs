@@ -32,7 +32,7 @@ use crate::spec::layer::PositionalAxis;
 use crate::transform::branch::{self, BranchSpec};
 use crate::transform::color_bin_group::{is_statistics_marker, BinDemand, SpaceDemand, StepBins, StepSpace};
 use crate::transform::composed::{ComposedRuns, ComposedSpec, ComposedState};
-use crate::transform::context::{RowsOrigin, StepInstance, TransformContext};
+use crate::transform::context::{LogEmptied, RowsOrigin, StepInstance, TransformContext};
 use crate::transform::core::{spec_name, SpaceColumn, SpaceSlot, TransformSpec};
 use crate::transform::swarm::SwarmSpec;
 
@@ -127,6 +127,12 @@ impl SpaceWalkStep<'_> {
 pub(crate) struct PassedStep {
     pub(crate) step: StepInstance,
     pub(crate) groupby: Vec<String>,
+    /// What the step's log axis left with no value to place, per facet
+    /// panel ([`LogEmptied`]); empty for a step no log axis emptied anything
+    /// of. Read by `render::scene_build::group_owned_by_its_fit`, beside the
+    /// fit warnings, so a group the log warning already names is not also
+    /// named as null.
+    pub(crate) log_emptied: Vec<LogEmptied>,
 }
 
 /// What a run records beside one published batch ([`apply_transforms_named`]).
@@ -586,8 +592,14 @@ impl<'s> Run<'s, '_> {
         // demanded step records here belongs to THIS step's own output,
         // read back right after the call below.
         step_ctx.log_input = Rc::new(RefCell::new(HashMap::new()));
+        // The step's own grouping, read once here for the seams that ask
+        // which of its groups a log axis left empty, and a fresh sink for
+        // what they find (`PassedStep::log_emptied`), for the same reason.
+        step_ctx.groupby = spec.groupby().map(<[String]>::to_vec).unwrap_or_default();
+        step_ctx.log_emptied = Rc::new(RefCell::new(Vec::new()));
         let result = spec.apply_with_context(&current.batch, &step_ctx)?;
         let step_log_input = step_ctx.log_input.borrow().clone();
+        let step_log_emptied = step_ctx.log_emptied.borrow().clone();
         let own = lowered.map(|id| LoweredStep {
             id,
             groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(),
@@ -613,7 +625,8 @@ impl<'s> Run<'s, '_> {
         // key collision. A secondary output descends from no Swarm.
         let passed_step = || PassedStep {
             step: StepInstance::Chain(id.clone()),
-            groupby: spec.groupby().map(<[String]>::to_vec).unwrap_or_default(),
+            groupby: step_ctx.groupby.clone(),
+            log_emptied: step_log_emptied.clone(),
         };
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
             let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone(), &step_log_input) });
@@ -692,12 +705,14 @@ impl<'s> Run<'s, '_> {
         step_ctx.named_outputs = published.outputs.clone();
         step_ctx.step = StepInstance::Composed(copy.group.clone());
         step_ctx.rows = rows.lineage.origin.clone();
+        step_ctx.groupby = copy.step.groupby().map(<[String]>::to_vec).unwrap_or_default();
         let out = copy.step.apply_with_context(&rows.batch, &step_ctx)?;
         self.composed.ran(&copy.group);
         let Rows { batch, mut lineage } = rows;
         let passed_step = || PassedStep {
             step: StepInstance::Composed(copy.group.clone()),
-            groupby: copy.step.groupby().map(<[String]>::to_vec).unwrap_or_default(),
+            groupby: step_ctx.groupby.clone(),
+            log_emptied: Vec::new(),
         };
         match spec_name(&copy.step) {
             Some(name) => {
@@ -1064,12 +1079,12 @@ mod tests {
         let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
         assert_eq!(
             lineages["f1"].steps,
-            vec![PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![] }],
+            vec![PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![] }],
             "the named step's own output records its own step and its (empty) grouping"
         );
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps,
-            vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone() }],
+            vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![] }],
             "the tail never ran the named step, so it only records its own (the count's) step and grouping"
         );
 
@@ -1078,8 +1093,8 @@ mod tests {
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps,
             vec![
-                PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![] },
-                PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone() },
+                PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![] },
+                PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![] },
             ],
             "two unnamed steps in sequence each add their own step and grouping, in order"
         );
@@ -1088,9 +1103,85 @@ mod tests {
         let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps[0],
-            PassedStep { step: StepInstance::Composed("f".to_string()), groupby: vec![] },
+            PassedStep { step: StepInstance::Composed("f".to_string()), groupby: vec![], log_emptied: vec![] },
             "the composition copy's own step and (empty) grouping precede the count's"
         );
+    }
+
+    /// A context whose plan demands `v` of the step at `[1]` in the positive
+    /// log space: the plan a log axis on `x` places on a lowered `Bin`.
+    fn log_demanding_step_one() -> TransformContext {
+        use crate::transform::color_bin_group::{ColorBinPlan, LogAxisSpace, RunPlan, SlotSpace};
+        let slot = SlotSpace {
+            space: LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive },
+            axes: vec![crate::spec::layer::PositionalAxis::X],
+            records_caller_input: true,
+        };
+        let plan = RunPlan {
+            color: ColorBinPlan { demand: BinDemand::default(), edges: None },
+            space: SpaceDemand::single(vec![1], StepSpace::for_slots([(crate::transform::core::SpaceSlot::Field, slot)])),
+        };
+        TransformContext { run_plan: Some(Rc::new(plan)), ..TransformContext::default() }
+    }
+
+    /// `g` (a, a, b, b) and `v` (-1, 0, 5, 10): group a holds nothing on a
+    /// positive log axis's side.
+    fn rows_with_group_a_off_the_side() -> RecordBatch {
+        RecordBatch::try_from_iter([
+            ("g", Arc::new(StringArray::from(vec!["a", "a", "b", "b"])) as arrow::array::ArrayRef),
+            ("v", Arc::new(Float64Array::from(vec![-1.0, 0.0, 5.0, 10.0])) as arrow::array::ArrayRef),
+        ])
+        .unwrap()
+    }
+
+    fn bin_by_g() -> serde_json::Value {
+        serde_json::json!({"type": "bin", "field": "v", "nice": false, "cumulative": false, "shared_extent": false, "groupby": ["g"]})
+    }
+
+    /// A lowered step stamps its own `groupby` on its context, so the log
+    /// seam can form its groups, and what the seam records lands on the
+    /// step's own passed record of the output the step made: the tail, a
+    /// named output and the step's own grouping alike. Rejects a step that
+    /// reads another step's grouping, or whose record is lost on the way to
+    /// the lineage.
+    #[test]
+    fn a_lowered_step_records_the_groups_its_log_axis_emptied_on_its_passed_step() {
+        pyo3::Python::initialize();
+        let marker = serde_json::json!({"type": "identity", "statistics": true});
+        let (_, lineages) =
+            apply_transforms_named(&chain(serde_json::json!([marker, bin_by_g()])), &rows_with_group_a_off_the_side(), &log_demanding_step_one())
+                .unwrap();
+        let passed = lineages[FINAL_OUTPUT_KEY].passed(&StepInstance::Chain(vec![1])).expect("the bin is a passed step");
+        assert_eq!(passed.groupby, vec!["g".to_string()]);
+        assert_eq!(passed.log_emptied, vec![LogEmptied { panel: None, groups: Some(vec!["g=a".to_string()]) }]);
+
+        let mut named = bin_by_g();
+        named["name"] = serde_json::json!("hist");
+        let (_, lineages) =
+            apply_transforms_named(&chain(serde_json::json!([marker, named])), &rows_with_group_a_off_the_side(), &log_demanding_step_one())
+                .unwrap();
+        let passed = lineages["hist"].passed(&StepInstance::Chain(vec![1])).expect("a named output records its own step");
+        assert_eq!(passed.log_emptied, vec![LogEmptied { panel: None, groups: Some(vec!["g=a".to_string()]) }]);
+    }
+
+    /// A composition's copy of a step runs in data space whatever the plan
+    /// says of the lowered steps, so a copy of the same bin records nothing
+    /// even over the same off-side rows, and keeps its own `groupby` on its
+    /// passed record. Rejects a copy that borrows the lowered step's space.
+    #[test]
+    fn a_composition_copy_records_no_log_emptied_group() {
+        pyo3::Python::initialize();
+        let marker = serde_json::json!({"type": "identity", "statistics": true});
+        let copy = serde_json::json!({"type": "composed", "group": "c", "step": bin_by_g()});
+        let (outputs, lineages) =
+            apply_transforms_named(&chain(serde_json::json!([copy, marker])), &rows_with_group_a_off_the_side(), &log_demanding_step_one())
+                .unwrap();
+        let passed = lineages[FINAL_OUTPUT_KEY].passed(&StepInstance::Composed("c".to_string())).expect("the copy is a passed step");
+        assert_eq!(passed.groupby, vec!["g".to_string()]);
+        assert!(passed.log_emptied.is_empty());
+        let groups = outputs[FINAL_OUTPUT_KEY].column_by_name("g").expect("the copy keeps its group column");
+        let groups = groups.as_any().downcast_ref::<StringArray>().expect("g is text");
+        assert!(groups.iter().flatten().any(|g| g == "a"), "data space bins group a's off-side rows too");
     }
 
     /// The wire round-trips, a named step is a copy like any other, and a

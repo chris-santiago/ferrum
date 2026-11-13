@@ -19,7 +19,7 @@ use crate::layout::{
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::color_bin_group::{BinDemand, ColorBinPlan, LogAxisSpace, RunPlan, SpaceDemand};
-use crate::transform::context::{AllNullOutcome, AllNullPartition, StepInstance, TransformContext, TransformWarning};
+use crate::transform::context::{AllNullOutcome, AllNullPartition, LogEmptied, StepInstance, TransformContext, TransformWarning};
 use crate::transform::core::{apply_transforms_named, SpaceSlot, TransformSpec, FINAL_OUTPUT_KEY};
 use crate::transform::run::{step_spec_at, OutputLineage, OutputLineages};
 
@@ -744,7 +744,8 @@ pub struct PreparedInputs {
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
-    /// The facet partitions a statistic's `groupby` null-key drop emptied
+    /// The facet partitions a step left with nothing to draw, by a
+    /// `groupby` null-key drop or by a log axis with no value on its side
     /// ([`FacetPartitions::emptied_by_drop`]): their panels draw empty, frame
     /// and axes over no marks, where a cell no layer has rows for is skipped.
     pub(in crate::render) facet_emptied_by_drop: HashSet<FacetPartitionKey>,
@@ -2137,9 +2138,11 @@ type TransformRun = (
 );
 
 /// A faceted run's partitions: every key in the order the run partitioned
-/// the facet's input, and the keys a step's `groupby` null-key drop emptied
+/// the facet's input, and the keys a step left with nothing to draw: its
+/// `groupby` null-key drop emptied them
 /// ([`crate::transform::context::TransformContext::refuse_unless_partition`]),
-/// whose panels draw empty rather than vanish.
+/// or the log axis left an ungrouped step no value on its side
+/// ([`AllNullOutcome::OffSide`]). Their panels draw empty rather than vanish.
 #[derive(Debug, Default)]
 pub(super) struct FacetPartitions {
     pub(super) order: Vec<FacetPartitionKey>,
@@ -2365,7 +2368,24 @@ fn run_transforms_with_facet(
             });
             all_null_steps[index].partitions.insert(key);
         }
+        let panel = facet_partition_label(fspec, key);
         for (key, mut lineage) in panel_lineages {
+            // What each step's log axis left empty in this panel, stamped
+            // with the panel's label and merged beside the first panel's
+            // lineage, so the census defers a group only in the panel it
+            // is empty in.
+            let panel_emptied: Vec<(StepInstance, Vec<LogEmptied>)> = lineage
+                .steps
+                .iter_mut()
+                .filter(|passed| !passed.log_emptied.is_empty())
+                .map(|passed| {
+                    let emptied = std::mem::take(&mut passed.log_emptied)
+                        .into_iter()
+                        .map(|emptied| LogEmptied { panel: Some(panel.clone()), ..emptied })
+                        .collect();
+                    (passed.step.clone(), emptied)
+                })
+                .collect();
             let consumed = lineage.statistic_input.take().map(|rows| {
                 let rows = inject_facet_column(&rows, &fspec.field, col_value);
                 match (&fspec.row, row_value) {
@@ -2374,7 +2394,12 @@ fn run_transforms_with_facet(
                 }
             });
             let panel_log_input = std::mem::take(&mut lineage.log_input);
-            let (_, batches, log_input) = merged_lineages.entry(key).or_insert_with(|| (lineage, Vec::new(), HashMap::new()));
+            let (merged_lineage, batches, log_input) = merged_lineages.entry(key).or_insert_with(|| (lineage, Vec::new(), HashMap::new()));
+            for (step, emptied) in panel_emptied {
+                if let Some(passed) = merged_lineage.steps.iter_mut().find(|passed| passed.step == step) {
+                    passed.log_emptied.extend(emptied);
+                }
+            }
             batches.extend(consumed);
             for (field_key, column) in panel_log_input {
                 log_input.entry(field_key).or_default().push(column);
@@ -2518,7 +2543,7 @@ fn settle_all_null_partitions(
                 );
                 return Err(transform_refusal(refusal.to_string(), ctx));
             }
-            AllNullOutcome::Refused(_) => {}
+            AllNullOutcome::Refused(_) | AllNullOutcome::OffSide => {}
             AllNullOutcome::Emptied(warning) if every_panel => {
                 settled.replaced_counts.push(step);
                 settled.warnings.push(warning);

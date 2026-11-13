@@ -403,6 +403,14 @@ pub(crate) enum NullKeyPolicy {
     Pool,
 }
 
+/// The null-key policy of the fit statistics (`Smooth`, `Robust`, `Logistic`,
+/// `Glm`): null-keyed rows are dropped from every group, except that a batch
+/// whose every key is null is fit whole. Each fit's partition and the log
+/// seam that asks which of its groups an axis emptied
+/// ([`crate::transform::log_space::run_fit_in_log_space`]) both read this
+/// one value, so the seam cannot form groups the fit does not.
+pub(crate) const FIT_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::SkipWithWholeBatchFallback;
+
 impl NullKeyPolicy {
     /// Whether a null-containing key excludes its row from every group.
     fn skips_null_rows(self) -> bool {

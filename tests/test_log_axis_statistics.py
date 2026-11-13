@@ -27,7 +27,7 @@ import json
 import math
 import re
 import warnings
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
 import polars as pl
@@ -55,6 +55,23 @@ from tests._svg_rects import (
     polylines,
     step_after_paths,
     svg_elements,
+)
+
+from tests.test_domain_rows_left_out import _domain_warning, _statistic_domain_warning
+from tests.test_null_group_warning import (
+    FIT_FEW,
+    FIT_FEW_PAIRS,
+    FIT_FEW_POINTS,
+    _fit_message,
+    _log_message,
+    _null_key_dropped_message,
+    _panel_fit_message,
+    _panel_key_fallback_message,
+    _panel_message,
+    _render_capturing,
+    _slot_frame,
+    _slot_message,
+    _whole_fit_message,
 )
 
 #: A frame a chart reads: the polars and pyarrow tables the dtype doors build.
@@ -4237,11 +4254,7 @@ def test_one_row_on_a_log_x_degrades_like_any_other_sparse_fit():
             .to_svg()
         )
     )
-    assert msgs == [
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
-        "x/y points); it degraded to an empty/flat output instead of failing "
-        "the whole chart"
-    ], msgs
+    assert msgs == [_whole_fit_message("Smooth", FIT_FEW_POINTS)], msgs
     assert "<svg" in svg
 
 
@@ -4279,11 +4292,7 @@ def test_zero_rows_on_a_log_x_degrades_like_any_other_sparse_fit():
             .to_svg()
         )
     )
-    assert msgs == [
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) "
-        "x/y points); it degraded to an empty/flat output instead of failing "
-        "the whole chart"
-    ], msgs
+    assert msgs == [_whole_fit_message("Smooth", FIT_FEW_POINTS)], msgs
     assert "<svg" in svg
 
 
@@ -4438,3 +4447,812 @@ def test_a_callers_own_transform_loess_stays_in_data_space():
     _, ys = _vertices_in_data_units(points, x_ladder, y_ladder, x_log=True, y_log=False)
     assert ys[0] == pytest.approx(2.264281216137249, rel=1e-9)
     assert ys[-1] == pytest.approx(11.091113846921928, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# A hue level or facet panel whose every value the log axis cannot place (zero
+# or negative) is one event, reported once, by the log warning that counts the
+# rows. The level keeps its legend entry and the panel keeps its place, drawn
+# empty; neither is also named as a group of nulls, nor by its statistic as one
+# it could not estimate. A level of nulls keeps its own report, and a level
+# with one value on the side and one off it keeps its statistic's too.
+# ---------------------------------------------------------------------------
+
+_LEVEL_XS = [float(x) for x in np.geomspace(10, 1000, 12)]
+#: Values a log axis cannot place: zero and two negatives.
+_OFF_SIDE_LEVEL = [-1.0, 0.0, -3.0]
+
+
+def _level_frame(
+    c_x: list[float | None], c_y: list[float] | None = None, *, with_c: bool = True
+) -> pl.DataFrame:
+    """Levels ``a`` and ``b`` of twelve rows each spread over ``10..1000`` on ``v``, then level
+    ``c`` whose ``v`` is ``c_x``. ``w`` is a value every fit can read, ``b`` a binary response for
+    the logistic fit, and ``c``'s ``w`` stays inside the range of the other levels' so the value
+    axis is the same with and without it. ``with_c=False`` leaves ``c``'s rows out."""
+    rows = []
+    for level, shift in (("a", 1.0), ("b", 1.05)):
+        for i, x in enumerate(_LEVEL_XS):
+            w = 2.0 + math.log10(x) + 0.3 * math.sin(i) + (0.5 if level == "b" else 0.0)
+            rows.append((x * shift, w, float(i % 3 == 0 or i > 8), level))
+    if with_c:
+        c_y = [3.5 + 0.5 * i for i in range(len(c_x))] if c_y is None else c_y
+        rows.extend((x, y, float(i % 2), "c") for i, (x, y) in enumerate(zip(c_x, c_y)))
+    schema = {"v": pl.Float64, "w": pl.Float64, "b": pl.Float64, "g": pl.Utf8}
+    return pl.DataFrame(rows, schema=schema, orient="row")
+
+
+def _log_x() -> fm.X:
+    return fm.X("v", scale=fm.LogScale())
+
+
+class _StatisticDoor(NamedTuple):
+    """One way to draw a statistic of ``v`` split by ``g`` on a log ``v`` axis."""
+
+    build: Callable[[pl.DataFrame], fm.Chart]
+    #: The statistic that warns its own sentence for a group it cannot estimate, and its reason.
+    fit: tuple[str, str] | None
+    #: The entry and channels the census names a level whose ``v`` is null, when that level
+    #: still draws a placed mark of its own, as the histogram's bar or the fit's scatter point.
+    census: tuple[str, str] | None
+
+
+_STATISTIC_DOORS: dict[str, _StatisticDoor] = {
+    "displot hist": _StatisticDoor(
+        lambda df: fm.displot(df, x="v", hue="g", kind="hist", log_scale=True),
+        None,
+        ("displot", "x"),
+    ),
+    "displot hist kde=True": _StatisticDoor(
+        lambda df: fm.displot(df, x="v", hue="g", kind="hist", kde=True, log_scale=True),
+        ("Kde", FIT_FEW),
+        ("displot", "x"),
+    ),
+    "displot kde": _StatisticDoor(
+        lambda df: fm.displot(df, x="v", hue="g", kind="kde", log_scale=True),
+        ("Kde", FIT_FEW),
+        None,
+    ),
+    "displot ecdf": _StatisticDoor(
+        lambda df: fm.displot(df, x="v", hue="g", kind="ecdf", log_scale=True),
+        None,
+        ("displot", "x"),
+    ),
+    "mark_histogram": _StatisticDoor(
+        lambda df: fm.Chart(df).mark_histogram().encode(x=_log_x(), color="g"),
+        None,
+        ("mark_histogram", "x"),
+    ),
+    "mark_bar bin": _StatisticDoor(
+        lambda df: (
+            fm.Chart(df)
+            .mark_bar()
+            .encode(x=fm.X("v", bin=True, scale=fm.LogScale()), y="count()", color="g")
+        ),
+        None,
+        ("mark_bar", "x and x2"),
+    ),
+    "mark_density": _StatisticDoor(
+        lambda df: fm.Chart(df).mark_density().encode(x=_log_x(), color="g"),
+        ("Kde", FIT_FEW),
+        None,
+    ),
+    "mark_smooth lm": _StatisticDoor(
+        lambda df: (
+            fm.Chart(df).mark_smooth(method="lm", ci=None).encode(x=_log_x(), y="w", color="g")
+        ),
+        ("Smooth", FIT_FEW_POINTS),
+        None,
+    ),
+    "mark_smooth loess": _StatisticDoor(
+        lambda df: (
+            fm.Chart(df).mark_smooth(method="loess", ci=None).encode(x=_log_x(), y="w", color="g")
+        ),
+        ("Smooth", FIT_FEW_POINTS),
+        None,
+    ),
+    "mark_smooth glm": _StatisticDoor(
+        lambda df: (
+            fm.Chart(df).mark_smooth(method="glm", ci=None).encode(x=_log_x(), y="w", color="g")
+        ),
+        ("Smooth", FIT_FEW_POINTS),
+        None,
+    ),
+    "lmplot robust": _StatisticDoor(
+        lambda df: fm.lmplot(df, x="v", y="w", hue="g", method="robust", logx=True, ci=None),
+        ("Robust", FIT_FEW_POINTS),
+        ("lmplot", "x"),
+    ),
+    "lmplot logistic": _StatisticDoor(
+        lambda df: fm.lmplot(df, x="v", y="b", hue="g", method="logistic", logx=True, ci=None),
+        ("Logistic", FIT_FEW_POINTS),
+        ("lmplot", "x"),
+    ),
+    "lmplot glm": _StatisticDoor(
+        lambda df: fm.lmplot(df, x="v", y="w", hue="g", method="glm", logx=True, ci=None),
+        ("Glm", FIT_FEW_POINTS),
+        ("lmplot", "x"),
+    ),
+    "displot kde2d": _StatisticDoor(
+        lambda df: fm.displot(df, x="v", y="w", hue="g", kind="kde", log_scale=True),
+        ("Kde2D", FIT_FEW_PAIRS),
+        None,
+    ),
+}
+_STATISTIC_DOOR_CASES = [pytest.param(door, id=name) for name, door in _STATISTIC_DOORS.items()]
+#: What an infinite ``v`` beside off-side values adds to the log warning, by door. An infinity is
+#: placed by no log axis, and the axis reports the row itself under its own domain warning, a
+#: separate event from the level the axis empties, wherever the door keeps that row as a mark: the
+#: ECDF's step and the fit doors' scatter points. A statistic's own rows never keep it.
+_INFINITE_ROW_DOMAIN_WARNING = {
+    "displot ecdf": _statistic_domain_warning("displot", "x", "v", 1),
+    "lmplot robust": _domain_warning("x", "v", 1),
+    "lmplot logistic": _domain_warning("x", "v", 1),
+    "lmplot glm": _domain_warning("x", "v", 1),
+}
+
+
+def _group_fit(door: _StatisticDoor, group: str = "g=c") -> list[str]:
+    """The sentence ``door``'s statistic warns for ``group`` when it cannot estimate it."""
+    return [] if door.fit is None else [_fit_message(door.fit[0], group, door.fit[1])]
+
+
+def _group_census(door: _StatisticDoor, level: str = "c") -> list[str]:
+    """The census sentence ``door`` names level ``level`` in when its ``v`` is null."""
+    if door.census is None:
+        return []
+    entry, channels = door.census
+    return [_slot_message(entry, channels, level, "g")]
+
+
+def _x_ladder(svg: str) -> dict[float, float]:
+    return value_axis_ladder(svg, axis="x")
+
+
+@pytest.mark.parametrize("door", _STATISTIC_DOOR_CASES)
+def test_a_level_wholly_off_the_log_side_is_reported_by_the_log_warning_alone(
+    door: _StatisticDoor,
+):
+    """Level ``c`` holds three values the axis cannot place and none on its side, on every
+    statistic that works in the axis's space. The level keeps its legend entry, and the log
+    warning's count of the three rows is the only message: not a null census sentence, and not
+    the statistic's own "fewer than 2 usable values", which describes values that are present."""
+    svg, messages = _render_capturing(door.build(_level_frame(_OFF_SIDE_LEVEL)).to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _STATISTIC_DOOR_CASES)
+def test_a_level_wholly_off_the_log_side_takes_no_position_on_the_axis(door: _StatisticDoor):
+    """The emptied level's output is not drawn anywhere, so the value axis reads as it does for
+    the chart with no rows of that level: a density's default grid for a group with nothing to
+    estimate would otherwise land at ``1`` and widen the axis down to it."""
+    with_level, _ = _render_capturing(door.build(_level_frame(_OFF_SIDE_LEVEL)).to_svg)
+    without, _ = _render_capturing(door.build(_level_frame([], with_c=False)).to_svg)
+    assert _x_ladder(with_level) == _x_ladder(without)
+
+
+@pytest.mark.parametrize("value", [None, float("nan")], ids=["null", "nan"])
+@pytest.mark.parametrize("door", _STATISTIC_DOOR_CASES)
+def test_a_level_of_a_null_beside_off_side_values_is_reported_by_the_log_warning_alone(
+    door: _StatisticDoor, value: float | None
+):
+    """A level with no value on the axis's side, two off it and one null or NaN, is one event the
+    log warning counts (two rows): the null is not named beside it, by the census or by the
+    statistic."""
+    svg, messages = _render_capturing(door.build(_level_frame([value, -1.0, 0.0])).to_svg)
+    assert messages == [_log_message("x", "v", 2)]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("name", list(_STATISTIC_DOORS))
+def test_a_level_of_an_infinity_beside_off_side_values_is_reported_by_the_log_warning(name: str):
+    """The same level with an infinity for its unusable value: the log warning counts the two
+    off-side rows and nothing names the level a second time. Where the door keeps the infinite
+    row as a mark of its own (the ECDF's step, the fit doors' scatter), the axis also reports that
+    row, once, under its domain warning."""
+    door = _STATISTIC_DOORS[name]
+    svg, messages = _render_capturing(door.build(_level_frame([math.inf, -1.0, 0.0])).to_svg)
+    extra = _INFINITE_ROW_DOMAIN_WARNING.get(name)
+    assert messages == [_log_message("x", "v", 2)] + ([] if extra is None else [extra])
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _STATISTIC_DOOR_CASES)
+def test_a_level_with_one_value_on_the_side_and_one_off_it_keeps_its_statistics_report(
+    door: _StatisticDoor,
+):
+    """Level ``c`` has a value on the axis's side, so the axis did not empty it: a statistic that
+    needs two points to fit still says it could not, and the log warning still counts the one
+    off-side row, in that order. A histogram or an ECDF draws the one value and says only the
+    second."""
+    svg, messages = _render_capturing(door.build(_level_frame([-1.0, 50.0])).to_svg)
+    assert messages == _group_fit(door) + [_log_message("x", "v", 1)]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _STATISTIC_DOOR_CASES)
+def test_a_level_of_nulls_on_a_log_axis_keeps_its_report(door: _StatisticDoor):
+    """No value of level ``c`` is off the axis's side, so the log warning has nothing to count
+    and the level is named as it is on a linear axis: by its statistic when it fits one, and by
+    the census when it draws a placed mark of its own."""
+    svg, messages = _render_capturing(door.build(_level_frame([None, None])).to_svg)
+    assert messages == _group_fit(door) + _group_census(door)
+    assert ">c<" in svg
+
+
+def _facet_frame(q_values: list[float | None]) -> pl.DataFrame:
+    """Facet panel ``p`` of six values on the axis's side, then panel ``q`` holding ``q_values``."""
+    return pl.DataFrame(
+        {"v": _LEVEL_XS[:6] + q_values, "f": ["p"] * 6 + ["q"] * len(q_values)},
+        schema={"v": pl.Float64, "f": pl.Utf8},
+    )
+
+
+def _panel_level_frame(panels: dict[str, dict[str, list[float | None]]]) -> pl.DataFrame:
+    """One frame of ``v`` split by facet panel ``f`` and hue level ``g``: ``panels`` maps each
+    panel to the values each of its levels holds."""
+    rows = [
+        (panel, level, value)
+        for panel, levels in panels.items()
+        for level, values in levels.items()
+        for value in values
+    ]
+    return pl.DataFrame(rows, schema={"f": pl.Utf8, "g": pl.Utf8, "v": pl.Float64}, orient="row")
+
+
+def _faceted(kind: str, frame: pl.DataFrame, *, hue: bool = False) -> fm.Chart:
+    """``frame``'s ``v`` as ``kind`` on a log value axis, one panel per ``f``, split by ``g`` when
+    ``hue``."""
+    if kind in {"mark_histogram", "mark_density"}:
+        chart = getattr(fm.Chart(frame), kind)().encode(
+            x=_log_x(), **({"color": "g"} if hue else {})
+        )
+        return chart.facet(col="f")
+    return fm.displot(
+        frame, x="v", col="f", kind=kind, log_scale=True, **({"hue": "g"} if hue else {})
+    )
+
+
+#: The statistics a facet panel is drawn by: the entry each speaks as, and the statistic that
+#: warns its own sentence for a panel it cannot estimate.
+_FACET_KINDS = {
+    "hist": ("displot", None),
+    "kde": ("displot", "Kde"),
+    "ecdf": ("displot", None),
+    "mark_histogram": ("mark_histogram", None),
+    "mark_density": ("mark_density", "Kde"),
+}
+_FACET_KIND_CASES = [pytest.param(kind, id=kind) for kind in _FACET_KINDS]
+
+
+def _drawn_panels(svg: str) -> tuple[list[str], int]:
+    """The facet strip labels a render draws, and how many panels' plot areas it draws."""
+    return _column_strip_headers(svg, ["p", "q"]), len(mark_groups(svg))
+
+
+@pytest.mark.parametrize(
+    "q_values,rows",
+    [
+        pytest.param(_OFF_SIDE_LEVEL, 3, id="off-side"),
+        pytest.param([None, -1.0, 0.0], 2, id="off-side-and-null"),
+        pytest.param([float("nan"), -1.0, 0.0], 2, id="off-side-and-nan"),
+        pytest.param([math.inf, -1.0, 0.0], 2, id="off-side-and-inf"),
+    ],
+)
+@pytest.mark.parametrize("kind", _FACET_KIND_CASES)
+def test_a_facet_panel_wholly_off_the_log_side_is_drawn_empty_and_reported_by_the_log_warning_alone(
+    kind: str, q_values: list[float | None], rows: int
+):
+    """Panel ``q`` holds no value on the axis's side and at least one off it. It keeps its place
+    and its strip label and draws nothing, and the log warning's count of the off-side rows is the
+    only message: not a null census sentence for the panel, and not its statistic's own
+    "could not fit the data". An ECDF keeps an infinite row as a step of its own, which the axis
+    reports under its domain warning beside the log warning."""
+    svg, messages = _render_capturing(_faceted(kind, _facet_frame(q_values)).to_svg)
+    infinite = any(value is not None and math.isinf(value) for value in q_values)
+    extra = [_INFINITE_ROW_DOMAIN_WARNING["displot ecdf"]] if infinite and kind == "ecdf" else []
+    assert messages == [_log_message("x", "v", rows)] + extra
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+
+
+@pytest.mark.parametrize("kind", _FACET_KIND_CASES)
+def test_a_facet_panel_of_nulls_on_a_log_axis_keeps_its_report(kind: str):
+    """No value of panel ``q`` is off the axis's side, so the log warning has nothing to count:
+    the panel is named, as it is on a linear axis, by its statistic when it fits one and by the
+    census otherwise."""
+    entry, statistic = _FACET_KINDS[kind]
+    expected = (
+        _panel_message(entry, "x") if statistic is None else _panel_fit_message(statistic, FIT_FEW)
+    )
+    svg, messages = _render_capturing(_faceted(kind, _facet_frame([None, None])).to_svg)
+    assert messages == [expected]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+
+
+_HUE_PANELS = {"a": _LEVEL_XS[:6], "b": _LEVEL_XS[2:8]}
+
+
+@pytest.mark.parametrize("kind", _FACET_KIND_CASES)
+def test_a_facet_panel_holding_the_only_rows_of_a_level_off_the_side_keeps_the_panel_and_the_entry(
+    kind: str,
+):
+    """Level ``c`` lives only in panel ``q``, where all three of its values are off the axis's
+    side. The panel is drawn empty and ``c`` keeps its legend entry, and the log warning is the
+    only message."""
+    frame = _panel_level_frame({"p": _HUE_PANELS, "q": {"c": _OFF_SIDE_LEVEL}})
+    svg, messages = _render_capturing(_faceted(kind, frame, hue=True).to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("kind", _FACET_KIND_CASES)
+def test_a_level_off_the_side_in_one_panel_beside_a_level_that_draws_there_is_reported_once(
+    kind: str,
+):
+    """Panel ``q`` holds level ``b`` on the axis's side and level ``c`` only off it: ``b`` draws,
+    ``c`` is left to the log warning, and neither the census nor the statistic names it for the
+    panel."""
+    frame = _panel_level_frame({"p": _HUE_PANELS, "q": {"b": _LEVEL_XS[3:9], "c": _OFF_SIDE_LEVEL}})
+    svg, messages = _render_capturing(_faceted(kind, frame, hue=True).to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+    assert ">c<" in svg
+
+
+def _refusal_of_the_primitive_route(frame: pl.DataFrame) -> str:
+    """The axis's own refusal of ``frame``'s ``v``, as a point layer states it."""
+    with pytest.raises(ValueError) as excinfo:
+        fm.Chart(frame).mark_point().encode(x=_log_x(), y="v").to_svg()
+    return str(excinfo.value)
+
+
+def _every_value_off_the_side(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns(v=-pl.col("v").abs() - 1.0)
+
+
+class _NoValueOnSide(NamedTuple):
+    """A frame of which no row sits on the axis's side, and the chart that draws it."""
+
+    frame: pl.DataFrame
+    build: Callable[[pl.DataFrame], fm.Chart]
+
+
+_NO_VALUE_ON_SIDE_CASES = {
+    "unfaceted ungrouped hist": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", kind="hist", log_scale=True),
+    ),
+    "unfaceted ungrouped kde": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", kind="kde", log_scale=True),
+    ),
+    "unfaceted ungrouped ecdf": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", kind="ecdf", log_scale=True),
+    ),
+    "unfaceted ungrouped smooth": _NoValueOnSide(
+        _every_value_off_the_side(_level_frame([1.0, 2.0])),
+        lambda df: fm.Chart(df).mark_smooth(method="lm", ci=None).encode(x=_log_x(), y="w"),
+    ),
+    "unfaceted grouped hist": _NoValueOnSide(
+        _every_value_off_the_side(_level_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", hue="g", kind="hist", log_scale=True),
+    ),
+    "unfaceted grouped kde": _NoValueOnSide(
+        _every_value_off_the_side(_level_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", hue="g", kind="kde", log_scale=True),
+    ),
+    "unfaceted grouped ecdf": _NoValueOnSide(
+        _every_value_off_the_side(_level_frame([1.0, 2.0])),
+        lambda df: fm.displot(df, x="v", hue="g", kind="ecdf", log_scale=True),
+    ),
+    "unfaceted grouped smooth": _NoValueOnSide(
+        _every_value_off_the_side(_level_frame([1.0, 2.0])),
+        lambda df: (
+            fm.Chart(df).mark_smooth(method="lm", ci=None).encode(x=_log_x(), y="w", color="g")
+        ),
+    ),
+    "every panel hist": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])), lambda df: _faceted("hist", df)
+    ),
+    "every panel kde": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])), lambda df: _faceted("kde", df)
+    ),
+    "every panel mark_density": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])), lambda df: _faceted("mark_density", df)
+    ),
+    "every panel ecdf": _NoValueOnSide(
+        _every_value_off_the_side(_facet_frame([1.0, 2.0])), lambda df: _faceted("ecdf", df)
+    ),
+    "every panel grouped hist": _NoValueOnSide(
+        _every_value_off_the_side(
+            _panel_level_frame({"p": _HUE_PANELS, "q": {"c": _LEVEL_XS[:3]}})
+        ),
+        lambda df: _faceted("hist", df, hue=True),
+    ),
+}
+
+
+def _with_a_zero(frame: pl.DataFrame) -> pl.DataFrame:
+    """``frame`` with its first row's ``v`` at zero, so the values are zero or negative."""
+    return frame.with_columns(
+        v=pl.when(pl.int_range(pl.len()) == 0).then(0.0).otherwise(pl.col("v"))
+    )
+
+
+#: The reason the axis gives by the frame it refuses: every value negative, or some at zero.
+_NO_VALUE_ON_SIDE_REASONS = {
+    "negative": "is negative, and a LogScale with no domain maps only positive values; pass an",
+    "zero": (
+        "are zero or negative, and a LogScale with no domain maps only positive values; "
+        "use fm.SymlogScale()"
+    ),
+}
+
+
+@pytest.mark.parametrize("flavor", sorted(_NO_VALUE_ON_SIDE_REASONS))
+@pytest.mark.parametrize("case", sorted(_NO_VALUE_ON_SIDE_CASES))
+def test_a_frame_with_no_value_on_the_log_side_is_refused_by_the_axis_with_no_warning(
+    case: str, flavor: str
+):
+    """Every row of every panel, or of the whole unfaceted frame, sits off the axis's side:
+    nothing is left to draw, so the axis refuses in the sentence the point route uses on the same
+    rows (the negative one for a frame of negatives, the zero-or-negative one with a zero among
+    them), and no warning is raised beside it. Neither the emptied groups nor the emptied panels
+    are kept in place of that refusal."""
+    frame, build = _NO_VALUE_ON_SIDE_CASES[case]
+    frame = _with_a_zero(frame) if flavor == "zero" else frame
+    expected = _refusal_of_the_primitive_route(frame)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError) as excinfo:
+            build(frame).to_svg()
+    assert str(excinfo.value) == expected
+    assert _NO_VALUE_ON_SIDE_REASONS[flavor] in expected
+    assert caught == []
+
+
+def _off_side_levels() -> pl.DataFrame:
+    """Levels ``a``, ``b`` and ``c``, every value of every level off the axis's side."""
+    return _level_frame([10.0, 20.0, 30.0]).with_columns(v=-pl.col("v"))
+
+
+#: The chart a grouped statistic layer is drawn by, on a log ``v`` axis and split by ``g``.
+_GROUPED_LAYERS: dict[str, Callable[[pl.DataFrame], fm.Chart]] = {
+    "histogram": lambda df: fm.Chart(df).mark_histogram().encode(x=_log_x(), color="g"),
+    "density": lambda df: fm.Chart(df).mark_density().encode(x=_log_x(), color="g"),
+}
+#: A rule at ``5``, a value on the axis's side, as a layer of its own and as one carrying a ``g``
+#: for a ``Chart.layer`` that inherits the host's colour.
+_RULE_FRAME = pl.DataFrame({"r": [5.0]})
+_RULE_GROUP_FRAME = pl.DataFrame({"r": [5.0], "g": ["a"]})
+
+
+def _beside_a_rule(door: str, statistic: Callable[[pl.DataFrame], fm.Chart], frame) -> fm.Chart:
+    """``statistic`` of ``frame`` and a rule on the axis's side, composed through ``door``."""
+    rule = fm.Chart(_RULE_FRAME).mark_rule().encode(x="r")
+    if door == "plus":
+        return statistic(frame) + rule
+    if door == "layer_chart":
+        return fm.LayerChart(statistic(frame), rule)
+    return statistic(frame).layer(
+        fm.Layer(data=_RULE_GROUP_FRAME, mark="rule", encoding={"x": "r"})
+    )
+
+
+_COMPOSITION_DOORS = ["plus", "layer_chart", "chart_layer"]
+
+
+@pytest.mark.parametrize("door", _COMPOSITION_DOORS)
+@pytest.mark.parametrize("layer", sorted(_GROUPED_LAYERS))
+def test_a_grouped_layer_wholly_off_the_side_beside_a_layer_that_draws_keeps_every_entry(
+    layer: str, door: str
+):
+    """The rule puts a value on the axis's side, so the axis resolves; the grouped layer holds
+    none of its own, in any of its three levels. Every level keeps its legend entry and the log
+    warning, counting all 27 rows, is the only message."""
+    chart = _beside_a_rule(door, _GROUPED_LAYERS[layer], _off_side_levels())
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [_log_message("x", "v", 27)]
+    assert sorted(set(legend_labels(svg))) == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("door", _COMPOSITION_DOORS)
+def test_an_ungrouped_layer_wholly_off_the_side_beside_a_layer_that_draws_is_reported_once(
+    door: str,
+):
+    """With no key there is no entry to keep: the histogram draws nothing, the rule draws, and the
+    log warning is the only message."""
+    frame = _off_side_levels()
+    chart = _beside_a_rule(door, lambda df: fm.Chart(df).mark_histogram().encode(x=_log_x()), frame)
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [_log_message("x", "v", 27)]
+    assert data_bar_rects(svg) == []
+
+
+def _hist_and_point(door: str, frame: pl.DataFrame, layer: str) -> fm.Chart:
+    """``layer``'s statistic of ``frame`` composed through ``door`` with a point layer of the rows
+    of levels ``a`` and ``b``, both on the log ``v`` axis. The point layer holds no row of level
+    ``c``, so an entry for ``c`` can only come from the statistic's layer."""
+    point_frame = frame.filter(pl.col("g") != "c")
+    point_encoding = {"x": _log_x(), "y": "w", "color": "g"}
+    statistic = _GROUPED_LAYERS[layer](frame)
+    point = fm.Chart(point_frame).mark_point().encode(**point_encoding)
+    if door == "plus":
+        return statistic + point
+    if door == "layer_chart":
+        return fm.LayerChart(statistic, point)
+    if door == "composite_leaf":
+        return fm.hconcat(statistic, point)
+    return statistic.layer(fm.Layer(data=point_frame, mark="point", encoding=point_encoding))
+
+
+@pytest.mark.parametrize("door", [*_COMPOSITION_DOORS, "composite_leaf"])
+@pytest.mark.parametrize("layer", sorted(_GROUPED_LAYERS))
+def test_a_level_off_the_side_is_reported_once_on_every_composition_door(layer: str, door: str):
+    """Level ``c`` is wholly off the axis's side in a statistic layer composed with a point layer
+    of the other levels' rows (a layer, or a leaf of a composite). Each layer reads its own
+    lineage, and the statistic's layer defers to the log warning as a single chart does: one
+    message, and the level's entry, which only the statistic's layer can supply, kept."""
+    svg, messages = _render_capturing(
+        _hist_and_point(door, _level_frame(_OFF_SIDE_LEVEL), layer).to_svg
+    )
+    assert messages == [_log_message("x", "v", 3)]
+    assert "c" in legend_labels(svg)
+
+
+def _point_frame(c_y: list[float | None]) -> pl.DataFrame:
+    return _level_frame(_OFF_SIDE_LEVEL, [0.0] * 3).with_columns(
+        w=pl.concat([pl.Series([1.0] * 24, dtype=pl.Float64), pl.Series(c_y, dtype=pl.Float64)])
+    )
+
+
+def test_a_point_level_off_the_side_with_a_null_y_keeps_the_census_sentence_for_y():
+    """A primitive mark has no statistic: the nulls of ``y`` are the caller's, would empty
+    the level on any axis, and are named beside the log warning's count of ``x``."""
+    chart = fm.Chart(_point_frame([None] * 3)).mark_point().encode(x=_log_x(), y="w", color="g")
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [_log_message("x", "v", 3), _slot_message("mark_point", "y", "c", "g")]
+    assert ">c<" in svg
+
+
+def test_a_point_level_off_the_side_with_its_y_present_is_reported_by_the_log_warning_alone():
+    chart = fm.Chart(_point_frame([1.0] * 3)).mark_point().encode(x=_log_x(), y="w", color="g")
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+    assert ">c<" in svg
+
+
+def _scene_legend_labels(scene_json: str) -> list[str]:
+    """The text of every legend label of an interactive scene."""
+    legend = json.loads(scene_json)["legend"]
+    return [node["content"] for node in legend if node["type"] == "text"]
+
+
+@pytest.mark.parametrize(
+    "door",
+    [
+        pytest.param(_STATISTIC_DOORS["displot hist"], id="hist"),
+        pytest.param(_STATISTIC_DOORS["displot kde"], id="kde"),
+        pytest.param(_STATISTIC_DOORS["displot ecdf"], id="ecdf"),
+        pytest.param(_STATISTIC_DOORS["mark_smooth lm"], id="smooth"),
+    ],
+)
+def test_the_interactive_route_reports_an_emptied_level_as_a_static_render_does(
+    door: _StatisticDoor,
+):
+    """``.interactive()`` renders a static fallback and the scene, so the one message appears once
+    per render (twice for the export, once for the scene), and the legend of the scene keeps the
+    emptied level."""
+    chart = door.build(_level_frame(_OFF_SIDE_LEVEL))
+    _, static = _render_capturing(chart.to_svg)
+    _, exported = _render_capturing(lambda: chart.interactive().to_html())
+    scene, from_scene = _render_capturing(lambda: chart.interactive().scene_json)
+    assert static == [_log_message("x", "v", 3)]
+    assert exported == static * 2
+    assert from_scene == static
+    assert {"a", "b", "c"} <= set(_scene_legend_labels(scene))
+
+
+@pytest.mark.parametrize("kind", ["hist", "kde", "ecdf"])
+def test_the_interactive_route_keeps_a_panel_wholly_off_the_side(kind: str):
+    """The scene of a facet panel with no value on the axis's side holds the panel, as the static
+    render draws it, and the one log warning is the only message."""
+    chart = _faceted(kind, _facet_frame(_OFF_SIDE_LEVEL))
+    _, static = _render_capturing(chart.to_svg)
+    scene, from_scene = _render_capturing(lambda: chart.interactive().scene_json)
+    assert static == [_log_message("x", "v", 3)]
+    assert from_scene == static
+    assert len(json.loads(scene)["panels"]) == 2
+
+
+#: Charts with no level the log axis empties: each builds the chart, the messages it raises and
+#: the SHA-256 of its svg. The messages and the bytes are the ones the library gave before a
+#: level the axis empties was reported by the log warning alone, so a change that touches a chart
+#: with no such level shows here.
+_UNCHANGED_CHARTS: dict[str, tuple[Callable[[], fm.Chart], list[str], str]] = {
+    "linear axis, level of negatives": (
+        lambda: fm.displot(_level_frame(_OFF_SIDE_LEVEL), x="v", hue="g", kind="hist"),
+        [],
+        "b404ee96346eca89172237d12243335af7bbaa71c740e87e250226ca248d186a",
+    ),
+    "log histogram, every level on the side": (
+        lambda: fm.displot(
+            _level_frame([20.0, 30.0, 40.0]), x="v", hue="g", kind="hist", log_scale=True
+        ),
+        [],
+        "161d7de892a78496bfae7d112d2767e2af010e1e390eb1a38a92ece77a8af2fb",
+    ),
+    "log histogram, one value on the side": (
+        lambda: _STATISTIC_DOORS["displot hist"].build(_level_frame([-1.0, 50.0])),
+        [_log_message("x", "v", 1)],
+        "9bb76880b94f56a2aa48c4a9af373af4085982ce5439624d148491a42f8f828f",
+    ),
+    "log kde, one value on the side": (
+        lambda: _STATISTIC_DOORS["displot kde"].build(_level_frame([-1.0, 50.0])),
+        [_fit_message("Kde", "g=c", FIT_FEW), _log_message("x", "v", 1)],
+        "16592d7280d45fcce4d4f6ee9a24e6916ad36f71afa36ff101249df5c635c7ea",
+    ),
+    "log ecdf, one value on the side": (
+        lambda: _STATISTIC_DOORS["displot ecdf"].build(_level_frame([-1.0, 50.0])),
+        [_log_message("x", "v", 1)],
+        "707df01eb0d2d1a8331b4a0895370918a0cf71dae48b0bd848c30ba4fae53807",
+    ),
+    "log smooth, one value on the side": (
+        lambda: _STATISTIC_DOORS["mark_smooth lm"].build(_level_frame([-1.0, 50.0])),
+        [_fit_message("Smooth", "g=c", FIT_FEW_POINTS), _log_message("x", "v", 1)],
+        "e9c55c5c3500f6cccf178ba28472493c7c637bc45a322d8a7f05dab9dbe685d0",
+    ),
+    "boxen category off the side": (
+        lambda: (
+            fm.Chart(_slot_frame([-1.0] * 6))
+            .mark_boxen()
+            .encode(x="c", y=fm.Y("w", scale=fm.LogScale()))
+        ),
+        [_log_message("y", "lower", 1)],
+        "981d3857d48caea19de55ff061b2d8c7c5deed7bcb4cd36d95196547784cbbf4",
+    ),
+    "level an explicit domain cuts": (
+        lambda: (
+            fm.Chart(_level_frame([5000.0, 5500.0, 6000.0]))
+            .mark_histogram()
+            .encode(x=fm.X("v", scale=fm.LogScale(domain=[1, 2000])), color="g")
+        ),
+        [_statistic_domain_warning("mark_histogram", "x", "v", 4)],
+        "a77b3f3c3028a3844e6c6ffcc8e54ef4a19d49827c9857e23b141d0adc0cddc2",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNCHANGED_CHARTS))
+def test_a_chart_with_no_level_the_log_axis_empties_is_unchanged(case: str):
+    """The messages and the bytes of a chart with no group wholly off the axis's side, or one
+    whose group the axis does not empty, are the ones this library has always drawn: a linear
+    axis, a log axis with every level on its side, a level with one value on it, a boxen
+    category (computed in data space), and a level an explicit domain cuts."""
+    build, expected, digest = _UNCHANGED_CHARTS[case]
+    svg, messages = _render_capturing(build().to_svg)
+    assert messages == expected
+    assert hashlib.sha256(svg.encode()).hexdigest() == digest
+
+
+def _panel_fit_frame(c_in_p: list[float], c_in_q: list[float]) -> pl.DataFrame:
+    """Levels ``a`` and ``b`` of eight rows in each of panels ``p`` and ``q`` on the axis's side,
+    and level ``c`` holding ``c_in_p`` in panel ``p`` and ``c_in_q`` in panel ``q``."""
+    rows = []
+    for panel, c_values in (("p", c_in_p), ("q", c_in_q)):
+        for level, values in (("a", _LEVEL_XS[:8]), ("b", _LEVEL_XS[2:10]), ("c", c_values)):
+            rows.extend(
+                (panel, level, x, 2.0 + math.log10(abs(x) + 1.0) + 0.1 * i)
+                for i, x in enumerate(values)
+            )
+    schema = {"f": pl.Utf8, "g": pl.Utf8, "v": pl.Float64, "w": pl.Float64}
+    return pl.DataFrame(rows, schema=schema, orient="row")
+
+
+def test_a_density_group_one_panel_cannot_estimate_keeps_its_report_beside_an_emptied_panel_group():
+    """Level ``c`` holds one value on the axis's side in panel ``p`` (too few to estimate, a fact
+    of the data the density names) and two values off it in panel ``q`` (an event of the axis).
+    The axis's emptying of ``c`` in ``q`` removes nothing the statistic said about ``c`` in
+    ``p``: the density's sentence for panel ``p`` stays, beside the log warning's two rows."""
+    frame = _panel_fit_frame([50.0], [-1.0, 0.0])
+    chart = fm.displot(frame, x="v", col="f", hue="g", kind="kde", log_scale=True)
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [
+        _fit_message("Kde", "g=c", FIT_FEW, panel="f=p"),
+        _log_message("x", "v", 2),
+    ]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+    assert ">c<" in svg
+
+
+def test_a_fit_group_one_panel_cannot_estimate_keeps_its_report_beside_an_emptied_panel_group():
+    """The same shape under a fit: the group is named by the panel it was fitted in, and the
+    fit's sentence for panel ``p`` stays beside the log warning for panel ``q``."""
+    frame = _panel_fit_frame([50.0], [-1.0, 0.0])
+    chart = (
+        fm.Chart(frame)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=_log_x(), y="w", color="g")
+        .facet(col="f")
+    )
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [
+        _fit_message("Smooth", "g=c, f=p", FIT_FEW_POINTS, panel="f=p"),
+        _log_message("x", "v", 2),
+    ]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+    assert ">c<" in svg
+
+
+#: The statistics that drop a row whose grouping column is null, by door, in the order they warn.
+#: The ECDF's window pools a null key as a group of its own instead of dropping it.
+_NULL_KEY_DROPPED_BY = {
+    "displot hist": ["Bin"],
+    "displot hist kde=True": ["Kde", "Bin"],
+    "displot kde": ["Kde"],
+    "displot ecdf": [],
+    "mark_histogram": ["Bin"],
+    "mark_bar bin": ["Bin"],
+    "mark_density": ["Kde"],
+    "mark_smooth lm": ["Smooth"],
+    "mark_smooth loess": ["Smooth"],
+    "mark_smooth glm": ["Smooth"],
+    "lmplot robust": ["Robust"],
+    "lmplot logistic": ["Logistic"],
+    "lmplot glm": ["Glm"],
+    "displot kde2d": ["Kde2D"],
+}
+
+
+@pytest.mark.parametrize("name", list(_STATISTIC_DOORS))
+def test_rows_off_the_log_side_with_a_null_key_are_reported_by_the_log_warning_beside_the_key(
+    name: str,
+):
+    """Three rows whose grouping column is null and whose ``v`` is off the axis's side. A statistic
+    that drops a null-keyed row says so (a separate event, which stays) and the log warning counts
+    the three rows; the ECDF keeps the null key as a group of its own, which the axis empties, so
+    the log warning is its only message: not a census sentence for ``g=null``."""
+    frame = _level_frame(_OFF_SIDE_LEVEL).with_columns(
+        g=pl.when(pl.col("g") == "c").then(None).otherwise(pl.col("g"))
+    )
+    _, messages = _render_capturing(_STATISTIC_DOORS[name].build(frame).to_svg)
+    dropped = [_null_key_dropped_message(step, 3, "g") for step in _NULL_KEY_DROPPED_BY[name]]
+    assert messages == dropped + [_log_message("x", "v", 3)]
+
+
+def test_an_ecdf_panel_whose_only_level_has_a_null_key_off_the_side_is_reported_once():
+    """Faceted: panel ``q`` holds only a null-keyed level, every value off the axis's side. The
+    panel is drawn empty and the log warning is the only message."""
+    frame = _panel_level_frame({"p": _HUE_PANELS, "q": {None: _OFF_SIDE_LEVEL}})
+    svg, messages = _render_capturing(_faceted("ecdf", frame, hue=True).to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+    assert _drawn_panels(svg) == (["p", "q"], 2)
+
+
+def test_a_fit_panel_whose_keys_are_all_null_and_off_the_side_is_reported_by_the_log_warning():
+    """Faceted fit, panel ``q`` with a null ``g`` on every row and every ``v`` off the axis's side.
+    The statistic's own null-key fallback (the panel's rows fitted as one group) is the caller's
+    to fix and stays; the fit's "could not fit the data in facet panel f=q" would restate the log
+    warning's cause, so only the fallback and the log warning speak."""
+    rows = []
+    for i, x in enumerate(_LEVEL_XS[:8]):
+        rows.append(("p", x, 2.0 + math.log10(x) + 0.1 * i, "a"))
+        rows.append(("p", x * 1.1, 2.5 + math.log10(x) + 0.1 * i, "b"))
+    rows.extend(("q", x, y, None) for x, y in zip(_OFF_SIDE_LEVEL, [3.0, 3.5, 4.0]))
+    schema = {"f": pl.Utf8, "v": pl.Float64, "w": pl.Float64, "g": pl.Utf8}
+    frame = pl.DataFrame(rows, schema=schema, orient="row")
+    chart = (
+        fm.Chart(frame)
+        .mark_smooth(method="lm", ci=None)
+        .encode(x=_log_x(), y="w", color="g")
+        .facet(col="f")
+    )
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == [
+        _panel_key_fallback_message("Smooth", "g", "f=q"),
+        _log_message("x", "v", 3),
+    ]
+    assert _drawn_panels(svg) == (["p", "q"], 2)

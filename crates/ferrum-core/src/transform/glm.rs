@@ -37,7 +37,7 @@ use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
     stack_grouped_batches, FitRows, KeyValue,
-    NullKeyPolicy,
+    FIT_NULL_KEYS,
 };
 use crate::transform::log_space::run_fit_in_log_space;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
@@ -325,7 +325,7 @@ fn apply_in_data_space(
         batch,
         &spec.groupby,
         "Glm",
-        NullKeyPolicy::SkipWithWholeBatchFallback,
+        FIT_NULL_KEYS,
         ctx,
     )?;
     let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();

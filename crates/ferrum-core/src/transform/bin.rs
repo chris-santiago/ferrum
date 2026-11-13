@@ -514,6 +514,10 @@ fn apply_in_data_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformConte
     apply_one_group(spec, batch, None, &aggs)
 }
 
+/// The null-key policy of `Bin`'s groups, read by its partition and by the
+/// log seam that asks which of its groups an axis emptied.
+const GROUP_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
+
 /// `apply_with_context` under a drawn log axis's demand: the bin edges
 /// (and every extent/count rule that derives them —
 /// [`resolve_bin_extent`], [`group_edges`], [`shared_bin_edges`]) sit in
@@ -541,6 +545,7 @@ fn apply_in_log_space(spec: &BinSpec, batch: &RecordBatch, ctx: &TransformContex
         LABEL,
         batch,
         &demand,
+        GROUP_NULL_KEYS,
         |mapped_batch, columns, ctx| {
             apply_in_data_space(&BinSpec { field: columns.column(SpaceSlot::Field, &spec.field), ..mapped_spec }, mapped_batch, ctx)
         },
@@ -1025,7 +1030,7 @@ fn apply_grouped(
     // null-key skip, dtype-preservation — same policy as single-column path).
     refuse_groupby_output_collision("stat_bin", group_cols, &spec.computed_columns())?;
     let partition =
-        group_partition_multi(batch, group_cols, "stat_bin", NullKeyPolicy::Skip, warn_ctx)?;
+        group_partition_multi(batch, group_cols, "stat_bin", GROUP_NULL_KEYS, warn_ctx)?;
 
     let shared_edges =
         if spec.shared_extent { shared_bin_edges(spec, batch, group_cols)? } else { None };

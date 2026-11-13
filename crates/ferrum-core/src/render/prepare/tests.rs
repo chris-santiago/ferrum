@@ -13858,6 +13858,108 @@ fn an_area_groups_color_by_category_only_when_it_draws_color() {
     assert!(matches!(prep.provisional_scales.color, Some(ColorScale::Categorical { .. })), "an area drawing color groups it");
 }
 
+/// A frame faceted on `f` whose `Bin` of `v` (grouped by `h` when `grouped`)
+/// runs in a positive log space on `x`, preceded by the statistics marker so
+/// the step is lowered and its slot demanded.
+fn log_axis_facet_run(
+    grouped: bool,
+    f: Vec<&str>,
+    h: Vec<&str>,
+    v: Vec<Option<f64>>,
+) -> Result<TransformRun, RenderError> {
+    use crate::transform::color_bin_group::{ColorBinPlan, LogAxisSpace, RunPlan, SlotSpace, SpaceDemand, StepSpace};
+    pyo3::Python::initialize();
+    let groupby = if grouped { r#"["h"]"# } else { "[]" };
+    let json = format!(
+        r#"{{"data":{{"kind":"named","name":"default"}},"mark":"bar","encoding":{{"x":{{"field":"v"}},"y":{{"field":"v"}}}},
+        "transforms":[{{"type":"identity","statistics":true}},
+                      {{"type":"bin","field":"v","nice":true,"cumulative":false,"shared_extent":false,"groupby":{groupby}}}],
+        "facet":{{"field":"f","mode":{{"kind":"wrap","ncols":2}}}}}}"#
+    );
+    let spec: crate::spec::chart::ChartSpec = serde_json::from_str(&json).expect("valid spec");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("f", DataType::Utf8, true),
+        Field::new("h", DataType::Utf8, true),
+        Field::new("v", DataType::Float64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(f)), Arc::new(StringArray::from(h)), Arc::new(Float64Array::from(v))],
+    )
+    .expect("schema and columns agree");
+    let slot = SlotSpace {
+        space: LogAxisSpace { base: 10.0, side: crate::scale::log::LogSide::Positive },
+        axes: vec![crate::spec::layer::PositionalAxis::X],
+        records_caller_input: true,
+    };
+    let plan = RunPlan {
+        color: ColorBinPlan { demand: crate::transform::color_bin_group::BinDemand::default(), edges: None },
+        space: SpaceDemand::single(vec![1], StepSpace::for_slots([(crate::transform::core::SpaceSlot::Field, slot)])),
+    };
+    let theme = crate::layout::ThemeInputs::default();
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    run_transforms_with_facet(&spec, &batch, viewport, &theme, Some(&plan))
+}
+
+/// What the lowered step recorded as emptied by the log axis, per panel, on
+/// the final output's lineage.
+fn log_emptied_of(lineages: &OutputLineages) -> Vec<crate::transform::context::LogEmptied> {
+    let lineage = &lineages[crate::transform::run::FINAL_OUTPUT_KEY];
+    let step = StepInstance::Chain(vec![1]);
+    lineage.passed(&step).expect("the final output passed the lowered step").log_emptied.clone()
+}
+
+/// A group the log axis empties in one facet panel is recorded under that
+/// panel's label, panel by panel, so the census defers only in the panel
+/// the group is empty in; a panel whose groups all hold a value on the
+/// side records nothing. Rejects a record without its panel, which would
+/// cover the group in a sibling panel where it draws.
+#[test]
+fn a_group_the_log_axis_empties_is_recorded_under_its_facet_panel() {
+    let (_, warnings, lineages, _) = log_axis_facet_run(
+        true,
+        vec!["p", "p", "q", "q", "q", "r", "r"],
+        vec!["a", "a", "a", "c", "c", "c", "c"],
+        vec![Some(10.0), Some(100.0), Some(10.0), Some(-1.0), Some(0.0), Some(-1.0), Some(5.0)],
+    )
+    .expect("renders");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        log_emptied_of(&lineages),
+        vec![crate::transform::context::LogEmptied { panel: Some("f=q".to_string()), groups: Some(vec!["h=c".to_string()]) }]
+    );
+}
+
+/// An ungrouped step wholly off the log axis's side in one facet panel
+/// leaves that panel drawn empty, with no warning; in every panel it leaves
+/// every panel empty, still with no warning and no refusal (the axis
+/// refuses the frame itself); a panel with a value on the side draws. Rejects
+/// a panel that vanishes from the facet.
+#[test]
+fn an_ungrouped_step_wholly_off_the_log_side_leaves_its_panel_empty_without_a_warning() {
+    let (outputs, warnings, _, partitions) = log_axis_facet_run(
+        false,
+        vec!["p", "p", "q", "q"],
+        vec!["a", "a", "a", "a"],
+        vec![Some(10.0), Some(100.0), Some(-1.0), Some(0.0)],
+    )
+    .expect("renders");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(partitions.emptied_by_drop, HashSet::from([("q".to_string(), None)]));
+    assert_eq!(partitions.order.len(), 2);
+    assert!(outputs[crate::transform::run::FINAL_OUTPUT_KEY].num_rows() > 0, "panel p still draws");
+
+    let (_, warnings, _, partitions) = log_axis_facet_run(
+        false,
+        vec!["p", "p", "q", "q"],
+        vec!["a", "a", "a", "a"],
+        vec![Some(-3.0), Some(0.0), Some(-1.0), None],
+    )
+    .expect("every panel off the side is the axis's refusal to make, not the transform's");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(partitions.emptied_by_drop.len(), 2);
+}
+
 /// A frame faceted on `f` whose grouped statistic drops null `h` keys.
 fn null_key_facet_run(
     transform: &str,

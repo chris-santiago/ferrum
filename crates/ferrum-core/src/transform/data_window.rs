@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::transform::color_bin_group::LogAxisSpace;
+use crate::transform::log_space::{emptied_by_axis, AxisEmptied};
 use crate::transform::core::SpaceSlot;
 use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
@@ -190,6 +191,17 @@ pub(crate) fn apply_with_context(
         let demanded = demanded?;
         if !demanded.is_empty() {
             sorted_indices.retain(|&i| demanded.iter().all(|(space, values)| !space.off_side(f64_at(values, i))));
+            // The groups (or the whole call) the axis left with no value on
+            // its side are recorded for the null census: the cut rows' null
+            // output is the axis's doing, and its own off-side report names
+            // it. Nothing more is cut or blanked: the sort column is the
+            // caller's own value, which that report already counts.
+            let slots: Vec<(&Float64Array, LogAxisSpace)> = demanded.iter().map(|(space, values)| (*values, *space)).collect();
+            match emptied_by_axis(ctx, "data_window", batch, &slots, GROUP_NULL_KEYS) {
+                AxisEmptied::Nothing => {}
+                AxisEmptied::WholeCall | AxisEmptied::FallbackBatch => ctx.note_log_emptied(None),
+                AxisEmptied::Groups(labels) => ctx.note_log_emptied(Some(labels)),
+            }
         }
     }
 
@@ -579,6 +591,11 @@ fn build_sort_order(n_rows: usize, columns: &WindowColumns) -> Vec<usize> {
     indices
 }
 
+/// The null-key policy the window's hand-rolled partitioner implements
+/// (null-keyed rows pool into one group), read by the all-null warning and by
+/// the log seam that asks which of its groups an axis emptied.
+const GROUP_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::Pool;
+
 /// Build partitions: runs of ADJACENT sorted indices that share the same group
 /// key.
 ///
@@ -663,7 +680,7 @@ fn build_partitions(
     warn_if_group_keys_all_null(
         "data_window",
         &groupby,
-        NullKeyPolicy::Pool,
+        GROUP_NULL_KEYS,
         NullKeyCounts { any_null, fully_null, n_rows: sorted_indices.len() },
         warn_ctx,
     );
@@ -1764,6 +1781,94 @@ mod tests {
         let mut sorted = counts.clone();
         sorted.sort_by(f64::total_cmp);
         assert_eq!(sorted, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "{counts:?}");
+    }
+
+    /// The window a log axis demands records which of its `groupby` groups
+    /// hold no value on the axis's side and one off it, and cuts nothing
+    /// more than it did: every group keeps its rows (the emptied group's
+    /// output stays null) and no warning is raised. Rejects a record that
+    /// names a group of nulls or a group with one value on the side.
+    #[test]
+    fn data_window_in_log_space_records_the_groups_the_axis_empties() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("x", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "c", "c", "m", "m", "n", "n", "p", "p"])),
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0), Some(2.0), Some(-1.0), Some(0.0), None, Some(-1.0), None, None, Some(-1.0), Some(5.0),
+                ])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            sort: Some(vec!["x".into()]),
+            frame: Some((None, Some(0))),
+            groupby: Some(vec!["g".into()]),
+            ..window_spec(vec![op("count", Some("x"), "count")])
+        };
+        let ctx = TransformContext { groupby: vec!["g".into()], ..ctx_demanding_x(positive_space()) };
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 10);
+        assert_eq!(
+            *ctx.log_emptied.borrow(),
+            vec![crate::transform::context::LogEmptied { panel: None, groups: Some(vec!["g=c".to_string(), "g=m".to_string()]) }]
+        );
+        assert!(ctx.warnings.borrow().is_empty());
+        let counts = col_values(&out, 2);
+        assert!(counts[2].is_nan() && counts[3].is_nan(), "the emptied group's rows keep a null count: {counts:?}");
+    }
+
+    /// The window pools null-keyed rows into a group of their own, so a null
+    /// key whose rows hold only off-side values is a group the axis emptied,
+    /// recorded under its `g=null` label like any other. Rejects grouping
+    /// the record with a policy that drops null keys.
+    #[test]
+    fn data_window_in_log_space_records_a_pooled_null_key_group_the_axis_empties() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("x", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec![Some("a"), Some("a"), None, None])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, -1.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            sort: Some(vec!["x".into()]),
+            frame: Some((None, Some(0))),
+            groupby: Some(vec!["g".into()]),
+            ..window_spec(vec![op("count", Some("x"), "count")])
+        };
+        let ctx = TransformContext { groupby: vec!["g".into()], ..ctx_demanding_x(positive_space()) };
+        apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(
+            *ctx.log_emptied.borrow(),
+            vec![crate::transform::context::LogEmptied { panel: None, groups: Some(vec!["g=null".to_string()]) }]
+        );
+    }
+
+    /// An ungrouped window wholly off the side is one emptied call, and a
+    /// window with a value on the side records nothing.
+    #[test]
+    fn data_window_in_log_space_records_an_ungrouped_call_wholly_off_the_side() {
+        let spec = DataWindowSpec {
+            sort: Some(vec!["x".into()]),
+            frame: Some((None, Some(0))),
+            ..window_spec(vec![op("count", Some("x"), "count")])
+        };
+        let ctx = ctx_demanding_x(positive_space());
+        apply_with_context(&spec, &batch_with_x(vec![0.0, -2.0]), &ctx).unwrap();
+        assert_eq!(*ctx.log_emptied.borrow(), vec![crate::transform::context::LogEmptied { panel: None, groups: None }]);
+        let ctx = ctx_demanding_x(positive_space());
+        apply_with_context(&spec, &batch_with_x(vec![0.0, 2.0]), &ctx).unwrap();
+        assert!(ctx.log_emptied.borrow().is_empty());
     }
 
     fn batch_with_x(values: Vec<f64>) -> RecordBatch {

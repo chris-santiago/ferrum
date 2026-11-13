@@ -1900,6 +1900,12 @@ fn resolve_layer_styles(
 /// the two sides may spell differently. `panel` must match the warning's
 /// own facet label, so one panel's fit never explains away rows in a
 /// sibling panel.
+///
+/// A group a log axis emptied (every value it holds off the axis's side) is
+/// owned the same way, by the record its step kept of it
+/// ([`crate::transform::run::PassedStep::log_emptied`]): the axis's own
+/// off-side report already names the values, so the group is not named
+/// again as null.
 fn group_owned_by_its_fit(
     warnings: &[RenderWarning],
     lineage: Option<&crate::transform::run::OutputLineage>,
@@ -1911,8 +1917,11 @@ fn group_owned_by_its_fit(
     // Built once per call, not once per row: each relevant warning's own
     // grouping fields and named-group set (a lookup is then O(1), not a
     // linear scan of a list as long as the number of degraded groups).
-    let relevant: Vec<RelevantFitWarning> =
-        warnings.iter().filter_map(|w| RelevantFitWarning::of(w, lineage, panel)).collect();
+    let relevant: Vec<RelevantFitWarning> = warnings
+        .iter()
+        .filter_map(|w| RelevantFitWarning::of(w, lineage, panel))
+        .chain(RelevantFitWarning::of_log_emptied(lineage, panel))
+        .collect();
     if relevant.is_empty() {
         return false;
     }
@@ -1922,8 +1931,9 @@ fn group_owned_by_its_fit(
 /// One `DegenerateFit`/`IntervalUndefined`/`ExtentUndefined` whose own
 /// panel already matched this layer's panel and whose own step is already
 /// among the layer's own lineage's passed steps ([`RelevantFitWarning::of`]),
-/// with its own grouping fields and named-group set built once rather than
-/// per row: a lookup against `names` is then an `O(1)` set membership
+/// or one record of the groups a log axis emptied
+/// ([`RelevantFitWarning::of_log_emptied`]), with its own grouping fields and
+/// named-group set built once rather than per row: a lookup against `names` is then an `O(1)` set membership
 /// check, not a linear scan of a list `ExtentUndefined` can make as long
 /// as the data.
 struct RelevantFitWarning<'a> {
@@ -1956,6 +1966,23 @@ impl<'a> RelevantFitWarning<'a> {
         let passed = lineage.passed(step)?;
         let names = (!names.is_empty()).then(|| names.into_iter().collect());
         Some(Self { groupby: &passed.groupby, names })
+    }
+
+    /// What the log axis left empty in `panel`, one entry per record the
+    /// lineage's steps kept ([`crate::transform::run::PassedStep::log_emptied`]):
+    /// the axis's own off-side report names the cause, so the groups a
+    /// record names (every row, when it names none) are owned exactly as a
+    /// fit warning's are.
+    fn of_log_emptied(
+        lineage: &'a crate::transform::run::OutputLineage,
+        panel: Option<&'a str>,
+    ) -> impl Iterator<Item = Self> + 'a {
+        lineage.steps.iter().flat_map(move |passed| {
+            passed.log_emptied.iter().filter(move |emptied| emptied.panel.as_deref() == panel).map(move |emptied| Self {
+                groupby: &passed.groupby,
+                names: emptied.groups.as_ref().map(|groups| groups.iter().map(String::as_str).collect()),
+            })
+        })
     }
 
     /// Whether this warning covers `row` of `batch`: it names no group at
@@ -16749,9 +16776,9 @@ mod tests {
                 step: step.clone(),
             }),
         ];
-        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["g".into()] }]);
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["g".into()], log_emptied: vec![] }]);
         let not_reached = lineage(Vec::new());
-        let missing_column = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["absent".into()] }]);
+        let missing_column = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["absent".into()], log_emptied: vec![] }]);
 
         assert!(group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 2], Some("f=p")), "both g=a rows are named");
         assert!(
@@ -16780,6 +16807,90 @@ mod tests {
         );
         assert!(group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[], Some("f=p")), "no rows to cover is vacuously owned");
         assert!(!group_owned_by_its_fit(&[], Some(&reached), &batch, &[0], Some("f=p")));
+    }
+
+    /// A group the log axis emptied is owned by the record the step kept of
+    /// it, read through the same rule a fit warning is: a row is covered
+    /// when its label under the step's own grouping fields is a group the
+    /// record names (or the record names none, the whole call), in the panel
+    /// the record was stamped with, on a lineage that passed the step. Rejects
+    /// a record that covers a sibling panel's rows, another group's rows, or
+    /// a row whose grouping column cannot be read, and one that defers a
+    /// group of nulls (which no record names).
+    #[test]
+    fn a_log_emptied_record_owns_only_the_rows_of_its_own_groups_in_its_own_panel() {
+        use crate::transform::context::{LogEmptied, StepInstance};
+        use crate::transform::run::{OutputLineage, PassedStep};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let lineage = |groupby: &str, emptied: Vec<LogEmptied>| OutputLineage {
+            swarm: None,
+            statistic_input: None,
+            lowered: Vec::new(),
+            written_groupby: Vec::new(),
+            source: std::sync::Arc::new(Schema::empty()),
+            log_input: std::collections::HashMap::new(),
+            steps: vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: vec![groupby.into()], log_emptied: emptied }],
+        };
+        // Rows 0 and 2 are group "g=a"; row 1 is "g=b".
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![std::sync::Arc::new(StringArray::from(vec!["a", "b", "a"]))],
+        )
+        .unwrap();
+        let named = |panel: Option<&str>, group: &str| LogEmptied { panel: panel.map(str::to_string), groups: Some(vec![group.to_string()]) };
+
+        let emptied_a = lineage("g", vec![named(Some("f=p"), "g=a")]);
+        assert!(group_owned_by_its_fit(&[], Some(&emptied_a), &batch, &[0, 2], Some("f=p")), "both g=a rows are named");
+        assert!(!group_owned_by_its_fit(&[], Some(&emptied_a), &batch, &[0, 1], Some("f=p")), "row 1 is g=b, which no record names");
+        assert!(!group_owned_by_its_fit(&[], Some(&emptied_a), &batch, &[0, 2], Some("f=q")), "a sibling panel's record never owns these rows");
+        assert!(!group_owned_by_its_fit(&[], Some(&emptied_a), &batch, &[0, 2], None), "an unfaceted layer is not a panel's");
+        assert!(!group_owned_by_its_fit(&[], Some(&lineage("absent", vec![named(Some("f=p"), "g=a")])), &batch, &[0], Some("f=p")));
+        assert!(!group_owned_by_its_fit(&[], Some(&lineage("g", Vec::new())), &batch, &[0, 2], Some("f=p")), "no record, nothing owned");
+
+        let whole = lineage("g", vec![LogEmptied { panel: None, groups: None }]);
+        assert!(group_owned_by_its_fit(&[], Some(&whole), &batch, &[0, 1, 2], None), "the whole call covers every row of its panel");
+        assert!(!group_owned_by_its_fit(&[], Some(&whole), &batch, &[0], Some("f=p")), "and only its own panel");
+
+        let two_panels = lineage("g", vec![named(Some("f=p"), "g=a"), named(Some("f=q"), "g=b")]);
+        assert!(group_owned_by_its_fit(&[], Some(&two_panels), &batch, &[1], Some("f=q")));
+        assert!(!group_owned_by_its_fit(&[], Some(&two_panels), &batch, &[1], Some("f=p")));
+    }
+
+    /// A record whose label for a group is not the label its rows read under
+    /// the step's grouping fields (a binned color key the output carries as a
+    /// value of its own, say) never defers the census: the group is still
+    /// named, beside the log warning, rather than silenced by a record that
+    /// cannot be matched to it. Rejects a record that covers rows by anything
+    /// but their own label.
+    #[test]
+    fn a_log_emptied_record_whose_label_disagrees_with_the_rows_never_defers_the_census() {
+        use crate::transform::context::{LogEmptied, StepInstance};
+        use crate::transform::run::{OutputLineage, PassedStep};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let lineage = OutputLineage {
+            swarm: None,
+            statistic_input: None,
+            lowered: Vec::new(),
+            written_groupby: Vec::new(),
+            source: std::sync::Arc::new(Schema::empty()),
+            log_input: std::collections::HashMap::new(),
+            steps: vec![PassedStep {
+                step: StepInstance::Chain(vec![1]),
+                groupby: vec!["w".into()],
+                log_emptied: vec![LogEmptied { panel: None, groups: Some(vec!["w=0".to_string()]) }],
+            }],
+        };
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![Field::new("w", DataType::Float64, false)])),
+            vec![std::sync::Arc::new(Float64Array::from(vec![0.0, 0.5]))],
+        )
+        .unwrap();
+        assert!(group_owned_by_its_fit(&[], Some(&lineage), &batch, &[0], None), "the row labelled w=0 is the record's");
+        assert!(!group_owned_by_its_fit(&[], Some(&lineage), &batch, &[1], None), "w=0.5 is a label the record does not name");
     }
 
     /// `group_owned_by_its_fit` must still resolve ownership correctly
@@ -16819,7 +16930,7 @@ mod tests {
         .unwrap();
         let rows: Vec<usize> = (0..N).collect();
         let step = StepInstance::Chain(vec![0]);
-        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["t".into()] }]);
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["t".into()], log_emptied: vec![] }]);
 
         let every_label_named = vec![RenderWarning::Transform(TransformWarning::ExtentUndefined {
             transform: "ErrorExtent".into(),

@@ -810,8 +810,7 @@ def test_a_user_written_fit_step_owns_its_degenerate_group():
     assert messages == [
         "Smooth: every row has a null in its groupby key (gi), so the data could not be split "
         "into groups; the whole batch was used as one ungrouped computation instead",
-        "Smooth: could not fit the data (fewer than 2 usable (non-null/non-NaN) x/y points); "
-        f"{_FIT_DEGRADED}",
+        _whole_fit_message("Smooth", FIT_FEW_POINTS),
     ]
 
 
@@ -980,6 +979,10 @@ def _census(messages: list[str]) -> list[str]:
 # ``_FIT_DEGRADED``, is defined at the top of the module).
 FIT_FEW = "fewer than 2 usable (non-null/non-NaN) values"
 FIT_NONE = "no usable (non-null/non-NaN) values"
+# A fit over x and y counts points where Kde counts values, and a bivariate density counts
+# points without the x/y.
+FIT_FEW_POINTS = "fewer than 2 usable (non-null/non-NaN) x/y points"
+FIT_FEW_PAIRS = "fewer than 2 usable (non-null/non-NaN) points"
 FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
 
 
@@ -999,6 +1002,25 @@ def _whole_fit_message(statistic: str, reason: str) -> str:
     """The ``DegenerateFit`` sentence for a whole call (no group, no facet panel) ``statistic``
     could not estimate."""
     return f"{statistic}: could not fit the data ({reason}); {_FIT_DEGRADED}"
+
+
+def _null_key_dropped_message(statistic: str, rows: int, column: str) -> str:
+    """The sentence a grouped statistic warns for ``rows`` rows whose grouping ``column`` is null,
+    which belong to no group and are dropped."""
+    return (
+        f"{statistic}: {rows} rows have a null '{column}' and belong to no group, so they were "
+        f"dropped; fill or filter the nulls in '{column}'"
+    )
+
+
+def _panel_key_fallback_message(statistic: str, column: str, panel: str) -> str:
+    """The sentence a grouped statistic warns for a facet panel whose grouping ``column`` is null
+    on every row: the panel's rows are one ungrouped computation."""
+    return (
+        f"{statistic}: every row in facet panel {panel} has a null in its groupby key "
+        f"({column}), so that panel's rows could not be split into groups; in that panel, the "
+        "whole batch was used as one ungrouped computation instead"
+    )
 
 
 def _fit_warnings(messages: list[str], statistic: str) -> list[str]:
@@ -1991,12 +2013,9 @@ def _mark_histogram(frame: pl.DataFrame, *, hue=None, facet=None, x="v", **optio
     return chart if facet is None else chart.facet(col=facet)
 
 
-def _binned_bar(frame: pl.DataFrame, *, hue=None, facet=None, **options) -> fm.Chart:
-    chart = (
-        fm.Chart(frame)
-        .mark_bar(**options)
-        .encode(x=fm.X("v", bin=True), y="count()", **_given(color=hue))
-    )
+def _binned_bar(frame: pl.DataFrame, *, hue=None, facet=None, x=None, **options) -> fm.Chart:
+    x = fm.X("v", bin=True) if x is None else x
+    chart = fm.Chart(frame).mark_bar(**options).encode(x=x, y="count()", **_given(color=hue))
     return chart if facet is None else chart.facet(col=facet)
 
 
@@ -2377,8 +2396,12 @@ def _log_message(axis: str, field: str, rows: int) -> str:
 _LOG_AXIS = {
     "displot": {"log_scale": True},
     "mark_histogram": {"x": fm.X("v", scale=fm.LogScale())},
+    "binned_bar": {"x": fm.X("v", bin=True, scale=fm.LogScale())},
 }
-_LOG_AXIS_DOORS = list(_LOG_AXIS)
+# Every door above, and the two whose bars a plain ``x=`` binds: the binned bar's axis needs its
+# own ``bin=True`` in the same ``X``, so the tests that swap in their own ``x`` skip it.
+_LOG_EMPTIED_DOORS = list(_LOG_AXIS)
+_LOG_AXIS_DOORS = ["displot", "mark_histogram"]
 
 
 def _log_histogram(door: str, frame: pl.DataFrame, **options) -> tuple[str, list[str]]:
@@ -2387,26 +2410,83 @@ def _log_histogram(door: str, frame: pl.DataFrame, **options) -> tuple[str, list
     return _render_capturing(chart.to_svg)
 
 
-@pytest.mark.parametrize("multiple", ["layer", "stack"])
-@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
-def test_a_histogram_hue_level_a_log_axis_empties_keeps_its_entry_and_is_named_beside_the_log_warning(
-    door: str, multiple: str
+# The histogram variants that place a level's bars over, on top of or beside its siblings', on
+# every door a log value axis reaches.
+_LOG_EMPTIED_CASES = [
+    pytest.param(name, options, id=f"{name}-{variant}")
+    for name, _door, variant, options in _HISTOGRAM_VARIANTS
+    if name in _LOG_EMPTIED_DOORS and variant in {"layer", "stack", "dodge"}
+]
+
+
+@pytest.mark.parametrize("door,options", _LOG_EMPTIED_CASES)
+def test_a_histogram_hue_level_a_log_axis_empties_keeps_its_entry_and_is_reported_by_the_log_warning_alone(
+    door: str, options: dict
 ):
     """On a log axis the histogram bins in the axis's space, where a level whose every value is
-    zero or negative has no value to bin: the level keeps its legend entry as a placeholder and
-    the census names it, beside the log warning that counts the rows the axis cannot place. The
-    census sentence's cause is the statistic's output row, null or non-finite, not the caller's
-    finite values; a statistic-side cause would change this sentence, and this test, with it."""
-    svg, messages = _log_histogram(door, _hist_group_frame([-1.0, 0.0, -3.0]), multiple=multiple)
-    expected = [
-        _log_message("x", "v", 3),
-        _slot_message(_HISTOGRAM_DOORS[door].entry, "x", "c", "g"),
-    ]
-    assert messages == expected
+    zero or negative has no value to bin. The level keeps its legend entry and draws nothing, and
+    the log warning that counts the rows the axis cannot place is the only report: the census's
+    "null or non-finite" describes a null, and these values are present."""
+    svg, messages = _log_histogram(door, _hist_group_frame([-1.0, 0.0, -3.0]), **options)
+    assert messages == [_log_message("x", "v", 3)]
     assert ">c<" in svg
 
 
-@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf")], ids=["null", "nan", "inf"])
+@pytest.mark.parametrize("door", _LOG_EMPTIED_DOORS)
+def test_a_histogram_hue_level_of_one_unusable_value_and_off_side_values_is_reported_by_the_log_warning_alone(
+    door: str, value: float | None
+):
+    """A level holding a null, a NaN or an infinity beside values the log axis cannot place has
+    no value on the axis's side whichever cause emptied the rest, so it is one event: the log
+    warning counts the two off-side rows and nothing names the level a second time."""
+    svg, messages = _log_histogram(door, _hist_group_frame([value, -1.0, 0.0]))
+    assert messages == [_log_message("x", "v", 2)]
+    assert ">c<" in svg
+
+
+@pytest.mark.parametrize("door", _LOG_EMPTIED_DOORS)
+def test_a_histogram_hue_level_of_nulls_beside_a_level_off_side_keeps_its_own_report(door: str):
+    """Two levels the axis cannot use for different reasons: ``c`` holds only nulls and ``d`` only
+    zero or negative values. The log warning counts ``d``'s rows alone, and the census still names
+    ``c``, whose nulls the log warning does not count, and does not name ``d``."""
+    frame = pl.DataFrame(
+        {
+            "v": _HIST_A + _HIST_B + [None] * 3 + [-1.0, 0.0, -3.0],
+            "g": ["a"] * 6 + ["b"] * 6 + ["c"] * 3 + ["d"] * 3,
+        },
+        schema={"v": pl.Float64, "g": pl.Utf8},
+    )
+    svg, messages = _log_histogram(door, frame)
+    census = _HISTOGRAM_DOORS[door]
+    assert messages == [
+        _log_message("x", "v", 3),
+        _slot_message(census.entry, census.channels, "c", "g"),
+    ]
+    assert ">c<" in svg and ">d<" in svg
+
+
+def test_a_binned_colour_level_a_log_axis_empties_is_reported_by_the_log_warning_alone():
+    """The colour is binned, so the emptied unit is a bin of ``w`` whose three rows all sit
+    off the axis's side: the bin is reported by the log warning, as a hue level is. The census
+    names a binned level by the label its key carries, and the statistic's record carries the
+    same key, so the two agree."""
+    frame = pl.DataFrame(
+        {
+            "v": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, -1.0, 0.0, -3.0],
+            "w": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 1.0, 2.0, 3.0],
+        }
+    )
+    chart = (
+        fm.Chart(frame)
+        .mark_histogram()
+        .encode(x=fm.X("v", scale=fm.LogScale()), color=fm.Color("w", bin=True))
+    )
+    _, messages = _render_capturing(chart.to_svg)
+    assert messages == [_log_message("x", "v", 3)]
+
+
+@pytest.mark.parametrize("door", _LOG_EMPTIED_DOORS)
 def test_a_histogram_hue_level_with_an_on_side_value_on_a_log_axis_is_not_named(door: str):
     """Level ``c`` keeps two values on the log axis's side beside the one it cannot place, so it
     draws its bars: the log warning counts the one row and the level is not named."""
@@ -2415,12 +2495,14 @@ def test_a_histogram_hue_level_with_an_on_side_value_on_a_log_axis_is_not_named(
     assert ">c<" in svg
 
 
-@pytest.mark.parametrize("door", _LOG_AXIS_DOORS)
+@pytest.mark.parametrize("door", _LOG_EMPTIED_DOORS)
 def test_a_histogram_hue_level_of_nulls_on_a_log_axis_is_named_by_the_census_alone(door: str):
     """No value of a level of nulls is off the axis's side, so the log warning has nothing to count
-    and the census names the level, as it does on a linear axis."""
+    and the census names the level, as it does on a linear axis, in the channels the door's bars
+    carry (``x and x2`` for a binned bar)."""
+    census = _HISTOGRAM_DOORS[door]
     svg, messages = _log_histogram(door, _hist_group_frame([None] * 4))
-    assert messages == [_slot_message(_HISTOGRAM_DOORS[door].entry, "x", "c", "g")]
+    assert messages == [_slot_message(census.entry, census.channels, "c", "g")]
     assert ">c<" in svg
 
 

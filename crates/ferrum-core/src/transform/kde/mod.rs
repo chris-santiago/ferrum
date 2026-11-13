@@ -308,6 +308,10 @@ pub(crate) fn apply_with_context(
     }
 }
 
+/// The null-key policy of `Kde`'s groups, read by its partition and by the
+/// log seam that asks which of its groups an axis emptied.
+const GROUP_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
+
 /// `apply_with_context` under a drawn log axis's demand: the fit, the
 /// bandwidth and the grid are computed in `slot.space`'s units over the
 /// on-side values, mirroring [`crate::transform::bin::apply_in_log_space`]
@@ -336,6 +340,7 @@ fn apply_in_log_space(spec: &KdeSpec, batch: &RecordBatch, ctx: &TransformContex
         LABEL,
         batch,
         &demand,
+        GROUP_NULL_KEYS,
         |mapped_batch, columns, ctx| {
             apply_in_data_space(&KdeSpec { field: columns.column(SpaceSlot::Field, &spec.field), ..mapped_spec }, mapped_batch, ctx)
         },
@@ -577,7 +582,7 @@ fn apply_grouped(
         batch,
         group_cols,
         "stat_kde",
-        NullKeyPolicy::Skip,
+        GROUP_NULL_KEYS,
         warn_ctx,
     )?;
 

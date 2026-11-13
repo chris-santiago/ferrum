@@ -26,8 +26,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 
 use crate::transform::color_bin_group::SlotSpace;
-use crate::transform::context::TransformContext;
+use crate::transform::context::{describe_group_keys, describe_group_row, AllNullOutcome, TransformContext, TransformWarning};
 use crate::transform::core::{SpaceColumn, SpaceSlot};
+use crate::transform::group_key::{group_partition_multi, NullKeyPolicy, FIT_NULL_KEYS};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 use crate::transform::project::with_column;
 
@@ -226,17 +227,17 @@ pub(crate) fn with_mapped_slot(batch: &RecordBatch, demand: &DemandedField, labe
             let mapped: Float64Array = values.iter().map(|v| v.and_then(|v| space.forward(v))).collect();
             (name, Arc::new(mapped))
         }
-        Some(positions) => (demand.field.to_string(), map_list(caller, positions, |v| space.forward(v), demand.field, label)?),
+        Some(positions) => (demand.field.to_string(), map_list(caller, positions, |_, v| space.forward(v), demand.field, label)?),
     };
     let mapped = with_column(batch, &name, column).map_err(|e| PyValueError::new_err(format!("{label}: {e}")))?;
     Ok((mapped, name))
 }
 
-/// `column`, a `List<Float64>` with one list per row, with each list's
-/// elements at `positions` mapped through `map` (`None` becomes null) and
-/// every other element copied. A column of any other type is returned
-/// unchanged.
-fn map_list(column: &ArrayRef, positions: Range<usize>, map: impl Fn(f64) -> Option<f64>, name: &str, label: &str) -> PyResult<ArrayRef> {
+/// `column`, a `List<Float64>` with one list per row, with each present
+/// element of row `i` at `positions` replaced by `map(i, value)` (`None`
+/// becomes null) and every other element copied. A column of any other type
+/// is returned unchanged.
+fn map_list(column: &ArrayRef, positions: Range<usize>, map: impl Fn(usize, f64) -> Option<f64>, name: &str, label: &str) -> PyResult<ArrayRef> {
     let Some(list) = column.as_any().downcast_ref::<ListArray>() else { return Ok(Arc::clone(column)) };
     let mut builder = ListBuilder::new(Float64Builder::new());
     for i in 0..list.len() {
@@ -249,7 +250,7 @@ fn map_list(column: &ArrayRef, positions: Range<usize>, map: impl Fn(f64) -> Opt
             PyValueError::new_err(format!("{label}: internal error mapping '{name}' to/from data units"))
         })?;
         for (position, v) in values.iter().enumerate() {
-            let v = if positions.contains(&position) { v.and_then(&map) } else { v };
+            let v = if positions.contains(&position) { v.and_then(|v| map(i, v)) } else { v };
             builder.values().append_option(v);
         }
         builder.append(true);
@@ -257,39 +258,167 @@ fn map_list(column: &ArrayRef, positions: Range<usize>, map: impl Fn(f64) -> Opt
     Ok(Arc::new(builder.finish()))
 }
 
-/// `result` with its `name` column mapped back to data units through
-/// [`LogAxisSpace::backward`], keeping the column's own field (the output
-/// schema stays the data-space body's): a scalar Float64 output (bin edges,
-/// a kde grid, contour vertices) or a list one (a `Kde2D` grid axis, or
-/// its `extent` positions). A null entry stays null; an absent column, or
-/// a column of another type, is left as it is, so one output list serves
-/// every route of a step (`per_row` and the aggregating route).
-fn backward_map_output(result: RecordBatch, name: &str, shape: ColumnShape, space: &LogAxisSpace, label: &str) -> PyResult<RecordBatch> {
+/// `result` with its `name` column rewritten value by value: each present
+/// entry of row `i` (every position `shape` maps, for a list column) becomes
+/// `map(i, value)`, `None` giving null; a null entry stays null. The
+/// column's own field is kept (the output schema stays the data-space
+/// body's); an absent column, or a column of another type, is left as it
+/// is, so one output list serves every route of a step (`per_row` and the
+/// aggregating route).
+fn rewrite_output(result: RecordBatch, name: &str, shape: ColumnShape, map: impl Fn(usize, f64) -> Option<f64>, label: &str) -> PyResult<RecordBatch> {
     let schema = result.schema();
     let Ok(idx) = schema.index_of(name) else { return Ok(result) };
     let column = result.column(idx);
-    let mapped: ArrayRef = match shape.positions() {
+    let rewritten: ArrayRef = match shape.positions() {
         None => {
             let Some(values) = column.as_any().downcast_ref::<Float64Array>() else { return Ok(result) };
-            Arc::new(values.iter().map(|v| v.map(|v| space.backward(v))).collect::<Float64Array>())
+            Arc::new(values.iter().enumerate().map(|(i, v)| v.and_then(|v| map(i, v))).collect::<Float64Array>())
         }
-        Some(positions) => map_list(column, positions, |v| Some(space.backward(v)), name, label)?,
+        Some(positions) => map_list(column, positions, map, name, label)?,
     };
     let mut columns = result.columns().to_vec();
-    columns[idx] = mapped;
+    columns[idx] = rewritten;
     RecordBatch::try_new(schema, columns).map_err(|e| PyValueError::new_err(format!("{label}: {e}")))
 }
 
-/// Whether `column` holds no on-side value and at least one off-side one:
+/// `result` with its `name` column mapped back to data units through
+/// [`LogAxisSpace::backward`] ([`rewrite_output`]): a scalar Float64 output
+/// (bin edges, a kde grid, contour vertices) or a list one (a `Kde2D` grid
+/// axis, or its `extent` positions).
+fn backward_map_output(result: RecordBatch, name: &str, shape: ColumnShape, space: &LogAxisSpace, label: &str) -> PyResult<RecordBatch> {
+    rewrite_output(result, name, shape, |_, v| Some(space.backward(v)), label)
+}
+
+/// Whether `values` hold no on-side value and at least one off-side one:
 /// a demanded step's own body degrades (a flat `DegenerateFit`, an empty
 /// grid) over data its axis already refuses to place, restating a warning
-/// the axis's own `LogScaleNoValueOnSide` refusal already gives in
-/// `mark_point`'s own voice. `false` for a column with nothing off-side,
-/// and for a column with nothing on OR off side (already null/NaN — an
-/// ordinary missing-data case unrelated to this axis's side).
-fn all_off_side(column: &Float64Array, space: &LogAxisSpace) -> bool {
-    let mut finite = column.iter().flatten().filter(|v| v.is_finite()).peekable();
+/// the axis's own off-side report already gives. `false` for values with
+/// nothing off-side, and for values with nothing on OR off side (already
+/// null/NaN: an ordinary missing-data case unrelated to this axis's side).
+fn all_off_side(values: impl IntoIterator<Item = Option<f64>>, space: &LogAxisSpace) -> bool {
+    let mut finite = values.into_iter().flatten().filter(|v| v.is_finite()).peekable();
     finite.peek().is_some() && finite.all(|v| space.off_side(v))
+}
+
+/// What a log axis left a call with no value to place ([`emptied_by_axis`]).
+#[derive(Debug, PartialEq)]
+pub(crate) enum AxisEmptied {
+    /// No group (or no call) holds an off-side value and none on the side.
+    Nothing,
+    /// An ungrouped call whose rows hold none on some demanded slot.
+    WholeCall,
+    /// A grouped call whose every key is null, which the body fits as one
+    /// batch ([`NullKeyPolicy::SkipWithWholeBatchFallback`]), and whose rows
+    /// hold none on some demanded slot.
+    FallbackBatch,
+    /// The labels ([`describe_group_keys`]) of the step's own groups that
+    /// hold none on some demanded slot, in group order.
+    Groups(Vec<String>),
+}
+
+/// What `ctx`'s log axis left empty of a call reading `slots` (each a
+/// caller's scalar column and the space it is demanded in) over `batch`:
+/// the whole-call form of [`all_off_side`] for an ungrouped step, else the
+/// same test restricted to each group of the step's own `groupby`
+/// ([`TransformContext::groupby`]). Groups are formed by the shared
+/// partitioner under `null_keys`, which each statistic hands over as the
+/// one policy its own partition reads, so a group the body keeps (the
+/// window's pooled null key) is a group here and a row the body drops is
+/// not; a body that fits the whole batch when every key is null is judged
+/// on that batch ([`AxisEmptied::FallbackBatch`]). The partitioner runs
+/// under a context whose sinks are private, so nothing it reports reaches
+/// the run. A partition that cannot be formed finds nothing: the body
+/// refuses it in its own voice.
+pub(crate) fn emptied_by_axis(
+    ctx: &TransformContext,
+    label: &str,
+    batch: &RecordBatch,
+    slots: &[(&Float64Array, LogAxisSpace)],
+    null_keys: NullKeyPolicy,
+) -> AxisEmptied {
+    if ctx.groupby.is_empty() {
+        let emptied = slots.iter().any(|(values, space)| all_off_side(values.iter(), space));
+        return if emptied { AxisEmptied::WholeCall } else { AxisEmptied::Nothing };
+    }
+    if !slots.iter().any(|(values, space)| values.iter().flatten().any(|v| space.off_side(v))) {
+        return AxisEmptied::Nothing;
+    }
+    let Ok(partition) = group_partition_multi(batch, &ctx.groupby, label, null_keys, &with_private_sinks(ctx)) else {
+        return AxisEmptied::Nothing;
+    };
+    if partition.groups.is_empty() && null_keys == NullKeyPolicy::SkipWithWholeBatchFallback && batch.num_rows() > 0 {
+        let emptied = slots.iter().any(|(values, space)| all_off_side(values.iter(), space));
+        return if emptied { AxisEmptied::FallbackBatch } else { AxisEmptied::Nothing };
+    }
+    let labels: Vec<String> = partition
+        .groups
+        .iter()
+        .filter(|(_, rows)| {
+            slots.iter().any(|(values, space)| all_off_side(rows.iter().map(|&row| values.is_valid(row).then(|| values.value(row))), space))
+        })
+        .map(|(keys, _)| describe_group_keys(&ctx.groupby, keys))
+        .collect();
+    if labels.is_empty() {
+        AxisEmptied::Nothing
+    } else {
+        AxisEmptied::Groups(labels)
+    }
+}
+
+/// Which rows of `result` are the output of an emptied group, and the labels
+/// of the groups they matched: a row belongs to a group when its own label
+/// ([`describe_group_row`] under `groupby`) is one of `labels`. A group whose
+/// rows the result does not carry under its label matches nothing, so it is
+/// neither blanked nor reported.
+fn rows_of_groups(result: &RecordBatch, groupby: &[String], labels: &[String]) -> (Vec<bool>, Vec<String>) {
+    let mut matched: Vec<String> = Vec::new();
+    let flags = (0..result.num_rows())
+        .map(|row| {
+            let Some(group) = describe_group_row(result, groupby, row).filter(|group| labels.contains(group)) else { return false };
+            if !matched.contains(&group) {
+                matched.push(group);
+            }
+            true
+        })
+        .collect();
+    (flags, matched)
+}
+
+/// `result` with each of its `outputs` columns set to NaN (every position
+/// `shape` maps, for a list column) on the rows `blank` flags: an emptied
+/// group's default output must take no position on the axis. A column the
+/// result lacks, or holds in another type, is left as it is.
+fn blank_rows(result: RecordBatch, blank: &[bool], outputs: &[(&str, ColumnShape)], label: &str) -> PyResult<RecordBatch> {
+    if !blank.contains(&true) {
+        return Ok(result);
+    }
+    outputs.iter().try_fold(result, |result, (name, shape)| {
+        rewrite_output(result, name, *shape, |row, v| Some(if blank[row] { f64::NAN } else { v }), label)
+    })
+}
+
+/// Drop from `ctx`'s warnings, from index `from` on (the ones the body just
+/// raised), each per-group `DegenerateFit` and `IntervalUndefined` that
+/// names a group in `labels` (`None`: the ones that name no group, which is
+/// how a body that fit the whole batch reports itself): the axis emptied
+/// that group, so its fit failed for want of values the caller never gave
+/// the statistic, and the axis's own off-side report already says why.
+/// Every other warning stays.
+fn drop_fit_warnings(ctx: &TransformContext, from: usize, labels: Option<&[String]>) {
+    let mut index = 0;
+    ctx.warnings.borrow_mut().retain(|warning| {
+        index += 1;
+        let group = match warning {
+            TransformWarning::DegenerateFit { group, .. } | TransformWarning::IntervalUndefined { group, .. } => Some(group.as_deref()),
+            _ => None,
+        };
+        let dropped = group.is_some_and(|group| match (group, labels) {
+            (None, None) => true,
+            (Some(group), Some(labels)) => labels.iter().any(|label| label == group),
+            _ => false,
+        });
+        index <= from || !dropped
+    });
 }
 
 /// `ctx` with a fresh, independent warnings sink: every other shared sink
@@ -299,6 +428,13 @@ fn all_off_side(column: &Float64Array, space: &LogAxisSpace) -> bool {
 /// runner that owns `ctx`'s own sink.
 fn with_scratch_warnings(ctx: &TransformContext) -> TransformContext {
     TransformContext { warnings: Rc::new(RefCell::new(Vec::new())), ..ctx.clone() }
+}
+
+/// [`with_scratch_warnings`] with a private `all_null_partitions` sink too:
+/// nothing the returned context's calls report, warning or all-null
+/// partition, reaches the run.
+fn with_private_sinks(ctx: &TransformContext) -> TransformContext {
+    TransformContext { all_null_partitions: Rc::new(RefCell::new(Vec::new())), ..with_scratch_warnings(ctx) }
 }
 
 /// The column each demanded slot reads in the batch [`run_in_log_space`]
@@ -321,16 +457,32 @@ impl SlotColumns {
 /// Run a lowered step's body in log space. For each of `demand`'s slots
 /// this records the caller's untouched column for the off-side tally
 /// (once per axis in [`SlotSpace::axes`], where
-/// [`SlotSpace::records_caller_input`] says to), notes whether a scalar
-/// slot's column holds no on-side value and at least one off-side one, and
-/// maps the slot ([`with_mapped_slot`]). `body` then runs on the mapped
-/// batch with each slot's column name ([`SlotColumns`]) — on a zero-row
-/// slice under a scratch warnings sink when a slot is all off-side, its
-/// output cut to zero rows too, so the step neither restates a degenerate
-/// fit its axis already refuses nor leaves a phantom on-side value (a
-/// `Kde`'s default grid mapped back) for the axis to read. Each of
-/// `outputs` (an output column, the slot whose units it holds, and its
-/// shape) is mapped back to data units in that slot's space, and every
+/// [`SlotSpace::records_caller_input`] says to) and maps the slot
+/// ([`with_mapped_slot`]); [`emptied_by_axis`] then asks what the axis left
+/// with no value to place.
+///
+/// An ungrouped call whose slot holds no on-side value and at least one
+/// off-side one runs `body` on a zero-row slice under a scratch warnings
+/// sink, its output cut to zero rows too: the step neither restates a
+/// degenerate fit its axis already refuses nor leaves a phantom on-side
+/// value (a `Kde`'s default grid mapped back) for the axis to read, and the
+/// axis's own `LogScaleNoValueOnSide` refusal speaks for a whole frame with
+/// nothing on the side. Inside a facet partition the panel is also recorded
+/// as one the axis emptied ([`AllNullOutcome::OffSide`]), so it draws empty
+/// instead of vanishing.
+///
+/// A grouped call runs `body` on the whole mapped batch (each grouped body
+/// degrades a group with no usable value and never refuses it). A group of
+/// its own `groupby` that holds no on-side value and at least one off-side
+/// one is then emptied by the axis: the `DegenerateFit` and
+/// `IntervalUndefined` the body raised for it are dropped, every `outputs`
+/// column on its rows is set to NaN, and its label is recorded
+/// ([`TransformContext::note_log_emptied`]) for the null census. The axis's
+/// own off-side report names that cause once, so the group keeps its row,
+/// its legend entry and its place, and takes no position on the axis.
+///
+/// Each of `outputs` (an output column, the slot whose units it holds, and
+/// its shape) is mapped back to data units in that slot's space, and every
 /// step-private column the result still carries (a `per_row` `Bin` passes
 /// its input through) is dropped, so the output schema is the data-space
 /// body's own. An extent-like spec field is mapped by each arm through
@@ -341,12 +493,13 @@ pub(crate) fn run_in_log_space(
     label: &str,
     batch: &RecordBatch,
     demand: &[DemandedField],
+    null_keys: NullKeyPolicy,
     body: impl FnOnce(&RecordBatch, &SlotColumns, &TransformContext) -> PyResult<RecordBatch>,
     outputs: &[(&str, SpaceSlot, ColumnShape)],
 ) -> PyResult<RecordBatch> {
     let mut mapped_batch = batch.clone();
     let mut columns = SlotColumns::default();
-    let mut degenerate = false;
+    let mut caller_slots: Vec<(Float64Array, LogAxisSpace)> = Vec::new();
     for d in demand {
         if d.shape == ColumnShape::Scalar {
             let caller = caller_column(batch, d.field, label)?;
@@ -355,7 +508,7 @@ pub(crate) fn run_in_log_space(
                     ctx.note_log_input(axis, d.field, Arc::clone(caller));
                 }
             }
-            degenerate |= all_off_side(&coerce_to_float64(caller, label, d.field)?, &d.space.space);
+            caller_slots.push((coerce_to_float64(caller, label, d.field)?, d.space.space));
         }
         let (next, name) = with_mapped_slot(&mapped_batch, d, label)?;
         mapped_batch = next;
@@ -364,7 +517,13 @@ pub(crate) fn run_in_log_space(
         }
         columns.columns.push((d.slot, name));
     }
-    let mut result = if degenerate {
+    let slots: Vec<(&Float64Array, LogAxisSpace)> = caller_slots.iter().map(|(values, space)| (values, *space)).collect();
+    let emptied = emptied_by_axis(ctx, label, batch, &slots, null_keys);
+    let warned_before = ctx.warnings.borrow().len();
+    let mut result = if emptied == AxisEmptied::WholeCall {
+        if ctx.is_partition {
+            ctx.record_all_null(AllNullOutcome::OffSide);
+        }
         body(&mapped_batch.slice(0, 0), &columns, &with_scratch_warnings(ctx))?.slice(0, 0)
     } else {
         body(&mapped_batch, &columns, ctx)?
@@ -372,6 +531,25 @@ pub(crate) fn run_in_log_space(
     for (output, slot, shape) in outputs {
         let Some(d) = demand.iter().find(|d| d.slot == *slot) else { continue };
         result = backward_map_output(result, output, *shape, &d.space.space, label)?;
+    }
+    let blanked: Vec<(&str, ColumnShape)> =
+        outputs.iter().filter(|(_, slot, _)| demand.iter().any(|d| d.slot == *slot)).map(|(name, _, shape)| (*name, *shape)).collect();
+    match &emptied {
+        AxisEmptied::Groups(labels) => {
+            let (flags, matched) = rows_of_groups(&result, &ctx.groupby, labels);
+            if !matched.is_empty() {
+                result = blank_rows(result, &flags, &blanked, label)?;
+                drop_fit_warnings(ctx, warned_before, Some(&matched));
+                ctx.note_log_emptied(Some(matched));
+            }
+        }
+        AxisEmptied::FallbackBatch => {
+            let all = vec![true; result.num_rows()];
+            result = blank_rows(result, &all, &blanked, label)?;
+            drop_fit_warnings(ctx, warned_before, None);
+            ctx.note_log_emptied(None);
+        }
+        AxisEmptied::Nothing | AxisEmptied::WholeCall => {}
     }
     let schema = result.schema();
     let kept: Vec<usize> = (0..schema.fields().len()).filter(|&i| !columns.private.contains(schema.field(i).name())).collect();
@@ -417,6 +595,7 @@ pub(crate) fn run_fit_in_log_space(
         label,
         batch,
         &demand,
+        FIT_NULL_KEYS,
         |mapped_batch, cols, ctx| {
             let xcol = cols.column(SpaceSlot::X, x.0);
             let ycol = cols.column(SpaceSlot::Y, y.0);
@@ -642,5 +821,404 @@ mod tests {
         let list = mapped.column(0).as_any().downcast_ref::<ListArray>().unwrap().value(0);
         let values = list.as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec();
         assert_eq!(values, [1.0, 100.0, 5.0, 7.0]);
+    }
+
+    // ---- the groups a log axis empties ----
+
+    use crate::transform::context::{AllNullOutcome, LogEmptied, StepInstance, TransformWarning, Unfittable};
+
+    /// `g` and `v`, `v` a nullable Float64.
+    fn grouped(g: &[&str], v: &[Option<f64>]) -> RecordBatch {
+        RecordBatch::try_from_iter([
+            ("g", Arc::new(arrow::array::StringArray::from(g.to_vec())) as ArrayRef),
+            ("v", Arc::new(Float64Array::from(v.to_vec())) as ArrayRef),
+        ])
+        .unwrap()
+    }
+
+    /// A context demanding `v` in the positive log space, grouped by `groupby`.
+    fn demanding_v(groupby: &[&str]) -> TransformContext {
+        TransformContext {
+            groupby: groupby.iter().map(|g| g.to_string()).collect(),
+            step: StepInstance::Chain(vec![1]),
+            ..TransformContext::default()
+        }
+    }
+
+    /// One row per group in first-appearance order, as a grouped statistic
+    /// does: `g`, and `out` holding a default `1.0` in log units for every
+    /// group (a `Kde` group with no usable value puts its grid there). Each
+    /// group named in `degraded` raises the fit warning its own body raises.
+    fn per_group_body(
+        degraded: &'static [&'static str],
+        interval: &'static [&'static str],
+    ) -> impl FnOnce(&RecordBatch, &SlotColumns, &TransformContext) -> PyResult<RecordBatch> {
+        move |mapped, _cols, ctx| {
+            let g = mapped.column_by_name("g").unwrap().as_any().downcast_ref::<arrow::array::StringArray>().unwrap().clone();
+            let mut seen: Vec<String> = Vec::new();
+            for i in 0..g.len() {
+                if !seen.iter().any(|s| s == g.value(i)) {
+                    seen.push(g.value(i).to_string());
+                }
+            }
+            for name in &seen {
+                let label = format!("g={name}");
+                if degraded.contains(&name.as_str()) {
+                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", "fewer than 2 usable (non-null/non-NaN) values"))?;
+                }
+                if interval.contains(&name.as_str()) {
+                    ctx.warn(TransformWarning::IntervalUndefined {
+                        transform: "Smooth".into(),
+                        group: Some(label.clone()),
+                        ci: 0.95,
+                        reason: "no band".into(),
+                        panel: None,
+                        step: ctx.step.clone(),
+                    });
+                }
+            }
+            RecordBatch::try_from_iter([
+                ("g", Arc::new(arrow::array::StringArray::from(seen.clone())) as ArrayRef),
+                ("out", Arc::new(Float64Array::from(vec![1.0; seen.len()])) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        }
+    }
+
+    fn run_per_group(
+        ctx: &TransformContext,
+        batch: &RecordBatch,
+        degraded: &'static [&'static str],
+        interval: &'static [&'static str],
+    ) -> RecordBatch {
+        pyo3::Python::initialize();
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        run_in_log_space(ctx, "stat_test", batch, &demand, NullKeyPolicy::Skip, per_group_body(degraded, interval), &[("out", SpaceSlot::Field, ColumnShape::Scalar)])
+            .unwrap()
+    }
+
+    fn out_by_group(result: &RecordBatch) -> Vec<(String, f64)> {
+        let g = result.column_by_name("g").unwrap().as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let out = result.column_by_name("out").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..result.num_rows()).map(|i| (g.value(i).to_string(), out.value(i))).collect()
+    }
+
+    fn fit_groups(ctx: &TransformContext) -> Vec<String> {
+        ctx.warnings
+            .borrow()
+            .iter()
+            .filter_map(|w| match w {
+                TransformWarning::DegenerateFit { group, .. } | TransformWarning::IntervalUndefined { group, .. } => group.clone(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A group whose every value is off the axis's side is recorded under
+    /// its label, its default output is blanked (so no phantom value
+    /// reaches the axis), and the fit warning its body raised for it is
+    /// dropped; a group with values on the side keeps its output and its
+    /// own warnings. Rejects leaving the group's `DegenerateFit` beside the
+    /// axis's own report, or leaving its default grid at the axis.
+    #[test]
+    fn a_group_wholly_off_the_side_is_recorded_blanked_and_loses_its_fit_warnings() {
+        let batch = grouped(&["a", "a", "c", "c", "c"], &[Some(10.0), Some(100.0), Some(-1.0), Some(0.0), Some(-3.0)]);
+        let ctx = demanding_v(&["g"]);
+        let result = run_per_group(&ctx, &batch, &["a", "c"], &["a", "c"]);
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=c".to_string()]) }]);
+        assert_eq!(fit_groups(&ctx), ["g=a", "g=a"], "only the group the axis emptied loses its warnings");
+        let out = out_by_group(&result);
+        assert_eq!(out[0], ("a".to_string(), 10.0), "the on-side group maps back as before");
+        assert_eq!(out[1].0, "c");
+        assert!(out[1].1.is_nan(), "the emptied group's output takes no position: {out:?}");
+    }
+
+    /// A group of one null and off-side values is emptied by the axis; a
+    /// group of nulls only, and a group with one value on the side, are
+    /// not: each keeps its own fit warning and its output, and nothing is
+    /// recorded for them. Rejects treating a null or a single on-side
+    /// value as the axis's doing.
+    #[test]
+    fn only_a_group_with_an_off_side_value_and_none_on_the_side_is_emptied() {
+        let batch = grouped(
+            &["m", "m", "m", "n", "n", "p", "p"],
+            &[None, Some(-1.0), Some(0.0), None, None, Some(-1.0), Some(5.0)],
+        );
+        let ctx = demanding_v(&["g"]);
+        let result = run_per_group(&ctx, &batch, &["m", "n", "p"], &[]);
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=m".to_string()]) }]);
+        assert_eq!(fit_groups(&ctx), ["g=n", "g=p"]);
+        let out = out_by_group(&result);
+        assert!(out[0].1.is_nan(), "{out:?}");
+        assert_eq!((out[1].1, out[2].1), (10.0, 10.0), "the groups the axis did not empty keep their output");
+    }
+
+    /// A call with no group emptied is byte-identical to the body's own
+    /// output and records nothing: its warnings stand, its columns are the
+    /// body's mapped back, and the sink stays empty. Rejects a seam that
+    /// records or filters on a chart with nothing off-side.
+    #[test]
+    fn a_call_no_group_of_which_is_emptied_records_nothing_and_filters_nothing() {
+        let batch = grouped(&["a", "a", "b"], &[Some(10.0), Some(-1.0), Some(100.0)]);
+        let ctx = demanding_v(&["g"]);
+        let result = run_per_group(&ctx, &batch, &["b"], &["a"]);
+        assert!(ctx.log_emptied.borrow().is_empty());
+        assert_eq!(fit_groups(&ctx), ["g=a", "g=b"]);
+        let out = out_by_group(&result);
+        assert_eq!(out, [("a".to_string(), 10.0), ("b".to_string(), 10.0)]);
+    }
+
+    /// An ungrouped call wholly off the side keeps the cut: its output has
+    /// no rows and a scratch sink takes the body's warnings, and nothing is
+    /// recorded for the groups it does not have. Inside a facet partition
+    /// the panel is also recorded as one the axis emptied, which
+    /// [`AllNullOutcome::OffSide`] settles with no warning. Rejects running
+    /// an ungrouped fit on a frame the axis refuses.
+    #[test]
+    fn an_ungrouped_call_wholly_off_the_side_is_cut_and_records_its_panel() {
+        let batch = grouped(&["a", "a"], &[Some(-1.0), Some(0.0)]);
+        let ctx = demanding_v(&[]);
+        let result = run_per_group(&ctx, &batch, &["a"], &[]);
+        assert_eq!(result.num_rows(), 0);
+        assert!(ctx.warnings.borrow().is_empty(), "the body's own warnings go to a scratch sink");
+        assert!(ctx.log_emptied.borrow().is_empty());
+        assert!(ctx.all_null_partitions.borrow().is_empty(), "a whole-frame call is not a partition");
+
+        let partition = TransformContext { is_partition: true, ..demanding_v(&[]) };
+        let result = run_per_group(&partition, &batch, &["a"], &[]);
+        assert_eq!(result.num_rows(), 0);
+        let recorded = partition.all_null_partitions.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert!(matches!(recorded[0].outcome, AllNullOutcome::OffSide));
+        assert!(recorded[0].outcome.empties());
+        assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
+    }
+
+    /// A grouped call wholly off the side is not cut: its body runs and
+    /// every group is blanked, so the axis finds nothing on its side and
+    /// refuses in its own voice, while each group keeps its row and its
+    /// place. Rejects cutting a grouped call to zero rows, which loses every
+    /// group's key.
+    #[test]
+    fn a_grouped_call_wholly_off_the_side_blanks_every_group_and_keeps_its_rows() {
+        let batch = grouped(&["a", "b"], &[Some(-1.0), Some(0.0)]);
+        let ctx = TransformContext { is_partition: true, ..demanding_v(&["g"]) };
+        let result = run_per_group(&ctx, &batch, &["a", "b"], &[]);
+        let out = out_by_group(&result);
+        assert_eq!(out.iter().map(|(g, _)| g.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(out.iter().all(|(_, v)| v.is_nan()), "{out:?}");
+        assert_eq!(
+            *ctx.log_emptied.borrow(),
+            vec![LogEmptied { panel: None, groups: Some(vec!["g=a".to_string(), "g=b".to_string()]) }]
+        );
+        assert!(fit_groups(&ctx).is_empty());
+        assert!(ctx.all_null_partitions.borrow().is_empty(), "a grouped call keeps its rows, so no panel is cut");
+    }
+
+    /// An emptied group's list-shaped output (a `Kde2D` grid axis, or the
+    /// positions of its `extent`) is blanked element by element at the
+    /// positions the axis's units hold, and the other positions stay.
+    #[test]
+    fn an_emptied_groups_list_output_is_blanked_at_its_positions() {
+        pyo3::Python::initialize();
+        let batch = grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]);
+        let ctx = demanding_v(&["g"]);
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        let body = |mapped: &RecordBatch, _: &SlotColumns, _: &TransformContext| -> PyResult<RecordBatch> {
+            let mut builder = ListBuilder::new(Float64Builder::new());
+            for _ in 0..mapped.num_rows() {
+                builder.values().append_slice(&[1.0, 2.0, 7.0]);
+                builder.append(true);
+            }
+            RecordBatch::try_from_iter([
+                ("g", Arc::clone(mapped.column_by_name("g").unwrap())),
+                ("extent", Arc::new(builder.finish()) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        };
+        let result = run_in_log_space(&ctx, "stat_test", &batch, &demand, NullKeyPolicy::Skip, body, &[("extent", SpaceSlot::Field, ColumnShape::ListPositions(0, 2))]).unwrap();
+        let lists = result.column_by_name("extent").unwrap().as_any().downcast_ref::<ListArray>().unwrap();
+        let row = |i: usize| lists.value(i).as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec();
+        assert_eq!(row(0), [10.0, 100.0, 7.0]);
+        let blanked = row(1);
+        assert!(blanked[0].is_nan() && blanked[1].is_nan() && blanked[2] == 7.0, "{blanked:?}");
+    }
+
+    // ---- the null-key policy the seam shares with the body ----
+
+    /// `g` (nullable text) and `v`.
+    fn keyed(g: &[Option<&str>], v: &[Option<f64>]) -> RecordBatch {
+        RecordBatch::try_from_iter([
+            ("g", Arc::new(arrow::array::StringArray::from(g.to_vec())) as ArrayRef),
+            ("v", Arc::new(Float64Array::from(v.to_vec())) as ArrayRef),
+        ])
+        .unwrap()
+    }
+
+    /// A body that groups by `g` under `policy` exactly as the statistics do
+    /// (the shared partitioner), one output row per group holding `out` `1.0`,
+    /// and a `DegenerateFit` for each group in `degraded` ("g=null" names the
+    /// null key); when the policy fits the whole batch because every key is
+    /// null, the one pooled row carries a null key and its fit warning names
+    /// no group.
+    fn keyed_body(
+        policy: NullKeyPolicy,
+        degraded: &'static [&'static str],
+    ) -> impl FnOnce(&RecordBatch, &SlotColumns, &TransformContext) -> PyResult<RecordBatch> {
+        move |mapped, _cols, ctx| {
+            let groupby = vec!["g".to_string()];
+            let partition = group_partition_multi(mapped, &groupby, "stat_test", policy, ctx)?;
+            let mut keys: Vec<Option<String>> = Vec::new();
+            for (key, _) in &partition.groups {
+                let label = describe_group_keys(&groupby, key);
+                if degraded.contains(&label.as_str()) {
+                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", "too few"))?;
+                }
+                keys.push(match &label[2..] {
+                    "null" => None,
+                    name => Some(name.to_string()),
+                });
+            }
+            if keys.is_empty() && mapped.num_rows() > 0 {
+                ctx.warn(TransformWarning::DegenerateFit {
+                    transform: "Smooth".into(),
+                    group: None,
+                    reason: "too few".into(),
+                    panel: None,
+                    step: ctx.step.clone(),
+                });
+                keys.push(None);
+            }
+            RecordBatch::try_from_iter([
+                ("g", Arc::new(arrow::array::StringArray::from(keys.clone())) as ArrayRef),
+                ("out", Arc::new(Float64Array::from(vec![1.0; keys.len()])) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        }
+    }
+
+    fn run_keyed(
+        ctx: &TransformContext,
+        batch: &RecordBatch,
+        policy: NullKeyPolicy,
+        degraded: &'static [&'static str],
+    ) -> RecordBatch {
+        pyo3::Python::initialize();
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        run_in_log_space(ctx, "stat_test", batch, &demand, policy, keyed_body(policy, degraded), &[("out", SpaceSlot::Field, ColumnShape::Scalar)]).unwrap()
+    }
+
+    fn out_values(result: &RecordBatch) -> Vec<f64> {
+        result.column_by_name("out").unwrap().as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec()
+    }
+
+    /// A step that pools its null-keyed rows into a group of their own (the
+    /// ECDF window) has that group emptied by the axis when it holds only
+    /// off-side values: its label is `g=null`, recorded, its warning dropped
+    /// and its output blanked. Under a step that skips null keys the same
+    /// rows form no group, so nothing is recorded for them. Rejects forming
+    /// the groups with a policy other than the body's.
+    #[test]
+    fn the_seam_forms_groups_with_the_null_key_policy_of_the_body() {
+        let batch = keyed(&[Some("a"), Some("a"), None, None], &[Some(10.0), Some(100.0), Some(-1.0), Some(0.0)]);
+        let pooled = demanding_v(&["g"]);
+        let result = run_keyed(&pooled, &batch, NullKeyPolicy::Pool, &["g=null"]);
+        assert_eq!(*pooled.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=null".to_string()]) }]);
+        assert!(fit_groups(&pooled).is_empty(), "the pooled null-key group's fit warning is the axis's to explain");
+        let out = out_values(&result);
+        assert_eq!(out[0], 10.0);
+        assert!(out[1].is_nan(), "{out:?}");
+
+        let skipped = demanding_v(&["g"]);
+        let result = run_keyed(&skipped, &batch, NullKeyPolicy::Skip, &[]);
+        assert!(skipped.log_emptied.borrow().is_empty(), "a skipped null key forms no group to empty");
+        assert_eq!(out_values(&result), [10.0]);
+    }
+
+    /// A fit that falls back to the whole batch because every key is null
+    /// treats that batch as the one group: when it holds only off-side
+    /// values, the batch is recorded as emptied (no group named), the fit's
+    /// own warning for it is dropped, its output is blanked, and the
+    /// all-null-key warning (the caller's null key, a separate fact) stays.
+    /// A fallback batch with a value on the side keeps its fit warning.
+    #[test]
+    fn a_whole_batch_fallback_emptied_by_the_axis_is_recorded_as_the_whole_call() {
+        let batch = keyed(&[None, None, None], &[Some(-1.0), Some(0.0), Some(-3.0)]);
+        let ctx = demanding_v(&["g"]);
+        let result = run_keyed(&ctx, &batch, FIT_NULL_KEYS, &[]);
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: None }]);
+        let warnings = ctx.warnings.borrow();
+        assert!(!warnings.iter().any(|w| matches!(w, TransformWarning::DegenerateFit { .. })), "{warnings:?}");
+        assert!(warnings.iter().any(|w| matches!(w, TransformWarning::GroupKeyAllNull { .. })), "the null key is still reported: {warnings:?}");
+        assert!(out_values(&result).iter().all(|v| v.is_nan()));
+
+        let batch = keyed(&[None, None, None], &[Some(-1.0), Some(5.0), None]);
+        let ctx = demanding_v(&["g"]);
+        run_keyed(&ctx, &batch, FIT_NULL_KEYS, &[]);
+        assert!(ctx.log_emptied.borrow().is_empty());
+        assert!(ctx.warnings.borrow().iter().any(|w| matches!(w, TransformWarning::DegenerateFit { group: None, .. })));
+    }
+
+    /// A fit warning raised before the call (a sibling facet panel's, which
+    /// shares the run's sink) for a group label the call also empties is not
+    /// the call's to drop. Rejects a drop that reads the whole sink.
+    #[test]
+    fn a_fit_warning_raised_before_the_call_survives_the_drop() {
+        let batch = grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]);
+        let ctx = demanding_v(&["g"]);
+        ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::new("Kde", "an earlier panel's reason")).unwrap();
+        run_per_group(&ctx, &batch, &["c"], &[]);
+        assert_eq!(fit_groups(&ctx), ["g=c"], "the earlier panel's warning stays, this call's is dropped");
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=c".to_string()]) }]);
+    }
+
+    /// The fit warning is dropped, and the group recorded, only for a group
+    /// whose output rows were blanked: of two emptied groups, the one whose
+    /// rows read a label other than the partition's keeps its warning and is
+    /// not recorded, while the matched one is blanked, recorded and loses its
+    /// warning, so the halves of one fact cannot disagree.
+    #[test]
+    fn a_group_whose_output_rows_cannot_be_matched_keeps_its_warning_and_is_not_recorded() {
+        pyo3::Python::initialize();
+        let batch = grouped(&["a", "b", "c"], &[Some(10.0), Some(-1.0), Some(-2.0)]);
+        let ctx = demanding_v(&["g"]);
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        let body = |_: &RecordBatch, _: &SlotColumns, ctx: &TransformContext| -> PyResult<RecordBatch> {
+            ctx.degrade_group_or_refuse("Kde", Some("g=b"), Unfittable::new("Kde", "too few"))?;
+            ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::new("Kde", "too few"))?;
+            RecordBatch::try_from_iter([
+                ("g", Arc::new(arrow::array::StringArray::from(vec!["a", "b", "renamed"])) as ArrayRef),
+                ("out", Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0])) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        };
+        let result = run_in_log_space(&ctx, "stat_test", &batch, &demand, NullKeyPolicy::Skip, body, &[("out", SpaceSlot::Field, ColumnShape::Scalar)]).unwrap();
+        let out = out_values(&result);
+        assert_eq!(out[0], 10.0);
+        assert!(out[1].is_nan(), "the matched group is blanked: {out:?}");
+        assert_eq!(out[2], 10.0, "the unmatched group keeps its output");
+        assert_eq!(fit_groups(&ctx), ["g=c"], "only the matched group's warning is dropped");
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=b".to_string()]) }]);
+    }
+
+    /// The fits' seam forms groups under the policy their partitions read
+    /// ([`FIT_NULL_KEYS`]): a batch whose every key is null, which a fit
+    /// fits whole, is judged as that batch, so a batch holding only off-side
+    /// values is recorded as the whole call. Rejects handing the fits' seam
+    /// a policy that drops null keys, which finds no group to empty.
+    #[test]
+    fn the_fits_seam_judges_an_all_null_key_batch_under_the_fit_policy() {
+        pyo3::Python::initialize();
+        let batch = keyed(&[None, None], &[Some(-1.0), Some(0.0)]);
+        let ctx = demanding_v(&["g"]);
+        let space = x_slot();
+        let columns = [SpaceColumn { output: "out".to_string(), slot: SpaceSlot::X, input: "v".to_string(), pass_through: false }];
+        let body = |mapped: &RecordBatch, _: &str, _: &str, _: &TransformContext| -> PyResult<RecordBatch> { Ok(mapped.clone()) };
+        run_fit_in_log_space(&ctx, "stat_test", &batch, &columns, ("v", Some(&space)), ("w", None), body).unwrap();
+        assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: None }]);
     }
 }

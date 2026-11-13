@@ -215,6 +215,10 @@ fn surface_fields() -> Vec<Field> {
     ]
 }
 
+/// The null-key policy of `Kde2D`'s groups, read by its partition and by the
+/// log seam that asks which of its groups an axis emptied.
+const GROUP_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
+
 /// `apply_with_context` under a drawn log axis's demand on the `x` slot,
 /// the `y` slot, or both independently (`x_slot`/`y_slot`, since a
 /// bivariate fit's two axes can each resolve a different `LogScale`, or
@@ -257,6 +261,7 @@ fn apply_in_log_space(
         LABEL,
         batch,
         &demand,
+        GROUP_NULL_KEYS,
         |mapped_batch, columns, ctx| {
             let x = columns.column(SpaceSlot::X, &spec.x);
             let y = columns.column(SpaceSlot::Y, &spec.y);
@@ -485,7 +490,7 @@ fn apply_grouped(
         batch,
         group_cols,
         "stat_kde_2d",
-        NullKeyPolicy::Skip,
+        GROUP_NULL_KEYS,
         warn_ctx,
     )?;
 

@@ -37,7 +37,7 @@ use crate::transform::core::{SpaceSlot, TransformSpec};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, pooled_group_key,
     stack_grouped_batches,
-    NullKeyPolicy,
+    FIT_NULL_KEYS,
     KeyValue,
 };
 use crate::transform::log_space::run_fit_in_log_space;
@@ -483,7 +483,7 @@ fn apply_grouped(
         batch,
         group_cols,
         "Robust",
-        NullKeyPolicy::SkipWithWholeBatchFallback,
+        FIT_NULL_KEYS,
         ctx,
     )?;
 

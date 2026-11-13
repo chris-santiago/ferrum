@@ -3000,7 +3000,10 @@ pub enum RenderWarning {
     /// explicit domain or a log scale's off side empties keeps
     /// [`Self::DomainRowsLeftOut`](Self::DomainRowsLeftOut)/
     /// [`Self::LogScaleRowsLeftOut`](Self::LogScaleRowsLeftOut) as its only
-    /// report. The legend keeps the group's entry regardless (one color
+    /// report; for a group a statistic computed in a log axis's space, the
+    /// statistic's own record of the groups the axis emptied
+    /// ([`crate::transform::run::PassedStep::log_emptied`]) is read as a fit
+    /// warning is (`scene_build::group_owned_by_its_fit`). The legend keeps the group's entry regardless (one color
     /// scale is resolved over every layer's rows, so dropping a category
     /// here would shift the palette of every other one). A band slot
     /// (`render::draw::band_slot_groups`, one per category of an ordinal

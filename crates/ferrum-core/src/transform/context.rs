@@ -414,6 +414,25 @@ pub(crate) struct AllNullPartition {
     pub(crate) outcome: AllNullOutcome,
 }
 
+/// What a step's log axis left with no value to place: the groups of the
+/// step's own `groupby` (labelled as [`describe_group_keys`] labels a
+/// fit warning's group) each holding no value on the axis's side and at
+/// least one value off it, or the whole call when it is ungrouped. Recorded
+/// by the seams that read the caller's column in a log axis's space
+/// (`log_space::run_in_log_space`, the ECDF window), carried beside the
+/// step on [`crate::transform::run::PassedStep::log_emptied`], and read by
+/// the null census so a group the log warning already names is not named a
+/// second time as null.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogEmptied {
+    /// The facet panel the step ran in ([`TransformWarning::DegenerateFit`]'s
+    /// `panel` text), `None` for an unfaceted chart. Stamped when the
+    /// facet run merges its partitions.
+    pub(crate) panel: Option<String>,
+    /// The emptied groups' labels; `None` when the whole call is emptied.
+    pub(crate) groups: Option<Vec<String>>,
+}
+
 /// Why one fit's rows could not be fit: the reason a degraded group's
 /// warning gives, and the refusal the same rows raise as the whole frame
 /// ([`TransformContext::degrade_group_or_refuse`]).
@@ -450,6 +469,11 @@ pub(crate) enum AllNullOutcome {
     /// fallback): the panel draws that fit, and the facet run reports the
     /// warning once.
     Pooled(TransformWarning),
+    /// The step's log axis left the panel no value to place, and the
+    /// step's output was cut to nothing for it: the panel draws empty, and
+    /// nothing is reported, because the axis's own off-side warning (or its
+    /// refusal, when every panel was left empty) already names the cause.
+    OffSide,
 }
 
 impl AllNullOutcome {
@@ -829,6 +853,16 @@ pub struct TransformContext {
     /// output, not overwritten by a later step demanded on a different
     /// field.
     pub(crate) log_input: Rc<RefCell<HashMap<(crate::spec::layer::PositionalAxis, String), arrow::array::ArrayRef>>>,
+    /// The `groupby` fields of the step this context is handed to, set per
+    /// step by the pipeline runner beside [`Self::step`]. Read by the log
+    /// seams, which form the step's own groups to ask which of them the
+    /// axis left empty; empty outside a run and for an ungrouped step.
+    pub(crate) groupby: Vec<String>,
+    /// What the step's log axis left empty ([`LogEmptied`]), a fresh sink
+    /// per step call as [`Self::log_input`] is, read back by the pipeline
+    /// runner right after the call and carried on that output's
+    /// [`crate::transform::run::PassedStep::log_emptied`].
+    pub(crate) log_emptied: Rc<RefCell<Vec<LogEmptied>>>,
     /// The pipeline step this context is handed to, set per step by the
     /// pipeline runner; [`StepInstance::Unplaced`] outside a run.
     pub(crate) step: StepInstance,
@@ -893,6 +927,13 @@ impl TransformContext {
     /// a demanded step maps it — see [`Self::log_input`]'s doc.
     pub(crate) fn note_log_input(&self, axis: crate::spec::layer::PositionalAxis, field: &str, column: arrow::array::ArrayRef) {
         self.log_input.borrow_mut().insert((axis, field.to_string()), column);
+    }
+
+    /// Record that the step's log axis left `groups` (the labels of its own
+    /// `groupby` groups, `None` for the whole call) with no value to place
+    /// ([`LogEmptied`]).
+    pub(crate) fn note_log_emptied(&self, groups: Option<Vec<String>>) {
+        self.log_emptied.borrow_mut().push(LogEmptied { panel: None, groups });
     }
 
     /// Raise `refusal`, the refusal a `groupby` null-key drop that left

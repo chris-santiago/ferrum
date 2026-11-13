@@ -54,6 +54,7 @@ use std::sync::Arc;
 use crate::transform::context::TransformContext;
 use crate::transform::core::TransformSpec;
 use crate::transform::core::SpaceSlot;
+use crate::transform::group_key::NullKeyPolicy;
 use crate::transform::log_space::{run_in_log_space, ColumnShape, DemandedField};
 
 /// This transform's own voice prefix, passed to every shared
@@ -529,6 +530,9 @@ pub(crate) fn apply_with_context(spec: &ContourSpec, batch: &RecordBatch, ctx: &
         LABEL,
         batch,
         &demand,
+        // Contour demands list slots only, which never form a group, so the
+        // policy is never read.
+        NullKeyPolicy::Skip,
         |mapped_batch, _columns, _ctx| apply(spec, mapped_batch),
         &[
             ("contour_x", SpaceSlot::GridX, ColumnShape::Scalar),

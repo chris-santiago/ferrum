@@ -21,6 +21,7 @@ import pytest
 import ferrum as fm
 from tests.test_null_group_warning import (
     FIT_BANDWIDTH,
+    FIT_FEW_PAIRS,
     _NO_FACET_ROWS_WARNING,
     _NO_ROWS_TO_DRAW,
     _fit_message,
@@ -29,8 +30,8 @@ from tests.test_null_group_warning import (
     _whole_fit_message,
 )
 
-# Kde2D counts points, not values: its count reason is spelled once here (Kde keeps "values").
-_FEW_POINTS = "fewer than 2 usable (non-null/non-NaN) points"
+# Kde2D counts points, not values: its count reason is the shared one (Kde keeps "values").
+_FEW_POINTS = FIT_FEW_PAIRS
 _ZERO_GRID = "its density is zero across the evaluation grid"
 # The reason Hex and Raster give for a panel or call with rows and no usable value.
 _NO_FINITE = "no usable (non-null, finite) values"
