@@ -45,7 +45,7 @@ def xy_df() -> pl.DataFrame:
     """A noisy monotone relationship, a binary response, and a grouping column.
 
     ``b`` is drawn from a logistic model (not thresholded), so the two
-    classes overlap -- a clean split makes ``Logistic`` refuse outright
+    classes overlap -- a clean split gives ``Logistic`` no fit to draw
     ("singular design"), the same shape ``test_lmplot_scatter_data_source.py``'s
     ``obs_df`` fixture avoids for the same reason.
     """

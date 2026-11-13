@@ -68,6 +68,15 @@ FIT_FEW_POINTS = "fewer than 2 usable (non-null, finite) x/y points"
 FIT_FEW_PAIRS = "fewer than 2 usable (non-null, finite) points"
 # A local regression needs three points.
 FIT_FEW_LOESS_POINTS = "fewer than 3 usable (non-null, finite) x/y points"
+# The reasons Logistic, Glm and Robust give for a fit they cannot compute.
+FIT_ZERO_VARIANCE = "zero x variance"
+FIT_SINGULAR = "singular design (X'WX has zero determinant)"
+FIT_SEPARATED = (
+    "perfect separation detected (model classifies every observation with probability > 0.999)"
+)
+FIT_SEPARATED_DIVERGED = "perfect separation detected (coefficients diverged)"
+FIT_NOT_BINARY = "y is not binary (found 2)"
+FIT_DIVERGED = "IRLS diverged (non-finite coefficients)"
 FIT_BANDWIDTH = "the bandwidth resolved to a non-positive or non-finite value"
 # The tied-value reasons: Kde and Violin share one for values, Kde2D names points and each axis.
 FIT_TIED = "its usable values are all equal"
@@ -1352,11 +1361,20 @@ def _faceted_point_chart(df: pl.DataFrame, **facet: str) -> fm.Chart:
     return fm.Chart(df).mark_point().encode(x="c", y="w").facet(**facet)
 
 
-def _list_message(entry: str, units: str) -> str:
+def _list_message(entry: str, units: str, channels: str = "y") -> str:
     """The sentence a layer reads when several units draw nothing: ``units`` is
     their list, each in the shape it reads in (a bare panel clause, or ``of`` and
     a name)."""
-    return f"{entry}: every row {units}, has a null or non-finite y, so they draw nothing"
+    return f"{entry}: every row {units}, has a null or non-finite {channels}, so they draw nothing"
+
+
+def _panel_units(panels: list[str]) -> str:
+    """The list of two or more bare facet-panel clauses a layer's sentence names, as the engine
+    joins them: ``A, and B`` for two, ``A, B, and C`` for more, and ``;`` in place of ``,`` when
+    a panel label holds a comma (a row facet)."""
+    named = [f"in facet panel {panel}" for panel in panels]
+    sep = "; " if any("," in panel for panel in panels) else ", "
+    return sep.join(named[:-1]) + f"{sep}and {named[-1]}"
 
 
 @pytest.mark.parametrize(

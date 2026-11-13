@@ -455,11 +455,6 @@ _ALL_DOORS = {**_STATISTIC_DOORS, **_TRANSFORM_DOORS}
 _DOOR_CASES = [pytest.param(name, id=name) for name in _ALL_DOORS]
 
 
-#: The fits that refuse a call with no usable observation rather than degrade it: the null twin
-#: refuses, and an all-infinite call refuses the same way.
-_REFUSED_WHEN_ALL_NULL = {("Logistic", "all-inf"), ("Glm", "all-inf")}
-
-
 def _guard_against_a_refusal(twin: _Outcome, door: str) -> None:
     """The twin is the reference, so it must be a chart: a door both frames refuse proves nothing."""
     assert not twin.output.startswith("RAISE"), f"{door} refuses its null twin: {twin.output}"
@@ -478,8 +473,7 @@ def test_an_infinite_value_is_skipped_as_a_null_one_is(name: str, input_name: st
     door, frame = _ALL_DOORS[name], _INPUTS[input_name]
     got = _outcome(_static(door.build(frame)))
     twin = _outcome(_static(door.build(_null_twin(frame))))
-    if (name, input_name) not in _REFUSED_WHEN_ALL_NULL:
-        _guard_against_a_refusal(twin, name)
+    _guard_against_a_refusal(twin, name)
     assert got.messages == twin.messages
     assert got.output == twin.output
 
@@ -919,15 +913,25 @@ def test_a_fit_transform_over_only_infinite_x_names_the_usable_point_count(
     assert shown == [expected]
 
 
+@pytest.mark.parametrize("output", ["static", "interactive"])
 @pytest.mark.parametrize("name", ["Logistic", "Glm"])
-def test_a_logistic_or_glm_call_of_only_infinities_refuses_as_an_all_null_call_does(name: str):
-    """These two fits refuse a call with no usable observation instead of degrading it: an
-    all-infinite call is refused in the words an all-null call is, never fitted or blanked."""
+def test_a_logistic_or_glm_call_of_only_infinities_warns_and_draws_as_an_all_null_call_does(
+    name: str, output: str
+):
+    """These two fits degrade a call with no usable observation as ``Robust`` does: an all-infinite
+    call and its all-null twin each draw their frame with no fit and name the fit once, in the
+    shared usable wording, on both output kinds."""
     frame = _INPUTS["all-inf"]
-    got = _outcome(_static(_STATISTIC_DOORS[name].build(frame)))
-    twin = _outcome(_static(_STATISTIC_DOORS[name].build(_null_twin(frame))))
-    assert twin.output.startswith("RAISE ValueError"), twin.output
+    render = {"static": _static, "interactive": _scene_of}[output]
+    got = _outcome(render(_STATISTIC_DOORS[name].build(frame)))
+    twin = _outcome(render(_STATISTIC_DOORS[name].build(_null_twin(frame))))
+    robust = _outcome(render(_STATISTIC_DOORS["Robust"].build(frame)))
+    _guard_against_a_refusal(twin, name)
+    assert got.messages == [_whole_fit_message(name, FIT_FEW_POINTS)]
+    assert twin.messages == got.messages
+    assert robust.messages == [_whole_fit_message("Robust", FIT_FEW_POINTS)]
     assert got == twin
+    assert got.output == robust.output
 
 
 def test_a_two_dimensional_density_group_of_only_infinities_is_named_with_the_usable_count():

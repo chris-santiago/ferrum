@@ -432,26 +432,31 @@ pub(crate) struct LogEmptied {
     pub(crate) groups: Option<Vec<String>>,
 }
 
-/// Why one fit's rows could not be fit: the reason a degraded group's
-/// warning gives, and the refusal the same rows raise as the whole frame
+/// Why one fit's rows could not be fit: the reason a degraded group's or
+/// panel's warning gives, and, for a response the method cannot read, the
+/// refusal the genuine whole frame raises
 /// ([`TransformContext::degrade_group_or_refuse`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Unfittable {
     pub(crate) reason: String,
-    pub(crate) refusal: String,
+    /// `Some` for a response outside the method ([`Unfittable::malformed`]),
+    /// `None` for data the fit cannot use ([`Unfittable::degenerate`]).
+    pub(crate) refusal: Option<String>,
 }
 
 impl Unfittable {
-    /// A failure whose refusal is `"{transform}: {reason}"`.
-    pub(crate) fn new(transform: &str, reason: impl Into<String>) -> Self {
-        let reason = reason.into();
-        Self { refusal: format!("{transform}: {reason}"), reason }
+    /// Data the fit cannot use (too few usable points, no variance, a
+    /// singular design, separation): it degrades on every call and never
+    /// refuses.
+    pub(crate) fn degenerate(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into(), refusal: None }
     }
-}
 
-impl From<Unfittable> for pyo3::PyErr {
-    fn from(failure: Unfittable) -> Self {
-        pyo3::exceptions::PyValueError::new_err(failure.refusal)
+    /// A response the method cannot read at all: the genuine whole frame
+    /// refuses with `"{transform}: {reason}"`; a group or panel degrades.
+    pub(crate) fn malformed(transform: &str, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self { refusal: Some(format!("{transform}: {reason}")), reason }
     }
 }
 
@@ -932,22 +937,36 @@ impl TransformContext {
         self.log_emptied.borrow_mut().push(LogEmptied { panel: None, groups });
     }
 
-    /// One fit's rows cannot be fit ([`Unfittable`]). The whole frame
-    /// (`group` `None`) refuses with the failure's refusal, as an ungrouped
-    /// fit always has; a `groupby` group degrades as `Smooth`'s and
-    /// `Robust`'s groups do: a [`TransformWarning::DegenerateFit`] names the
-    /// group and the reason, and the caller emits that group's empty
-    /// (all-NaN) fit, so the other groups still draw.
+    /// Whether a fit over `group` reads the caller's own whole frame: no
+    /// `groupby` group, and not a facet panel or other partition of it. The
+    /// one place a response outside the method refuses instead of degrading.
+    pub(crate) fn is_genuine_whole_frame(&self, group: Option<&str>) -> bool {
+        group.is_none() && !self.is_partition
+    }
+
+    /// One fit's rows cannot be fit ([`Unfittable`]). Data the fit cannot
+    /// use degrades on every call: a [`TransformWarning::DegenerateFit`]
+    /// names the group (or, with no group inside a facet partition, the
+    /// panel the facet run stamps; with neither, the call) and the reason,
+    /// and the caller emits the empty (all-NaN) fit, so the other groups and
+    /// panels still draw. A response outside the method
+    /// ([`Unfittable::malformed`]) refuses only the genuine whole frame (no
+    /// group, not a partition) with its refusal; a group or a panel of it
+    /// degrades. `Smooth`'s polynomial-degree gate is this rule's twin.
     pub(crate) fn degrade_group_or_refuse(
         &self,
         transform: &str,
         group: Option<&str>,
         failure: Unfittable,
     ) -> pyo3::PyResult<()> {
-        let Some(group) = group else { return Err(failure.into()) };
+        if self.is_genuine_whole_frame(group) {
+            if let Some(refusal) = failure.refusal {
+                return Err(pyo3::exceptions::PyValueError::new_err(refusal));
+            }
+        }
         self.warn(TransformWarning::DegenerateFit {
             transform: transform.to_string(),
-            group: Some(group.to_string()),
+            group: group.map(str::to_string),
             reason: failure.reason,
             panel: None,
             step: self.step.clone(),
@@ -985,6 +1004,43 @@ impl TransformContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one rule of `degrade_group_or_refuse`: data the fit cannot use
+    /// never refuses; a response outside the method refuses only with no
+    /// group and no partition.
+    #[test]
+    fn degrade_group_or_refuse_refuses_only_a_malformed_whole_frame() {
+        pyo3::Python::initialize();
+        for group in [None, Some("g=a")] {
+            for is_partition in [false, true] {
+                for malformed in [false, true] {
+                    let ctx = TransformContext { is_partition, ..TransformContext::default() };
+                    let failure = if malformed {
+                        Unfittable::malformed("Fit", "y is odd")
+                    } else {
+                        Unfittable::degenerate("too few")
+                    };
+                    let label = format!("group={group:?} partition={is_partition} malformed={malformed}");
+                    let outcome = ctx.degrade_group_or_refuse("Fit", group, failure);
+                    let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+                    if malformed && group.is_none() && !is_partition {
+                        assert_eq!(outcome.expect_err(&label).to_string(), "ValueError: Fit: y is odd", "{label}");
+                        assert!(said.is_empty(), "{label}: a refusal warns nothing");
+                    } else {
+                        outcome.unwrap_or_else(|e| panic!("{label}: {e}"));
+                        assert_eq!(said.len(), 1, "{label}: one DegenerateFit, got {said:?}");
+                        let reason = if malformed { "y is odd" } else { "too few" };
+                        let named = group.map_or("the data".to_string(), |g| format!("group {g}"));
+                        assert_eq!(
+                            said[0],
+                            format!("Fit: could not fit {named} ({reason}); it degraded to an empty/flat output instead of failing the whole chart"),
+                            "{label}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn all_variants() -> Vec<TransformWarning> {
         vec![

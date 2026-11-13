@@ -346,9 +346,13 @@ fn apply_in_data_space(
     stack_grouped_batches("Glm", &per_group_batches, &spec.groupby, &partition.dtypes)
 }
 
-/// Fit `batch`'s rows, or only one group's (`group`). Rows that cannot be fit
-/// refuse the whole frame and degrade a group to its empty fit, with a
-/// warning ([`TransformContext::degrade_group_or_refuse`]).
+/// Fit `batch`'s rows, or only one group's (`group`). Data the fit cannot
+/// use (too few usable points, no x variance, a singular design, IRLS
+/// divergence) degrades the call, panel or group to its empty fit with a
+/// warning ([`Unfittable::degenerate`]). A `y` outside the family is a
+/// response the method cannot read ([`Unfittable::malformed`]): it refuses
+/// the genuine whole frame and degrades a group or a panel
+/// ([`TransformContext::degrade_group_or_refuse`]).
 fn fit(
     spec: &GlmSpec,
     batch: &RecordBatch,
@@ -364,25 +368,25 @@ fn fit(
     validate_pair(spec.family, spec.link)?;
     let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Glm", only_indices)?;
 
-    if xs.len() < 2 {
-        return unfittable(Unfittable {
-            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
-            refusal: "Glm: need at least 2 non-null observations".into(),
-        });
-    }
-
-    // Family-specific input validation.
-    if let Some(failure) = family_y_failure(spec.family, &ys) {
+    // A response outside the family is a caller's mistake: the genuine whole
+    // frame refuses it whatever its count of usable rows, so it is read
+    // before the count there. A group or a panel names the data's own count
+    // first.
+    let too_few = (xs.len() < 2).then(|| Unfittable::degenerate(FEWER_THAN_TWO_USABLE_XY_POINTS));
+    let outside_family = family_y_failure(spec.family, &ys);
+    let failure = if ctx.is_genuine_whole_frame(group.map(|group| group.label.as_str())) {
+        outside_family.or(too_few)
+    } else {
+        too_few.or(outside_family)
+    };
+    if let Some(failure) = failure {
         return unfittable(failure);
     }
 
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
     if !(x_max > x_min) {
-        return unfittable(Unfittable {
-            reason: "zero x variance".into(),
-            refusal: "Glm: singular design (X'WX has zero determinant); x has zero variance".into(),
-        });
+        return unfittable(Unfittable::degenerate("zero x variance"));
     }
 
     let (beta, cov) = match fit_irls(&xs, &ys, spec.family, spec.link, spec.max_iter, spec.tol) {
@@ -466,7 +470,7 @@ fn family_y_failure(family: GlmFamily, ys: &[f64]) -> Option<Unfittable> {
         GlmFamily::Gaussian => return None,
     };
     let y = ys.iter().find(|&&y| outside(y))?;
-    Some(Unfittable::new("Glm", format!("{needs}; found {y}")))
+    Some(Unfittable::malformed("Glm", format!("{needs}; found {y}")))
 }
 
 /// Fit GLM β = (β₀, β₁) by IRLS. Returns (β, Σ̂ = (X'WX)⁻¹), or why the rows
@@ -514,7 +518,7 @@ pub(crate) fn fit_irls(
         }
 
         let inv = invert_2x2(wxtx)
-            .ok_or_else(|| Unfittable::new("Glm", "singular design (X'WX has zero determinant)"))?;
+            .ok_or_else(|| Unfittable::degenerate("singular design (X'WX has zero determinant)"))?;
 
         let b0 = inv[0][0] * wxtz[0] + inv[0][1] * wxtz[1];
         let b1 = inv[1][0] * wxtz[0] + inv[1][1] * wxtz[1];
@@ -522,7 +526,7 @@ pub(crate) fn fit_irls(
         last_cov = Some(inv);
 
         if !beta[0].is_finite() || !beta[1].is_finite() {
-            return Err(Unfittable::new("Glm", "IRLS diverged (non-finite coefficients)"));
+            return Err(Unfittable::degenerate("IRLS diverged (non-finite coefficients)"));
         }
 
         // Update η, μ.
@@ -657,6 +661,12 @@ fn parse_link(s: &str) -> PyResult<GlmLink> {
 /// Output columns: ``x`` (Float64), ``y`` (Float64 fitted mean),
 /// ``ci_lower`` and ``ci_upper`` (Float64; present only when ``ci`` is set,
 /// otherwise ``NaN``).
+///
+/// Data the fit cannot use (fewer than 2 usable points, no ``x`` variance, a
+/// singular design, IRLS divergence) warns and draws an empty fit, naming
+/// the facet panel, group or call, as ``Smooth`` and ``Robust`` do. A ``y``
+/// outside ``family`` is refused when the call is the whole frame, and
+/// degrades a facet panel or a ``groupby`` group.
 ///
 /// Parameters
 /// ----------
@@ -825,6 +835,42 @@ mod tests {
 
     fn positive_space() -> LogSpace {
         LogSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
+    }
+
+    /// A call (here a facet panel) whose every `x` is off a log x axis's side
+    /// is cut to zero rows by the log seam: the fit's degenerate batch comes
+    /// back, its warning goes to the scratch sink, the panel is recorded as
+    /// one the axis emptied, and nothing refuses, so the axis's own report is
+    /// the only one.
+    #[test]
+    fn glm_panel_wholly_off_a_log_axis_is_cut_and_raises_nothing() {
+        pyo3::Python::initialize();
+        let batch = xy_batch(vec![-3.0, -2.0, -1.0, -3.0], vec![0.0, 1.0, 0.0, 1.0]);
+        let ctx = TransformContext {
+            is_partition: true,
+            log_space: Some(std::rc::Rc::new(x_slot(positive_space()))),
+            ..TransformContext::default()
+        };
+        let out = apply_with_context(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &batch, &ctx).expect("Glm: a panel the axis emptied must not refuse");
+        assert_eq!(out.num_rows(), 0);
+        assert!(ctx.warnings.borrow().is_empty(), "the fit's own warning goes to the scratch sink");
+        let recorded = ctx.all_null_partitions.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert!(matches!(recorded[0].outcome, crate::transform::context::AllNullOutcome::OffSide));
+    }
+
+    /// A zero-row whole frame has nothing to fit and degrades, naming the call.
+    #[test]
+    fn glm_zero_row_whole_frame_degrades() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &xy_batch(vec![], vec![]), &ctx).expect("Glm: a zero-row frame degrades");
+        assert_degrades(
+            &ctx,
+            &out,
+            whole_call_sentence(FEWER_THAN_TWO_USABLE_XY_POINTS),
+            "zero rows",
+        );
     }
 
     /// Demanded on a positive-side log x, a Poisson/log `Glm` fits over
@@ -1120,10 +1166,75 @@ mod tests {
         assert!(!ungrouped.contains("groupby"), "an ungrouped spec omits groupby: {ungrouped}");
     }
 
+    /// The one warning a call that cannot be fit raises, and its all-NaN fit.
+    fn assert_degrades(ctx: &TransformContext, out: &RecordBatch, expected: String, label: &str) {
+        assert!(col(out, "y").iter().all(|y| y.is_nan()), "{label}: no fit drawn");
+        let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(said, [expected], "{label}");
+    }
+
+    /// The whole-call sentence of a `Glm` fit that cannot be computed.
+    fn whole_call_sentence(reason: &str) -> String {
+        format!("Glm: could not fit the data ({reason}); it degraded to an empty/flat output instead of failing the whole chart")
+    }
+
+    /// A facet panel (`is_partition`, no group) degrades; the genuine whole
+    /// frame degrades too when the data is merely unusable, and refuses when
+    /// `y` is outside the family (`refusal`).
+    fn assert_whole_frame_and_panel(spec: &GlmSpec, x: Vec<f64>, y: Vec<f64>, reason: &str, refusal: Option<&str>, label: &str) {
+        let whole = TransformContext::default();
+        match refusal {
+            None => {
+                let out = apply_with_context(spec, &xy_batch(x.clone(), y.clone()), &whole).unwrap_or_else(|e| panic!("{label}: {e}"));
+                assert_degrades(&whole, &out, whole_call_sentence(reason), label);
+            }
+            Some(text) => {
+                let refused = apply_with_context(spec, &xy_batch(x.clone(), y.clone()), &whole).expect_err(label).to_string();
+                assert_eq!(refused, format!("ValueError: {text}"), "{label}: whole frame refuses");
+            }
+        }
+        let panel = TransformContext { is_partition: true, ..TransformContext::default() };
+        let out = apply_with_context(spec, &xy_batch(x, y), &panel).unwrap_or_else(|e| panic!("{label} (panel): {e}"));
+        assert_degrades(&panel, &out, whole_call_sentence(reason), label);
+    }
+
+    /// A `y` outside the family refuses the genuine whole frame whatever its
+    /// count of usable rows (the response is read before the count), and
+    /// degrades a facet panel or a group, which names the data's own count
+    /// first when it holds fewer than two rows.
+    #[test]
+    fn a_response_outside_the_family_refuses_the_whole_frame_at_any_row_count() {
+        pyo3::Python::initialize();
+        let cases: [(GlmFamily, GlmLink, &str, [f64; 3], &str); 5] = [
+            (GlmFamily::Binomial, GlmLink::Logit, "binomial", [0.0, 2.0, 1.0], "binomial family requires binary y (0 or 1); found 2"),
+            (GlmFamily::Poisson, GlmLink::Log, "poisson", [1.0, -1.0, 2.0], "poisson family requires non-negative integer y; found -1"),
+            (GlmFamily::Poisson, GlmLink::Log, "poisson fractional", [1.0, 1.5, 2.0], "poisson family requires non-negative integer y; found 1.5"),
+            (GlmFamily::Gamma, GlmLink::Inverse, "gamma", [1.0, 0.0, 2.0], "gamma family requires strictly positive y; found 0"),
+            (GlmFamily::InverseGaussian, GlmLink::InverseSquared, "inverse_gaussian", [1.0, 0.0, 2.0], "inverse_gaussian family requires strictly positive y; found 0"),
+        ];
+        for (family, link, label, ys, reason) in cases {
+            let bad = ys.iter().position(|y| reason.ends_with(&format!("found {y}"))).expect(label);
+            let spec = spec(family, link, 10, None);
+            // One row (the offending one), two rows, three rows.
+            let rows: [Vec<usize>; 3] = [vec![bad], vec![bad, (bad + 1) % 3], vec![0, 1, 2]];
+            for picked in rows {
+                let count = picked.len();
+                let xs: Vec<f64> = picked.iter().map(|&i| i as f64).collect();
+                let ys: Vec<f64> = picked.iter().map(|&i| ys[i]).collect();
+                let refused = apply(&spec, &xy_batch(xs.clone(), ys.clone())).expect_err(label).to_string();
+                assert_eq!(refused, format!("ValueError: Glm: {reason}"), "{label}, {count} rows: whole frame refuses");
+                let panel = TransformContext { is_partition: true, ..TransformContext::default() };
+                let out = apply_with_context(&spec, &xy_batch(xs, ys), &panel).unwrap_or_else(|e| panic!("{label}, {count} rows: {e}"));
+                let panel_reason = if count < 2 { FEWER_THAN_TWO_USABLE_XY_POINTS } else { reason };
+                assert_degrades(&panel, &out, whole_call_sentence(panel_reason), &format!("{label}, {count} rows, panel"));
+            }
+        }
+    }
+
     /// A group that cannot be fit draws no fit (its curve is all NaN) and a
     /// warning names it and the reason, while the other group fits as it
     /// does alone, as `Smooth`'s and `Robust`'s groups degrade. The same rows
-    /// ungrouped still refuse.
+    /// ungrouped degrade the call too.
     #[test]
     fn a_group_that_cannot_be_fit_degrades_with_a_warning_and_the_others_draw() {
         pyo3::Python::initialize();
@@ -1156,16 +1267,17 @@ mod tests {
                 [format!("Glm: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
                 "{label}"
             );
-            assert!(apply(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), &xy_batch(bx, by)).is_err(), "{label}: ungrouped still refuses");
+            assert_whole_frame_and_panel(&spec(GlmFamily::Gaussian, GlmLink::Identity, 10, None), bx, by, reason, None, label);
         }
     }
 
     /// Every way one group's fit can fail degrades that group alone: no fit
     /// for it, a warning naming it and the reason, and the other group fits
-    /// as it does alone. The same rows ungrouped refuse with the reason's
-    /// own message.
+    /// as it does alone. The same rows as a facet panel degrade it; as the
+    /// whole frame they degrade the call, except a `y` outside the family,
+    /// which refuses with the reason's own message.
     #[test]
-    fn every_per_group_fit_failure_degrades_the_group_and_refuses_ungrouped() {
+    fn every_per_group_fit_failure_degrades_the_group_and_the_panel() {
         pyo3::Python::initialize();
         #[allow(clippy::type_complexity)]
         let cases: Vec<(&str, GlmSpec, (Vec<f64>, Vec<f64>), (Vec<f64>, Vec<f64>), &str)> = vec![
@@ -1228,8 +1340,9 @@ mod tests {
                 [format!("Glm: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
                 "{label}"
             );
-            let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
-            assert_eq!(refused, format!("ValueError: Glm: {reason}"), "{label}: ungrouped refuses");
+            let refusal = format!("Glm: {reason}");
+            let family_refusal = reason.contains("family requires").then_some(refusal.as_str());
+            assert_whole_frame_and_panel(&spec, bx, by, reason, family_refusal, label);
         }
     }
 

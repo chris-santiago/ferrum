@@ -1269,6 +1269,16 @@ _NO_VALUE_ON_SIDE_REMEDY = (
 )
 
 
+def _no_value_on_side_refusal(axis: str, field: str, rows: int, lo: float, hi: float) -> str:
+    """The axis's refusal of ``rows`` rows of ``field`` that are all negative: the remedy's example
+    domain is the data's own extent, ``[lo, hi]``."""
+    return (
+        f"{axis} scale: every value of '{field}' ({rows} rows) is negative, and a LogScale with "
+        f"no domain maps only positive values; pass an explicit negative domain, e.g. "
+        f"fm.LogScale(domain=[{lo:g}, {hi:g}]), to draw a mirrored log scale"
+    )
+
+
 @pytest.mark.parametrize(
     "title,named",
     [("Price", "every value of 'Price' (5 rows)"), ("", "every value (5 rows)")],

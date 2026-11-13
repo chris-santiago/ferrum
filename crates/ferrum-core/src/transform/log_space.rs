@@ -864,7 +864,7 @@ mod tests {
             for name in &seen {
                 let label = format!("g={name}");
                 if degraded.contains(&name.as_str()) {
-                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES))?;
+                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::degenerate(crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_VALUES))?;
                 }
                 if interval.contains(&name.as_str()) {
                     ctx.warn(TransformWarning::IntervalUndefined {
@@ -1074,7 +1074,7 @@ mod tests {
             for (key, _) in &partition.groups {
                 let label = describe_group_keys(&groupby, key);
                 if degraded.contains(&label.as_str()) {
-                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::new("Kde", "too few"))?;
+                    ctx.degrade_group_or_refuse("Kde", Some(&label), Unfittable::degenerate("too few"))?;
                 }
                 keys.push(match &label[2..] {
                     "null" => None,
@@ -1169,7 +1169,7 @@ mod tests {
     fn a_fit_warning_raised_before_the_call_survives_the_drop() {
         let batch = grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]);
         let ctx = demanding_v(&["g"]);
-        ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::new("Kde", "an earlier panel's reason")).unwrap();
+        ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::degenerate("an earlier panel's reason")).unwrap();
         run_per_group(&ctx, &batch, &["c"], &[]);
         assert_eq!(fit_groups(&ctx), ["g=c"], "the earlier panel's warning stays, this call's is dropped");
         assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=c".to_string()]) }]);
@@ -1188,8 +1188,8 @@ mod tests {
         let space = x_slot();
         let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
         let body = |_: &RecordBatch, _: &SlotColumns, ctx: &TransformContext| -> PyResult<RecordBatch> {
-            ctx.degrade_group_or_refuse("Kde", Some("g=b"), Unfittable::new("Kde", "too few"))?;
-            ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::new("Kde", "too few"))?;
+            ctx.degrade_group_or_refuse("Kde", Some("g=b"), Unfittable::degenerate("too few"))?;
+            ctx.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::degenerate("too few"))?;
             RecordBatch::try_from_iter([
                 ("g", Arc::new(arrow::array::StringArray::from(vec!["a", "b", "renamed"])) as ArrayRef),
                 ("out", Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0])) as ArrayRef),

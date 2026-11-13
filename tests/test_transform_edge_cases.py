@@ -11,6 +11,13 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests.test_null_group_warning import (
+    FIT_FEW_POINTS,
+    FIT_SINGULAR,
+    FIT_ZERO_VARIANCE,
+    _render_capturing,
+    _whole_fit_message,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -22,6 +29,13 @@ def _renders(chart) -> None:
     """Assert chart produces valid SVG without crashing."""
     svg = chart.to_svg()
     assert "<svg" in svg
+
+
+def _degrades(chart, *messages: str) -> None:
+    """Assert the chart draws and raises exactly ``messages``, in order."""
+    svg, said = _render_capturing(chart.to_svg)
+    assert "<svg" in svg
+    assert said == list(messages)
 
 
 def _graceful_failure(chart) -> None:
@@ -173,15 +187,18 @@ class TestConstantValues:
         _graceful_failure(chart)
 
     def test_glm_constant_x(self, df_constant):
-        """GLM with zero-variance x should raise cleanly."""
+        """GLM with zero-variance x draws no fit and names it, as the smoothing mark does."""
         chart = (
             fm.Chart(df_constant)
             .mark_smooth()
             .encode(x="x:Q", y="y:Q")
             .transform(fm.Glm(x="x", y="y", family="gaussian"))
         )
-        with pytest.raises(ValueError, match="singular|zero variance"):
-            chart.to_svg()
+        _degrades(
+            chart,
+            _whole_fit_message("Glm", FIT_ZERO_VARIANCE),
+            _whole_fit_message("Smooth", FIT_FEW_POINTS),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,15 +240,18 @@ class TestAllNullNaN:
         _graceful_failure(chart)
 
     def test_glm_all_nan(self, df_all_nan):
-        """GLM with all-NaN y should raise cleanly."""
+        """GLM with all-NaN y draws no fit and names it."""
         chart = (
             fm.Chart(df_all_nan)
             .mark_smooth()
             .encode(x="x:Q", y="y:Q")
             .transform(fm.Glm(x="x", y="y", family="gaussian"))
         )
-        with pytest.raises(ValueError, match="non-null observations"):
-            chart.to_svg()
+        _degrades(
+            chart,
+            _whole_fit_message("Glm", FIT_FEW_POINTS),
+            _whole_fit_message("Smooth", FIT_FEW_POINTS),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -303,31 +323,40 @@ class TestLogistic:
     """Logistic regression with degenerate binary targets."""
 
     def test_logistic_all_zero(self):
-        """All y=0 should raise (no separation possible)."""
+        """All y=0 draws no fit and names the singular design."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5})
         chart = (
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
-        with pytest.raises(ValueError, match="singular"):
-            chart.to_svg()
+        _degrades(
+            chart,
+            _whole_fit_message("Logistic", FIT_SINGULAR),
+            _whole_fit_message("Smooth", FIT_FEW_POINTS),
+        )
 
     def test_logistic_all_one(self):
-        """All y=1 should raise (no separation possible)."""
+        """All y=1 draws no fit and names the singular design."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [1.0] * 5})
         chart = (
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
-        with pytest.raises(ValueError, match="singular"):
-            chart.to_svg()
+        _degrades(
+            chart,
+            _whole_fit_message("Logistic", FIT_SINGULAR),
+            _whole_fit_message("Smooth", FIT_FEW_POINTS),
+        )
 
     def test_logistic_single_unique_x(self):
-        """Constant x with mixed y should raise (singular design)."""
+        """Constant x with mixed y draws no fit and names the zero variance."""
         df = pl.DataFrame({"x": [5.0] * 10, "y": [0.0] * 5 + [1.0] * 5})
         chart = (
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
-        with pytest.raises(ValueError, match="singular|zero variance"):
-            chart.to_svg()
+        _degrades(
+            chart,
+            _whole_fit_message("Logistic", FIT_ZERO_VARIANCE),
+            _whole_fit_message("Smooth", FIT_FEW_POINTS),
+        )
 
     def test_logistic_valid_overlapping(self):
         """Non-degenerate binary target with overlap should render."""

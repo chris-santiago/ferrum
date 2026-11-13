@@ -121,9 +121,13 @@ fn apply_in_data_space(
     stack_grouped_batches("Logistic", &per_group_batches, &spec.groupby, &partition.dtypes)
 }
 
-/// Fit `batch`'s rows, or only one group's (`group`). Rows that cannot be fit
-/// refuse the whole frame and degrade a group to its empty fit, with a
-/// warning ([`TransformContext::degrade_group_or_refuse`]).
+/// Fit `batch`'s rows, or only one group's (`group`). Data the fit cannot
+/// use (too few usable points, no x variance, one class, separation, a
+/// singular design) degrades the call, panel or group to its empty fit with a
+/// warning ([`Unfittable::degenerate`]). A `y` that is not 0 or 1 is a
+/// response the method cannot read ([`Unfittable::malformed`] semantics): it
+/// refuses the genuine whole frame and degrades a group or a panel
+/// ([`TransformContext::degrade_group_or_refuse`]).
 fn fit(
     spec: &LogisticSpec,
     batch: &RecordBatch,
@@ -140,25 +144,19 @@ fn fit(
     if let Some(y) = ys.iter().find(|&&y| y != 0.0 && y != 1.0) {
         return unfittable(Unfittable {
             reason: format!("y is not binary (found {y})"),
-            refusal: format!("Logistic: y must be binary (only 0 or 1); found value {y}"),
+            refusal: Some(format!("Logistic: y must be binary (only 0 or 1); found value {y}")),
         });
     }
 
     if xs.len() < 2 {
-        return unfittable(Unfittable {
-            reason: FEWER_THAN_TWO_USABLE_XY_POINTS.into(),
-            refusal: "Logistic: need at least 2 non-null observations".into(),
-        });
+        return unfittable(Unfittable::degenerate(FEWER_THAN_TWO_USABLE_XY_POINTS));
     }
 
     // Singular design: zero variance in x => X'WX is singular.
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
     if !(x_max > x_min) {
-        return unfittable(Unfittable {
-            reason: "zero x variance".into(),
-            refusal: "Logistic: singular design (X'WX has zero determinant); x has zero variance".into(),
-        });
+        return unfittable(Unfittable::degenerate("zero x variance"));
     }
 
     let (beta, cov) = match fit_irls(&xs, &ys, spec.max_iter, spec.tol) {
@@ -268,7 +266,7 @@ fn fit_irls(
         }
 
         let inv = invert_2x2(wxtx)
-            .ok_or_else(|| Unfittable::new("Logistic", "singular design (X'WX has zero determinant)"))?;
+            .ok_or_else(|| Unfittable::degenerate("singular design (X'WX has zero determinant)"))?;
 
         let b0 = inv[0][0] * wxtz[0] + inv[0][1] * wxtz[1];
         let b1 = inv[1][0] * wxtz[0] + inv[1][1] * wxtz[1];
@@ -277,7 +275,7 @@ fn fit_irls(
 
         // Perfect-separation guard: blow-up in coefficients.
         if beta[0].abs() > 1e3 || beta[1].abs() > 1e3 {
-            return Err(Unfittable::new("Logistic", "perfect separation detected (coefficients diverged)"));
+            return Err(Unfittable::degenerate("perfect separation detected (coefficients diverged)"));
         }
 
         // Update η, μ.
@@ -290,8 +288,7 @@ fn fit_irls(
         if it < 5 {
             let saturated = mu.iter().all(|&p| p < 1e-6 || p > 1.0 - 1e-6);
             if saturated {
-                return Err(Unfittable::new(
-                    "Logistic",
+                return Err(Unfittable::degenerate(
                     "perfect separation detected (fitted probabilities saturated)",
                 ));
             }
@@ -326,8 +323,7 @@ fn check_separation_at_convergence(ys: &[f64], mu: &[f64]) -> Result<(), Unfitta
         }
     }
     if all_perfect {
-        return Err(Unfittable::new(
-            "Logistic",
+        return Err(Unfittable::degenerate(
             "perfect separation detected (model classifies every observation with probability > 0.999)",
         ));
     }
@@ -415,6 +411,12 @@ use pyo3::prelude::*;
 ///
 /// Output columns: ``x`` (Float64), ``y`` (Float64 fitted probability),
 /// ``ci_lower`` and ``ci_upper`` (Float64; ``NaN`` when ``ci`` is not set).
+///
+/// Data the fit cannot use (fewer than 2 usable points, no ``x`` variance,
+/// one class, perfect separation) warns and draws an empty fit, naming the
+/// facet panel, group or call, as ``Smooth`` and ``Robust`` do. A ``y`` that
+/// is not 0 or 1 is refused when the call is the whole frame, and degrades a
+/// facet panel or a ``groupby`` group.
 ///
 /// Parameters
 /// ----------
@@ -564,6 +566,42 @@ mod tests {
         LogSpace { base: 10.0, side: crate::scale::log::LogSide::Positive }
     }
 
+    /// A call (here a facet panel) whose every `x` is off a log x axis's side
+    /// is cut to zero rows by the log seam: the fit's degenerate batch comes
+    /// back, its warning goes to the scratch sink, the panel is recorded as
+    /// one the axis emptied, and nothing refuses, so the axis's own report is
+    /// the only one.
+    #[test]
+    fn logistic_panel_wholly_off_a_log_axis_is_cut_and_raises_nothing() {
+        pyo3::Python::initialize();
+        let batch = xy_batch(vec![-3.0, -2.0, -1.0, -3.0], vec![0.0, 1.0, 0.0, 1.0]);
+        let ctx = TransformContext {
+            is_partition: true,
+            log_space: Some(std::rc::Rc::new(x_slot(positive_space()))),
+            ..TransformContext::default()
+        };
+        let out = apply_with_context(&default_spec(10, None), &batch, &ctx).expect("Logistic: a panel the axis emptied must not refuse");
+        assert_eq!(out.num_rows(), 0);
+        assert!(ctx.warnings.borrow().is_empty(), "the fit's own warning goes to the scratch sink");
+        let recorded = ctx.all_null_partitions.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert!(matches!(recorded[0].outcome, crate::transform::context::AllNullOutcome::OffSide));
+    }
+
+    /// A zero-row whole frame has nothing to fit and degrades, naming the call.
+    #[test]
+    fn logistic_zero_row_whole_frame_degrades() {
+        pyo3::Python::initialize();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&default_spec(10, None), &xy_batch(vec![], vec![]), &ctx).expect("Logistic: a zero-row frame degrades");
+        assert_degrades(
+            &ctx,
+            &out,
+            whole_call_sentence(FEWER_THAN_TWO_USABLE_XY_POINTS),
+            "zero rows",
+        );
+    }
+
     /// Demanded on a positive-side log x, `Logistic` fits over `x` mapped
     /// into log10 units, then maps its `x` grid back
     /// ([`run_fit_in_log_space`]) — this must equal, point for point,
@@ -669,32 +707,115 @@ mod tests {
         assert!(msg.contains("binary"), "expected 'binary' in error; got: {msg}");
     }
 
+
+    /// The one warning a call that cannot be fit raises, and its all-NaN fit.
+    fn assert_degrades(ctx: &TransformContext, out: &RecordBatch, expected: String, label: &str) {
+        assert!(col(out, "y").iter().all(|y| y.is_nan()), "{label}: no fit drawn");
+        let said: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(said, [expected], "{label}");
+    }
+
+    /// The whole-call sentence of a `Logistic` fit that cannot be computed.
+    fn whole_call_sentence(reason: &str) -> String {
+        format!("Logistic: could not fit the data ({reason}); it degraded to an empty/flat output instead of failing the whole chart")
+    }
+
+    /// Data the fit cannot use degrades the whole frame, a facet panel
+    /// (`is_partition`, no group) and the call alike, never refusing.
+    fn assert_whole_frame_and_panel_degrade(spec: &LogisticSpec, x: Vec<f64>, y: Vec<f64>, reason: &str, label: &str) {
+        let whole = TransformContext::default();
+        let out = apply_with_context(spec, &xy_batch(x.clone(), y.clone()), &whole).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_degrades(&whole, &out, whole_call_sentence(reason), label);
+        let panel = TransformContext { is_partition: true, ..TransformContext::default() };
+        let out = apply_with_context(spec, &xy_batch(x, y), &panel).unwrap_or_else(|e| panic!("{label} (panel): {e}"));
+        assert_degrades(&panel, &out, whole_call_sentence(reason), label);
+    }
+
     #[test]
-    fn test_logistic_perfect_separation_raises() {
+    fn test_logistic_perfect_separation_degrades() {
         pyo3::Python::initialize();
         // All y=0 for x<<0, all y=1 for x>>0 with a huge gap → perfect separation.
         let xs: Vec<f64> = vec![-100.0, -90.0, -80.0, 80.0, 90.0, 100.0];
         let ys: Vec<f64> = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let batch = xy_batch(xs, ys);
-        let spec = default_spec(10, None);
-        let err = apply(&spec, &batch).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.to_lowercase().contains("separation"),
-            "expected 'separation' in error; got: {msg}");
+        assert_whole_frame_and_panel_degrade(
+            &default_spec(10, None),
+            xs,
+            ys,
+            "perfect separation detected (model classifies every observation with probability > 0.999)",
+            "perfect separation",
+        );
+    }
+
+    /// Coefficients that blow up on the first weighted step (the weights are
+    /// near-flat over a tiny `x` spread) are separation the fit cannot use:
+    /// the whole call and a panel degrade with that reason.
+    #[test]
+    fn test_logistic_diverging_coefficients_degrade() {
+        pyo3::Python::initialize();
+        assert_whole_frame_and_panel_degrade(
+            &default_spec(10, None),
+            vec![0.0, 1e-4, 2e-4, 3e-4],
+            vec![0.0, 0.0, 1.0, 1.0],
+            "perfect separation detected (coefficients diverged)",
+            "diverged coefficients",
+        );
+        assert_whole_frame_and_panel_degrade(
+            &default_spec(10, None),
+            vec![1e6, 1e6 + 1.0, 1e6 + 2.0, 1e6 + 3.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            "perfect separation detected (coefficients diverged)",
+            "diverged coefficients at a large offset",
+        );
+    }
+
+    /// One class over an `x` whose spread is tiny next to its magnitude
+    /// saturates every fitted probability within the first five steps (the
+    /// weighted solve loses the intercept to cancellation): separation the
+    /// fit cannot use, so the whole call and a panel degrade.
+    #[test]
+    fn test_logistic_saturated_probabilities_degrade() {
+        pyo3::Python::initialize();
+        let cases = [
+            (vec![1_000_000.02, 1_000_000.0, 999_999.96], vec![1.0; 3]),
+            (vec![999_999.99, 1_000_000.0, 1_000_000.03], vec![1.0; 3]),
+            (vec![1_000_000.03, 1_000_000.01, 999_999.99], vec![0.0; 3]),
+        ];
+        for (i, (xs, ys)) in cases.into_iter().enumerate() {
+            assert_whole_frame_and_panel_degrade(
+                &default_spec(10, None),
+                xs,
+                ys,
+                "perfect separation detected (fitted probabilities saturated)",
+                &format!("saturated probabilities, case {i}"),
+            );
+        }
+    }
+
+    /// A `y` that is not 0 or 1 refuses the genuine whole frame whatever its
+    /// count of usable rows, and degrades a facet panel.
+    #[test]
+    fn test_logistic_response_outside_the_method_refuses_the_whole_frame_at_any_row_count() {
+        pyo3::Python::initialize();
+        for (label, xs, ys) in [
+            ("one row", vec![1.0], vec![2.0]),
+            ("two rows", vec![1.0, 2.0], vec![0.0, 2.0]),
+            ("many rows", vec![0.0, 1.0, 2.0, 3.0, 4.0], vec![0.0, 1.0, 2.0, 0.0, 1.0]),
+        ] {
+            let refused = apply(&default_spec(10, None), &xy_batch(xs.clone(), ys.clone())).expect_err(label).to_string();
+            assert_eq!(refused, "ValueError: Logistic: y must be binary (only 0 or 1); found value 2", "{label}");
+            let panel = TransformContext { is_partition: true, ..TransformContext::default() };
+            let out = apply_with_context(&default_spec(10, None), &xy_batch(xs, ys), &panel).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_degrades(&panel, &out, whole_call_sentence("y is not binary (found 2)"), label);
+        }
     }
 
     #[test]
-    fn test_logistic_singular_design_raises() {
+    fn test_logistic_singular_design_degrades() {
         pyo3::Python::initialize();
         // All x identical → zero variance → singular X'WX.
         let xs = vec![3.0; 10];
         let ys: Vec<f64> = (0..10).map(|i| (i % 2) as f64).collect();
-        let batch = xy_batch(xs, ys);
-        let spec = default_spec(10, None);
-        let err = apply(&spec, &batch).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.to_lowercase().contains("singular"),
-            "expected 'singular' in error; got: {msg}");
+        assert_whole_frame_and_panel_degrade(&default_spec(10, None), xs, ys, "zero x variance", "constant x");
     }
 
     #[test]
@@ -877,7 +998,8 @@ mod tests {
     /// A group that cannot be fit draws no fit (its curve is all NaN) and a
     /// warning names it and the reason, while the other group fits as it
     /// does alone, as `Smooth`'s and `Robust`'s groups degrade. The same rows
-    /// ungrouped still refuse.
+    /// ungrouped degrade the call too, except a `y` that is not binary, which
+    /// refuses the whole frame and degrades a facet panel.
     #[test]
     fn a_group_that_cannot_be_fit_degrades_with_a_warning_and_the_others_draw() {
         pyo3::Python::initialize();
@@ -910,16 +1032,23 @@ mod tests {
                 [format!("Logistic: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
                 "{label}"
             );
-            assert!(apply(&default_spec(10, None), &xy_batch(bx, by)).is_err(), "{label}: ungrouped still refuses");
+            if reason.starts_with("y is not binary") {
+                let refused = apply(&default_spec(10, None), &xy_batch(bx.clone(), by.clone())).expect_err(label).to_string();
+                assert_eq!(refused, "ValueError: Logistic: y must be binary (only 0 or 1); found value 2", "{label}: whole frame refuses");
+                let panel = TransformContext { is_partition: true, ..TransformContext::default() };
+                let out = apply_with_context(&default_spec(10, None), &xy_batch(bx, by), &panel).unwrap_or_else(|e| panic!("{label} (panel): {e}"));
+                assert_degrades(&panel, &out, whole_call_sentence(reason), label);
+            } else {
+                assert_whole_frame_and_panel_degrade(&default_spec(10, None), bx, by, reason, label);
+            }
         }
     }
 
     /// Every way one group's fit can fail degrades that group alone: no fit
     /// for it, a warning naming it and the reason, and the other group fits
-    /// as it does alone. The same rows ungrouped refuse with the reason's
-    /// own message.
+    /// as it does alone. The same rows ungrouped degrade the call as well.
     #[test]
-    fn every_per_group_fit_failure_degrades_the_group_and_refuses_ungrouped() {
+    fn every_per_group_fit_failure_degrades_the_group_and_the_ungrouped_call() {
         pyo3::Python::initialize();
         #[allow(clippy::type_complexity)]
         let cases: Vec<(&str, LogisticSpec, (Vec<f64>, Vec<f64>), (Vec<f64>, Vec<f64>), &str)> = vec![
@@ -961,8 +1090,7 @@ mod tests {
                 [format!("Logistic: could not fit group g=b ({reason}); it degraded to an empty/flat output instead of failing the whole chart")],
                 "{label}"
             );
-            let refused = apply(&spec, &xy_batch(bx, by)).expect_err(label).to_string();
-            assert_eq!(refused, format!("ValueError: Logistic: {reason}"), "{label}: ungrouped refuses");
+            assert_whole_frame_and_panel_degrade(&spec, bx, by, reason, label);
         }
     }
 

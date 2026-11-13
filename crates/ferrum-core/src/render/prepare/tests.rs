@@ -2262,6 +2262,195 @@ fn smooth_whole_frame_rank_deficient_still_refuses() {
     );
 }
 
+/// The two binary-response fits a facet panel or a whole call can fail to
+/// compute, over `x`/`y`, optionally faceted by `sp`: `Logistic`, and `Glm`
+/// in the binomial family (the one family that reads a binary `y`).
+fn fit_steps() -> Vec<(&'static str, crate::transform::core::TransformSpec)> {
+    use crate::transform::core::TransformSpec;
+    use crate::transform::glm::{GlmFamily, GlmLink, GlmSpec};
+    use crate::transform::logistic::LogisticSpec;
+    vec![
+        (
+            "Logistic",
+            TransformSpec::Logistic(LogisticSpec {
+                x: "x".into(),
+                y: "y".into(),
+                n_grid: 5,
+                ci: None,
+                max_iter: 25,
+                tol: 1e-8,
+                groupby: vec![],
+                name: None,
+            }),
+        ),
+        (
+            "Glm",
+            TransformSpec::Glm(GlmSpec {
+                x: "x".into(),
+                y: "y".into(),
+                family: GlmFamily::Binomial,
+                link: GlmLink::Logit,
+                n_grid: 5,
+                ci: None,
+                max_iter: 25,
+                tol: 1e-8,
+                groupby: vec![],
+                name: None,
+            }),
+        ),
+    ]
+}
+
+fn fit_spec(step: crate::transform::core::TransformSpec, faceted: bool) -> ChartSpec {
+    let mut spec = base_spec();
+    if faceted {
+        spec.facet = Some(crate::layout::FacetSpec {
+            field: "sp".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::FacetResolve::default(),
+        });
+    }
+    spec.transforms = vec![step];
+    spec
+}
+
+/// `x`, `y` and a panel key `sp`: the `"many"` panel holds eight rows whose
+/// `y` overlaps across `x`, so it fits; the `"few"` panel holds `few_rows`.
+fn fit_panels_batch(few_rows: &[(f64, f64)]) -> RecordBatch {
+    let many = [(0.0, 0.0), (1.0, 0.0), (2.0, 1.0), (3.0, 0.0), (4.0, 1.0), (5.0, 0.0), (6.0, 1.0), (7.0, 1.0)];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("sp", DataType::Utf8, false),
+    ]));
+    let rows: Vec<(f64, f64, &str)> = few_rows
+        .iter()
+        .map(|&(x, y)| (x, y, "few"))
+        .chain(many.iter().map(|&(x, y)| (x, y, "many")))
+        .collect();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+        ],
+    )
+    .unwrap()
+}
+
+fn run_fit(spec: &ChartSpec, batch: &RecordBatch) -> Result<(RecordBatch, Vec<crate::transform::context::TransformWarning>), crate::render::RenderError> {
+    let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+    let theme = crate::layout::ThemeInputs::default();
+    let (outputs, warnings, _, _) = run_transforms_with_facet(spec, batch, viewport, &theme, None)?;
+    Ok((outputs.get(FINAL_OUTPUT_KEY).unwrap().clone(), warnings))
+}
+
+/// A facet panel `Logistic` or `Glm` cannot fit (too few usable points, no
+/// `x` variance, one class, a `y` outside the method) is an ungrouped call on
+/// a slice: it degrades that panel, stamped with its name, while the other
+/// panel fits. Before the partition read, each of these refused the chart.
+#[test]
+fn logistic_and_glm_facet_panel_that_cannot_be_fit_degrades_instead_of_refusing() {
+    let panels: [(&str, Vec<(f64, f64)>, &str); 4] = [
+        ("one point", vec![(1.0, 0.0)], crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_XY_POINTS),
+        ("constant x", vec![(2.0, 0.0), (2.0, 1.0), (2.0, 0.0)], "zero x variance"),
+        ("one class", vec![(0.0, 1.0), (1.0, 1.0), (2.0, 1.0)], "singular design (X'WX has zero determinant)"),
+        ("y of 2", vec![(0.0, 0.0), (1.0, 2.0), (2.0, 1.0)], "y is not binary (found 2)"),
+    ];
+    for (name, step) in fit_steps() {
+        for (label, few, reason) in &panels {
+            // Glm reads a y of 2 as outside the binomial family.
+            let reason = if name == "Glm" && *label == "y of 2" {
+                "binomial family requires binary y (0 or 1); found 2"
+            } else {
+                reason
+            };
+            let (out, warnings) = run_fit(&fit_spec(step.clone(), true), &fit_panels_batch(few))
+                .unwrap_or_else(|e| panic!("{name} {label}: a panel the fit cannot use must degrade, not fail the chart: {e}"));
+            let sp = str_col(&out, "sp");
+            let y = float_col(&out, "y");
+            let by_panel = |panel: &str| -> Vec<f64> { sp.iter().zip(&y).filter(|(s, _)| *s == panel).map(|(_, v)| *v).collect() };
+            assert!(by_panel("few").iter().all(|v| v.is_nan()), "{name} {label}: the panel draws an empty fit");
+            assert!(by_panel("many").iter().all(|v| v.is_finite()), "{name} {label}: the other panel still fits");
+            let said: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+            assert_eq!(
+                said,
+                [format!(
+                    "{name}: could not fit the data in facet panel sp=few ({reason}); it degraded to an empty/flat output instead of failing the whole chart"
+                )],
+                "{name} {label}"
+            );
+        }
+    }
+}
+
+/// A response the method cannot read still refuses the genuine whole frame,
+/// with the method's own text, while the same rows degrade as a panel.
+#[test]
+fn logistic_and_glm_whole_frame_response_outside_the_method_still_refuses() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 1.0, 0.0])),
+        ],
+    )
+    .unwrap();
+    for (name, step) in fit_steps() {
+        let err = run_fit(&fit_spec(step, false), &batch)
+            .expect_err(name)
+            .to_string();
+        let expected = if name == "Logistic" {
+            "Logistic: y must be binary (only 0 or 1); found value 2"
+        } else {
+            "Glm: binomial family requires binary y (0 or 1); found 2"
+        };
+        assert_eq!(err, format!("transform failed: ValueError: {expected}"), "{name}");
+    }
+}
+
+/// Data the fit cannot use degrades the unfaceted call too, naming the call.
+#[test]
+fn logistic_and_glm_whole_frame_with_nothing_to_fit_degrades() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![0.0])),
+        ],
+    )
+    .unwrap();
+    for (name, step) in fit_steps() {
+        let (out, warnings) = run_fit(&fit_spec(step, false), &batch).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(float_col(&out, "y").iter().all(|v| v.is_nan()), "{name}");
+        let said: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            said,
+            [format!(
+                "{name}: could not fit the data ({}); it degraded to an empty/flat output instead of failing the whole chart",
+                crate::transform::numeric_util::FEWER_THAN_TWO_USABLE_XY_POINTS
+            )],
+            "{name}"
+        );
+    }
+}
+
 // ── Batch-D T9 round 4: `concat_batches_by_name` must be dtype-generic ──
 //
 // Round 3's `is_partition` fix eliminated the metrics-column schema

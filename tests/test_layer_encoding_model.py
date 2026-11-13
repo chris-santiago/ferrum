@@ -61,14 +61,17 @@ from tests._svg_extents import axis_tick_labels
 from tests._svg_rects import THEME_CHROME_STROKES, mark_layer, svg_elements
 from tests.test_null_group_warning import (
     FIT_FEW_POINTS,
+    FIT_SEPARATED,
     _NO_FACET_ROWS_WARNING,
     _NO_ROWS_TO_DRAW,
     _all_keys_null_fallback_message,
     _all_keys_null_message,
     _facet_key_dropped_message,
+    _fit_message,
     _not_drawn,
     _null_key_dropped_message,
     _panel_key_fallback_message,
+    _whole_fit_message,
 )
 from tests._wire_steps import all_steps, operand_branches
 
@@ -15135,9 +15138,7 @@ def test_a_perfectly_separated_logistic_group_draws_none_and_warns(output):
         warnings.simplefilter("always")
         drawn = render(chart)
     assert [str(w.message) for w in caught if "could not fit" in str(w.message)] == [
-        "Logistic: could not fit group c=s (perfect separation detected (model classifies every "
-        "observation with probability > 0.999)); it degraded to an empty/flat output instead of "
-        "failing the whole chart"
+        _fit_message("Logistic", "c=s", FIT_SEPARATED)
     ]
     if output == "static":
         assert tag_counts(drawn) == {"polyline": 2}
@@ -15146,12 +15147,39 @@ def test_a_perfectly_separated_logistic_group_draws_none_and_warns(output):
         assert sum(len(batch["nodes"]) for batch in lines) == 2
 
 
+@pytest.mark.parametrize("output", ["static", "interactive"])
 @pytest.mark.parametrize("fit", sorted(_GROUPED_FITS))
-def test_an_ungrouped_logistic_or_glm_fit_that_cannot_be_fit_still_refuses(fit):
-    """With no groupby the one fit is the whole chart, so its bad rows refuse it."""
+def test_an_ungrouped_logistic_or_glm_fit_that_cannot_be_fit_warns_and_draws(fit, output):
+    """With no groupby the one fit is the whole chart: a single usable row draws no fit and is named.
+
+    Rejects the whole-frame refusal Smooth and Robust never give for data they cannot fit.
+    """
     one_row = _FITS_SPARSE.filter(pl.col("c") == "r")
     chart = fm.Chart(one_row).transform(_GROUPED_FITS[fit]()).mark_line().encode(x="x", y="y")
-    with pytest.raises(ValueError, match="need at least 2 non-null observations"):
+    render = {"static": lambda c: c.to_svg(), "interactive": _scene}[output]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        drawn = render(chart)
+    assert [str(w.message) for w in caught] == [_whole_fit_message(fit, FIT_FEW_POINTS)]
+    if output == "static":
+        assert "polyline" not in tag_counts(drawn)
+    else:
+        assert sum(_scene_line_counts(drawn)) == 0
+
+
+@pytest.mark.parametrize("fit", sorted(_GROUPED_FITS))
+def test_an_ungrouped_logistic_or_glm_fit_over_a_response_outside_its_family_still_refuses(fit):
+    """A response the method cannot read is the caller's mistake: the whole frame refuses it."""
+    outside = {
+        "Logistic": ("b", 2.0, "Logistic: y must be binary (only 0 or 1)"),
+        "Glm": ("n", -1.0, "Glm: poisson family requires non-negative integer y"),
+    }
+    column, value, text = outside[fit]
+    frame = _FITS.with_columns(
+        pl.when(pl.col("x") == 2.0).then(value).otherwise(pl.col(column)).alias(column)
+    )
+    chart = fm.Chart(frame).transform(_GROUPED_FITS[fit]()).mark_line().encode(x="x", y="y")
+    with pytest.raises(ValueError, match=re.escape(text)):
         _quiet(chart.to_svg)
 
 

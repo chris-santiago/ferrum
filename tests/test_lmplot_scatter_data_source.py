@@ -88,8 +88,8 @@ def obs_df() -> pl.DataFrame:
             "predictor": predictor,
             "response": 1.5 * predictor + 3.0 + rng.normal(0, 0.4, _N_ROWS),
             # Drawn from a logistic model rather than thresholded, so the two
-            # classes overlap: a clean split makes `Logistic` refuse outright
-            # ("perfect separation detected").
+            # classes overlap: a clean split gives `Logistic` no fit to draw
+            # ("perfect separation detected"), and the fit tests need one.
             "binary": (rng.random(_N_ROWS) < 1.0 / (1.0 + np.exp(-(predictor - 5.0)))).astype(
                 float
             ),
